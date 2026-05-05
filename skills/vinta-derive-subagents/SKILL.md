@@ -13,10 +13,28 @@ Author the canonical YAML sources for the target project's sub-agents. Setup scr
 
 ## Inputs
 
-1. Inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md).
+1. Inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md), specifically `existing_ai_artifacts.agents` — every sub-agent file already in the repo with its name, description, classification (`foundation-shape` / `stack-specialist` / `project-custom`).
 2. AGENTS.md content from [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) (so agent prompts can reference real conventions).
-3. Step 0 interview decisions from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) (PR policy, commit style, co-author trailer policy).
+3. Step 0 interview decisions from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) — including the §E **per-agent disposition** (migrate / keep / drop / replace).
 4. Stack templates under [bootstrap-ai-tools/resources/stacks/<stack>/agents/](../vinta-bootstrap-ai-tools/resources/stacks/) for matched stacks.
+
+## Reconcile against existing agents (do this FIRST)
+
+Before drafting any new YAML, walk through every entry in `existing_ai_artifacts.agents` and apply the disposition the user picked in Step 0 §E:
+
+- **Migrate to `ai-tools/agents/<name>.yaml`** — convert vendor format → canonical YAML. Preserve `name` + `description` + body. Map vendor-specific fields:
+  - Claude `tools:` (CSV string) → YAML `claude-tools:` or `overrides.claude.tools` (let `setup-ai-tools.mjs` derive defaults from `access`).
+  - Cursor `readonly: true|false` → `access: read-only | read-write`.
+  - Codex `sandbox_mode` → `access` mapping (`read-only` → `read-only`, `workspace-write` → `read-write`); preserve other Codex-only fields under `overrides.codex`.
+  - Copilot `tools:` array → `overrides.copilot.tools`.
+  - Move the body content into the canonical YAML `body:` literal block.
+- **Keep in current vendor path, don't touch** — don't emit a canonical YAML for it. AGENTS.md may reference it; `setup-ai-tools.mjs` won't manage it.
+- **Drop** — log the removal; don't emit anything.
+- **Replace with Vinta foundation version** (foundation-shape only — `implementer` / `reviewer` / `fixer`) — discard the existing body, emit the canonical foundation trio body below.
+
+For the foundation trio: only emit a fresh canonical version when none exists OR the user said `Replace`. If the user said `Migrate` or `Keep` for an existing `implementer.yaml`, **do not overwrite**.
+
+After this reconciliation, continue with the foundation trio + stack specialists for any name still missing.
 
 ## Foundation trio (always emit)
 

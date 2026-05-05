@@ -17,13 +17,14 @@ Project-agnostic. Adapts to whatever the analysis finds. Stack-specific skill + 
 
 ## Sub-skill flow
 
-This orchestrator runs five sub-skills in order. Each is its own SKILL.md so it can be invoked standalone (e.g. to refresh just AGENTS.md without redoing analysis from scratch).
+This orchestrator runs six sub-skills in order. Each is its own SKILL.md so it can be invoked standalone (e.g. to refresh just AGENTS.md without redoing analysis from scratch).
 
 1. [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) — walk the repo, build a structured inventory: languages, frameworks, build tools, test frameworks, deploy targets, monorepo shape, env model, multi-tenancy patterns, CI providers. Outputs an in-memory inventory the rest of the flow consumes.
 2. [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) — synthesize `ai-tools/AGENTS.md` from the inventory + a focused interview for what the analysis can't see.
 3. [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) — author `ai-tools/agents/*.yaml`. Always emits the foundation trio (`implementer`, `reviewer`, `fixer`); adds stack-specific specialists when the user supplies a template for a matched stack.
 4. [vinta-derive-skills](../vinta-derive-skills/SKILL.md) — author `ai-tools/skills/*/SKILL.md`. Always copies the project-agnostic foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`) verbatim from its bundled resources. Generates `implement-plan` from a parameterized template using project specifics. Asks the user whether the optional `add-e2e-test` and `add-env-var` skills are needed. Asks for stack-specific templates per matched stack.
 5. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) — copy the canonical `setup-ai-tools.mjs` into `ai-tools/scripts/`, wire the package script alias, run setup, verify all vendor paths resolve.
+6. [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md) — find any pre-existing implementation plans / feature specs scattered across the repo (`docs/`, `specs/`, `plans/`, root markdown, etc.) and propose moving them to the canonical layout `ai-plans/YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md`. Read-only by default; every rename is gated on per-file user approval. Skipped automatically when the analysis finds no candidates.
 
 Each sub-skill returns a short status report. Don't run the next sub-skill until the previous finished cleanly. If a sub-skill fails or surfaces ambiguity, surface that to the user and resolve before continuing.
 
@@ -51,7 +52,7 @@ Use `AskUserQuestion` for finite-choice questions; iterate plain prose for open-
 ### A. Scope
 
 1. **Existing setup?** `ai-tools/` already present → confirm: refresh in place, or stop and route to specific sub-skill (e.g. just re-run install-ai-tools-setup). `AskUserQuestion` options: `Fresh bootstrap`, `Refresh in place`, `Stop, run a specific sub-skill instead`.
-2. **Which sub-skills to run?** Default = all five in order. `AskUserQuestion` options: `All five`, `Skip analyze-codebase (use prior inventory)`, `Skip derive-skills (foundation only)`, `Custom selection (ask me)`.
+2. **Which sub-skills to run?** Default = all six in order. `AskUserQuestion` options: `All six`, `Skip analyze-codebase (use prior inventory)`, `Skip derive-skills (foundation only)`, `Skip migrate-plans-specs (no prior planning docs)`, `Custom selection (ask me)`.
 3. **Vendor coverage.** Which AI tools does the team use? `AskUserQuestion` multi-select: `Claude Code`, `Cursor`, `VS Code Copilot`, `Codex`. Maps to the setup script's `--only` flag at the install step.
 
 ### B. Stack detection
@@ -78,7 +79,42 @@ Two skills are part of the foundation set but aren't always needed. Ask explicit
 
 If the user answers "No" to either, that skill won't ship. If the user answers "Yes" but doesn't have a template, derive-skills drafts one via interview.
 
-After Step 0: read back the captured decisions, confirm via `AskUserQuestion` (`Looks good`, `Some corrections (I'll list)`, `Stop, rethink`).
+### E. Existing AI artifacts (per-artifact disposition)
+
+`vinta-analyze-codebase` §11 produces an inventory of **every** AI-tooling artifact already in the repo: instruction docs (AGENTS.md / CLAUDE.md / .cursorrules / .github/copilot-instructions.md / ...), skills under `.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, `.github/skills/`, `.agents/skills/`, `ai-tools/skills/`, and sub-agent files under `.claude/agents/`, `.cursor/agents/`, `.codex/agents/`, `.github/agents/`, `ai-tools/agents/`.
+
+**Don't skip this step even when the inventory is short.** Three skill files in `.cursor/skills/` from a teammate's experiment are exactly the artifacts that get clobbered if the orchestrator forgets they exist.
+
+For each artifact, read it (frontmatter + body), then ask the user via `AskUserQuestion`:
+
+- **Instruction docs** (`AGENTS.md`, `CLAUDE.md`, etc.):
+  - `Merge into new ai-tools/AGENTS.md` — `vinta-write-agents-md` folds existing content into the canonical sections, preserving anything still accurate.
+  - `Keep as-is, link from ai-tools/AGENTS.md` — leave the file in place, reference it.
+  - `Replace from scratch` — discard existing, draft fresh from inventory + interview.
+
+- **Skills** (each under any vendor `skills/` dir):
+  - `Migrate to ai-tools/skills/<name>/` — move into the canonical layout; `setup-ai-tools.mjs` will re-link to the chosen vendors. Vendor-prefixed dir (`vinta-*`) is left alone — installed by the `@vinta/ai-workflows` CLI.
+  - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
+  - `Drop` — delete (rare; usually the user wants to migrate).
+
+  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale.
+
+- **Sub-agents** (each under any vendor `agents/` dir):
+  - `Migrate to ai-tools/agents/<name>.yaml` — converts vendor-specific format → canonical YAML; `setup-ai-tools.mjs` re-emits per-vendor copies.
+  - `Keep in current vendor path, don't touch` — leaves it where it is.
+  - `Drop`.
+
+  Foundation-shape (`implementer`, `reviewer`, `fixer`) gets the `Replace with Vinta foundation version` option as well.
+
+Surface decisions per artifact, **not** as a single batch. The user might want to migrate one custom skill but keep two others where they are.
+
+After Step 0: read back the captured decisions (including every per-artifact disposition), confirm via `AskUserQuestion` (`Looks good`, `Some corrections (I'll list)`, `Stop, rethink`).
+
+The dispositions become inputs to:
+
+- `vinta-write-agents-md` — knows whether to merge / link / replace.
+- `vinta-derive-subagents` — knows which agents to migrate vs leave; doesn't redrop a foundation file the user said `Replace`.
+- `vinta-derive-skills` — same logic for skills. Doesn't ship a foundation version the user said `Keep` for.
 
 ## Stack templates — detection only, content is user-supplied
 
@@ -112,7 +148,7 @@ No skill / agent content lives in `resources/stacks/<stack>/`. That's by design 
 
 ## Outputs
 
-After all five sub-skills run, the target repo has:
+After all six sub-skills run, the target repo has:
 
 ```
 ai-tools/
@@ -133,6 +169,12 @@ ai-tools/
 │   └── <stack-specific>.yaml            ← only if user supplied templates
 └── scripts/
     └── setup-ai-tools.mjs               ← copied from install-ai-tools-setup resources
+
+ai-plans/                                 ← created by migrate-plans-specs (step 6)
+├── YYYY-MM-DD-FEATURE_NAME_SPEC.md      ← migrated from docs/, specs/, root, etc.
+└── YYYY-MM-DD-FEATURE_NAME_PLAN.md      ← future docs land here too (foundation
+                                            skills `create-spec` + `plan-feature`
+                                            write to this layout)
 ```
 
 Plus the symlinks + per-vendor generated files, set up by the install step.
@@ -172,5 +214,6 @@ After all sub-skills finish:
 3. Each selected vendor's directory has the expected files: `.claude/agents/*.md`, `.cursor/agents/*.md`, `.github/agents/*.agent.md`, `.codex/agents/*.toml`.
 4. Spot-check one skill, one agent: open SKILL.md / `<agent>.yaml` and confirm content describes THIS project (not a copy-pasted template with `<placeholder>` strings).
 5. If the project uses Claude Code: in a new session, ask Claude to invoke one of the project-specific skills. Confirm it loads + the body looks right.
+6. If [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md) ran: `ls ai-plans/` lists the migrated docs in canonical `YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md` form. `git status` shows the renames staged (or already committed). No plan/spec markdown left orphaned in `docs/`, `specs/`, or repo root unless the user explicitly skipped them.
 
 End the run with a one-paragraph summary: what was created, what was skipped (per `--only`), what manual edits the user should review.

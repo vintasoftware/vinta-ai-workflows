@@ -129,9 +129,63 @@ For each app/package: name + path + framework (cross-ref §3) + entry point.
 - `README.md` at root + per-app.
 - `docs/` directory.
 - Architecture decision records (`docs/adr/`, `docs/architecture/`).
-- Existing AI-tooling artifacts: `ai-plans/`, `ai-tools/`, `.claude/`, `.cursor/`, `.codex/`, `.github/copilot-instructions.md`.
 
-If the repo has any of these AI-tooling dirs, **read them in full**. They tell you what conventions already exist — do NOT overwrite.
+### 11. Existing AI-tooling artifacts
+
+This is a load-bearing input for the rest of the bootstrap flow — surface every artifact found, even partial/legacy ones. Read each in full; they tell you what conventions already exist so the downstream `vinta-write-agents-md` / `vinta-derive-subagents` / `vinta-derive-skills` steps can **preserve, merge, or migrate** rather than overwrite.
+
+**Instruction documents** — search for any of these and capture their content:
+
+- `AGENTS.md` (root + per-app in monorepos).
+- `CLAUDE.md`, `.cursorrules`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`.
+- Codex / Cursor / Copilot instructions inside vendor dirs (`.codex/AGENTS.md`, etc.).
+- Anything tagged "AI conventions" / "Coding agent guide" / "LLM rules" in CONTRIBUTING / docs.
+
+**Skills** — for each vendor path, list every skill found with its `name` + `description` (from frontmatter):
+
+| Path | What lives there |
+|---|---|
+| `.claude/skills/<name>/SKILL.md` | Claude Code project skills |
+| `.cursor/skills/<name>/SKILL.md` | Cursor project skills |
+| `.codex/skills/<name>/SKILL.md` | Codex project skills (legacy path) |
+| `.github/skills/<name>/SKILL.md` | Copilot project skills |
+| `.agents/skills/<name>/SKILL.md` | Universal skills (Codex/Cursor/Copilot) |
+| `ai-tools/skills/<name>/SKILL.md` | Vinta canonical layout (already-bootstrapped) |
+
+For each skill, also classify:
+
+- `vinta-managed` — directory name starts with `vinta-` (installed by `@vinta/ai-workflows`; can be left alone or refreshed via that CLI).
+- `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`).
+- `project-custom` — anything else; written by the team.
+
+**Sub-agents** — list every agent file with its name + description:
+
+| Path | Format | Purpose |
+|---|---|---|
+| `.claude/agents/<name>.md` | markdown + frontmatter | Claude Code |
+| `.cursor/agents/<name>.md` | markdown + frontmatter | Cursor |
+| `.codex/agents/<name>.toml` | TOML | Codex |
+| `.github/agents/<name>.agent.md` | markdown + frontmatter | Copilot |
+| `ai-tools/agents/<name>.yaml` | YAML | Vinta canonical |
+
+For each agent, also classify:
+
+- `foundation-shape` — name matches `implementer` / `reviewer` / `fixer`.
+- `stack-specialist` — recognizable stack agent (e.g. `migration-author`, `deploy-author`).
+- `project-custom` — anything else.
+
+**Setup wiring** — note presence of:
+
+- `ai-tools/scripts/setup-ai-tools.mjs` (Vinta canonical multi-vendor setup).
+- `package.json#scripts.setup:ai-tools` or similar alias.
+- Symlinks: `AGENTS.md → ai-tools/AGENTS.md`, `.claude/skills → ../ai-tools/skills`, etc.
+
+**Plan/spec docs** — flag presence (full inventory comes later from [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md)):
+
+- `ai-plans/` directory contents.
+- Loose `IMPLEMENTATION_PLAN.md`, `SPEC.md`, `RFC.md` at root or under `docs/`.
+
+If anything is found, **do NOT overwrite** — the downstream skills will read this section and decide preserve / merge / migrate per artifact, gated on user confirmation in [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) Step 0 §A.4.
 
 ## Output: structured inventory
 
@@ -143,8 +197,25 @@ repo:
   default_branch: <string>
   code_host: github | gitlab | bitbucket | self-hosted | unknown
   existing_ai_artifacts:
-    - AGENTS.md | CLAUDE.md | .cursorrules | .github/copilot-instructions.md | ai-tools/ | ...
-  # if existing_ai_artifacts is non-empty, include the content (read in full) so derive-* skills can preserve it.
+    instructions:
+      - { path: AGENTS.md, content: <full text> }
+      - { path: .github/copilot-instructions.md, content: <full text> }
+      - ...
+    skills:
+      - { path: .claude/skills/checkout-flow/SKILL.md, name: checkout-flow,
+          description: <from frontmatter>, classification: project-custom }
+      - { path: ai-tools/skills/plan-feature/SKILL.md, name: plan-feature,
+          description: <...>, classification: foundation-shape }
+      - ...
+    agents:
+      - { path: .claude/agents/migration-author.md, name: migration-author,
+          description: <...>, classification: stack-specialist }
+      - ...
+    setup:
+      - ai-tools/scripts/setup-ai-tools.mjs
+      - package.json#scripts.setup:ai-tools
+    plans_dir_present: true | false   # full migration list comes from vinta-migrate-plans-specs
+  # downstream skills MUST read existing_ai_artifacts before drafting anything new.
 
 languages:
   - typescript | python | rust | go | ...

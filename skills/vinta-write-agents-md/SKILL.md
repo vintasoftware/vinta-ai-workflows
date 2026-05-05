@@ -13,8 +13,11 @@ The canonical project-conventions document. Read by every AI tool. Single source
 
 ## Inputs
 
-1. The structured inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md).
-2. Any existing `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` / `README.md` content — read in full, preserve information that's still accurate.
+1. The structured inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md). Pay attention to `existing_ai_artifacts.instructions` — every found instruction doc must be folded in, replaced, or referenced per the Step 0 §E disposition captured in [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md).
+2. Any existing `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` / `README.md` / `.cursorrules` / `.github/copilot-instructions.md` content — read in full. Behavior depends on the user's disposition:
+   - **Merge into new AGENTS.md** — extract every still-accurate fact (commands, paths, naming rules, multi-tenancy notes, env vars, deploy steps) and weave into the canonical sections below. Don't lose content silently — if a paragraph doesn't fit any section, surface it for the user to place or drop.
+   - **Keep as-is, link from AGENTS.md** — leave the file untouched; add a `## See also` reference to it from the new AGENTS.md and copy only the high-level pointer (one sentence + link).
+   - **Replace from scratch** — discard the old content; draft fresh from inventory + interview. Note the discarded files in the run summary so the user can verify nothing important was lost.
 3. Interview answers (Step 0 below).
 
 ## Step 0 — Interview before drafting

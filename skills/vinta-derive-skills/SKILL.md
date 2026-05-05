@@ -13,11 +13,25 @@ Author the project's `ai-tools/skills/<name>/SKILL.md` files. Skills are reusabl
 
 ## Inputs
 
-1. Inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md).
+1. Inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md), specifically `existing_ai_artifacts.skills` — every skill file already in the repo with name, description, classification (`vinta-managed` / `foundation-shape` / `project-custom`).
 2. AGENTS.md from [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md).
-3. Step 0 interview answers from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) (PR creation policy, AI co-author policy, code host, commands, branch convention).
+3. Step 0 interview answers from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md), including the §E **per-skill disposition** (migrate / keep / drop / replace).
 4. Stack matches from the inventory; for each, the skill categories listed in [bootstrap-ai-tools/resources/stacks/<stack>/notes.md](../vinta-bootstrap-ai-tools/resources/stacks/).
 5. User-supplied stack templates for matched stacks (path / URL / package — asked at runtime).
+
+## Reconcile against existing skills (do this FIRST)
+
+Before drafting any new SKILL.md, walk through every entry in `existing_ai_artifacts.skills` and apply the disposition the user picked in Step 0 §E:
+
+- **Migrate to `ai-tools/skills/<name>/`** — `git mv` the existing skill folder (with all its resources) into the canonical layout. After move, scan the body for hard-coded vendor paths that no longer apply (`.cursor/skills/...` self-references, etc.) and rewrite to the new path. `setup-ai-tools.mjs` will re-link to the chosen vendors.
+- **Keep in current vendor path, don't touch** — leave it where it is; AGENTS.md may reference it; downstream skill setup won't manage it. **Don't ship a foundation duplicate that would shadow it.**
+- **Drop** — log removal; don't emit anything.
+- **Replace with Vinta foundation version** (foundation-shape only — `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`) — proceed with the bucket A / B / C flow below for that name. The user has explicitly opted into overwriting their version.
+- **`vinta-managed`** (any skill whose dir starts with `vinta-`) — leave alone. These come from the `@vinta/ai-workflows` CLI; `vinta-derive-skills` doesn't manage them.
+
+For each name in the foundation set: only emit it (verbatim copy / generate from template / interview-draft) when no existing skill of that name is being migrated or kept. If the user said `Migrate` or `Keep` for an existing `plan-feature/SKILL.md`, **do not overwrite**.
+
+For project-custom skills: never auto-generate something the user already has under a different name. If the user has `<their-name>/SKILL.md` covering ground a stack template would also cover, ask before adding the stack-template version.
 
 ## Foundation set
 
