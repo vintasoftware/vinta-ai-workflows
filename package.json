@@ -1,0 +1,25 @@
+{
+  "name": "@vinta/ai-workflows",
+  "version": "0.1.0",
+  "description": "Bootstrap AI tooling (AGENTS.md, skills, sub-agents) across Claude Code, Codex, Cursor, and VS Code + GitHub Copilot.",
+  "type": "module",
+  "bin": {
+    "vinta-ai-workflow": "./vinta-ai-workflow.mjs"
+  },
+  "files": [
+    "vinta-ai-workflow.mjs",
+    "skills",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com:vinta/vinta-ai-workflows.git"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "license": "UNLICENSED"
+}
