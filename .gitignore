@@ -26,6 +26,11 @@ $RECYCLE.BIN/
 *.swo
 *~
 
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+
 # Node / npm
 node_modules/
 npm-debug.log*
@@ -56,8 +61,13 @@ coverage/
 .nyc_output/
 
 # Local-only Claude Code / vendor artifacts (not committed from the source repo)
-.claude/
+# — except the dev-skills symlinks committed at the repo root, which give every
+# developer auto-discovery of the maintenance skills under dev-skills/ without
+# a per-machine setup step. See AGENTS.md > dev-skills/.
+.claude/*
+!.claude/skills
 .codex/
-.cursor/
-.github/skills/
-.agents/
+.cursor/*
+!.cursor/skills
+.agents/*
+!.agents/skills
