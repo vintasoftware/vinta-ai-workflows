@@ -236,6 +236,197 @@ proposes per-skill changes with diffs, and only applies what the user
 accepts. See [its SKILL.md](skills/vinta-update-project-skills/SKILL.md)
 for details.
 
+## The AI workflow after bootstrap
+
+Once `vinta-bootstrap-ai-tools` finishes and you commit the generated
+`ai-tools/` layout, the project has three foundation skills wired up to
+take a feature from raw prompt to merged code:
+
+```
+   raw prompt / ticket
+            │
+            ▼
+   ┌─────────────────┐    ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md
+   │   create-spec   │───►  what + why (Business Context, Hypothesis,
+   └─────────────────┘      Use-cases, Acceptance, Negative scope,
+            │               Open questions, Risks)
+            ▼
+   ┌─────────────────┐    ai-plans/YYYY-MM-DD-FEATURE_NAME_PLAN.md
+   │  plan-feature   │───►  how + when (Goals, Decisions, Data Model,
+   └─────────────────┘      Phased Rollout, Touch List, Risks)
+            │
+            ▼
+   ┌─────────────────┐    one stacked branch per phase + tracking file
+   │  implement-plan │───►  plan/<feature>/phase-1, phase-2, ...
+   └─────────────────┘      pushed to GitHub / GitLab / etc.
+```
+
+Each step writes to `ai-plans/YYYY-MM-DD-{FEATURE_NAME}_{SPEC|PLAN}.md`
+(the canonical layout `vinta-migrate-plans-specs` migrates legacy docs to
+during bootstrap).
+
+### 1. Spec generation — `create-spec`
+
+**Trigger:** `/create-spec`, "write a spec for X", "draft a spec for the
+new <feature>". Runs as soon as you have a prompt or ticket and need
+structure before planning.
+
+**What it does:** interviews the requester before drafting — never turns a
+vague prompt into a plausible-sounding spec by guessing. The interview
+covers Business Context, Hypothesis, Objectives, Use-cases, State
+transitions, Acceptance scenarios, Negative scope, Alternatives
+considered, Open questions, and Risks assumed.
+
+**Output:** `ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md` with the fixed
+section structure above. `YYYY-MM-DD` = today; `FEATURE_NAME` =
+`UPPERCASE_WITH_UNDERSCORES`.
+
+**Hand-off:** confirm scope with the requester, then move to `plan-feature`.
+The spec is the contract; the plan is the build pipeline. Plans without
+specs produce plausible-sounding but unverified work.
+
+### 2. Implementation plan generation — `plan-feature`
+
+**Trigger:** `/plan-feature`, "plan the <feature>", "break this spec into
+phases". Reads the matching `*_SPEC.md` (paired by date + feature name)
+before drafting.
+
+**What it does:** translates the spec into a phased delivery plan. Output
+sections:
+
+- **§1 Goals + Non-goals** — what's in / out of scope.
+- **§2 Guiding Decisions** — feature flag (key, scope, default, flip-on
+  criterion if any), storage shape, tenant scoping, API contract, schema
+  rules. Load-bearing — every phase reaches back here.
+- **§3 Data Model Changes** — migrations + rollout order.
+- **§5 Phased Rollout** — each phase declares: `id`, `title`, `goal`,
+  `Suggested AI model` (per vendor — implement-plan picks the cheapest
+  available), `reusable_skills` (other project skills the implementer
+  should invoke), `Changes`, `Tests`, `Acceptance`, plus flags for
+  `is_cross_repo` and `is_flag_removal` (both deferred).
+- **§6 Risk & Rollout Notes**, **§7 Open Questions**, **§8 Touch List**.
+
+Phases are sized so the slowest path (e.g. cross-repo producer wiring,
+external integration approval) starts in Phase 1 and fast in-repo work
+fills in behind. Large mutation phases get split (`4a / 4b / 4c`) rather
+than monolithic.
+
+**Output:** `ai-plans/YYYY-MM-DD-FEATURE_NAME_PLAN.md`. Same `FEATURE_NAME`
+prefix as the spec so `ls ai-plans/` groups pairs.
+
+**Hand-off:** review the plan with the team — feature-flag decision,
+phase boundaries, cross-repo dependencies, rollback story. Once approved,
+move to `implement-plan`.
+
+### 3. Phase-by-phase execution — `implement-plan`
+
+**Trigger:** `/implement-plan`, "implement the <feature> plan", "execute
+phase N of plan X". Asks which plan if ambiguous, then drives every
+in-scope phase to completion without further prompts (unless a phase
+fails after retries).
+
+**Per-phase loop** (Step 1 of the skill):
+
+1. **Compose a token-efficient prompt.** AGENTS.md + plan §1 + §2 +
+   relevant §3 + this phase's §5 body + the running tracking summary
+   (replaces full prior-phase content as context handoff). Don't dump
+   the full plan into every prompt.
+2. **Pick the model from the plan's per-phase suggestion.** Filter to
+   what the runtime can actually run, choose the cheapest survivor.
+   Capability gap on retry → escalate one tier; after Tier 4, stop and
+   surface to the user.
+3. **Spawn the right agent type.** `implementer` by default; switch to
+   a stack-specialist (`migration-author`, `deploy-author`, etc.) when
+   that role's risk dominates the phase.
+4. **Implementer runs inner + outer loop.** Inner: lint → scoped tests
+   → typecheck on touched files; iterate until green. Outer (only after
+   inner is green): full build + full test suite + e2e where applicable.
+   Never commits, pushes, or proceeds with a red gate.
+5. **Three-layer review** before merging the phase branch:
+   - **Layer 1 — mechanical**: read every diff, confirm outer gate ran
+     green, scope-creep + secrets scan.
+   - **Layer 2 — plan compliance**: walk every "Changes" item, every
+     "Tests" entry, the Acceptance line, AGENTS.md conventions, any
+     reusable-skill compliance, feature-flag wiring, cross-phase
+     consistency.
+   - **Layer 3 — independent reviewer**: spawn a fresh `reviewer` agent
+     with no implementation context. Findings triaged BLOCKER /
+     SHOULD-FIX / NIT.
+6. **Fix loop**: each finding → spawn a `fixer` agent (separate session)
+   that re-runs inner + outer loops; orchestrator never edits directly.
+   Repeat until all three layers are clean.
+
+**Branch model — one branch per phase, stacked:**
+
+```bash
+# First executed phase — branches from the default branch.
+git checkout main && git pull --ff-only
+git checkout -b plan/<feature-kebab>/phase-1
+# implementer's commits land here
+git push -u origin plan/<feature-kebab>/phase-1
+
+# Phase 2 stacks on phase 1 — never branches back to main.
+git checkout plan/<feature-kebab>/phase-1
+git checkout -b plan/<feature-kebab>/phase-2
+git push -u origin plan/<feature-kebab>/phase-2
+
+# Phase 3 stacks on phase 2, etc.
+```
+
+Each phase's PR (or branch, depending on the project's PR policy
+captured at bootstrap) targets the previous phase's branch, not `main`.
+This keeps the diff per PR scoped to a single phase, makes review
+manageable, and lets the team merge phases sequentially as approvals
+land — earlier phases ship to production while later ones are still in
+review.
+
+**Tracking file** — `ai-plans/TRACKING_<feature-kebab>.md`. The
+orchestrator writes it from `git diff` + the agent's report (not the
+agent's narration). Records: completed phases (status, model used,
+branch, base, e2e+screenshots when applicable, 5–15 line summary),
+current phase, remaining phases, deferred phases. Acts as the durable
+context handoff between phase prompts. Deleted on plan completion.
+
+**Phases the orchestrator never auto-executes:**
+
+- **Cross-repo phases** (`is_cross_repo: true`) — work in another
+  repository. Marked deferred in tracking; orchestrator continues to
+  the next in-repo phase. Don't block on cross-repo work.
+- **Flag-removal phase** (always the last phase when a feature flag
+  exists). Gated on real-world soak signal — handled by a dedicated
+  flag-removal skill, not `implement-plan`. Marked deferred; orchestrator
+  ends the run with a hand-off note.
+
+**Failure handling:** if a phase fails Layer 1 / 2 / 3 + fixer escalation,
+orchestrator stops, posts the agent's report, and asks how to proceed.
+It does not silently rerun, skip, or escalate models without the user.
+
+### Putting it together
+
+```
+# Day 1 — discovery + scoping
+/create-spec           # interview → ai-plans/2026-05-12-CHECKOUT_FLOW_SPEC.md
+# review with team, iterate
+
+# Day 2 — planning
+/plan-feature          # reads spec → ai-plans/2026-05-12-CHECKOUT_FLOW_PLAN.md
+# review feature flag, phase boundaries, rollback story
+
+# Day 3+ — execution
+/implement-plan        # orchestrator runs phase 1 → phase 2 → ... → phase N-1
+                       # each phase: implementer + reviewer + fixer agents,
+                       # one stacked branch + PR per phase
+# merge phase branches sequentially as approvals land
+# soak phase 1 in prod → soak phase 2 → ...
+# once feature flag's flip-on criterion is met:
+#   invoke the flag-removal skill on the deferred phase N
+```
+
+Standalone re-invocation works at every step — kick `create-spec` again
+when the requirements shift mid-plan, re-run `plan-feature` after
+contract changes, restart `implement-plan` mid-feature (it picks up
+from the tracking file, never re-runs completed phases).
+
 ## Uninstall
 
 After the bootstrap is committed, remove the skills:
