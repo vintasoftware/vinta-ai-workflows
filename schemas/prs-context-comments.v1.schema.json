@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/prs-context-comments.v1.schema.json",
+  "title": "PR-context inline comments list",
+  "description": "YAML list embedded inside the ` ```yaml ... ``` ` fence under the `# Comments` section of a `prs-context/{feature-kebab}/phase-{phase.id}.md` file. Authored by `implement-plan` (or `amend-plan`); read by `open-pr.sh` to post each entry as an inline review comment via `gh` / `glab`. Empty list is valid (clean phase, nothing non-obvious).",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["file", "start_line", "body"],
+    "additionalProperties": false,
+    "properties": {
+      "file": {
+        "description": "Path relative to the repo root.",
+        "type": "string",
+        "minLength": 1
+      },
+      "start_line": {
+        "description": "First line of the commented region on the new side of the diff (1-based).",
+        "type": "integer",
+        "minimum": 1
+      },
+      "end_line": {
+        "description": "Optional last line of a multi-line comment (1-based, inclusive). Omit for single-line comments.",
+        "type": "integer",
+        "minimum": 1
+      },
+      "side": {
+        "description": "Which side of the diff the comment attaches to. `RIGHT` = post-change (default). `LEFT` = pre-change (rare; for comments on removed code).",
+        "type": "string",
+        "enum": ["LEFT", "RIGHT"],
+        "default": "RIGHT"
+      },
+      "body": {
+        "description": "Markdown comment body. 1–3 lines explaining non-obvious context. Reference plan §1 / §2 entries when the decision lives there. Don't restate code.",
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "allOf": [
+      {
+        "description": "If end_line is provided, it must be >= start_line.",
+        "if": { "required": ["end_line"] },
+        "then": {
+          "properties": {
+            "end_line": { "type": "integer" }
+          }
+        }
+      }
+    ]
+  }
+}

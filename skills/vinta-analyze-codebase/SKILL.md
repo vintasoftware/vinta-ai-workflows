@@ -185,6 +185,23 @@ For each agent, also classify:
 - `ai-plans/` directory contents.
 - Loose `IMPLEMENTATION_PLAN.md`, `SPEC.md`, `RFC.md` at root or under `docs/`.
 
+**PR / MR templates** — list every existing template file (case-insensitive). Used by `implement-plan` / `amend-plan` to scaffold the prs-context `# Description` so generated PRs match the project's existing convention. Search:
+
+- GitHub:
+  - `.github/pull_request_template.md` (and `PULL_REQUEST_TEMPLATE.md` casing).
+  - `.github/PULL_REQUEST_TEMPLATE/*.md` (multi-template directory).
+  - `pull_request_template.md` and `PULL_REQUEST_TEMPLATE.md` at repo root.
+  - `docs/pull_request_template.md` and `docs/PULL_REQUEST_TEMPLATE.md`.
+- GitLab:
+  - `.gitlab/merge_request_templates/*.md`.
+- Bitbucket / others: typically configured server-side, no file convention. Note in inventory if user-supplied.
+
+For each template found, capture:
+- Path (relative to repo root).
+- A one-line summary of the section structure (`## Summary`, `## Test plan`, `## Screenshots`, `<!-- comments -->`, etc.) so downstream skills know how to fill it.
+
+Output goes into `existing_ai_artifacts.pr_templates` (see schema below). The full content is read on demand by `implement-plan` / `amend-plan` when drafting prs-context files; analyze-codebase only enumerates.
+
 If anything is found, **do NOT overwrite** — the downstream skills will read this section and decide preserve / merge / migrate per artifact, gated on user confirmation in [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) Step 0 §A.4.
 
 ## Output: structured inventory
@@ -214,6 +231,9 @@ repo:
     setup:
       - ai-tools/scripts/setup-ai-tools.mjs
       - package.json#scripts.setup:ai-tools
+    pr_templates:
+      - { path: .github/pull_request_template.md, sections: [Summary, Test plan, Screenshots] }
+      - { path: .github/PULL_REQUEST_TEMPLATE/feature.md, sections: [...] }
     plans_dir_present: true | false   # full migration list comes from vinta-migrate-plans-specs
   # downstream skills MUST read existing_ai_artifacts before drafting anything new.
 

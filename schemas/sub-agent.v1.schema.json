@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/sub-agent.v1.schema.json",
+  "title": "vinta-ai-workflows sub-agent definition",
+  "description": "Vendor-agnostic sub-agent definition. Lives at `ai-tools/agents/<name>.yaml` in a target project. Read by `setup-ai-tools.mjs` which emits per-vendor copies (Claude markdown, Cursor markdown, Copilot `.agent.md`, Codex TOML). One file per agent. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "required": ["schema_version", "name", "description", "access", "body"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Schema major version. Bumped only on breaking changes.",
+      "type": "integer",
+      "const": 1
+    },
+    "name": {
+      "description": "Agent identifier. Lowercase kebab-case. Used as filename stem and as the agent's slash-command name.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "minLength": 1
+    },
+    "description": {
+      "description": "One-line role + when-to-use summary. Used in vendor frontmatter for delegation hints.",
+      "type": "string",
+      "minLength": 1
+    },
+    "access": {
+      "description": "Read/write capability profile. Drives vendor-specific defaults (Claude `tools:`, Cursor `readonly:`, Codex `sandbox_mode`, Copilot `tools[]`).",
+      "type": "string",
+      "enum": ["read-only", "read-write"]
+    },
+    "body": {
+      "description": "Markdown body of the agent prompt. Multi-line literal block. Becomes the body of every per-vendor file emitted by `setup-ai-tools.mjs`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "claude-tools": {
+      "description": "Optional shorthand: top-level Claude Code `tools:` value. When set, overrides the default derived from `access`. Equivalent to `overrides.claude.tools`.",
+      "type": "string"
+    },
+    "model": {
+      "description": "Optional default model preference (per-vendor when present at top level). Vendor-specific overrides win.",
+      "type": "string"
+    },
+    "is_background": {
+      "description": "Cursor-only top-level flag — agent runs as a background task.",
+      "type": "boolean"
+    },
+    "overrides": {
+      "description": "Vendor-specific overrides. Each vendor's keys mirror what the vendor's frontmatter accepts.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "claude": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "tools": {
+              "description": "Comma-separated tool names (Claude format).",
+              "type": "string"
+            },
+            "model": { "type": "string" }
+          }
+        },
+        "cursor": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "model": { "type": "string" },
+            "readonly": { "type": "boolean" },
+            "is_background": { "type": "boolean" }
+          }
+        },
+        "copilot": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "tools": {
+              "description": "List of Copilot tool ids (e.g. `codebase`, `editFiles`, `runCommands`).",
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "model": { "type": "string" },
+            "user-invocable": { "type": "boolean" },
+            "disable-model-invocation": { "type": "boolean" }
+          }
+        },
+        "codex": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "sandbox_mode": {
+              "type": "string",
+              "enum": ["read-only", "workspace-write", "workspace-network"]
+            },
+            "model": { "type": "string" },
+            "model_reasoning_effort": {
+              "type": "string",
+              "enum": ["low", "medium", "high"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

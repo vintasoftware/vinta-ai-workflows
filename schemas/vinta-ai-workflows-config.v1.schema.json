@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json",
+  "title": "vinta-ai-workflows project config",
+  "description": "Single source of truth for vinta-ai-workflows configuration in a target project. Lives at `.vinta-ai-workflows.yaml` at the repo root. Authored by `vinta-bootstrap-ai-tools`; updated in place by `vinta-ai-workflows-sync`. Read by every builder skill, foundation skill template, and meta-skill. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "vinta_ai_workflows_version",
+    "project",
+    "commands",
+    "policies",
+    "vendors",
+    "foundation_skills",
+    "foundation_agents"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Schema major version. Bumped only on breaking changes.",
+      "type": "integer",
+      "const": 1
+    },
+    "vinta_ai_workflows_version": {
+      "description": "Last `@vinta/ai-workflows` package version this project synced from. Compared against the cloned package version by `vinta-ai-workflows-sync` to enumerate releases since.",
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[A-Za-z0-9.-]+)?$"
+    },
+    "last_synced_at": {
+      "description": "ISO 8601 timestamp of the last successful bootstrap or sync run.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "project": {
+      "type": "object",
+      "required": ["name", "default_branch", "code_host", "stack_summary", "ai_plans_dir"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "default_branch": { "type": "string", "minLength": 1, "examples": ["main", "master"] },
+        "code_host": {
+          "type": "string",
+          "enum": ["github", "gitlab", "bitbucket", "self-hosted", "other"]
+        },
+        "stack_summary": {
+          "description": "Human-readable one-liner of the stack (lang + framework + key deps). Pulled from `vinta-analyze-codebase` inventory.",
+          "type": "string"
+        },
+        "ai_plans_dir": {
+          "description": "Directory holding `YYYY-MM-DD-FEATURE_NAME_{SPEC,PLAN}.md` files. Default `ai-plans`. Some monorepos use `core-service/ai-plans` etc.",
+          "type": "string",
+          "minLength": 1,
+          "default": "ai-plans"
+        },
+        "pr_template_paths": {
+          "description": "Paths (relative to repo root) of the project's existing PR / MR templates. Detected at bootstrap by scanning for `.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/PULL_REQUEST_TEMPLATE/*.md`, `pull_request_template.md`, `docs/pull_request_template.md` (GitHub case-insensitive) and `.gitlab/merge_request_templates/*.md` (GitLab). When non-empty, `implement-plan` / `amend-plan` use the template as the scaffold for the prs-context file's `# Description` section. Empty array → free-form description. Multiple entries (template dir) → orchestrator asks the user which to use, or picks `default.md` if present.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "default": []
+        }
+      }
+    },
+    "commands": {
+      "description": "Commands consumed by `implement-plan` / `amend-plan` / project foundation skills at runtime.",
+      "type": "object",
+      "required": ["lint", "build", "test_unit"],
+      "additionalProperties": true,
+      "properties": {
+        "lint": { "type": "string" },
+        "format": { "type": "string" },
+        "build": {
+          "description": "Type-check / build gate. Often the same as the test command on Python projects.",
+          "type": "string"
+        },
+        "test_unit": { "type": "string" },
+        "test_unit_scoped": {
+          "description": "Per-package or per-app scoped suite (e.g. `pnpm test:patient`).",
+          "type": "string"
+        },
+        "test_unit_new_pattern": {
+          "description": "Pattern for running a single new test file in isolation. Use placeholders like `<pkg>` / `<new-test-path>`.",
+          "type": "string"
+        },
+        "e2e": { "type": "string" }
+      }
+    },
+    "policies": {
+      "description": "Step-0 interview answers driving template rendering + agent prompts.",
+      "type": "object",
+      "required": ["pr_creation", "ai_coauthor", "commit_style", "stage_pattern"],
+      "additionalProperties": false,
+      "properties": {
+        "pr_creation": {
+          "description": "Whether agents open PRs or only push branches. Drives §1f matrix in `implement-plan`.",
+          "type": "string",
+          "enum": ["agents-create", "branches-only"]
+        },
+        "ai_coauthor": {
+          "description": "Whether commits may carry AI co-author trailers (`Co-Authored-By: Claude ...`).",
+          "type": "string",
+          "enum": ["allowed", "forbidden"]
+        },
+        "commit_style": {
+          "type": "string",
+          "enum": ["conventional", "imperative", "other"]
+        },
+        "stage_pattern": {
+          "description": "Default `git add` pattern shown to subagents (no `git add -A`).",
+          "type": "string"
+        },
+        "anti_git_add_all_reason": {
+          "description": "One-line reason `git add -A` is forbidden in this repo (e.g. secrets, build artifacts in tree).",
+          "type": "string"
+        }
+      }
+    },
+    "vendors": {
+      "description": "Vendor coverage selected at bootstrap. Consumed by `setup-ai-tools.mjs` `--only` flag.",
+      "type": "array",
+      "items": { "type": "string", "enum": ["claude", "cursor", "copilot", "codex"] },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "foundation_skills": {
+      "description": "Per-foundation-skill opt-in. Use `enabled` / `disabled`. `disabled` is a sticky opt-out — `vinta-ai-workflows-sync` does not re-propose disabled skills.",
+      "type": "object",
+      "additionalProperties": { "type": "string", "enum": ["enabled", "disabled"] },
+      "properties": {
+        "plan-feature": { "type": "string", "enum": ["enabled", "disabled"] },
+        "create-spec": { "type": "string", "enum": ["enabled", "disabled"] },
+        "create-qa-use-cases": { "type": "string", "enum": ["enabled", "disabled"] },
+        "implement-plan": { "type": "string", "enum": ["enabled", "disabled"] },
+        "amend-plan": { "type": "string", "enum": ["enabled", "disabled"] },
+        "open-pr-from-context": { "type": "string", "enum": ["enabled", "disabled"] },
+        "add-e2e-test": { "type": "string", "enum": ["enabled", "disabled"] },
+        "add-env-var": { "type": "string", "enum": ["enabled", "disabled"] }
+      }
+    },
+    "foundation_agents": {
+      "description": "Per-foundation-agent opt-in. Foundation trio (`implementer` / `reviewer` / `fixer`) are usually `enabled`.",
+      "type": "object",
+      "additionalProperties": { "type": "string", "enum": ["enabled", "disabled"] },
+      "properties": {
+        "implementer": { "type": "string", "enum": ["enabled", "disabled"] },
+        "reviewer": { "type": "string", "enum": ["enabled", "disabled"] },
+        "fixer": { "type": "string", "enum": ["enabled", "disabled"] }
+      }
+    },
+    "stacks": {
+      "description": "Stack templates applied at bootstrap (e.g. `medplum`, `django`, `nextjs-app-router`).",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "default": []
+    },
+    "stack_specialist_agents": {
+      "description": "Stack-specific sub-agents shipped (e.g. `migration-author` for Django, `deploy-author` for Medplum).",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "default": []
+    },
+    "run_options": {
+      "description": "Per-skill run-option defaults. Skills override via per-invocation prompts; values here are the defaults shown.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "implement-plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pause_between_phases": { "type": "boolean", "default": false },
+            "generate_inline_comments": { "type": "boolean", "default": false }
+          }
+        },
+        "amend-plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "blast_radius_signal_threshold": {
+              "description": "How many tripping signals before suggesting restart-from-scratch. 2 = `high-blast-radius`, 3 = `restart-recommended`.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 7,
+              "default": 2
+            }
+          }
+        }
+      }
+    },
+    "skills": {
+      "description": "Per-skill custom config. Open schema — each skill defines its own keys.",
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    }
+  }
+}

@@ -116,6 +116,77 @@ The dispositions become inputs to:
 - `vinta-derive-subagents` — knows which agents to migrate vs leave; doesn't redrop a foundation file the user said `Replace`.
 - `vinta-derive-skills` — same logic for skills. Doesn't ship a foundation version the user said `Keep` for.
 
+## Step 0.5 — Write `.vinta-ai-workflows.yaml` (single source of truth)
+
+Captured interview state lands in **one** YAML file at the repo root: `.vinta-ai-workflows.yaml`. Schema: [`schemas/vinta-ai-workflows-config.v1.schema.json`](../../schemas/vinta-ai-workflows-config.v1.schema.json) (`schema_version: 1`).
+
+This file is the **only** source of truth for project-wide settings. Every downstream sub-skill (4 → 6 below) reads from it instead of receiving values via in-conversation state. Every meta-skill ([vinta-ai-workflows-sync](../vinta-ai-workflows-sync/SKILL.md), [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)) reads + rewrites it.
+
+Write the file now (before any sub-skill runs). Populate from §A–§E:
+
+```yaml
+# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
+
+schema_version: 1
+vinta_ai_workflows_version: <pkg version detected at install time>
+last_synced_at: <ISO 8601 now>
+
+project:
+  name: <from inventory>
+  default_branch: <from inventory>
+  code_host: <github | gitlab | bitbucket | self-hosted>
+  stack_summary: <inventory.frameworks one-liner>
+  ai_plans_dir: <ai-plans | core-service/ai-plans | ...>
+  pr_template_paths: <inventory.existing_ai_artifacts.pr_templates[].path>  # empty array if none found
+
+commands:
+  lint: <§A.3.1>
+  format: <derived>
+  build: <derived>
+  test_unit: <§A.3.2>
+  test_unit_scoped: <derived from monorepo shape>
+  test_unit_new_pattern: <derived>
+  e2e: <only if §D.1 = Yes>
+
+policies:
+  pr_creation: <§A.3.4>
+  ai_coauthor: <§A.3.5>
+  commit_style: <conventional | imperative | other>
+  stage_pattern: <derived>
+  anti_git_add_all_reason: <derived>
+
+vendors: <§A.3 list>
+
+foundation_skills:
+  plan-feature: enabled
+  create-spec: enabled
+  create-qa-use-cases: enabled
+  implement-plan: enabled
+  amend-plan: enabled
+  open-pr-from-context: enabled
+  add-e2e-test: <§D.1 → enabled | disabled>
+  add-env-var: <§D.2 → enabled | disabled>
+
+foundation_agents:
+  implementer: enabled
+  reviewer: enabled
+  fixer: enabled
+
+stacks: <§B matched stacks>
+stack_specialist_agents: <empty unless user supplied templates>
+
+run_options:
+  implement-plan:
+    pause_between_phases: false
+    generate_inline_comments: false
+  amend-plan:
+    blast_radius_signal_threshold: 2
+```
+
+Validate the file against the schema before writing — if any required field is unresolved, route back to the relevant interview question. Don't write a partial config.
+
+Existing-project case: `.vinta-ai-workflows.yaml` already present → that's a re-bootstrap. Show the existing config, ask via `AskUserQuestion`: `Keep existing config and refresh sub-skills only`, `Re-interview and overwrite`, `Stop`. The `Refresh sub-skills only` path is the common case for older projects whose config was written by an earlier `vinta-bootstrap-ai-tools`.
+
 ## Stack templates — detection only, content is user-supplied
 
 [`resources/stacks/<stack>/notes.md`](resources/stacks/) defines **detection signals** + lists the **categories of skills + sub-agents that typically belong** to each stack. **It does NOT ship ready-made skill / agent content.** The team's specific skill library lives wherever the team keeps it (a shared repo, a personal `~/skills/` dir, a published package, a private gist) — the bootstrap orchestrator asks the user to point at it when a stack matches.
@@ -148,9 +219,11 @@ No skill / agent content lives in `resources/stacks/<stack>/`. That's by design 
 
 ## Outputs
 
-After all six sub-skills run, the target repo has:
+After Step 0.5 + all six sub-skills run, the target repo has:
 
 ```
+.vinta-ai-workflows.yaml                    ← single source of truth (Step 0.5)
+                                              schema: schemas/vinta-ai-workflows-config.v1.schema.json
 ai-tools/
 ├── AGENTS.md
 ├── skills/

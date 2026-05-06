@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/prs-context-frontmatter.v1.schema.json",
+  "title": "PR-context file frontmatter (`prs-context/<feature>/<phase>.md`)",
+  "description": "YAML frontmatter at the top of every `prs-context/{feature-kebab}/phase-{phase.id}.md` file. Authored by `implement-plan` (and rewritten by `amend-plan`); read + updated by the bundled `open-pr.sh` script. The `# Title`, `# Description`, `# Comments` body sections that follow the frontmatter are markdown / fenced YAML and not covered by this schema; the `# Comments` YAML list has its own schema (`prs-context-comments.v1.schema.json`).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "plan_id",
+    "feature_name",
+    "phase_id",
+    "phase_title",
+    "branch",
+    "base",
+    "created_at",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Schema major version. Bumped only on breaking changes.",
+      "type": "integer",
+      "const": 1
+    },
+    "plan_id": {
+      "description": "Kebab-case identifier of the plan. Filename feature portion (strip `YYYY-MM-DD-` prefix and `_PLAN.md` suffix, lowercase).",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "minLength": 1
+    },
+    "feature_name": {
+      "description": "`UPPERCASE_WITH_UNDERSCORES` feature name. Matches the plan + spec filename feature portion.",
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*$",
+      "minLength": 1
+    },
+    "phase_id": {
+      "description": "Phase id verbatim from the plan §5 (e.g. `1`, `4a`, `2.5`).",
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)?[a-z]?$",
+      "minLength": 1
+    },
+    "phase_title": {
+      "description": "Phase title verbatim from the plan §5.",
+      "type": "string",
+      "minLength": 1
+    },
+    "branch": {
+      "description": "Source branch the PR opens from. Default convention `plan/<plan-id-kebab>/phase-<phase.id>`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "base": {
+      "description": "Target branch. Either the project's default branch (`main`) or the previous phase's stacked branch.",
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "description": "ISO 8601 timestamp when the PR-context file was first written.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "description": "Lifecycle. `pending` until `open-pr.sh` publishes; then `published`.",
+      "type": "string",
+      "enum": ["pending", "published"]
+    },
+    "pr_url": {
+      "description": "URL of the published PR / MR. Populated by `open-pr.sh` on success. Empty string while `status: pending`.",
+      "type": "string",
+      "anyOf": [
+        { "format": "uri" },
+        { "const": "" }
+      ]
+    }
+  }
+}

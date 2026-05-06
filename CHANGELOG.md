@@ -7,36 +7,92 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.2] — 2026-05-06
 
-### Changed
-
-- **PR creation consolidated to a single flow.** Earlier drafts had two
-  parallel paths in `implement-plan`: the legacy `{{PR_CREATION_INSTRUCTION_BLOCK}}`
-  in §1e (raw `gh pr create` / `glab mr create`) and the new
-  `prs-context` + `open-pr.sh` flow in §1f. Removed the legacy block.
-  PRs now always go through a `prs-context/{feature-kebab}/phase-{phase.id}.md`
-  file + the bundled script, even when inline comments are off.
-  Behavior matrix in the [implement-plan template §1f](skills/vinta-derive-skills/resources/implement-plan-template.md):
-
-  | PR policy | inline comments | §1f does |
-  |---|---|---|
-  | agents create | off | write file (empty comments) + run `open-pr.sh` |
-  | agents create | on  | write file (full) + run `open-pr.sh` |
-  | branches only | off | skip §1f |
-  | branches only | on  | write file (durable record); skip script |
-
-- **Renamed run-option:** `run_options.generate_pr_context` →
-  `run_options.generate_inline_comments`. The opt-in is now strictly
-  about inline comments — PR opening itself is governed by the project's
-  PR creation policy captured at bootstrap, not by this per-run flag.
-- **Removed placeholder** `{{PR_CREATION_INSTRUCTION_BLOCK}}` from the
-  implement-plan template + `vinta-derive-skills` SKILL.md substitution
-  table. The remaining `{{PR_*}}` placeholders cover framing only
-  (description, push, checklist, summary phrasing); they no longer
-  carry raw `gh pr create` lines.
-- **Important rule + Quick checklist** updated to describe the unified
-  §1f matrix instead of the previous two-flag gate.
-
 ### Added
+
+- **Schema-as-contract: `schemas/` directory** at the repo root. Four
+  JSON Schema (Draft 2020-12) files now define every YAML format the
+  toolchain produces or consumes. Every YAML payload carries a top-level
+  `schema_version: <int>` matching the schema filename suffix.
+  - [`vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json)
+    — for `.vinta-ai-workflows.yaml` (project config, see below).
+  - [`sub-agent.v1.schema.json`](schemas/sub-agent.v1.schema.json) —
+    for `ai-tools/agents/<name>.yaml` (vendor-agnostic sub-agent
+    definitions consumed by `setup-ai-tools.mjs`). Documents the four
+    vendor-override sub-objects (`overrides.{claude,cursor,copilot,codex}`).
+  - [`prs-context-frontmatter.v1.schema.json`](schemas/prs-context-frontmatter.v1.schema.json)
+    — for the YAML frontmatter at the top of every
+    `prs-context/{feature-kebab}/phase-{phase.id}.md` file.
+  - [`prs-context-comments.v1.schema.json`](schemas/prs-context-comments.v1.schema.json)
+    — for the YAML list inside the `# Comments` ` ```yaml ` fence.
+  - [`schemas/README.md`](schemas/README.md) documents versioning
+    rules (when to bump major, how to ship `vN+1` alongside `vN`),
+    IDE wiring via `# yaml-language-server: $schema=...` directives,
+    and CI validation snippets (`ajv-cli`).
+
+- **Project config file: `.vinta-ai-workflows.yaml`** (new — written by
+  `vinta-bootstrap-ai-tools` Step 0.5, read + rewritten by
+  `vinta-ai-workflows-sync`). Single source of truth for project-wide
+  settings:
+  - `vinta_ai_workflows_version` — last package version synced from.
+  - `project.{name, default_branch, code_host, stack_summary, ai_plans_dir, pr_template_paths}`.
+  - `commands.{lint, format, build, test_unit, test_unit_scoped, test_unit_new_pattern, e2e}`.
+  - `policies.{pr_creation, ai_coauthor, commit_style, stage_pattern, anti_git_add_all_reason}`.
+  - `vendors` — claude / cursor / copilot / codex selection.
+  - `foundation_skills` + `foundation_agents` — per-artifact opt-in
+    (`enabled` / `disabled`). `disabled` is sticky — `vinta-ai-workflows-sync`
+    won't re-propose disabled artifacts.
+  - `stacks` + `stack_specialist_agents` — applied stack templates.
+  - `run_options.<skill>` — per-skill defaults
+    (`implement-plan.{pause_between_phases, generate_inline_comments}`,
+    `amend-plan.blast_radius_signal_threshold`).
+  - `skills.<name>` — per-skill custom config (open shape per skill).
+  Replaces today's pattern of inlining interview answers into rendered
+  SKILL.md bodies; bodies will continue to inline values (Path B) but
+  re-rendering is driven from the config so values can be edited and
+  propagated by re-running sync.
+
+- **New builder skill: `vinta-ai-workflows-sync`**
+  ([SKILL.md](skills/vinta-ai-workflows-sync/SKILL.md)). Brings a
+  project up to date with the latest package version. Workflow:
+  1. Load `.vinta-ai-workflows.yaml`; validate against schema. If
+     missing, run "Bootstrapping the config file" — reverse-extracts
+     state from existing artifacts + interview-fills gaps.
+  2. Diff the project's `vinta_ai_workflows_version` against the
+     cloned package's current version; parse `CHANGELOG.md` to
+     enumerate releases between.
+  3. Per change, classify against the project's opt-in surface
+     (`affects-project` / `opt-in-offer` / `config-schema-change` /
+     `not-applicable` / `tooling`). Cross-validate via file diff;
+     surface orphan diffs (no changelog entry) at the end.
+  4. Build a per-bucket proposal with inline diffs; `AskUserQuestion`
+     per change (`Apply` / `Skip` / `Show diff`); batch tooling
+     changes under one prompt.
+  5. Apply approved: migrate config schema, flip opt-ins to
+     `enabled`, re-render templates, re-copy verbatim foundation
+     skills (delegated to [vinta-update-project-skills](skills/vinta-update-project-skills/SKILL.md)),
+     re-run setup-ai-tools.mjs in idempotent mode.
+  6. Re-validate every YAML file against its schema.
+  7. Bump `vinta_ai_workflows_version` + `last_synced_at`.
+  Layers on top of `vinta-update-project-skills` (narrow tool stays;
+  sync calls it for foundation-skill body diffs).
+
+- **`vinta-bootstrap-ai-tools` Step 0.5 — Write `.vinta-ai-workflows.yaml`**.
+  New step inserted between Step 0 (interview) and the sub-skill flow.
+  Captures all interview state into the canonical config file before
+  any sub-skill runs. Validates against the schema; partial configs
+  route back to the relevant interview question. Re-bootstrap of an
+  existing-config project asks `Keep existing / Re-interview / Stop`.
+  Outputs tree updated to show `.vinta-ai-workflows.yaml` at the repo
+  root.
+
+- **Schema directives** added to the templates that emit YAML files —
+  `# yaml-language-server: $schema=...` lines at the top of each
+  authored payload so IDEs auto-validate. Wired into:
+  - [skills/vinta-derive-skills/resources/prs-context-template.md](skills/vinta-derive-skills/resources/prs-context-template.md)
+    (frontmatter + `# Comments` fence).
+  - [skills/vinta-derive-subagents/SKILL.md](skills/vinta-derive-subagents/SKILL.md)
+    (sub-agent YAML shape examples now show `schema_version: 1` +
+    schema directive).
 
 - **New project-skill template: `amend-plan`** (renders to
   `ai-tools/skills/amend-plan/SKILL.md` per project, alongside
@@ -137,6 +193,73 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file so re-running mid-plan honors the original choices.
 - **Quick checklist + Important rules** in the implement-plan template
   updated with bullets for opt-in honoring and PR-context durability.
+
+### Changed
+
+- **`setup-ai-tools.mjs` validates `schema_version`** on every loaded
+  `ai-tools/agents/<name>.yaml`. Files lacking `schema_version: 1`
+  fail fast with a clear error pointing at
+  `schemas/sub-agent.v1.schema.json`.
+
+- **PR-context generation honors existing project PR / MR templates.**
+  New `project.pr_template_paths: string[]` field in
+  [`vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json)
+  lists templates detected at bootstrap. Detection in
+  [`vinta-analyze-codebase` §11](skills/vinta-analyze-codebase/SKILL.md)
+  now scans (case-insensitive):
+  - GitHub: `.github/pull_request_template.md`,
+    `.github/PULL_REQUEST_TEMPLATE.md`,
+    `.github/PULL_REQUEST_TEMPLATE/*.md`,
+    repo-root + `docs/` variants.
+  - GitLab: `.gitlab/merge_request_templates/*.md`.
+  Inventory output adds `existing_ai_artifacts.pr_templates[]` with
+  `path` + section summary per template.
+
+  `implement-plan` §1f step 2 now reads `project.pr_template_paths`
+  and uses the chosen template's section structure verbatim for the
+  prs-context `# Description`. Sections are filled with phase-specific
+  content; `<!-- HTML comments -->` placeholders are preserved;
+  checklists are ticked only for items the diff actually satisfies.
+  Multi-template directories prompt the user once; the choice is
+  cached under `run_options.pr_template_used` for subsequent phases.
+  Empty array → free-form description with default sections
+  (`## Summary`, `## Plan reference`, `## Test plan`).
+
+  `amend-plan` §4f follows the same rule when refreshing prs-context
+  bodies, picking up the current `pr_template_paths` even when the
+  template was added or swapped after the original `implement-plan`
+  run.
+
+  [`prs-context-template.md`](skills/vinta-derive-skills/resources/prs-context-template.md)
+  `# Description` guidance updated with the three branches (one
+  template / multiple templates / empty).
+
+- **PR creation consolidated to a single flow.** Earlier drafts had two
+  parallel paths in `implement-plan`: the legacy `{{PR_CREATION_INSTRUCTION_BLOCK}}`
+  in §1e (raw `gh pr create` / `glab mr create`) and the new
+  `prs-context` + `open-pr.sh` flow in §1f. Removed the legacy block.
+  PRs now always go through a `prs-context/{feature-kebab}/phase-{phase.id}.md`
+  file + the bundled script, even when inline comments are off.
+  Behavior matrix in the [implement-plan template §1f](skills/vinta-derive-skills/resources/implement-plan-template.md):
+
+  | PR policy | inline comments | §1f does |
+  |---|---|---|
+  | agents create | off | write file (empty comments) + run `open-pr.sh` |
+  | agents create | on  | write file (full) + run `open-pr.sh` |
+  | branches only | off | skip §1f |
+  | branches only | on  | write file (durable record); skip script |
+
+- **Renamed run-option:** `run_options.generate_pr_context` →
+  `run_options.generate_inline_comments`. The opt-in is now strictly
+  about inline comments — PR opening itself is governed by the project's
+  PR creation policy captured at bootstrap, not by this per-run flag.
+- **Removed placeholder** `{{PR_CREATION_INSTRUCTION_BLOCK}}` from the
+  implement-plan template + `vinta-derive-skills` SKILL.md substitution
+  table. The remaining `{{PR_*}}` placeholders cover framing only
+  (description, push, checklist, summary phrasing); they no longer
+  carry raw `gh pr create` lines.
+- **Important rule + Quick checklist** updated to describe the unified
+  §1f matrix instead of the previous two-flag gate.
 
 ## [0.1.1] — 2026-05-05
 

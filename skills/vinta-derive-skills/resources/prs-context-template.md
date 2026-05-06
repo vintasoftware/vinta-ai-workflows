@@ -1,4 +1,6 @@
 ---
+# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/prs-context-frontmatter.v1.schema.json
+schema_version: 1                        # see schemas/prs-context-frontmatter.v1.schema.json
 plan_id: <plan-id>                       # filename feature portion, kebab-case
 feature_name: <FEATURE_NAME>             # UPPERCASE_WITH_UNDERSCORES, matches plan/spec
 phase_id: <phase-id>                     # e.g. "1", "4a"
@@ -16,15 +18,31 @@ pr_url:                                  # set by open-pr-from-context after pub
 
 # Description
 
-<Markdown body. Reference the plan + phase. Summarize what changed and why.
-Do NOT restate every diff — that's what `git diff` is for. Cover:
+<Markdown body. **Body shape is dictated by `project.pr_template_paths` in
+`.vinta-ai-workflows.yaml`:**
+
+- **One template path** → follow that template's section structure verbatim.
+  Fill each section with phase-specific content. Preserve every
+  `<!-- HTML comment -->` placeholder. Tick checklist items the diff actually
+  satisfies; leave the rest unticked. Don't strip sections you can't fill —
+  leave the template's prompt untouched.
+- **Multiple template paths** (project has a `PULL_REQUEST_TEMPLATE/` directory
+  on GitHub or `merge_request_templates/` on GitLab) → the orchestrator picks
+  one (cached in tracking under `run_options.pr_template_used`) and uses its
+  structure here.
+- **Empty array** (no project template) → free-form. Default sections:
+  - `## Summary` (1–3 sentences).
+  - `## Plan reference` (link to `{{PLAN_DIR}}/<plan-file>` + phase id).
+  - `## Test plan` (commands the reviewer can run).
+
+In every case, cover:
 
 - Phase goal in one line.
 - Decisions that aren't obvious from the diff (cite plan §1, §2 entries).
 - Feature-flag behavior (off-flag = pre-feature, per plan §2).
 - Anything reviewers will ask about that the diff doesn't answer.
 
-Close with the standard footer if the project uses one (test plan, screenshots, etc.).>
+Don't restate every diff — that's what `git diff` is for.>
 
 # Comments
 
@@ -32,7 +50,11 @@ The agent picks **non-obvious** spots in the diff that benefit from a one-paragr
 context note — typically 3–10 per phase. Skip everything that's already obvious
 from the diff itself or from AGENTS.md conventions.
 
+YAML inside this fence is validated against
+[`schemas/prs-context-comments.v1.schema.json`](../../../../schemas/prs-context-comments.v1.schema.json).
+
 ```yaml
+# yaml-language-server: $schema=../../../../node_modules/@vinta/ai-workflows/schemas/prs-context-comments.v1.schema.json
 - file: <relative path from repo root>
   start_line: <line number on the new side>
   end_line: <optional; omit for single-line>

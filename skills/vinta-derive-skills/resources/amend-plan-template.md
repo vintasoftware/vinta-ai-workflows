@@ -281,6 +281,8 @@ For the rewritten branch, look for `prs-context/{feature-kebab}/phase-{phase.id}
   - Inline comments may now reference SHAs that no longer exist. They'll appear as "outdated" in the PR UI.
   - If the new diff has materially different comment-worthy spots, regenerate the `# Comments` block, set `status: pending`, and re-run [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) on the file. The script reuses the existing PR, posts new comments. Old "outdated" comments stay visible in the PR for audit; that's the platform's behavior.
 
+When rewriting the `# Description` body, **honor `project.pr_template_paths`** from `.vinta-ai-workflows.yaml` — same rule as [implement-plan §1f step 2](../implement-plan/SKILL.md): follow the project's PR template structure, fill new sections with phase-specific content from the rewritten body, leave un-fillable placeholders untouched. If the prior file used a different template than the project now declares (template was added or swapped between the original `implement-plan` run and this amend), prefer the current `pr_template_paths` choice — surface the change to the user when the body shape shifts visibly.
+
 Always include in the publish-log block at the bottom of the file:
 
 ```markdown

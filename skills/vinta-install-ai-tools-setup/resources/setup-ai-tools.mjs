@@ -320,6 +320,10 @@ for (const file of readdirSync(AGENTS_SRC)) {
   const text = readFileSync(src, 'utf8');
   const doc = YAML.parse(text);
 
+  // Schema: schemas/sub-agent.v1.schema.json (in @vinta/ai-workflows package).
+  if (doc?.schema_version !== 1) {
+    throw new Error(`${src}: missing or unsupported 'schema_version' (expected: 1; see schemas/sub-agent.v1.schema.json)`);
+  }
   if (!doc?.name) throw new Error(`${src}: missing required field 'name'`);
   if (!doc?.description) throw new Error(`${src}: missing required field 'description'`);
   if (!doc?.access) throw new Error(`${src}: missing required field 'access' (read-only | read-write)`);
