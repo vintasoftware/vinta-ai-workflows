@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/sub-agent.v1.schema.json",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/sub-agent.v1.schema.json",
   "title": "vinta-ai-workflows sub-agent definition",
   "description": "Vendor-agnostic sub-agent definition. Lives at `ai-tools/agents/<name>.yaml` in a target project. Read by `setup-ai-tools.mjs` which emits per-vendor copies (Claude markdown, Cursor markdown, Copilot `.agent.md`, Codex TOML). One file per agent. See schemas/README.md for versioning rules.",
   "type": "object",

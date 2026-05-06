@@ -73,16 +73,16 @@ Each developer's GitHub SSH key needs read access to the repo. Then:
 
 ```bash
 # inside the target project
-npm  install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git
-pnpm add  -D   git+ssh://git@github.com:vinta/vinta-ai-workflows.git
-yarn add  -D   git+ssh://git@github.com:vinta/vinta-ai-workflows.git
-bun  add  -d   git+ssh://git@github.com:vinta/vinta-ai-workflows.git
+npm  install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git
+pnpm add  -D   git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git
+yarn add  -D   git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git
+bun  add  -d   git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git
 ```
 
 Pin a tag/commit when you want determinism:
 
 ```bash
-npm install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git#v0.1.0
+npm install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git#v0.1.0
 ```
 
 ### B. From GitHub Packages (if/when published)
@@ -106,7 +106,7 @@ npm install -D @vinta/ai-workflows
 If you don't want the dep tracked in `package.json`:
 
 ```bash
-npx -y -p git+ssh://git@github.com:vinta/vinta-ai-workflows.git \
+npx -y -p git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git \
   vinta-ai-workflows install --tool all
 ```
 
@@ -184,7 +184,7 @@ Refresh installed skills against the latest package version:
 npm  update @vinta/ai-workflows
 pnpm update @vinta/ai-workflows
 # Or for git+ssh, just re-install with the new ref:
-npm install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git#v0.2.0
+npm install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git#v0.2.0
 
 # 2. Re-link / re-copy skills.
 npx vinta-ai-workflows update --tool all
@@ -546,7 +546,7 @@ done
 ```bash
 # 1. Add the package to the target project.
 cd ~/code/my-new-project
-npm install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git
+npm install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git
 
 # 2. Install the skills your tool reads.
 npx vinta-ai-workflows install --tool claude-code
@@ -565,7 +565,7 @@ npm uninstall @vinta/ai-workflows
 # Later, when this package gains new versions:
 # 6. (optional) Re-install + run vinta-update-project-skills to refresh
 #    the project's generated skills against the latest source.
-npm install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git
+npm install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git
 npx vinta-ai-workflows install --tool claude-code \
   --skills vinta-update-project-skills
 # Then in Claude Code: /vinta-update-project-skills

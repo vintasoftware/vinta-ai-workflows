@@ -5,6 +5,21 @@ All notable changes to `@vinta/ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-05-06
+
+### Fixed
+
+- **Repository URL typo** across README, `package.json`, and every
+  `schemas/*.schema.json` `$id` + the schema directive examples in
+  `schemas/README.md`: `git@github.com:vinta/vinta-ai-workflows.git` →
+  `git@github.com:vintasoftware/vinta-ai-workflows.git`. The `vinta`
+  GitHub org doesn't exist; the package lives under `vintasoftware`.
+  Install commands (`npm install -D git+ssh://...`), the `npx -y -p
+  git+ssh://...` one-shot, the update-flow examples, and the canonical
+  `$schema` URLs IDEs resolve via `# yaml-language-server:` directives
+  all pointed at the wrong host. Schema `$id` change is metadata only —
+  no validation behavior change, no major bump warranted.
+
 ## [0.1.3] — 2026-05-06
 
 ### Added

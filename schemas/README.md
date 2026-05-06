@@ -35,7 +35,7 @@ When you bump the major:
 Add the schema directive to the top of any YAML file you author by hand. Editors with the Red Hat YAML extension (VS Code, Cursor) auto-validate against the URL.
 
 ```yaml
-# yaml-language-server: $schema=https://github.com/vinta/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
+# yaml-language-server: $schema=https://github.com/vintasoftware/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
 schema_version: 1
 vinta_ai_workflows_version: 0.1.2
 # ...
@@ -45,7 +45,7 @@ For PR-context files (markdown with YAML frontmatter), the directive goes inside
 
 ```markdown
 ---
-# yaml-language-server: $schema=https://github.com/vinta/vinta-ai-workflows/schemas/prs-context-frontmatter.v1.schema.json
+# yaml-language-server: $schema=https://github.com/vintasoftware/vinta-ai-workflows/schemas/prs-context-frontmatter.v1.schema.json
 schema_version: 1
 plan_id: checkout-flow
 # ...

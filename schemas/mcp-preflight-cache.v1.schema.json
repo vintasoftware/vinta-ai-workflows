@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/mcp-preflight-cache.v1.schema.json",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/mcp-preflight-cache.v1.schema.json",
   "title": "MCP preflight cache",
   "description": "Per-server preflight state for the `systematic-debugging` foundation skill. Lives at `.vinta-ai-workflows/cache.yaml` in the target project (gitignored — never committed; entries reflect the current developer machine, not project-wide truth). Read + written by the rendered `systematic-debugging` SKILL.md and the `refresh-mcp-cache` CLI command. No TTL — entries stay valid until something fails. A failed MCP call mid-debug-session marks the offending server `dirty`, forcing the next debug run to re-preflight that server (and only that server).",
   "type": "object",

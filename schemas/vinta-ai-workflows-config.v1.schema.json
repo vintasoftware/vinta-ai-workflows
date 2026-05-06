@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json",
   "title": "vinta-ai-workflows project config",
   "description": "Single source of truth for vinta-ai-workflows configuration in a target project. Lives at `.vinta-ai-workflows.yaml` at the repo root. Authored by `vinta-bootstrap-ai-tools`; updated in place by `vinta-ai-workflows-sync`. Read by every builder skill, foundation skill template, and meta-skill. See schemas/README.md for versioning rules.",
   "type": "object",
