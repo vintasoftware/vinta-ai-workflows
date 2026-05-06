@@ -46,14 +46,25 @@ These are project-agnostic enough to ship as-is. Copy from this skill's [resourc
 | `plan-feature` | [resources/foundation-skills/plan-feature/SKILL.md](resources/foundation-skills/plan-feature/SKILL.md) | Author phased implementation plans for a new feature, with interview-driven scoping. |
 | `create-spec` | [resources/foundation-skills/create-spec/SKILL.md](resources/foundation-skills/create-spec/SKILL.md) | Turn a raw feature prompt into a structured spec doc. |
 | `create-qa-use-cases` | [resources/foundation-skills/create-qa-use-cases/SKILL.md](resources/foundation-skills/create-qa-use-cases/SKILL.md) | Bootstrap a project's `QA_USE_CASES.md` from the active spec/plan. |
+| `open-pr-from-context` | [resources/foundation-skills/open-pr-from-context/](resources/foundation-skills/open-pr-from-context/) | Thin SKILL.md wrapper around [scripts/open-pr.sh](resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh) — bash script that publishes one `prs-context/{feature}/{phase}.md` file as a real PR + inline comments via the project's PR CLI (`gh` / `glab`). Used by `implement-plan` (when CLI + `yq`/`jq` are available) and standalone (to publish a `pending` file later). |
 
-These three reference each other (plan-feature reads spec; plan-feature dispatches create-qa-use-cases when the doc is missing). Copy all three or none — they form a unit.
+These four reference each other:
+
+- `plan-feature` reads spec; dispatches `create-qa-use-cases` when the doc is missing.
+- `implement-plan` (bucket B below) writes per-phase PR-context files following [resources/prs-context-template.md](resources/prs-context-template.md), then invokes `open-pr-from-context` when a PR CLI is detected.
+
+Copy all four or none — they form a unit.
 
 After copying, scan each for project-specific path references that no longer match the target (the bundled copies came from a real project — they may say `core-service/ai-plans/`, `apps/provider-app/`, etc). Replace with the target's paths from the inventory.
 
-### B. Generate — `implement-plan` from a template
+### B. Generate — `implement-plan` + `amend-plan` from templates
 
-`implement-plan` is too project-specific to copy verbatim — its body cites real test commands, branch conventions, agent dispatch table, PR / co-author policy. Generate from [resources/implement-plan-template.md](resources/implement-plan-template.md) by substituting placeholders:
+Two project-specific skills, generated from templates because their bodies cite real test commands, branch conventions, agent dispatch table, PR / co-author policy:
+
+- **`implement-plan`** — forward execution: drives a fresh plan phase-by-phase. From [resources/implement-plan-template.md](resources/implement-plan-template.md).
+- **`amend-plan`** — history rewriting: revises an in-flight plan, amends already-implemented phase commits, force-pushes, rebases stacked downstream branches. From [resources/amend-plan-template.md](resources/amend-plan-template.md). Companion to `implement-plan` — same agents, same review gates, same PR-context flow, opposite git topology direction.
+
+Both consume the same placeholder set below — render each by substituting from the inventory + Step 0 interview answers:
 
 | Placeholder | Source | Example |
 |---|---|---|
@@ -74,7 +85,7 @@ After copying, scan each for project-specific path references that no longer mat
 | `{{STACK_SPECIFIC_DEPLOY_BLOCK}}` | from matched stacks | `- Bots: \`pnpm bots:build\`, \`pnpm bots:deploy --env=dev-<handle>\`...` for Medplum, or empty |
 | `{{CODE_HOST}}` | Step 0 interview | `GitHub`, `GitLab`, `Bitbucket` |
 | `{{DEFAULT_BRANCH}}` | inventory.repo.default_branch | `main` or `master` |
-| `{{PR_*}}` family (`{{PR_POLICY_DESCRIPTION}}`, `{{PR_POLICY_BLOCK}}`, `{{PR_REMINDER_LINE}}`, `{{BRANCH_PUSH_HEADING}}`, `{{PR_CREATION_INSTRUCTION_BLOCK}}`, `{{PR_LINK_NOTE}}`, `{{FINAL_REPORT_PR_NOTE}}`, `{{PR_RULE_TAIL}}`, `{{PR_CHECKLIST_NOTE}}`, `{{FINAL_CHECKLIST_PR_NOTE}}`, `{{PUSH_INSTRUCTION_LINE}}`) | Step 0 (PR creation policy) | If "agents only push branches": various lines about NO PR creation, manual human PR. If "agents create PRs": fill with `gh pr create` / `glab mr create` instructions. |
+| `{{PR_*}}` family (`{{PR_POLICY_DESCRIPTION}}`, `{{PR_POLICY_BLOCK}}`, `{{PR_REMINDER_LINE}}`, `{{BRANCH_PUSH_HEADING}}`, `{{PR_LINK_NOTE}}`, `{{FINAL_REPORT_PR_NOTE}}`, `{{PR_RULE_TAIL}}`, `{{PR_CHECKLIST_NOTE}}`, `{{FINAL_CHECKLIST_PR_NOTE}}`, `{{PUSH_INSTRUCTION_LINE}}`) | Step 0 (PR creation policy) | Describes whether agents create PRs vs only push branches. **Note:** PR creation itself goes through §1f (`prs-context` file + bundled `open-pr.sh`), not raw `gh pr create` lines. These placeholders cover the framing (description, push instructions, checklist + summary phrasing) — the §1f matrix consumes the policy directly. |
 | `{{COAUTHOR_*}}` family (`{{COAUTHOR_POLICY_BLOCK}}`, `{{COAUTHOR_INSTRUCTION_LINE}}`, `{{COAUTHOR_LAYER1_CHECK}}`, `{{COAUTHOR_RULE_LINE}}`, `{{COAUTHOR_CHECKLIST_NOTE}}`) | Step 0 (AI co-author policy) | If "forbidden": "Do NOT add `Co-Authored-By: Claude` ..." everywhere. If "allowed": empty / softer language. |
 | `{{COMMIT_STYLE_LINE}}` | Step 0 (commit style) + repo log | `Default subject: short imperative, ≤72 chars` or `Conventional Commits format: type(scope): subject` |
 | `{{ANTI_GIT_ADD_ALL_REASON}}` | derived from common artifacts in target | `secrets, .env files, build artifacts, .auth/ live in the tree` |
@@ -82,7 +93,12 @@ After copying, scan each for project-specific path references that no longer mat
 | `{{PROJECT_SKILLS_LIST}}` | computed from skills emitted | comma-separated names of the skills the project actually has |
 | `{{AGENT_DISPATCH_TABLE}}` | from [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) output | markdown table mapping phase shapes → agent type |
 
-Render the template with substitutions, write to `ai-tools/skills/implement-plan/SKILL.md`. Validate the output: every `{{PLACEHOLDER}}` should be replaced; if any survive, the template needs a new substitution rule.
+Render each template with substitutions, write to:
+
+- `ai-tools/skills/implement-plan/SKILL.md` (from `implement-plan-template.md`)
+- `ai-tools/skills/amend-plan/SKILL.md` (from `amend-plan-template.md`)
+
+Validate each output: every `{{PLACEHOLDER}}` should be replaced; if any survive, the template needs a new substitution rule. The two templates share the same placeholder set — fix substitutions for both at the same time.
 
 ### C. Optional — ask the user
 

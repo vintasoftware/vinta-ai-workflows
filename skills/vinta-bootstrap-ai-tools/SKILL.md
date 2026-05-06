@@ -158,6 +158,7 @@ ai-tools/
 │   ├── create-spec/SKILL.md             ← always (copied verbatim)
 │   ├── create-qa-use-cases/SKILL.md     ← always (copied verbatim)
 │   ├── implement-plan/SKILL.md          ← always (generated from template, project-specific)
+│   ├── amend-plan/SKILL.md              ← always (generated from template, project-specific)
 │   ├── add-e2e-test/SKILL.md            ← optional — only if user opts in
 │   ├── add-env-var/SKILL.md             ← optional — only if user opts in
 │   └── <stack-specific skills>/SKILL.md ← only if user supplied templates

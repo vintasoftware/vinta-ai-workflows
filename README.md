@@ -401,6 +401,75 @@ context handoff between phase prompts. Deleted on plan completion.
 orchestrator stops, posts the agent's report, and asks how to proceed.
 It does not silently rerun, skip, or escalate models without the user.
 
+#### PR creation: single flow via `prs-context` + `open-pr.sh`
+
+`implement-plan` has **one** path for opening PRs: write a
+`prs-context/{feature-name}/{phase-name}.md` file, then run the bundled
+[open-pr.sh](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh)
+script. No raw `gh pr create` / `glab mr create` calls live elsewhere
+in the flow. The file is the durable record; the script is the
+publisher. The `prs-context/` directory is auto-added to `.gitignore`
+by `setup-ai-tools.mjs`.
+
+What actually happens depends on two signals:
+
+1. **Project PR creation policy** — captured at bootstrap. Either
+   "agents create PRs" or "branches only, humans open PRs".
+2. **`generate_inline_comments` opt-in** — Step 0 per-run question, off
+   by default. Yes → agent picks 3–10 non-obvious diff spots and writes
+   them to the file's `# Comments` block. No → file's `# Comments` block
+   is empty; only `# Title` + `# Description` populate.
+
+| PR policy | inline comments | What §1f does |
+|---|---|---|
+| agents create | off | Write file (empty `# Comments`); run `open-pr.sh` → PR opened, no inline comments. |
+| agents create | on  | Write file (full); run `open-pr.sh` → PR opened, all comments posted. |
+| branches only | off | Skip §1f. Human opens PR manually. |
+| branches only | on  | Write file (durable record); **don't** run script. Publish later via `open-pr-from-context` from a CLI-equipped session. |
+
+`open-pr.sh` exit codes propagate: `0` = PR up + comments OK, `1` = PR
+up but ≥1 comment failed (failures listed by `(file:line)`), `2` = hard
+failure (file stays `status: pending` so re-running after fixing the
+gap is safe).
+
+**Required tools** for `open-pr.sh` (install before any policy =
+"agents create" run, and on any session that will publish a `pending`
+file later):
+
+- **`bash` 4+** — already present on macOS (3.2 ships by default; install
+  4+ via `brew install bash`) and Linux.
+- **`git`**.
+- **[`yq`](https://github.com/mikefarah/yq)** (Mike Farah's Go binary —
+  not the Python `yq` wrapper). Used to read/write the file's YAML
+  frontmatter and parse the comments list.
+- **[`jq`](https://stedolan.github.io/jq/)** — used to iterate the
+  comment list and parse `gh` / `glab` JSON output.
+- **One of [`gh`](https://cli.github.com)** (for GitHub) **or
+  [`glab`](https://gitlab.com/gitlab-org/cli)** (for GitLab), authenticated.
+
+Install commands:
+
+```bash
+# macOS
+brew install yq jq gh                    # GitHub
+brew install yq jq glab                  # GitLab
+
+# Debian / Ubuntu
+sudo apt install yq jq                   # check yq version — some distros ship the Python wrapper;
+                                          # if so, install Mike Farah's binary from the GitHub releases.
+# gh: see cli.github.com#installation
+# glab: see gitlab.com/gitlab-org/cli#installation
+
+# Auth (once per machine)
+gh auth login                            # GitHub
+glab auth login                          # GitLab
+```
+
+The script bails early with `missing dependency: <name>` if any are
+absent. If a runner can't install them (e.g. minimal CI image), the
+project's PR policy must be set to "branches only" at bootstrap so §1f
+skips the script — humans open PRs from the pushed branch.
+
 ### Putting it together
 
 ```

@@ -5,6 +5,139 @@ All notable changes to `@vinta/ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-05-06
+
+### Changed
+
+- **PR creation consolidated to a single flow.** Earlier drafts had two
+  parallel paths in `implement-plan`: the legacy `{{PR_CREATION_INSTRUCTION_BLOCK}}`
+  in §1e (raw `gh pr create` / `glab mr create`) and the new
+  `prs-context` + `open-pr.sh` flow in §1f. Removed the legacy block.
+  PRs now always go through a `prs-context/{feature-kebab}/phase-{phase.id}.md`
+  file + the bundled script, even when inline comments are off.
+  Behavior matrix in the [implement-plan template §1f](skills/vinta-derive-skills/resources/implement-plan-template.md):
+
+  | PR policy | inline comments | §1f does |
+  |---|---|---|
+  | agents create | off | write file (empty comments) + run `open-pr.sh` |
+  | agents create | on  | write file (full) + run `open-pr.sh` |
+  | branches only | off | skip §1f |
+  | branches only | on  | write file (durable record); skip script |
+
+- **Renamed run-option:** `run_options.generate_pr_context` →
+  `run_options.generate_inline_comments`. The opt-in is now strictly
+  about inline comments — PR opening itself is governed by the project's
+  PR creation policy captured at bootstrap, not by this per-run flag.
+- **Removed placeholder** `{{PR_CREATION_INSTRUCTION_BLOCK}}` from the
+  implement-plan template + `vinta-derive-skills` SKILL.md substitution
+  table. The remaining `{{PR_*}}` placeholders cover framing only
+  (description, push, checklist, summary phrasing); they no longer
+  carry raw `gh pr create` lines.
+- **Important rule + Quick checklist** updated to describe the unified
+  §1f matrix instead of the previous two-flag gate.
+
+### Added
+
+- **New project-skill template: `amend-plan`** (renders to
+  `ai-tools/skills/amend-plan/SKILL.md` per project, alongside
+  `implement-plan`). Source:
+  [skills/vinta-derive-skills/resources/amend-plan-template.md](skills/vinta-derive-skills/resources/amend-plan-template.md).
+  Companion to `implement-plan` — same agents, same review gates, same
+  prs-context flow; opposite git topology direction (history rewriting
+  instead of forward execution). Use cases: spec change forces a phase
+  body rewrite, a phase needs to slot in between existing ones, or a §2
+  guiding decision changes and cascades through later phases.
+
+  Flow:
+  1. Edit the plan file (rewrite affected phase bodies, insert / append
+     new phases, log the amendment in `## Amendments`).
+  2. Build a per-phase state map (`not-started` / `in-progress` /
+     `implemented-not-merged` / `merged-to-default`).
+  3. **Blast-radius evaluation.** Compute signals (rewrite share ≥ 50%,
+     §2 cascade ≥ 50%, ≥2 immutable phases combined with earlier
+     rewrites, data-model contract change in >2 phases, ≥70% rewritten
+     LoC, multi-author branches, ≥2 approved PRs). ≥2 signals tripping
+     → surface a `Restart` option to the user before any force-push
+     plan is shown. On `Restart`: hand off to `plan-feature` for a
+     fresh `YYYY-MM-DD-FEATURE_NAME_PLAN.md`; annotate the old plan
+     `Superseded`; leave old phase branches in place for audit; exit.
+  4. Refuse force-pushes that can't work — phases merged to the default
+     branch are immutable; amendment must be a new appended phase.
+     Branch protection, multi-author branches, and approved PRs all
+     prompt for explicit confirmation.
+  5. Per affected phase, in stack order: spawn an implementer subagent
+     to bring the diff into compliance with the new body, run inner +
+     outer test loops, run all three review layers, rebase onto the
+     (possibly-rewritten) parent, then `git push --force-with-lease`.
+     Conflicts resolved by a fixer subagent.
+  6. Refresh the `prs-context/{feature}/phase-{id}.md` file: pending
+     ones get rewritten in place; published ones may flip back to
+     pending and re-publish via `open-pr.sh` so new comments post.
+  7. Update `TRACKING_{plan-id}.md` with amendment notes; final report
+     lists every branch state, pending PR-contexts, blocked rewrites
+     with forward-phase suggestions, and a reviewer re-request reminder.
+
+  Hard rules:
+  - Never `--force`. Always `--force-with-lease`.
+  - Per-branch confirmation; never batch.
+  - Subagents commit but never push — orchestrator owns force-push.
+  - Phases merged to default branch are converted to `append-new` and
+    handed off to `implement-plan`, not rewritten here.
+  - `not-started` phases never executed by this skill — also handed off
+    to `implement-plan`.
+- **`vinta-bootstrap-ai-tools` Outputs tree** updated to list
+  `ai-tools/skills/amend-plan/SKILL.md` alongside `implement-plan`.
+- **`vinta-derive-skills` bucket B** now generates two skills from
+  templates instead of one. Both templates share the same placeholder
+  set (`{{LINT_CMD}}`, `{{BUILD_CMD}}`, `{{TEST_CMD}}`, `{{DEFAULT_BRANCH}}`,
+  `{{PR_*}}` family, `{{COAUTHOR_*}}` family, `{{COMMIT_STYLE_LINE}}`,
+  etc.) — substitute once, render twice.
+
+- **New foundation skill + bundled script: `open-pr-from-context`**
+  ([SKILL.md](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/SKILL.md),
+  [scripts/open-pr.sh](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh)).
+  The mechanical work — parse frontmatter + sections, detect CLI, open
+  PR, post each inline comment, rewrite frontmatter, append publish log —
+  lives in the bash script; the SKILL.md is a thin wrapper that picks
+  the file, runs the script, and reports the result. Script deps:
+  `bash 4+`, `git`, `yq` (Mike Farah), `jq`, plus one of `gh` / `glab`.
+  Per-comment failure tolerated — bad ones reported, run continues.
+  On success rewrites the file's frontmatter to `status: published` +
+  `pr_url`, appends a timestamped publish log. Strictly scoped: no push,
+  no test re-runs, no diff editing, no draft generation. Bundled with
+  the `vinta-derive-skills` foundation set so it ships with every new
+  bootstrap. Exit codes: 0 (full success), 1 (PR up, comment failures),
+  2 (hard failure / missing deps).
+- **PR-context template** at
+  [skills/vinta-derive-skills/resources/prs-context-template.md](skills/vinta-derive-skills/resources/prs-context-template.md)
+  defining the reproducible file shape: frontmatter (plan_id, feature_name,
+  phase_id, phase_title, branch, base, created_at, status, pr_url) +
+  `# Title`, `# Description`, `# Comments` sections (single fenced YAML
+  list of `{file, start_line, end_line?, side, body}` entries).
+- **`implement-plan` Step 0 opt-in questions** (template-level —
+  `vinta-derive-skills` renders these into the project's `implement-plan`
+  skill body):
+  - **Pause between phases?** Default off (auto-flow). When on, a new §1i
+    gate fires after each phase's user update with `Continue` / `Pause` /
+    `Stop` options; orchestrator exits cleanly on Pause and resumes on
+    next invocation per the existing "Re-running mid-plan" flow.
+  - **Generate PR descriptions + inline comments?** Default off. When on,
+    new §1f draft step fires after every phase: agent picks 3–10
+    non-obvious comment targets from the diff (subtle invariants,
+    feature-flag short-circuits, cross-phase coupling, upstream-contract
+    naming), writes `prs-context/{feature-kebab}/phase-{phase.id}.md`
+    following the template, and — if a PR CLI is detected — invokes
+    `open-pr-from-context` to publish.
+- **`prs-context/` auto-added to `.gitignore`** by
+  [skills/vinta-install-ai-tools-setup/resources/setup-ai-tools.mjs](skills/vinta-install-ai-tools-setup/resources/setup-ai-tools.mjs)
+  on first invocation. Idempotent (re-runs don't duplicate the entry);
+  preserves any existing `.gitignore` content; appends a labeled block.
+- **Run-options state** (`run_options.pause_between_phases`,
+  `run_options.generate_pr_context`) recorded in the per-plan tracking
+  file so re-running mid-plan honors the original choices.
+- **Quick checklist + Important rules** in the implement-plan template
+  updated with bullets for opt-in honoring and PR-context durability.
+
 ## [0.1.1] — 2026-05-05
 
 ### Added
