@@ -26,7 +26,7 @@ Before drafting any new SKILL.md, walk through every entry in `existing_ai_artif
 - **Migrate to `ai-tools/skills/<name>/`** — `git mv` the existing skill folder (with all its resources) into the canonical layout. After move, scan the body for hard-coded vendor paths that no longer apply (`.cursor/skills/...` self-references, etc.) and rewrite to the new path. `setup-ai-tools.mjs` will re-link to the chosen vendors.
 - **Keep in current vendor path, don't touch** — leave it where it is; AGENTS.md may reference it; downstream skill setup won't manage it. **Don't ship a foundation duplicate that would shadow it.**
 - **Drop** — log removal; don't emit anything.
-- **Replace with Vinta foundation version** (foundation-shape only — `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`) — proceed with the bucket A / B / C flow below for that name. The user has explicitly opted into overwriting their version.
+- **Replace with Vinta foundation version** (foundation-shape only — `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`) — proceed with the bucket A / B / C flow below for that name. The user has explicitly opted into overwriting their version.
 - **`vinta-managed`** (any skill whose dir starts with `vinta-`) — leave alone. These come from the `@vinta/ai-workflows` CLI; `vinta-derive-skills` doesn't manage them.
 
 For each name in the foundation set: only emit it (verbatim copy / generate from template / interview-draft) when no existing skill of that name is being migrated or kept. If the user said `Migrate` or `Keep` for an existing `plan-feature/SKILL.md`, **do not overwrite**.
@@ -112,8 +112,9 @@ Two skills depend on whether the project actually does the thing. Ask via `AskUs
 |---|---|---|
 | `add-e2e-test` | "Does this project have e2e tests, or plan to add them?" Options: `Yes — already has them`, `Yes — planning to add`, `No — skip` | Ask if user has an existing template (path / URL). If yes → copy + adapt. If no → draft from scratch using the canonical structure (see "Skill SKILL.md structure" below) interviewing user about: e2e framework, page-object pattern, auth/storage-state pattern, seed-helpers location, tenant scoping in seeds, screenshot conventions for PRs. |
 | `add-env-var` | "Does this project have a non-trivial env-var propagation flow (multiple files / build configs / CI to update for one new var)?" Options: `Yes`, `No — single .env file is enough` | Ask if user has an existing template. If yes → copy + adapt. If no → draft from scratch interviewing user about every layer the new var must touch (`.env.example`, build tool envPrefix allowlist, build cache hash inputs, app config module, AGENTS.md env section, CI workflows, deploy-time injection). |
+| `add-one-off-script` | "Does this project ever need one-off operational scripts — backfills, cleanups, ad-hoc data fixes?" Options: `Yes — enable`, `No — skip`. Recommend `Yes` for any project with a relational DB; the skill bundles a `BaseOneOffScript` class enforcing dry-run-by-default, idempotent re-runs, batched DB ops, streamed reads, segmented CSV backups (1M cells/file, never nested across tables), interruption-safe signal handlers, and console + filesystem + S3 logging. | Copy [resources/foundation-skills/add-one-off-script/](resources/foundation-skills/add-one-off-script/) into `ai-tools/skills/add-one-off-script/` (SKILL.md + the bundled `resources/one_off_script_base.{py,ts}` templates). Then ask the user whether they want the base class file pre-staged at `<scripts_dir>/one_off/_base.{py,ts}` — default `Yes` for projects whose primary lang is Python or TS. The skill itself prompts to copy the base class on first use if the user said `No` here. |
 
-If user answers "No" to either: don't ship that skill. Record nothing — the foundation set is just smaller.
+If user answers "No" to any: don't ship that skill. Record nothing — the foundation set is just smaller.
 
 If user answers "Yes" but has no template: draft from scratch via interview. The orchestrator can defer this to a separate `vinta-derive-skills` standalone run if the user wants to ship the rest first.
 
@@ -174,7 +175,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 - **Don't ship copy-pasted source-project SKILL.md files unchanged.** Run search-and-replace for source project names / paths / commands before saving.
 - **Foundation set is a unit.** Always copy `plan-feature` + `create-spec` + `create-qa-use-cases` together — they reference each other.
 - **`implement-plan` is generated, not copied.** Its body has too much project-specific content for verbatim shipping.
-- **Optional skills (`add-e2e-test`, `add-env-var`) are gated by user answer.** Don't ship them by default.
+- **Optional skills (`add-e2e-test`, `add-env-var`, `add-one-off-script`) are gated by user answer.** Don't ship them by default.
 - **Each skill solves one job.** Two unrelated checklists → split.
 - **Reference real files in the target.** Skill links must point to existing paths.
 - **Skills auto-load by description.** Specific triggers, specific outcomes.

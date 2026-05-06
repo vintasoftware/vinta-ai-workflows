@@ -135,6 +135,11 @@
         "open-pr-from-context": { "type": "string", "enum": ["enabled", "disabled"] },
         "add-e2e-test": { "type": "string", "enum": ["enabled", "disabled"] },
         "add-env-var": { "type": "string", "enum": ["enabled", "disabled"] },
+        "add-one-off-script": {
+          "description": "Author safe operational one-off scripts (backfills, cleanups, ad-hoc data fixes) following a strict contract: dry-run by default, idempotent on re-run, batched DB operations, streamed reads, segmented CSV backups before destructive writes (max 1M cells/file, never nested across tables), interruption-safe signal handlers, and console + filesystem + S3 logging. Bundles a `BaseOneOffScript` class template under [resources/foundation-skills/add-one-off-script/resources/](resources/foundation-skills/add-one-off-script/resources/). When `enabled`, project-level configuration lives under `skills.add-one-off-script` (scripts dir, S3 bucket/prefix, default batch size).",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        },
         "systematic-debugging": {
           "description": "Root-cause-first debugging skill rendered from `vinta-derive-skills/resources/systematic-debugging-template.md`. When `enabled`, the per-project MCP tool selection lives in `skills.systematic-debugging.observability_mcp_tools`.",
           "type": "string",
@@ -222,6 +227,53 @@
               "items": { "type": "string", "minLength": 1 },
               "uniqueItems": true,
               "default": []
+            }
+          }
+        },
+        "add-one-off-script": {
+          "description": "Configuration for the `add-one-off-script` foundation skill. Optional when `foundation_skills.add-one-off-script` is `enabled` — sensible defaults apply when omitted.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scripts_dir": {
+              "description": "Where one-off scripts live in the repo. Default `scripts/one_off`. Override for monorepos that nest scripts under a service / package dir.",
+              "type": "string",
+              "minLength": 1,
+              "default": "scripts/one_off"
+            },
+            "language": {
+              "description": "Primary language for scripts; selects which `BaseOneOffScript` template to stage. Default inferred from project stack at bootstrap.",
+              "type": "string",
+              "enum": ["python", "typescript"]
+            },
+            "log_dir": {
+              "description": "Where logs, PID files, processed-items logs, and CSV backups land. Default `.vinta-ai-workflows/one-off-runs` (gitignored).",
+              "type": "string",
+              "minLength": 1,
+              "default": ".vinta-ai-workflows/one-off-runs"
+            },
+            "default_batch_size": {
+              "description": "Default batch size injected into the `BaseOneOffScript` config when scripts don't override. Smaller for wide rows / contended tables.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000,
+              "default": 500
+            },
+            "csv_max_cells": {
+              "description": "Per-CSV-chunk cell cap (rows × columns) before the writer rolls over to the next file. The contract requires segmented CSVs so a single backup chunk stays loadable without OOM.",
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 10000000,
+              "default": 1000000
+            },
+            "s3_bucket": {
+              "description": "S3 bucket for log + CSV-backup uploads. Falls back to the `ONE_OFF_S3_BUCKET` env var at runtime when unset. Empty string disables S3 upload (filesystem copy remains authoritative).",
+              "type": "string"
+            },
+            "s3_prefix": {
+              "description": "S3 key prefix for uploads. Falls back to `ONE_OFF_S3_PREFIX` env, default `one-off-runs/`. Trailing slash recommended.",
+              "type": "string",
+              "default": "one-off-runs/"
             }
           }
         }

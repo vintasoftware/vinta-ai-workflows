@@ -72,11 +72,17 @@ These bleed across sub-skills, so capture once now:
 
 ### D. Optional foundation skills
 
-Three skills are part of the foundation set but aren't always needed. Ask explicitly:
+Four skills are part of the foundation set but aren't always needed. Ask explicitly:
 
 1. **`add-e2e-test`** — does the project have e2e tests (Playwright / Cypress / similar) or plan to add them? `AskUserQuestion` options: `Yes — already has them`, `Yes — planning to add`, `No — skip`. If yes, [vinta-derive-skills](../vinta-derive-skills/SKILL.md) §C will follow up to ask whether the user has a template or wants to draft from scratch.
 2. **`add-env-var`** — does the project have a non-trivial env-var propagation flow (multiple files / build configs / CI updates per new var) or a single `.env` file is enough? `AskUserQuestion` options: `Yes — non-trivial flow`, `No — single .env is enough`. Skip if `No`.
 3. **`systematic-debugging`** — should agents follow a root-cause-first debugging flow that mandates pulling evidence from the project's observability MCP servers before proposing any fix? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend enabling whenever any observability MCP server is wired up — the skill bakes the project's real test / lint / build commands into the rendered checklist and instructs the agent to discover available calls on those servers at runtime (so it stays correct even as MCP servers add or rename tools).
+4. **`add-one-off-script`** — does the project ever need one-off operational scripts (backfills, cleanups, ad-hoc data fixes) that mutate production data outside the regular migration / ETL / cron path? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for any project with a relational DB or large user dataset; the bundled `BaseOneOffScript` template enforces the safety contract (dry-run by default, idempotent re-runs, batched DB ops, streamed reads, segmented CSV backups capped at 1M cells per file with one set of files per affected table, interruption-safe signal handlers, console + filesystem + S3 logs that survive an interruption). Skip for read-only projects or projects whose only writes go through a migration tool.
+
+   **Follow-up only if §D.4 = Yes.** Three short questions land in `skills.add-one-off-script` of `.vinta-ai-workflows.yaml`:
+   - **Scripts dir.** Default `scripts/one_off`. Override for monorepos that nest scripts under a service / package dir. Free-form string.
+   - **Primary language.** `AskUserQuestion`: `Python`, `TypeScript`. Auto-pick from `inventory.frameworks` when one language clearly dominates; ask only when polyglot. Drives which `BaseOneOffScript` template gets staged at `<scripts_dir>/_base.{py,ts}`.
+   - **S3 bucket + prefix.** Open prose. Empty bucket disables S3 upload (filesystem copy stays authoritative). The skill also reads the `ONE_OFF_S3_BUCKET` / `ONE_OFF_S3_PREFIX` env vars at runtime, so leaving the config blank is fine if the team prefers env-only.
 
    **Follow-up only if §D.3 = Yes — observability MCP server inventory.** Open prose, not multi-select. Ask the user to name every MCP server already wired up that exposes observability data, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. Cross-check the answers against any MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.) — if a server is configured but the user didn't mention it, ask whether it carries observability data. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
 
@@ -86,7 +92,7 @@ Three skills are part of the foundation set but aren't always needed. Ask explic
    - Do **not** seed the cache file at bootstrap. The first debug run preflights all configured servers and writes the file then. An empty / missing `.vinta-ai-workflows/cache.yaml` is a valid initial state.
    - Mention to the user how to refresh: delete the file to re-preflight everything, or edit one entry's `status` to `dirty` to refresh that one server. Token rotated → cache will catch the auth error on the next call and flip the entry to `dirty` automatically.
 
-If the user answers "No" to any of the three, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above.
+If the user answers "No" to any of the four, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above. `add-one-off-script` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/add-one-off-script/](../vinta-derive-skills/resources/foundation-skills/add-one-off-script/) — its body is project-agnostic; the per-project variability lives in the `skills.add-one-off-script.*` config block above and in env vars consumed at runtime.
 
 ### E. Existing AI artifacts (per-artifact disposition)
 
@@ -106,7 +112,7 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
 
-  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale.
+  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale.
 
 - **Sub-agents** (each under any vendor `agents/` dir):
   - `Migrate to ai-tools/agents/<name>.yaml` — converts vendor-specific format → canonical YAML; `setup-ai-tools.mjs` re-emits per-vendor copies.
@@ -176,6 +182,7 @@ foundation_skills:
   add-e2e-test: <§D.1 → enabled | disabled>
   add-env-var: <§D.2 → enabled | disabled>
   systematic-debugging: <§D.3 → enabled | disabled>
+  add-one-off-script: <§D.4 → enabled | disabled>
 
 foundation_agents:
   implementer: enabled
@@ -196,6 +203,16 @@ skills:
   # Only emit this block when foundation_skills.systematic-debugging = enabled.
   systematic-debugging:
     observability_mcp_servers: <§D.3 follow-up — free-form array of MCP server identifiers, e.g. [sentry, datadog, our-internal-traces]>
+
+  # Only emit this block when foundation_skills.add-one-off-script = enabled.
+  add-one-off-script:
+    scripts_dir: <§D.4 follow-up — default `scripts/one_off`>
+    language: <§D.4 follow-up — `python` | `typescript`>
+    log_dir: .vinta-ai-workflows/one-off-runs
+    default_batch_size: 500
+    csv_max_cells: 1000000
+    s3_bucket: <§D.4 follow-up — empty disables S3 upload>
+    s3_prefix: one-off-runs/
 ```
 
 Validate the file against the schema before writing — if any required field is unresolved, route back to the relevant interview question. Don't write a partial config.
@@ -252,6 +269,13 @@ ai-tools/
 │   ├── add-e2e-test/SKILL.md            ← optional — only if user opts in
 │   ├── add-env-var/SKILL.md             ← optional — only if user opts in
 │   ├── systematic-debugging/SKILL.md    ← optional — only if user opts in (template-rendered)
+│   ├── add-one-off-script/              ← optional — only if user opts in (verbatim copy + bundled BaseOneOffScript + LocalRuntime templates)
+│   │   ├── SKILL.md
+│   │   └── resources/
+│   │       ├── one_off_script_base.py
+│   │       └── one_off_script_base.ts
+│   ├── run-one-off-script-django/       ← optional sister skill — only when stack matches + user supplies template (authors Jupyter notebook / mgmt command runner + JupyterRuntime / DjangoMgmtRuntime adapter in the per-script folder)
+│   ├── run-one-off-script-medplum/      ← optional sister skill — only when stack matches + user supplies template (authors Medplum bot + MedplumBotRuntime adapter in the per-script folder)
 │   └── <stack-specific skills>/SKILL.md ← only if user supplied templates
 ├── agents/
 │   ├── implementer.yaml                 ← always (foundation)
@@ -275,7 +299,7 @@ Foundation skills break into three buckets — see [vinta-derive-skills](../vint
 
 - **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs).
 - **Always generate**: `implement-plan`, `amend-plan`. Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates using interview answers + inventory.
-- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in the §D.3 follow-up; if no → don't ship.
+- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in the §D.3 follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via §D.4 follow-up; if no → don't ship.
 
 Stack-specific skills + agents land in the target only when the user provides templates for them. If they don't have templates yet, the orchestrator records the detected stacks + skill categories as a TODO list the user can address later via [vinta-derive-skills](../vinta-derive-skills/SKILL.md) / [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) standalone runs.
 

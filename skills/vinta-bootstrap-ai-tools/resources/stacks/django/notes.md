@@ -26,6 +26,7 @@ If no multi-tenancy signals → single-tenant Django; the team's templates may s
 - **Create-data-import / create-data-export** — async import/export commands feeding integrations.
 - **GraphQL-public-query** (if the project uses Strawberry or Graphene) — public-API mutation/query patterns.
 - **REST-endpoint** (if the project uses Django REST Framework or django-ninja) - REST API endpoint patterns.
+- **Run-one-off-script-django** — sister to the universal `add-one-off-script` foundation skill. Authors the *runner* artefact in the per-script folder (Jupyter notebook in `notebooks/` is the typical Vinta default; a thin `BaseCommand` under `<app>/management/commands/<name>.py` is the alternative for headless / cron / CI invocation) and ships the matching `Runtime` adapter at `<scripts_dir>/_runtime_django.py` (`JupyterRuntime` and/or `DjangoMgmtRuntime`). Adapter responsibilities: hook `BaseCommand.handle()` into `BaseOneOffScript.execute()`; respect `python manage.py <name> --apply` / `--resume` / `--status` / `--restore` flags; load Django settings + DB connection before the engine starts iterating; for the Jupyter variant, swap signal handlers for kernel-interrupt and skip the PID-file lease (notebook = single instance by construction). README in the per-script folder spells out `python manage.py shell < script.py`, `jupyter lab notebooks/<name>/runner.ipynb`, and `python manage.py <name> --apply` as the three legitimate entry points.
 
 ## Agent categories typically needed
 
@@ -41,6 +42,8 @@ If no multi-tenancy signals → single-tenant Django; the team's templates may s
 - Tenant column name (`tenant_id`, `organization_id`, `account_id`)
 - Hot tables list (the high-traffic models that need migration safety)
 - Migration command (`make migrations`, `python manage.py makemigrations`, `poetry run python manage.py makemigrations`)
+- One-off script invocation surface (Jupyter notebook in `notebooks/<name>/`, Django management command, both) — drives the `run-one-off-script-django` skill's runner artefact + which `Runtime` adapter ships
+- Notebook directory path (`notebooks/`, `core_service/notebooks/`) — only when Jupyter is selected as a runner surface
 
 ## When this stack doesn't apply cleanly
 
