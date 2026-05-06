@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/mcp-preflight-cache.v1.schema.json",
+  "title": "MCP preflight cache",
+  "description": "Per-server preflight state for the `systematic-debugging` foundation skill. Lives at `.vinta-ai-workflows/cache.yaml` in the target project (gitignored — never committed; entries reflect the current developer machine, not project-wide truth). Read + written by the rendered `systematic-debugging` SKILL.md and the `refresh-mcp-cache` CLI command. No TTL — entries stay valid until something fails. A failed MCP call mid-debug-session marks the offending server `dirty`, forcing the next debug run to re-preflight that server (and only that server).",
+  "type": "object",
+  "required": ["schema_version", "mcp_preflight"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Schema major version. Bumped only on breaking changes.",
+      "type": "integer",
+      "const": 1
+    },
+    "mcp_preflight": {
+      "description": "Map of MCP server identifier (matching an entry in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml`) to its last-known preflight state.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "verified_at"],
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "description": "`ok` skips preflight on subsequent runs. Any other value forces a fresh preflight on the next debug run AND surfaces the entry to the user as needing attention.",
+            "type": "string",
+            "enum": ["ok", "dirty", "missing", "auth-error", "unreachable"]
+          },
+          "verified_at": {
+            "description": "ISO 8601 timestamp the entry was last written. For `ok` entries, the time the server was last reachable + invocable. For non-ok entries, the time the failure was observed.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "tools_count": {
+            "description": "Number of tools the server exposed when last preflighted with `status: ok`. Sanity signal — a sudden drop to zero on a previously-ok server is suspicious.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "error_message": {
+            "description": "Verbatim error message captured when `status` is non-ok. Quoted to the user on the next debug run so they can see what failed without re-triggering the call.",
+            "type": "string"
+          },
+          "marked_dirty_during": {
+            "description": "Optional pointer to the debug session that flipped this entry to `dirty` (free-form — phase id, plan id, timestamp, whatever the caller passed). Helps trace which run discovered the failure.",
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

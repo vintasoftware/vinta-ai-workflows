@@ -72,12 +72,21 @@ These bleed across sub-skills, so capture once now:
 
 ### D. Optional foundation skills
 
-Two skills are part of the foundation set but aren't always needed. Ask explicitly:
+Three skills are part of the foundation set but aren't always needed. Ask explicitly:
 
 1. **`add-e2e-test`** — does the project have e2e tests (Playwright / Cypress / similar) or plan to add them? `AskUserQuestion` options: `Yes — already has them`, `Yes — planning to add`, `No — skip`. If yes, [vinta-derive-skills](../vinta-derive-skills/SKILL.md) §C will follow up to ask whether the user has a template or wants to draft from scratch.
 2. **`add-env-var`** — does the project have a non-trivial env-var propagation flow (multiple files / build configs / CI updates per new var) or a single `.env` file is enough? `AskUserQuestion` options: `Yes — non-trivial flow`, `No — single .env is enough`. Skip if `No`.
+3. **`systematic-debugging`** — should agents follow a root-cause-first debugging flow that mandates pulling evidence from the project's observability MCP servers before proposing any fix? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend enabling whenever any observability MCP server is wired up — the skill bakes the project's real test / lint / build commands into the rendered checklist and instructs the agent to discover available calls on those servers at runtime (so it stays correct even as MCP servers add or rename tools).
 
-If the user answers "No" to either, that skill won't ship. If the user answers "Yes" but doesn't have a template, derive-skills drafts one via interview.
+   **Follow-up only if §D.3 = Yes — observability MCP server inventory.** Open prose, not multi-select. Ask the user to name every MCP server already wired up that exposes observability data, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. Cross-check the answers against any MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.) — if a server is configured but the user didn't mention it, ask whether it carries observability data. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
+
+   **Cache scaffolding.** Preflight state lives at `.vinta-ai-workflows/cache.yaml` ([`mcp-preflight-cache.v1`](../../schemas/mcp-preflight-cache.v1.schema.json)). The bootstrap orchestrator must:
+
+   - Add `.vinta-ai-workflows/` to `.gitignore` if not already present (the cache is per-developer-machine state — never committed). [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) handles the gitignore patch alongside the existing `.vinta-ai-workflows/prs-context/` entry.
+   - Do **not** seed the cache file at bootstrap. The first debug run preflights all configured servers and writes the file then. An empty / missing `.vinta-ai-workflows/cache.yaml` is a valid initial state.
+   - Mention to the user how to refresh: delete the file to re-preflight everything, or edit one entry's `status` to `dirty` to refresh that one server. Token rotated → cache will catch the auth error on the next call and flip the entry to `dirty` automatically.
+
+If the user answers "No" to any of the three, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above.
 
 ### E. Existing AI artifacts (per-artifact disposition)
 
@@ -166,6 +175,7 @@ foundation_skills:
   open-pr-from-context: enabled
   add-e2e-test: <§D.1 → enabled | disabled>
   add-env-var: <§D.2 → enabled | disabled>
+  systematic-debugging: <§D.3 → enabled | disabled>
 
 foundation_agents:
   implementer: enabled
@@ -181,6 +191,11 @@ run_options:
     generate_inline_comments: false
   amend-plan:
     blast_radius_signal_threshold: 2
+
+skills:
+  # Only emit this block when foundation_skills.systematic-debugging = enabled.
+  systematic-debugging:
+    observability_mcp_servers: <§D.3 follow-up — free-form array of MCP server identifiers, e.g. [sentry, datadog, our-internal-traces]>
 ```
 
 Validate the file against the schema before writing — if any required field is unresolved, route back to the relevant interview question. Don't write a partial config.
@@ -224,6 +239,8 @@ After Step 0.5 + all six sub-skills run, the target repo has:
 ```
 .vinta-ai-workflows.yaml                    ← single source of truth (Step 0.5)
                                               schema: schemas/vinta-ai-workflows-config.v1.schema.json
+.vinta-ai-workflows/                        ← gitignored local state (only when systematic-debugging enabled)
+└── cache.yaml                              ← MCP preflight cache, schema: mcp-preflight-cache.v1.schema.json
 ai-tools/
 ├── AGENTS.md
 ├── skills/
@@ -234,6 +251,7 @@ ai-tools/
 │   ├── amend-plan/SKILL.md              ← always (generated from template, project-specific)
 │   ├── add-e2e-test/SKILL.md            ← optional — only if user opts in
 │   ├── add-env-var/SKILL.md             ← optional — only if user opts in
+│   ├── systematic-debugging/SKILL.md    ← optional — only if user opts in (template-rendered)
 │   └── <stack-specific skills>/SKILL.md ← only if user supplied templates
 ├── agents/
 │   ├── implementer.yaml                 ← always (foundation)
@@ -256,8 +274,8 @@ Plus the symlinks + per-vendor generated files, set up by the install step.
 Foundation skills break into three buckets — see [vinta-derive-skills](../vinta-derive-skills/SKILL.md) for the full mechanics:
 
 - **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs).
-- **Always generate**: `implement-plan`. Body has too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from a parameterized template using interview answers + inventory.
-- **Optional, ask first**: `add-e2e-test`, `add-env-var`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. If yes + user has a template → copy + adapt. If yes + no template → draft from scratch via interview. If no → don't ship.
+- **Always generate**: `implement-plan`, `amend-plan`. Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates using interview answers + inventory.
+- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in the §D.3 follow-up; if no → don't ship.
 
 Stack-specific skills + agents land in the target only when the user provides templates for them. If they don't have templates yet, the orchestrator records the detected stacks + skill categories as a TODO list the user can address later via [vinta-derive-skills](../vinta-derive-skills/SKILL.md) / [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) standalone runs.
 

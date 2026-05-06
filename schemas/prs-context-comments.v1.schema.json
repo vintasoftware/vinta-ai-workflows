@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/prs-context-comments.v1.schema.json",
   "title": "PR-context inline comments list",
-  "description": "YAML list embedded inside the ` ```yaml ... ``` ` fence under the `# Comments` section of a `prs-context/{feature-kebab}/phase-{phase.id}.md` file. Authored by `implement-plan` (or `amend-plan`); read by `open-pr.sh` to post each entry as an inline review comment via `gh` / `glab`. Empty list is valid (clean phase, nothing non-obvious).",
+  "description": "YAML list embedded inside the ` ```yaml ... ``` ` fence under the `# Comments` section of a `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` file. Authored by `implement-plan` (or `amend-plan`); read by `open-pr.sh` to post each entry as an inline review comment via `gh` / `glab`. Empty list is valid (clean phase, nothing non-obvious).",
   "type": "array",
   "items": {
     "type": "object",

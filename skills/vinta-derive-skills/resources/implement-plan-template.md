@@ -213,7 +213,7 @@ PR opening lives in §1f below (single flow — context file + `open-pr.sh`). Su
 
 ### 1f. Open PR via context file
 
-This is the **only** PR-creation path. PRs always go through a `prs-context/{feature-kebab}/phase-{phase.id}.md` file + the bundled [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) script — even when inline comments are not requested. The file is the durable record; the script is the publisher.
+This is the **only** PR-creation path. PRs always go through a `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` file + the bundled [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) script — even when inline comments are not requested. The file is the durable record; the script is the publisher.
 
 Two project-level signals decide the actual behavior:
 
@@ -249,14 +249,14 @@ Two project-level signals decide the actual behavior:
 
    When `generate_inline_comments = false`: skip this step. The file's `# Comments` block stays empty.
 
-4. **Write `prs-context/{feature-kebab}/phase-{phase.id}.md`** following [resources/prs-context-template.md](../prs-context-template.md). Frontmatter: `plan_id`, `feature_name`, `phase_id`, `phase_title`, `branch`, `base`, `created_at`, `status: pending`, empty `pr_url`. Body sections: `# Title` (single-line PR title), `# Description` (Markdown body — uses the project's PR template structure from step 2 when one exists), `# Comments` (YAML list of `{file, start_line, end_line?, side, body}` — empty list when comments are off).
+4. **Write `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md`** following [resources/prs-context-template.md](../prs-context-template.md). Frontmatter: `plan_id`, `feature_name`, `phase_id`, `phase_title`, `branch`, `base`, `created_at`, `status: pending`, empty `pr_url`. Body sections: `# Title` (single-line PR title), `# Description` (Markdown body — uses the project's PR template structure from step 2 when one exists), `# Comments` (YAML list of `{file, start_line, end_line?, side, body}` — empty list when comments are off).
 
-5. **Confirm `prs-context/` is in `.gitignore`.** [vinta-install-ai-tools-setup](../../../vinta-install-ai-tools-setup/SKILL.md) runs the multi-vendor setup script which appends `prs-context/` on its first invocation. If an older bootstrap missed it, append it now.
+5. **Confirm `.vinta-ai-workflows/prs-context/` is in `.gitignore`.** [vinta-install-ai-tools-setup](../../../vinta-install-ai-tools-setup/SKILL.md) runs the multi-vendor setup script which appends `.vinta-ai-workflows/prs-context/` on its first invocation. If an older bootstrap missed it, append it now.
 
 6. **Run `open-pr.sh`** (only when policy = agents create PRs). Detect a usable CLI (`gh` for GitHub, `glab` for GitLab) plus the script's other deps (`yq`, `jq`):
 
    ```bash
-   bash ai-tools/skills/open-pr-from-context/scripts/open-pr.sh prs-context/{feature-kebab}/phase-{phase.id}.md
+   bash ai-tools/skills/open-pr-from-context/scripts/open-pr.sh .vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md
    ```
 
    Script opens the PR (or detects an existing one), posts each inline comment, rewrites the file's frontmatter to `status: published` + populated `pr_url`, appends a publish log. Exit codes:

@@ -87,7 +87,7 @@ CONFIG SCHEMA CHANGE
   [0.1.2] new field: run_options.amend-plan.blast_radius_signal_threshold (int, default 2)
 
 TOOLING (batch-apply if approved)
-  [0.1.2] setup-ai-tools.mjs: appends `prs-context/` to .gitignore on first run
+  [0.1.2] setup-ai-tools.mjs: appends `.vinta-ai-workflows/prs-context/` to .gitignore on first run
 
 NOT APPLICABLE (skipped — opted out / unused stack)
   [0.1.1] add-env-var optional skill update — your config has add-env-var: disabled
@@ -128,7 +128,7 @@ In order:
 
 4. **`tooling` accepts** — run setup-ai-tools.mjs from the new package version in idempotent mode. The script handles gitignore append, vendor symlinks, vendor agent file regeneration.
 
-5. Re-validate every YAML file under the project against its schema (`.vinta-ai-workflows.yaml`, `ai-tools/agents/*.yaml`, any `prs-context/**/*.md` frontmatter blocks). Surface validation failures; don't silently proceed.
+5. Re-validate every YAML file under the project against its schema (`.vinta-ai-workflows.yaml`, `ai-tools/agents/*.yaml`, any `.vinta-ai-workflows/prs-context/**/*.md` frontmatter blocks). Surface validation failures; don't silently proceed.
 
 ### 7. Bump version + final report
 

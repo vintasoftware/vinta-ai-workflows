@@ -404,11 +404,11 @@ It does not silently rerun, skip, or escalate models without the user.
 #### PR creation: single flow via `prs-context` + `open-pr.sh`
 
 `implement-plan` has **one** path for opening PRs: write a
-`prs-context/{feature-name}/{phase-name}.md` file, then run the bundled
+`.vinta-ai-workflows/prs-context/{feature-name}/{phase-name}.md` file, then run the bundled
 [open-pr.sh](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh)
 script. No raw `gh pr create` / `glab mr create` calls live elsewhere
 in the flow. The file is the durable record; the script is the
-publisher. The `prs-context/` directory is auto-added to `.gitignore`
+publisher. The `.vinta-ai-workflows/prs-context/` directory is auto-added to `.gitignore`
 by `setup-ai-tools.mjs`.
 
 What actually happens depends on two signals:

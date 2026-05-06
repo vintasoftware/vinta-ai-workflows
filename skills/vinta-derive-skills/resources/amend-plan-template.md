@@ -58,7 +58,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
    | `state` | one of `not-started` / `in-progress` / `implemented-not-merged` / `merged-to-default` |
    | `branch` | tracking file or git, pattern `plan/{plan-id-kebab}/phase-{id}` |
    | `base` | tracking file or `git merge-base origin/<branch> <prev-branch>`; root phase bases on `{{DEFAULT_BRANCH}}` |
-   | `pr_status` | `prs-context/{feature-kebab}/phase-{id}.md` frontmatter (`pending` / `published`) when the file exists |
+   | `pr_status` | `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{id}.md` frontmatter (`pending` / `published`) when the file exists |
    | `merged_to_default` | `git branch --merged origin/{{DEFAULT_BRANCH}} | grep` against the branch |
 
    `merged-to-default = true` blocks any commit rewrite for that phase — see §3 below.
@@ -273,7 +273,7 @@ If `--force-with-lease` rejects: another developer pushed. Stop. Re-fetch, re-ap
 
 ### 4f. Refresh the PR-context file (when present)
 
-For the rewritten branch, look for `prs-context/{feature-kebab}/phase-{phase.id}.md`:
+For the rewritten branch, look for `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md`:
 
 - **File missing** — skip; nothing to refresh.
 - **File `status: pending`** — rewrite the file to reflect new title / description / comments per the [prs-context-template](prs-context-template.md). Status stays `pending`. The user will publish later via [open-pr-from-context](../foundation-skills/open-pr-from-context/SKILL.md).

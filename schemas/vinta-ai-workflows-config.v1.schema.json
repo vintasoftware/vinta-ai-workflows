@@ -134,7 +134,12 @@
         "amend-plan": { "type": "string", "enum": ["enabled", "disabled"] },
         "open-pr-from-context": { "type": "string", "enum": ["enabled", "disabled"] },
         "add-e2e-test": { "type": "string", "enum": ["enabled", "disabled"] },
-        "add-env-var": { "type": "string", "enum": ["enabled", "disabled"] }
+        "add-env-var": { "type": "string", "enum": ["enabled", "disabled"] },
+        "systematic-debugging": {
+          "description": "Root-cause-first debugging skill rendered from `vinta-derive-skills/resources/systematic-debugging-template.md`. When `enabled`, the per-project MCP tool selection lives in `skills.systematic-debugging.observability_mcp_tools`.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        }
       }
     },
     "foundation_agents": {
@@ -186,13 +191,41 @@
               "default": 2
             }
           }
+        },
+        "systematic-debugging": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow_local_only_debug": {
+              "description": "Whether the user is permitted to opt out of the MCP preflight + categories block on a per-run basis (e.g. `/systematic-debugging local-only — flaky test`). Defaults to `true`. Set to `false` for projects where production-only bugs must always go through the observability sweep — the skill will then refuse the `local-only` keyword and require the user to wire up an MCP server (or remove `systematic-debugging` from the project) instead.",
+              "type": "boolean",
+              "default": true
+            }
+          }
         }
       }
     },
     "skills": {
       "description": "Per-skill custom config. Open schema — each skill defines its own keys.",
       "type": "object",
-      "additionalProperties": { "type": "object" }
+      "additionalProperties": { "type": "object" },
+      "properties": {
+        "systematic-debugging": {
+          "description": "Configuration for the `systematic-debugging` foundation skill. Required when `foundation_skills.systematic-debugging` is `enabled`; ignored otherwise.",
+          "type": "object",
+          "required": ["observability_mcp_servers"],
+          "additionalProperties": false,
+          "properties": {
+            "observability_mcp_servers": {
+              "description": "Free-form list of MCP server identifiers the agent should introspect during Phase 0 (evidence sweep) before any hypothesis. Identifiers use whatever shorthand the team recognises (e.g. `sentry`, `datadog`, `our-internal-traces`, `grafana-prod`). No enum is enforced — the systematic-debugging agent discovers specific tool names + capabilities at runtime by listing the tools each server exposes and matching them against the evidence categories baked into the rendered SKILL.md (see `vinta-derive-skills/resources/systematic-debugging-mcp-tools.md`). Empty array is allowed but degrades the skill — the rendered Phase 0 collapses to 'local logs only'. Order is preserved in the rendered list; not significant otherwise.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true,
+              "default": []
+            }
+          }
+        }
+      }
     }
   }
 }

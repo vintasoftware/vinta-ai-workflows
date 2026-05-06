@@ -170,9 +170,11 @@ function escapeTomlMultiline(body) {
 
 // ── .gitignore management ────────────────────────────────────────────────
 //
-// implement-plan writes per-phase PR-context drafts to `prs-context/`. Those
-// are durable working notes for the agent + reviewers, not committed history.
-// Append `prs-context/` to .gitignore on first run if not already present.
+// `.vinta-ai-workflows/` holds durable working state that is per-developer
+// machine, not committed history:
+//   - prs-context/{feature}/{phase}.md — implement-plan / amend-plan PR drafts
+//   - cache.yaml — systematic-debugging MCP preflight state
+// Single umbrella entry covers everything. Append on first run if not present.
 
 function ensureGitignoreEntries(entries) {
   const path = '.gitignore';
@@ -271,7 +273,7 @@ function emitCodex(name, doc, body) {
 
 // ── Stage 0: gitignore ───────────────────────────────────────────────────
 
-const gitignoreAdded = ensureGitignoreEntries(['prs-context/']);
+const gitignoreAdded = ensureGitignoreEntries(['.vinta-ai-workflows/']);
 
 // ── Stage 1: stable symlinks (skills + AGENTS.md) ────────────────────────
 

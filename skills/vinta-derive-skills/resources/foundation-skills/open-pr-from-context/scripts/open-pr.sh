@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# open-pr.sh — publish one prs-context/{feature}/{phase}.md file as a real PR
+# open-pr.sh — publish one .vinta-ai-workflows/prs-context/{feature}/{phase}.md file as a real PR
 # + inline review comments via the project's PR CLI (`gh` for GitHub,
 # `glab` for GitLab). Reads frontmatter + sections, opens the PR (or
 # detects an existing one), posts each comment from the YAML list,

@@ -46,7 +46,7 @@ These are project-agnostic enough to ship as-is. Copy from this skill's [resourc
 | `plan-feature` | [resources/foundation-skills/plan-feature/SKILL.md](resources/foundation-skills/plan-feature/SKILL.md) | Author phased implementation plans for a new feature, with interview-driven scoping. |
 | `create-spec` | [resources/foundation-skills/create-spec/SKILL.md](resources/foundation-skills/create-spec/SKILL.md) | Turn a raw feature prompt into a structured spec doc. |
 | `create-qa-use-cases` | [resources/foundation-skills/create-qa-use-cases/SKILL.md](resources/foundation-skills/create-qa-use-cases/SKILL.md) | Bootstrap a project's `QA_USE_CASES.md` from the active spec/plan. |
-| `open-pr-from-context` | [resources/foundation-skills/open-pr-from-context/](resources/foundation-skills/open-pr-from-context/) | Thin SKILL.md wrapper around [scripts/open-pr.sh](resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh) — bash script that publishes one `prs-context/{feature}/{phase}.md` file as a real PR + inline comments via the project's PR CLI (`gh` / `glab`). Used by `implement-plan` (when CLI + `yq`/`jq` are available) and standalone (to publish a `pending` file later). |
+| `open-pr-from-context` | [resources/foundation-skills/open-pr-from-context/](resources/foundation-skills/open-pr-from-context/) | Thin SKILL.md wrapper around [scripts/open-pr.sh](resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh) — bash script that publishes one `.vinta-ai-workflows/prs-context/{feature}/{phase}.md` file as a real PR + inline comments via the project's PR CLI (`gh` / `glab`). Used by `implement-plan` (when CLI + `yq`/`jq` are available) and standalone (to publish a `pending` file later). |
 
 These four reference each other:
 
@@ -57,14 +57,15 @@ Copy all four or none — they form a unit.
 
 After copying, scan each for project-specific path references that no longer match the target (the bundled copies came from a real project — they may say `core-service/ai-plans/`, `apps/provider-app/`, etc). Replace with the target's paths from the inventory.
 
-### B. Generate — `implement-plan` + `amend-plan` from templates
+### B. Generate — `implement-plan`, `amend-plan`, `systematic-debugging` from templates
 
-Two project-specific skills, generated from templates because their bodies cite real test commands, branch conventions, agent dispatch table, PR / co-author policy:
+Project-specific skills, generated from templates because their bodies cite real test commands, branch conventions, agent dispatch table, PR / co-author policy, or selected MCP tools:
 
 - **`implement-plan`** — forward execution: drives a fresh plan phase-by-phase. From [resources/implement-plan-template.md](resources/implement-plan-template.md).
 - **`amend-plan`** — history rewriting: revises an in-flight plan, amends already-implemented phase commits, force-pushes, rebases stacked downstream branches. From [resources/amend-plan-template.md](resources/amend-plan-template.md). Companion to `implement-plan` — same agents, same review gates, same PR-context flow, opposite git topology direction.
+- **`systematic-debugging`** — root-cause-first debugging flow with project-specific reproduction commands and enforced observability MCP evidence-gathering. From [resources/systematic-debugging-template.md](resources/systematic-debugging-template.md) plus the **MCP-agnostic** evidence-categories block at [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md) — the rendered SKILL.md instructs the agent to list available MCP tools at runtime and map them to evidence categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards), instead of hardcoding tool names that go stale. **Opt-in** — only generated when `foundation_skills.systematic-debugging` is `enabled` in `.vinta-ai-workflows.yaml`. The free-form list of MCP server identifiers rendered into the body comes from `skills.systematic-debugging.observability_mcp_servers` in the same config.
 
-Both consume the same placeholder set below — render each by substituting from the inventory + Step 0 interview answers:
+`implement-plan` and `amend-plan` consume the same placeholder set below — render each by substituting from the inventory + Step 0 interview answers. `systematic-debugging` reuses the same set plus two extra placeholders (`{{OBSERVABILITY_MCP_BLOCK}}`, `{{OBSERVABILITY_MCP_LIST}}`) rendered from the catalogue.
 
 | Placeholder | Source | Example |
 |---|---|---|
@@ -92,13 +93,16 @@ Both consume the same placeholder set below — render each by substituting from
 | `{{STAGE_PATTERN}}` | derived from monorepo shape | `apps/... lib/... e2e/... ai-plans/...` or `<app>/... tests/... ai-plans/...` |
 | `{{PROJECT_SKILLS_LIST}}` | computed from skills emitted | comma-separated names of the skills the project actually has |
 | `{{AGENT_DISPATCH_TABLE}}` | from [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) output | markdown table mapping phase shapes → agent type |
+| `{{OBSERVABILITY_MCP_BLOCK}}` | rendered from [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md) | the verbatim "Phase 0 evidence categories" block — same content for every project. When `skills.systematic-debugging.observability_mcp_servers` is empty, renders the no-tools fallback paragraph instead. The block is MCP-agnostic on purpose: tool names are discovered at runtime, not baked at generation time. |
+| `{{OBSERVABILITY_MCP_LIST}}` | derived from `skills.systematic-debugging.observability_mcp_servers` | comma-separated MCP server identifiers as the user named them at bootstrap (e.g. `sentry, datadog, our-internal-traces`). Renders `none configured` when empty. |
 
 Render each template with substitutions, write to:
 
 - `ai-tools/skills/implement-plan/SKILL.md` (from `implement-plan-template.md`)
 - `ai-tools/skills/amend-plan/SKILL.md` (from `amend-plan-template.md`)
+- `ai-tools/skills/systematic-debugging/SKILL.md` (from `systematic-debugging-template.md`) — only when `foundation_skills.systematic-debugging: enabled`
 
-Validate each output: every `{{PLACEHOLDER}}` should be replaced; if any survive, the template needs a new substitution rule. The two templates share the same placeholder set — fix substitutions for both at the same time.
+Validate each output: every `{{PLACEHOLDER}}` should be replaced; if any survive, the template needs a new substitution rule. `implement-plan` and `amend-plan` share the same placeholder set — fix substitutions for both at the same time. `systematic-debugging` adds the two MCP-related placeholders; if a project picks an observability tool the catalogue doesn't list, ask the user for a free-form snippet (heading, required calls, fields to extract) and inline it before saving — and consider upstreaming the snippet to [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md).
 
 ### C. Optional — ask the user
 

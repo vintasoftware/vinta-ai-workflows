@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/vinta/vinta-ai-workflows/schemas/prs-context-frontmatter.v1.schema.json",
-  "title": "PR-context file frontmatter (`prs-context/<feature>/<phase>.md`)",
-  "description": "YAML frontmatter at the top of every `prs-context/{feature-kebab}/phase-{phase.id}.md` file. Authored by `implement-plan` (and rewritten by `amend-plan`); read + updated by the bundled `open-pr.sh` script. The `# Title`, `# Description`, `# Comments` body sections that follow the frontmatter are markdown / fenced YAML and not covered by this schema; the `# Comments` YAML list has its own schema (`prs-context-comments.v1.schema.json`).",
+  "title": "PR-context file frontmatter (`.vinta-ai-workflows/prs-context/<feature>/<phase>.md`)",
+  "description": "YAML frontmatter at the top of every `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` file. Authored by `implement-plan` (and rewritten by `amend-plan`); read + updated by the bundled `open-pr.sh` script. The `# Title`, `# Description`, `# Comments` body sections that follow the frontmatter are markdown / fenced YAML and not covered by this schema; the `# Comments` YAML list has its own schema (`prs-context-comments.v1.schema.json`).",
   "type": "object",
   "required": [
     "schema_version",

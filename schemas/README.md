@@ -8,8 +8,9 @@ JSON Schema (Draft 2020-12) contracts for every YAML file the vinta-ai-workflows
 |---|---|---|---|---|
 | Project config | `.vinta-ai-workflows.yaml` (repo root) | [`vinta-ai-workflows-config.v1.schema.json`](vinta-ai-workflows-config.v1.schema.json) | `vinta-bootstrap-ai-tools` (initial) → `vinta-ai-workflows-sync` (updates) | every builder skill, every template render, every meta-skill |
 | Sub-agent definition | `ai-tools/agents/<name>.yaml` | [`sub-agent.v1.schema.json`](sub-agent.v1.schema.json) | `vinta-derive-subagents` | `setup-ai-tools.mjs` (emits per-vendor copies) |
-| PR-context frontmatter | top-of-file YAML in `prs-context/{feature-kebab}/phase-{phase.id}.md` | [`prs-context-frontmatter.v1.schema.json`](prs-context-frontmatter.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
+| PR-context frontmatter | top-of-file YAML in `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` | [`prs-context-frontmatter.v1.schema.json`](prs-context-frontmatter.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
 | PR-context inline comments | YAML inside the ` ```yaml ... ``` ` fence under `# Comments` of the same file | [`prs-context-comments.v1.schema.json`](prs-context-comments.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
+| MCP preflight cache | `.vinta-ai-workflows/cache.yaml` (gitignored — per-developer-machine state) | [`mcp-preflight-cache.v1.schema.json`](mcp-preflight-cache.v1.schema.json) | rendered `systematic-debugging` SKILL.md (writes during Phase 0) | rendered `systematic-debugging` SKILL.md (reads at Phase 0 start) |
 
 ## Versioning rules
 
