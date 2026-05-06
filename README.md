@@ -6,7 +6,7 @@ multi-vendor wiring that exposes them to Claude Code, Codex, Cursor, and
 VS Code + GitHub Copilot.
 
 Distributed as a private npm package (`@vinta/ai-workflows`). The bundled
-CLI (`vinta-ai-workflow`) installs / updates / uninstalls the skills into
+CLI (`vinta-ai-workflows`) installs / updates / uninstalls the skills into
 the target project's vendor-specific skill directories.
 
 > "Skills" here = the [Agent Skills](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)
@@ -18,8 +18,8 @@ the target project's vendor-specific skill directories.
 
 ```
 vinta-ai-workflows/
-├── package.json             # @vinta/ai-workflows — exposes vinta-ai-workflow bin
-├── vinta-ai-workflow.mjs    # CLI: install / update / uninstall / list
+├── package.json             # @vinta/ai-workflows — exposes vinta-ai-workflows bin
+├── vinta-ai-workflows.mjs    # CLI: install / update / uninstall / list
 ├── README.md
 └── skills/
     ├── vinta-analyze-codebase/
@@ -107,26 +107,26 @@ If you don't want the dep tracked in `package.json`:
 
 ```bash
 npx -y -p git+ssh://git@github.com:vinta/vinta-ai-workflows.git \
-  vinta-ai-workflow install --tool all
+  vinta-ai-workflows install --tool all
 ```
 
 ## Run the CLI
 
-After install, the bin is available at `node_modules/.bin/vinta-ai-workflow`:
+After install, the bin is available at `node_modules/.bin/vinta-ai-workflows`:
 
 ```bash
 # inside the target project
-npx vinta-ai-workflow install --tool all
+npx vinta-ai-workflows install --tool all
 # pnpm:
-pnpm vinta-ai-workflow install --tool all
+pnpm vinta-ai-workflows install --tool all
 # or directly:
-./node_modules/.bin/vinta-ai-workflow install --tool all
+./node_modules/.bin/vinta-ai-workflows install --tool all
 ```
 
 Pick a single tool:
 
 ```bash
-npx vinta-ai-workflow install --tool claude-code
+npx vinta-ai-workflows install --tool claude-code
 ```
 
 `--tool` accepts: `claude-code`, `codex`, `cursor`, `copilot`, `agents`, `all`.
@@ -138,10 +138,10 @@ npx vinta-ai-workflow install --tool claude-code
 
 ```bash
 # One install, three tools.
-npx vinta-ai-workflow install --tool agents
+npx vinta-ai-workflows install --tool agents
 
 # Pair with Claude Code (which only reads .claude/skills/).
-npx vinta-ai-workflow install --tool claude-code
+npx vinta-ai-workflows install --tool claude-code
 ```
 
 ### Copy instead of symlink
@@ -152,7 +152,7 @@ build pipeline doesn't preserve symlinks, or if other contributors check
 out the project without this dep installed (e.g. you commit `.claude/`):
 
 ```bash
-npx vinta-ai-workflow install --tool all --copy
+npx vinta-ai-workflows install --tool all --copy
 ```
 
 Each copied skill gets a `.installed-by-vinta-ai-workflows` marker file
@@ -161,16 +161,16 @@ used by `uninstall` and `update` to recognize what the script owns.
 ### Subset of skills
 
 ```bash
-npx vinta-ai-workflow install --tool claude-code \
+npx vinta-ai-workflows install --tool claude-code \
   --skills vinta-bootstrap-ai-tools,vinta-write-agents-md
 ```
 
-`npx vinta-ai-workflow list` prints all available skills.
+`npx vinta-ai-workflows list` prints all available skills.
 
 ### Dry run
 
 ```bash
-npx vinta-ai-workflow install --tool all --dry-run
+npx vinta-ai-workflows install --tool all --dry-run
 ```
 
 Prints planned actions, touches nothing.
@@ -187,7 +187,7 @@ pnpm update @vinta/ai-workflows
 npm install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git#v0.2.0
 
 # 2. Re-link / re-copy skills.
-npx vinta-ai-workflow update --tool all
+npx vinta-ai-workflows update --tool all
 ```
 
 `update` is sugar for `uninstall` followed by `install` with the same flags.
@@ -501,7 +501,7 @@ from the tracking file, never re-runs completed phases).
 After the bootstrap is committed, remove the skills:
 
 ```bash
-npx vinta-ai-workflow uninstall --tool all
+npx vinta-ai-workflows uninstall --tool all
 ```
 
 Then drop the package itself:
@@ -549,7 +549,7 @@ cd ~/code/my-new-project
 npm install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git
 
 # 2. Install the skills your tool reads.
-npx vinta-ai-workflow install --tool claude-code
+npx vinta-ai-workflows install --tool claude-code
 
 # 3. Open the project in the AI tool. Run the bootstrap.
 #    Claude Code → /vinta-bootstrap-ai-tools
@@ -559,14 +559,14 @@ git add ai-tools/ AGENTS.md .claude/ .codex/ .cursor/ .github/ .agents/
 git commit -m "Bootstrap ai-tools layout"
 
 # 5. Uninstall the builder skills (one-shot done).
-npx vinta-ai-workflow uninstall --tool claude-code
+npx vinta-ai-workflows uninstall --tool claude-code
 npm uninstall @vinta/ai-workflows
 
 # Later, when this package gains new versions:
 # 6. (optional) Re-install + run vinta-update-project-skills to refresh
 #    the project's generated skills against the latest source.
 npm install -D git+ssh://git@github.com:vinta/vinta-ai-workflows.git
-npx vinta-ai-workflow install --tool claude-code \
+npx vinta-ai-workflows install --tool claude-code \
   --skills vinta-update-project-skills
 # Then in Claude Code: /vinta-update-project-skills
 ```
@@ -578,7 +578,7 @@ If you modify a `vinta-*` skill source under `skills/`:
 - **Symlink installs** (default): consumers get updates as soon as their
   `node_modules/@vinta/ai-workflows/` refreshes (next `npm install` /
   `git+ssh` re-pull).
-- **Copy installs** (`--copy`): consumers must re-run `vinta-ai-workflow update`
+- **Copy installs** (`--copy`): consumers must re-run `vinta-ai-workflows update`
   with the same flags. The CLI removes the previous copy and writes fresh
   content + marker.
 
@@ -589,7 +589,7 @@ To refresh **project-generated** skills (the ones under the project's
 ## CLI reference
 
 ```
-vinta-ai-workflow <command> [options]
+vinta-ai-workflows <command> [options]
 
 Commands:
   install     Place skills under <target>/.<vendor>/skills/

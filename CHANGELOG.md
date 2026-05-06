@@ -345,12 +345,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Initial release of `@vinta/ai-workflows` as a private npm package
-  exposing the `vinta-ai-workflow` CLI bin.
+  exposing the `vinta-ai-workflows` CLI bin.
 - Seven `vinta-`-prefixed bootstrap skills under `skills/`:
   `vinta-analyze-codebase`, `vinta-bootstrap-ai-tools`, `vinta-derive-skills`,
   `vinta-derive-subagents`, `vinta-install-ai-tools-setup`,
   `vinta-update-project-skills`, `vinta-write-agents-md`.
-- `vinta-ai-workflow` CLI commands: `install`, `update`, `uninstall`, `list`.
+- `vinta-ai-workflows` CLI commands: `install`, `update`, `uninstall`, `list`.
 - Multi-vendor install support: Claude Code (`.claude/skills/`), Codex
   (`.agents/skills/`), Cursor (`.cursor/skills/`), VS Code + Copilot
   (`.github/skills/`), plus virtual `agents` tool that writes to

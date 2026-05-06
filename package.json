@@ -4,12 +4,14 @@
   "description": "Bootstrap AI tooling (AGENTS.md, skills, sub-agents) across Claude Code, Codex, Cursor, and VS Code + GitHub Copilot.",
   "type": "module",
   "bin": {
-    "vinta-ai-workflow": "./vinta-ai-workflow.mjs"
+    "vinta-ai-workflows": "./vinta-ai-workflows.mjs"
   },
   "files": [
-    "vinta-ai-workflow.mjs",
+    "vinta-ai-workflows.mjs",
     "skills",
-    "README.md"
+    "schemas",
+    "README.md",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=18"

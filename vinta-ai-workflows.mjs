@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// vinta-ai-workflow.mjs — install vinta-ai-workflows builder skills into a
+// vinta-ai-workflows.mjs — install vinta-ai-workflows builder skills into a
 // target project's per-vendor skill directory (Claude Code, Codex, Cursor,
 // VS Code + Copilot). Project scope only; skills are namespaced with the
 // `vinta-` prefix so they don't collide with the user's own project skills.
 //
 // Usage (after `npm i -D @vinta/ai-workflows`):
-//   npx vinta-ai-workflow install   --tool <name> [opts]
-//   npx vinta-ai-workflow update    --tool <name> [opts]   # uninstall + install
-//   npx vinta-ai-workflow uninstall --tool <name> [opts]
-//   npx vinta-ai-workflow list
+//   npx vinta-ai-workflows install   --tool <name> [opts]
+//   npx vinta-ai-workflows update    --tool <name> [opts]   # uninstall + install
+//   npx vinta-ai-workflows uninstall --tool <name> [opts]
+//   npx vinta-ai-workflows list
 //
-// Or directly: node vinta-ai-workflow.mjs <cmd> [opts]
+// Or directly: node vinta-ai-workflows.mjs <cmd> [opts]
 //
 // Tools:
 //   claude-code   .claude/skills/
@@ -211,7 +211,7 @@ function install(opts) {
         cpSync(src, dest, { recursive: true });
         writeFileSync(
           join(dest, MARKER),
-          `Installed by @vinta/ai-workflows (vinta-ai-workflow.mjs)\nsource: ${src}\n`,
+          `Installed by @vinta/ai-workflows (vinta-ai-workflows.mjs)\nsource: ${src}\n`,
         );
       } else {
         const rel = relative(dirname(dest), src);
