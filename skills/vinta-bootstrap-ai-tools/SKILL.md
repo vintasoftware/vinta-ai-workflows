@@ -135,7 +135,7 @@ The dispositions become inputs to:
 
 Captured interview state lands in **one** YAML file at the repo root: `.vinta-ai-workflows.yaml`. Schema: [`schemas/vinta-ai-workflows-config.v1.schema.json`](../../schemas/vinta-ai-workflows-config.v1.schema.json) (`schema_version: 1`).
 
-This file is the **only** source of truth for project-wide settings. Every downstream sub-skill (4 → 6 below) reads from it instead of receiving values via in-conversation state. Every meta-skill ([vinta-ai-workflows-sync](../vinta-ai-workflows-sync/SKILL.md), [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)) reads + rewrites it.
+This file is the **only** source of truth for project-wide settings. Every downstream sub-skill (4 → 6 below) reads from it instead of receiving values via in-conversation state. Every meta-skill ([vinta-sync-ai-tools](../vinta-sync-ai-tools/SKILL.md), [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)) reads + rewrites it.
 
 Write the file now (before any sub-skill runs). Populate from §A–§E:
 

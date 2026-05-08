@@ -111,7 +111,7 @@ The skill that writes the YAML payload (e.g. `vinta-bootstrap-ai-tools` Step 0.5
 
 ### 5c. Reader code
 
-The CLI (`vinta-ai-workflows.mjs`) and `vinta-ai-workflows-sync` skill read these payloads. Update them to:
+The CLI (`vinta-ai-workflows.mjs`) and `vinta-sync-ai-tools` skill read these payloads. Update them to:
 
 - Accept either `schema_version: <N>` or `schema_version: <N+1>` during the deprecation window.
 - Translate v<N> payloads to the v<N+1> in-memory shape (a `migrateV<N>ToV<N+1>(payload)` helper, near where the payload is loaded).

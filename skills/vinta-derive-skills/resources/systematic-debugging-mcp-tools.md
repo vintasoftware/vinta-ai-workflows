@@ -122,4 +122,4 @@ Replace the entire block above with this single paragraph:
 
 - The block is emitted verbatim — there is no per-server templating. Tool discovery is a runtime activity, not a generation-time activity.
 - `skills.systematic-debugging.observability_mcp_servers` is a free-form list of identifiers the user recognises; the renderer only joins them into `{{OBSERVABILITY_MCP_LIST}}`. It is allowed to be empty (the no-tools fallback above renders) but the bootstrap interview should warn the user that an empty list defeats the skill's purpose.
-- If the user adds a new MCP server later, [vinta-ai-workflows-sync](../../vinta-ai-workflows-sync/SKILL.md) just appends it to the list and re-renders — no new catalogue entry needed.
+- If the user adds a new MCP server later, [vinta-sync-ai-tools](../../vinta-sync-ai-tools/SKILL.md) just appends it to the list and re-renders — no new catalogue entry needed.

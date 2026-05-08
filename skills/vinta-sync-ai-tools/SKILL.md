@@ -1,14 +1,14 @@
 ---
-name: vinta-ai-workflows-sync
+name: vinta-sync-ai-tools
 description: Bring a project up to date with the latest `@vinta/ai-workflows` package version. Reads the project's `.vinta-ai-workflows.yaml` (the single source of truth for which surface area is enabled), reads the cloned package's `CHANGELOG.md` to enumerate releases since the project's recorded version, classifies each change against the project's opt-in surface (affects-project / opt-in-offer / config-schema-change / not-applicable), shows per-change diffs, asks the user one `AskUserQuestion` per change (`Apply` / `Skip` / `Show diff`), applies approved changes (re-render templates, add new foundation skills, patch setup script, migrate config schema), and bumps `vinta_ai_workflows_version` + `last_synced_at` at the end. Layers on top of [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md), which it invokes for foundation-skill body diffs. Use after `npm update @vinta/ai-workflows` or pulling a newer git+ssh ref.
 ---
 
-# vinta-ai-workflows-sync
+# vinta-sync-ai-tools
 
 The version-upgrade path. Companion to the rest of the builder skills:
 
 - [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) — writes the project for the first time.
-- **vinta-ai-workflows-sync** — this skill. Updates the project against a newer package version.
+- **vinta-sync-ai-tools** — this skill. Updates the project against a newer package version.
 - [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md) — narrow tool for refreshing only the foundation-skill bodies. This skill calls it as a sub-step.
 
 ## Source of truth
@@ -167,7 +167,7 @@ Then re-enter step 1 of the main flow.
 
 ## Pitfalls
 
-- **Hand-edited rendered skill bodies.** `vinta-ai-workflows-sync` re-renders templates from the config — any inline edits the user made to the rendered `ai-tools/skills/<name>/SKILL.md` will be overwritten on `Apply`. Surface a warning when re-rendering would clobber a body the user touched (heuristic: file modified after the bootstrap commit). Default action: ask before overwriting.
+- **Hand-edited rendered skill bodies.** `vinta-sync-ai-tools` re-renders templates from the config — any inline edits the user made to the rendered `ai-tools/skills/<name>/SKILL.md` will be overwritten on `Apply`. Surface a warning when re-rendering would clobber a body the user touched (heuristic: file modified after the bootstrap commit). Default action: ask before overwriting.
 - **`OLD_VERSION` lower than the oldest changelog entry.** Some projects predate the changelog. Treat anything before the earliest documented version as "best-effort sync" and rely on file diff entirely.
 - **Multiple package versions in the clone.** If the user has both `node_modules/@vinta/ai-workflows/` and a separate `git clone`, they may diverge. Pick one source and pin to it for the run; surface the choice up front.
 - **Orphan diffs.** Surfaced, never auto-applied. Ask the maintainer to add a changelog entry; don't try to interpret an undocumented change.

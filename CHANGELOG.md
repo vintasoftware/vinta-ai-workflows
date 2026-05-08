@@ -5,6 +5,41 @@ All notable changes to `@vinta/ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] — 2026-05-08
+
+### Added
+
+- **README: prominent "Staying in sync with upstream" section** + sync
+  pitch in `## Why this is useful`. The new top-level section lands
+  between "The AI workflow after bootstrap" and "Running the bootstrap
+  skills" and documents the two-step flow (`npm update` →
+  `/vinta-sync-ai-tools` from the AI tool), the five classification
+  buckets (`affects-project`, `opt-in-offer`, `config-schema-change`,
+  `tooling`, `not-applicable`), the role of `.vinta-ai-workflows.yaml`
+  as the opt-in source of truth, the per-change `Apply` / `Skip` /
+  `Show diff` gating, and when to reach for `vinta-update-project-skills`
+  vs the CLI `update` command instead. `## Why this is useful` gains a
+  paragraph framing sync as a first-class capability of the package
+  (project keeps getting better without re-bootstrapping; opt-outs
+  sticky; schema migrations automatic). The `## Update` section gets a
+  callout pointing at the new section + a step 3 in its workflow that
+  invokes `vinta-sync-ai-tools`. Stale references in the intro
+  paragraph and the "Repo internals" section that framed
+  `vinta-update-project-skills` as the primary upstream-refresh path
+  now point to `vinta-sync-ai-tools`. No skill behavior change.
+
+### Changed
+
+- **Renamed builder skill `vinta-ai-workflows-sync` → `vinta-sync-ai-tools`.**
+  Directory moved from `skills/vinta-ai-workflows-sync/` to
+  `skills/vinta-sync-ai-tools/`; SKILL.md frontmatter `name:` updated;
+  every prose + link reference across the repo (other skill bodies under
+  `skills/`, dev-skills, schemas/README.md inventory row, schema
+  descriptions in `vinta-ai-workflows-config.v1.schema.json`) repointed
+  to the new name. New name reads as a verb-object pair matching its
+  sibling `vinta-bootstrap-ai-tools` and avoids embedding the package
+  name twice. No behavior change.
+
 ## [0.1.4] — 2026-05-06
 
 ### Fixed
@@ -261,7 +296,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across schemas, templates, foundation skills, README, sync skill,
   bootstrap skill, and `setup-ai-tools.mjs`. Migration for projects
   bootstrapped against earlier versions is the natural job of
-  [vinta-ai-workflows-sync](skills/vinta-ai-workflows-sync/SKILL.md);
+  [vinta-sync-ai-tools](skills/vinta-sync-ai-tools/SKILL.md);
   the existing `prs-context/` dir + stale `.gitignore` entry stay
   harmless until sync runs.
 

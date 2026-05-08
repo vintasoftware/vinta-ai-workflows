@@ -176,7 +176,7 @@ The skill ships these `BaseOneOffScript` templates under [resources/](resources/
 
 Use the project's actual language. If both apply (polyglot monorepo), pick the one that owns the target table.
 
-The base class is staged once per project at `<scripts_dir>/_base.py` (or `.ts`) — default `<scripts_dir>` is `scripts/one_off/`. The skill checks for it and prompts to copy if missing. Re-copy is allowed (and idempotent) when the base class has been updated by a `vinta-ai-workflows-sync` run.
+The base class is staged once per project at `<scripts_dir>/_base.py` (or `.ts`) — default `<scripts_dir>` is `scripts/one_off/`. The skill checks for it and prompts to copy if missing. Re-copy is allowed (and idempotent) when the base class has been updated by a `vinta-sync-ai-tools` run.
 
 ### Step 3 — Generate the per-script folder
 
