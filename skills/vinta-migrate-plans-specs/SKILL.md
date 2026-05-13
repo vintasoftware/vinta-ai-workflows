@@ -108,8 +108,8 @@ Strip dates, classification words, and extensions from the filename, then conver
 | `2025-11-15-checkout-plan.md` | `checkout` | `CHECKOUT` |
 | `docs/features/checkout-flow/spec.md` | `checkout-flow` (from parent dir) | `CHECKOUT_FLOW` |
 | `IMPLEMENTATION_PLAN.md` | (filename has no feature) → ask user | `<asked>` |
-| `feat-shipment-attributes-spec.md` | `shipment-attributes` | `SHIPMENT_ATTRIBUTES` |
-| `2026-04-23-BOOKMARKS_IMPLEMENTATION_PLAN.md` | `BOOKMARKS` | `BOOKMARKS` |
+| `feat-widget-config-spec.md` | `widget-config` | `WIDGET_CONFIG` |
+| `2026-04-23-WIDGETS_IMPLEMENTATION_PLAN.md` | `WIDGETS` | `WIDGETS` |
 
 If the source is a folder like `docs/features/checkout/spec.md` and a sibling `plan.md` exists, **lock both files to the same `FEATURE_NAME`** so the renamed pair groups in `ls`.
 
@@ -136,8 +136,8 @@ CLEAR (proposed: git mv to ai-plans/)
     feature name: asked user (filename had none)
 
 ALREADY CANONICAL — only filename normalization
-  ai-plans/2026-04-23-BOOKMARKS_IMPLEMENTATION_PLAN.md
-    → ai-plans/2026-04-23-BOOKMARKS_PLAN.md
+  ai-plans/2026-04-23-WIDGETS_IMPLEMENTATION_PLAN.md
+    → ai-plans/2026-04-23-WIDGETS_PLAN.md
     note: legacy `_IMPLEMENTATION_PLAN` suffix → `_PLAN`
 
 UNCLEAR — need user input
@@ -224,6 +224,6 @@ When invoked without explicit dry-run intent, still default to **showing all pro
 2. **Single clear plan**: one `IMPLEMENTATION_PLAN.md` at root → proposal shows 1 candidate, classification = PLAN, date from git log; user accepts → file moved with `git mv`, inbound refs (if any) rewritten.
 3. **Paired spec + plan in folder**: `docs/features/checkout/{spec,plan}.md` → both proposed under same `FEATURE_NAME=CHECKOUT`, dates synced where one's date is missing.
 4. **Already canonical**: no diffs proposed; report lists them as `Already canonical`.
-5. **Legacy suffix**: `ai-plans/2026-04-23-BOOKMARKS_IMPLEMENTATION_PLAN.md` → proposed rename to `_PLAN.md`; user accepts → renamed; inbound refs rewritten.
+5. **Legacy suffix**: `ai-plans/2026-04-23-WIDGETS_IMPLEMENTATION_PLAN.md` → proposed rename to `_PLAN.md`; user accepts → renamed; inbound refs rewritten.
 6. **Unclear file**: ADR-style file flagged `unclear`; user picks `Skip`; file left untouched and surfaced in final report.
 7. **Dry-run**: user asks for preview → proposal printed, no `git mv` calls executed, exit clean.

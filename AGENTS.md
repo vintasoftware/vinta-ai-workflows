@@ -58,7 +58,7 @@ There is no build, no test suite, no lint config in this repo. Verification is a
 
 - **Skills live under `skills/<name>/`.** Dir name must equal the SKILL.md `name:` frontmatter field (Cursor + Copilot constraint). Bundled resources go under `skills/<name>/resources/` or `skills/<name>/scripts/`.
 - **`vinta-`-prefixed skills are the bootstrap layer.** They run once in a target project, then get uninstalled. Don't add long-running operational logic here.
-- **Foundation skills under `skills/vinta-derive-skills/resources/foundation-skills/<name>/`** ship verbatim into target projects. **Don't reference Vinta-internal paths from inside their bodies** (e.g. `core-service/ai-plans/`, `apps/provider-app/`). The bundled body must read cleanly when pasted into an unrelated repo. `vinta-derive-skills` does a final scrub pass after copy, but the source should be clean to begin with.
+- **Foundation skills under `skills/vinta-derive-skills/resources/foundation-skills/<name>/`** ship verbatim into target projects. **Don't reference source-repo paths from inside their bodies** (e.g. `<source-repo>/ai-plans/`, `apps/<service>/`). The bundled body must read cleanly when pasted into an unrelated repo. `vinta-derive-skills` does a final scrub pass after copy, but the source should be clean to begin with.
 - **Stack notes (`vinta-bootstrap-ai-tools/resources/stacks/<stack>/notes.md`) are descriptions, not templates.** They tell the orchestrator what to ask the user about. Skill / agent content for stack-specific work is **user-supplied** at bootstrap time, not bundled here.
 - **Schemas are versioned in the filename**: `<name>.v<N>.schema.json`. Bump `v<N>` only on breaking changes; additive fields land in the same major. See [schemas/README.md](schemas/README.md).
 - **Generated artifacts never land in git here.** `.installed-by-vinta-ai-workflows` markers, vendor-symlinks, and per-machine state belong in target projects, not this one.
@@ -118,7 +118,7 @@ This `AGENTS.md` is hand-maintained for *this* repo. Update it when:
 ## Pitfalls
 
 - **Don't break the zero-runtime-deps property of the CLI.** A new `import` from anything outside `node:*` in `vinta-ai-workflows.mjs` is a red flag.
-- **Don't ship target-project paths in foundation-skill bodies.** `core-service/`, `apps/provider-app/`, `vinta/`, hard-coded tenant column names — all leak from the source repo this content was extracted from. Scrub them.
+- **Don't ship source-repo paths in foundation-skill bodies.** `<source-repo>/`, `apps/<service>/`, hard-coded tenant / org column names — all leak from the repo this content was extracted from. Scrub them.
 - **Don't add Vercel / Next.js advice unprompted.** The repo's name (`vinta-ai-workflows`) trips Vercel-plugin keyword matchers (`workflow`, `bootstrap`); ignore the auto-injected guidance unless the change actually concerns Vercel deployment of a target project.
 - **Don't compress a SKILL.md into "caveman" or other shorthand.** Skills are read by other AIs that load them at runtime — terseness saves tokens but loses the precision skills depend on. Code blocks unchanged is the rule; the same applies to SKILL.md prose.
 - **Don't delete a foundation skill without bumping the schema major.** `foundation_skills.<name>` enums in `vinta-ai-workflows-config.v1.schema.json` are part of the contract; removing one breaks every project that has it set.

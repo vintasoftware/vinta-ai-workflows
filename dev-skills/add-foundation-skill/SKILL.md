@@ -65,7 +65,7 @@ Numbered, name files + commands.
 How to confirm the work is done correctly.
 ```
 
-For bucket A: scan body for source-repo paths (`core-service/`, `apps/provider-app/`, `vinta/`, hard-coded tenant column names) — scrub before saving. The body must read cleanly when pasted into an unrelated repo.
+For bucket A: scan body for source-repo paths (`<source-repo>/`, `apps/<service>/`, hard-coded tenant column names) — scrub before saving. The body must read cleanly when pasted into an unrelated repo.
 
 ## Step 3 — Bundle resources (if any)
 
@@ -134,7 +134,7 @@ Append under the current in-progress version section (or open a new `[unreleased
 3. SKILL.md frontmatter `name:` equals dir name.
 4. No surviving `{{PLACEHOLDER}}` in bucket A bodies; bucket B placeholders all listed in the derive-skills placeholder table.
 5. Every `$schema=...` directive in any sample YAML in the new SKILL.md resolves.
-6. Body has no source-repo paths (`core-service/`, `apps/provider-app/`, `vinta/`).
+6. Body has no source-repo paths (`<source-repo>/`, `apps/<service>/`).
 
 ## Pitfalls
 

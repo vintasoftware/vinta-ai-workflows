@@ -111,7 +111,7 @@ or reuse a retired ID. The e2e spec filenames mirror these IDs one-to-one.
 - **Checkboxes (`- [ ]`)** because the doc doubles as a manual-test checklist. QA ticks them off in PRs.
 - **One observable assertion per branch.** "Verify eligibility result: If eligible → redirected to /onboarding. If ineligible → error message shown." Mirrors how the e2e spec is structured.
 - **Reference URL paths exactly** as the app routes them (`/settings`, `/onboarding/{uniqueId}`). Reviewer can follow without context.
-- **Never include implementation details.** No FHIR resource names, API endpoints, table names, or library specifics. Doc is read by QA, product, support — keep it user-language.
+- **Never include implementation details.** No domain model names, API endpoints, table names, or library specifics. Doc is read by QA, product, support — keep it user-language.
 
 ### Multi-app projects
 

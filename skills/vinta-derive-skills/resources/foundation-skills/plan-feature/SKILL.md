@@ -1,11 +1,11 @@
 ---
 name: plan-feature
-description: Author a phased implementation plan for a new feature in core-service following the repo's `core-service/ai-plans/` conventions. Use when the user asks to "plan", "design", "scope", or "break down" a feature, write an implementation plan / IMPLEMENTATION_PLAN.md, or turn a spec/idea into a phased roadmap. Always interrogates the requester before drafting.
+description: Author a phased implementation plan for a new feature following the repo's `ai-plans/` conventions. Use when the user asks to "plan", "design", "scope", or "break down" a feature, write an implementation plan / IMPLEMENTATION_PLAN.md, or turn a spec/idea into a phased roadmap. Always interrogates the requester before drafting.
 ---
 
 # Plan Feature
 
-Plans live in @core-service/ai-plans/ as `YYYY-MM-DD-FEATURE_NAME_IMPLEMENTATION_PLAN.md` (uppercase + underscores). `..._SPEC.md` sibling exists → **read first**. Plan translates spec into phased delivery, doesn't re-derive requirements. No spec? Point at @core-service/ai-tools/skills/create-spec/SKILL.md first; plan without spec = plausible-sounding but unverified. Spec/plan pair share `YYYY-MM-DD-FEATURE_NAME` prefix.
+Plans live in `ai-plans/` as `YYYY-MM-DD-FEATURE_NAME_IMPLEMENTATION_PLAN.md` (uppercase + underscores). `..._SPEC.md` sibling exists → **read first**. Plan translates spec into phased delivery, doesn't re-derive requirements. No spec? Point at [create-spec](../create-spec/SKILL.md) first; plan without spec = plausible-sounding but unverified. Spec/plan pair share `YYYY-MM-DD-FEATURE_NAME` prefix.
 
 ## Step 0 — Interrogate before drafting (NON-NEGOTIABLE)
 
@@ -58,7 +58,7 @@ Never flatten ten questions into one prose paragraph just because tool unavailab
 
 ### C. Data model & storage
 1. New table, new column on existing, JSONB blob, side table, no persistence?
-2. Touching existing table on hot path (`sales_order`, `catalog_product`)? Adding column there has very different costs than side table.
+2. Touching an existing table on a hot path (high-volume, frequently joined, partitioned)? Adding a column there has very different costs than a side table.
 3. Multi-tenancy: per-tenant, per-user-per-tenant, tenant-shared?
 4. Partitioning: do related tables partition by `tenant_id`? Should this one (for partition-wise joins)?
 5. Cardinality: rough upper bound rows per tenant?
@@ -66,14 +66,14 @@ Never flatten ten questions into one prose paragraph just because tool unavailab
 7. Indexing: which predicates need index-friendly?
 
 ### D. API surface
-1. REST v1 (`/api/v1/...`), Public GraphQL (`core.public_api`), internal-only, both?
-2. Auth: Clerk JWT (internal), `Authorization: Bearer <system_user>:<token>` (public), service-to-service?
+1. REST (internal versioned API), Public GraphQL, internal-only, or several?
+2. Auth: internal session/JWT, public API token (`Authorization: Bearer ...`), service-to-service?
 3. Bulk-upsert? Endpoints fed by integrations should be bulk-upsert.
 4. Client SDKs or external consumers locking in contract?
 
 ### E. Producers & consumers (cross-repo)
-1. Data flowing in from `lbd-integrations-data` or another producer? Which providers (Shopify, Shiphero, Amazon, Netsuite, API2Cart, GSheets…)?
-2. Downstream system reading new data — Athena/Glue, AI Lab, exports?
+1. Data flowing in from an upstream producer / integration repo? Which third-party providers feed it?
+2. Downstream system reading new data — warehouse / lake, analytics, exports?
 3. Deploy ordering between repos — what gets deployed first; what breaks if order flips?
 
 ### F. Backwards compatibility & semantics
@@ -83,19 +83,19 @@ Never flatten ten questions into one prose paragraph just because tool unavailab
 4. Case-sensitivity, normalization (trim, lowercase), dedupe — at which layer?
 
 ### G. Concurrency, transactions, idempotency
-1. Race conditions (concurrent batch edits, parallel Lambda on same row)?
+1. Race conditions (concurrent batch edits, parallel workers / serverless invocations on the same row)?
 2. Atomic-batch semantics: all-or-nothing, best-effort?
 3. Upsert needs `last_updated_at` guard so we don't overwrite newer state?
 
 ### H. Rollout & risk
-1. **Feature flag** — declared in @core-service/app/core/common/feature_flags/feature_flags.py. **Default YES** when feature touches existing flows (changes shape of existing endpoint, alters query path on hot table, modifies routing/matching, mutates data on existing rows, adds branching to use case with callers). Confirm flag key + per-tenant (`is_enabled_for_organization`) vs per-request (`is_enabled`). Skip only when **purely additive new surface** (brand-new endpoint, table, admin page no existing code reads/writes) — even then, ask before dropping.
+1. **Feature flag** — declared in the project's feature-flag module (substitute the actual path during planning). **Default YES** when feature touches existing flows (changes shape of existing endpoint, alters query path on hot table, modifies routing/matching, mutates data on existing rows, adds branching to use case with callers). Confirm flag key + scope (per-tenant vs per-request, by whatever names the project's flag API uses). Skip only when **purely additive new surface** (brand-new endpoint, table, admin page no existing code reads/writes) — even then, ask before dropping.
 2. Backfill needed? Idempotent? Resumable?
 3. Migration safety: locks, rewrites, query-plan regressions on hot tables?
 4. Rollback plan: revert migration, flag-off, hot-patch?
 
 ### I. Observability & validation
 1. Metric / log / dashboard tells us it's working in prod?
-2. Audit logging requirements (`data_auditing` app)?
+2. Audit logging requirements (whatever audit-trail app/module the project uses)?
 3. How measure producer adoption before downstream phases ship?
 
 ### J. Edge cases & failure modes
@@ -206,7 +206,7 @@ In the phase body, name the spec file path under **Tests → E2E**. If the phase
 
 **Capture screenshots on every affected UI**: the e2e spec takes one screenshot per distinct rendered state (landing page, each modal/wizard step, success toast, final state) — not just the final state. Spec writes to Playwright's **default per-test output dir** via `testInfo.outputPath('<id>-<NN>-<view-slug>.png')` (zero-padded step number, kebab-case slug describing what's on screen). Never hard-code `pr-screenshots/` in the spec. After the suite runs, a copy step moves matching files from `test-results/**/` into `pr-screenshots/`. The `pr-screenshots/` directory is gitignored — author drags the files into the PR description in numeric order so reviewers see the journey, not just the destination. See [add-e2e-test](../add-e2e-test/SKILL.md) for the strict filename convention + spec example + copy command.
 
-Doesn't fit → split: `Phase 4a — Static validation`, `Phase 4b — Resolution engine`, `Phase 4c — Apply engine`, `Phase 4d — View wiring`. Bookmarks plan in @core-service/ai-plans/2026-04-23-BOOKMARKS_IMPLEMENTATION_PLAN.md = worked example.
+Doesn't fit → split: `Phase 4a — Static validation`, `Phase 4b — Resolution engine`, `Phase 4c — Apply engine`, `Phase 4d — View wiring`.
 
 ### Phase template
 
@@ -244,8 +244,8 @@ Feature touches **any existing flow** — existing callers hit new branches, new
 
 In plan:
 
-1. Declare flag in §2: key, scope (`is_enabled` per-request vs `is_enabled_for_organization` per-tenant), default (`false`), flip-on criterion ("after Phase 5 ships + reprocess job runs clean for 48h on staging").
-2. Show flag definition site (@core-service/app/core/common/feature_flags/feature_flags.py) in §8 Touch List.
+1. Declare flag in §2: key, scope (per-request vs per-tenant, using the project's flag API names), default (`false`), flip-on criterion ("after Phase 5 ships + reprocess job runs clean for 48h on staging").
+2. Show flag definition site (the project's feature-flag module) in §8 Touch List.
 3. Every phase reachable from existing caller: name flag, describe what executes when **off** (must be pre-feature behavior, byte-for-byte where possible) vs **on**.
 4. Data model change unconditional (column existing can't be gated)? Make sure *reads + writes* of column gated; off-flag tenant has zero observable change. Test asserts.
 5. Phase N+1 (or §6 entry) for **flag rollout**: enable for one internal tenant → soak → staging → cohort → globally.
@@ -253,7 +253,7 @@ In plan:
 
 Legitimate skips:
 
-- **Purely additive new surface**: brand-new endpoint at new path, brand-new table, brand-new admin page no existing code reads/writes. Bookmarks plan @core-service/ai-plans/2026-04-23-BOOKMARKS_IMPLEMENTATION_PLAN.md = borderline-additive: new app + new endpoints, no flag — but would have needed one if touched existing user-settings tables.
+- **Purely additive new surface**: brand-new endpoint at new path, brand-new table, brand-new admin page no existing code reads/writes. Borderline-additive (new app + new endpoints alongside existing surfaces): err on the side of adding the flag — would have needed one if it had touched an existing shared table.
 - **Pure refactor with no behavior change**, provable via tests + diff review. Refactors don't need flags; features do.
 
 Unsure? Treat as not additive + add flag. Cost of unused flag = one PR. Cost of non-flagged regression = hotfix + postmortem.
@@ -272,8 +272,8 @@ Gated on real-world signal, not phase number — can't merge until flag on 100% 
 **Feature flag**: removed in this phase.
 
 Changes:
-1. Delete flag declaration in @core-service/app/core/common/feature_flags/feature_flags.py.
-2. Every site calling `{FLAG}.is_enabled(...)` / `{FLAG}.is_enabled_for_organization(...)`: inline on-branch + delete off-branch. Touch list:
+1. Delete flag declaration in the project's feature-flag module.
+2. Every site calling the flag's check methods (`is_enabled(...)` / per-tenant variant, by whatever names the project uses): inline on-branch + delete off-branch. Touch list:
    - {file 1}
    - {file 2}
    - …
@@ -296,7 +296,7 @@ Place as separate, numbered, last-in-list entry in §5 Phased Rollout. Also in �
 
 ### Order phases for slowest-moving dependency first
 
-Common mistake: leave producer wiring (`lbd-integrations-data`) for last, then discover integration repo's deploy cadence is two weeks. Order so slowest path starts in Phase 1 (e.g. *"accept field, validate, drop on floor"*) + fast in-repo work fills in behind. Order Tags plan @core-service/ai-plans/2026-04-28-ORDER_TAGS_IMPLEMENTATION_PLAN.md does this with `Phase 1` (API stub) → `Phase 1b` (cross-repo producer) → `Phase 2`+ (in-repo persistence).
+Common mistake: leave cross-repo producer wiring for last, then discover the upstream repo's deploy cadence is two weeks. Order so slowest path starts in Phase 1 (e.g. *"accept field, validate, drop on floor"*) + fast in-repo work fills in behind. Typical sequencing: `Phase 1` (API stub) → `Phase 1b` (cross-repo producer, parallel) → `Phase 2`+ (in-repo persistence).
 
 ### Never give time estimates
 
@@ -336,7 +336,7 @@ For each phase, suggest **cheapest/fastest model likely to one-shot work**. Iter
 
 ### Writing the suggestion
 
-> **Suggested AI model**: Tier 1 — `claude-haiku-4-5` / `gpt-5-nano` / `gemini-2.5-flash-lite`. Single-field migration + model export, exact precedent in @app/core/sales/models/order.py.
+> **Suggested AI model**: Tier 1 — `claude-haiku-4-5` / `gpt-5-nano` / `gemini-2.5-flash-lite`. Single-field migration + model export, exact precedent in `@<app>/<module>/models/<file>.py`.
 
 When one tier doesn't fit:
 
@@ -346,22 +346,22 @@ When one tier doesn't fit:
 
 ## Project skills to leverage
 
-Skills under @core-service/ai-tools/skills/ encode hard-won conventions. **Reference by name in each relevant phase** so implementer invokes via `Skill(name)` instead of re-deriving.
+Skills under the project's `ai-tools/skills/` directory encode hard-won conventions. **Reference by name in each relevant phase** so implementer invokes via `Skill(name)` instead of re-deriving.
 
 | Skill | Invoke when phase… |
 |---|---|
 | `create-model` | adds new Django model / database table |
 | `create-postgres-view` | adds or modifies `vw_*` (or MV, function, type) |
 | `create-postgres-function` | adds or modifies `CREATE FUNCTION` / `upsert_ct_*` / `ft_*` / aggregate |
-| `create-lambda` | scaffolds new AWS Lambda |
+| `create-cloud-function` | scaffolds new serverless function |
 | `create-data-export` | adds async CSV/Excel export |
 | `create-data-import` | adds CSV import |
-| `graphql-public-query` | adds Strawberry query/mutation under `core.public_api` |
+| `graphql-public-query` | adds a query/mutation under the project's public GraphQL module |
 | `write-tests` | writes pytest unit/integration tests following fixture catalog + snapshot conventions |
 
 In phase:
 
-> **Reusable skills**: `create-postgres-view` (for `vw_sales_order_matching_routing_rule/0009.sql` change); `write-tests` (for integration test under @tests/integration/sales/use_cases/).
+> **Reusable skills**: `create-postgres-view` (for the relevant `vw_*.sql` change); `write-tests` (for the integration test under the project's integration-tests dir).
 
 No clean skill match? Omit line — don't fabricate.
 
@@ -372,10 +372,10 @@ No clean skill match? Omit line — don't fabricate.
 For inline links in narrative prose, GitHub-flavored markdown links work + preferred for line-range deep-links:
 
 ```markdown
-See `upsert_orders` in [order.py:92-96](../app/core/sales/models/order.py#L92-L96).
+See `upsert_records` in [records.py:92-96](../<app>/<module>/models/records.py#L92-L96).
 ```
 
-Don't mix styles within one sentence. In **Touch List**, use `@path` for new files + `[name](relative-path)` for edited files when want line numbers — match @core-service/ai-plans/2026-04-28-ORDER_TAGS_IMPLEMENTATION_PLAN.md §7.
+Don't mix styles within one sentence. In **Touch List**, use `@path` for new files + `[name](relative-path)` for edited files when want line numbers.
 
 ## What to avoid
 
@@ -388,17 +388,17 @@ Don't mix styles within one sentence. In **Touch List**, use `@path` for new fil
 
 ## Worked references
 
-Model plan after one when in doubt:
+When in doubt, model the plan after a recent example in `ai-plans/` — look for ones that:
 
-- @core-service/ai-plans/2026-04-28-ORDER_TAGS_IMPLEMENTATION_PLAN.md — cross-repo producer wiring (`Phase 1b` parallel to in-repo phases) + "ship API contract first, persist later" rollout.
-- @core-service/ai-plans/2026-04-23-BOOKMARKS_IMPLEMENTATION_PLAN.md — splitting large mutation phase into `4a/4b/4c/4d` sub-phases.
-- @core-service/ai-plans/2026-03-11-SHIPMENT_ATTRIBUTES_IMPLEMENTATION_PLAN.md — small, sharply scoped plan following existing precedent (`ProductSellingAccount.attributes`).
-- @core-service/ai-plans/2025-11-27-SELLTHROUGH_PRODUCTS_IMPLEMENTATION_PLAN_V2.md — feature-flagged staged rollout across many small phases.
+- wire a cross-repo producer (`Phase 1b` parallel to in-repo phases) with an "API contract first, persist later" rollout;
+- split a large mutation phase into `4a/4b/4c/4d` sub-phases;
+- stay small + sharply scoped by following an existing precedent on the same entity;
+- use a feature-flagged staged rollout across many small phases.
 
 ## Checklist
 
 - [ ] Step 0 questions answered (or explicitly waived); decisions echoed back.
-- [ ] Filename: `core-service/ai-plans/{TODAY}-{FEATURE_NAME}_IMPLEMENTATION_PLAN.md`.
+- [ ] Filename: `ai-plans/{TODAY}-{FEATURE_NAME}_IMPLEMENTATION_PLAN.md`.
 - [ ] §1 Goals + non-goals.
 - [ ] §2 Guiding Decisions table — each row has *why*.
 - [ ] Phases MR-sized (~100–300 LoC) + independently mergeable.

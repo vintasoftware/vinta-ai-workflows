@@ -151,7 +151,7 @@ project:
   default_branch: <from inventory>
   code_host: <github | gitlab | bitbucket | self-hosted>
   stack_summary: <inventory.frameworks one-liner>
-  ai_plans_dir: <ai-plans | core-service/ai-plans | ...>
+  ai_plans_dir: <ai-plans | apps/<service>/ai-plans | ...>
   pr_template_paths: <inventory.existing_ai_artifacts.pr_templates[].path>  # empty array if none found
 
 commands:
@@ -317,7 +317,7 @@ Stack-specific skills + agents land in the target only when the user provides te
 
 - **Bootstrapping a project that already has its own conventions.** The user's existing AGENTS.md / CONTRIBUTING.md / `.cursorrules` is gospel. Treat as input to `vinta-write-agents-md`, not noise to overwrite.
 - **Detecting Django without verifying multi-tenancy.** Many Django projects are single-tenant; emitting `tenant_id` rules into AGENTS.md is wrong for them. Stack templates are starting points — interview before assuming.
-- **Stack templates pulling Vinta AI Workflow-specific paths.** Templates are written to be project-agnostic (no `apps/provider-app` hard-coding) but they may slip. Review each copied SKILL.md / agent.yaml for hard-coded paths from the source repo.
+- **Stack templates pulling source-repo-specific paths.** Templates are written to be project-agnostic (no `apps/<service>` hard-coding) but they may slip. Review each copied SKILL.md / agent.yaml for hard-coded paths from the source repo.
 - **Skipping the interview because "the analysis is enough".** It isn't. Conventions humans hold but don't commit (PR review tone, deploy approvals, who-owns-what) only surface in conversation.
 - **Forgetting to commit the canonical sources.** Generated vendor files are noisy in PRs. `vinta-derive-subagents` writes YAML; `vinta-install-ai-tools-setup` runs the script that produces vendor copies. Commit both — don't gitignore the vendor outputs unless the team agrees.
 

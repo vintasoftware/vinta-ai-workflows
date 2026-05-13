@@ -5,6 +5,79 @@ All notable changes to `@vinta/ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] — 2026-05-13
+
+### Changed
+
+- **Scrubbed source-repo path leaks from foundation skill bodies and
+  illustrative examples across the repo.** The bundled foundation skills
+  under `skills/vinta-derive-skills/resources/foundation-skills/`
+  (`plan-feature/SKILL.md`, `create-spec/SKILL.md`) referenced paths,
+  module names, table names, and worked-example plan filenames carried
+  over from the project this content was originally extracted from
+  (`core-service/ai-plans/`, `@core-service/app/core/common/feature_flags/feature_flags.py`,
+  `lbd-integrations-data`, `sales_order` / `catalog_product`, `core.public_api`,
+  `data_auditing`, `ProductSellingAccount.attributes`, `vw_sales_order_*`,
+  `@app/core/sales/models/order.py`, `@tests/integration/sales/use_cases/`,
+  and `BOOKMARKS` / `ORDER_TAGS` / `SHIPMENT_ATTRIBUTES` / `SELLTHROUGH`
+  worked-reference plan filenames). All replaced with project-agnostic
+  descriptions or generic placeholders (`ai-plans/`, `<source-repo>/`,
+  `apps/<service>/`, `<app>/<module>/`, `WIDGETS`). The bundled skill
+  bodies now read cleanly when pasted into an unrelated repo — no
+  `vinta-derive-skills` scrub pass required for these particular leaks.
+  Same scrub applied to meta-files that mentioned `core-service/` or
+  `apps/provider-app/` as illustrative examples of "what gets leaked"
+  (`AGENTS.md` + symlinked `.github/copilot-instructions.md`,
+  `CHANGELOG.md` historical note, `dev-skills/add-foundation-skill/SKILL.md`
+  + its four hardlinked installed copies under
+  `.agents/.claude/.cursor/.github/skills/`,
+  `skills/vinta-derive-skills/SKILL.md`,
+  `skills/vinta-bootstrap-ai-tools/SKILL.md`,
+  `skills/vinta-bootstrap-ai-tools/resources/stacks/django/notes.md`,
+  `skills/vinta-bootstrap-ai-tools/resources/stacks/medplum/notes.md`,
+  `skills/vinta-sync-ai-tools/SKILL.md`,
+  `skills/vinta-migrate-plans-specs/SKILL.md`, and
+  `schemas/vinta-ai-workflows-config.v1.schema.json` description). No
+  schema change; no skill behavior change.
+
+- **Second pass: genericized AWS / Strawberry / Shopify / FHIR examples
+  in foundation skill bodies.** Five remaining stack-specific examples
+  in foundation skills replaced with framework-neutral language:
+  `plan-feature/SKILL.md` §G.1 ("parallel Lambda on same row" →
+  "parallel workers / serverless invocations on the same row"); the
+  reusable-skills table's `create-lambda` row renamed to
+  `create-cloud-function | scaffolds new serverless function`, and the
+  `graphql-public-query` row dropped the Strawberry mention.
+  `create-spec/SKILL.md` §C.2 swapped "Webhook from Shopify, scheduled
+  Lambda" for "Webhook from upstream SaaS, scheduled function".
+  `create-qa-use-cases/SKILL.md` dropped the FHIR mention from the
+  "no implementation details" rule. Reader still reads cleanly; no
+  presumed stack. Other concrete platform mentions in the foundation
+  set (Medplum / Vercel / K8s / Jupyter / Django in
+  `add-one-off-script/SKILL.md`, Django/DRF/HStore/pytest in
+  `plan-feature/SKILL.md` Tier 2) were reviewed and kept as
+  illustrative examples per maintainer call.
+
+- **README cheat sheet for foundation skills + sub-agents.** New
+  "Cheat sheet — what lands in your project" section inserted between
+  "The AI workflow after bootstrap" and "Staying in sync with upstream"
+  in `README.md`. Two tables cover what `vinta-bootstrap-ai-tools`
+  writes into a target repo's `ai-tools/` layout: the foundation skill
+  set (`create-spec`, `plan-feature`, `create-qa-use-cases`,
+  `open-pr-from-context`, `implement-plan`, `amend-plan`, plus the
+  opt-in skills `systematic-debugging`, `add-e2e-test`, `add-env-var`,
+  `add-one-off-script`) with a status column flagging always-on vs
+  opt-in, and the foundation sub-agent trio (`implementer`, `reviewer`,
+  `fixer`) with access mode + role. Two upfront disclaimers: optional
+  foundation skills are gated by the bootstrap interview (recorded in
+  `.vinta-ai-workflows.yaml` under `foundation_skills.*.enabled`,
+  sticky across syncs); stack-specific skills and sub-agents are
+  user-supplied — the package ships only detection signals + category
+  lists per stack under
+  `skills/vinta-bootstrap-ai-tools/resources/stacks/`, not the bodies.
+  No content change; orients new readers before they read the workflow
+  sections.
+
 ## [0.1.5] — 2026-05-08
 
 ### Added
@@ -646,7 +719,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for any repo that already has AI tooling — nothing gets overwritten
   without an explicit per-artifact `Replace` answer.
 - Foundation skills (`plan-feature`, `create-spec`, `create-qa-use-cases`)
-  still hard-code Vinta-internal `core-service/ai-plans/` paths in their
+  still hard-code source-repo paths (e.g. `<source-repo>/ai-plans/`) in their
   bundled bodies; `vinta-derive-skills` already scrubs these after copy.
   `vinta-migrate-plans-specs` flags the legacy `_IMPLEMENTATION_PLAN`
   suffix during migration so projects can align their foundation-skill

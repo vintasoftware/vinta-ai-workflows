@@ -1,13 +1,13 @@
 ---
 name: create-spec
-description: Turn raw feature prompt into structured spec doc at `core-service/ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md`. Sections fixed — Business Context, Hypothesis, Objectives, Decisions (Use-cases / State transitions & edge cases / Acceptance scenarios / Negative scope), Alternatives considered (optional), Open questions, Risks assumed. Use when user asks "write a spec", "draft a spec doc", "turn this idea into a spec", or hands one-line / paragraph feature description needing structure before plan. Skill ALWAYS interviews requester before drafting — never turn vague prompt into plausible-sounding spec by guessing.
+description: Turn raw feature prompt into structured spec doc at `ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md`. Sections fixed — Business Context, Hypothesis, Objectives, Decisions (Use-cases / State transitions & edge cases / Acceptance scenarios / Negative scope), Alternatives considered (optional), Open questions, Risks assumed. Use when user asks "write a spec", "draft a spec doc", "turn this idea into a spec", or hands one-line / paragraph feature description needing structure before plan. Skill ALWAYS interviews requester before drafting — never turn vague prompt into plausible-sounding spec by guessing.
 ---
 
 # Spec Document
 
 Spec **frame problem + solution boundaries** before plan. Precedes [plan-feature](../plan-feature/SKILL.md): spec answer *"what + why?"*; plan answer *"how, in what order, with what tests"*. Different artefact, different audience (spec → product + eng leadership; plan → implementer).
 
-Output: `core-service/ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md` (uppercase + underscores, today date prefix). Structure fixed; content from interview, not inference.
+Output: `ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md` (uppercase + underscores, today date prefix). Structure fixed; content from interview, not inference.
 
 ## Step 0 — Interrogate before drafting (NON-NEGOTIABLE)
 
@@ -75,7 +75,7 @@ User say *"just write the spec, I'll fix it"*: comply but mark every unverified 
 
 1. **Walk through 1–3 concrete user journeys** end-to-end. Concrete: who initiate, what they click/send, what they see back, what side-effects fire.
    *Why: abstract descriptions miss conditions making features hard. Concrete journeys force decisions about ordering, defaults, error states.*
-2. **Integration-driven (no human) flows hitting same path?** Webhook from Shopify, scheduled Lambda, batch import.
+2. **Integration-driven (no human) flows hitting same path?** Webhook from upstream SaaS, scheduled function, batch import.
    *Why: flows working for humans often break for integrations (omit-vs-empty, retry semantics, idempotency).*
 3. **Alternative entry points?** UI button + API + admin + Slack — anywhere same feature reachable.
    *Why: each entry point may need own permissions, validation, audit log.*
@@ -125,7 +125,7 @@ User say *"just write the spec, I'll fix it"*: comply but mark every unverified 
    *Why: change urgency math; may force phases to overlap risk normally sequential.*
 2. **Existing systems / data we can't touch?** Frozen table, deprecated endpoint kept alive for one customer, contract under review.
    *Why: usually appear as Phase-3 surprises.*
-3. **External dependencies** — integration partners (Shopify, Shiphero, Amazon), other internal services (`lbd-integrations-data`, `core-infra`), other teams' deliverables. Who has to do what before this lands?
+3. **External dependencies** — integration partners (third-party SaaS APIs), other internal services / repos, other teams' deliverables. Who has to do what before this lands?
    *Why: define deploy ordering. Spec ignoring slowest-moving dep ship late.*
 
 ### I — Risks & assumptions
@@ -193,7 +193,7 @@ Bulleted. Each: risk, assumption (which if violated makes risk real), mitigation
 
 ## Filename + date
 
-`core-service/ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md`. Today's date ISO. `FEATURE_NAME` `UPPERCASE_WITH_UNDERSCORES`. Matching plan file use same prefix with `_IMPLEMENTATION_PLAN.md` so spec/plan pair groupable in `ls`.
+`ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md`. Today's date ISO. `FEATURE_NAME` `UPPERCASE_WITH_UNDERSCORES`. Matching plan file use same prefix with `_IMPLEMENTATION_PLAN.md` so spec/plan pair groupable in `ls`.
 
 ## Style rules
 
@@ -209,7 +209,7 @@ Bulleted. Each: risk, assumption (which if violated makes risk real), mitigation
 ## Will not
 
 - **Generate spec from one-liner without interviewing.** Even with 200 words pasted, interview still runs. Only override is explicit *"just write the spec, I'll fix it"*; then every assumption goes in §6 or §7.
-- **Use existing spec files in [core-service/ai-plans/](../../../ai-plans/) as structural templates.** Prior-art prompts, not specs in this skill's form. Read only if user explicitly asks.
+- **Use existing spec files in `ai-plans/` as structural templates.** Prior-art prompts, not specs in this skill's form. Read only if user explicitly asks.
 - **Pre-decide implementation strategy.** Storage shape, partitioning, API surface, feature-flag mechanics — plan-level. Spec stops at "what" + "why".
 - **Skip §6 Open Questions when real unknowns exist.** Spec with no open questions on non-trivial feature suspicious.
 - **Pretty up rough thinking.** "I dunno, maybe we add tags" → don't paraphrase as "to enable tenants to enrich order metadata for downstream routing decisions". Either ask for the why or quote them: "Stated motivation: 'I dunno, maybe we add tags' — see §6 Open Question 1."
@@ -217,7 +217,7 @@ Bulleted. Each: risk, assumption (which if violated makes risk real), mitigation
 ## Checklist
 
 - [ ] Step 0 interview run; load-bearing decisions echoed back; user confirmed before drafting.
-- [ ] Filename: `core-service/ai-plans/{YYYY-MM-DD}-{FEATURE_NAME}_SPEC.md`.
+- [ ] Filename: `ai-plans/{YYYY-MM-DD}-{FEATURE_NAME}_SPEC.md`.
 - [ ] All seven sections in order.
 - [ ] §1 cites stakeholders + rough cost-of-doing-nothing.
 - [ ] §2 falsifiable — or known-requirement with driver named. Not silently both.

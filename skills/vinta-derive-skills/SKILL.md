@@ -55,7 +55,7 @@ These four reference each other:
 
 Copy all four or none — they form a unit.
 
-After copying, scan each for project-specific path references that no longer match the target (the bundled copies came from a real project — they may say `core-service/ai-plans/`, `apps/provider-app/`, etc). Replace with the target's paths from the inventory.
+After copying, scan each for project-specific path references that no longer match the target (the bundled copies may still carry source-repo paths such as `<source-repo>/ai-plans/` or `apps/<service>/`). Replace with the target's paths from the inventory.
 
 ### B. Generate — `implement-plan`, `amend-plan`, `systematic-debugging` from templates
 
@@ -71,7 +71,7 @@ Project-specific skills, generated from templates because their bodies cite real
 |---|---|---|
 | `{{PROJECT_NAME}}` | inventory.repo.name | `ACME Sleep` |
 | `{{STACK_SUMMARY}}` | inventory.frameworks one-liner | `pnpm + Turbo + Vite + React + Medplum + Playwright` |
-| `{{PLAN_DIR}}` | derived from where `*_IMPLEMENTATION_PLAN.md` lives | `ai-plans` or `core-service/ai-plans` |
+| `{{PLAN_DIR}}` | derived from where `*_IMPLEMENTATION_PLAN.md` lives | `ai-plans` or `apps/<service>/ai-plans` |
 | `{{LINT_CMD}}` | inventory.commands.lint | `pnpm lint:fix` or `pre-commit run --files <changed>` or `ruff check` |
 | `{{FORMAT_CMD}}` | inventory.commands.format | `pnpm format` or `ruff format` |
 | `{{BUILD_CMD}}` | inventory.commands.build | `pnpm build` or `make all-tests` (when build is the type gate) |
@@ -183,7 +183,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 ## Pitfalls
 
 - **Forgetting to substitute placeholders in `implement-plan`.** A surviving `{{TEST_CMD}}` is a runtime confusion. Validate before saving.
-- **Copying foundation skills and forgetting to scrub source-project paths.** The bundled copies came from a real repo; their bodies may reference `core-service/ai-plans/`, `apps/provider-app/`, etc. Replace with the target's paths.
+- **Copying foundation skills and forgetting to scrub source-project paths.** Bundled copies may still carry source-repo paths (e.g. `<source-repo>/ai-plans/`, `apps/<service>/`). Replace with the target's paths.
 - **Asking too many questions for optional skills.** If `vinta-analyze-codebase` shows no e2e dir and the user clearly has no e2e setup, it's OK to skip the question and not ship `add-e2e-test`. Use judgment.
 - **Skipping the foundation copy because "the user already has them".** They probably don't. Confirm by reading the target's `ai-tools/skills/` (if it exists at all). If it does have these, ask the user "refresh from bundled copies, or keep what you have?".
 

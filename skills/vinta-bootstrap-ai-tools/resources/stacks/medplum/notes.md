@@ -30,10 +30,10 @@ Names are conventional — the team's existing templates may use different namin
 
 When the user provides their existing templates, the orchestrator should substitute these per the target project:
 
-- Bot directory path (e.g. `apps/provider-app/bots/`)
-- AccessPolicy JSON directory (e.g. `apps/provider-app/data/`)
+- Bot directory path (e.g. `apps/<service>/bots/`)
+- AccessPolicy JSON directory (e.g. `apps/<service>/data/`)
 - Bot deploy command (e.g. `pnpm bots:deploy`)
-- Tenant helper module path (e.g. `apps/provider-app/bots/utils/tenant.ts`)
+- Tenant helper module path (e.g. `apps/<service>/bots/utils/tenant.ts`)
 - Project naming (`Organization` vs `Project`, `org` vs `team`, etc)
 - One-off script invocation surface — bot vs Medplum CLI script — drives the `run-one-off-script-medplum` skill's runner artefact + `Runtime` adapter shape
 

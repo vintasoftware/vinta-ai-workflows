@@ -34,7 +34,7 @@ If no multi-tenancy signals → single-tenant Django; the team's templates may s
 
 ## Placeholders the orchestrator should ask about
 
-- Apps directory (e.g. `apps/`, `core_service/app/core/`, `<project>/`)
+- Apps directory (e.g. `apps/`, `<project>/app/core/`, `<project>/`)
 - Test directory layout (`tests/unit/`, `tests/integration/`, in-app `tests/`)
 - Test command (`pytest`, `make all-tests`, `python manage.py test`)
 - Lint command (`pre-commit run --files <changed>`, `ruff check`, `make lint`)
@@ -43,7 +43,7 @@ If no multi-tenancy signals → single-tenant Django; the team's templates may s
 - Hot tables list (the high-traffic models that need migration safety)
 - Migration command (`make migrations`, `python manage.py makemigrations`, `poetry run python manage.py makemigrations`)
 - One-off script invocation surface (Jupyter notebook in `notebooks/<name>/`, Django management command, both) — drives the `run-one-off-script-django` skill's runner artefact + which `Runtime` adapter ships
-- Notebook directory path (`notebooks/`, `core_service/notebooks/`) — only when Jupyter is selected as a runner surface
+- Notebook directory path (`notebooks/`, `<project>/notebooks/`) — only when Jupyter is selected as a runner surface
 
 ## When this stack doesn't apply cleanly
 

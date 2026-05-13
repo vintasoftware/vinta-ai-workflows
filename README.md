@@ -202,6 +202,43 @@ The script bails early with `missing dependency: <name>` if any are absent. If a
 
 Standalone re-invocation works at every step — kick `create-spec` again when the requirements shift mid-plan, re-run `plan-feature` after contract changes, restart `implement-plan` mid-feature (it picks up from the tracking file, never re-runs completed phases).
 
+## Cheat sheet — what lands in your project
+
+Quick inventory of what `vinta-bootstrap-ai-tools` writes into your repo's `ai-tools/` layout (and exposes via per-vendor wiring at `.claude/skills/`, `.agents/skills/`, etc.). Two disclaimers up front:
+
+> **Optional foundation skills are gated by the bootstrap interview.** `systematic-debugging`, `add-e2e-test`, `add-env-var`, and `add-one-off-script` ship **only** if the user says yes during `vinta-bootstrap-ai-tools` Step 0 (or later opts in via `vinta-sync-ai-tools`). They are not in every bootstrapped project. The opt-in is recorded in `.vinta-ai-workflows.yaml` under `foundation_skills.*.enabled` and is sticky across syncs.
+>
+> **Stack-specific skills and sub-agents are user-supplied.** This package ships **detection signals + category lists** per stack ([resources/stacks/](skills/vinta-bootstrap-ai-tools/resources/stacks/) — Django, Medplum, Next.js App Router, Python package, TypeScript monorepo), not the bodies. When a stack is detected, the orchestrator asks the user for a path / URL to their team's existing template. If no template exists, the category is recorded as a gap in the final summary, not auto-drafted. Bodies are project- and team-specific; one shared template doesn't fit every team's conventions.
+
+### Foundation skills (project-agnostic)
+
+Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
+
+| Skill | Status | What it does |
+|---|---|---|
+| [`create-spec`](skills/vinta-derive-skills/resources/foundation-skills/create-spec/SKILL.md) | always | Interview-driven spec doc from a raw prompt / ticket → `ai-plans/YYYY-MM-DD-FEATURE_NAME_SPEC.md`. |
+| [`plan-feature`](skills/vinta-derive-skills/resources/foundation-skills/plan-feature/SKILL.md) | always | Phased delivery plan from the matching spec → `ai-plans/YYYY-MM-DD-FEATURE_NAME_PLAN.md`. |
+| [`create-qa-use-cases`](skills/vinta-derive-skills/resources/foundation-skills/create-qa-use-cases/SKILL.md) | always | Bootstrap `QA_USE_CASES.md` from the active spec / plan. Called by `plan-feature` when missing. |
+| [`open-pr-from-context`](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/SKILL.md) | always | Publish a `.vinta-ai-workflows/prs-context/<feature>/<phase>.md` file as a real PR + inline comments via `gh` / `glab`. Bundles [`open-pr.sh`](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh). |
+| `implement-plan` | always (generated) | Phase-by-phase plan execution. Generated from a template with project commands + branch / PR / co-author policy. |
+| `amend-plan` | always (generated) | History-rewriting companion to `implement-plan` — revises in-flight plans, amends prior-phase commits, force-pushes, rebases stacked downstream branches. |
+| `systematic-debugging` | **opt-in** | Root-cause-first debugging with project-specific repro commands + MCP evidence-gathering (error tracking, traces, logs, metrics, alerts). Renders from a catalogue of observability MCP servers the user declares. |
+| `add-e2e-test` | **opt-in** | Add an e2e test. Body covers e2e framework, page-object pattern, auth/storage-state, seed helpers, tenant scoping, screenshot conventions. |
+| `add-env-var` | **opt-in** | Propagate a new env var through every layer (`.env.example`, build tool envPrefix, build cache hash, app config, AGENTS.md, CI, deploy injection). |
+| [`add-one-off-script`](skills/vinta-derive-skills/resources/foundation-skills/add-one-off-script/SKILL.md) | **opt-in** | Author one-off operational scripts (backfills, cleanups, ad-hoc fixes). Ships a `BaseOneOffScript` class (Python + TS) enforcing dry-run default, idempotency, batched DB ops, segmented CSV backups, signal-safe interruption, multi-sink logging. |
+
+### Foundation sub-agents (project-agnostic)
+
+Land at `ai-tools/agents/<name>.yaml` (canonical YAML; `setup-ai-tools.mjs` emits per-vendor copies into `.claude/agents/`, `.cursor/`, `.codex/`, `.github/`). Always-on trio.
+
+| Agent | Access | Role |
+|---|---|---|
+| `implementer` | read-write | Default coder for one plan phase. Reads AGENTS.md + plan + phase body, runs inner + outer test gates, reports back. Never branches, pushes, opens PRs, or adds AI co-author trailers. |
+| `reviewer` | read-only | Adversarial reviewer. Reads phase + diff + AGENTS.md, outputs `BLOCKER` / `SHOULD-FIX` / `NIT` findings with `file:line`. Does not edit. |
+| `fixer` | read-write | Applies one reviewer finding (or one named test failure). Smallest correct change, re-runs gates, reports. |
+
+Stack templates may add specialists like `migration-author` (Django) or `deploy-author` (Medplum) — see disclaimer above.
+
 ## Staying in sync with upstream
 
 Bootstrap is a snapshot. `@vinta/ai-workflows` keeps shipping — new foundation skills, refined templates, sharper agent prompts, schema additions, stack support, best-practice updates lifted from real projects. Pulling those into a previously-bootstrapped repo is a first-class flow, not an afterthought. **This is one of the most important capabilities of the package.**

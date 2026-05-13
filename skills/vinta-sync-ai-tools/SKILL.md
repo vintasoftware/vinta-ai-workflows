@@ -154,7 +154,7 @@ Run on first sync against a project without `.vinta-ai-workflows.yaml`:
    - `project.default_branch` → `git remote show origin | grep 'HEAD branch'` or `git rev-parse --abbrev-ref origin/HEAD`.
    - `project.code_host` → parse `git remote get-url origin`.
    - `project.stack_summary` → run [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) inventory, take the one-liner.
-   - `project.ai_plans_dir` → look for `ai-plans/`, `core-service/ai-plans/`, etc.
+   - `project.ai_plans_dir` → look for `ai-plans/`, `apps/<service>/ai-plans/`, etc.
 3. Detect commands by scanning `package.json#scripts`, `Makefile`, etc. Confirm each via `AskUserQuestion`.
 4. Detect policies by reading the existing `ai-tools/skills/implement-plan/SKILL.md` (if present) — reverse-extract `pr_creation`, `ai_coauthor`, `commit_style` from the rendered body. Interview-fill gaps.
 5. Detect vendor coverage from existing vendor symlinks/dirs (`.claude/`, `.cursor/`, `.codex/`, `.github/agents/`).

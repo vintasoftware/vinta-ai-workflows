@@ -47,7 +47,7 @@
           "type": "string"
         },
         "ai_plans_dir": {
-          "description": "Directory holding `YYYY-MM-DD-FEATURE_NAME_{SPEC,PLAN}.md` files. Default `ai-plans`. Some monorepos use `core-service/ai-plans` etc.",
+          "description": "Directory holding `YYYY-MM-DD-FEATURE_NAME_{SPEC,PLAN}.md` files. Default `ai-plans`. Monorepos often nest it under a service dir (e.g. `apps/<service>/ai-plans`).",
           "type": "string",
           "minLength": 1,
           "default": "ai-plans"
