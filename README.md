@@ -77,11 +77,11 @@ The bootstrap skills are **one-shot**. They scaffold the project once and are re
 
 **What it does:** translates the spec into a phased delivery plan. Output sections:
 
-- **§1 Goals + Non-goals** — what's in / out of scope.
-- **§2 Guiding Decisions** — feature flag (key, scope, default, flip-on criterion if any), storage shape, tenant scoping, API contract, schema rules. Load-bearing — every phase reaches back here.
-- **§3 Data Model Changes** — migrations + rollout order.
-- **§5 Phased Rollout** — each phase declares: `id`, `title`, `goal`, `Suggested AI model` (per vendor — implement-plan picks the cheapest available), `reusable_skills` (other project skills the implementer should invoke), `Changes`, `Tests`, `Acceptance`, plus flags for `is_cross_repo` and `is_flag_removal` (both deferred).
-- **§6 Risk & Rollout Notes**, **§7 Open Questions**, **§8 Touch List**.
+- **Goals + Non-goals** — what's in / out of scope.
+- **Guiding Decisions** — feature flag (key, scope, default, flip-on criterion if any), storage shape, tenant scoping, API contract, schema rules. Load-bearing — every phase reaches back here.
+- **Data Model Changes** — migrations + rollout order.
+- **Phased Rollout** — each phase declares: `id`, `title`, `goal`, `Suggested AI model` (per vendor — implement-plan picks the cheapest available), `reusable_skills` (other project skills the implementer should invoke), `Changes`, `Tests`, `Acceptance`, plus flags for `is_cross_repo` and `is_flag_removal` (both deferred).
+- **Risk & Rollout Notes**, **Open Questions**, **Touch List**.
 
 Phases are sized so the slowest path (e.g. cross-repo producer wiring, external integration approval) starts in Phase 1 and fast in-repo work fills in behind. Large mutation phases get split (`4a / 4b / 4c`) rather than monolithic.
 
@@ -95,7 +95,7 @@ Phases are sized so the slowest path (e.g. cross-repo producer wiring, external 
 
 **Per-phase loop** (Step 1 of the skill):
 
-1. **Compose a token-efficient prompt.** AGENTS.md + plan §1 + §2 + relevant §3 + this phase's §5 body + the running tracking summary (replaces full prior-phase content as context handoff). Don't dump the full plan into every prompt.
+1. **Compose a token-efficient prompt.** AGENTS.md + the plan's **Goals + Non-goals**, **Guiding Decisions**, relevant **Data Model Changes** subsection, this phase's body under **Phased Rollout**, plus the running tracking summary (replaces full prior-phase content as context handoff). Don't dump the full plan into every prompt.
 2. **Pick the model from the plan's per-phase suggestion.** Filter to what the runtime can actually run, choose the cheapest survivor. Capability gap on retry → escalate one tier; after Tier 4, stop and surface to the user.
 3. **Spawn the right agent type.** `implementer` by default; switch to a stack-specialist (`migration-author`, `deploy-author`, etc.) when that role's risk dominates the phase.
 4. **Implementer runs inner + outer loop.** Inner: lint → scoped tests → typecheck on touched files; iterate until green. Outer (only after inner is green): full build + full test suite + e2e where applicable. Never commits, pushes, or proceeds with a red gate.
@@ -142,11 +142,11 @@ What actually happens depends on two signals:
 1. **Project PR creation policy** — captured at bootstrap. Either "agents create PRs" or "branches only, humans open PRs".
 2. **`generate_inline_comments` opt-in** — Step 0 per-run question, off by default. Yes → agent picks 3–10 non-obvious diff spots and writes them to the file's `# Comments` block. No → file's `# Comments` block is empty; only `# Title` + `# Description` populate.
 
-| PR policy | inline comments | What §1f does |
+| PR policy | inline comments | What the **Open PR via context file** step does |
 |---|---|---|
 | agents create | off | Write file (empty `# Comments`); run `open-pr.sh` → PR opened, no inline comments. |
 | agents create | on  | Write file (full); run `open-pr.sh` → PR opened, all comments posted. |
-| branches only | off | Skip §1f. Human opens PR manually. |
+| branches only | off | Skip the step. Human opens PR manually. |
 | branches only | on  | Write file (durable record); **don't** run script. Publish later via `open-pr-from-context` from a CLI-equipped session. |
 
 `open-pr.sh` exit codes propagate: `0` = PR up + comments OK, `1` = PR up but ≥1 comment failed (failures listed by `(file:line)`), `2` = hard failure (file stays `status: pending` so re-running after fixing the gap is safe).
@@ -177,7 +177,7 @@ gh auth login                            # GitHub
 glab auth login                          # GitLab
 ```
 
-The script bails early with `missing dependency: <name>` if any are absent. If a runner can't install them (e.g. minimal CI image), the project's PR policy must be set to "branches only" at bootstrap so §1f skips the script — humans open PRs from the pushed branch.
+The script bails early with `missing dependency: <name>` if any are absent. If a runner can't install them (e.g. minimal CI image), the project's PR policy must be set to "branches only" at bootstrap so the **Open PR via context file** step skips the script — humans open PRs from the pushed branch.
 
 ### Putting it together
 

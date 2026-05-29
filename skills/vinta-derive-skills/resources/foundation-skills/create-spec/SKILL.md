@@ -36,9 +36,9 @@ Step 0 isn't one-pass. After each round of answers, **scan for new gaps**: contr
 Loop exit conditions (all required):
 - Every group A–I either fully answered or explicitly waived.
 - Every answer's downstream questions also asked + answered.
-- No "we'll figure that out later" — that's §6 Open Questions material; either has recommended default + owner + unblock condition, or resolved now.
-- Can write each §4.1 use-case (actor + trigger + flow + outcome) without inventing.
-- Can write §4.3 acceptance scenarios without making up Given/When/Then.
+- No "we'll figure that out later" — that's **Open questions** material; either has recommended default + owner + unblock condition, or resolved now.
+- Can write each **Decisions → Use-cases** entry (actor + trigger + flow + outcome) without inventing.
+- Can write **Decisions → Acceptance scenarios** without making up Given/When/Then.
 
 Any condition fails → another `AskUserQuestion` round. Don't shortcut to drafting just because you've done one batch.
 
@@ -53,7 +53,7 @@ User say *"just write the spec, I'll fix it"*: comply but mark every unverified 
 2. **What customer do today?** Manual workaround, support ticket, doesn't bother, leaves platform — name path + pain.
    *Why: no current pain → no demand to validate. "Leaves platform" different objective than "saves 10 minutes/week".*
 3. **Cost today?** Lost revenue, support volume, churn risk, manual hours, compliance risk, integration breakage. Rough estimate fine.
-   *Why: become success metric in §Objectives. Without it, "did this work?" has no answer.*
+   *Why: becomes success metric in **Objectives**. Without it, "did this work?" has no answer.*
 4. **Who else care about this landing?** Other teams, integration partners, support, sales engineering, named stakeholder. Anyone who block rollout if not looped in.
    *Why: surface hidden veto points before plan written.*
 
@@ -163,7 +163,7 @@ Numbered. For each:
 Known-requirement: replace "validate hypothesis" with "definition of done" — still concrete + measurable.
 
 ## 4. Decisions
-Resolved questions go here. Ambiguous → §6 Open Questions.
+Resolved questions go here. Ambiguous → **Open questions** section.
 
 ### 4.1 Use-cases
 Numbered. Each: actor, trigger, flow (2–6 numbered steps), outcome.
@@ -188,7 +188,7 @@ Each: short paragraph, what it was, why rejected. None? Say so: "Alternatives co
 Each: question, recommended default, who can answer, what unblocks if answered.
 
 ## 7. Risks assumed
-Bulleted. Each: risk, assumption (which if violated makes risk real), mitigation (or "accepted, no mitigation — see §6"), rough likelihood/severity (low/medium/high).
+Bulleted. Each: risk, assumption (which if violated makes risk real), mitigation (or "accepted, no mitigation — see **Open questions**"), rough likelihood/severity (low/medium/high).
 ```
 
 ## Filename + date
@@ -198,36 +198,38 @@ Bulleted. Each: risk, assumption (which if violated makes risk real), mitigation
 ## Style rules
 
 - **Plain English over jargon.** Read by product, design, sales engineering, on-call. Acronyms expanded on first use.
-- **No code.** No SQL, migration snippets, class skeletons, JSON contracts beyond what customer literally agreed to. Code lives in plan. Exception: typed interface client team committed to (Bookmarks spec's `IBookmarkBarFolderItem` TypeScript) belongs in §4.1 or §4.3 — as literal contract, not implementation guidance.
+- **No code.** No SQL, migration snippets, class skeletons, JSON contracts beyond what customer literally agreed to. Code lives in plan. Exception: typed interface client team committed to (Bookmarks spec's `IBookmarkBarFolderItem` TypeScript) belongs in **Decisions → Use-cases** or **Decisions → Acceptance scenarios** — as literal contract, not implementation guidance.
 - **No file paths or app names.** "We'll add this to `core/sales/models/order.py`" plan-level.
 - **No estimates.** Sizing belongs in plan.
 - **No marketing language.** "Seamlessly", "robust", "best-in-class", "delightful" — strike.
-- **Decisions decided; assumptions flagged.** Solid-feeling but unverified → move to §6 or §7.
+- **Decisions decided; assumptions flagged.** Solid-feeling but unverified → move to **Open questions** or **Risks assumed**.
 - **One feature per spec.** Multiple loosely-coupled features → multiple specs.
 - **Illustrate with examples + diagrams, not prose.** "For example, if tenant admin clicks 'Add tag' button on order details page, then..." better than "tenant admins should be able to add tags to orders in UI". State machine diagram better than "orders have lifecycle states: Draft, Active, Archived". Diagrams must use mermaidjs syntax to ensure stay up to date with reality.
 
 ## Will not
 
-- **Generate spec from one-liner without interviewing.** Even with 200 words pasted, interview still runs. Only override is explicit *"just write the spec, I'll fix it"*; then every assumption goes in §6 or §7.
+- **Generate spec from one-liner without interviewing.** Even with 200 words pasted, interview still runs. Only override is explicit *"just write the spec, I'll fix it"*; then every assumption goes in **Open questions** or **Risks assumed**.
 - **Use existing spec files in `ai-plans/` as structural templates.** Prior-art prompts, not specs in this skill's form. Read only if user explicitly asks.
 - **Pre-decide implementation strategy.** Storage shape, partitioning, API surface, feature-flag mechanics — plan-level. Spec stops at "what" + "why".
-- **Skip §6 Open Questions when real unknowns exist.** Spec with no open questions on non-trivial feature suspicious.
-- **Pretty up rough thinking.** "I dunno, maybe we add tags" → don't paraphrase as "to enable tenants to enrich order metadata for downstream routing decisions". Either ask for the why or quote them: "Stated motivation: 'I dunno, maybe we add tags' — see §6 Open Question 1."
+- **Skip Open questions when real unknowns exist.** Spec with no open questions on non-trivial feature suspicious.
+- **Pretty up rough thinking.** "I dunno, maybe we add tags" → don't paraphrase as "to enable tenants to enrich order metadata for downstream routing decisions". Either ask for the why or quote them: "Stated motivation: 'I dunno, maybe we add tags' — see **Open questions**, item 1."
+- **Never use `§N` shorthand for section references.** Use section names verbatim — `Business Context`, `Hypothesis`, `Objectives`, `Decisions`, `Decisions → Use-cases`, `Decisions → Acceptance scenarios`, `Decisions → Negative scope`, `Alternatives considered`, `Open questions`, `Risks assumed`. `§4.3` makes the reader count headings and breaks when the spec evolves.
 
 ## Checklist
 
 - [ ] Step 0 interview run; load-bearing decisions echoed back; user confirmed before drafting.
 - [ ] Filename: `ai-plans/{YYYY-MM-DD}-{FEATURE_NAME}_SPEC.md`.
 - [ ] All seven sections in order.
-- [ ] §1 cites stakeholders + rough cost-of-doing-nothing.
-- [ ] §2 falsifiable — or known-requirement with driver named. Not silently both.
-- [ ] §3 has metric, source, threshold, timeframe, kill criterion (when hypothesis-mode).
-- [ ] §4.1 each: actor + trigger + step-by-step flow + outcome.
-- [ ] §4.2 covers state machine, edge cases, idempotency, concurrency, time-bounded rules where applicable.
-- [ ] §4.3 has 3–7 scenarios covering happy / error / edge / integration paths.
-- [ ] §4.4 exhaustive enough to surprise user.
-- [ ] §5 present (or explicit "none" with reason).
-- [ ] §6 lists every unresolved item with default, owner, unblocks-on.
-- [ ] §7 has assumption + mitigation + likelihood/severity.
+- [ ] **Business Context** cites stakeholders + rough cost-of-doing-nothing.
+- [ ] **Hypothesis** falsifiable — or known-requirement with driver named. Not silently both.
+- [ ] **Objectives** has metric, source, threshold, timeframe, kill criterion (when hypothesis-mode).
+- [ ] **Decisions → Use-cases** each: actor + trigger + step-by-step flow + outcome.
+- [ ] **Decisions → State transitions & edge cases** covers state machine, edge cases, idempotency, concurrency, time-bounded rules where applicable.
+- [ ] **Decisions → Acceptance scenarios** has 3–7 scenarios covering happy / error / edge / integration paths.
+- [ ] **Decisions → Negative scope** exhaustive enough to surprise user.
+- [ ] **Alternatives considered** present (or explicit "none" with reason).
+- [ ] **Open questions** lists every unresolved item with default, owner, unblocks-on.
+- [ ] **Risks assumed** has assumption + mitigation + likelihood/severity.
 - [ ] Body has no code, no file paths, no app names, no time estimates, no marketing language.
-- [ ] Every unverified inference in §6 or §7, not §1–§4.
+- [ ] Every unverified inference in **Open questions** or **Risks assumed** — not in **Business Context** through **Decisions**.
+- [ ] No `§N` section references anywhere in the spec body. Use section names.

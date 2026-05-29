@@ -25,10 +25,10 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
 ## When to use
 
-- A spec change forces a phase body rewrite (different acceptance, different decisions in §2).
+- A spec change forces a phase body rewrite (different acceptance, different decisions in the plan's **Guiding Decisions**).
 - A phase was implemented but the resulting diff is wrong / incomplete (caught post-merge to the phase branch but pre-merge to `{{DEFAULT_BRANCH}}`).
 - A new phase needs to slot in between two existing ones, or be appended.
-- A guiding decision in §2 changed and it cascades into multiple phases.
+- A guiding decision in **Guiding Decisions** changed and it cascades into multiple phases.
 
 ## When NOT to use
 
@@ -38,15 +38,15 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
 ## Step 0 — Understand the change + parse the plan
 
-1. **Identify the plan file.** Same logic as [implement-plan §0](../implement-plan/SKILL.md): ask the user (path or feature name); `ls {{PLAN_DIR}}/` + grep; confirm before proceeding.
+1. **Identify the plan file.** Same logic as the [implement-plan "Locate + parse plan" step](../implement-plan/SKILL.md#step-0--locate--parse-plan): ask the user (path or feature name); `ls {{PLAN_DIR}}/` + grep; confirm before proceeding.
 
 2. **Capture the requested change.** The user's prompt is the source. If vague, interview via `AskUserQuestion`:
-   - *"Which phases are affected?"* — enumerate phase ids from §5.
-   - *"Is this a body rewrite of an existing phase, a new phase to slot in, or a §2 decision change that cascades?"*
+   - *"Which phases are affected?"* — enumerate phase ids from the plan's **Phased Rollout** section.
+   - *"Is this a body rewrite of an existing phase, a new phase to slot in, or a **Guiding Decisions** change that cascades?"*
    - *"What's the new acceptance criterion / change list?"* — verbatim.
    Don't infer scope. The plan-amend is the user's contract, not yours.
 
-3. **Parse the plan.** Same structured fields as [implement-plan §0.2](../implement-plan/SKILL.md): plan id, §1 / §2 / §3 / §5 phase records / §6–8.
+3. **Parse the plan.** Same structured fields as [implement-plan's "Extract structured fields" step](../implement-plan/SKILL.md#step-0--locate--parse-plan): plan id, **Goals + Non-goals** / **Guiding Decisions** / **Data Model Changes** / phase records from **Phased Rollout** / **Risk & Rollout Notes** through **Touch List**.
 
 4. **Read the tracking file** `{{PLAN_DIR}}/TRACKING_{plan-id}.md` if present. Its `Completed Phases` section tells you which phase branches were pushed and which model + base were used. If absent → `git branch -a | grep plan/{plan-id-kebab}` to enumerate pushed phase branches.
 
@@ -54,30 +54,30 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
    | Field | Source |
    |---|---|
-   | `phase.id`, `phase.title` | plan §5 |
+   | `phase.id`, `phase.title` | plan's **Phased Rollout** section |
    | `state` | one of `not-started` / `in-progress` / `implemented-not-merged` / `merged-to-default` |
    | `branch` | tracking file or git, pattern `plan/{plan-id-kebab}/phase-{id}` |
    | `base` | tracking file or `git merge-base origin/<branch> <prev-branch>`; root phase bases on `{{DEFAULT_BRANCH}}` |
    | `pr_status` | `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{id}.md` frontmatter (`pending` / `published`) when the file exists |
    | `merged_to_default` | `git branch --merged origin/{{DEFAULT_BRANCH}} | grep` against the branch |
 
-   `merged-to-default = true` blocks any commit rewrite for that phase — see §3 below.
+   `merged-to-default = true` blocks any commit rewrite for that phase — see [Step 3 — Refuse force-pushes that can't work](#step-3--refuse-force-pushes-that-cant-work) below.
 
 6. **Classify the requested change** by phase impact, in priority order:
 
    - **`body-rewrite`** — existing phase keeps its id; body changes. Cascades downstream because rewritten commits get new SHAs.
    - **`insert-new`** — new phase between existing ones. Cascades downstream because every later phase rebases onto the new branch.
    - **`append-new`** — new phase tacked on after the last one. No downstream cascade. Implementation runs forward via [implement-plan](../implement-plan/SKILL.md) — this skill hands off after editing the plan file.
-   - **`section-2-decision-change`** — `§2 Guiding Decisions` change. Cascades into every phase that referenced the decision.
+   - **`guiding-decisions-change`** — change inside the plan's **Guiding Decisions** section. Cascades into every phase that referenced the decision.
 
 7. **Evaluate amendment blast radius — recommend restart when too big.** Amending in place stops being a good deal once the rewrite work approaches re-implementation. Compute these signals from the per-phase state map + the requested change:
 
    | Signal | Threshold suggesting RESTART |
    |---|---|
    | Phases needing `body-rewrite` ÷ total implemented phases | ≥ 50% |
-   | `section-2-decision-change` cascading into | ≥ 50% of implemented phases |
+   | `guiding-decisions-change` cascading into | ≥ 50% of implemented phases |
    | Phases in `merged-to-default` (immutable, must be `append-new`) | ≥ 2, AND remaining work also rewrites earlier phases |
-   | New body materially changes the data-model contract from §3 | rewrite of >2 phases hinges on it |
+   | New body materially changes the data-model contract from **Data Model Changes** | rewrite of >2 phases hinges on it |
    | Estimated touched LoC across rewrites | ≥ 70% of original implementation diff size (rough estimate via `git diff --stat <base>..<branch>` summed across affected branches) |
    | Multi-author phase branches in the rewrite queue | ≥ 1 (force-push erases collaborator local state) |
    | Approved PRs in the rewrite queue | ≥ 2 (re-review burden becomes non-trivial) |
@@ -118,16 +118,16 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
 Always the first write. Plan file is durable; commits get rewritten next.
 
-1. **Body rewrites** — replace the affected `## Phase {id}` block in §5 verbatim with the new body. Keep `phase.id` stable so branch naming stays valid.
+1. **Body rewrites** — replace the affected `## Phase {id}` block inside **Phased Rollout** verbatim with the new body. Keep `phase.id` stable so branch naming stays valid.
 
 2. **Inserts** — choose a new id. Two conventions are common:
    - Decimal: `1.5` between `1` and `2` (matches existing patterns in some Vinta plans). Branch becomes `plan/{plan-id-kebab}/phase-1.5`.
-   - Letter: `1b` between `1` (relabeled `1a`) and `2`. Requires renaming `1` → `1a` in §5 + updating downstream references.
+   - Letter: `1b` between `1` (relabeled `1a`) and `2`. Requires renaming `1` → `1a` inside **Phased Rollout** + updating downstream references.
    Ask the user. Default: decimal — no rename of existing ids.
 
-3. **Appends** — new `## Phase N+1` block at end of §5. Same shape as siblings: Goal, Suggested AI model, reusable_skills, Changes, Tests, Acceptance.
+3. **Appends** — new `## Phase N+1` block at end of **Phased Rollout**. Same shape as siblings: Goal, Suggested AI model, reusable_skills, Changes, Tests, Acceptance.
 
-4. **§2 Decision changes** — rewrite the affected `§2.x` row. Add a one-line note at the top of §2 ("**Amended YYYY-MM-DD**: replaced §2.3 storage shape from X to Y; affects phases 2, 3, 4.") so reviewers see what shifted.
+4. **Guiding Decisions changes** — rewrite the affected row. Add a one-line note at the top of **Guiding Decisions** ("**Amended YYYY-MM-DD**: replaced storage shape from X to Y; affects phases 2, 3, 4.") so reviewers see what shifted. Reference the changed row by its **Decision** column name, not by a `§N.M` shorthand.
 
 5. **Bump the amendment log.** At the bottom of the plan, under `## Amendments`, append:
 
@@ -181,7 +181,7 @@ git reset --hard origin/{branch}
 
 ### 4b. For `change_kind = amend-existing` only — apply the body change
 
-Spawn an implementer subagent. Prompt shape (token-efficient, mirrors [implement-plan §1a](../implement-plan/SKILL.md)):
+Spawn an implementer subagent. Prompt shape (token-efficient, mirrors the [implement-plan "Prepare agent prompt" step](../implement-plan/SKILL.md#1a-prepare-agent-prompt-token-efficient)):
 
 ```
 You are amending {phase.id}: {phase.title} of plan {plan.id}.
@@ -191,7 +191,7 @@ You are amending {phase.id}: {phase.title} of plan {plan.id}.
 
 ## Read first
 1. AGENTS.md — repo conventions.
-2. {{PLAN_DIR}}/{plan-filename}, sections §1, §2, §3, and the rewritten phase body in §5.
+2. {{PLAN_DIR}}/{plan-filename}, the **Goals + Non-goals**, **Guiding Decisions**, and **Data Model Changes** sections, plus the rewritten phase body inside **Phased Rollout**.
 3. The current diff: `git diff {base}...HEAD` — what's already on this branch.
 
 ## What changed in the plan (verbatim)
@@ -233,7 +233,7 @@ For `change_kind = rebase-only` (downstream phase whose parent moved): skip the 
 
 ### 4c. Run the three-layer review (same as implement-plan)
 
-Same Layer 1 / 2 / 3 / fix-loop as [implement-plan §1d](../implement-plan/SKILL.md). The reviewer agent gets the **new** phase body to walk against. Layer 2 walks: every "Changes" item in the new body, every "Tests" entry, the new acceptance line.
+Same Layer 1 / 2 / 3 / fix-loop as the [implement-plan "Thorough review" step](../implement-plan/SKILL.md#1d-thorough-review). The reviewer agent gets the **new** phase body to walk against. Layer 2 walks: every "Changes" item in the new body, every "Tests" entry, the new acceptance line.
 
 Skip Layer 3 only when `change_kind = rebase-only` (no body change → no compliance walk). Layers 1 + 2 still apply (verify the rebase didn't lose unrelated work).
 
@@ -248,7 +248,7 @@ git rebase $PARENT_TIP
 
 Conflicts:
 
-1. **Spawn a fixer subagent** with the conflict body + new phase body + parent's tip diff. Same agent type as [implement-plan §1d fix loop](../implement-plan/SKILL.md).
+1. **Spawn a fixer subagent** with the conflict body + new phase body + parent's tip diff. Same agent type as the [implement-plan "Fix loop" subsection](../implement-plan/SKILL.md#fix-loop).
 2. Fixer resolves, runs inner + outer gate.
 3. Orchestrator continues the rebase: `git rebase --continue`.
 
@@ -281,7 +281,7 @@ For the rewritten branch, look for `.vinta-ai-workflows/prs-context/{feature-keb
   - Inline comments may now reference SHAs that no longer exist. They'll appear as "outdated" in the PR UI.
   - If the new diff has materially different comment-worthy spots, regenerate the `# Comments` block, set `status: pending`, and re-run [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) on the file. The script reuses the existing PR, posts new comments. Old "outdated" comments stay visible in the PR for audit; that's the platform's behavior.
 
-When rewriting the `# Description` body, **honor `project.pr_template_paths`** from `.vinta-ai-workflows.yaml` — same rule as [implement-plan §1f step 2](../implement-plan/SKILL.md): follow the project's PR template structure, fill new sections with phase-specific content from the rewritten body, leave un-fillable placeholders untouched. If the prior file used a different template than the project now declares (template was added or swapped between the original `implement-plan` run and this amend), prefer the current `pr_template_paths` choice — surface the change to the user when the body shape shifts visibly.
+When rewriting the `# Description` body, **honor `project.pr_template_paths`** from `.vinta-ai-workflows.yaml` — same rule as step 2 of the [implement-plan "Open PR via context file" step](../implement-plan/SKILL.md#1f-open-pr-via-context-file): follow the project's PR template structure, fill new sections with phase-specific content from the rewritten body, leave un-fillable placeholders untouched. If the prior file used a different template than the project now declares (template was added or swapped between the original `implement-plan` run and this amend), prefer the current `pr_template_paths` choice — surface the change to the user when the body shape shifts visibly.
 
 Always include in the publish-log block at the bottom of the file:
 
@@ -316,7 +316,8 @@ After every queue entry processes:
 
 - **Never `--force`. Always `--force-with-lease`.** Protects against silent overwrites.
 - **Plan file edit is the first write.** Commit the new plan body before any branch rewrite. The plan is the contract; the branches are the artifact.
-- **Recommend restart when blast radius is high.** Step 0.7 evaluates signals; ≥2 tripping signals → surface a restart option to the user before any force-push plan is shown. Don't quietly amend a half-rewrite of the whole plan.
+- **Recommend restart when blast radius is high.** The blast-radius step inside Step 0 evaluates signals; ≥2 tripping signals → surface a restart option to the user before any force-push plan is shown. Don't quietly amend a half-rewrite of the whole plan.
+- **Never use `§N` shorthand to point at sections** — neither in this skill body, the rewritten plan body, the amendment log entry, nor any prs-context refresh. Always use the section's full name (and link when possible). `§N` references are hard for humans to follow and shift when section numbering moves.
 - **Phases merged to `{{DEFAULT_BRANCH}}` are immutable.** Convert to `append-new` phases. Refuse to attempt rewrites.
 - **Confirm every force-push individually.** No batch "confirm all".
 - **Use `--force-with-lease`** (already stated; worth restating).
@@ -324,12 +325,12 @@ After every queue entry processes:
 - **PR-context file is a derived artifact.** Refresh it after the rewrite; never edit the file as a substitute for fixing the diff.
 - **Subagents commit but never push.** Orchestrator owns force-push. {{PR_RULE_TAIL}}.
 {{COAUTHOR_RULE_LINE}}
-- **Stop on Tier-4 failure** (model escalation, same rules as [implement-plan §1b](../implement-plan/SKILL.md)).
+- **Stop on Tier-4 failure** (model escalation, same rules as the [implement-plan "Pick model" step](../implement-plan/SKILL.md#1b-pick-model-from-plans-per-phase-suggestion)).
 - **Stop on rebase failure** the fixer can't resolve in one retry. Don't ship half-rebased branches.
 
 ## Quick checklist (orchestrator, per amendment run)
 
-- [ ] User-requested change captured verbatim; classification determined (`body-rewrite` / `insert-new` / `append-new` / `section-2-decision-change`).
+- [ ] User-requested change captured verbatim; classification determined (`body-rewrite` / `insert-new` / `append-new` / `guiding-decisions-change`).
 - [ ] Plan parsed; per-phase state map built (state, branch, base, pr_status, merged_to_default).
 - [ ] Blast-radius signals computed; `low` → straight to confirmation, `high-blast-radius` / `restart-recommended` → user offered `Restart` / `Amend in place` / `Stop` before the force-push plan is shown.
 - [ ] On `Restart` choice: new plan drafted (or hand-off to [plan-feature](../plan-feature/SKILL.md)); old plan annotated `Superseded`; tracking marked; this skill exits.

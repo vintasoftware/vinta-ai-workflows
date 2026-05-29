@@ -87,7 +87,7 @@ Note: many repos have the test command in CI config but not surfaced as a top-le
 - `apps/` + `lib/` (or `apps/` + `packages/`) directory pattern → conventional monorepo layout.
 - Single-package repos: report as such; downstream skills need to know.
 
-For each app/package: name + path + framework (cross-ref §3) + entry point.
+For each app/package: name + path + framework (cross-ref the [Frameworks (from dependencies)](#3-frameworks-from-dependencies) scan above) + entry point.
 
 ### 6. Tests
 
@@ -202,7 +202,7 @@ For each template found, capture:
 
 Output goes into `existing_ai_artifacts.pr_templates` (see schema below). The full content is read on demand by `implement-plan` / `amend-plan` when drafting prs-context files; analyze-codebase only enumerates.
 
-If anything is found, **do NOT overwrite** — the downstream skills will read this section and decide preserve / merge / migrate per artifact, gated on user confirmation in [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) Step 0 §A.4.
+If anything is found, **do NOT overwrite** — the downstream skills will read this section and decide preserve / merge / migrate per artifact, gated on user confirmation in [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md#e-existing-ai-artifacts-per-artifact-disposition)'s **Existing AI artifacts (per-artifact disposition)** interview group.
 
 ## Output: structured inventory
 
@@ -315,6 +315,7 @@ stacks_matched:
 - **Don't run code.** No `pnpm install`, no `pytest`, no shell commands beyond `ls`, `cat`, `grep`, `git log`. Pure read.
 - **Stop at the first match per section unless the section says otherwise.** A repo is a TypeScript repo if `package.json` + `tsconfig.json` exist; you don't need to grep every `.ts` file to confirm.
 - **Existing AI artifacts override stack defaults.** If `AGENTS.md` exists, its content beats your detection. Surface conflicts (e.g. AGENTS.md says "use yarn" but lockfile is `pnpm-lock.yaml`) as findings, don't silently pick one.
+- **Never use `§N` shorthand in any inventory output, summary, or downstream prompt.** Reference sections by their full heading name. `§N` references break when the source's section numbering changes.
 
 ## Pitfalls
 

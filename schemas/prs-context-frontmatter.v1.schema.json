@@ -35,13 +35,13 @@
       "minLength": 1
     },
     "phase_id": {
-      "description": "Phase id verbatim from the plan §5 (e.g. `1`, `4a`, `2.5`).",
+      "description": "Phase id verbatim from the plan's `Phased Rollout` section (e.g. `1`, `4a`, `2.5`).",
       "type": "string",
       "pattern": "^[0-9]+(\\.[0-9]+)?[a-z]?$",
       "minLength": 1
     },
     "phase_title": {
-      "description": "Phase title verbatim from the plan §5.",
+      "description": "Phase title verbatim from the plan's `Phased Rollout` section.",
       "type": "string",
       "minLength": 1
     },

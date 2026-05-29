@@ -4,7 +4,7 @@ schema_version: 1                        # see schemas/prs-context-frontmatter.v
 plan_id: <plan-id>                       # filename feature portion, kebab-case
 feature_name: <FEATURE_NAME>             # UPPERCASE_WITH_UNDERSCORES, matches plan/spec
 phase_id: <phase-id>                     # e.g. "1", "4a"
-phase_title: <phase title>               # verbatim from plan §5
+phase_title: <phase title>               # verbatim from the plan's Phased Rollout section
 branch: plan/<feature-kebab>/phase-<id>  # branch the PR opens from
 base: <main | plan/<feature-kebab>/phase-<prev-id>>  # target branch for the PR
 created_at: <ISO 8601 timestamp>
@@ -38,8 +38,8 @@ pr_url:                                  # set by open-pr-from-context after pub
 In every case, cover:
 
 - Phase goal in one line.
-- Decisions that aren't obvious from the diff (cite plan §1, §2 entries).
-- Feature-flag behavior (off-flag = pre-feature, per plan §2).
+- Decisions that aren't obvious from the diff (cite the plan's **Goals + Non-goals** / **Guiding Decisions** entries — by name, never with `§` shorthand).
+- Feature-flag behavior (off-flag = pre-feature, per the plan's **Guiding Decisions** entry).
 - Anything reviewers will ask about that the diff doesn't answer.
 
 Don't restate every diff — that's what `git diff` is for.>
@@ -72,12 +72,16 @@ YAML inside this fence is validated against
 ## What counts as "non-obvious"
 
 - A subtle invariant the diff relies on (e.g. "this query is intentionally not
-  inside the tenant filter — see §2.3").
+  inside the tenant filter — see the **Guiding Decisions** row on tenant scoping").
 - A workaround for a known framework bug or library limitation.
 - A naming choice driven by an upstream contract (don't rename, will break X).
-- The off-flag short-circuit when a feature flag is in §2.
-- Why a seemingly-cleaner refactor wasn't made (out of scope per §1 Non-goals).
+- The off-flag short-circuit when a feature flag is in **Guiding Decisions**.
+- Why a seemingly-cleaner refactor wasn't made (out of scope per **Goals + Non-goals**).
 - Cross-phase coupling (this hook will be consumed by phase 3).
+
+## Never use `§N` shorthand
+
+Plan sections have **names** (`Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `Phased Rollout`, `Risk & Rollout Notes`, `Open Questions`, `Touch List`). Use the names. `§1`, `§2.3`, `§5` etc. force the reader to flip back to the plan and count headings — that's friction. Title + section name is unambiguous and survives renumbering.
 
 ## What does NOT need a comment
 

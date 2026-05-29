@@ -30,7 +30,7 @@ Open prose:
 5. **Does the body reference other skills?** Cross-link list.
 
 For bucket B: also list every placeholder + its source (inventory field, interview answer, derived).
-For bucket C: also draft the bootstrap §D question and follow-up (if any).
+For bucket C: also draft the bootstrap **Optional foundation skills** question and follow-up (if any).
 
 ## Step 2 — Author the SKILL.md
 
@@ -116,12 +116,12 @@ Also add `<name>` to:
 
 Edit [skills/vinta-bootstrap-ai-tools/SKILL.md](../../skills/vinta-bootstrap-ai-tools/SKILL.md):
 
-- **Bucket C**: add a §D question. Numbering matters — append after the last existing question, increment the "Four skills are part of the foundation set" header count if needed. Document any follow-up questions that capture per-skill config.
+- **Bucket C**: add a question inside the **Optional foundation skills** interview group. Numbering matters — append after the last existing question, increment the "Four skills are part of the foundation set" header count if needed. Document any follow-up questions that capture per-skill config.
 - **All buckets**: update the `foundation_skills:` block in the Step 0.5 YAML example (add `<name>: <enabled | disabled>`).
 - **Bucket C with config**: also extend the `skills:` block in the Step 0.5 YAML example.
 - **Outputs tree**: append `│   ├── <name>/SKILL.md` (and `│   │   └── resources/...` if applicable) to the `ai-tools/skills/` listing.
 - **Foundation skills break into three buckets** paragraph: add `<name>` to the appropriate bucket's name list.
-- **§E foundation-shape list** in the `Replace with Vinta foundation version` option: add `<name>`.
+- **Existing AI artifacts foundation-shape list** in the `Replace with Vinta foundation version` option: add `<name>`.
 
 ## Step 7 — CHANGELOG entry
 

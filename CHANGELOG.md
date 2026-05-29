@@ -5,6 +5,48 @@ All notable changes to `@vinta/ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### Changed
+
+- **Replaced all `§N` shorthand cross-references with named section
+  links across the repo.** `§1`, `§4.3`, `§1f`, `§A.3`, etc. were
+  unreadable for humans (forced readers to flip back to the source doc
+  and count headings) and brittle (broke as soon as section numbering
+  shifted). Every reference now uses the section's full name — and a
+  markdown anchor link when the link target is reachable — in:
+  - README.md (plan structure, `Open PR via context file` matrix).
+  - Bundled foundation skills under
+    `skills/vinta-derive-skills/resources/foundation-skills/`
+    (`plan-feature/SKILL.md`, `create-spec/SKILL.md`,
+    `create-qa-use-cases/SKILL.md`, `add-one-off-script/SKILL.md`).
+  - Template-rendered foundation skills
+    (`implement-plan-template.md`, `amend-plan-template.md`,
+    `prs-context-template.md`). The
+    `amend-plan` `section-2-decision-change` change classification was
+    renamed to `guiding-decisions-change` to follow suit.
+  - Builder skills (`vinta-bootstrap-ai-tools`, `vinta-analyze-codebase`,
+    `vinta-write-agents-md`, `vinta-derive-skills`,
+    `vinta-derive-subagents`, `vinta-install-ai-tools-setup`,
+    `vinta-sync-ai-tools`, `vinta-bootstrap-ai-tools/resources/stacks/README.md`).
+  - JSON schemas (`vinta-ai-workflows-config.v1.schema.json`,
+    `prs-context-comments.v1.schema.json`,
+    `prs-context-frontmatter.v1.schema.json`).
+  - Dev-skills (`add-foundation-skill`, `add-stack`).
+  - Historical CHANGELOG entries (descriptions only — wording
+    cleaned, no semantic change).
+
+- **Added explicit "no `§N` shorthand" rules to every skill that drafts
+  or renders documentation.** Each generator now refuses the pattern in
+  the bodies it produces, so the fix sticks instead of drifting back in
+  the next regeneration. Touched skills: `vinta-derive-skills` (Rules
+  list), `vinta-analyze-codebase` (Rules list), `vinta-write-agents-md`
+  (Style rules), `vinta-derive-subagents` (Rules list),
+  `implement-plan-template.md` + `amend-plan-template.md` (Important
+  rules sections), `prs-context-template.md` (new "Never use `§N`
+  shorthand" section), `plan-feature/SKILL.md` (What to avoid),
+  `create-spec/SKILL.md` (Style rules + Checklist).
+
 ## [0.1.6] — 2026-05-13
 
 ### Changed
@@ -43,12 +85,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Second pass: genericized AWS / Strawberry / Shopify / FHIR examples
   in foundation skill bodies.** Five remaining stack-specific examples
   in foundation skills replaced with framework-neutral language:
-  `plan-feature/SKILL.md` §G.1 ("parallel Lambda on same row" →
-  "parallel workers / serverless invocations on the same row"); the
-  reusable-skills table's `create-lambda` row renamed to
-  `create-cloud-function | scaffolds new serverless function`, and the
-  `graphql-public-query` row dropped the Strawberry mention.
-  `create-spec/SKILL.md` §C.2 swapped "Webhook from Shopify, scheduled
+  `plan-feature/SKILL.md`'s **Concurrency, transactions, idempotency**
+  group, question 1 ("parallel Lambda on same row" → "parallel workers
+  / serverless invocations on the same row"); the reusable-skills
+  table's `create-lambda` row renamed to `create-cloud-function |
+  scaffolds new serverless function`, and the `graphql-public-query`
+  row dropped the Strawberry mention. `create-spec/SKILL.md`'s **Use
+  cases** group, question 2 swapped "Webhook from Shopify, scheduled
   Lambda" for "Webhook from upstream SaaS, scheduled function".
   `create-qa-use-cases/SKILL.md` dropped the FHIR mention from the
   "no implementation details" rule. Reader still reads cleanly; no
@@ -233,8 +276,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ready-made content).
 
 - **New optional foundation skill: `add-one-off-script`** (copied verbatim
-  to `ai-tools/skills/add-one-off-script/` per project, opt-in via
-  Step 0 §D.4). Source:
+  to `ai-tools/skills/add-one-off-script/` per project, opt-in via the
+  Step 0 **Optional foundation skills → add-one-off-script** question).
+  Source:
   [skills/vinta-derive-skills/resources/foundation-skills/add-one-off-script/](skills/vinta-derive-skills/resources/foundation-skills/add-one-off-script/).
   Authors safe one-off operational scripts (data backfills, ad-hoc
   cleanups, tenant fixes outside the regular migration / ETL / cron
@@ -290,13 +334,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `skills.add-one-off-script.s3_prefix: string` (default
     `one-off-runs/`; falls back to `ONE_OFF_S3_PREFIX` env).
 
-- **Bootstrap interview Step 0 §D.4**: new question for the
-  `add-one-off-script` skill plus three short follow-ups (scripts dir,
-  primary language, S3 bucket + prefix). The §D wording at the top
-  switched from "three skills" to "four skills" accordingly. Outputs
-  tree updated to list `ai-tools/skills/add-one-off-script/` plus its
-  `resources/` directory carrying the language-specific
-  `BaseOneOffScript` templates. The §E "foundation-shape" name list
+- **Bootstrap interview Step 0 — Optional foundation skills → `add-one-off-script` question**:
+  new question for the `add-one-off-script` skill plus three short
+  follow-ups (scripts dir, primary language, S3 bucket + prefix). The
+  **Optional foundation skills** header wording at the top switched from
+  "three skills" to "four skills" accordingly. Outputs tree updated to
+  list `ai-tools/skills/add-one-off-script/` plus its `resources/`
+  directory carrying the language-specific `BaseOneOffScript` templates.
+  The **Existing AI artifacts** group's foundation-shape name list
   (which gates the `Replace with Vinta foundation version` option)
   gained `add-one-off-script`.
 
@@ -309,7 +354,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **New optional foundation skill: `systematic-debugging`** (renders to
   `ai-tools/skills/systematic-debugging/SKILL.md` per project, opt-in
-  via Step 0 §D.3). Source:
+  via the Step 0 **Optional foundation skills → systematic-debugging**
+  question). Source:
   [skills/vinta-derive-skills/resources/systematic-debugging-template.md](skills/vinta-derive-skills/resources/systematic-debugging-template.md).
   Root-cause-first debugging flow with project-specific reproduction
   commands ({{TEST_CMD}}, {{LINT_CMD}}, {{BUILD_CMD}},
@@ -352,8 +398,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (default `true`) — controls whether developers may opt out of
     Phase 0 per run with a `local-only` keyword.
 
-- **Bootstrap interview Step 0 §D.3**: new question for the
-  systematic-debugging skill, plus a free-form follow-up that asks the
+- **Bootstrap interview Step 0 — Optional foundation skills → `systematic-debugging` question**:
+  new question for the systematic-debugging skill, plus a free-form follow-up that asks the
   user to name observability MCP servers already wired up. The
   orchestrator cross-checks the answer against the project's actual MCP
   config files (`.mcp.json`, `~/.claude/mcp_servers.json`,
@@ -488,8 +534,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Companion to `implement-plan` — same agents, same review gates, same
   prs-context flow; opposite git topology direction (history rewriting
   instead of forward execution). Use cases: spec change forces a phase
-  body rewrite, a phase needs to slot in between existing ones, or a §2
-  guiding decision changes and cascades through later phases.
+  body rewrite, a phase needs to slot in between existing ones, or a
+  **Guiding Decisions** row changes and cascades through later phases.
 
   Flow:
   1. Edit the plan file (rewrite affected phase bodies, insert / append
@@ -497,7 +543,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   2. Build a per-phase state map (`not-started` / `in-progress` /
      `implemented-not-merged` / `merged-to-default`).
   3. **Blast-radius evaluation.** Compute signals (rewrite share ≥ 50%,
-     §2 cascade ≥ 50%, ≥2 immutable phases combined with earlier
+     **Guiding Decisions** cascade ≥ 50%, ≥2 immutable phases combined with earlier
      rewrites, data-model contract change in >2 phases, ≥70% rewritten
      LoC, multi-author branches, ≥2 approved PRs). ≥2 signals tripping
      → surface a `Restart` option to the user before any force-push
@@ -560,12 +606,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`implement-plan` Step 0 opt-in questions** (template-level —
   `vinta-derive-skills` renders these into the project's `implement-plan`
   skill body):
-  - **Pause between phases?** Default off (auto-flow). When on, a new §1i
-    gate fires after each phase's user update with `Continue` / `Pause` /
-    `Stop` options; orchestrator exits cleanly on Pause and resumes on
-    next invocation per the existing "Re-running mid-plan" flow.
+  - **Pause between phases?** Default off (auto-flow). When on, a new
+    **Per-phase pause gate** step fires after each phase's user update
+    with `Continue` / `Pause` / `Stop` options; orchestrator exits
+    cleanly on Pause and resumes on next invocation per the existing
+    "Re-running mid-plan" flow.
   - **Generate PR descriptions + inline comments?** Default off. When on,
-    new §1f draft step fires after every phase: agent picks 3–10
+    a new **Open PR via context file** draft step fires after every
+    phase: agent picks 3–10
     non-obvious comment targets from the diff (subtle invariants,
     feature-flag short-circuits, cross-phase coupling, upstream-contract
     naming), writes `prs-context/{feature-kebab}/phase-{phase.id}.md`
@@ -592,7 +640,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   New `project.pr_template_paths: string[]` field in
   [`vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json)
   lists templates detected at bootstrap. Detection in
-  [`vinta-analyze-codebase` §11](skills/vinta-analyze-codebase/SKILL.md)
+  [`vinta-analyze-codebase`'s **Existing AI-tooling artifacts** scan](skills/vinta-analyze-codebase/SKILL.md#11-existing-ai-tooling-artifacts)
   now scans (case-insensitive):
   - GitHub: `.github/pull_request_template.md`,
     `.github/PULL_REQUEST_TEMPLATE.md`,
@@ -602,7 +650,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Inventory output adds `existing_ai_artifacts.pr_templates[]` with
   `path` + section summary per template.
 
-  `implement-plan` §1f step 2 now reads `project.pr_template_paths`
+  The `implement-plan` skill's **Open PR via context file** step (step 2) now reads `project.pr_template_paths`
   and uses the chosen template's section structure verbatim for the
   prs-context `# Description`. Sections are filled with phase-specific
   content; `<!-- HTML comments -->` placeholders are preserved;
@@ -612,7 +660,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Empty array → free-form description with default sections
   (`## Summary`, `## Plan reference`, `## Test plan`).
 
-  `amend-plan` §4f follows the same rule when refreshing prs-context
+  The `amend-plan` skill's **Refresh the PR-context file** step follows the same rule when refreshing prs-context
   bodies, picking up the current `pr_template_paths` even when the
   template was added or swapped after the original `implement-plan`
   run.
@@ -623,17 +671,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **PR creation consolidated to a single flow.** Earlier drafts had two
   parallel paths in `implement-plan`: the legacy `{{PR_CREATION_INSTRUCTION_BLOCK}}`
-  in §1e (raw `gh pr create` / `glab mr create`) and the new
-  `prs-context` + `open-pr.sh` flow in §1f. Removed the legacy block.
-  PRs now always go through a `prs-context/{feature-kebab}/phase-{phase.id}.md`
-  file + the bundled script, even when inline comments are off.
-  Behavior matrix in the [implement-plan template §1f](skills/vinta-derive-skills/resources/implement-plan-template.md):
+  inside the **Branch push** step (raw `gh pr create` / `glab mr create`)
+  and the new `prs-context` + `open-pr.sh` flow inside the **Open PR via
+  context file** step. Removed the legacy block. PRs now always go through
+  a `prs-context/{feature-kebab}/phase-{phase.id}.md` file + the bundled
+  script, even when inline comments are off. Behavior matrix in the
+  [implement-plan template's **Open PR via context file** step](skills/vinta-derive-skills/resources/implement-plan-template.md):
 
-  | PR policy | inline comments | §1f does |
+  | PR policy | inline comments | What the **Open PR via context file** step does |
   |---|---|---|
   | agents create | off | write file (empty comments) + run `open-pr.sh` |
   | agents create | on  | write file (full) + run `open-pr.sh` |
-  | branches only | off | skip §1f |
+  | branches only | off | skip the step |
   | branches only | on  | write file (durable record); skip script |
 
 - **Renamed run-option:** `run_options.generate_pr_context` →
@@ -646,7 +695,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (description, push, checklist, summary phrasing); they no longer
   carry raw `gh pr create` lines.
 - **Important rule + Quick checklist** updated to describe the unified
-  §1f matrix instead of the previous two-flag gate.
+  **Open PR via context file** matrix instead of the previous two-flag gate.
 
 ## [0.1.1] — 2026-05-05
 
@@ -661,7 +710,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   derives date from filename, doc body, `git log --diff-filter=A --follow`,
   or asks. Locks paired spec+plan to the same `FEATURE_NAME`. Rewrites
   inbound markdown references in the same batch as each move.
-- **`vinta-bootstrap-ai-tools` Step 0 §E — Existing AI artifacts disposition.**
+- **`vinta-bootstrap-ai-tools` Step 0 — Existing AI artifacts disposition.**
   Per-artifact `AskUserQuestion` over every instruction doc, skill, and
   sub-agent found in the repo. Options: `Migrate to ai-tools/<…>`,
   `Keep in current vendor path, don't touch`, `Drop`, plus
@@ -670,16 +719,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `add-e2e-test`, `add-env-var`, `implementer`, `reviewer`, `fixer`).
   Decisions never batched — one prompt per artifact.
 - **`vinta-bootstrap-ai-tools` sub-skill flow extended to six steps.**
-  Step 6 dispatches `vinta-migrate-plans-specs`. Step 0 §A.2 question
-  updated to offer a `Skip migrate-plans-specs` option in the custom
-  selection.
+  Step 6 dispatches `vinta-migrate-plans-specs`. The Step 0 **Scope →
+  Which sub-skills to run** question updated to offer a `Skip
+  migrate-plans-specs` option in the custom selection.
 - **`vinta-bootstrap-ai-tools` Outputs section** now documents the
   `ai-plans/` tree alongside the `ai-tools/` tree.
 - **`vinta-bootstrap-ai-tools` Verification** check #6 — confirms migrated
   docs land in canonical `YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md` form
   and no orphaned plan/spec markdown remains in `docs/`, `specs/`, or
   repo root.
-- **`vinta-analyze-codebase` §11 — Existing AI-tooling artifacts.** Full
+- **`vinta-analyze-codebase` — Existing AI-tooling artifacts scan.** Full
   enumeration of instruction docs, skills (across `.claude/skills/`,
   `.cursor/skills/`, `.codex/skills/`, `.github/skills/`, `.agents/skills/`,
   `ai-tools/skills/`), and sub-agents (across the parallel `agents/`
@@ -689,7 +738,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Inventory schema** (`existing_ai_artifacts.{instructions,skills,agents,setup,plans_dir_present}`)
   added to `vinta-analyze-codebase` output, consumed by the four
   downstream sub-skills.
-- **`vinta-write-agents-md` Inputs §2** — three explicit branches per
+- **`vinta-write-agents-md` Inputs — existing instruction docs** — three explicit branches per
   existing instruction doc: `Merge into new ai-tools/AGENTS.md`,
   `Keep as-is, link from ai-tools/AGENTS.md`, `Replace from scratch`.
   Discarded files surfaced in the run summary.
@@ -707,11 +756,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`vinta-bootstrap-ai-tools` sub-skill flow** updated from "five sub-skills"
-  to "six sub-skills" wording across the orchestrator. Step 0 §A.2 default
-  changed from `All five` to `All six`.
-- **`vinta-analyze-codebase`** documentation split: §10 Documentation
-  already present is now READMEs / ADRs only; existing AI tooling moved
-  to its own §11 with deeper coverage.
+  to "six sub-skills" wording across the orchestrator. The Step 0 **Scope
+  → Which sub-skills to run** default changed from `All five` to `All six`.
+- **`vinta-analyze-codebase`** documentation split: the **Documentation
+  already present** scan is now READMEs / ADRs only; existing AI tooling
+  moved to its own **Existing AI-tooling artifacts** scan with deeper
+  coverage.
 
 ### Notes
 

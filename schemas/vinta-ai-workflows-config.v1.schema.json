@@ -92,7 +92,7 @@
       "additionalProperties": false,
       "properties": {
         "pr_creation": {
-          "description": "Whether agents open PRs or only push branches. Drives §1f matrix in `implement-plan`.",
+          "description": "Whether agents open PRs or only push branches. Drives the `implement-plan` skill's `Open PR via context file` step matrix.",
           "type": "string",
           "enum": ["agents-create", "branches-only"]
         },
