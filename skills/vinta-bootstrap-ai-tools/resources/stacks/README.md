@@ -34,7 +34,7 @@ For each stack whose detection signals match the target's analyze-codebase inven
    - **Skill categories typically needed** (just names + one-liners — no full SKILL.md content).
    - **Agent categories typically needed** (same).
    - **Common placeholders** the orchestrator should ask the user about (paths, command names, env-var names).
-3. Update [vinta-analyze-codebase](../../../vinta-analyze-codebase/SKILL.md) §3 if a new dep / signal-file table row is needed.
+3. Update the **Frameworks (from dependencies)** scan in [vinta-analyze-codebase](../../../vinta-analyze-codebase/SKILL.md#3-frameworks-from-dependencies) if a new dep / signal-file table row is needed.
 4. Update [vinta-bootstrap-ai-tools](../../SKILL.md) "Stack templates" table.
 
 ## Existing stacks

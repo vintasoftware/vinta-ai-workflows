@@ -89,7 +89,7 @@ Don't bloat the table — one row, ~120 chars max. Detail lives in `notes.md`.
 
 ## Step 4 — Wire `vinta-analyze-codebase`
 
-Edit [skills/vinta-analyze-codebase/SKILL.md](../../skills/vinta-analyze-codebase/SKILL.md), §3 (or wherever stack detection lives — grep for the existing stack names to find the right block).
+Edit [skills/vinta-analyze-codebase/SKILL.md](../../skills/vinta-analyze-codebase/SKILL.md)'s **Frameworks (from dependencies)** scan (or wherever stack detection lives — grep for the existing stack names to find the right block).
 
 Add detection logic that flips the inventory's `stacks: [<stack>]` array when the signals match. If the new stack reuses an existing dep / signal, link the existing detection rather than duplicating.
 

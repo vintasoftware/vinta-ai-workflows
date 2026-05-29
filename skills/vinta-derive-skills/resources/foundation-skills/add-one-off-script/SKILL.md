@@ -227,7 +227,7 @@ The folder's `README.md` carries everything the operator needs to run the script
 - One-paragraph description (same as `describe()`).
 - Author + date + linked spec / plan / ticket.
 - Active `Runtime` adapter (LocalRuntime, JupyterRuntime, MedplumBotRuntime, …) — and therefore which sister skill manages the runner artefact.
-- Exact launch + monitor + interrupt + restore commands (see §6 of the contract above; sister skill replaces these with surface-specific commands).
+- Exact launch + monitor + interrupt + restore commands (see [Background-runnable + interruption-safe](#6-background-runnable--interruption-safe) above; sister skill replaces these with surface-specific commands).
 - Expected runtime + safe time-of-day.
 - What "done" looks like — the SELECT that returns 0 rows when the script has finished.
 

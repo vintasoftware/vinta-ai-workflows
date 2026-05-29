@@ -74,26 +74,26 @@ These bleed across sub-skills, so capture once now:
 
 Five skills are part of the foundation set but aren't always needed. Ask explicitly:
 
-1. **`add-e2e-test`** — does the project have e2e tests (Playwright / Cypress / similar) or plan to add them? `AskUserQuestion` options: `Yes — already has them`, `Yes — planning to add`, `No — skip`. If yes, [vinta-derive-skills](../vinta-derive-skills/SKILL.md) §C will follow up to ask whether the user has a template or wants to draft from scratch.
+1. **`add-e2e-test`** — does the project have e2e tests (Playwright / Cypress / similar) or plan to add them? `AskUserQuestion` options: `Yes — already has them`, `Yes — planning to add`, `No — skip`. If yes, [vinta-derive-skills](../vinta-derive-skills/SKILL.md)'s **Optional — ask the user** bucket follows up to ask whether the user has a template or wants to draft from scratch.
 2. **`add-env-var`** — does the project have a non-trivial env-var propagation flow (multiple files / build configs / CI updates per new var) or a single `.env` file is enough? `AskUserQuestion` options: `Yes — non-trivial flow`, `No — single .env is enough`. Skip if `No`.
 3. **`systematic-debugging`** — should agents follow a root-cause-first debugging flow that mandates pulling evidence from the project's observability MCP servers before proposing any fix? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend enabling whenever any observability MCP server is wired up — the skill bakes the project's real test / lint / build commands into the rendered checklist and instructs the agent to discover available calls on those servers at runtime (so it stays correct even as MCP servers add or rename tools).
 4. **`add-one-off-script`** — does the project ever need one-off operational scripts (backfills, cleanups, ad-hoc data fixes) that mutate production data outside the regular migration / ETL / cron path? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for any project with a relational DB or large user dataset; the bundled `BaseOneOffScript` template enforces the safety contract (dry-run by default, idempotent re-runs, batched DB ops, streamed reads, segmented CSV backups capped at 1M cells per file with one set of files per affected table, interruption-safe signal handlers, console + filesystem + S3 logs that survive an interruption). Skip for read-only projects or projects whose only writes go through a migration tool.
 
-   **Follow-up only if §D.4 = Yes.** Three short questions land in `skills.add-one-off-script` of `.vinta-ai-workflows.yaml`:
+   **Follow-up only when `add-one-off-script` = Yes.** Three short questions land in `skills.add-one-off-script` of `.vinta-ai-workflows.yaml`:
    - **Scripts dir.** Default `scripts/one_off`. Override for monorepos that nest scripts under a service / package dir. Free-form string.
    - **Primary language.** `AskUserQuestion`: `Python`, `TypeScript`. Auto-pick from `inventory.frameworks` when one language clearly dominates; ask only when polyglot. Drives which `BaseOneOffScript` template gets staged at `<scripts_dir>/_base.{py,ts}`.
    - **S3 bucket + prefix.** Open prose. Empty bucket disables S3 upload (filesystem copy stays authoritative). The skill also reads the `ONE_OFF_S3_BUCKET` / `ONE_OFF_S3_PREFIX` env vars at runtime, so leaving the config blank is fine if the team prefers env-only.
 
 5. **`prepare-worktree`** — does the team want to run long-running plans / experiments inside an isolated git worktree (its own runnable copy of the app, with its own dev + test DB, env files, docker-compose project name) instead of swapping branches in the main checkout? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for any project with long migrations, multi-day plans, or teams where parallel concurrent work in the same checkout is common (one dev shipping a feature while another runs a migration; an agent driving `implement-plan` for hours while the human keeps coding on `main`). Skip for solo projects where branch-switching in place is unproblematic.
 
-   **Follow-up only if §D.5 = Yes — worktree defaults.** Three short questions land under `skills.prepare-worktree.*`:
-   - **Worktree root.** `AskUserQuestion`: `.claude/worktrees` (claude-code convention; the runtime's `EnterWorktree` puts them there), `../<repo-name>-wt-` (sibling dirs of the main checkout — survives across runtimes; relative-path tooling that walks up still works). Auto-pick the first when claude-code is the only selected vendor; ask when multiple vendors are in §A.3.
+   **Follow-up only when `prepare-worktree` = Yes — worktree defaults.** Three short questions land under `skills.prepare-worktree.*`:
+   - **Worktree root.** `AskUserQuestion`: `.claude/worktrees` (claude-code convention; the runtime's `EnterWorktree` puts them there), `../<repo-name>-wt-` (sibling dirs of the main checkout — survives across runtimes; relative-path tooling that walks up still works). Auto-pick the first when claude-code is the only selected vendor; ask when multiple vendors are in the **Scope** group's vendor coverage answer.
    - **Default deps strategy when the plan does NOT install new deps.** `AskUserQuestion`: `symlink` (fastest, reuses main's `node_modules` / `vendor/` / `venv/`), `copy` (defensive; safe for pnpm + npm + cargo + go; risky for yarn PnP + venv), `reinstall` (slowest, always correct). Recommend `symlink` for pnpm / npm / cargo / go projects; `reinstall` for poetry / yarn PnP.
    - **Default test-DB strategy.** `AskUserQuestion`: `fork-on-schema-change` (default — only forks when the plan body shows migrations), `always-fork` (defensive — every worktree gets its own test DB regardless), `share` (only safe for solo work; flaky cross-worktree test runs are the cost).
 
    **Follow-up — `implement-plan` default for worktree opt-in.** `AskUserQuestion`: should the `implement-plan` Step 0 question (c) — "run phases in a worktree?" — default to `Yes` or `No`? Lands in `run_options.implement-plan.use_worktree`. Recommend `No` for solo projects + short plans; `Yes` for teams that already use worktrees as part of their workflow.
 
-   **Follow-up only if §D.3 = Yes — observability MCP server inventory.** Open prose, not multi-select. Ask the user to name every MCP server already wired up that exposes observability data, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. Cross-check the answers against any MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.) — if a server is configured but the user didn't mention it, ask whether it carries observability data. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
+   **Follow-up only when `systematic-debugging` = Yes — observability MCP server inventory.** Open prose, not multi-select. Ask the user to name every MCP server already wired up that exposes observability data, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. Cross-check the answers against any MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.) — if a server is configured but the user didn't mention it, ask whether it carries observability data. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
 
    **Cache scaffolding.** Preflight state lives at `.vinta-ai-workflows/cache.yaml` ([`mcp-preflight-cache.v1`](../../schemas/mcp-preflight-cache.v1.schema.json)). The bootstrap orchestrator must:
 
@@ -105,7 +105,7 @@ If the user answers "No" to any of the five, that skill won't ship. If the user 
 
 ### E. Existing AI artifacts (per-artifact disposition)
 
-`vinta-analyze-codebase` §11 produces an inventory of **every** AI-tooling artifact already in the repo: instruction docs (AGENTS.md / CLAUDE.md / .cursorrules / .github/copilot-instructions.md / ...), skills under `.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, `.github/skills/`, `.agents/skills/`, `ai-tools/skills/`, and sub-agent files under `.claude/agents/`, `.cursor/agents/`, `.codex/agents/`, `.github/agents/`, `ai-tools/agents/`.
+[vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md#11-existing-ai-tooling-artifacts)'s **Existing AI-tooling artifacts** scan produces an inventory of **every** AI-tooling artifact already in the repo: instruction docs (AGENTS.md / CLAUDE.md / .cursorrules / .github/copilot-instructions.md / ...), skills under `.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, `.github/skills/`, `.agents/skills/`, `ai-tools/skills/`, and sub-agent files under `.claude/agents/`, `.cursor/agents/`, `.codex/agents/`, `.github/agents/`, `ai-tools/agents/`.
 
 **Don't skip this step even when the inventory is short.** Three skill files in `.cursor/skills/` from a teammate's experiment are exactly the artifacts that get clobbered if the orchestrator forgets they exist.
 
@@ -146,7 +146,7 @@ Captured interview state lands in **one** YAML file at the repo root: `.vinta-ai
 
 This file is the **only** source of truth for project-wide settings. Every downstream sub-skill (4 → 6 below) reads from it instead of receiving values via in-conversation state. Every meta-skill ([vinta-sync-ai-tools](../vinta-sync-ai-tools/SKILL.md), [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)) reads + rewrites it.
 
-Write the file now (before any sub-skill runs). Populate from §A–§E:
+Write the file now (before any sub-skill runs). Populate from the interview groups **Scope**, **Stack detection**, **Project conventions**, **Optional foundation skills**, and **Existing AI artifacts**:
 
 ```yaml
 # yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
@@ -164,22 +164,22 @@ project:
   pr_template_paths: <inventory.existing_ai_artifacts.pr_templates[].path>  # empty array if none found
 
 commands:
-  lint: <§A.3.1>
+  lint: <Project conventions → Source of truth for code style>
   format: <derived>
   build: <derived>
-  test_unit: <§A.3.2>
+  test_unit: <Project conventions → Test framework(s)>
   test_unit_scoped: <derived from monorepo shape>
   test_unit_new_pattern: <derived>
-  e2e: <only if §D.1 = Yes>
+  e2e: <only when foundation_skills.add-e2e-test = enabled>
 
 policies:
-  pr_creation: <§A.3.4>
-  ai_coauthor: <§A.3.5>
+  pr_creation: <Project conventions → PR creation policy>
+  ai_coauthor: <Project conventions → Co-author trailer policy>
   commit_style: <conventional | imperative | other>
   stage_pattern: <derived>
   anti_git_add_all_reason: <derived>
 
-vendors: <§A.3 list>
+vendors: <Scope → Vendor coverage list>
 
 foundation_skills:
   plan-feature: enabled
@@ -188,49 +188,49 @@ foundation_skills:
   implement-plan: enabled
   amend-plan: enabled
   open-pr-from-context: enabled
-  add-e2e-test: <§D.1 → enabled | disabled>
-  add-env-var: <§D.2 → enabled | disabled>
-  systematic-debugging: <§D.3 → enabled | disabled>
-  add-one-off-script: <§D.4 → enabled | disabled>
-  prepare-worktree: <§D.5 → enabled | disabled>
+  add-e2e-test: <Optional foundation skills → add-e2e-test answer → enabled | disabled>
+  add-env-var: <Optional foundation skills → add-env-var answer → enabled | disabled>
+  systematic-debugging: <Optional foundation skills → systematic-debugging answer → enabled | disabled>
+  add-one-off-script: <Optional foundation skills → add-one-off-script answer → enabled | disabled>
+  prepare-worktree: <Optional foundation skills → prepare-worktree answer → enabled | disabled>
 
 foundation_agents:
   implementer: enabled
   reviewer: enabled
   fixer: enabled
 
-stacks: <§B matched stacks>
+stacks: <Stack detection → matched stacks>
 stack_specialist_agents: <empty unless user supplied templates>
 
 run_options:
   implement-plan:
     pause_between_phases: false
     generate_inline_comments: false
-    use_worktree: <§D.5 follow-up — default for Step 0 question (c); false unless team opted in>
+    use_worktree: <Optional foundation skills → prepare-worktree follow-up → default for Step 0 question (c); false unless team opted in>
   amend-plan:
     blast_radius_signal_threshold: 2
 
 skills:
   # Only emit this block when foundation_skills.systematic-debugging = enabled.
   systematic-debugging:
-    observability_mcp_servers: <§D.3 follow-up — free-form array of MCP server identifiers, e.g. [sentry, datadog, our-internal-traces]>
+    observability_mcp_servers: <systematic-debugging follow-up — free-form array of MCP server identifiers, e.g. [sentry, datadog, our-internal-traces]>
 
   # Only emit this block when foundation_skills.prepare-worktree = enabled.
   prepare-worktree:
-    worktree_root: <§D.5 follow-up — `.claude/worktrees` | `../<repo>-wt-`>
-    deps_strategy: <§D.5 follow-up — symlink | copy | reinstall>
+    worktree_root: <prepare-worktree follow-up — `.claude/worktrees` | `../<repo>-wt-`>
+    deps_strategy: <prepare-worktree follow-up — symlink | copy | reinstall>
     compose_network: per-worktree
-    test_db_strategy: <§D.5 follow-up — fork-on-schema-change | always-fork | share>
+    test_db_strategy: <prepare-worktree follow-up — fork-on-schema-change | always-fork | share>
     summary_dir: .vinta-ai-workflows/worktrees
 
   # Only emit this block when foundation_skills.add-one-off-script = enabled.
   add-one-off-script:
-    scripts_dir: <§D.4 follow-up — default `scripts/one_off`>
-    language: <§D.4 follow-up — `python` | `typescript`>
+    scripts_dir: <add-one-off-script follow-up — default `scripts/one_off`>
+    language: <add-one-off-script follow-up — `python` | `typescript`>
     log_dir: .vinta-ai-workflows/one-off-runs
     default_batch_size: 500
     csv_max_cells: 1000000
-    s3_bucket: <§D.4 follow-up — empty disables S3 upload>
+    s3_bucket: <add-one-off-script follow-up — empty disables S3 upload>
     s3_prefix: one-off-runs/
 ```
 
@@ -263,7 +263,7 @@ If multiple stacks match (common — TypeScript monorepo + Medplum, or Django + 
 
 1. `mkdir resources/stacks/<stack-name>`.
 2. Write `notes.md` with detection signals + skill / agent categories + placeholders to ask about.
-3. Update [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) §3 if a new dep / signal needs to be detected.
+3. Update the **Frameworks (from dependencies)** scan in [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md#3-frameworks-from-dependencies) if a new dep / signal needs to be detected.
 4. Update the table above.
 
 No skill / agent content lives in `resources/stacks/<stack>/`. That's by design — those are project- and team-specific.
@@ -319,7 +319,7 @@ Foundation skills break into three buckets — see [vinta-derive-skills](../vint
 
 - **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs).
 - **Always generate**: `implement-plan`, `amend-plan`. Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates using interview answers + inventory.
-- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in the §D.3 follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via §D.4 follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from the §D.5 follow-ups, and (when the user opted in via the §D.5 follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship.
+- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, and (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship.
 
 Stack-specific skills + agents land in the target only when the user provides templates for them. If they don't have templates yet, the orchestrator records the detected stacks + skill categories as a TODO list the user can address later via [vinta-derive-skills](../vinta-derive-skills/SKILL.md) / [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) standalone runs.
 
@@ -331,7 +331,7 @@ Stack-specific skills + agents land in the target only when the user provides te
 - **Foundation skills are universal.** Every project gets `add-env-var`, `add-e2e-test`, `plan-feature`, `implement-plan`, `create-spec`, `create-qa-use-cases`. The bodies need light per-project edits (test commands, branch conventions) — `vinta-derive-skills` handles that.
 - **Foundation agents are universal.** `implementer` / `reviewer` / `fixer` always. Stack specialists (`deploy-author` for Medplum, `migration-author` for Django) only when the stack matches.
 - **Don't run install-ai-tools-setup until AGENTS.md + agents YAMLs + skills exist.** The setup script reads these files; running it on an empty `ai-tools/` produces nothing useful.
-- **Multi-vendor coverage matches the user's selection.** The install step's `--only` flag is set from Step 0 §A.3.
+- **Multi-vendor coverage matches the user's selection.** The install step's `--only` flag is set from the Step 0 **Scope → Vendor coverage** answer.
 
 ## Pitfalls
 

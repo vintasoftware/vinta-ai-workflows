@@ -21,8 +21,8 @@ This skill runs **inside** the plan-feature flow, so the active spec + plan are 
 
 Extract from the active feature's docs:
 
-1. **Use cases** from spec §4.1 (one PA/PR entry per user-facing flow). UI-affecting phases from plan §5 that aren't already in §4.1 get an entry too.
-2. **Role list** from spec §1 / §4.1 actors + plan §2 Guiding Decisions.
+1. **Use cases** from the spec's **Decisions → Use-cases** section (one PA/PR entry per user-facing flow). UI-affecting phases from the plan's **Phased Rollout** that aren't already in the spec's **Use-cases** get an entry too.
+2. **Role list** from the spec's **Business Context** / **Decisions → Use-cases** actors + the plan's **Guiding Decisions**.
 3. **App boundaries** if the spec/plan name them; otherwise ask.
 
 If invoked standalone (not from plan-feature), ask the user *"Which spec + plan should I seed from?"* via `AskUserQuestion` and load only those two files. Don't go fishing.
@@ -48,7 +48,7 @@ For everything **not** answered by the active spec/plan, ask via `AskUserQuestio
 2. For each use case, who's the role? If the source says "Care Coordinator, Physician" pick one default and note the others. Multi-role use cases are normal — comma-separate them in the entry.
 
 **D. ID assignment**
-1. Order: append in the order use cases appear in the active spec (§4.1 first, then any plan-only phases). Don't reshuffle.
+1. Order: append in the order use cases appear in the active spec (**Decisions → Use-cases** first, then any plan-only phases). Don't reshuffle.
 2. Default starting numbers `PA001` / `PR001`. Confirm or override.
 
 ### Clarity loop
@@ -133,9 +133,9 @@ If `QA_USE_CASES.md` exists at repo root, **stop**. Tell the user the file alrea
 ### 2. Pull from the active spec + plan only
 
 The active feature's spec + plan are already in the conversation (handed in by [plan-feature](../plan-feature/SKILL.md), or pointed to by the user when invoked standalone). Extract:
-- Use cases from the active spec §4.1.
-- UI-facing phases from the active plan §5 that aren't already in §4.1.
-- Roles from the active spec §1 / §4.1 actors.
+- Use cases from the active spec's **Decisions → Use-cases**.
+- UI-facing phases from the active plan's **Phased Rollout** that aren't already in the spec's **Use-cases**.
+- Roles from the active spec's **Business Context** / **Decisions → Use-cases** actors.
 
 **Do not** sweep `ai-plans/` for older specs. Pre-existing features that pre-date the doc get added later via [add-e2e-test](../add-e2e-test/SKILL.md) when they need test coverage.
 
@@ -224,7 +224,7 @@ or reuse a retired ID. The e2e spec filenames mirror these IDs one-to-one.
 After writing the file:
 
 1. Open it. Render in a markdown previewer — table renders, sections appear in order, no broken markdown.
-2. Cross-check: every use case from every spec §4.1 appears as a numbered entry. None missing.
+2. Cross-check: every use case from every spec's **Decisions → Use-cases** appears as a numbered entry. None missing.
 3. Cross-check: every role mentioned anywhere in the entries appears in the role table.
 4. Cross-check: ids start at `001` per app prefix, ascend with no gaps.
 5. Run `grep -c '^### P[AR][0-9]' QA_USE_CASES.md` — count matches your interview tally.

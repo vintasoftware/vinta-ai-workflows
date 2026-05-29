@@ -31,7 +31,7 @@
         "default": "RIGHT"
       },
       "body": {
-        "description": "Markdown comment body. 1–3 lines explaining non-obvious context. Reference plan §1 / §2 entries when the decision lives there. Don't restate code.",
+        "description": "Markdown comment body. 1–3 lines explaining non-obvious context. Reference the plan's `Goals + Non-goals` / `Guiding Decisions` entries by name when the decision lives there — never use `§N` shorthand. Don't restate code.",
         "type": "string",
         "minLength": 1
       }

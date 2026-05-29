@@ -20,7 +20,7 @@ Drop irrelevant groups; don't drop questions inside relevant group:
 Every question in groups B–J with discrete answer set — yes/no, named option, finite enum — **must** go through `AskUserQuestion` tool, not free-form prose. Why:
 
 - User picks; no retyping context.
-- Multiple related questions ride one `AskUserQuestion` call (tool accepts list of questions, each own option set). Batch per group: one call for §C, one for §D, etc.
+- Multiple related questions ride one `AskUserQuestion` call (tool accepts list of questions, each own option set). Batch per group: one call for the **Data model & storage** group, one for the **API surface** group, etc.
 - Short option label per choice; rationale ("default: per-user — confirm or override") goes in question header, not option labels.
 
 Plain prose (no tool) **only** when answer genuinely open-ended: "walk me through user journey", "what success look like in your words", "what deadline driver". Group A mostly prose; B–J mostly closed-choice.
@@ -110,7 +110,7 @@ Don't treat Step 0 as one-pass. After each round of answers, **scan for new gaps
 Loop exit conditions (all required):
 - Every group A–J either fully answered or explicitly waived.
 - Every answer's downstream questions also asked + answered.
-- No "we'll figure that out later" — that's §7 Open Questions material; either it has a recommended default + owner, or it gets resolved now.
+- No "we'll figure that out later" — that's **Open Questions** material; either it has a recommended default + owner, or it gets resolved now.
 - You can write each Phase's Goal + Acceptance line right now without inventing.
 
 If any condition fails → another `AskUserQuestion` round. Don't shortcut to drafting.
@@ -189,7 +189,7 @@ Reviewer reads diff in 30 minutes:
 
 ### One use-case per phase (mandatory)
 
-Every spec use-case (§4.1 in the SPEC) gets **its own phase**. Never bundle two use-cases in one phase even when the diff is tiny. Bundling = larger PR + reviewer needs context for both flows + rollback drags both. Cost of an extra phase = one PR header. Cost of a bundled regression = hotfix + split-after-the-fact.
+Every spec use-case (entries under **Decisions → Use-cases** in the SPEC) gets **its own phase**. Never bundle two use-cases in one phase even when the diff is tiny. Bundling = larger PR + reviewer needs context for both flows + rollback drags both. Cost of an extra phase = one PR header. Cost of a bundled regression = hotfix + split-after-the-fact.
 
 Apply even when:
 - Two use-cases share the same endpoint — split anyway, the second phase is "wire use-case 2 into the existing endpoint." Reviewer reads ≤50 LoC.
@@ -217,14 +217,14 @@ Doesn't fit → split: `Phase 4a — Static validation`, `Phase 4b — Resolutio
    "Ship value: none on its own" → say so explicitly + justify why scaffolding needed.
 
 **Feature flag**: `{flag-key}` — {gated path; what runs when off vs on}.
-   Omit only if phase is purely scaffolding (no reachable behavior) or §2 explicitly marks "no flag — purely additive surface".
+   Omit only if phase is purely scaffolding (no reachable behavior) or **Guiding Decisions** explicitly marks "no flag — purely additive surface".
 
 Changes:
 1. {File or module}: {what changes, what stays}.
 2. {Next thing}.
 3. ...
 
-Spec use-case: {SPEC §4.1 use-case id/name this phase implements, or "shared scaffolding — no use-case yet"}.
+Spec use-case: {SPEC **Decisions → Use-cases** id/name this phase implements, or "shared scaffolding — no use-case yet"}.
 
 Tests:
 - **Unit**: {file path} — {what it covers}.
@@ -240,15 +240,15 @@ Acceptance: {one literal statement true after merge + deploy of this phase, only
 
 ### Gate behavior changes behind feature flag by default
 
-Feature touches **any existing flow** — existing callers hit new branches, new fields, new constraints, new query plans, differently-shaped responses → **plan for flag from Phase 1**. Default *flag on*, not off; ask in Step 0 §H to confirm but don't silently drop.
+Feature touches **any existing flow** — existing callers hit new branches, new fields, new constraints, new query plans, differently-shaped responses → **plan for flag from Phase 1**. Default *flag on*, not off; ask in the Step 0 **Rollout & risk** group to confirm but don't silently drop.
 
 In plan:
 
-1. Declare flag in §2: key, scope (per-request vs per-tenant, using the project's flag API names), default (`false`), flip-on criterion ("after Phase 5 ships + reprocess job runs clean for 48h on staging").
-2. Show flag definition site (the project's feature-flag module) in §8 Touch List.
+1. Declare flag in **Guiding Decisions**: key, scope (per-request vs per-tenant, using the project's flag API names), default (`false`), flip-on criterion ("after Phase 5 ships + reprocess job runs clean for 48h on staging").
+2. Show flag definition site (the project's feature-flag module) in **Touch List**.
 3. Every phase reachable from existing caller: name flag, describe what executes when **off** (must be pre-feature behavior, byte-for-byte where possible) vs **on**.
 4. Data model change unconditional (column existing can't be gated)? Make sure *reads + writes* of column gated; off-flag tenant has zero observable change. Test asserts.
-5. Phase N+1 (or §6 entry) for **flag rollout**: enable for one internal tenant → soak → staging → cohort → globally.
+5. Phase N+1 (or **Risk & Rollout Notes** entry) for **flag rollout**: enable for one internal tenant → soak → staging → cohort → globally.
 6. **Always end with dedicated final phase to remove flag.** Name `Phase N — Remove the {flag-key} feature flag`. **Mandatory** when flag declared — flag debt = real debt.
 
 Legitimate skips:
@@ -292,7 +292,7 @@ Tests:
 Acceptance: `grep -r "{flag-key}" app/ tests/` returns nothing, feature behaves identically to flag-on state, full test suite green.
 ```
 
-Place as separate, numbered, last-in-list entry in §5 Phased Rollout. Also in §8 Touch List under own phase. **Required**.
+Place as separate, numbered, last-in-list entry inside **Phased Rollout**. Also in **Touch List** under its own phase. **Required**.
 
 ### Order phases for slowest-moving dependency first
 
@@ -379,6 +379,7 @@ Don't mix styles within one sentence. In **Touch List**, use `@path` for new fil
 
 ## What to avoid
 
+- **No `§N` shorthand for section references — anywhere in the plan body.** Use section names: `Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `API Design`, `Phased Rollout`, `Risk & Rollout Notes`, `Open Questions`, `Touch List`. Readers shouldn't have to count headings to follow a cross-reference, and section numbering shifts when the spec/plan evolves. Same rule applies to citing SPEC sections (`Use-cases`, `Acceptance scenarios`, etc.) — name them.
 - **No time estimates.** Use LoC sizing.
 - **No vibes-based guarantees** ("should be straightforward", "trivial", "easy lift").
 - **No skipped non-goals section.**
@@ -399,16 +400,16 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 
 - [ ] Step 0 questions answered (or explicitly waived); decisions echoed back.
 - [ ] Filename: `ai-plans/{TODAY}-{FEATURE_NAME}_IMPLEMENTATION_PLAN.md`.
-- [ ] §1 Goals + non-goals.
-- [ ] §2 Guiding Decisions table — each row has *why*.
+- [ ] **Goals + Non-goals** section present.
+- [ ] **Guiding Decisions** table — each row has *why*.
 - [ ] Phases MR-sized (~100–300 LoC) + independently mergeable.
 - [ ] Phase numbering uses numbers + letters consistently.
-- [ ] **At least one phase per spec use-case (§4.1).** No phase implements two use-cases. Cross-cutting scaffolding is its own foundation phase.
+- [ ] **At least one phase per spec use-case** (entries under SPEC **Decisions → Use-cases**). No phase implements two use-cases. Cross-cutting scaffolding is its own foundation phase.
 - [ ] Each phase has Goal / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / Suggested AI model / Reusable skills / Acceptance.
 - [ ] Every phase introducing a new UI flow has an **E2E happy-path test** in its Tests block, with screenshot output to `pr-screenshots/`.
-- [ ] Feature flag declared in §2 (key, scope, default, flip-on criterion) **unless** §2 explicitly justifies "no flag — purely additive surface".
+- [ ] Feature flag declared in **Guiding Decisions** (key, scope, default, flip-on criterion) **unless** **Guiding Decisions** explicitly justifies "no flag — purely additive surface".
 - [ ] ≥1 test per gated phase asserts flag-off behavior unchanged.
-- [ ] If flag declared, **final phase of §5 is dedicated flag-removal phase** with prerequisite (soak window), full deletion touch list, `grep` acceptance check.
+- [ ] If flag declared, **final entry under Phased Rollout is dedicated flag-removal phase** with prerequisite (soak window), full deletion touch list, `grep` acceptance check.
 - [ ] No time estimates anywhere.
 - [ ] Cross-repo phases labeled `Phase Nb`, deploy ordering called out.
 - [ ] Risk & Rollout Notes covers locks, partitions, backfills, rollback.

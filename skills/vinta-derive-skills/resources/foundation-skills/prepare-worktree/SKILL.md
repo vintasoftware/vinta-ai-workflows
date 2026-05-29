@@ -35,8 +35,8 @@ Use `AskUserQuestion` for every finite-choice question. Open prose only when the
 ### 0.1 — Scope of the worktree
 
 1. **Plan-driven or freeform?** `AskUserQuestion`:
-   - `Plan-driven — point me at a plan file` → ask for path; read it (§0.2 below).
-   - `Freeform — just isolate the env, no plan to consult` → skip §0.2; default every "does the feature do X?" question to "unsure → fork to be safe".
+   - `Plan-driven — point me at a plan file` → ask for path; read it in the **Plan inspection** step below.
+   - `Freeform — just isolate the env, no plan to consult` → skip **Plan inspection**; default every "does the feature do X?" question to "unsure → fork to be safe".
 
 2. **Worktree name** (used as the dir name + as the suffix appended to DB names / docker project names). Default = kebab(plan's feature name) when plan-driven; else ask the user.
 
@@ -46,13 +46,13 @@ Use `AskUserQuestion` for every finite-choice question. Open prose only when the
 
 Read the plan once and extract (don't ask the user to repeat what's already written):
 
-- **New dependencies?** Scan §3 / §5 / §2 for `pnpm add`, `npm install`, `pip install`, `poetry add`, `cargo add`, `go get`, `Gemfile` edits. If yes → record `deps_change: true`. Drives the `node_modules` / `vendor/` / `venv/` decision in §1.
-- **Migrations / data-model changes?** Look for §3 entries, `alembic`, `manage.py makemigrations`, `prisma migrate`, `knex migrate`, `goose`, `sqlx migrate`, schema files (`.sql`, `schema.prisma`, `models.py`). If yes → record `schema_change: true`. Drives the DB fork decision in §3.
-- **New env vars?** Look for `process.env.<NEW>`, `os.environ['<NEW>']`, `.env.example` edits, `config.<new>` reads. If yes → record `env_change: true`. Drives the `.env` copy-vs-symlink decision in §2.
+- **New dependencies?** Scan the plan's **Data Model Changes**, **Phased Rollout**, and **Guiding Decisions** sections for `pnpm add`, `npm install`, `pip install`, `poetry add`, `cargo add`, `go get`, `Gemfile` edits. If yes → record `deps_change: true`. Drives the `node_modules` / `vendor/` / `venv/` decision in the **Inventory ignored runnable state** step.
+- **Migrations / data-model changes?** Look at the plan's **Data Model Changes** section, plus `alembic`, `manage.py makemigrations`, `prisma migrate`, `knex migrate`, `goose`, `sqlx migrate`, schema files (`.sql`, `schema.prisma`, `models.py`). If yes → record `schema_change: true`. Drives the DB fork decision in the **Database fork** step.
+- **New env vars?** Look for `process.env.<NEW>`, `os.environ['<NEW>']`, `.env.example` edits, `config.<new>` reads. If yes → record `env_change: true`. Drives the `.env` copy-vs-symlink decision in the **Inventory ignored runnable state** step.
 - **Touches test infra?** New fixtures, factories, seed scripts, a custom `pytest` plugin, a new `vitest` setup file. If yes → record `test_infra_change: true`. Drives whether the worktree gets its own per-suite scratch dir (`tmp/`, `__snapshots__/`, `playwright-report/`).
-- **New services / sidecars?** New `docker-compose.yml` entries, new background workers, a new local proxy. If yes → record `compose_change: true`. Drives the compose project name / network strategy in §4.
+- **New services / sidecars?** New `docker-compose.yml` entries, new background workers, a new local proxy. If yes → record `compose_change: true`. Drives the compose project name / network strategy in the **Docker / compose isolation** step.
 
-If freeform (§0.1 = freeform): set every flag to `true` (fork everything) — the cost is wasted disk; the cost of a wrong shared-state decision is corrupted data.
+If freeform (the **Scope** step's first answer was `Freeform`): set every flag to `true` (fork everything) — the cost is wasted disk; the cost of a wrong shared-state decision is corrupted data.
 
 ### 0.3 — Sanity checks
 
@@ -69,8 +69,8 @@ git worktree add -b <branch> <worktree-path> <base-ref>
 ```
 
 - `<branch>` — `<worktree-name>` (or a per-plan convention from the caller; e.g. [implement-plan](../implement-plan/SKILL.md) passes `plan/<plan-id-kebab>/wt`).
-- `<base-ref>` — `origin/<default-branch>` by default; `HEAD` only if §0.3 confirmed.
-- `<worktree-path>` — from §0.1.3.
+- `<base-ref>` — `origin/<default-branch>` by default; `HEAD` only when the **Sanity checks** step confirmed.
+- `<worktree-path>` — from the worktree-root answer in the **Scope** step.
 
 Confirm `git worktree list` shows the new entry. From here, every command runs **inside** the worktree (`cd <worktree-path>` or pass `-C <worktree-path>` on every git call). Don't leave the user's shell in the worktree without explicit confirmation.
 
@@ -84,14 +84,14 @@ Common categories (extend per project):
 |---|---|---|
 | Dep dirs | `node_modules/`, `vendor/`, `venv/`, `.venv/`, `target/`, `bin/`, `obj/` | Symlink (deps_change=false) / Copy + reinstall (deps_change=true) |
 | Build / cache | `dist/`, `build/`, `.next/`, `.turbo/`, `.cache/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/` | Skip (rebuilt on next run) |
-| Env files | `.env`, `.env.local`, `.env.development`, `.env.test`, `.envrc` | Copy (env_change=true) / Symlink (env_change=false), then mutate per §3 / §4 |
+| Env files | `.env`, `.env.local`, `.env.development`, `.env.test`, `.envrc` | Copy (env_change=true) / Symlink (env_change=false), then mutate per the **Database fork** + **Docker / compose isolation** steps |
 | Local DBs | `db.sqlite3`, `*.sqlite`, `data/`, `pgdata/`, `.localstack/` | Fork (schema_change=true) / Symlink (schema_change=false) |
 | Per-machine config | `.idea/`, `.vscode/settings.json` (when ignored), `local.settings.json`, `.tool-versions` | Copy (independent edits per worktree) |
 | Test artefacts | `coverage/`, `playwright-report/`, `test-results/`, `__snapshots__/` (when ignored) | Skip; per-worktree fresh dirs |
 | Tool state | `.terraform/`, `.serverless/`, `.aws-sam/`, `.gradle/` | Symlink (read-mostly) / Copy (changes per worktree) |
 | Tracked-by-project AI tooling state | `.vinta-ai-workflows/` | Symlink (shared cache is fine across worktrees) |
 
-Record every decision in `.vinta-ai-workflows/worktrees/<name>.yaml` (see §6) so teardown can reverse them mechanically.
+Record every decision in `.vinta-ai-workflows/worktrees/<name>.yaml` (see the **Write the summary file** step) so teardown can reverse them mechanically.
 
 ### 2a — Dep dirs
 
@@ -105,9 +105,9 @@ Default: **copy** for pnpm + npm + cargo + go; **reinstall** for poetry + venv +
 
 ### 2b — Env files
 
-`env_change = false` → `ln -s <main>/.env <worktree>/.env`. Mutations the agent makes to `.env` would leak into main — flag this in the worktree's `README.md` (§6).
+`env_change = false` → `ln -s <main>/.env <worktree>/.env`. Mutations the agent makes to `.env` would leak into main — flag this in the worktree's `README.md` (written in the **Write the summary file** step).
 
-`env_change = true` → `cp <main>/.env <worktree>/.env`. Then mutate per §3 (DB URL) + §4 (compose project name).
+`env_change = true` → `cp <main>/.env <worktree>/.env`. Then mutate per the **Database fork** step (DB URL) + the **Docker / compose isolation** step (compose project name).
 
 `.env.example` is **always** symlinked — it's committed; the worktree should keep tracking it.
 
@@ -141,7 +141,7 @@ For each detected DB, ask the user (`AskUserQuestion`) once:
 
 - **Stub the DB** — point the worktree at a fresh empty DB (`createdb <main_db>_wt_<name>` + run all migrations + seed if a seed exists). Best when the feature needs schema parity but no production data.
 
-Record the chosen strategy + the forked DB name in the worktree summary (§6).
+Record the chosen strategy + the forked DB name in the worktree summary (written in the **Write the summary file** step).
 
 ### 3b — Test database
 
@@ -150,7 +150,7 @@ A different beast — tests on the same engine but a different DB name (`<main_d
 - **`pytest-django` / `pytest`** — set `--reuse-db` per worktree via a per-worktree `DJANGO_SETTINGS_MODULE` env, OR override `DATABASES['default']['NAME']` to `<main_db>_test_wt_<name>` in `conftest.py` when the env var `WORKTREE_NAME` is set. Drop a `conftest_worktree.py` patch in the worktree (don't edit `conftest.py` in tracked code — too easy to commit by accident).
 - **`vitest` / `jest`** — set `TEST_DATABASE_URL` per worktree; ensure the test setup respects it.
 - **Rails** — `DATABASE_URL` for the `test` env, `<main_db>_test_wt_<name>`.
-- **Docker-compose-based test DB** — see §4 below; per-worktree compose project name fixes it.
+- **Docker-compose-based test DB** — see the **Docker / compose isolation** step below; per-worktree compose project name fixes it.
 
 If `test_infra_change = true` → fork the test DB unconditionally. If `false` and the user says "share is fine" → still flag the race risk; offer a one-line fix to switch later.
 
@@ -197,7 +197,7 @@ Quick walk-through of common gotchas. For each, follow the same fork/share patte
 - **Cron / background jobs** — disable cron in the worktree's `.env` (`DISABLE_CRON=true`) unless the feature needs them. Two workers polling the same queue against a shared DB is a footgun.
 - **Webhooks / dev tunnels** (ngrok, cloudflared) — each worktree needs its own tunnel hostname; if the project hard-codes one URL, document the override.
 
-If §0.2 inferred the plan doesn't touch any of these: symlink / share. If unsure: fork. Cheap.
+If the **Plan inspection** step inferred the plan doesn't touch any of these: symlink / share. If unsure: fork. Cheap.
 
 ## Step 6 — Write the summary file
 
@@ -306,18 +306,18 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 
 ## Pitfalls
 
-- **Symlinking `node_modules` for a `pnpm add` phase.** The new package writes back through the symlink into the main checkout's store. Detect dep churn in §0.2 and copy/reinstall instead.
-- **Forking the dev DB but forgetting the test DB.** Tests still hit the shared test DB and stomp on parallel worktrees' fixtures. Both axes need their own decision in §3.
+- **Symlinking `node_modules` for a `pnpm add` phase.** The new package writes back through the symlink into the main checkout's store. Detect dep churn in the **Plan inspection** step and copy/reinstall instead.
+- **Forking the dev DB but forgetting the test DB.** Tests still hit the shared test DB and stomp on parallel worktrees' fixtures. Both axes need their own decision in the **Database fork** step.
 - **Forgetting `COMPOSE_PROJECT_NAME`.** Containers from worktree-A overwrite worktree-B's containers; volumes get nuked. Set it in `.env` so every `docker compose` call inherits.
 - **Sharing a Redis DB without per-worktree prefix.** Tests writing `user:123` collide across worktrees. Pick an index OR a key prefix.
 - **Copying `node_modules` for yarn PnP / absolute-path setups.** The copy carries baked-in paths from the main checkout. Reinstall instead — pnpm's relative-symlink store is the safe-to-copy exception.
 - **Leaving cron / background workers on in the worktree.** They poll the shared DB and double-process jobs. Default to off.
-- **Provisioning a worktree, running migrations, then realizing the user wanted to share the DB.** §3 ask BEFORE migrating; rollback of a forked-DB migration is mechanical (drop the DB), but rollback of a shared-DB migration is a half-day.
+- **Provisioning a worktree, running migrations, then realizing the user wanted to share the DB.** The **Database fork** step asks BEFORE migrating; rollback of a forked-DB migration is mechanical (drop the DB), but rollback of a shared-DB migration is a half-day.
 - **Symlinking `.env` and then editing it.** The edit leaks into main. Copy (not symlink) the moment `env_change = true`.
 
 ## Verification
 
-After §6 writes the summary:
+After the **Write the summary file** step writes the summary:
 
 1. `git worktree list` shows the new entry.
 2. `cd <worktree-path>` then run the project's standard lint + test commands. Both must run clean against the worktree's forked DB / env.

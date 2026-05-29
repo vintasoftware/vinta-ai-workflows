@@ -15,12 +15,12 @@ Author the canonical YAML sources for the target project's sub-agents. Setup scr
 
 1. Inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md), specifically `existing_ai_artifacts.agents` — every sub-agent file already in the repo with its name, description, classification (`foundation-shape` / `stack-specialist` / `project-custom`).
 2. AGENTS.md content from [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) (so agent prompts can reference real conventions).
-3. Step 0 interview decisions from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) — including the §E **per-agent disposition** (migrate / keep / drop / replace).
+3. Step 0 interview decisions from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) — including the [Existing AI artifacts](../vinta-bootstrap-ai-tools/SKILL.md#e-existing-ai-artifacts-per-artifact-disposition) **per-agent disposition** (migrate / keep / drop / replace).
 4. Stack templates under [bootstrap-ai-tools/resources/stacks/<stack>/agents/](../vinta-bootstrap-ai-tools/resources/stacks/) for matched stacks.
 
 ## Reconcile against existing agents (do this FIRST)
 
-Before drafting any new YAML, walk through every entry in `existing_ai_artifacts.agents` and apply the disposition the user picked in Step 0 §E:
+Before drafting any new YAML, walk through every entry in `existing_ai_artifacts.agents` and apply the disposition the user picked in the bootstrap interview's [Existing AI artifacts](../vinta-bootstrap-ai-tools/SKILL.md#e-existing-ai-artifacts-per-artifact-disposition) group:
 
 - **Migrate to `ai-tools/agents/<name>.yaml`** — convert vendor format → canonical YAML. Preserve `name` + `description` + body. Map vendor-specific fields:
   - Claude `tools:` (CSV string) → YAML `claude-tools:` or `overrides.claude.tools` (let `setup-ai-tools.mjs` derive defaults from `access`).
@@ -82,7 +82,7 @@ body: |
   # Reviewer
   
   Sections:
-  - Read in order (phase body, plan §1+§2, AGENTS.md, reusable SKILL.md, full diff, tracking).
+  - Read in order (phase body, the plan's **Goals + Non-goals** + **Guiding Decisions** sections, AGENTS.md, reusable SKILL.md, full diff, tracking).
   - Look for (plan compliance, convention violations, bugs, test gaps, deploy risks, security, scope creep, commit hygiene).
   - Report shape (BLOCKER/SHOULD-FIX/NIT with file:line + suggested fix).
   - Severity guidance.
@@ -165,6 +165,7 @@ The setup script ([vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup
 - **No PR creation by any agent.** Per Step 0 interview policy. The "Will not" section in every agent body must say so explicitly.
 - **No AI co-author trailers in commits.** Per Step 0 interview policy. Repeat in every read-write agent body.
 - **Stack templates are starting points.** Customize aggressively to the target project; don't ship copy-pasted Vinta AI Workflow-specific paths.
+- **No `§N` shorthand in any agent body, prompt, or "look for" list.** Reference plan or spec sections by their full name (`Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `Phased Rollout`, etc.). `§N` references are unreadable for humans and shift when section numbering changes.
 
 ## Adding a new agent later
 

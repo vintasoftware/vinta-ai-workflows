@@ -19,7 +19,7 @@ The setup script reads `ai-tools/AGENTS.md`, `ai-tools/skills/`, and `ai-tools/a
 - `ai-tools/AGENTS.md` (from [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md))
 - `ai-tools/agents/*.yaml` (from [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md))
 - `ai-tools/skills/<name>/SKILL.md` (from [vinta-derive-skills](../vinta-derive-skills/SKILL.md))
-- Step 0 vendor selection from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) §A.3
+- Step 0 vendor selection from the [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md#a-scope) **Scope → Vendor coverage** answer.
 
 ## Steps
 
@@ -65,7 +65,7 @@ Default to (a). Confirm with the user.
 
 ### 5. Configure vendor selection (optional)
 
-If the user only wants a subset of vendors (per Step 0 §A.3), pass `--only` on the first run:
+If the user only wants a subset of vendors (per the Step 0 **Scope → Vendor coverage** answer), pass `--only` on the first run:
 
 ```bash
 node ai-tools/scripts/setup-ai-tools.mjs --only claude-code,cursor
@@ -108,7 +108,7 @@ Stage:
 - `AGENTS.md` (root symlink)
 - `.claude/`, `.cursor/`, `.github/agents/`, `.github/skills/`, `.github/copilot-instructions.md`, `.codex/agents/`, `.agents/skills/` — whichever vendors selected
 
-Commit message style matches the project's convention (Step 0 §D). Default: `Bootstrap ai-tools layout (AGENTS.md, skills, sub-agents, vendor wiring)`.
+Commit message style matches the project's convention captured during the bootstrap interview's **Project conventions** group. Default: `Bootstrap ai-tools layout (AGENTS.md, skills, sub-agents, vendor wiring)`.
 
 ## What gets re-run vs left alone
 
