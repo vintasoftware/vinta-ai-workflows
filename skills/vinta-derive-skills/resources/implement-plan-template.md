@@ -28,11 +28,11 @@ Parse once, reuse for every phase:
 1. **Identify plan file.** Ask user which plan (path or feature name). Feature name: `ls {{PLAN_DIR}}/` + grep; confirm before proceeding.
 2. **Extract structured fields**, in order:
    - **Feature name** + **plan id** — derived from filename's `FEATURE_NAME` portion only: strip `YYYY-MM-DD-` prefix + `_IMPLEMENTATION_PLAN.md` suffix. Kebab variant for branch names.
-   - **§1 Goals + Non-goals** — verbatim, used in every phase prompt.
-   - **§2 Guiding Decisions** — verbatim. Pay attention to: feature flag (key, scope, default, flip-on criterion), storage shape, tenant scoping, API contract decisions.
-   - **§3 Data Model Changes** — keep full body; later phases reference earlier subsections.
-   - **§5 Phased Rollout** — parse into phase records: `{ id, title, goal, body, spec_use_case, suggested_model_tier, reusable_skills, has_e2e, acceptance, is_cross_repo, is_flag_removal }`.
-   - **§6 Risk & Rollout Notes**, **§7 Open Questions**, **§8 Touch List** — keep available; include in phase prompts only when relevant.
+   - **Goals + Non-goals** section — verbatim, used in every phase prompt.
+   - **Guiding Decisions** section — verbatim. Pay attention to: feature flag (key, scope, default, flip-on criterion), storage shape, tenant scoping, API contract decisions.
+   - **Data Model Changes** section — keep full body; later phases reference earlier subsections.
+   - **Phased Rollout** section — parse into phase records: `{ id, title, goal, body, spec_use_case, suggested_model_tier, reusable_skills, has_e2e, acceptance, is_cross_repo, is_flag_removal }`.
+   - **Risk & Rollout Notes**, **Open Questions**, **Touch List** sections — keep available; include in phase prompts only when relevant.
 3. **Classify each phase**: `is_cross_repo`, `is_flag_removal` — orchestrator does NOT auto-execute these.
 4. **Ask the user two opt-in questions** via `AskUserQuestion`. Both default to off; record both answers in tracking under `run_options`:
 
@@ -40,7 +40,7 @@ Parse once, reuse for every phase:
 
    b. **Draft inline review comments per phase?** *"On top of the standard PR description, do you want me to scan each phase's diff and add 3–10 inline comments calling out non-obvious decisions (subtle invariants, feature-flag short-circuits, cross-phase coupling, upstream-contract naming)? Off by default — say yes when reviewers will appreciate annotated diffs."* Options: `Yes — include inline comments`, `No — PR description only`.
 
-   PR opening itself is **not** asked here — it's governed by the project's PR creation policy captured at bootstrap (see `{{PR_POLICY_BLOCK}}` above). When that policy = "agents create PRs", §1f always opens the PR via [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) regardless of the comment opt-in.
+   PR opening itself is **not** asked here — it's governed by the project's PR creation policy captured at bootstrap (see `{{PR_POLICY_BLOCK}}` above). When that policy = "agents create PRs", the [Open PR via context file](#1f-open-pr-via-context-file) step always opens the PR via [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) regardless of the comment opt-in.
 
 5. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, branch naming pattern (default: `plan/{plan-id-kebab}/phase-{phase-id}`), captured `run_options.pause_between_phases` + `run_options.generate_inline_comments`{{PR_REMINDER_LINE}}.
 
@@ -62,14 +62,14 @@ You are implementing {phase.id}: {phase.title} of plan {plan.id}.
 
 ## Read first
 1. AGENTS.md — repo conventions.
-2. {{PLAN_DIR}}/{plan-filename}, sections §1, §2, §3 and YOUR phase body in §5.
+2. {{PLAN_DIR}}/{plan-filename}, the **Goals + Non-goals**, **Guiding Decisions**, **Data Model Changes** sections and YOUR phase body inside **Phased Rollout**.
 
-## Plan-level decisions (from §1 + §2)
+## Plan-level decisions (from Goals + Non-goals + Guiding Decisions)
 {Goals + Non-goals verbatim}
 {Guiding Decisions table verbatim}
 {If feature flag declared:}
   Feature flag: `{flag-key}` — scope `{per-tenant|per-request}`, default `{false|true}`.
-  Wire reads + writes per the plan's §2 entry. Off-flag path = byte-for-byte pre-feature behavior.
+  Wire reads + writes per the plan's **Guiding Decisions** entry. Off-flag path = byte-for-byte pre-feature behavior.
 
 ## What was already implemented in prior phases
 {Tracking file "Completed Phases" section. First executed phase: "Nothing yet — this is the first phase."}
@@ -109,7 +109,7 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 - Anything you couldn't do (with explanation).
 ```
 
-**Don't** dump the full plan into every prompt. Tracking summaries replace prior phases as context. Always include §1 + §2 + relevant §3 — load-bearing decisions; phases reach back frequently.
+**Don't** dump the full plan into every prompt. Tracking summaries replace prior phases as context. Always include the **Goals + Non-goals** and **Guiding Decisions** sections plus the relevant **Data Model Changes** subsection — load-bearing decisions; phases reach back frequently.
 
 ### 1b. Pick model from plan's per-phase suggestion
 
@@ -133,8 +133,8 @@ Record the **model actually used** + the **plan's suggested tier** in tracking.
 Use whatever agent-spawning primitive the runtime exposes. Pass:
 
 - Descriptive label (e.g. `"{plan.id} {phase.id}: {phase.title}"`).
-- Model from §1b, translated.
-- Phase prompt from §1a.
+- Model from the [Pick model from plan's per-phase suggestion](#1b-pick-model-from-plans-per-phase-suggestion) step, translated.
+- Phase prompt from the [Prepare agent prompt](#1a-prepare-agent-prompt-token-efficient) step.
 - The right **agent type**.
 
 **Agent type per phase.** Project agents in [`ai-tools/agents/`](ai-tools/agents/) (exposed to claude-code via `.claude/agents` symlink):
@@ -168,7 +168,7 @@ Open phase body alongside diff and walk:
 4. **Repo conventions** from AGENTS.md.
 5. **Reusable-skill compliance.**
 {{E2E_LAYER2_CHECK}}
-6. **Feature-flag wiring** if §2 declared a flag — flag-OFF byte-for-byte pre-feature behavior, ≥1 test asserts.
+6. **Feature-flag wiring** if the plan's **Guiding Decisions** declared a flag — flag-OFF byte-for-byte pre-feature behavior, ≥1 test asserts.
 7. **Cross-phase consistency** with prior tracking summaries.
 
 #### Layer 3 — Independent reviewer subagent
@@ -176,7 +176,7 @@ Open phase body alongside diff and walk:
 After Layers 1–2 pass, spawn a **separate** subagent (different session, no implementation context) using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)). Read-only by design.
 
 Reviewer prompt template — see the reviewer agent's body for the standard form. Triage findings:
-- **BLOCKER**: must fix before §1e.
+- **BLOCKER**: must fix before the **{{BRANCH_PUSH_HEADING}}** step below.
 - **SHOULD-FIX**: fix in-phase if cheap; else follow-up issue + tracking note.
 - **NIT**: ignore unless trivially cheap.
 
@@ -209,7 +209,7 @@ git checkout -b plan/{plan-id-kebab}/phase-{phase.id}
 git push -u origin plan/{plan-id-kebab}/phase-{phase.id}
 ```
 
-PR opening lives in §1f below (single flow — context file + `open-pr.sh`). Subagents never open PRs themselves; the orchestrator does, after review passes.
+PR opening lives in the [Open PR via context file](#1f-open-pr-via-context-file) step below (single flow — context file + `open-pr.sh`). Subagents never open PRs themselves; the orchestrator does, after review passes.
 
 ### 1f. Open PR via context file
 
@@ -217,19 +217,19 @@ This is the **only** PR-creation path. PRs always go through a `.vinta-ai-workfl
 
 Two project-level signals decide the actual behavior:
 
-| `{{PR_POLICY_BLOCK}}` policy | `run_options.generate_inline_comments` | What §1f does |
+| `{{PR_POLICY_BLOCK}}` policy | `run_options.generate_inline_comments` | What this **Open PR via context file** step does |
 |---|---|---|
 | agents create PRs | false | Write minimal context file (`# Title`, `# Description`, empty `# Comments`). Run `open-pr.sh` → PR opened, no inline comments. |
 | agents create PRs | true  | Write full context file (title + description + 3–10 inline comments). Run `open-pr.sh` → PR opened, all comments posted. |
-| branches only     | false | **Skip §1f entirely.** Human will open PR manually from the pushed branch. |
-| branches only     | true  | Write full context file (durable record). **Don't run `open-pr.sh`.** Human can publish later from a CLI-equipped session via [open-pr-from-context](../foundation-skills/open-pr-from-context/SKILL.md). Surface this in §1h. |
+| branches only     | false | **Skip this step entirely.** Human will open PR manually from the pushed branch. |
+| branches only     | true  | Write full context file (durable record). **Don't run `open-pr.sh`.** Human can publish later from a CLI-equipped session via [open-pr-from-context](../foundation-skills/open-pr-from-context/SKILL.md). Surface this in the [Send brief update](#1h-send-brief-update-to-user) step. |
 
 #### Steps
 
-1. **Skip if neither column applies** (policy = branches only AND `generate_inline_comments = false`). Jump to §1g.
+1. **Skip if neither column applies** (policy = branches only AND `generate_inline_comments = false`). Jump to the [Update tracking file](#1g-update-tracking-file) step.
 
 2. **Honor existing PR / MR templates.** Read `project.pr_template_paths` from `.vinta-ai-workflows.yaml`. For each entry:
-   - **One template** → load it; the prs-context `# Description` body must follow that template's section structure verbatim. Fill each section with phase-specific content drawn from §1 / §2 / phase body. Preserve any `<!-- HTML comments -->` placeholders; do not strip the template's checklists. Sections you can't fill from phase data → leave the template's placeholder/prompt untouched (don't fabricate).
+   - **One template** → load it; the prs-context `# Description` body must follow that template's section structure verbatim. Fill each section with phase-specific content drawn from the plan's **Goals + Non-goals**, **Guiding Decisions**, and the phase body. Preserve any `<!-- HTML comments -->` placeholders; do not strip the template's checklists. Sections you can't fill from phase data → leave the template's placeholder/prompt untouched (don't fabricate).
    - **Multiple templates** (`PULL_REQUEST_TEMPLATE/` directory) → ask once via `AskUserQuestion`: list each template + its filename, ask which to use for this run. Cache the choice in tracking under `run_options.pr_template_used` so subsequent phases of the same plan use the same one without re-asking.
    - **Empty array** → free-form description. Default sections: `## Summary` (1–3 sentences), `## Plan reference` (link / phase id), `## Test plan` (commands the reviewer can run).
 
@@ -238,11 +238,11 @@ Two project-level signals decide the actual behavior:
    GitHub also honors `?template=<name>` in the PR-create URL when the project has a multi-template directory. `gh pr create --body-file` writes the body directly so the URL trick isn't needed; the body must match the chosen template's structure regardless.
 
 3. **Pick comment targets** (only when `generate_inline_comments = true`). Read the phase diff via `git diff {{DEFAULT_BRANCH}}...HEAD` (or the previous phase branch for stacked phases). Select 3–10 spots that benefit from a one-paragraph context note — typically:
-   - A subtle invariant the diff relies on (cite plan §1 / §2 entries).
+   - A subtle invariant the diff relies on (cite the plan's **Goals + Non-goals** / **Guiding Decisions** entries — by name, never use `§` shorthand).
    - A workaround for a known framework / library limitation.
    - A naming choice driven by an upstream contract.
-   - The off-flag short-circuit when a feature flag is in §2.
-   - Why a seemingly-cleaner refactor wasn't made (out of scope per §1).
+   - The off-flag short-circuit when a feature flag is in **Guiding Decisions**.
+   - Why a seemingly-cleaner refactor wasn't made (out of scope per **Goals + Non-goals**).
    - Cross-phase coupling (this hook is consumed by phase N+k).
 
    Skip lint/format churn, boilerplate matching nearby files, standard patterns from AGENTS.md, and self-explanatory test names. **A clean phase produces few comments — that's fine. Don't pad.**
@@ -261,8 +261,8 @@ Two project-level signals decide the actual behavior:
 
    Script opens the PR (or detects an existing one), posts each inline comment, rewrites the file's frontmatter to `status: published` + populated `pr_url`, appends a publish log. Exit codes:
 
-   - `0` — PR up, all comments (if any) posted. Capture `pr_url` for §1h.
-   - `1` — PR up, ≥1 comment failed. Surface the failed `(file:line)` list to the user; continue to §1g.
+   - `0` — PR up, all comments (if any) posted. Capture `pr_url` for the [Send brief update](#1h-send-brief-update-to-user) step.
+   - `1` — PR up, ≥1 comment failed. Surface the failed `(file:line)` list to the user; continue to the [Update tracking file](#1g-update-tracking-file) step.
    - `2` — Hard failure (deps missing, branch not pushed, CLI unauthed, file invalid). Surface the script's stderr; treat the phase as having no PR. The file stays `status: pending` so the user can re-run after fixing the gap.
 
    When policy = "branches only": **don't run the script.** File stays `status: pending`.
@@ -279,7 +279,7 @@ The orchestrator writes this from the git diff + the agent's summary — not fro
 
 ### 1h. Send brief update to user
 
-One short paragraph: phase N done, branch pushed{{PR_LINK_NOTE}}, what got built, and — when §1f ran — the PR-context file path with its `status` (`published` + URL when `open-pr.sh` opened the PR; `pending` when the script wasn't run because PR policy = branches only or deps were missing). When `status: pending`, mention how to publish later (`bash ai-tools/skills/open-pr-from-context/scripts/open-pr.sh <path>`). Moving to phase N+1. No long retrospective — tracking file is the durable record.
+One short paragraph: phase N done, branch pushed{{PR_LINK_NOTE}}, what got built, and — when the [Open PR via context file](#1f-open-pr-via-context-file) step ran — the PR-context file path with its `status` (`published` + URL when `open-pr.sh` opened the PR; `pending` when the script wasn't run because PR policy = branches only or deps were missing). When `status: pending`, mention how to publish later (`bash ai-tools/skills/open-pr-from-context/scripts/open-pr.sh <path>`). Moving to phase N+1. No long retrospective — tracking file is the durable record.
 
 ### 1i. Per-phase pause gate (opt-in)
 
@@ -344,15 +344,16 @@ After all executable phases complete:
 - **Feature flags = gates, not toggles for tests.**
 - **Never remove a feature flag from this skill.**
 - **Stop on Tier-4 failure.**
-- **Honor opt-in flags.** `run_options.pause_between_phases` controls §1i; `run_options.generate_inline_comments` controls whether §1f drafts inline comments (always writes the file when §1f runs at all — empty comments when off).
+- **Honor opt-in flags.** `run_options.pause_between_phases` controls the [Per-phase pause gate](#1i-per-phase-pause-gate-opt-in); `run_options.generate_inline_comments` controls whether the [Open PR via context file](#1f-open-pr-via-context-file) step drafts inline comments (always writes the file when that step runs at all — empty comments when off).
 - **PR-context file + `open-pr.sh` is the only PR-creation path.** No raw `gh pr create` / `glab mr create` calls outside the bundled script. The file is durable; the script is the publisher.
-- **§1f gating** = combination of project PR policy ({{PR_POLICY_BLOCK}}) and `generate_inline_comments`. See the matrix in §1f. Skip §1f entirely only when policy = branches only AND comments = off.
+- **[Open PR via context file](#1f-open-pr-via-context-file) gating** = combination of project PR policy ({{PR_POLICY_BLOCK}}) and `generate_inline_comments`. See the matrix in that step. Skip it entirely only when policy = branches only AND comments = off.
+- **Never use `§N` shorthand to point at sections** — neither in this skill body nor in any rendered file (tracking, prs-context, branch description). Always use the section's full name with a markdown link when possible. `§N` references are hard to read for humans and brittle when section numbering shifts.
 
 ## Quick checklist (orchestrator, per phase)
 
 - [ ] Plan parsed; structured fields cached.
 - [ ] Cross-repo + flag-removal phases identified + deferred.
-- [ ] Current phase: prompt composed with §1 + §2 + relevant §3 + tracking summaries + this phase's body.
+- [ ] Current phase: prompt composed with **Goals + Non-goals** + **Guiding Decisions** + relevant **Data Model Changes** subsection + tracking summaries + this phase's body.
 - [ ] Model picked from `**Suggested AI model**:` line (cheapest available); plan tier recorded.
 - [ ] Subagent spawned, report received.
 - [ ] Inner loop green: scoped lint + new tests individually + scoped suite.
@@ -362,7 +363,7 @@ After all executable phases complete:
 - [ ] Layer 3 review: adversarial review run; BLOCKERs fixed; SHOULD-FIX either fixed or noted.
 - [ ] After any fix-up: Layers 1 + 2 + outer gate re-run.
 - [ ] Stacked branch created; pushed.{{PR_CHECKLIST_NOTE}}
-- [ ] §1f decision applied per matrix (PR policy + `generate_inline_comments`):
+- [ ] **Open PR via context file** decision applied per matrix (PR policy + `generate_inline_comments`):
   - [ ] PR-context file written when at least one of policy=create / comments=true holds.
   - [ ] `open-pr.sh` run when policy=create AND deps available; PR URL captured.
   - [ ] Per-comment failures (exit 1) surfaced with `(file:line)` list.

@@ -13,7 +13,7 @@ The canonical project-conventions document. Read by every AI tool. Single source
 
 ## Inputs
 
-1. The structured inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md). Pay attention to `existing_ai_artifacts.instructions` — every found instruction doc must be folded in, replaced, or referenced per the Step 0 §E disposition captured in [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md).
+1. The structured inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md). Pay attention to `existing_ai_artifacts.instructions` — every found instruction doc must be folded in, replaced, or referenced per the [Existing AI artifacts (per-artifact disposition)](../vinta-bootstrap-ai-tools/SKILL.md#e-existing-ai-artifacts-per-artifact-disposition) decision captured in the bootstrap interview.
 2. Any existing `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` / `README.md` / `.cursorrules` / `.github/copilot-instructions.md` content — read in full. Behavior depends on the user's disposition:
    - **Merge into new AGENTS.md** — extract every still-accurate fact (commands, paths, naming rules, multi-tenancy notes, env vars, deploy steps) and weave into the canonical sections below. Don't lose content silently — if a paragraph doesn't fit any section, surface it for the user to place or drop.
    - **Keep as-is, link from AGENTS.md** — leave the file untouched; add a `## See also` reference to it from the new AGENTS.md and copy only the high-level pointer (one sentence + link).
@@ -66,7 +66,7 @@ The skeleton is fixed. Sections that don't apply: skip with a one-line "n/a — 
 ```markdown
 # {Project Name}
 
-{One-paragraph what + why, from §A interview.}
+{One-paragraph what + why, from the **Project framing** interview group.}
 
 ## Project Overview
 
@@ -98,7 +98,7 @@ The skeleton is fixed. Sections that don't apply: skip with a one-line "n/a — 
 
 ## Code Style
 
-{Pulled from analysis + §B interview. Bullet list of enforced + cultural rules.}
+{Pulled from analysis + the **Conventions the analysis can't see** interview group. Bullet list of enforced + cultural rules.}
 
 ## Architecture
 
@@ -116,7 +116,7 @@ The skeleton is fixed. Sections that don't apply: skip with a one-line "n/a — 
 
 ## {Multi-tenancy / Tenant Model — only if applicable}
 
-{How tenants are scoped at every layer. Pull from §B.5 interview + analyze-codebase env_model.multi_tenancy.}
+{How tenants are scoped at every layer. Pull from the **Conventions the analysis can't see → Multi-tenancy details** interview answer + analyze-codebase env_model.multi_tenancy.}
 
 ## Environment Variables
 
@@ -160,6 +160,7 @@ VAR_TWO
 - **Plain English.** Read by humans + agents + new hires. Acronyms expanded on first use.
 - **No code beyond what's necessary.** If a 5-line snippet captures the convention, use it. Don't paste 50 lines of context.
 - **No marketing language.** "Robust", "seamless", "delightful" — strike. State what it does.
+- **No `§N` shorthand for cross-references.** When AGENTS.md points at other docs, name the section (`See the **Multi-tenancy** section in docs/ARCHITECTURE.md`). `§4.2` is unreadable for humans and breaks when section numbering shifts.
 
 ## What NOT to put in AGENTS.md
 
@@ -187,5 +188,5 @@ After writing:
 
 - **Letting analyze-codebase output dictate the prose.** The inventory is structured data; AGENTS.md is human-readable narrative. Translate, don't paste.
 - **Writing the convention "Use X library" when the project actually uses Y.** Re-read direct deps in `package.json` / `pyproject.toml` before each section.
-- **Forgetting commit / PR conventions.** §D interview is short and easy to skip; don't. The implement-plan / fixer agents need this.
-- **Assuming multi-tenant when single-tenant.** Re-read evidence from §B.5 + analyze-codebase env_model.multi_tenancy. If absent, mark the section "n/a — single-tenant".
+- **Forgetting commit / PR conventions.** The **PR + commit conventions** interview group is short and easy to skip; don't. The implement-plan / fixer agents need this.
+- **Assuming multi-tenant when single-tenant.** Re-read evidence from the **Conventions the analysis can't see → Multi-tenancy details** answer + analyze-codebase env_model.multi_tenancy. If absent, mark the section "n/a — single-tenant".

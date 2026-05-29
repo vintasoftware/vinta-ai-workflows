@@ -15,13 +15,13 @@ Author the project's `ai-tools/skills/<name>/SKILL.md` files. Skills are reusabl
 
 1. Inventory from [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md), specifically `existing_ai_artifacts.skills` — every skill file already in the repo with name, description, classification (`vinta-managed` / `foundation-shape` / `project-custom`).
 2. AGENTS.md from [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md).
-3. Step 0 interview answers from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md), including the §E **per-skill disposition** (migrate / keep / drop / replace).
+3. Step 0 interview answers from [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md), including the [Existing AI artifacts](../vinta-bootstrap-ai-tools/SKILL.md#e-existing-ai-artifacts-per-artifact-disposition) group's **per-skill disposition** (migrate / keep / drop / replace).
 4. Stack matches from the inventory; for each, the skill categories listed in [bootstrap-ai-tools/resources/stacks/<stack>/notes.md](../vinta-bootstrap-ai-tools/resources/stacks/).
 5. User-supplied stack templates for matched stacks (path / URL / package — asked at runtime).
 
 ## Reconcile against existing skills (do this FIRST)
 
-Before drafting any new SKILL.md, walk through every entry in `existing_ai_artifacts.skills` and apply the disposition the user picked in Step 0 §E:
+Before drafting any new SKILL.md, walk through every entry in `existing_ai_artifacts.skills` and apply the disposition the user picked in the bootstrap interview's [Existing AI artifacts](../vinta-bootstrap-ai-tools/SKILL.md#e-existing-ai-artifacts-per-artifact-disposition) group:
 
 - **Migrate to `ai-tools/skills/<name>/`** — `git mv` the existing skill folder (with all its resources) into the canonical layout. After move, scan the body for hard-coded vendor paths that no longer apply (`.cursor/skills/...` self-references, etc.) and rewrite to the new path. `setup-ai-tools.mjs` will re-link to the chosen vendors.
 - **Keep in current vendor path, don't touch** — leave it where it is; AGENTS.md may reference it; downstream skill setup won't manage it. **Don't ship a foundation duplicate that would shadow it.**
@@ -86,7 +86,7 @@ Project-specific skills, generated from templates because their bodies cite real
 | `{{STACK_SPECIFIC_DEPLOY_BLOCK}}` | from matched stacks | `- Bots: \`pnpm bots:build\`, \`pnpm bots:deploy --env=dev-<handle>\`...` for Medplum, or empty |
 | `{{CODE_HOST}}` | Step 0 interview | `GitHub`, `GitLab`, `Bitbucket` |
 | `{{DEFAULT_BRANCH}}` | inventory.repo.default_branch | `main` or `master` |
-| `{{PR_*}}` family (`{{PR_POLICY_DESCRIPTION}}`, `{{PR_POLICY_BLOCK}}`, `{{PR_REMINDER_LINE}}`, `{{BRANCH_PUSH_HEADING}}`, `{{PR_LINK_NOTE}}`, `{{FINAL_REPORT_PR_NOTE}}`, `{{PR_RULE_TAIL}}`, `{{PR_CHECKLIST_NOTE}}`, `{{FINAL_CHECKLIST_PR_NOTE}}`, `{{PUSH_INSTRUCTION_LINE}}`) | Step 0 (PR creation policy) | Describes whether agents create PRs vs only push branches. **Note:** PR creation itself goes through §1f (`prs-context` file + bundled `open-pr.sh`), not raw `gh pr create` lines. These placeholders cover the framing (description, push instructions, checklist + summary phrasing) — the §1f matrix consumes the policy directly. |
+| `{{PR_*}}` family (`{{PR_POLICY_DESCRIPTION}}`, `{{PR_POLICY_BLOCK}}`, `{{PR_REMINDER_LINE}}`, `{{BRANCH_PUSH_HEADING}}`, `{{PR_LINK_NOTE}}`, `{{FINAL_REPORT_PR_NOTE}}`, `{{PR_RULE_TAIL}}`, `{{PR_CHECKLIST_NOTE}}`, `{{FINAL_CHECKLIST_PR_NOTE}}`, `{{PUSH_INSTRUCTION_LINE}}`) | Step 0 (PR creation policy) | Describes whether agents create PRs vs only push branches. **Note:** PR creation itself goes through the rendered skill's **Open PR via context file** step (`prs-context` file + bundled `open-pr.sh`), not raw `gh pr create` lines. These placeholders cover the framing (description, push instructions, checklist + summary phrasing) — the **Open PR via context file** matrix consumes the policy directly. |
 | `{{COAUTHOR_*}}` family (`{{COAUTHOR_POLICY_BLOCK}}`, `{{COAUTHOR_INSTRUCTION_LINE}}`, `{{COAUTHOR_LAYER1_CHECK}}`, `{{COAUTHOR_RULE_LINE}}`, `{{COAUTHOR_CHECKLIST_NOTE}}`) | Step 0 (AI co-author policy) | If "forbidden": "Do NOT add `Co-Authored-By: Claude` ..." everywhere. If "allowed": empty / softer language. |
 | `{{COMMIT_STYLE_LINE}}` | Step 0 (commit style) + repo log | `Default subject: short imperative, ≤72 chars` or `Conventional Commits format: type(scope): subject` |
 | `{{ANTI_GIT_ADD_ALL_REASON}}` | derived from common artifacts in target | `secrets, .env files, build artifacts, .auth/ live in the tree` |
@@ -179,6 +179,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 - **Each skill solves one job.** Two unrelated checklists → split.
 - **Reference real files in the target.** Skill links must point to existing paths.
 - **Skills auto-load by description.** Specific triggers, specific outcomes.
+- **Never use `§N` shorthand to point at sections in any drafted SKILL.md body, agent prompt, or rendered template.** Use the section's full name (and a markdown anchor link when the link target is reachable). `§N` shorthand makes cross-references hard for humans to follow and breaks when section numbering shifts. This rule applies to both the foundation skills shipped verbatim and the template-rendered ones.
 
 ## Pitfalls
 

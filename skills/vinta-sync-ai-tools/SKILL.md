@@ -70,7 +70,7 @@ vinta-ai-workflows sync: 0.1.0 → 0.1.2 (2 releases)
 ====================================================
 
 AFFECTS PROJECT — your enabled surface gained changes
-  [0.1.1] implement-plan template: §1f PR-context flow added
+  [0.1.1] implement-plan template: "Open PR via context file" PR-context flow added
     file: ai-tools/skills/implement-plan/SKILL.md (will re-render)
     diff: +88 lines, -6 lines
 
