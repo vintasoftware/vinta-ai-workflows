@@ -5,6 +5,108 @@ All notable changes to `@vinta/ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### Added
+
+- **New optional foundation skill: `prepare-worktree`** (copied verbatim
+  to `ai-tools/skills/prepare-worktree/SKILL.md` per project, opt-in via
+  Step 0 §D.5). Source:
+  [skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md](skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md).
+  Provisions a fully-runnable git worktree for parallel feature work so a
+  long-running plan (or experiment) can build, test, lint, migrate, and
+  hit databases without disturbing the main checkout — or other parallel
+  worktrees on the same machine. Walks the project's `.gitignore` +
+  package manifests + env templates + docker config and decides per
+  ignored path whether to **symlink** (read-only-ish reuse), **copy**
+  (defensive, when the feature mutates the path), or **fork** (state
+  that would corrupt main if shared — dev DB, test DB, docker-compose
+  project name). Reads the active plan to bias decisions: dep churn
+  flips dep dirs to copy/reinstall; migrations flip the dev DB to fork
+  and run them once; new env vars flip `.env` from symlink to copy +
+  mutate; compose changes flip the network strategy. Drops a per-worktree
+  summary YAML at `.vinta-ai-workflows/worktrees/<name>.yaml` + a
+  `WORKTREE.md` at the worktree root so teardown is mechanical (no
+  decision lives only in conversation memory). Bucket A (copy verbatim) —
+  body is project-agnostic; per-project variability lives in
+  `skills.prepare-worktree.*` config (worktree root, deps strategy,
+  compose-network strategy, test-DB strategy, summary dir).
+
+- **`implement-plan` Step 0 question (c) — "Run phases in a worktree?"**.
+  New opt-in: when the user picks `Yes`, the orchestrator runs
+  `prepare-worktree` **once** at the start of the plan (new Step 0.5),
+  records `worktree_path` / `worktree_branch` / `worktree_summary` in the
+  tracking file, and threads them into every phase's subagent prompt +
+  every `git` call in §1e. **One worktree per plan run** — every phase
+  branch stacks inside the same worktree; the skill never provisions a
+  second one mid-plan. Mid-plan resumes detect the worktree from
+  tracking and reuse it (asking only when the worktree is missing).
+  When `foundation_skills.prepare-worktree` is `disabled`, the question
+  is skipped and `run_options.use_worktree` is forced to `false` with a
+  one-line note pointing at `vinta-sync-ai-tools` to enable later.
+  Failure modes are explicit — prepare-worktree errors never fall back
+  silently to the main checkout; the user picks `Retry` / `Run in main`
+  / `Stop`.
+
+- **`.vinta-ai-workflows.yaml` config additions for `prepare-worktree`**:
+  - `foundation_skills.prepare-worktree: enabled | disabled` — sticky
+    opt-in like every other foundation skill.
+  - `skills.prepare-worktree.worktree_root: string` (default
+    `.claude/worktrees` for claude-code-primary projects;
+    `../<repo>-wt-` sibling-dir layout otherwise) — where new worktrees
+    land. The skill resolves `<root>/<name>` per provisioning call.
+  - `skills.prepare-worktree.deps_strategy: symlink | copy | reinstall`
+    (default `symlink`) — default for dep dirs (`node_modules/`,
+    `vendor/`, `venv/`) when the active plan does NOT install new deps.
+    The skill auto-flips to `reinstall` when it detects dep churn in the
+    plan body.
+  - `skills.prepare-worktree.compose_network: per-worktree | shared-external | host`
+    (default `per-worktree`) — docker-compose networking strategy.
+    `shared-external` joins an externally-declared network so the
+    worktree can reach main's compose services (queues, caches, search
+    indexes that are expensive to spin twice).
+  - `skills.prepare-worktree.test_db_strategy: fork-on-schema-change | always-fork | share`
+    (default `fork-on-schema-change`) — when to fork the test DB per
+    worktree. `share` is only safe for solo work (parallel runs flake).
+  - `skills.prepare-worktree.summary_dir: string` (default
+    `.vinta-ai-workflows/worktrees`) — where per-worktree summary YAMLs
+    land. Covered by the umbrella `.vinta-ai-workflows/` gitignore.
+  - `run_options.implement-plan.use_worktree: boolean` (default
+    `false`) — suggested default shown for the Step 0 question (c)
+    above; per-run prompt always asks. Flipped to `true` at bootstrap
+    when the user opts in via the §D.5 follow-up.
+
+- **Bootstrap interview Step 0 §D.5**: new question for the
+  `prepare-worktree` skill plus four short follow-ups (worktree root,
+  default deps strategy, default test-DB strategy, and the
+  `implement-plan` default for question (c)). The §D wording at the
+  top switched from "four skills" to "five skills" accordingly.
+  Outputs tree updated to list `ai-tools/skills/prepare-worktree/SKILL.md`
+  as an opt-in foundation skill. The §E "foundation-shape" name list
+  (which gates the `Replace with Vinta foundation version` option)
+  gained `prepare-worktree`.
+
+- **`vinta-derive-skills` bucket A** gains a row for `prepare-worktree`
+  (verbatim copy). **Bucket C** also gets a row covering the opt-in
+  interview + the four follow-ups; this is the same compose pattern as
+  `add-one-off-script` (A + C — verbatim copy, gated by ask-first).
+  Foundation-shape lists in both "Reconcile against existing skills" +
+  Rules sections extended with `prepare-worktree`.
+
+### Changed
+
+- **`implement-plan` template**: Step 0 §4 grew from two opt-in
+  questions to three (added (c) for worktree opt-in); a new **Step 0.5**
+  sits between Step 0 and Step 1 for worktree provisioning;
+  per-phase prompt (§1a) carries a worktree block when
+  `use_worktree = true`; §1e branch / push commands now prefix with
+  `git -C <worktree_path>` when applicable; tracking schema (§1g) gains
+  `run_options.worktree_path` / `worktree_branch` / `worktree_summary`;
+  Re-running mid-plan flow learned to detect + reuse the worktree;
+  Step 2 final report surfaces the teardown command (never auto-runs
+  it). Three new entries in the **Important rules** section codify the
+  one-worktree-per-plan-run invariant + the no-silent-fallback rule.
+
 ## [0.1.6] — 2026-05-13
 
 ### Changed

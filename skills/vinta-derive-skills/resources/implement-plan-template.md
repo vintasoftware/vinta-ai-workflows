@@ -34,17 +34,44 @@ Parse once, reuse for every phase:
    - **§5 Phased Rollout** — parse into phase records: `{ id, title, goal, body, spec_use_case, suggested_model_tier, reusable_skills, has_e2e, acceptance, is_cross_repo, is_flag_removal }`.
    - **§6 Risk & Rollout Notes**, **§7 Open Questions**, **§8 Touch List** — keep available; include in phase prompts only when relevant.
 3. **Classify each phase**: `is_cross_repo`, `is_flag_removal` — orchestrator does NOT auto-execute these.
-4. **Ask the user two opt-in questions** via `AskUserQuestion`. Both default to off; record both answers in tracking under `run_options`:
+4. **Ask the user three opt-in questions** via `AskUserQuestion`. Defaults are project-specific (see below); record every answer in tracking under `run_options`:
 
    a. **Pause between phases?** *"Do you want me to pause and wait for confirmation after each phase, before starting the next one? Lets you review the diff / branch / PR / tracking summary before moving on."* Options: `Auto-flow (default) — keep going phase to phase`, `Pause between phases — wait for go after each one`.
 
    b. **Draft inline review comments per phase?** *"On top of the standard PR description, do you want me to scan each phase's diff and add 3–10 inline comments calling out non-obvious decisions (subtle invariants, feature-flag short-circuits, cross-phase coupling, upstream-contract naming)? Off by default — say yes when reviewers will appreciate annotated diffs."* Options: `Yes — include inline comments`, `No — PR description only`.
 
+   c. **Run phases in a worktree?** *"Do you want every phase's subagent to work inside an isolated git worktree (its own runnable copy of the app with its own dev + test DB, env files, docker-compose project name) instead of sharing your main checkout? Lets you keep using `{{DEFAULT_BRANCH}}` for unrelated work while this plan runs; survives parallel plans on the same repo without DB / port / docker collisions. Costs one extra checkout's worth of disk + the time it takes [prepare-worktree](../prepare-worktree/SKILL.md) to provision it."* Options: `No — run in current checkout`, `Yes — provision one shared worktree for the whole plan`. Default = value of `run_options.implement-plan.use_worktree` in `.vinta-ai-workflows.yaml` (`No` when unset).
+
+      When `Yes`: **the same worktree is used for every executable phase** — all phase branches stack inside it. The skill never provisions a second worktree mid-plan. If the user wants per-phase worktrees, that's a different workflow (split the plan into independent plans).
+
+      Skip this question entirely when `foundation_skills.prepare-worktree` is `disabled` in `.vinta-ai-workflows.yaml`: record `run_options.use_worktree = false`; surface a one-line note that worktree isolation is available if the team opts in via [vinta-sync-ai-tools](../../skills/vinta-sync-ai-tools/SKILL.md).
+
    PR opening itself is **not** asked here — it's governed by the project's PR creation policy captured at bootstrap (see `{{PR_POLICY_BLOCK}}` above). When that policy = "agents create PRs", §1f always opens the PR via [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) regardless of the comment opt-in.
 
-5. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, branch naming pattern (default: `plan/{plan-id-kebab}/phase-{phase-id}`), captured `run_options.pause_between_phases` + `run_options.generate_inline_comments`{{PR_REMINDER_LINE}}.
+5. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, branch naming pattern (default: `plan/{plan-id-kebab}/phase-{phase-id}`), captured `run_options.pause_between_phases` + `run_options.generate_inline_comments` + `run_options.use_worktree`{{PR_REMINDER_LINE}}.
 
-   Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`.
+   Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`. Worktree isolation follows `run_options.use_worktree`.
+
+## Step 0.5 — Provision worktree (when `run_options.use_worktree = true`)
+
+Skip when `run_options.use_worktree = false`; jump to Step 1.
+
+When true, invoke [prepare-worktree](../prepare-worktree/SKILL.md) **once**, before any phase runs:
+
+1. **Inputs.** Plan path (so prepare-worktree can read it for deps / migrations / env / compose churn — see prepare-worktree §0.2), suggested worktree name = `plan-{plan-id-kebab}`, plan-driven mode.
+2. **Pre-run sanity.** Confirm no existing worktree at the target path (`git worktree list | grep <name>` — refuse if collision). Confirm `git -C <main> status` of the main checkout (warn if dirty; defer to prepare-worktree's §0.3 for the call).
+3. **Run prepare-worktree.** Pass the plan file + worktree name. The skill returns:
+   - `worktree_path` — absolute path the phase subagents will `cd` into.
+   - `worktree_branch` — the base branch prepare-worktree created; phase branches stack off this.
+   - `worktree_summary` — `.vinta-ai-workflows/worktrees/<name>.yaml` (read by teardown).
+4. **Persist to tracking.** Write `run_options.worktree_path`, `run_options.worktree_branch`, `run_options.worktree_summary` into `{{PLAN_DIR}}/TRACKING_{plan-id}.md` (Step 1g schema gains these three fields). All later phases read them — never re-provision mid-plan.
+5. **Report to user.** Quote the prepare-worktree summary back: which dirs symlinked vs copied vs forked; which DB(s) forked + their names; compose project name; teardown command. Hold here until the user confirms (`AskUserQuestion`: `Looks good — start phase 1`, `Stop — let me adjust`).
+
+**Worktree topology rule.** When `use_worktree = true`, every phase branches off the previous phase **inside the worktree**, not off `{{DEFAULT_BRANCH}}` in the main checkout. The first phase branches off `<worktree_branch>` (which prepare-worktree based on `origin/{{DEFAULT_BRANCH}}`); subsequent phases stack as usual. All `git` calls in §1e use `git -C <worktree_path>` (or `cd` into the worktree first). All inner / outer test commands (§1a step 3 + 5) run inside the worktree so they hit the forked DB / env / compose stack.
+
+Failure modes:
+- **prepare-worktree returns an error** (disk full, branch exists, DB clone failed) → surface to the user; do NOT fall back to "just run in the main checkout" silently — that defeats the opt-in. Ask: `Retry`, `Run in main checkout instead (flip use_worktree to false)`, `Stop`.
+- **User cancels at the confirmation gate** → tear the worktree down (run the teardown command from prepare-worktree's report) before exiting, so the next run starts clean.
 
 ## Step 1 — Per-phase loop
 
@@ -60,9 +87,20 @@ You are implementing {phase.id}: {phase.title} of plan {plan.id}.
 ## Repo
 {{PROJECT_NAME}} ({{STACK_SUMMARY}}).
 
+{If run_options.use_worktree = true:}
+  ## Worktree
+  Work entirely inside this worktree: `<run_options.worktree_path>`.
+  `cd` into it before any command. Every `git`, every lint / test / build / migrate
+  call runs there. Do NOT touch the main checkout — its DB, env, and compose stack
+  are intentionally separated. See `<run_options.worktree_path>/WORKTREE.md` for
+  what's forked vs shared (deps, dev DB, test DB, compose project name, env file).
+  Branch base for this phase: `<phase-specific base>` — orchestrator already
+  created your phase branch there; commit straight to it.
+
 ## Read first
 1. AGENTS.md — repo conventions.
 2. {{PLAN_DIR}}/{plan-filename}, sections §1, §2, §3 and YOUR phase body in §5.
+{If run_options.use_worktree = true:} 3. `WORKTREE.md` at the worktree root — fork map (which dirs symlink to main vs are independent copies).
 
 ## Plan-level decisions (from §1 + §2)
 {Goals + Non-goals verbatim}
@@ -193,20 +231,28 @@ Reviewer finds nothing on a >300-LoC multi-file phase → suspicious. Read once 
 
 Branch naming: `plan/{plan-id-kebab}/phase-{phase.id}`.
 
-**First executed phase** (branches from `{{DEFAULT_BRANCH}}`):
+When `run_options.use_worktree = false`, every `git` command runs in the main checkout. When `true`, every `git` command below runs inside the worktree — prefix with `git -C <run_options.worktree_path>` (or `cd` first). Phase branches stack inside the worktree; nothing touches the main checkout's working tree.
+
+**First executed phase** (branches from `{{DEFAULT_BRANCH}}` when `use_worktree = false`; branches from `<run_options.worktree_branch>` when `true`):
 ```bash
+# use_worktree = false:
 git checkout {{DEFAULT_BRANCH}}
 git pull --ff-only
 git checkout -b plan/{plan-id-kebab}/phase-{phase.id}
+
+# use_worktree = true (run inside the worktree):
+git -C <worktree_path> checkout <run_options.worktree_branch>
+git -C <worktree_path> checkout -b plan/{plan-id-kebab}/phase-{phase.id}
+
 # subagent's commits land on this branch
-git push -u origin plan/{plan-id-kebab}/phase-{phase.id}
+git -C <path> push -u origin plan/{plan-id-kebab}/phase-{phase.id}
 ```
 
-**Subsequent phases** (stacked on the previous phase's branch):
+**Subsequent phases** (stacked on the previous phase's branch — same path-prefix rule):
 ```bash
-git checkout plan/{plan-id-kebab}/phase-{prev.id}
-git checkout -b plan/{plan-id-kebab}/phase-{phase.id}
-git push -u origin plan/{plan-id-kebab}/phase-{phase.id}
+git -C <path> checkout plan/{plan-id-kebab}/phase-{prev.id}
+git -C <path> checkout -b plan/{plan-id-kebab}/phase-{phase.id}
+git -C <path> push -u origin plan/{plan-id-kebab}/phase-{phase.id}
 ```
 
 PR opening lives in §1f below (single flow — context file + `open-pr.sh`). Subagents never open PRs themselves; the orchestrator does, after review passes.
@@ -273,7 +319,7 @@ Two project-level signals decide the actual behavior:
 
 Tracking lives at `{{PLAN_DIR}}/TRACKING_{plan-id}.md`. Commit on the **current** phase's branch — deletion in Step 3.
 
-Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, completed-phases (with status, model, branch, base, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
+Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `use_worktree`, `worktree_path`, `worktree_branch`, `worktree_summary` — last three only when `use_worktree = true`), completed-phases (with status, model, branch, base, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
 
 The orchestrator writes this from the git diff + the agent's summary — not from the agent's narration.
 
@@ -314,17 +360,21 @@ What this skill does instead:
 
 User invokes the skill against a partially-done plan:
 
-1. Read `{{PLAN_DIR}}/TRACKING_{plan-id}.md` if present.
-2. `git branch -a | grep plan/{plan-id-kebab}` to detect already-pushed phase branches.
-3. Cross-reference with the plan's phase list.
-4. Confirm resumption point with the user.
+1. Read `{{PLAN_DIR}}/TRACKING_{plan-id}.md` if present. Extract `run_options.*` — including `worktree_path` / `worktree_branch` / `worktree_summary` when set. Never re-prompt the Step 0 §4 questions on resume; the original answers stick.
+2. **Worktree resume.** When `run_options.use_worktree = true`:
+   - Confirm the worktree still exists (`git worktree list | grep <worktree_path>`). Missing → ask user: `Reprovision (run prepare-worktree again with the same name)`, `Switch to main checkout (flip use_worktree to false for the rest of the run)`, `Stop`.
+   - Confirm the worktree summary file still parses; if not, regenerate from the existing worktree state.
+   - All resumed phases use the existing worktree — do not provision a second one.
+3. `git -C <path> branch -a | grep plan/{plan-id-kebab}` to detect already-pushed phase branches (`<path>` = main checkout or worktree per `run_options.use_worktree`).
+4. Cross-reference with the plan's phase list.
+5. Confirm resumption point with the user.
 
 ## Step 2 — Final report
 
 After all executable phases complete:
 
 1. **Delete `TRACKING_{plan-id}.md`** on the last phase's branch. Commit. The plan file stays.
-2. Send the user a final summary: branches pushed (with bases, in stack order); for UI-flow phases — list of `pr-screenshots/` files (if applicable); deferred phases (cross-repo + flag-removal); next steps for the human.
+2. Send the user a final summary: branches pushed (with bases, in stack order); for UI-flow phases — list of `pr-screenshots/` files (if applicable); deferred phases (cross-repo + flag-removal); next steps for the human. When `run_options.use_worktree = true`: include the worktree path + branch + summary file path + the teardown command (`git worktree remove <path>` + the per-engine drop-db / `docker compose -p <project> down -v` lines from `<worktree_summary>`). Do NOT auto-run teardown — the user may still want the worktree to debug review feedback or land follow-ups.
 {{FINAL_REPORT_PR_NOTE}}
 3. Flag-removal phase deferred → end with `/schedule` offer for the dedicated flag-removal skill.
 
@@ -344,7 +394,9 @@ After all executable phases complete:
 - **Feature flags = gates, not toggles for tests.**
 - **Never remove a feature flag from this skill.**
 - **Stop on Tier-4 failure.**
-- **Honor opt-in flags.** `run_options.pause_between_phases` controls §1i; `run_options.generate_inline_comments` controls whether §1f drafts inline comments (always writes the file when §1f runs at all — empty comments when off).
+- **Honor opt-in flags.** `run_options.pause_between_phases` controls §1i; `run_options.generate_inline_comments` controls whether §1f drafts inline comments (always writes the file when §1f runs at all — empty comments when off); `run_options.use_worktree` controls whether §0.5 runs and whether every later `git` / lint / test / build / migrate call uses the worktree path.
+- **One worktree per plan run.** When `use_worktree = true`, provision once in §0.5 and reuse for every phase. Never spawn a second worktree mid-plan; never silently fall back to the main checkout on prepare-worktree failure (ask the user).
+- **Don't auto-tear-down the worktree.** Step 2 surfaces the teardown command; the user runs it when they're ready (after reviewer feedback is addressed, after the PR merges, etc.).
 - **PR-context file + `open-pr.sh` is the only PR-creation path.** No raw `gh pr create` / `glab mr create` calls outside the bundled script. The file is durable; the script is the publisher.
 - **§1f gating** = combination of project PR policy ({{PR_POLICY_BLOCK}}) and `generate_inline_comments`. See the matrix in §1f. Skip §1f entirely only when policy = branches only AND comments = off.
 
@@ -352,7 +404,8 @@ After all executable phases complete:
 
 - [ ] Plan parsed; structured fields cached.
 - [ ] Cross-repo + flag-removal phases identified + deferred.
-- [ ] Current phase: prompt composed with §1 + §2 + relevant §3 + tracking summaries + this phase's body.
+- [ ] `run_options.use_worktree` resolved; §0.5 ran when `true` (worktree provisioned + summary captured + user confirmed); skipped when `false`.
+- [ ] Current phase: prompt composed with §1 + §2 + relevant §3 + tracking summaries + this phase's body (plus the worktree block when `use_worktree = true`).
 - [ ] Model picked from `**Suggested AI model**:` line (cheapest available); plan tier recorded.
 - [ ] Subagent spawned, report received.
 - [ ] Inner loop green: scoped lint + new tests individually + scoped suite.
