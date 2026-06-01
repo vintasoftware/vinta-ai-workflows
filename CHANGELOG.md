@@ -7,6 +7,32 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [unreleased]
 
+### Added
+
+- **`DESIGN.md` detection + Cursor Project Rules wiring during bootstrap.**
+  `vinta-bootstrap-ai-tools` Step 0 gains group **F. Design system doc
+  (`DESIGN.md`)**: if a `DESIGN.md` exists at the repo root, the
+  orchestrator asks via `AskUserQuestion` whether to wire it into AI
+  tooling (`Keep and wire into AI tooling` (recommended) /
+  `Keep as-is, don't reference` / `Drop`). The file itself is never
+  overwritten — the team owns its contents. When `wired`:
+  - `vinta-write-agents-md` inserts a "Design system" section in
+    `ai-tools/AGENTS.md` pointing at `DESIGN.md`.
+  - `vinta-install-ai-tools-setup` writes `.cursor/rules/design.mdc`
+    with the frontmatter + body from
+    [Design.md with Cursor — Option A: Project Rules (recommended)](https://designmd.app/blog/design-md-with-cursor/)
+    so Cursor auto-loads the design system before generating UI files.
+    Only emitted when `cursor` ∈ `vendors`. Globs default to
+    `**/*.tsx`, `**/*.jsx`, `**/*.vue`, `**/*.svelte`, `**/*.astro`,
+    `**/*.css`; the orchestrator asks once before shipping defaults
+    when the analysis surfaced a UI framework not covered.
+  Disposition lands in a new `project.design_md: wired |
+  kept-unreferenced | absent` field of `.vinta-ai-workflows.yaml`.
+  Outputs tree updated to show `DESIGN.md` preserved at repo root and
+  `.cursor/rules/design.mdc` (conditional). New top-level rule added
+  to the orchestrator: **`DESIGN.md` is sacrosanct** — read-only at
+  all times; only the sibling Cursor pointer is ever written.
+
 ### Changed
 
 - **Replaced all `§N` shorthand cross-references with named section
