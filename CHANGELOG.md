@@ -5,7 +5,7 @@ All notable changes to `@vinta/ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.1.7] — 2026-06-01
 
 ### Added
 
