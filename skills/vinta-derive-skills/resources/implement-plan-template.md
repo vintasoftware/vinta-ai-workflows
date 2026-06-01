@@ -40,11 +40,11 @@ Parse once, reuse for every phase:
 
    b. **Draft inline review comments per phase?** *"On top of the standard PR description, do you want me to scan each phase's diff and add 3–10 inline comments calling out non-obvious decisions (subtle invariants, feature-flag short-circuits, cross-phase coupling, upstream-contract naming)? Off by default — say yes when reviewers will appreciate annotated diffs."* Options: `Yes — include inline comments`, `No — PR description only`.
 
-   PR opening itself is **not** asked here — it's governed by the project's PR creation policy captured at bootstrap (see `{{PR_POLICY_BLOCK}}` above). When that policy = "agents create PRs", the [Open PR via context file](#1f-open-pr-via-context-file) step always opens the PR via [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) regardless of the comment opt-in.
+   PR opening itself is **not** asked here — it's governed by the project's PR creation policy captured at bootstrap (see `{{PR_POLICY_BLOCK}}` above). When that policy = "agents create PRs", the [Open PR via context file](#1f-open-pr-via-context-file) step always opens the PR via [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) regardless of the comment opt-in.{{COMMIT_STRATEGY_STEP0_QUESTION}}
 
-5. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, branch naming pattern (default: `plan/{plan-id-kebab}/phase-{phase-id}`), captured `run_options.pause_between_phases` + `run_options.generate_inline_comments`{{PR_REMINDER_LINE}}.
+5. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, {{BRANCH_NAMING_PATTERN_SUMMARY}}, captured `run_options.pause_between_phases` + `run_options.generate_inline_comments`{{COMMIT_STRATEGY_CONFIRM_NOTE}}{{PR_REMINDER_LINE}}.
 
-   Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`.
+   Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`.{{COMMIT_STRATEGY_STEP0_TRAILER}}
 
 ## Step 1 — Per-phase loop
 
@@ -95,10 +95,7 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
    b. **Full test suite:** `{{TEST_CMD}}`.
    {{E2E_OUTER_GATE_LINE}}
 6. Outer gate fails → return step 2 (fix regression), re-run inner loop, then 5a/5b/5c. **Never** commit, push, or proceed while any gate is red.
-7. Stage right files (NEVER `git add -A` — {{ANTI_GIT_ADD_ALL_REASON}}). Stage explicitly: `git add {{STAGE_PATTERN}}`.
-8. Commit with the repo's style — look at `git log -10 --oneline` first. {{COMMIT_STYLE_LINE}}.
-9. {{COAUTHOR_INSTRUCTION_LINE}}
-10. {{PUSH_INSTRUCTION_LINE}}
+{{PER_PHASE_COMMIT_BLOCK}}
 
 ## Required output (single final report)
 - Status: SUCCESS or FAILURE (and why).
@@ -191,29 +188,15 @@ Reviewer finds nothing on a >300-LoC multi-file phase → suspicious. Read once 
 
 ### 1e. {{BRANCH_PUSH_HEADING}}
 
-Branch naming: `plan/{plan-id-kebab}/phase-{phase.id}`.
-
-**First executed phase** (branches from `{{DEFAULT_BRANCH}}`):
-```bash
-git checkout {{DEFAULT_BRANCH}}
-git pull --ff-only
-git checkout -b plan/{plan-id-kebab}/phase-{phase.id}
-# subagent's commits land on this branch
-git push -u origin plan/{plan-id-kebab}/phase-{phase.id}
-```
-
-**Subsequent phases** (stacked on the previous phase's branch):
-```bash
-git checkout plan/{plan-id-kebab}/phase-{prev.id}
-git checkout -b plan/{plan-id-kebab}/phase-{phase.id}
-git push -u origin plan/{plan-id-kebab}/phase-{phase.id}
-```
+{{BRANCH_NAMING_BLOCK}}
 
 PR opening lives in the [Open PR via context file](#1f-open-pr-via-context-file) step below (single flow — context file + `open-pr.sh`). Subagents never open PRs themselves; the orchestrator does, after review passes.
 
 ### 1f. Open PR via context file
 
-This is the **only** PR-creation path. PRs always go through a `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` file + the bundled [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) script — even when inline comments are not requested. The file is the durable record; the script is the publisher.
+This is the **only** PR-creation path. PRs always go through {{PRS_CONTEXT_FILE_PATH_DESCRIPTION}} + the bundled [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) script — even when inline comments are not requested. The file is the durable record; the script is the publisher.
+
+{{PR_OPEN_TIMING_BLOCK}}
 
 Two project-level signals decide the actual behavior:
 
@@ -273,7 +256,7 @@ Two project-level signals decide the actual behavior:
 
 Tracking lives at `{{PLAN_DIR}}/TRACKING_{plan-id}.md`. Commit on the **current** phase's branch — deletion in Step 3.
 
-Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, completed-phases (with status, model, branch, base, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
+Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, {{TRACKING_BRANCH_FIELD}}, completed-phases (with status, model{{TRACKING_PHASE_BRANCH_FIELD}}, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
 
 The orchestrator writes this from the git diff + the agent's summary — not from the agent's narration.
 
@@ -324,7 +307,7 @@ User invokes the skill against a partially-done plan:
 After all executable phases complete:
 
 1. **Delete `TRACKING_{plan-id}.md`** on the last phase's branch. Commit. The plan file stays.
-2. Send the user a final summary: branches pushed (with bases, in stack order); for UI-flow phases — list of `pr-screenshots/` files (if applicable); deferred phases (cross-repo + flag-removal); next steps for the human.
+2. Send the user a final summary: {{FINAL_REPORT_BRANCH_SUMMARY}}; for UI-flow phases — list of `pr-screenshots/` files (if applicable); deferred phases (cross-repo + flag-removal); next steps for the human.
 {{FINAL_REPORT_PR_NOTE}}
 3. Flag-removal phase deferred → end with `/schedule` offer for the dedicated flag-removal skill.
 
@@ -362,7 +345,8 @@ After all executable phases complete:
 - [ ] Layer 2 review: every "Changes" ticked; every "Tests" materialized; acceptance line satisfiable; conventions, reusable skills, e2e + screenshot compliance (if applicable), flag wiring all checked.
 - [ ] Layer 3 review: adversarial review run; BLOCKERs fixed; SHOULD-FIX either fixed or noted.
 - [ ] After any fix-up: Layers 1 + 2 + outer gate re-run.
-- [ ] Stacked branch created; pushed.{{PR_CHECKLIST_NOTE}}
+- [ ] {{BRANCH_CHECKLIST_LINE}}{{PR_CHECKLIST_NOTE}}
+{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}
 - [ ] **Open PR via context file** decision applied per matrix (PR policy + `generate_inline_comments`):
   - [ ] PR-context file written when at least one of policy=create / comments=true holds.
   - [ ] `open-pr.sh` run when policy=create AND deps available; PR URL captured.

@@ -124,6 +124,8 @@ git push -u origin plan/<feature-kebab>/phase-2
 
 Each phase's PR (or branch, depending on the project's PR policy captured at bootstrap) targets the previous phase's branch, not `main`. This keeps the diff per PR scoped to a single phase, makes review manageable, and lets the team merge phases sequentially as approvals land — earlier phases ship to production while later ones are still in review.
 
+**Alternative: modular commits.** Teams that prefer one branch + one PR per plan can set `policies.commit_strategy: modular-commits` in `.vinta-ai-workflows.yaml`. Under that mode, every phase pushes its **atomic unit commits** (one per service, use-case wire-up, init export, serializer field, refactor, or bug fix — tests in the same commit as code) to a single `plan/<feature-kebab>` branch; the PR opens once after Phase 1 review and gets updated as later phases push. The third option, `commit_strategy: ask`, prompts `implement-plan` at Step 0 (alongside the existing `pause_between_phases` / `generate_inline_comments` opt-ins) and caches the answer in the tracking file. Default is `stacked-branches` — the model documented above. See [`schemas/vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json) for the field definition.
+
 **Tracking file** — `ai-plans/TRACKING_<feature-kebab>.md`. The orchestrator writes it from `git diff` + the agent's report (not the agent's narration). Records: completed phases (status, model used, branch, base, e2e+screenshots when applicable, 5–15 line summary), current phase, remaining phases, deferred phases. Acts as the durable context handoff between phase prompts. Deleted on plan completion.
 
 **Phases the orchestrator never auto-executes:**
@@ -257,7 +259,7 @@ That's it. The sync skill walks every release between the project's recorded ver
 
 ### How it stays safe
 
-The single source of truth is `.vinta-ai-workflows.yaml` at the repo root (written at bootstrap, schema: [`schemas/vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json)). It records every opt-in the project made — which foundation skills are `enabled`, which stacks are applied, which vendors are wired, which policies (PR creation, AI co-author, commit style) hold. `vinta-sync-ai-tools` reads this file and uses it to classify every upstream change into one of:
+The single source of truth is `.vinta-ai-workflows.yaml` at the repo root (written at bootstrap, schema: [`schemas/vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json)). It records every opt-in the project made — which foundation skills are `enabled`, which stacks are applied, which vendors are wired, which policies (PR creation, commit strategy, AI co-author, commit style) hold. `vinta-sync-ai-tools` reads this file and uses it to classify every upstream change into one of:
 
 | Bucket | Meaning | Default |
 |---|---|---|

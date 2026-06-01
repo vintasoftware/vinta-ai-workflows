@@ -69,6 +69,12 @@ These bleed across sub-skills, so capture once now:
 4. **PR creation policy** — agents open PRs, or only push branches and humans open PRs?
 5. **Co-author trailer policy** — repo allows AI co-author trailers in commits, or strictly human-only?
 6. **Deploy targets** — Vercel, AWS, Kubernetes, Heroku, custom, none.
+7. **Commit strategy** — how `implement-plan` should structure branches + commits across phases. `AskUserQuestion` options:
+   - `Stacked branches (default) — one branch + one PR per phase, stacked on top of each other` — current behavior. Each phase ships one commit on its own branch; reviewers see one PR per phase.
+   - `Modular commits — one branch + one PR for the whole plan, atomic commit per logical unit` — each phase produces multiple commits (one per service / use-case wire-up / init / serializer field / refactor / fix). Tests travel in the same commit as the code they test. Reviewers read the commit list as a TOC.
+   - `Ask me each run` — `implement-plan` prompts at Step 0 (alongside `pause_between_phases` / `generate_inline_comments`) and caches the answer in `TRACKING_{plan-id}.md`.
+
+   Lands in `.vinta-ai-workflows.yaml` `policies.commit_strategy`. Drives the `implement-plan` template's branch / commit / PR-opening flow + the `amend-plan` skill's supported-strategies check.
 
 ### D. Optional foundation skills
 
@@ -165,6 +171,7 @@ commands:
 
 policies:
   pr_creation: <Project conventions → PR creation policy>
+  commit_strategy: <Project conventions → Commit strategy>  # stacked-branches | modular-commits | ask
   ai_coauthor: <Project conventions → Co-author trailer policy>
   commit_style: <conventional | imperative | other>
   stage_pattern: <derived>
