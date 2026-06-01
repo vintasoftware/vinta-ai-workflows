@@ -123,6 +123,39 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
 
 Surface decisions per artifact, **not** as a single batch. The user might want to migrate one custom skill but keep two others where they are.
 
+### F. Design system doc (`DESIGN.md`)
+
+Scan the repo root for `DESIGN.md` (case-insensitive). Per [Design.md with Cursor](https://designmd.app/blog/design-md-with-cursor/), this file holds the project's design system (colors, typography, spacing, components) in a Markdown format AI agents can consume before generating UI. **Never overwrite or rewrite an existing `DESIGN.md`** — the team owns its contents.
+
+If present, ask via `AskUserQuestion`:
+
+- `Keep and wire into AI tooling` (recommended) — leave file untouched at repo root; reference it from `ai-tools/AGENTS.md`; when `cursor` is in **Scope → Vendor coverage**, write `.cursor/rules/design.mdc` (Cursor Project Rules, Option A from the linked blog post) so Cursor auto-loads it before generating UI files.
+- `Keep as-is, don't reference` — leave the file alone; no AGENTS.md mention, no Cursor rule.
+- `Drop` — delete (rare; confirm twice before removing).
+
+If absent, no prompt — don't fabricate a `DESIGN.md`. Record the gap so [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) can mention it as a TODO if the user wants design-system guidance.
+
+The disposition lands in `project.design_md` of `.vinta-ai-workflows.yaml` (free-form string: `wired | kept-unreferenced | absent`). [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) reads it when `wired` and inserts a "Design system" section pointing at `DESIGN.md`. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) reads it when `wired` + `cursor` ∈ `vendors` and writes `.cursor/rules/design.mdc` with this exact body:
+
+```markdown
+---
+description: Design system rules — read DESIGN.md before generating UI
+globs: ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.astro", "**/*.css"]
+---
+
+Before generating any visual component, read the DESIGN.md file at the project root.
+
+Rules:
+- Use ONLY the colors defined in DESIGN.md
+- Follow the typographic scale exactly
+- Apply spacing values from the Spacing section
+- Follow component patterns from the Components section
+- Never violate the Do's and Don'ts section
+- When in doubt, reference DESIGN.md — do not invent new values
+```
+
+Globs may need tuning for the project's actual UI file extensions (Svelte-only projects, RN `.tsx`, etc.). Ask the user once if the analysis surfaced a UI framework not covered by the default glob list; otherwise ship the defaults.
+
 After Step 0: read back the captured decisions (including every per-artifact disposition), confirm via `AskUserQuestion` (`Looks good`, `Some corrections (I'll list)`, `Stop, rethink`).
 
 The dispositions become inputs to:
@@ -153,6 +186,7 @@ project:
   stack_summary: <inventory.frameworks one-liner>
   ai_plans_dir: <ai-plans | apps/<service>/ai-plans | ...>
   pr_template_paths: <inventory.existing_ai_artifacts.pr_templates[].path>  # empty array if none found
+  design_md: <Step 0.F → wired | kept-unreferenced | absent>
 
 commands:
   lint: <Project conventions → Source of truth for code style>
@@ -286,6 +320,11 @@ ai-tools/
 └── scripts/
     └── setup-ai-tools.mjs               ← copied from install-ai-tools-setup resources
 
+DESIGN.md                                 ← preserved at repo root if pre-existing (never overwritten)
+.cursor/rules/design.mdc                  ← only when DESIGN.md exists, user opted Wire it in,
+                                              and `cursor` ∈ vendors (Cursor Project Rules, Option A
+                                              from https://designmd.app/blog/design-md-with-cursor/)
+
 ai-plans/                                 ← created by migrate-plans-specs (step 6)
 ├── YYYY-MM-DD-FEATURE_NAME_SPEC.md      ← migrated from docs/, specs/, root, etc.
 └── YYYY-MM-DD-FEATURE_NAME_PLAN.md      ← future docs land here too (foundation
@@ -312,6 +351,7 @@ Stack-specific skills + agents land in the target only when the user provides te
 - **Foundation agents are universal.** `implementer` / `reviewer` / `fixer` always. Stack specialists (`deploy-author` for Medplum, `migration-author` for Django) only when the stack matches.
 - **Don't run install-ai-tools-setup until AGENTS.md + agents YAMLs + skills exist.** The setup script reads these files; running it on an empty `ai-tools/` produces nothing useful.
 - **Multi-vendor coverage matches the user's selection.** The install step's `--only` flag is set from the Step 0 **Scope → Vendor coverage** answer.
+- **`DESIGN.md` is sacrosanct.** If the repo already has one, never overwrite, rewrite, or "clean up" its contents. Only ever read it to verify shape, and only ever write the sibling `.cursor/rules/design.mdc` pointer when the user opts in + `cursor` is a selected vendor.
 
 ## Pitfalls
 
