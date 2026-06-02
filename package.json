@@ -21,7 +21,7 @@
     "url": "git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git"
   },
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   },
-  "license": "UNLICENSED"
+  "license": "MIT"
 }
