@@ -322,7 +322,7 @@ for (const file of readdirSync(AGENTS_SRC)) {
   const text = readFileSync(src, 'utf8');
   const doc = YAML.parse(text);
 
-  // Schema: schemas/sub-agent.v1.schema.json (in @vinta/ai-workflows package).
+  // Schema: schemas/sub-agent.v1.schema.json (in vinta-ai-workflows package).
   if (doc?.schema_version !== 1) {
     throw new Error(`${src}: missing or unsupported 'schema_version' (expected: 1; see schemas/sub-agent.v1.schema.json)`);
   }

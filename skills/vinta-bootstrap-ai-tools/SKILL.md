@@ -108,7 +108,7 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Replace from scratch` — discard existing, draft fresh from inventory + interview.
 
 - **Skills** (each under any vendor `skills/` dir):
-  - `Migrate to ai-tools/skills/<name>/` — move into the canonical layout; `setup-ai-tools.mjs` will re-link to the chosen vendors. Vendor-prefixed dir (`vinta-*`) is left alone — installed by the `@vinta/ai-workflows` CLI.
+  - `Migrate to ai-tools/skills/<name>/` — move into the canonical layout; `setup-ai-tools.mjs` will re-link to the chosen vendors. Vendor-prefixed dir (`vinta-*`) is left alone — installed by the `vinta-ai-workflows` CLI.
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
 
@@ -173,7 +173,7 @@ This file is the **only** source of truth for project-wide settings. Every downs
 Write the file now (before any sub-skill runs). Populate from the interview groups **Scope**, **Stack detection**, **Project conventions**, **Optional foundation skills**, and **Existing AI artifacts**:
 
 ```yaml
-# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
+# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
 
 schema_version: 1
 vinta_ai_workflows_version: <pkg version detected at install time>

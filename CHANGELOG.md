@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@vinta/ai-workflows` are documented in this file.
+All notable changes to `vinta-ai-workflows` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -202,7 +202,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`dev-skills/` — maintenance skills for this repo.** New top-level
-  directory holding skills agents load when editing `@vinta/ai-workflows`
+  directory holding skills agents load when editing `vinta-ai-workflows`
   itself. Excluded from the npm package via the `files` whitelist and
   from the CLI's `SKILLS_SRC` discovery (which only walks `skills/`), so
   these skills never ship to consumer projects.
@@ -807,7 +807,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Initial release of `@vinta/ai-workflows` as a private npm package
+- Initial release of `vinta-ai-workflows` as a private npm package
   exposing the `vinta-ai-workflows` CLI bin.
 - Seven `vinta-`-prefixed bootstrap skills under `skills/`:
   `vinta-analyze-codebase`, `vinta-bootstrap-ai-tools`, `vinta-derive-skills`,

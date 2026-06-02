@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a release of `@vinta/ai-workflows` — pick patch / minor / major bump, close the in-progress CHANGELOG section, bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on `main`, fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Surfaces the npm publish command for the user to run manually — never auto-publishes. Use when the user says "release", "cut a release", "tag 0.1.4", "publish".
+description: Cut a release of `vinta-ai-workflows` — pick patch / minor / major bump, close the in-progress CHANGELOG section, bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on `main`, fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Surfaces the npm publish command for the user to run manually — never auto-publishes. Use when the user says "release", "cut a release", "tag 0.1.4", "publish".
 ---
 
 # Release
