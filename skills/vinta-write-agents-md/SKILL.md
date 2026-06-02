@@ -19,6 +19,7 @@ The canonical project-conventions document. Read by every AI tool. Single source
    - **Keep as-is, link from AGENTS.md** — leave the file untouched; add a `## See also` reference to it from the new AGENTS.md and copy only the high-level pointer (one sentence + link).
    - **Replace from scratch** — discard the old content; draft fresh from inventory + interview. Note the discarded files in the run summary so the user can verify nothing important was lost.
 3. Interview answers (Step 0 below).
+4. `.vinta-ai-workflows.yaml` (`policies.dependency_licenses`) — drives the **Dependency licenses** section. The bootstrap interview captures enforcement + forbidden SPDX list + per-package overrides + free-form notes; this skill only reads and renders. Don't re-interview the user about license policy — if the config block is missing, route the user back to [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) Step 0 (Project conventions → license policy).
 
 ## Step 0 — Interview before drafting
 
@@ -133,6 +134,28 @@ VAR_TWO
 ```
 ...
 ```
+
+## Dependency licenses
+
+{Rendered from `policies.dependency_licenses` in `.vinta-ai-workflows.yaml`. Skip when the block is absent. When `enforcement: off`, render a single line: "No license check enforced." When `enforcement: block` or `warn`, render:}
+
+**Enforcement:** {`block` — refuse install + ask user before override / `warn` — proceed but flag in phase report}.
+
+**Forbidden SPDX licenses** (any new third-party dep matching these must be checked before install):
+
+{Bullet list of `forbidden_spdx` entries as inline SPDX IDs.}
+
+**Pre-install check.** Before running `npm add` / `pnpm add` / `pip install` / `poetry add` / `uv add` / `cargo add` / `go get` (or equivalent) for any new dep, look up the package's declared license (`npm view <pkg> license`, PyPI metadata, `cargo metadata`, the package's repo `LICENSE`) and compare to the list above. If the license is in the list and the `(package, license)` pair is not in **Approved overrides**, stop and surface the conflict to the user.
+
+{When `allowed_overrides` is non-empty:}
+
+**Approved overrides** (these forbidden-license deps are explicitly accepted):
+
+| Package | License | Reason |
+|---|---|---|
+| {package} | {SPDX} | {reason} |
+
+{When `notes` is non-empty, render verbatim under a `**Notes.**` paragraph.}
 
 ## Error / Exception Tracking
 
