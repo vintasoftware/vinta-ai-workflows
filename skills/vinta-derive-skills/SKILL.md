@@ -27,7 +27,7 @@ Before drafting any new SKILL.md, walk through every entry in `existing_ai_artif
 - **Keep in current vendor path, don't touch** — leave it where it is; AGENTS.md may reference it; downstream skill setup won't manage it. **Don't ship a foundation duplicate that would shadow it.**
 - **Drop** — log removal; don't emit anything.
 - **Replace with Vinta foundation version** (foundation-shape only — `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`) — proceed with the bucket A / B / C flow below for that name. The user has explicitly opted into overwriting their version.
-- **`vinta-managed`** (any skill whose dir starts with `vinta-`) — leave alone. These come from the `@vinta/ai-workflows` CLI; `vinta-derive-skills` doesn't manage them.
+- **`vinta-managed`** (any skill whose dir starts with `vinta-`) — leave alone. These come from the `vinta-ai-workflows` CLI; `vinta-derive-skills` doesn't manage them.
 
 For each name in the foundation set: only emit it (verbatim copy / generate from template / interview-draft) when no existing skill of that name is being migrated or kept. If the user said `Migrate` or `Keep` for an existing `plan-feature/SKILL.md`, **do not overwrite**.
 

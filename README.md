@@ -2,7 +2,7 @@
 
 Bootstrap AI tooling — AGENTS.md, sub-agents, project skills, multi-vendor wiring — into any project, then get out of the way.
 
-Distributed as a private npm package (`@vinta/ai-workflows`) with a CLI that installs / updates / uninstalls a set of one-shot bootstrap skills into the project's vendor-specific skill directories (Claude Code, Codex, Cursor, VS Code + GitHub Copilot).
+Distributed as a private npm package (`vinta-ai-workflows`) with a CLI that installs / updates / uninstalls a set of one-shot bootstrap skills into the project's vendor-specific skill directories (Claude Code, Codex, Cursor, VS Code + GitHub Copilot).
 
 ## Quick start
 
@@ -25,7 +25,7 @@ git commit -m "Bootstrap ai-tools layout"
 
 # 5. Remove the builder skills — one-shot done.
 npx vinta-ai-workflows uninstall --tool claude-code
-npm uninstall @vinta/ai-workflows
+npm uninstall vinta-ai-workflows
 ```
 
 Prerequisites: Node ≥ 18, SSH access to the private repo (or a registry token if your team mirrors it).
@@ -55,7 +55,7 @@ After bootstrap, the project ships with **three foundation skills** that take a 
 
 You also get: an `AGENTS.md` tuned to the codebase, project-specific sub-agents and skills derived from the actual stack, and per-vendor wiring so Claude Code / Codex / Cursor / Copilot all see the same artifacts.
 
-**The project keeps getting better without re-bootstrapping.** `@vinta/ai-workflows` ships new foundation skills, sharper templates, schema additions, and best-practice updates lifted from real projects. A bootstrapped repo pulls those in via [`vinta-sync-ai-tools`](#staying-in-sync-with-upstream) — one command from the AI tool, per-change `Apply` / `Skip` / `Show diff` gating, opt-outs sticky across runs, schema migrations automatic. No manual re-scaffolding, no clobbered hand-tuning, no drift between projects on the same package version. This is treated as a first-class capability of the package, not an afterthought.
+**The project keeps getting better without re-bootstrapping.** `vinta-ai-workflows` ships new foundation skills, sharper templates, schema additions, and best-practice updates lifted from real projects. A bootstrapped repo pulls those in via [`vinta-sync-ai-tools`](#staying-in-sync-with-upstream) — one command from the AI tool, per-change `Apply` / `Skip` / `Show diff` gating, opt-outs sticky across runs, schema migrations automatic. No manual re-scaffolding, no clobbered hand-tuning, no drift between projects on the same package version. This is treated as a first-class capability of the package, not an afterthought.
 
 The bootstrap skills are **one-shot**. They scaffold the project once and are removed — they don't pollute the slash menu, and they can't accidentally overwrite hand-tuned output on a future run. Sync handles every later upgrade.
 
@@ -241,13 +241,13 @@ Stack templates may add specialists like `migration-author` (Django) or `deploy-
 
 ## Staying in sync with upstream
 
-Bootstrap is a snapshot. `@vinta/ai-workflows` keeps shipping — new foundation skills, refined templates, sharper agent prompts, schema additions, stack support, best-practice updates lifted from real projects. Pulling those into a previously-bootstrapped repo is a first-class flow, not an afterthought. **This is one of the most important capabilities of the package.**
+Bootstrap is a snapshot. `vinta-ai-workflows` keeps shipping — new foundation skills, refined templates, sharper agent prompts, schema additions, stack support, best-practice updates lifted from real projects. Pulling those into a previously-bootstrapped repo is a first-class flow, not an afterthought. **This is one of the most important capabilities of the package.**
 
 ### The flow at a glance
 
 ```bash
 # 1. Pull the new package version (or update the git+ssh ref).
-npm update @vinta/ai-workflows
+npm update vinta-ai-workflows
 
 # 2. Run the sync skill from your AI tool.
 #    Claude Code → /vinta-sync-ai-tools
@@ -285,7 +285,7 @@ At the end of a run:
 
 After any of these, schedule a sync run:
 
-- `npm update @vinta/ai-workflows` or pulling a newer git+ssh ref.
+- `npm update vinta-ai-workflows` or pulling a newer git+ssh ref.
 - A teammate bumped the version pin in `package.json`.
 - The package shipped a new foundation skill, stack, or schema field you want to opt into.
 - The project's `.vinta-ai-workflows.yaml` is missing — the sync skill's first step is a "Bootstrap the config file" path that reverse-extracts state from existing artifacts and interview-fills gaps before continuing.
@@ -341,7 +341,7 @@ In the project root, add `.npmrc`:
 Export `GITHUB_TOKEN` (a Personal Access Token with `read:packages` and the `repo` scope for private repos), then:
 
 ```bash
-npm install -D @vinta/ai-workflows
+npm install -D vinta-ai-workflows
 ```
 
 ### One-shot via npx (no install)
@@ -411,8 +411,8 @@ Refresh installed builder skills against the latest package version:
 
 ```bash
 # 1. Pull the new package version.
-npm  update @vinta/ai-workflows
-pnpm update @vinta/ai-workflows
+npm  update vinta-ai-workflows
+pnpm update vinta-ai-workflows
 # Or for git+ssh, just re-install with the new ref:
 npm install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git#v0.2.0
 
@@ -438,8 +438,8 @@ npx vinta-ai-workflows uninstall --tool all
 Then drop the package itself:
 
 ```bash
-npm  uninstall @vinta/ai-workflows
-pnpm remove    @vinta/ai-workflows
+npm  uninstall vinta-ai-workflows
+pnpm remove    vinta-ai-workflows
 ```
 
 ### What `uninstall` removes
@@ -510,7 +510,7 @@ Project scope only — there is no user-scope mode. The `vinta-` skills are inte
 
 ```
 vinta-ai-workflows/
-├── package.json             # @vinta/ai-workflows — exposes vinta-ai-workflows bin
+├── package.json             # vinta-ai-workflows — exposes vinta-ai-workflows bin
 ├── vinta-ai-workflows.mjs    # CLI: install / update / uninstall / list
 ├── README.md
 └── skills/
@@ -541,7 +541,7 @@ When this package gains new versions later, [`vinta-sync-ai-tools`](#staying-in-
 
 If you modify a `vinta-*` skill source under `skills/`:
 
-- **Symlink installs** (default): consumers get updates as soon as their `node_modules/@vinta/ai-workflows/` refreshes (next `npm install` / `git+ssh` re-pull).
+- **Symlink installs** (default): consumers get updates as soon as their `node_modules/vinta-ai-workflows/` refreshes (next `npm install` / `git+ssh` re-pull).
 - **Copy installs** (`--copy`): consumers must re-run `vinta-ai-workflows update` with the same flags. The CLI removes the previous copy and writes fresh content + marker.
 
 To bring a bootstrapped project up to date with newer builder-skill source, run [`vinta-sync-ai-tools`](#staying-in-sync-with-upstream) from the AI tool — it re-renders templates, offers new opt-ins, migrates the config schema, and delegates foundation-skill body diffs to `vinta-update-project-skills`.

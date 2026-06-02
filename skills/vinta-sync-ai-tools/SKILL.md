@@ -1,6 +1,6 @@
 ---
 name: vinta-sync-ai-tools
-description: Bring a project up to date with the latest `@vinta/ai-workflows` package version. Reads the project's `.vinta-ai-workflows.yaml` (the single source of truth for which surface area is enabled), reads the cloned package's `CHANGELOG.md` to enumerate releases since the project's recorded version, classifies each change against the project's opt-in surface (affects-project / opt-in-offer / config-schema-change / not-applicable), shows per-change diffs, asks the user one `AskUserQuestion` per change (`Apply` / `Skip` / `Show diff`), applies approved changes (re-render templates, add new foundation skills, patch setup script, migrate config schema), and bumps `vinta_ai_workflows_version` + `last_synced_at` at the end. Layers on top of [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md), which it invokes for foundation-skill body diffs. Use after `npm update @vinta/ai-workflows` or pulling a newer git+ssh ref.
+description: Bring a project up to date with the latest `vinta-ai-workflows` package version. Reads the project's `.vinta-ai-workflows.yaml` (the single source of truth for which surface area is enabled), reads the cloned package's `CHANGELOG.md` to enumerate releases since the project's recorded version, classifies each change against the project's opt-in surface (affects-project / opt-in-offer / config-schema-change / not-applicable), shows per-change diffs, asks the user one `AskUserQuestion` per change (`Apply` / `Skip` / `Show diff`), applies approved changes (re-render templates, add new foundation skills, patch setup script, migrate config schema), and bumps `vinta_ai_workflows_version` + `last_synced_at` at the end. Layers on top of [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md), which it invokes for foundation-skill body diffs. Use after `npm update vinta-ai-workflows` or pulling a newer git+ssh ref.
 ---
 
 # vinta-sync-ai-tools
@@ -20,7 +20,7 @@ If `.vinta-ai-workflows.yaml` is missing (older bootstrap or hand-built project)
 ## Inputs
 
 1. The project root (default: cwd).
-2. The cloned `@vinta/ai-workflows` source. Auto-detected via the same paths as [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md) — symlink realpath, copy-mode marker, or asked.
+2. The cloned `vinta-ai-workflows` source. Auto-detected via the same paths as [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md) — symlink realpath, copy-mode marker, or asked.
 3. The project's `.vinta-ai-workflows.yaml` (read; rewritten at the end).
 
 ## Steps
@@ -148,7 +148,7 @@ After all approved changes apply:
 
 Run on first sync against a project without `.vinta-ai-workflows.yaml`:
 
-1. Detect the installed package version: read `node_modules/@vinta/ai-workflows/package.json` (or the clone's). Use as `vinta_ai_workflows_version`.
+1. Detect the installed package version: read `node_modules/vinta-ai-workflows/package.json` (or the clone's). Use as `vinta_ai_workflows_version`.
 2. Detect project facts:
    - `project.name` → `package.json#name` or `Cargo.toml#package.name` or repo dir name; confirm.
    - `project.default_branch` → `git remote show origin | grep 'HEAD branch'` or `git rev-parse --abbrev-ref origin/HEAD`.
@@ -169,7 +169,7 @@ Then re-enter step 1 of the main flow.
 
 - **Hand-edited rendered skill bodies.** `vinta-sync-ai-tools` re-renders templates from the config — any inline edits the user made to the rendered `ai-tools/skills/<name>/SKILL.md` will be overwritten on `Apply`. Surface a warning when re-rendering would clobber a body the user touched (heuristic: file modified after the bootstrap commit). Default action: ask before overwriting.
 - **`OLD_VERSION` lower than the oldest changelog entry.** Some projects predate the changelog. Treat anything before the earliest documented version as "best-effort sync" and rely on file diff entirely.
-- **Multiple package versions in the clone.** If the user has both `node_modules/@vinta/ai-workflows/` and a separate `git clone`, they may diverge. Pick one source and pin to it for the run; surface the choice up front.
+- **Multiple package versions in the clone.** If the user has both `node_modules/vinta-ai-workflows/` and a separate `git clone`, they may diverge. Pick one source and pin to it for the run; surface the choice up front.
 - **Orphan diffs.** Surfaced, never auto-applied. Ask the maintainer to add a changelog entry; don't try to interpret an undocumented change.
 - **Breaking schema bump (`schema_version: N → N+1`).** Migration code must come from the package's release notes. If migration data is missing, stop — don't guess.
 - **Sticky opt-outs.** A user who accepted `add-env-var: disabled` once stays disabled across sync runs. To re-offer, manually flip to `enabled` in `.vinta-ai-workflows.yaml` and re-run sync.

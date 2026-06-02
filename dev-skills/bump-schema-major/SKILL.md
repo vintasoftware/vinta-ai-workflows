@@ -95,8 +95,8 @@ For each entry from Step 2:
 Update to point at v<N+1>:
 
 ```diff
--# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/<name>.v<N>.schema.json
-+# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/<name>.v<N+1>.schema.json
+-# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/<name>.v<N>.schema.json
++# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/<name>.v<N+1>.schema.json
 ```
 
 Any project that has not migrated yet keeps using v<N>; their existing local files are unaffected. New bootstraps emit v<N+1>-compatible YAML.

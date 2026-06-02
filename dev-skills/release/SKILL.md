@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a release of `@vinta/ai-workflows` — pick patch / minor / major bump, close the in-progress CHANGELOG section, bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on `main`, fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Surfaces the npm publish command for the user to run manually — never auto-publishes. Use when the user says "release", "cut a release", "tag v0.1.4", "publish".
+description: Cut a release of `vinta-ai-workflows` — pick patch / minor / major bump, close the in-progress CHANGELOG section, bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on `main`, fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Surfaces the npm publish command for the user to run manually — never auto-publishes. Use when the user says "release", "cut a release", "tag 0.1.4", "publish".
 ---
 
 # Release
@@ -26,7 +26,7 @@ Read the unreleased CHANGELOG section + the commit list from Step 0.6. Use `AskU
 
 - **patch** — bug fixes, doc fixes, internal refactors invisible to consumers.
 - **minor** — new skills, additive schema fields, new CLI flags with backward-compatible defaults.
-- **major** — removed skill, breaking schema change (new `v<N+1>` schema file), CLI flag rename without alias, default-behavior flip.
+- **major** — removed skill, breaking schema change (new `<N+1>` schema file), CLI flag rename without alias, default-behavior flip.
 
 Read the rule from `AGENTS.md` `## CHANGELOG + version policy` if uncertain — quote it back to the user.
 
@@ -75,7 +75,7 @@ chore(release): v<new>
 <one-paragraph summary pulled from the CHANGELOG section's lead bullet>
 EOF
 )"
-git tag -a "v<new>" -m "Release v<new>"
+git tag -a "<new>" -m "Release <new>"
 ```
 
 Confirm with the user before pushing.
@@ -84,7 +84,7 @@ Confirm with the user before pushing.
 
 ```bash
 git push origin main
-git push origin "v<new>"
+git push origin "<new>"
 ```
 
 If the team uses signed tags + a tag-protection rule, surface the failure and ask the user to push manually with their key.
@@ -109,8 +109,8 @@ The user owns this step. Don't auto-publish.
 ## Verification
 
 1. `python3 -c "import json; print(json.load(open('package.json'))['version'])"` → matches the new version.
-2. `git tag --sort=-v:refname | head -1` → `v<new>`.
-3. `git log -1 --oneline` → `chore(release): v<new>`.
+2. `git tag --sort=-v:refname | head -1` → `<new>`.
+3. `git log -1 --oneline` → `chore(release): <new>`.
 4. `head -20 CHANGELOG.md` → top section header dated today, version matches.
 5. `git status --porcelain` → empty.
 6. `git rev-list --left-right --count origin/main...HEAD` → `0\t0` (pushed).

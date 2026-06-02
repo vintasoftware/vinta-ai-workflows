@@ -1,11 +1,37 @@
 # Changelog
 
-All notable changes to `@vinta/ai-workflows` are documented in this file.
+All notable changes to `vinta-ai-workflows` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
+## [0.1.7] — 2026-06-01
+
+### Added
+
+- **`DESIGN.md` detection + Cursor Project Rules wiring during bootstrap.**
+  `vinta-bootstrap-ai-tools` Step 0 gains group **F. Design system doc
+  (`DESIGN.md`)**: if a `DESIGN.md` exists at the repo root, the
+  orchestrator asks via `AskUserQuestion` whether to wire it into AI
+  tooling (`Keep and wire into AI tooling` (recommended) /
+  `Keep as-is, don't reference` / `Drop`). The file itself is never
+  overwritten — the team owns its contents. When `wired`:
+  - `vinta-write-agents-md` inserts a "Design system" section in
+    `ai-tools/AGENTS.md` pointing at `DESIGN.md`.
+  - `vinta-install-ai-tools-setup` writes `.cursor/rules/design.mdc`
+    with the frontmatter + body from
+    [Design.md with Cursor — Option A: Project Rules (recommended)](https://designmd.app/blog/design-md-with-cursor/)
+    so Cursor auto-loads the design system before generating UI files.
+    Only emitted when `cursor` ∈ `vendors`. Globs default to
+    `**/*.tsx`, `**/*.jsx`, `**/*.vue`, `**/*.svelte`, `**/*.astro`,
+    `**/*.css`; the orchestrator asks once before shipping defaults
+    when the analysis surfaced a UI framework not covered.
+  Disposition lands in a new `project.design_md: wired |
+  kept-unreferenced | absent` field of `.vinta-ai-workflows.yaml`.
+  Outputs tree updated to show `DESIGN.md` preserved at repo root and
+  `.cursor/rules/design.mdc` (conditional). New top-level rule added
+  to the orchestrator: **`DESIGN.md` is sacrosanct** — read-only at
+  all times; only the sibling Cursor pointer is ever written.
 
 ### Added
 
@@ -280,7 +306,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`dev-skills/` — maintenance skills for this repo.** New top-level
-  directory holding skills agents load when editing `@vinta/ai-workflows`
+  directory holding skills agents load when editing `vinta-ai-workflows`
   itself. Excluded from the npm package via the `files` whitelist and
   from the CLI's `SKILLS_SRC` discovery (which only walks `skills/`), so
   these skills never ship to consumer projects.
@@ -885,7 +911,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Initial release of `@vinta/ai-workflows` as a private npm package
+- Initial release of `vinta-ai-workflows` as a private npm package
   exposing the `vinta-ai-workflows` CLI bin.
 - Seven `vinta-`-prefixed bootstrap skills under `skills/`:
   `vinta-analyze-codebase`, `vinta-bootstrap-ai-tools`, `vinta-derive-skills`,

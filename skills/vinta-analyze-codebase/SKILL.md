@@ -154,7 +154,7 @@ This is a load-bearing input for the rest of the bootstrap flow — surface ever
 
 For each skill, also classify:
 
-- `vinta-managed` — directory name starts with `vinta-` (installed by `@vinta/ai-workflows`; can be left alone or refreshed via that CLI).
+- `vinta-managed` — directory name starts with `vinta-` (installed by `vinta-ai-workflows`; can be left alone or refreshed via that CLI).
 - `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `add-e2e-test`, `add-env-var`).
 - `project-custom` — anything else; written by the team.
 

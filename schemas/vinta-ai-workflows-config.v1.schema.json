@@ -22,7 +22,7 @@
       "const": 1
     },
     "vinta_ai_workflows_version": {
-      "description": "Last `@vinta/ai-workflows` package version this project synced from. Compared against the cloned package version by `vinta-sync-ai-tools` to enumerate releases since.",
+      "description": "Last `vinta-ai-workflows` package version this project synced from. Compared against the cloned package version by `vinta-sync-ai-tools` to enumerate releases since.",
       "type": "string",
       "pattern": "^\\d+\\.\\d+\\.\\d+(-[A-Za-z0-9.-]+)?$"
     },
