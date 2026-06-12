@@ -99,6 +99,60 @@ Project-specific skills, generated from templates because their bodies cite real
 | `{{DEPENDENCY_LICENSE_BLOCK}}` | derived from `policies.dependency_licenses` | Top-level `## Adding new third-party dependencies` section. Empty string when `enforcement: off` or the block is absent. When `block` / `warn`: short paragraph naming the enforcement mode + the forbidden SPDX list + the pre-install check (`npm view <pkg> license`, PyPI metadata, etc.) + a one-line pointer to the **Dependency licenses** section in [AGENTS.md](AGENTS.md) for the full table including `allowed_overrides` and `notes`. See [resources/dependency-license-block.md](resources/dependency-license-block.md) for the canonical body. |
 | `{{DEPENDENCY_LICENSE_LAYER1_CHECK}}` | derived from `policies.dependency_licenses` | Layer 1 review checklist item. Empty string when `enforcement: off`. When `block` / `warn`: `6. **Dependency license scan**: \`git diff package.json pyproject.toml ...\` (project-relevant manifests) — for every added dep look up its SPDX license (\`npm view <pkg> license\`, PyPI metadata, repo \`LICENSE\`). A license in \`policies.dependency_licenses.forbidden_spdx\` and not in \`allowed_overrides\` is a BLOCKER (when \`block\`) or a SHOULD-FIX (when \`warn\`). A missing / \`UNKNOWN\` / undeclared license is **always a BLOCKER** regardless of enforcement mode — there is no override to silently bless undisclosed terms.` |
 | `{{DEPENDENCY_LICENSE_RULE_LINE}}` | derived from `policies.dependency_licenses` | Important-rules bullet. Empty string when `enforcement: off`. When `block`: `- **License check before any new dep.** Refuse \`npm add\` / \`pnpm add\` / \`pip install\` / \`poetry add\` / \`uv add\` / \`cargo add\` / \`go get\` when the package's SPDX license is in the forbidden list — see AGENTS.md **Dependency licenses**. User can grant a one-off override after acknowledging the violation; record the override in \`policies.dependency_licenses.allowed_overrides\` before re-running.` When `warn`: same line but `Proceed but record the violation in the phase report` instead of `Refuse`. |
+| `{{COMMIT_STRATEGY_*}}` family (`{{COMMIT_STRATEGY_STEP0_QUESTION}}`, `{{COMMIT_STRATEGY_STEP0_TRAILER}}`, `{{COMMIT_STRATEGY_CONFIRM_NOTE}}`, `{{BRANCH_NAMING_PATTERN_SUMMARY}}`, `{{BRANCH_NAMING_BLOCK}}`, `{{PER_PHASE_COMMIT_BLOCK}}`, `{{PR_OPEN_TIMING_BLOCK}}`, `{{PRS_CONTEXT_FILE_PATH_DESCRIPTION}}`, `{{TRACKING_BRANCH_FIELD}}`, `{{TRACKING_PHASE_BRANCH_FIELD}}`, `{{FINAL_REPORT_BRANCH_SUMMARY}}`, `{{BRANCH_CHECKLIST_LINE}}`, `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}`) | Step 0 (`policies.commit_strategy`) | Render based on the project's commit strategy (`stacked-branches` / `modular-commits` / `ask`). See the per-placeholder substitution table immediately after this row for the three columns. The `{{BRANCH_PUSH_HEADING}}` placeholder above is also part of this family — its substitution depends on the strategy. |
+
+### `{{COMMIT_STRATEGY_*}}` substitution table
+
+Per-placeholder rendering for each enum value of `policies.commit_strategy`. The `ask` column embeds **both** branch / commit / PR paths gated by inline runtime markers (`If \`run_options.commit_strategy_resolved = "modular-commits"\`:` ... `Else (\`stacked-branches\`):` ...) — same pattern already used for `pause_between_phases` / `generate_inline_comments`.
+
+| Placeholder | `stacked-branches` substitution | `modular-commits` substitution | `ask` substitution |
+|---|---|---|---|
+| `{{COMMIT_STRATEGY_STEP0_QUESTION}}` | empty string | empty string | a third opt-in block analogous to 4a/4b: `\n\n   c. **Commit strategy?** *"This project's commit_strategy is set to ask. Pick one for this run: one branch + one PR per phase (stacked), or one branch + one PR for the whole plan with one atomic commit per logical unit (modular)?"* Options: \`Stacked branches — one branch + PR per phase\`, \`Modular commits — atomic commits, one PR for whole plan\`. Cache answer in tracking under \`run_options.commit_strategy_resolved\`.` (note: the substitution starts with `\n\n` because the placeholder hugs the end of the preceding paragraph in the template — under stacked / modular the placeholder vanishes without leaving a stray blank line) |
+| `{{COMMIT_STRATEGY_STEP0_TRAILER}}` | empty string | empty string | ` Commit-strategy behavior follows \`run_options.commit_strategy_resolved\`.` (note: leading space — appended to the previous sentence) |
+| `{{COMMIT_STRATEGY_CONFIRM_NOTE}}` | empty string | empty string | ` + \`run_options.commit_strategy_resolved\`` (leading ` + ` — appends to the captured-options list) |
+| `{{BRANCH_NAMING_PATTERN_SUMMARY}}` | ``branch naming pattern (default: `plan/{plan-id-kebab}/phase-{phase-id}`)`` | ``plan branch (one branch for whole plan: `plan/{plan-id-kebab}`)`` | ``branch naming pattern (depends on `run_options.commit_strategy_resolved` — resolved at Step 0)`` |
+| `{{BRANCH_NAMING_BLOCK}}` | the current per-phase stacked block: `Branch naming: \`plan/{plan-id-kebab}/phase-{phase.id}\`.\n\n**First executed phase** (branches from \`{{DEFAULT_BRANCH}}\`):\n\`\`\`bash\ngit checkout {{DEFAULT_BRANCH}}\ngit pull --ff-only\ngit checkout -b plan/{plan-id-kebab}/phase-{phase.id}\n# subagent's commits land on this branch\ngit push -u origin plan/{plan-id-kebab}/phase-{phase.id}\n\`\`\`\n\n**Subsequent phases** (stacked on the previous phase's branch):\n\`\`\`bash\ngit checkout plan/{plan-id-kebab}/phase-{prev.id}\ngit checkout -b plan/{plan-id-kebab}/phase-{phase.id}\ngit push -u origin plan/{plan-id-kebab}/phase-{phase.id}\n\`\`\`` | single-branch block — see [Phase 3 substitution body](#modular-commits-branch-naming-block) | both blocks gated by `if run_options.commit_strategy_resolved == "modular-commits"` runtime markers |
+| `{{PER_PHASE_COMMIT_BLOCK}}` | the current 4-step stacked block (steps 7–10 of Step 1a): `7. Stage right files (NEVER \`git add -A\` — {{ANTI_GIT_ADD_ALL_REASON}}). Stage explicitly: \`git add {{STAGE_PATTERN}}\`.\n8. Commit with the repo's style — look at \`git log -10 --oneline\` first. {{COMMIT_STYLE_LINE}}.\n9. {{COAUTHOR_INSTRUCTION_LINE}}\n10. {{PUSH_INSTRUCTION_LINE}}` | the modular-commits multi-commit block — see [Phase 3 substitution body](#modular-commits-per-phase-commit-block) | both blocks gated by runtime markers |
+| `{{PR_OPEN_TIMING_BLOCK}}` | empty string (current behavior: PR opens per phase after review) | `**PR opens once after Phase 1 passes review.** Subsequent phases push commits to the same plan branch and append an "Phase {N} complete" comment to the PR (or the orchestrator re-runs \`open-pr.sh\` with the existing context file path — the script is idempotent for existing PRs).` | both blocks gated by runtime markers |
+| `{{PRS_CONTEXT_FILE_PATH_DESCRIPTION}}` | `` a `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` file `` | `` a single `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md` file (one PR per plan, not per phase) `` | `` either `.../phase-{phase.id}.md` or `.../plan.md` depending on `run_options.commit_strategy_resolved` `` |
+| `{{TRACKING_BRANCH_FIELD}}` | empty string (per-phase branch lives under `{{TRACKING_PHASE_BRANCH_FIELD}}`) | `top-level \`plan_branch:\` field` (single branch for whole plan) | both gated by runtime markers |
+| `{{TRACKING_PHASE_BRANCH_FIELD}}` | `, branch, base` (per-phase fields kept inline) | empty string (no per-phase branch under modular) | both gated by runtime markers |
+| `{{FINAL_REPORT_BRANCH_SUMMARY}}` | `branches pushed (with bases, in stack order)` | ``single plan branch `plan/{plan-id-kebab}` with commit log organized by phase`` | dynamic per resolved strategy |
+| `{{BRANCH_CHECKLIST_LINE}}` | `Stacked branch created; pushed.` | `Plan branch updated with phase commits; pushed.` | dynamic per resolved strategy |
+| `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}` | empty string | block of 3 extra checklist items (commit units planned upfront; each commit = one unit; tests in same commit as code; no "and" in commit messages) — see [Phase 3 substitution body](#modular-commits-checklist-block) | both variants gated by runtime markers |
+
+For `{{BRANCH_PUSH_HEADING}}` the substitutions are: `Push stacked branch` (stacked) / `Push to plan branch` (modular) / `Push branch` (ask — heading stays generic; the body inside the section explains both flows under runtime markers).
+
+### `{{COMMIT_STRATEGY_REFUSAL_BLOCK}}` (amend-plan only)
+
+`amend-plan-template.md` carries one additional placeholder not used by `implement-plan-template.md`. It renders the "this skill doesn't support this strategy yet" refusal block immediately after the description in the rendered SKILL.md.
+
+| `commit_strategy` | Substitution |
+|---|---|
+| `stacked-branches` | empty string (current behavior — full amend flow runs) |
+| `modular-commits` | a refusal section — see the [refusal-block body](#commit_strategy_refusal_block-body) below |
+| `ask` | the same refusal section, but its preamble reads tracking's `run_options.commit_strategy_resolved` first and only refuses when that value resolves to `modular-commits`; when it resolves to `stacked-branches` the section renders an empty string (full amend flow runs) |
+
+#### `{{COMMIT_STRATEGY_REFUSAL_BLOCK}}` body
+
+```markdown
+
+## Unsupported commit strategy
+
+**This skill does not yet support `commit_strategy = modular-commits`.** Detected from `.vinta-ai-workflows.yaml` `policies.commit_strategy` (or `TRACKING_{plan-id}.md` `run_options.commit_strategy_resolved` when the project policy is `ask` and a run is already in flight).
+
+Amending under modular commits requires rewriting an arbitrary number of inline atomic commits across a shared `plan/{plan-id-kebab}` branch. The git topology is fundamentally different from the per-phase stacked branches this skill is designed around — the rewrite plan, force-push targets, and downstream rebase fan-out all differ. Full support is tracked as a follow-up.
+
+**Resolve the amendment one of three ways:**
+
+1. **Append a new phase** — extend the plan with the change as a new `Phase N+1`, then run [implement-plan](../implement-plan/SKILL.md). Cleanest path; preserves the existing commit log.
+2. **Hand-craft the amendment** — `git rebase -i plan/{plan-id-kebab}` (or `git commit --fixup` + `git rebase --autosquash`) on the plan branch, force-push, and re-run review manually. Skip this skill entirely.
+3. **Re-run the plan from scratch on a new branch** — abandon the in-flight commits (leave them for audit), regenerate the plan with [plan-feature](../plan-feature/SKILL.md), implement forward.
+
+Refuse with this guidance; do not proceed.
+```
+
+The Phase 3 substitution bodies referenced above (`{{BRANCH_NAMING_BLOCK}}` modular variant, `{{PER_PHASE_COMMIT_BLOCK}}` modular variant, `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}` modular variant) live in [resources/implement-plan-template-modular-substitutions.md](resources/implement-plan-template-modular-substitutions.md) — a sister file that derive-skills reads when rendering `modular-commits` or `ask`.
 
 Render each template with substitutions, write to:
 

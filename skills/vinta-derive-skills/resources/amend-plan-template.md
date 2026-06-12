@@ -7,7 +7,7 @@ description: Adjust an existing implementation plan in `{{PLAN_DIR}}/` after imp
 
 Revise a plan in [`{{PLAN_DIR}}/`]({{PLAN_DIR}}/) after work has begun. Companion to [implement-plan](../implement-plan/SKILL.md): same agents, same review gates, same PR-context flow — but the orchestrator's job here is **history rewriting** instead of forward execution.
 
-The flow is destructive (force-push). Every modification is gated on user confirmation. Default disposition for any ambiguous case is "stop and ask" — never force-push without an explicit per-branch `Confirm` from the user.
+The flow is destructive (force-push). Every modification is gated on user confirmation. Default disposition for any ambiguous case is "stop and ask" — never force-push without an explicit per-branch `Confirm` from the user.{{COMMIT_STRATEGY_REFUSAL_BLOCK}}
 
 ## Working assumptions
 

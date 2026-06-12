@@ -105,6 +105,12 @@
           "type": "string",
           "enum": ["conventional", "imperative", "other"]
         },
+        "commit_strategy": {
+          "description": "How `implement-plan` structures branches and commits across phases. `stacked-branches` (default — current behavior): one branch + one PR per phase, stacked on top of each other. `modular-commits`: one branch + one PR for the whole plan; each phase contributes multiple atomic commits (one per logical unit — service, use-case wire-up, init/exports, serializer field, refactor, fix). Tests travel in the same commit as the code they test. `ask`: `implement-plan` prompts the user at Step 0 (alongside `pause_between_phases` / `generate_inline_comments`) and caches the resolved value in `TRACKING_{plan-id}.md` under `run_options.commit_strategy_resolved`. Omitting the field is equivalent to `stacked-branches` (backward-compatible for configs written before this field existed).",
+          "type": "string",
+          "enum": ["stacked-branches", "modular-commits", "ask"],
+          "default": "stacked-branches"
+        },
         "stage_pattern": {
           "description": "Default `git add` pattern shown to subagents (no `git add -A`).",
           "type": "string"

@@ -42,6 +42,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off-channel-confirmed SPDX`. Same behaviour reinforced in the Layer 1
   reviewer check: undeclared license = BLOCKER, no enforcement-mode
   downgrade.
+  
+- **New `policies.commit_strategy` field in `.vinta-ai-workflows.yaml`**
+  (`stacked-branches` | `modular-commits` | `ask`, default
+  `stacked-branches`). Drives how the rendered `implement-plan` skill
+  structures branches and commits across phases:
+  - `stacked-branches` — current behavior. One branch + one PR per
+    phase, stacked on top of each other.
+  - `modular-commits` — one branch + one PR for the whole plan; each
+    phase contributes multiple atomic commits (one per logical unit:
+    service, use-case wire-up, init/exports, serializer field,
+    refactor, fix). Tests travel in the same commit as the code they
+    test. The commit list becomes a table of contents for reviewers.
+  - `ask` — `implement-plan` prompts the user at Step 0 (alongside
+    `pause_between_phases` / `generate_inline_comments`) and caches the
+    resolved value in `TRACKING_{plan-id}.md` under
+    `run_options.commit_strategy_resolved`.
+  Additive on schema v1 — existing configs without the field default
+  to `stacked-branches` at read time (backward-compatible). Bootstrap
+  interview captures the answer in **C. Project conventions**.
 
 - **New optional foundation skill: `prepare-worktree`** (copied verbatim
   to `ai-tools/skills/prepare-worktree/SKILL.md` per project, opt-in via
@@ -176,6 +195,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   all times; only the sibling Cursor pointer is ever written.
 
 ### Changed
+
+- **`implement-plan` template rendered with new
+  `{{COMMIT_STRATEGY_*}}` placeholder family.** Branch naming, per-phase
+  push, subagent commit instructions, PR-open timing, tracking-file
+  branch field, and final-report branch summary now swap based on
+  `policies.commit_strategy`. Under `ask`, both code paths render in
+  the same body gated by `run_options.commit_strategy_resolved` —
+  mirrors the existing `pause_between_phases` /
+  `generate_inline_comments` opt-in pattern.
+- **`amend-plan` refuses to run when
+  `policies.commit_strategy != stacked-branches`** and points users at
+  appending a new phase via `implement-plan` (or hand-crafting the
+  rebase). Modular-commits amendment support is tracked as a follow-up
+  — rewriting an arbitrary number of inline commits on a shared branch
+  is out of scope for this release.
 
 - **Replaced all `§N` shorthand cross-references with named section
   links across the repo.** `§1`, `§4.3`, `§1f`, `§A.3`, etc. were

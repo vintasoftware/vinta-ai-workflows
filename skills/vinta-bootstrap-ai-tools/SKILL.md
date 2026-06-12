@@ -74,6 +74,12 @@ These bleed across sub-skills, so capture once now:
    - **Forbidden SPDX list.** Show the default seed (`GPL-2.0-only`, `GPL-3.0-only`, `AGPL-3.0-only`, `SSPL-1.0`) targeting viral copyleft licenses, then ask via open prose: *"Add or remove entries? Common additions: `LGPL-2.1-only`, `LGPL-3.0-only`, `BSL-1.1`, `EUPL-1.2`, `CC-BY-NC-*` (non-commercial)."* Skip when enforcement = `Off`.
    - **Existing overrides (optional).** Open prose: *"Any packages already in the manifest with a forbidden license the team has accepted? Format: `<package> <SPDX-id> <one-line reason>`. Leave blank if none."* Each entry lands in `policies.dependency_licenses.allowed_overrides[]`. Skip when enforcement = `Off`.
    - **Notes (optional).** Open prose: *"Any nuance the structured fields can't capture? (e.g. 'LGPL fine for dynamic linking only', 'viral-license deps go through @counsel before merge'.)"* Lands in `policies.dependency_licenses.notes`.
+8. **Commit strategy** — how `implement-plan` should structure branches + commits across phases. `AskUserQuestion` options:
+   - `Stacked branches (default) — one branch + one PR per phase, stacked on top of each other` — current behavior. Each phase ships one commit on its own branch; reviewers see one PR per phase.
+   - `Modular commits — one branch + one PR for the whole plan, atomic commit per logical unit` — each phase produces multiple commits (one per service / use-case wire-up / init / serializer field / refactor / fix). Tests travel in the same commit as the code they test. Reviewers read the commit list as a TOC.
+   - `Ask me each run` — `implement-plan` prompts at Step 0 (alongside `pause_between_phases` / `generate_inline_comments`) and caches the answer in `TRACKING_{plan-id}.md`.
+
+   Lands in `.vinta-ai-workflows.yaml` `policies.commit_strategy`. Drives the `implement-plan` template's branch / commit / PR-opening flow + the `amend-plan` skill's supported-strategies check.
 
 ### D. Optional foundation skills
 
@@ -213,6 +219,7 @@ commands:
 
 policies:
   pr_creation: <Project conventions → PR creation policy>
+  commit_strategy: <Project conventions → Commit strategy>  # stacked-branches | modular-commits | ask
   ai_coauthor: <Project conventions → Co-author trailer policy>
   commit_style: <conventional | imperative | other>
   stage_pattern: <derived>
