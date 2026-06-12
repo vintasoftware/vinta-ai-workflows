@@ -147,6 +147,8 @@ VAR_TWO
 
 **Pre-install check.** Before running `npm add` / `pnpm add` / `pip install` / `poetry add` / `uv add` / `cargo add` / `go get` (or equivalent) for any new dep, look up the package's declared license (`npm view <pkg> license`, PyPI metadata, `cargo metadata`, the package's repo `LICENSE`) and compare to the list above. If the license is in the list and the `(package, license)` pair is not in **Approved overrides**, stop and surface the conflict to the user.
 
+**Unknown / undeclared license.** When the lookup returns no license, an empty value, `UNKNOWN`, `SEE LICENSE IN <file>`, or only an unstructured `LICENSE` file with no SPDX identifier, **stop and ask the user** regardless of the enforcement mode above. Don't guess, don't fall back to "assume MIT" — the package may be all-rights-reserved by default. The user picks one of: skip the dep, treat as forbidden, or record an `allowed_overrides` entry with the SPDX they independently confirmed off-channel.
+
 {When `allowed_overrides` is non-empty:}
 
 **Approved overrides** (these forbidden-license deps are explicitly accepted):

@@ -34,7 +34,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out get no extra prose in their rendered skills. `enforcement: block`
   refuses the install + asks the user to acknowledge before recording an
   `allowed_overrides[]` entry and re-running; `warn` proceeds but flags
-  in the phase report.
+  in the phase report. **Missing / `UNKNOWN` / undeclared license is
+  always handled as a stop-and-ask, regardless of enforcement mode** —
+  unknown ≠ permissive, so the subagent surfaces the gap (registry
+  lookup output, upstream URL) and asks the user to pick `skip the dep`
+  / `treat as forbidden` / `record an `allowed_overrides` entry with an
+  off-channel-confirmed SPDX`. Same behaviour reinforced in the Layer 1
+  reviewer check: undeclared license = BLOCKER, no enforcement-mode
+  downgrade.
 
 ## [0.1.7] — 2026-06-01
 
