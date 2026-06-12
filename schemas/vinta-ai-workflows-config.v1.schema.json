@@ -203,6 +203,11 @@
           "description": "Root-cause-first debugging skill rendered from `vinta-derive-skills/resources/systematic-debugging-template.md`. When `enabled`, the per-project MCP tool selection lives in `skills.systematic-debugging.observability_mcp_tools`.",
           "type": "string",
           "enum": ["enabled", "disabled"]
+        },
+        "prepare-worktree": {
+          "description": "Provision a fully-runnable git worktree for parallel feature work — symlinks dep dirs, copies env files, forks dev / test DBs, namespaces docker-compose project + network, drops a summary YAML for mechanical teardown. Copy-verbatim foundation skill (bucket A). When `enabled`, project-level defaults (worktree root, deps strategy, compose network strategy) live under `skills.prepare-worktree`. Consumed by `implement-plan` when its Step 0 question (c) opts in — the orchestrator runs `prepare-worktree` once at the start of a plan run and threads the worktree path through every subagent's prompt so phases all stack inside the same isolated checkout.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
         }
       }
     },
@@ -240,7 +245,12 @@
           "additionalProperties": false,
           "properties": {
             "pause_between_phases": { "type": "boolean", "default": false },
-            "generate_inline_comments": { "type": "boolean", "default": false }
+            "generate_inline_comments": { "type": "boolean", "default": false },
+            "use_worktree": {
+              "description": "Default answer to Step 0 question (c) — whether `implement-plan` should provision an isolated git worktree (via `prepare-worktree`) and run every phase's subagent inside it. False = run in the current checkout. True = create one shared worktree at the start of the plan run; all phase branches stack inside it. Per-run prompt still asks; this is the suggested default shown.",
+              "type": "boolean",
+              "default": false
+            }
           }
         },
         "amend-plan": {
@@ -286,6 +296,42 @@
               "items": { "type": "string", "minLength": 1 },
               "uniqueItems": true,
               "default": []
+            }
+          }
+        },
+        "prepare-worktree": {
+          "description": "Configuration for the `prepare-worktree` foundation skill. Optional when `foundation_skills.prepare-worktree` is `enabled` — every field has a sensible default. Consumed by the skill at runtime to bias the per-worktree symlink-vs-copy-vs-fork decisions.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "worktree_root": {
+              "description": "Where new worktrees land. Default `.claude/worktrees` when claude-code is the primary harness (matches the EnterWorktree convention); other harnesses default to `../<repo-name>-wt-` (sibling dirs of the main checkout). The skill resolves `<root>/<name>` per provisioning call.",
+              "type": "string",
+              "minLength": 1
+            },
+            "deps_strategy": {
+              "description": "Default strategy for dep dirs (`node_modules/`, `vendor/`, `venv/`) when the active plan does NOT install new deps. `symlink` reuses main's install (fast, safe for read-only); `copy` clones it (safe for pnpm-style relative-symlink stores, fails for yarn PnP); `reinstall` runs the package manager fresh in the worktree. The skill flips to `reinstall` automatically when it detects dep churn in the plan body.",
+              "type": "string",
+              "enum": ["symlink", "copy", "reinstall"],
+              "default": "symlink"
+            },
+            "compose_network": {
+              "description": "Default docker-compose networking strategy for the worktree. `per-worktree` spins a fresh isolated network (safest, doubles infra); `shared-external` joins an externally-declared network so the worktree can talk to main's compose services (queues, caches, search); `host` uses host networking when the project already does. Skill writes the chosen strategy into the worktree's `docker-compose.override.yml` (or equivalent) when `compose_change` is set.",
+              "type": "string",
+              "enum": ["per-worktree", "shared-external", "host"],
+              "default": "per-worktree"
+            },
+            "test_db_strategy": {
+              "description": "Default policy for the test DB. `always-fork` provisions a dedicated test DB per worktree (no flaky cross-worktree races at the cost of one extra DB per worktree); `fork-on-schema-change` only forks when the plan touches migrations; `share` keeps using the main checkout's test DB and accepts the race risk (only sensible for solo work).",
+              "type": "string",
+              "enum": ["always-fork", "fork-on-schema-change", "share"],
+              "default": "fork-on-schema-change"
+            },
+            "summary_dir": {
+              "description": "Where per-worktree summary YAMLs land. Default `.vinta-ai-workflows/worktrees` — covered by the umbrella gitignore added in 0.1.3. The skill writes `<summary_dir>/<name>.yaml` per provisioned worktree; teardown reads it.",
+              "type": "string",
+              "minLength": 1,
+              "default": ".vinta-ai-workflows/worktrees"
             }
           }
         },
