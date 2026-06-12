@@ -84,12 +84,12 @@ derive-skills resolves the six `{{MODULAR_EXAMPLE_*}}` placeholders + the `{{MOD
 
 | Placeholder | `commit_style = conventional` | `commit_style = imperative` | `commit_style = other` |
 |---|---|---|---|
-| `{{MODULAR_EXAMPLE_NEW_SERVICE}}` | `` `feat(design-duplication): add service to copy files between dockets` `` | `Created service to copy design files between dockets` | both — `` `feat(design-duplication): add service to copy files between dockets` `` (Conventional) or `Created service to copy design files between dockets` (imperative) |
-| `{{MODULAR_EXAMPLE_USE_CASE}}` | `` `feat(design-duplication): wire complex fields into design duplication use case` `` | `Updated design duplication use case to call complex fields services` | both |
-| `{{MODULAR_EXAMPLE_INIT}}` | `` `chore(design-duplication): expose new services in init file` `` | `Updated init file to expose new duplication services` | both |
-| `{{MODULAR_EXAMPLE_SERIALIZER}}` | `` `feat(design-duplication): add duplication flag for contacts to serializer` `` | `Added duplication flag for contacts to serializer` | both |
-| `{{MODULAR_EXAMPLE_REFACTOR}}` | `` `refactor(design-duplication): apply shared batch size to duplication services` `` | `Applied batch size constant to all duplication services` | both |
-| `{{MODULAR_EXAMPLE_BUGFIX}}` | `` `fix(2d-reports): include legacy classifier rows in infringing section` `` | `Fixed missing legacy classifier rows in infringing section` | both |
+| `{{MODULAR_EXAMPLE_NEW_SERVICE}}` | `` `feat(record-copy): add service to copy files between records` `` | `Created service to copy files between records` | both — `` `feat(record-copy): add service to copy files between records` `` (Conventional) or `Created service to copy files between records` (imperative) |
+| `{{MODULAR_EXAMPLE_USE_CASE}}` | `` `feat(record-copy): wire optional fields into record copy use case` `` | `Updated record copy use case to call optional fields services` | both |
+| `{{MODULAR_EXAMPLE_INIT}}` | `` `chore(record-copy): expose new services in init file` `` | `Updated init file to expose new copy services` | both |
+| `{{MODULAR_EXAMPLE_SERIALIZER}}` | `` `feat(record-copy): add copy flag for tags to serializer` `` | `Added copy flag for tags to serializer` | both |
+| `{{MODULAR_EXAMPLE_REFACTOR}}` | `` `refactor(record-copy): apply shared batch size to copy services` `` | `Applied batch size constant to all copy services` | both |
+| `{{MODULAR_EXAMPLE_BUGFIX}}` | `` `fix(reports): include archived rows in summary section` `` | `Fixed missing archived rows in summary section` | both |
 | `{{MODULAR_COMMIT_MESSAGE_FORMAT_BLOCK}}` | the **Conventional Commits** block below | the **Verb-first imperative** block below | both blocks under `### Option A` / `### Option B` headings + a `Pick one style and use it consistently within the plan branch` lead-in |
 
 #### Conventional Commits block (used when `commit_style = conventional` or `other`)
@@ -110,16 +110,16 @@ Spec: [conventionalcommits.org](https://www.conventionalcommits.org/en/v1.0.0/)
 | `chore` | Maintenance — init files, exports, config |
 | `docs` | Documentation only |
 
-**Scope:** the feature area or module (e.g. `2d-reports`, `design-duplication`). Optional but recommended.
+**Scope:** the feature area or module (e.g. `reports`, `record-copy`). Optional but recommended.
 
 **Breaking changes:** append `!` before the colon — `feat(auth)!: replace session tokens`.
 
 ```
-feat(design-duplication): add service to copy files between dockets
-feat(design-duplication): add service to copy classifications between dockets
-feat(design-duplication): wire complex fields into design duplication use case
-chore(design-duplication): expose new services in init file
-refactor(design-duplication): apply shared batch size to duplication services
+feat(record-copy): add service to copy files between records
+feat(record-copy): add service to copy tags between records
+feat(record-copy): wire optional fields into record copy use case
+chore(record-copy): expose new services in init file
+refactor(record-copy): apply shared batch size to copy services
 ```
 
 #### Verb-first imperative block (used when `commit_style = imperative` or `other`)
@@ -133,11 +133,11 @@ refactor(design-duplication): apply shared batch size to duplication services
 **Preferred verbs:** Created, Updated, Added, Removed, Fixed, Refactored.
 
 ```
-Created service to copy design files between dockets
-Created service to copy design classifications between dockets
-Updated design duplication use case to call complex fields services
-Updated init file to expose new duplication services
-Applied batch size constant to all duplication services
+Created service to copy files between records
+Created service to copy tags between records
+Updated record copy use case to call optional fields services
+Updated init file to expose new copy services
+Applied batch size constant to all copy services
 ```
 
 #### Bad (both styles)
@@ -145,7 +145,7 @@ Applied batch size constant to all duplication services
 ```
 WIP
 add stuff
-Implement full duplication feature   ← too broad, should be split
+Implement full record copy feature   ← too broad, should be split
 ```
 
 ## `{{PR_OPEN_TIMING_BLOCK}}` (modular)
