@@ -82,6 +82,8 @@ You are implementing {phase.id}: {phase.title} of plan {plan.id}.
 
 Project skills available: {{PROJECT_SKILLS_LIST}}
 
+{{DEPENDENCY_LICENSE_BLOCK}}
+
 ## Working instructions
 1. Read existing code paths your changes touch — do not write before reading.
 2. Implement using Read/Edit/Write. Match existing patterns.
@@ -156,6 +158,7 @@ Three layers, all required, in order. The orchestrator never edits — every iss
 3. **Verify the outer gate** ran + green. Look in the report for explicit confirmation that `{{BUILD_CMD}}` AND `{{TEST_CMD}}` were executed + passed{{E2E_LAYER1_NOTE}}. Vague confirmation → **re-run yourself**.
 4. **Scope creep**: file touched outside expected surface area? Unrelated formatting churn? Surface it.
 5. **No-secrets scan**: `git diff` for `password|secret|token|api_key|AKIA|BEGIN [A-Z]+ KEY`.
+{{DEPENDENCY_LICENSE_LAYER1_CHECK}}
 {{COAUTHOR_LAYER1_CHECK}}
 
 #### Layer 2 — Plan compliance walkthrough
@@ -346,6 +349,7 @@ After all executable phases complete:
 - **Stop on Tier-4 failure.**
 - **Honor opt-in flags.** `run_options.pause_between_phases` controls the [Per-phase pause gate](#1i-per-phase-pause-gate-opt-in); `run_options.generate_inline_comments` controls whether the [Open PR via context file](#1f-open-pr-via-context-file) step drafts inline comments (always writes the file when that step runs at all — empty comments when off).
 - **PR-context file + `open-pr.sh` is the only PR-creation path.** No raw `gh pr create` / `glab mr create` calls outside the bundled script. The file is durable; the script is the publisher.
+{{DEPENDENCY_LICENSE_RULE_LINE}}
 - **[Open PR via context file](#1f-open-pr-via-context-file) gating** = combination of project PR policy ({{PR_POLICY_BLOCK}}) and `generate_inline_comments`. See the matrix in that step. Skip it entirely only when policy = branches only AND comments = off.
 - **Never use `§N` shorthand to point at sections** — neither in this skill body nor in any rendered file (tracking, prs-context, branch description). Always use the section's full name with a markdown link when possible. `§N` references are hard to read for humans and brittle when section numbering shifts.
 

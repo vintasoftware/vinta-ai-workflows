@@ -112,6 +112,59 @@
         "anti_git_add_all_reason": {
           "description": "One-line reason `git add -A` is forbidden in this repo (e.g. secrets, build artifacts in tree).",
           "type": "string"
+        },
+        "dependency_licenses": {
+          "description": "Third-party dependency license policy. Captured at bootstrap; rendered into `ai-tools/AGENTS.md` (`## Dependency licenses` section) and the `implement-plan` / `amend-plan` skill bodies so the implementer / reviewer agents check a new dep's SPDX license against `forbidden_spdx` before running any install command (`npm add`, `pnpm add`, `pip install`, `poetry add`, `uv add`, `cargo add`, `go get`, etc.). When `enforcement: block`, the agent must refuse the install and surface the violation to the user; `warn` records the violation in the phase report but proceeds; `off` skips the check entirely.",
+          "type": "object",
+          "required": ["enforcement", "forbidden_spdx"],
+          "additionalProperties": false,
+          "properties": {
+            "enforcement": {
+              "description": "How the implementer / reviewer agents react when a new dep's license is in `forbidden_spdx`. `block` (default) — refuse install, ask user to confirm override before proceeding. `warn` — proceed but flag in the phase report. `off` — skip the check.",
+              "type": "string",
+              "enum": ["block", "warn", "off"],
+              "default": "block"
+            },
+            "forbidden_spdx": {
+              "description": "SPDX license identifiers (https://spdx.org/licenses/) the project refuses to take on as a third-party dep. Bootstrap proposes a default list (GPL-2.0-only, GPL-3.0-only, AGPL-3.0-only, SSPL-1.0) targeting viral copyleft licenses; the user confirms / edits before write. Empty array disables the check even when `enforcement` is `block` or `warn` (use `enforcement: off` instead for clarity).",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true,
+              "default": ["GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only", "SSPL-1.0"]
+            },
+            "allowed_overrides": {
+              "description": "Explicit per-package exceptions to `forbidden_spdx`. Each entry whitelists one package + license pair the team has accepted (legal review, dual-license clause, in-house carve-out). The implementer agent skips the block when the candidate package + license matches an entry; the reviewer agent treats the entry as load-bearing context (don't silently drop).",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["package", "license", "reason"],
+                "additionalProperties": false,
+                "properties": {
+                  "package": {
+                    "description": "Package identifier as it appears in the manifest (npm name, PyPI distribution, Cargo crate, Go module path).",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "license": {
+                    "description": "SPDX identifier this override applies to. Must be present in `forbidden_spdx` for the override to mean anything.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reason": {
+                    "description": "One-line justification (e.g. 'legal review 2025-Q4', 'GPL exception clause covers our use', 'wraps a CLI invoked at build time only — not linked').",
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "uniqueItems": true,
+              "default": []
+            },
+            "notes": {
+              "description": "Free-form prose surfaced verbatim in the AGENTS.md `## Dependency licenses` section. Use for nuance the structured fields can't capture (e.g. 'LGPL is fine for dynamic linking but not for static linking — check the consuming module before adding', 'all viral-license deps go through @counsel before merge').",
+              "type": "string"
+            }
+          }
         }
       }
     },
