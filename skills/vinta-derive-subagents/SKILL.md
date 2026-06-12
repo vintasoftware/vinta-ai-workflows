@@ -44,10 +44,10 @@ Every project gets these three. Bodies are project-tailored; structure is stable
 
 Default coder for one phase of an `ai-plans/` plan. Reads AGENTS.md + plan body, executes Changes/Tests/Acceptance, runs inner loop + outer gate, reports back. Never branches, pushes, or opens PRs (orchestrator owns git remotes). Never adds AI co-author trailers (when policy forbids).
 
-YAML shape — full contract at [`schemas/sub-agent.v1.schema.json`](../../schemas/sub-agent.v1.schema.json). Required fields: `schema_version`, `name`, `description`, `access`, `body`. Authoring tip: prepend `# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/sub-agent.v1.schema.json` for IDE validation.
+YAML shape — full contract at [`schemas/sub-agent.v1.schema.json`](../../schemas/sub-agent.v1.schema.json). Required fields: `schema_version`, `name`, `description`, `access`, `body`. Authoring tip: prepend `# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/sub-agent.v1.schema.json` for IDE validation.
 
 ```yaml
-# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/sub-agent.v1.schema.json
+# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/sub-agent.v1.schema.json
 schema_version: 1
 name: implementer
 description: |

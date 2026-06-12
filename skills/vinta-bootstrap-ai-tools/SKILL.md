@@ -69,7 +69,12 @@ These bleed across sub-skills, so capture once now:
 4. **PR creation policy** — agents open PRs, or only push branches and humans open PRs?
 5. **Co-author trailer policy** — repo allows AI co-author trailers in commits, or strictly human-only?
 6. **Deploy targets** — Vercel, AWS, Kubernetes, Heroku, custom, none.
-7. **Commit strategy** — how `implement-plan` should structure branches + commits across phases. `AskUserQuestion` options:
+7. **Third-party dependency license policy.** Should agents check the SPDX license of any new dep against a forbidden list before running `npm add` / `pnpm add` / `pip install` / `poetry add` / `uv add` / `cargo add` / `go get` (etc.)?
+   - **Enforcement.** `AskUserQuestion` options: `Block (recommended)` — refuse install + surface violation, ask user to confirm override before proceeding; `Warn` — proceed but flag in the phase report; `Off` — skip the check entirely.
+   - **Forbidden SPDX list.** Show the default seed (`GPL-2.0-only`, `GPL-3.0-only`, `AGPL-3.0-only`, `SSPL-1.0`) targeting viral copyleft licenses, then ask via open prose: *"Add or remove entries? Common additions: `LGPL-2.1-only`, `LGPL-3.0-only`, `BSL-1.1`, `EUPL-1.2`, `CC-BY-NC-*` (non-commercial)."* Skip when enforcement = `Off`.
+   - **Existing overrides (optional).** Open prose: *"Any packages already in the manifest with a forbidden license the team has accepted? Format: `<package> <SPDX-id> <one-line reason>`. Leave blank if none."* Each entry lands in `policies.dependency_licenses.allowed_overrides[]`. Skip when enforcement = `Off`.
+   - **Notes (optional).** Open prose: *"Any nuance the structured fields can't capture? (e.g. 'LGPL fine for dynamic linking only', 'viral-license deps go through @counsel before merge'.)"* Lands in `policies.dependency_licenses.notes`.
+8. **Commit strategy** — how `implement-plan` should structure branches + commits across phases. `AskUserQuestion` options:
    - `Stacked branches (default) — one branch + one PR per phase, stacked on top of each other` — current behavior. Each phase ships one commit on its own branch; reviewers see one PR per phase.
    - `Modular commits — one branch + one PR for the whole plan, atomic commit per logical unit` — each phase produces multiple commits (one per service / use-case wire-up / init / serializer field / refactor / fix). Tests travel in the same commit as the code they test. Reviewers read the commit list as a TOC.
    - `Ask me each run` — `implement-plan` prompts at Step 0 (alongside `pause_between_phases` / `generate_inline_comments`) and caches the answer in `TRACKING_{plan-id}.md`.
@@ -114,7 +119,7 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Replace from scratch` — discard existing, draft fresh from inventory + interview.
 
 - **Skills** (each under any vendor `skills/` dir):
-  - `Migrate to ai-tools/skills/<name>/` — move into the canonical layout; `setup-ai-tools.mjs` will re-link to the chosen vendors. Vendor-prefixed dir (`vinta-*`) is left alone — installed by the `@vinta/ai-workflows` CLI.
+  - `Migrate to ai-tools/skills/<name>/` — move into the canonical layout; `setup-ai-tools.mjs` will re-link to the chosen vendors. Vendor-prefixed dir (`vinta-*`) is left alone — installed by the `vinta-ai-workflows` CLI.
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
 
@@ -128,6 +133,39 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   Foundation-shape (`implementer`, `reviewer`, `fixer`) gets the `Replace with Vinta foundation version` option as well.
 
 Surface decisions per artifact, **not** as a single batch. The user might want to migrate one custom skill but keep two others where they are.
+
+### F. Design system doc (`DESIGN.md`)
+
+Scan the repo root for `DESIGN.md` (case-insensitive). Per [Design.md with Cursor](https://designmd.app/blog/design-md-with-cursor/), this file holds the project's design system (colors, typography, spacing, components) in a Markdown format AI agents can consume before generating UI. **Never overwrite or rewrite an existing `DESIGN.md`** — the team owns its contents.
+
+If present, ask via `AskUserQuestion`:
+
+- `Keep and wire into AI tooling` (recommended) — leave file untouched at repo root; reference it from `ai-tools/AGENTS.md`; when `cursor` is in **Scope → Vendor coverage**, write `.cursor/rules/design.mdc` (Cursor Project Rules, Option A from the linked blog post) so Cursor auto-loads it before generating UI files.
+- `Keep as-is, don't reference` — leave the file alone; no AGENTS.md mention, no Cursor rule.
+- `Drop` — delete (rare; confirm twice before removing).
+
+If absent, no prompt — don't fabricate a `DESIGN.md`. Record the gap so [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) can mention it as a TODO if the user wants design-system guidance.
+
+The disposition lands in `project.design_md` of `.vinta-ai-workflows.yaml` (free-form string: `wired | kept-unreferenced | absent`). [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) reads it when `wired` and inserts a "Design system" section pointing at `DESIGN.md`. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) reads it when `wired` + `cursor` ∈ `vendors` and writes `.cursor/rules/design.mdc` with this exact body:
+
+```markdown
+---
+description: Design system rules — read DESIGN.md before generating UI
+globs: ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.astro", "**/*.css"]
+---
+
+Before generating any visual component, read the DESIGN.md file at the project root.
+
+Rules:
+- Use ONLY the colors defined in DESIGN.md
+- Follow the typographic scale exactly
+- Apply spacing values from the Spacing section
+- Follow component patterns from the Components section
+- Never violate the Do's and Don'ts section
+- When in doubt, reference DESIGN.md — do not invent new values
+```
+
+Globs may need tuning for the project's actual UI file extensions (Svelte-only projects, RN `.tsx`, etc.). Ask the user once if the analysis surfaced a UI framework not covered by the default glob list; otherwise ship the defaults.
 
 After Step 0: read back the captured decisions (including every per-artifact disposition), confirm via `AskUserQuestion` (`Looks good`, `Some corrections (I'll list)`, `Stop, rethink`).
 
@@ -146,7 +184,7 @@ This file is the **only** source of truth for project-wide settings. Every downs
 Write the file now (before any sub-skill runs). Populate from the interview groups **Scope**, **Stack detection**, **Project conventions**, **Optional foundation skills**, and **Existing AI artifacts**:
 
 ```yaml
-# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
+# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
 
 schema_version: 1
 vinta_ai_workflows_version: <pkg version detected at install time>
@@ -159,6 +197,7 @@ project:
   stack_summary: <inventory.frameworks one-liner>
   ai_plans_dir: <ai-plans | apps/<service>/ai-plans | ...>
   pr_template_paths: <inventory.existing_ai_artifacts.pr_templates[].path>  # empty array if none found
+  design_md: <Step 0.F → wired | kept-unreferenced | absent>
 
 commands:
   lint: <Project conventions → Source of truth for code style>
@@ -176,6 +215,17 @@ policies:
   commit_style: <conventional | imperative | other>
   stage_pattern: <derived>
   anti_git_add_all_reason: <derived>
+  # Only emit `dependency_licenses` when enforcement != Off (the `off` value is
+  # supported by the schema but the agent never needs the rest of the block
+  # when there is no check to run — keep the config slim).
+  dependency_licenses:
+    enforcement: <Project conventions → license policy enforcement → block | warn | off>
+    forbidden_spdx: <license policy forbidden list — array of SPDX IDs the user confirmed at bootstrap>
+    allowed_overrides:                       # empty array when the user listed no exceptions
+      - package: <name>
+        license: <SPDX ID — must appear in forbidden_spdx>
+        reason: <one-line justification>
+    notes: <free-form prose, omit when blank>
 
 vendors: <Scope → Vendor coverage list>
 
@@ -293,6 +343,11 @@ ai-tools/
 └── scripts/
     └── setup-ai-tools.mjs               ← copied from install-ai-tools-setup resources
 
+DESIGN.md                                 ← preserved at repo root if pre-existing (never overwritten)
+.cursor/rules/design.mdc                  ← only when DESIGN.md exists, user opted Wire it in,
+                                              and `cursor` ∈ vendors (Cursor Project Rules, Option A
+                                              from https://designmd.app/blog/design-md-with-cursor/)
+
 ai-plans/                                 ← created by migrate-plans-specs (step 6)
 ├── YYYY-MM-DD-FEATURE_NAME_SPEC.md      ← migrated from docs/, specs/, root, etc.
 └── YYYY-MM-DD-FEATURE_NAME_PLAN.md      ← future docs land here too (foundation
@@ -319,6 +374,7 @@ Stack-specific skills + agents land in the target only when the user provides te
 - **Foundation agents are universal.** `implementer` / `reviewer` / `fixer` always. Stack specialists (`deploy-author` for Medplum, `migration-author` for Django) only when the stack matches.
 - **Don't run install-ai-tools-setup until AGENTS.md + agents YAMLs + skills exist.** The setup script reads these files; running it on an empty `ai-tools/` produces nothing useful.
 - **Multi-vendor coverage matches the user's selection.** The install step's `--only` flag is set from the Step 0 **Scope → Vendor coverage** answer.
+- **`DESIGN.md` is sacrosanct.** If the repo already has one, never overwrite, rewrite, or "clean up" its contents. Only ever read it to verify shape, and only ever write the sibling `.cursor/rules/design.mdc` pointer when the user opts in + `cursor` is a selected vendor.
 
 ## Pitfalls
 

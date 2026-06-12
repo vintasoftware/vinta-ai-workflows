@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@vinta/ai-workflows` are documented in this file.
+All notable changes to `vinta-ai-workflows` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -9,6 +9,40 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Third-party dependency license policy captured at bootstrap, surfaced
+  to AI agents at implementation time.** `vinta-bootstrap-ai-tools` Step 0
+  group **C. Project conventions** gains question 7 — enforcement
+  (`block` (default) / `warn` / `off`), a confirm-and-edit prompt for the
+  forbidden SPDX list (seed: `GPL-2.0-only`, `GPL-3.0-only`,
+  `AGPL-3.0-only`, `SSPL-1.0`), per-package overrides, and free-form
+  notes. Captured in a new `policies.dependency_licenses` block of
+  `vinta-ai-workflows-config.v1.schema.json`. Consumers:
+  - `vinta-write-agents-md` renders a new **Dependency licenses** section
+    in `ai-tools/AGENTS.md` (enforcement mode + forbidden list + approved
+    overrides table + notes + pre-install check pointers like
+    `npm view <pkg> license`, PyPI metadata, etc.).
+  - `vinta-derive-skills` substitutes three new placeholders into the
+    `implement-plan` + `amend-plan` templates: `{{DEPENDENCY_LICENSE_BLOCK}}`
+    (top-level "Adding new third-party dependencies" section directly
+    before Working instructions — canonical body at
+    [vinta-derive-skills/resources/dependency-license-block.md](skills/vinta-derive-skills/resources/dependency-license-block.md)),
+    `{{DEPENDENCY_LICENSE_LAYER1_CHECK}}` (reviewer Layer 1 mechanical
+    check that greps the manifest diff for forbidden licenses), and
+    `{{DEPENDENCY_LICENSE_RULE_LINE}}` (an Important-rules bullet).
+  All three placeholders render the empty string when
+  `enforcement: off` or the config block is absent — projects that opt
+  out get no extra prose in their rendered skills. `enforcement: block`
+  refuses the install + asks the user to acknowledge before recording an
+  `allowed_overrides[]` entry and re-running; `warn` proceeds but flags
+  in the phase report. **Missing / `UNKNOWN` / undeclared license is
+  always handled as a stop-and-ask, regardless of enforcement mode** —
+  unknown ≠ permissive, so the subagent surfaces the gap (registry
+  lookup output, upstream URL) and asks the user to pick `skip the dep`
+  / `treat as forbidden` / `record an `allowed_overrides` entry with an
+  off-channel-confirmed SPDX`. Same behaviour reinforced in the Layer 1
+  reviewer check: undeclared license = BLOCKER, no enforcement-mode
+  downgrade.
+  
 - **New `policies.commit_strategy` field in `.vinta-ai-workflows.yaml`**
   (`stacked-branches` | `modular-commits` | `ask`, default
   `stacked-branches`). Drives how the rendered `implement-plan` skill
@@ -27,6 +61,34 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Additive on schema v1 — existing configs without the field default
   to `stacked-branches` at read time (backward-compatible). Bootstrap
   interview captures the answer in **C. Project conventions**.
+
+## [0.1.7] — 2026-06-01
+
+### Added
+
+- **`DESIGN.md` detection + Cursor Project Rules wiring during bootstrap.**
+  `vinta-bootstrap-ai-tools` Step 0 gains group **F. Design system doc
+  (`DESIGN.md`)**: if a `DESIGN.md` exists at the repo root, the
+  orchestrator asks via `AskUserQuestion` whether to wire it into AI
+  tooling (`Keep and wire into AI tooling` (recommended) /
+  `Keep as-is, don't reference` / `Drop`). The file itself is never
+  overwritten — the team owns its contents. When `wired`:
+  - `vinta-write-agents-md` inserts a "Design system" section in
+    `ai-tools/AGENTS.md` pointing at `DESIGN.md`.
+  - `vinta-install-ai-tools-setup` writes `.cursor/rules/design.mdc`
+    with the frontmatter + body from
+    [Design.md with Cursor — Option A: Project Rules (recommended)](https://designmd.app/blog/design-md-with-cursor/)
+    so Cursor auto-loads the design system before generating UI files.
+    Only emitted when `cursor` ∈ `vendors`. Globs default to
+    `**/*.tsx`, `**/*.jsx`, `**/*.vue`, `**/*.svelte`, `**/*.astro`,
+    `**/*.css`; the orchestrator asks once before shipping defaults
+    when the analysis surfaced a UI framework not covered.
+  Disposition lands in a new `project.design_md: wired |
+  kept-unreferenced | absent` field of `.vinta-ai-workflows.yaml`.
+  Outputs tree updated to show `DESIGN.md` preserved at repo root and
+  `.cursor/rules/design.mdc` (conditional). New top-level rule added
+  to the orchestrator: **`DESIGN.md` is sacrosanct** — read-only at
+  all times; only the sibling Cursor pointer is ever written.
 
 ### Changed
 
@@ -212,7 +274,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`dev-skills/` — maintenance skills for this repo.** New top-level
-  directory holding skills agents load when editing `@vinta/ai-workflows`
+  directory holding skills agents load when editing `vinta-ai-workflows`
   itself. Excluded from the npm package via the `files` whitelist and
   from the CLI's `SKILLS_SRC` discovery (which only walks `skills/`), so
   these skills never ship to consumer projects.
@@ -817,7 +879,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Initial release of `@vinta/ai-workflows` as a private npm package
+- Initial release of `vinta-ai-workflows` as a private npm package
   exposing the `vinta-ai-workflows` CLI bin.
 - Seven `vinta-`-prefixed bootstrap skills under `skills/`:
   `vinta-analyze-codebase`, `vinta-bootstrap-ai-tools`, `vinta-derive-skills`,

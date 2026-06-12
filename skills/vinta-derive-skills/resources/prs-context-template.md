@@ -1,5 +1,5 @@
 ---
-# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/prs-context-frontmatter.v1.schema.json
+# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/prs-context-frontmatter.v1.schema.json
 schema_version: 1                        # see schemas/prs-context-frontmatter.v1.schema.json
 plan_id: <plan-id>                       # filename feature portion, kebab-case
 feature_name: <FEATURE_NAME>             # UPPERCASE_WITH_UNDERSCORES, matches plan/spec
@@ -54,7 +54,7 @@ YAML inside this fence is validated against
 [`schemas/prs-context-comments.v1.schema.json`](../../../../schemas/prs-context-comments.v1.schema.json).
 
 ```yaml
-# yaml-language-server: $schema=../../../../node_modules/@vinta/ai-workflows/schemas/prs-context-comments.v1.schema.json
+# yaml-language-server: $schema=../../../../node_modules/vinta-ai-workflows/schemas/prs-context-comments.v1.schema.json
 - file: <relative path from repo root>
   start_line: <line number on the new side>
   end_line: <optional; omit for single-line>

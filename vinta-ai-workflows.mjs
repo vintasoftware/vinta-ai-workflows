@@ -4,7 +4,7 @@
 // VS Code + Copilot). Project scope only; skills are namespaced with the
 // `vinta-` prefix so they don't collide with the user's own project skills.
 //
-// Usage (after `npm i -D @vinta/ai-workflows`):
+// Usage (after `npm i -D vinta-ai-workflows`):
 //   npx vinta-ai-workflows install   --tool <name> [opts]
 //   npx vinta-ai-workflows update    --tool <name> [opts]   # uninstall + install
 //   npx vinta-ai-workflows uninstall --tool <name> [opts]
@@ -211,7 +211,7 @@ function install(opts) {
         cpSync(src, dest, { recursive: true });
         writeFileSync(
           join(dest, MARKER),
-          `Installed by @vinta/ai-workflows (vinta-ai-workflows.mjs)\nsource: ${src}\n`,
+          `Installed by vinta-ai-workflows (vinta-ai-workflows.mjs)\nsource: ${src}\n`,
         );
       } else {
         const rel = relative(dirname(dest), src);

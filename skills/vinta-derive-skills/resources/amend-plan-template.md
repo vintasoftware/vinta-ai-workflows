@@ -211,6 +211,8 @@ Use `git commit --amend` ONLY when:
 - The amendment is small (≤30% of the original diff size), AND
 - The user explicitly authorized amend in Step 0.
 
+{{DEPENDENCY_LICENSE_BLOCK}}
+
 ## Working instructions (same loops as implement-plan)
 1. Read existing code paths your changes touch.
 2. Edit. Match existing patterns.
@@ -325,6 +327,7 @@ After every queue entry processes:
 - **PR-context file is a derived artifact.** Refresh it after the rewrite; never edit the file as a substitute for fixing the diff.
 - **Subagents commit but never push.** Orchestrator owns force-push. {{PR_RULE_TAIL}}.
 {{COAUTHOR_RULE_LINE}}
+{{DEPENDENCY_LICENSE_RULE_LINE}}
 - **Stop on Tier-4 failure** (model escalation, same rules as the [implement-plan "Pick model" step](../implement-plan/SKILL.md#1b-pick-model-from-plans-per-phase-suggestion)).
 - **Stop on rebase failure** the fixer can't resolve in one retry. Don't ship half-rebased branches.
 

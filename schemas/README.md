@@ -58,7 +58,7 @@ plan_id: checkout-flow
 Local-path schemas work too if the project has the `vinta-ai-workflows` clone vendored:
 
 ```yaml
-# yaml-language-server: $schema=./node_modules/@vinta/ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
+# yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
 ```
 
 Authoring tools (`vinta-bootstrap-ai-tools`, `vinta-derive-subagents`, `implement-plan`, `amend-plan`) embed the directive when they emit a fresh file.

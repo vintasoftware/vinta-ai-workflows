@@ -4,7 +4,7 @@ Conventions for any AI agent (Claude Code, Codex, Cursor, Copilot, …) editing 
 
 ## What this repo is
 
-`@vinta/ai-workflows` — a private npm package that ships **bootstrap skills** (Agent Skills format) into other projects' AI-tooling directories (`.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/`). The package itself contains:
+`vinta-ai-workflows` — a private npm package that ships **bootstrap skills** (Agent Skills format) into other projects' AI-tooling directories (`.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/`). The package itself contains:
 
 - `vinta-ai-workflows.mjs` — single-file Node CLI (`install` / `update` / `uninstall` / `list`). Dependency-free. Node ≥ 18.
 - `skills/<name>/SKILL.md` — the `vinta-`-prefixed bootstrap skills users invoke after installing.
