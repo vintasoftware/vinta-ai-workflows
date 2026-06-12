@@ -69,6 +69,11 @@ These bleed across sub-skills, so capture once now:
 4. **PR creation policy** — agents open PRs, or only push branches and humans open PRs?
 5. **Co-author trailer policy** — repo allows AI co-author trailers in commits, or strictly human-only?
 6. **Deploy targets** — Vercel, AWS, Kubernetes, Heroku, custom, none.
+7. **Third-party dependency license policy.** Should agents check the SPDX license of any new dep against a forbidden list before running `npm add` / `pnpm add` / `pip install` / `poetry add` / `uv add` / `cargo add` / `go get` (etc.)?
+   - **Enforcement.** `AskUserQuestion` options: `Block (recommended)` — refuse install + surface violation, ask user to confirm override before proceeding; `Warn` — proceed but flag in the phase report; `Off` — skip the check entirely.
+   - **Forbidden SPDX list.** Show the default seed (`GPL-2.0-only`, `GPL-3.0-only`, `AGPL-3.0-only`, `SSPL-1.0`) targeting viral copyleft licenses, then ask via open prose: *"Add or remove entries? Common additions: `LGPL-2.1-only`, `LGPL-3.0-only`, `BSL-1.1`, `EUPL-1.2`, `CC-BY-NC-*` (non-commercial)."* Skip when enforcement = `Off`.
+   - **Existing overrides (optional).** Open prose: *"Any packages already in the manifest with a forbidden license the team has accepted? Format: `<package> <SPDX-id> <one-line reason>`. Leave blank if none."* Each entry lands in `policies.dependency_licenses.allowed_overrides[]`. Skip when enforcement = `Off`.
+   - **Notes (optional).** Open prose: *"Any nuance the structured fields can't capture? (e.g. 'LGPL fine for dynamic linking only', 'viral-license deps go through @counsel before merge'.)"* Lands in `policies.dependency_licenses.notes`.
 
 ### D. Optional foundation skills
 
@@ -212,6 +217,17 @@ policies:
   commit_style: <conventional | imperative | other>
   stage_pattern: <derived>
   anti_git_add_all_reason: <derived>
+  # Only emit `dependency_licenses` when enforcement != Off (the `off` value is
+  # supported by the schema but the agent never needs the rest of the block
+  # when there is no check to run — keep the config slim).
+  dependency_licenses:
+    enforcement: <Project conventions → license policy enforcement → block | warn | off>
+    forbidden_spdx: <license policy forbidden list — array of SPDX IDs the user confirmed at bootstrap>
+    allowed_overrides:                       # empty array when the user listed no exceptions
+      - package: <name>
+        license: <SPDX ID — must appear in forbidden_spdx>
+        reason: <one-line justification>
+    notes: <free-form prose, omit when blank>
 
 vendors: <Scope → Vendor coverage list>
 

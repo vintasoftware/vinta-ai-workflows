@@ -5,6 +5,44 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### Added
+
+- **Third-party dependency license policy captured at bootstrap, surfaced
+  to AI agents at implementation time.** `vinta-bootstrap-ai-tools` Step 0
+  group **C. Project conventions** gains question 7 — enforcement
+  (`block` (default) / `warn` / `off`), a confirm-and-edit prompt for the
+  forbidden SPDX list (seed: `GPL-2.0-only`, `GPL-3.0-only`,
+  `AGPL-3.0-only`, `SSPL-1.0`), per-package overrides, and free-form
+  notes. Captured in a new `policies.dependency_licenses` block of
+  `vinta-ai-workflows-config.v1.schema.json`. Consumers:
+  - `vinta-write-agents-md` renders a new **Dependency licenses** section
+    in `ai-tools/AGENTS.md` (enforcement mode + forbidden list + approved
+    overrides table + notes + pre-install check pointers like
+    `npm view <pkg> license`, PyPI metadata, etc.).
+  - `vinta-derive-skills` substitutes three new placeholders into the
+    `implement-plan` + `amend-plan` templates: `{{DEPENDENCY_LICENSE_BLOCK}}`
+    (top-level "Adding new third-party dependencies" section directly
+    before Working instructions — canonical body at
+    [vinta-derive-skills/resources/dependency-license-block.md](skills/vinta-derive-skills/resources/dependency-license-block.md)),
+    `{{DEPENDENCY_LICENSE_LAYER1_CHECK}}` (reviewer Layer 1 mechanical
+    check that greps the manifest diff for forbidden licenses), and
+    `{{DEPENDENCY_LICENSE_RULE_LINE}}` (an Important-rules bullet).
+  All three placeholders render the empty string when
+  `enforcement: off` or the config block is absent — projects that opt
+  out get no extra prose in their rendered skills. `enforcement: block`
+  refuses the install + asks the user to acknowledge before recording an
+  `allowed_overrides[]` entry and re-running; `warn` proceeds but flags
+  in the phase report. **Missing / `UNKNOWN` / undeclared license is
+  always handled as a stop-and-ask, regardless of enforcement mode** —
+  unknown ≠ permissive, so the subagent surfaces the gap (registry
+  lookup output, upstream URL) and asks the user to pick `skip the dep`
+  / `treat as forbidden` / `record an `allowed_overrides` entry with an
+  off-channel-confirmed SPDX`. Same behaviour reinforced in the Layer 1
+  reviewer check: undeclared license = BLOCKER, no enforcement-mode
+  downgrade.
+
 ## [0.1.7] — 2026-06-01
 
 ### Added
