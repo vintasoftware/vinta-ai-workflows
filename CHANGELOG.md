@@ -7,6 +7,32 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
+<!-- pre-release: 0.2.0-alpha2 on 2026-06-13 -->
+
+### Changed
+
+- **Fixed bug on setup-ai-tools.mjs**: Sub agents were being generated 
+with an invalid description and were not being loaded by claude-code and 
+possibly other AI tools.
+
+- **`implement-plan` template — stray main-checkout-write guard (only
+  when `run_options.use_worktree = true`).** A subagent told to work
+  inside the worktree can resolve an absolute path back to the **main
+  checkout** and silently edit files there; because worktrees have
+  independent working trees those edits never reach the phase commit —
+  they sit as uncommitted thrash in the main checkout and read as a
+  silent implementer/fixer failure. Layer 1 mechanical checks gain a new
+  item: after **every** implementer **and** fixer subagent returns, run
+  `git -C <main-checkout-path> status --short | grep -vE '^\?\?'`
+  (tracked modifications only); any output is a BLOCKER — recover intent
+  via `git -C <main-checkout-path> diff`, re-dispatch the agent with an
+  explicit worktree-path instruction if the change belongs there, then
+  `git -C <main-checkout-path> restore` so the main checkout returns
+  clean between phases. `<main-checkout-path>` is the repo root the skill
+  was invoked from, never `run_options.worktree_path`. Skipped entirely
+  when `use_worktree = false`. Mirrored in the per-phase Quick checklist
+  Layer 1 line and a new **Important rules** bullet.
+
 <!-- pre-release: 0.2.0-alpha1 on 2026-06-12 -->
 
 ### Added
