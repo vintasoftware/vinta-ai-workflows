@@ -193,6 +193,11 @@ Three layers, all required, in order. The orchestrator never edits — every iss
 3. **Verify the outer gate** ran + green. Look in the report for explicit confirmation that `{{BUILD_CMD}}` AND `{{TEST_CMD}}` were executed + passed{{E2E_LAYER1_NOTE}}. Vague confirmation → **re-run yourself**.
 4. **Scope creep**: file touched outside expected surface area? Unrelated formatting churn? Surface it.
 5. **No-secrets scan**: `git diff` for `password|secret|token|api_key|AKIA|BEGIN [A-Z]+ KEY`.
+6. **Stray main-checkout writes (only when `run_options.use_worktree = true`)**: a subagent is told to work inside the worktree, but a buggy agent (often a smaller model) can resolve an absolute path back to the **main checkout** and silently edit files there (worktrees have independent working trees, so those edits never reach the phase commit — they sit as uncommitted thrash in the main checkout, and the "missing" edits read as a silent fixer/implementer failure). After **every** implementer **and** fixer subagent returns, run `git -C <main-checkout-path> status --short | grep -vE '^\?\?'` (tracked modifications only). Any output is a BLOCKER for this phase:
+   - Diff the stray files (`git -C <main-checkout-path> diff -- <path>`) to recover intent.
+   - If the edit belongs in the worktree, re-dispatch the fixer/implementer with an explicit instruction to write to the worktree path (the change is missing from the phase commit until it does).
+   - Once recovered (or confirmed superseded by the correctly-committed worktree version), discard the stray edits with `git -C <main-checkout-path> restore -- <path>` so the main checkout returns clean. Never leave the main checkout dirty between phases — a later phase's Layer 1 can't tell new thrash from old.
+   `<main-checkout-path>` is the repo root the skill was invoked from (NOT `run_options.worktree_path`). Skip this check entirely when `run_options.use_worktree = false`.
 {{DEPENDENCY_LICENSE_LAYER1_CHECK}}
 {{COAUTHOR_LAYER1_CHECK}}
 
@@ -377,6 +382,7 @@ After all executable phases complete:
 - **Honor opt-in flags.** `run_options.pause_between_phases` controls the [Per-phase pause gate](#1i-per-phase-pause-gate-opt-in); `run_options.generate_inline_comments` controls whether the [Open PR via context file](#1f-open-pr-via-context-file) step drafts inline comments (always writes the file when that step runs at all — empty comments when off); `run_options.use_worktree` controls whether the [Provision worktree](#step-05--provision-worktree-when-run_optionsuse_worktree--true) step runs and whether every later `git` / lint / test / build / migrate call uses the worktree path.
 - **One worktree per plan run.** When `use_worktree = true`, provision once in the [Provision worktree](#step-05--provision-worktree-when-run_optionsuse_worktree--true) step and reuse for every phase. Never spawn a second worktree mid-plan; never silently fall back to the main checkout on prepare-worktree failure (ask the user).
 - **Don't auto-tear-down the worktree.** Step 2 surfaces the teardown command; the user runs it when they're ready (after reviewer feedback is addressed, after the PR merges, etc.).
+- **Catch stray main-checkout writes when `use_worktree = true`.** A subagent can resolve a path back to the main checkout and silently edit there, leaving the change out of the phase commit. Layer 1 runs `git -C <main-checkout-path> status --short` after every implementer and fixer; any tracked modification is a BLOCKER — recover the intent, re-dispatch to the worktree, then restore the main checkout clean. `<main-checkout-path>` is the repo root the skill was invoked from, never `run_options.worktree_path`.
 - **PR-context file + `open-pr.sh` is the only PR-creation path.** No raw `gh pr create` / `glab mr create` calls outside the bundled script. The file is durable; the script is the publisher.
 {{DEPENDENCY_LICENSE_RULE_LINE}}
 - **[Open PR via context file](#1f-open-pr-via-context-file) gating** = combination of project PR policy ({{PR_POLICY_BLOCK}}) and `generate_inline_comments`. See the matrix in that step. Skip it entirely only when policy = branches only AND comments = off.
@@ -392,7 +398,7 @@ After all executable phases complete:
 - [ ] Subagent spawned, report received.
 - [ ] Inner loop green: scoped lint + new tests individually + scoped suite.
 - [ ] **Outer gate green:** `{{BUILD_CMD}}` AND `{{TEST_CMD}}`{{E2E_OUTER_GATE_CHECKLIST}} both passed.
-- [ ] Layer 1 review: full diff read; no scope creep; no secrets; outer gate confirmed{{COAUTHOR_CHECKLIST_NOTE}}.
+- [ ] Layer 1 review: full diff read; no scope creep; no secrets; outer gate confirmed{{COAUTHOR_CHECKLIST_NOTE}}; when `use_worktree = true`, `git -C <main-checkout-path> status --short` clean (no stray main-checkout writes) after the implementer and after every fixer.
 - [ ] Layer 2 review: every "Changes" ticked; every "Tests" materialized; acceptance line satisfiable; conventions, reusable skills, e2e + screenshot compliance (if applicable), flag wiring all checked.
 - [ ] Layer 3 review: adversarial review run; BLOCKERs fixed; SHOULD-FIX either fixed or noted.
 - [ ] After any fix-up: Layers 1 + 2 + outer gate re-run.
