@@ -204,13 +204,23 @@ function autoGenHeader(srcPath, comment = '#') {
 
 // ── Vendor emitters ──────────────────────────────────────────────────────
 
+// Fold a (possibly multi-line) value into a YAML-safe single-line scalar.
+// The agent `description` in the source YAML is authored as multi-line prose;
+// interpolated raw into markdown frontmatter it produces invalid YAML
+// (unindented continuation lines + embedded colons), so the harness silently
+// skips the agent. A JSON string is also a valid YAML double-quoted flow
+// scalar, so JSON.stringify gives correct escaping for free.
+function yamlInlineScalar(value) {
+  return JSON.stringify(String(value).replace(/\s+/g, ' ').trim());
+}
+
 function emitClaude(name, doc, body) {
   const cfg = resolveVendorConfig(doc, 'claude');
   const lines = [
     '---',
     autoGenHeader(`ai-tools/agents/${name}.yaml`),
     `name: ${doc.name}`,
-    `description: ${doc.description}`,
+    `description: ${yamlInlineScalar(doc.description)}`,
   ];
   if (cfg.tools) lines.push(`tools: ${cfg.tools}`);
   if (cfg.model) lines.push(`model: ${cfg.model}`);
@@ -224,7 +234,7 @@ function emitCursor(name, doc, body) {
     '---',
     autoGenHeader(`ai-tools/agents/${name}.yaml`),
     `name: ${doc.name}`,
-    `description: ${doc.description}`,
+    `description: ${yamlInlineScalar(doc.description)}`,
   ];
   if (cfg.model) lines.push(`model: ${cfg.model}`);
   if (cfg.readonly !== undefined) lines.push(`readonly: ${cfg.readonly}`);
@@ -238,7 +248,7 @@ function emitCopilot(name, doc, body) {
   const lines = [
     '---',
     autoGenHeader(`ai-tools/agents/${name}.yaml`),
-    `description: ${doc.description}`,
+    `description: ${yamlInlineScalar(doc.description)}`,
   ];
   if (cfg.tools) lines.push(`tools: ${JSON.stringify(cfg.tools)}`);
   if (cfg.model) lines.push(`model: ${cfg.model}`);
