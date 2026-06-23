@@ -199,6 +199,43 @@ Quick walk-through of common gotchas. For each, follow the same fork/share patte
 
 If the **Plan inspection** step inferred the plan doesn't touch any of these: symlink / share. If unsure: fork. Cheap.
 
+## Step 5.5 — Filesystem sandbox (OS-level write guard)
+
+Symlinking + threading the worktree path through prompts keeps *cooperative* agents in the worktree, but it's not a guarantee: a buggy agent (often a smaller model spawned for a phase) can resolve an absolute path back to the **main checkout** and silently write there. Those writes never reach the worktree's commit — they sit as uncommitted thrash in the main checkout, and the "missing" edits read as a silent agent failure. Prompt instructions don't stop it; they rely on the agent's goodwill.
+
+The deterministic, **harness-agnostic** fix is to confine the *process* (not the tool) at the OS filesystem layer: make the main checkout read-only for any command run inside the sandbox, regardless of which agent CLI issues the writes. The bundled [scripts/sandbox-run.sh](scripts/sandbox-run.sh) does this — `sandbox-exec` on macOS, `bwrap` (bubblewrap) on Linux.
+
+**Model: deny-main, allow-rest.** The whole filesystem stays writable EXCEPT the main checkout, with the worktree (and the shared `.vinta-ai-workflows` dir) punched back to writable — even though the worktree usually lives *under* the main checkout (`.claude/worktrees/<name>/`). This deliberately does **not** lock `HOME` / caches / `/tmp`, so package managers, build tools, and test runners behave exactly as unsandboxed. The only thing the cage blocks is a write to the main checkout's own tracked tree — which is exactly the bug.
+
+Wrapper contract:
+
+```bash
+sandbox-run.sh \
+  --deny  <main-checkout-root> \
+  --allow <worktree-path> \
+  --allow <summary_dir-and-prs-context-parent>   # the .vinta-ai-workflows dir
+  -- <command> [args...]
+```
+
+The command runs with main-checkout writes blocked. A stray write fails with `Operation not permitted` (macOS) / `EROFS` (Linux) — the agent sees an ordinary error and retries against the correct path; the worktree stays the only writable copy of the repo.
+
+**Capability probe (run here, record the result):**
+
+```bash
+command -v sandbox-exec >/dev/null && tier=enforced   # macOS
+command -v bwrap        >/dev/null && tier=enforced   # Linux
+# neither → tier=none (sandbox unavailable)
+```
+
+- `tier=enforced` → the OS guarantee holds. The caller ([implement-plan](../implement-plan/SKILL.md)) can downgrade its post-run stray-write check to a backstop.
+- `tier=none` → no sandbox tool on this machine (locked-down CI without `bwrap`'s user-namespace support, Windows, etc.). `sandbox-run.sh` still runs the command (best-effort, unsandboxed) and prints a loud warning; prevention falls back to the caller's reactive stray-write detection. **Don't fail provisioning over this** — surface the degraded tier and continue.
+
+Escape hatch: `VINTA_SANDBOX=off` makes the wrapper a transparent pass-through (for the rare tool that needs access the sandbox blocks). Record the achieved tier in the summary (next step) so the caller knows whether it's running guaranteed or best-effort.
+
+**Sandbox-mode shared-state rule.** Because main is read-only inside the cage, any path the *run* writes must live in the worktree or in an `--allow`'d dir — never a symlink that resolves back into the main checkout. Two follow-ons:
+- The existing `deps_change=true` → copy/reinstall logic already gives the worktree its own writable `node_modules/` when a phase installs deps; non-churn phases keep the read-only symlink (agents shouldn't write deps anyway — correct).
+- The `.vinta-ai-workflows/` dir (summary YAMLs, prs-context) is shared/symlinked but **written** during a run, so it must be passed as an `--allow` path (or made a real writable dir in the worktree). Record which.
+
 ## Step 6 — Write the summary file
 
 `.vinta-ai-workflows/worktrees/<name>.yaml` (committed to `.gitignore` via the existing `.vinta-ai-workflows/` umbrella). Schema:
@@ -240,6 +277,11 @@ state:
     redis_db_index: <int>
     s3_prefix: wt-<name>/
     cron_disabled: <bool>
+  sandbox:
+    tier: enforced | none          # from the Filesystem sandbox step's capability probe
+    launcher: sandbox-exec | bwrap | null   # null when tier=none
+    deny: [<main-checkout-root>]   # subtree(s) made read-only inside the cage
+    allow: [<worktree-path>, <.vinta-ai-workflows-dir>]   # writable exceptions
 notes: |
   <freeform — anything the user / agent should know>
 ```
@@ -253,6 +295,12 @@ Branch: `<branch>` (based on `<base-ref>`).
 
 ## What's forked vs shared
 <one-line per row in `state` above>
+
+## Write protection
+Sandbox tier: `<enforced | none>` (launcher: `<sandbox-exec | bwrap | none>`).
+When `enforced`, commands run via `sandbox-run.sh` cannot write to the main
+checkout — only this worktree (+ `.vinta-ai-workflows`). When `none`, no OS
+guard is active; the orchestrator's post-run stray-write check is the backstop.
 
 ## How to run things
 - Lint: `<project lint command>` (runs inside this worktree)
@@ -276,6 +324,7 @@ One paragraph to the caller:
 
 - Worktree path + branch.
 - One line per fork decision (deps / env / dev DB / test DB / compose / other).
+- **Sandbox tier** (`enforced` via `sandbox-exec` / `bwrap`, or `none`) — so the caller knows whether main-checkout writes are OS-blocked or only caught after the fact.
 - Anything the user must do manually before running the app (`source .envrc`, `direnv allow`, login to a cloud CLI in the worktree, etc.).
 - Teardown command.
 
@@ -300,6 +349,8 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 - **Every fork decision lands in `.vinta-ai-workflows/worktrees/<name>.yaml`.** Teardown reads it; humans grep it; agents resuming a stalled plan read it. No decision lives only in conversation memory.
 - **Worktree root governed by runtime conventions.** claude-code uses `.claude/worktrees/`; other harnesses use sibling dirs. Don't fight the harness — match it.
 - **Don't mutate the main checkout from this skill.** Every write goes to the worktree or to `.vinta-ai-workflows/`. Forking a Postgres DB is the one exception (the new DB lives in the same server) — document it loudly in the summary.
+- **Sandbox is the deterministic guard; the prompt is not.** When a sandbox tool exists, the [Filesystem sandbox](#step-55--filesystem-sandbox-os-level-write-guard) step's `sandbox-run.sh` makes the main checkout read-only for any spawned command — this is what actually *prevents* stray main-checkout writes across harnesses. Telling the agent "stay in the worktree" is best-effort only. Always probe + record the tier; never claim prevention when `tier=none`.
+- **Deny-main, allow-rest — never allow-worktree-only.** Locking everything except the worktree breaks package managers / caches / `$HOME`. Lock only the main checkout subtree; re-allow the worktree (nested under it) and the written `.vinta-ai-workflows` dir. Don't tighten further without testing the project's real lint / test / build / migrate commands inside the cage.
 - **Worktree base = `origin/<default-branch>` by default.** `HEAD` only when the user explicitly confirms; record the choice in the summary.
 - **Refuse to provision a second worktree for the same branch.** Git enforces this — don't try to work around it.
 - **Don't auto-install heavy deps** (e.g. `pnpm install` from scratch) without confirmation when the project's main `node_modules/` is already populated — symlink first, ask if reinstall is needed.
@@ -311,6 +362,9 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 - **Forgetting `COMPOSE_PROJECT_NAME`.** Containers from worktree-A overwrite worktree-B's containers; volumes get nuked. Set it in `.env` so every `docker compose` call inherits.
 - **Sharing a Redis DB without per-worktree prefix.** Tests writing `user:123` collide across worktrees. Pick an index OR a key prefix.
 - **Copying `node_modules` for yarn PnP / absolute-path setups.** The copy carries baked-in paths from the main checkout. Reinstall instead — pnpm's relative-symlink store is the safe-to-copy exception.
+- **Forgetting to `--allow` the `.vinta-ai-workflows` dir under sandbox.** It's shared/symlinked but the run *writes* it (summary YAMLs, prs-context). If it's not an `--allow` exception, those writes hit the read-only main subtree and fail mid-run. Pass it alongside the worktree path.
+- **Assuming the sandbox is always there.** `bwrap` needs user namespaces enabled — some hardened kernels and CI images disable them. Probe (`command -v bwrap`); on `tier=none` degrade to the post-run check, don't silently believe writes are blocked.
+- **Over-tightening into an allow-worktree-only cage.** Tempting, but it breaks every tool that writes outside the repo (npm cache, `~/.config`, `$TMPDIR`). The deny-main model is the one that needs no per-stack allowlist tuning.
 - **Leaving cron / background workers on in the worktree.** They poll the shared DB and double-process jobs. Default to off.
 - **Provisioning a worktree, running migrations, then realizing the user wanted to share the DB.** The **Database fork** step asks BEFORE migrating; rollback of a forked-DB migration is mechanical (drop the DB), but rollback of a shared-DB migration is a half-day.
 - **Symlinking `.env` and then editing it.** The edit leaks into main. Copy (not symlink) the moment `env_change = true`.

@@ -64,7 +64,8 @@ When true, invoke [prepare-worktree](../prepare-worktree/SKILL.md) **once**, bef
    - `worktree_path` — absolute path the phase subagents will `cd` into.
    - `worktree_branch` — the base branch prepare-worktree created; phase branches stack off this.
    - `worktree_summary` — `.vinta-ai-workflows/worktrees/<name>.yaml` (read by teardown).
-4. **Persist to tracking.** Write `run_options.worktree_path`, `run_options.worktree_branch`, `run_options.worktree_summary` into `{{PLAN_DIR}}/TRACKING_{plan-id}.md` (Step 1g schema gains these three fields). All later phases read them — never re-provision mid-plan.
+   - `sandbox_tier` — `enforced` (the [Filesystem sandbox](../prepare-worktree/SKILL.md#step-55--filesystem-sandbox-os-level-write-guard) step found `sandbox-exec` / `bwrap` and will OS-block main-checkout writes) or `none` (no sandbox tool — prevention degrades to the Layer 1 backstop). Drives the [Spawn subagent](#1c-spawn-subagent) wrapping + Layer 1 below.
+4. **Persist to tracking.** Write `run_options.worktree_path`, `run_options.worktree_branch`, `run_options.worktree_summary`, `run_options.sandbox_tier` into `{{PLAN_DIR}}/TRACKING_{plan-id}.md` (Step 1g schema gains these fields). All later phases read them — never re-provision mid-plan.
 5. **Report to user.** Quote the prepare-worktree summary back: which dirs symlinked vs copied vs forked; which DB(s) forked + their names; compose project name; teardown command. Hold here until the user confirms (`AskUserQuestion`: `Looks good — start phase 1`, `Stop — let me adjust`).
 
 **Worktree topology rule.** When `use_worktree = true`, every phase branches off the previous phase **inside the worktree**, not off `{{DEFAULT_BRANCH}}` in the main checkout. The first phase branches off `<worktree_branch>` (which prepare-worktree based on `origin/{{DEFAULT_BRANCH}}`); subsequent phases stack as usual. All `git` calls in the **{{BRANCH_PUSH_HEADING}}** step use `git -C <worktree_path>` (or `cd` into the worktree first). All inner / outer test commands in the [Prepare agent prompt](#1a-prepare-agent-prompt-token-efficient) step's working-instructions block run inside the worktree so they hit the forked DB / env / compose stack.
@@ -94,6 +95,9 @@ You are implementing {phase.id}: {phase.title} of plan {plan.id}.
   call runs there. Do NOT touch the main checkout — its DB, env, and compose stack
   are intentionally separated. See `<run_options.worktree_path>/WORKTREE.md` for
   what's forked vs shared (deps, dev DB, test DB, compose project name, env file).
+  {If run_options.sandbox_tier = enforced:} Writes to the main checkout are
+  OS-blocked — if you see `Operation not permitted` / `EROFS` on a write, you
+  used a main-checkout path by mistake; redo it against this worktree path.
   Branch base for this phase: `<phase-specific base>` — orchestrator already
   created your phase branch there; commit straight to it.
 
@@ -174,6 +178,21 @@ Use whatever agent-spawning primitive the runtime exposes. Pass:
 - Phase prompt from the [Prepare agent prompt](#1a-prepare-agent-prompt-token-efficient) step.
 - The right **agent type**.
 
+**Sandbox the spawn (only when `run_options.use_worktree = true`).** The prompt tells the subagent to stay in the worktree, but that's cooperative — a smaller model can resolve a path back to the main checkout and silently write there (the failure Layer 1 below catches reactively). When the runtime spawns subagents as **subprocesses** (it shells out to an agent CLI — e.g. `codex exec …`, a `claude -p …` child, a custom runner), wrap that launch command in the worktree's bundled guard so the OS blocks main-checkout writes regardless of harness:
+
+```bash
+ai-tools/skills/prepare-worktree/scripts/sandbox-run.sh \
+  --deny  <main-checkout-root> \
+  --allow <run_options.worktree_path> \
+  --allow <main-checkout-root>/.vinta-ai-workflows \
+  -- <the agent spawn command>
+```
+
+`<main-checkout-root>` is the repo root the skill was invoked from (never `worktree_path`). A stray write then fails with `Operation not permitted` / `EROFS`; the subagent retries against the worktree.
+
+- **In-process subagent runtimes** (the orchestrator and subagent share one OS process — e.g. claude-code's Task tool) can't wrap a single spawn. Two options: (a) install a runtime pre-write guard hook scoped to the worktree, or (b) run the **entire** implement-plan invocation under `sandbox-run.sh` with the same `--deny` / `--allow` set (the deny-main model leaves `.vinta-ai-workflows` writable for the orchestrator's own tracking / prs-context writes). Pick whichever the runtime supports.
+- **`run_options.sandbox_tier = none`** (no sandbox tool on the machine) → skip wrapping; prevention falls back entirely to the Layer 1 stray-write check below. Surface this once to the user so the weaker guarantee is explicit.
+
 **Agent type per phase.** Project agents in [`ai-tools/agents/`](ai-tools/agents/) (exposed to claude-code via `.claude/agents` symlink):
 
 {{AGENT_DISPATCH_TABLE}}
@@ -193,7 +212,7 @@ Three layers, all required, in order. The orchestrator never edits — every iss
 3. **Verify the outer gate** ran + green. Look in the report for explicit confirmation that `{{BUILD_CMD}}` AND `{{TEST_CMD}}` were executed + passed{{E2E_LAYER1_NOTE}}. Vague confirmation → **re-run yourself**.
 4. **Scope creep**: file touched outside expected surface area? Unrelated formatting churn? Surface it.
 5. **No-secrets scan**: `git diff` for `password|secret|token|api_key|AKIA|BEGIN [A-Z]+ KEY`.
-6. **Stray main-checkout writes (only when `run_options.use_worktree = true`)**: a subagent is told to work inside the worktree, but a buggy agent (often a smaller model) can resolve an absolute path back to the **main checkout** and silently edit files there (worktrees have independent working trees, so those edits never reach the phase commit — they sit as uncommitted thrash in the main checkout, and the "missing" edits read as a silent fixer/implementer failure). After **every** implementer **and** fixer subagent returns, run `git -C <main-checkout-path> status --short | grep -vE '^\?\?'` (tracked modifications only). Any output is a BLOCKER for this phase:
+6. **Stray main-checkout writes (only when `run_options.use_worktree = true`)**: a subagent is told to work inside the worktree, but a buggy agent (often a smaller model) can resolve an absolute path back to the **main checkout** and silently edit files there (worktrees have independent working trees, so those edits never reach the phase commit — they sit as uncommitted thrash in the main checkout, and the "missing" edits read as a silent fixer/implementer failure). **When `run_options.sandbox_tier = enforced` the OS sandbox from the [Spawn subagent](#1c-spawn-subagent) step already blocks these writes — this check becomes a cheap backstop (a clean `git status` is the expected result; non-empty output means the sandbox was bypassed or a path slipped through, still a BLOCKER).** When `sandbox_tier = none` it's the *only* line of defense — run it religiously. Either way, after **every** implementer **and** fixer subagent returns, run `git -C <main-checkout-path> status --short | grep -vE '^\?\?'` (tracked modifications only). Any output is a BLOCKER for this phase:
    - Diff the stray files (`git -C <main-checkout-path> diff -- <path>`) to recover intent.
    - If the edit belongs in the worktree, re-dispatch the fixer/implementer with an explicit instruction to write to the worktree path (the change is missing from the phase commit until it does).
    - Once recovered (or confirmed superseded by the correctly-committed worktree version), discard the stray edits with `git -C <main-checkout-path> restore -- <path>` so the main checkout returns clean. Never leave the main checkout dirty between phases — a later phase's Layer 1 can't tell new thrash from old.
@@ -304,7 +323,7 @@ Two project-level signals decide the actual behavior:
 
 Tracking lives at `{{PLAN_DIR}}/TRACKING_{plan-id}.md`. Commit on the **current** phase's branch — deletion in Step 3.
 
-Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `use_worktree`, `worktree_path`, `worktree_branch`, `worktree_summary` — last three only when `use_worktree = true`), {{TRACKING_BRANCH_FIELD}}, completed-phases (with status, model{{TRACKING_PHASE_BRANCH_FIELD}}, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
+Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `use_worktree`, `worktree_path`, `worktree_branch`, `worktree_summary`, `sandbox_tier` — last four only when `use_worktree = true`), {{TRACKING_BRANCH_FIELD}}, completed-phases (with status, model{{TRACKING_PHASE_BRANCH_FIELD}}, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
 
 The orchestrator writes this from the git diff + the agent's summary — not from the agent's narration.
 
@@ -349,6 +368,7 @@ User invokes the skill against a partially-done plan:
 2. **Worktree resume.** When `run_options.use_worktree = true`:
    - Confirm the worktree still exists (`git worktree list | grep <worktree_path>`). Missing → ask user: `Reprovision (run prepare-worktree again with the same name)`, `Switch to main checkout (flip use_worktree to false for the rest of the run)`, `Stop`.
    - Confirm the worktree summary file still parses; if not, regenerate from the existing worktree state.
+   - **Re-probe `sandbox_tier`** (`command -v sandbox-exec || command -v bwrap`) — a resume may run on a different machine than the original provisioning. Update `run_options.sandbox_tier` in tracking before spawning; the [Spawn subagent](#1c-spawn-subagent) wrapping follows the re-probed value.
    - All resumed phases use the existing worktree — do not provision a second one.
 3. `git -C <path> branch -a | grep plan/{plan-id-kebab}` to detect already-pushed phase branches (`<path>` = main checkout or worktree per `run_options.use_worktree`).
 4. Cross-reference with the plan's phase list.
@@ -382,7 +402,7 @@ After all executable phases complete:
 - **Honor opt-in flags.** `run_options.pause_between_phases` controls the [Per-phase pause gate](#1i-per-phase-pause-gate-opt-in); `run_options.generate_inline_comments` controls whether the [Open PR via context file](#1f-open-pr-via-context-file) step drafts inline comments (always writes the file when that step runs at all — empty comments when off); `run_options.use_worktree` controls whether the [Provision worktree](#step-05--provision-worktree-when-run_optionsuse_worktree--true) step runs and whether every later `git` / lint / test / build / migrate call uses the worktree path.
 - **One worktree per plan run.** When `use_worktree = true`, provision once in the [Provision worktree](#step-05--provision-worktree-when-run_optionsuse_worktree--true) step and reuse for every phase. Never spawn a second worktree mid-plan; never silently fall back to the main checkout on prepare-worktree failure (ask the user).
 - **Don't auto-tear-down the worktree.** Step 2 surfaces the teardown command; the user runs it when they're ready (after reviewer feedback is addressed, after the PR merges, etc.).
-- **Catch stray main-checkout writes when `use_worktree = true`.** A subagent can resolve a path back to the main checkout and silently edit there, leaving the change out of the phase commit. Layer 1 runs `git -C <main-checkout-path> status --short` after every implementer and fixer; any tracked modification is a BLOCKER — recover the intent, re-dispatch to the worktree, then restore the main checkout clean. `<main-checkout-path>` is the repo root the skill was invoked from, never `run_options.worktree_path`.
+- **Prevent stray main-checkout writes at the OS layer when you can; catch them always.** When `use_worktree = true` and a sandbox tool exists (`sandbox_tier = enforced`), wrap every subprocess subagent spawn in `prepare-worktree`'s `sandbox-run.sh` (deny main checkout, allow worktree + `.vinta-ai-workflows`) so main-checkout writes are blocked by the kernel regardless of harness — see [Spawn subagent](#1c-spawn-subagent). This is *prevention*; the prompt instruction alone is not. Regardless of tier, Layer 1 runs `git -C <main-checkout-path> status --short` after every implementer and fixer as the backstop; any tracked modification is a BLOCKER — recover the intent, re-dispatch to the worktree, then restore the main checkout clean. `<main-checkout-path>` is the repo root the skill was invoked from, never `run_options.worktree_path`.
 - **PR-context file + `open-pr.sh` is the only PR-creation path.** No raw `gh pr create` / `glab mr create` calls outside the bundled script. The file is durable; the script is the publisher.
 {{DEPENDENCY_LICENSE_RULE_LINE}}
 - **[Open PR via context file](#1f-open-pr-via-context-file) gating** = combination of project PR policy ({{PR_POLICY_BLOCK}}) and `generate_inline_comments`. See the matrix in that step. Skip it entirely only when policy = branches only AND comments = off.
@@ -392,10 +412,10 @@ After all executable phases complete:
 
 - [ ] Plan parsed; structured fields cached.
 - [ ] Cross-repo + flag-removal phases identified + deferred.
-- [ ] `run_options.use_worktree` resolved; [Provision worktree](#step-05--provision-worktree-when-run_optionsuse_worktree--true) ran when `true` (worktree provisioned + summary captured + user confirmed); skipped when `false`.
+- [ ] `run_options.use_worktree` resolved; [Provision worktree](#step-05--provision-worktree-when-run_optionsuse_worktree--true) ran when `true` (worktree provisioned + summary captured + `sandbox_tier` probed + user confirmed); skipped when `false`.
 - [ ] Current phase: prompt composed with **Goals + Non-goals** + **Guiding Decisions** + relevant **Data Model Changes** subsection + tracking summaries + this phase's body (plus the worktree block when `use_worktree = true`).
 - [ ] Model picked from `**Suggested AI model**:` line (cheapest available); plan tier recorded.
-- [ ] Subagent spawned, report received.
+- [ ] Subagent spawned, report received. When `use_worktree = true` AND `sandbox_tier = enforced`: subprocess spawn wrapped in `sandbox-run.sh` (deny main, allow worktree + `.vinta-ai-workflows`), or the whole run sandboxed for in-process runtimes.
 - [ ] Inner loop green: scoped lint + new tests individually + scoped suite.
 - [ ] **Outer gate green:** `{{BUILD_CMD}}` AND `{{TEST_CMD}}`{{E2E_OUTER_GATE_CHECKLIST}} both passed.
 - [ ] Layer 1 review: full diff read; no scope creep; no secrets; outer gate confirmed{{COAUTHOR_CHECKLIST_NOTE}}; when `use_worktree = true`, `git -C <main-checkout-path> status --short` clean (no stray main-checkout writes) after the implementer and after every fixer.
