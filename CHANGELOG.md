@@ -7,7 +7,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
-<!-- pre-release: 0.2.0-alpha2 on 2026-06-13 -->
+<!-- pre-release: 0.2.0-alpha3 on 2026-06-23 -->
 
 ### Added
 
@@ -27,6 +27,31 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the only one that uses a key). **Consumers**: re-sync the
   `plan-feature` skill to pick up a refreshed table; the resource's
   `last_verified` date signals how current it is.
+
+- **`prepare-worktree` — OS-level filesystem sandbox that *prevents*
+  stray main-checkout writes (harness-agnostic).** The prompt instruction
+  "stay in the worktree" is cooperative only; a smaller phase subagent can
+  resolve a path back to the main checkout and silently write there. A new
+  bundled script `prepare-worktree/scripts/sandbox-run.sh` confines the
+  *process* (not the agent tool) at the kernel layer — `sandbox-exec` on
+  macOS, `bwrap` (bubblewrap) on Linux — using a **deny-main, allow-rest**
+  model: the whole filesystem stays writable except the main checkout, with
+  the worktree (nested under it) and `.vinta-ai-workflows` punched back to
+  writable, so package managers / caches / `$HOME` behave normally and no
+  per-stack allowlist tuning is needed. A stray main-checkout write fails
+  with `Operation not permitted` / `EROFS` regardless of which harness
+  (claude-code, Codex, …) issued it. `prepare-worktree` adds a capability
+  probe + a `sandbox` block in its summary YAML recording the achieved tier
+  (`enforced` / `none`); `implement-plan` wraps each subprocess subagent
+  spawn in the script when `sandbox_tier = enforced`, threads the tier
+  through tracking + the re-running-mid-plan resume path, and downgrades its
+  existing Layer 1 stray-write check from sole defense to a backstop. On
+  machines without a sandbox tool (`tier = none`) the script runs the
+  command unsandboxed with a loud warning and the Layer 1 check remains the
+  guard. Escape hatch: `VINTA_SANDBOX=off`. **Consumers**: re-sync
+  `prepare-worktree` + `implement-plan` to pick up the guard; the whole
+  `prepare-worktree/` dir now ships (SKILL.md + `scripts/sandbox-run.sh`),
+  so re-run the foundation-skill copy, not just the SKILL.md.
 
 ### Changed
 
@@ -56,6 +81,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bootstrap `add-e2e-test` answer now also sets
   `foundation_skills.create-qa-use-cases`. Result: projects marked as
   having no e2e tests get foundation skills with zero e2e references.
+  
+<!-- pre-release: 0.2.0-alpha2 on 2026-06-13 -->
+
+### Changed
 
 - **Fixed bug on setup-ai-tools.mjs**: Sub agents were being generated 
 with an invalid description and were not being loaded by claude-code and 
