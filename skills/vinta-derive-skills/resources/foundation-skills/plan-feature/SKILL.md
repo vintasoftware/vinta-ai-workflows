@@ -292,7 +292,7 @@ Tests:
 - Existing test suite passes unchanged on on-branch.
 - Remove flag-parametrized tests no longer make sense.
 
-**Suggested AI model**: Tier 1 — `claude-haiku-4-5` / `gpt-5-nano` / `gemini-2.5-flash-lite`. Mechanical deletion + inlining; cheap models excel.
+**Suggested AI model**: Tier 1 (IDs in `resources/ai-models.yaml`). Mechanical deletion + inlining; cheap models excel.
 
 **Reusable skills**: none — pure cleanup.
 
@@ -313,41 +313,29 @@ Common mistake: leave cross-repo producer wiring for last, then discover the ups
 
 For each phase, suggest **cheapest/fastest model likely to one-shot work**. Iterating with cheap model usually beats burning Opus tokens on CRUD scaffold.
 
+**Concrete model IDs per tier live in [resources/ai-models.yaml](resources/ai-models.yaml) — read that file when writing each suggestion. Never recall model names from memory; they go stale as vendors ship.** The tiers below define *when* each applies (stable judgement); the IDs drift, and a nightly job keeps the resource current. Note the file's `last_verified` date — if it's far in the past, the IDs may be stale; flag that rather than trusting them blindly.
+
 ### Tier 1 — cheapest/fastest (boilerplate, exact-precedent edits)
 **Use for**: single migration adding column or index, exporting from `__init__.py`, registering admin, scaffolding empty Django app, thin serializer mirroring existing pattern verbatim.
-
-- Anthropic: `claude-haiku-4-5`
-- OpenAI: `gpt-5-nano` (fall back to `gpt-5-mini` if file has any branching logic)
-- Google: `gemini-2.5-flash-lite`
 
 ### Tier 2 — standard pattern application
 **Use for**: repository methods, DRF serializer with non-trivial validation, ViewSet wiring with filterset, pytest unit/integration tests against established fixtures, simple HStore/ArrayField additions.
 
-- Anthropic: `claude-haiku-4-5` (with iteration), step up to `claude-sonnet-4-6` if phase touches >3 files
-- OpenAI: `gpt-5-mini`
-- Google: `gemini-2.5-flash`
-
 ### Tier 3 — multi-file orchestration, business logic, SQL views
 **Use for**: use case coordinating across repositories with non-trivial branching, new `vw_*` view + non-managed model + migration, serializer with cross-field validation affecting use-case behavior, integration tests covering concurrency edges.
-
-- Anthropic: `claude-sonnet-4-6`
-- OpenAI: `gpt-5`
-- Google: `gemini-2.5-pro` (or `gemini-3-pro` for stronger code recall)
 
 ### Tier 4 — architectural / novel / hard
 **Use for**: cycle detection in user-mutable trees, transactional batch protocols with deferred constraints, partitioned-to-partitioned FK design, perf tuning slow query against partitioned hot table, debugging heisenbug.
 
-- Anthropic: `claude-opus-4-7` (`[1m]` 1M-context for large codebases)
-- OpenAI: `gpt-5` with extended thinking, or `o3` / `o4` for pure reasoning
-- Google: `gemini-3-pro` with thinking
-
 ### Writing the suggestion
 
-> **Suggested AI model**: Tier 1 — `claude-haiku-4-5` / `gpt-5-nano` / `gemini-2.5-flash-lite`. Single-field migration + model export, exact precedent in `@<app>/<module>/models/<file>.py`.
+Pick the tier from the rubric above, then pull the matching vendor IDs out of [resources/ai-models.yaml](resources/ai-models.yaml):
 
-When one tier doesn't fit:
+> **Suggested AI model**: Tier 1 (IDs in [resources/ai-models.yaml](resources/ai-models.yaml)). Single-field migration + model export, exact precedent in `@<app>/<module>/models/<file>.py`.
 
-> **Suggested AI model**: Tier 2 for repository + serializer (Haiku 4.5 / GPT-5 mini / Gemini Flash); step up to Tier 3 (`claude-sonnet-4-6`) for integration test spanning upsert → routing → reprocess.
+When one tier doesn't fit, name both:
+
+> **Suggested AI model**: Tier 2 for repository + serializer; step up to Tier 3 for the integration test spanning upsert → routing → reprocess. IDs per tier in [resources/ai-models.yaml](resources/ai-models.yaml).
 
 **Default to cheapest tier that plausibly works, not safest.** Cheap models failing fast beats expensive succeeding slowly.
 

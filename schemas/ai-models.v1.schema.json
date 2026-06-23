@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/ai-models.v1.schema.json",
+  "title": "AI model tier table",
+  "description": "Per-tier AI model recommendations consumed by the plan-feature skill and maintained by the nightly check-ai-models job. Source of truth for concrete model IDs; the SKILL.md body carries only selection guidance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "last_verified", "source", "tiers"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Matches the v1 suffix on this schema filename."
+    },
+    "last_verified": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Date every model id below was last confirmed to still exist against the aggregator."
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary"],
+      "description": "Free, no-key model-list aggregators the checker queries. Vendors tracked are derived from the `models` keys under `tiers`.",
+      "properties": {
+        "primary": {
+          "type": "string",
+          "format": "uri",
+          "description": "Primary aggregator JSON (e.g. models.dev/api.json), vendor-keyed with a `.models` map per provider."
+        },
+        "fallback": {
+          "type": "string",
+          "format": "uri",
+          "description": "Fallback aggregator JSON used when the primary is unreachable (e.g. LiteLLM price/context JSON)."
+        }
+      }
+    },
+    "tiers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tier", "label", "use_for", "models"],
+        "properties": {
+          "tier": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Tier number, cheapest/fastest (1) → architectural/hard."
+          },
+          "label": {
+            "type": "string",
+            "description": "Short tier name."
+          },
+          "use_for": {
+            "type": "string",
+            "description": "When to reach for this tier."
+          },
+          "models": {
+            "type": "object",
+            "description": "Vendor key → ordered list of recommended models for this tier. Keys should match entries in the top-level `vendors` map.",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id"],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Vendor model id as it appears in the vendor's model-list API."
+                  },
+                  "note": {
+                    "type": "string",
+                    "description": "Optional caveat (fallback, variant, when-to-step-up)."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
