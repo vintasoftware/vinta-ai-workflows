@@ -11,6 +11,33 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`plan-feature` — per-phase PR-size target raised from ~100–300 LoC to
+  up to 1500 LoC** (tests included). The old "reviewer reads the diff in
+  30 minutes / ~100–300 LoC" guidance forced excessive phase splitting:
+  trivial use-cases became standalone PRs and the phase count ballooned
+  past what a reviewer wants to track. The new ceiling — "reviewer reads
+  ≤1500 LoC and understands the phase in isolation" — keeps phases
+  MR-sized and single-concern while letting a coherent unit of work land
+  in one PR. Pairs with the new **Phase granularity** Step 0 choice
+  below: bundled phases also cap at 1500 LoC. Plan-shape checklist
+  updated to match.
+
+- **`plan-feature` — "one use-case per phase" is now a Step 0 choice, not
+  a hard mandate.** Added a **Phase granularity** question to the Scope
+  group (default: one use-case per phase). The rule, its apply-even-when
+  list, and the checklist item now branch on the answer — opting into
+  bundling lets closely-related use-cases share a phase as long as each
+  phase stays MR-sized, single-concern, and independently mergeable.
+
+- **E2E content is stripped from no-e2e projects.** `create-qa-use-cases`
+  now ships **only when `add-e2e-test` is enabled** (it seeds e2e specs),
+  and `plan-feature`'s Playwright / `QA_USE_CASES.md` / `pr-screenshots/`
+  sections are wrapped in `<!-- e2e:start/end -->` markers that
+  `vinta-derive-skills` strips when `add-e2e-test` is disabled. The
+  bootstrap `add-e2e-test` answer now also sets
+  `foundation_skills.create-qa-use-cases`. Result: projects marked as
+  having no e2e tests get foundation skills with zero e2e references.
+
 - **Fixed bug on setup-ai-tools.mjs**: Sub agents were being generated 
 with an invalid description and were not being loaded by claude-code and 
 possibly other AI tools.

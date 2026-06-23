@@ -77,7 +77,7 @@ There is no build, no test suite, no lint config in this repo. Verification is a
 - **`AskUserQuestion` for finite-choice questions** in any new skill. Open prose only when answers are genuinely free-form. This is the convention every existing skill follows; new skills must too.
 - **Step 0 interview is non-negotiable** for skills that produce per-project artifacts. Don't draft from a one-line prompt; interrogate first.
 - **Read before write.** Any skill that touches existing files (AGENTS.md, project skills, sub-agents) must read + reconcile first; never blind-overwrite.
-- **Foundation set is a unit.** `plan-feature` + `create-spec` + `create-qa-use-cases` reference each other. If you change one, audit the cross-links in the others.
+- **Foundation set is a unit.** `plan-feature` + `create-spec` + `open-pr-from-context` always ship together and reference each other. `create-qa-use-cases` ships **only when `add-e2e-test` is enabled** (it seeds e2e specs); `plan-feature`'s e2e content lives inside `<!-- e2e:start/end -->` markers that derive-skills strips for no-e2e projects. If you change one, audit the cross-links in the others — and confirm no e2e cross-link dangles when e2e is off.
 - **Schema changes ripple.** Adding a field to `vinta-ai-workflows-config.v1.schema.json` requires:
   1. Schema entry with description.
   2. Bootstrap interview question that captures it (or default-derivation from inventory).
