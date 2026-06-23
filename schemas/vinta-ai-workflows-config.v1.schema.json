@@ -188,7 +188,11 @@
       "properties": {
         "plan-feature": { "type": "string", "enum": ["enabled", "disabled"] },
         "create-spec": { "type": "string", "enum": ["enabled", "disabled"] },
-        "create-qa-use-cases": { "type": "string", "enum": ["enabled", "disabled"] },
+        "create-qa-use-cases": {
+          "description": "Bootstrap `QA_USE_CASES.md` from the active spec/plan. Coupled to `add-e2e-test`: QA use-cases seed e2e specs, so ship (and set `enabled`) only when `add-e2e-test` is `enabled`. When `add-e2e-test` is `disabled`, set this `disabled` too — derive-skills won't ship the skill and strips the e2e regions from `plan-feature`.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        },
         "implement-plan": { "type": "string", "enum": ["enabled", "disabled"] },
         "amend-plan": { "type": "string", "enum": ["enabled", "disabled"] },
         "open-pr-from-context": { "type": "string", "enum": ["enabled", "disabled"] },

@@ -1,6 +1,6 @@
 ---
 name: vinta-derive-skills
-description: Author project-specific skills under `ai-tools/skills/`. Always copies the project-agnostic foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`) verbatim from this skill's bundled resources. Generates `implement-plan` from a parameterized template using project-specific commands + branch / commit / PR conventions captured in the bootstrap interview. Asks the user whether `add-e2e-test` and `add-env-var` are needed (optional foundation skills — only ship if applicable). Stack-specific skills (Medplum, Django, etc) come from user-supplied templates pointed at by the orchestrator — see [bootstrap-ai-tools/resources/stacks/<stack>/notes.md](../vinta-bootstrap-ai-tools/resources/stacks/) for the categories per stack.
+description: Author project-specific skills under `ai-tools/skills/`. Always copies the project-agnostic foundation set (`plan-feature`, `create-spec`, `open-pr-from-context`) verbatim from this skill's bundled resources; ships `create-qa-use-cases` and keeps `plan-feature`'s e2e sections only when `add-e2e-test` is enabled. Generates `implement-plan` from a parameterized template using project-specific commands + branch / commit / PR conventions captured in the bootstrap interview. Asks the user whether `add-e2e-test` and `add-env-var` are needed (optional foundation skills — only ship if applicable). Stack-specific skills (Medplum, Django, etc) come from user-supplied templates pointed at by the orchestrator — see [bootstrap-ai-tools/resources/stacks/<stack>/notes.md](../vinta-bootstrap-ai-tools/resources/stacks/) for the categories per stack.
 ---
 
 # Derive skills
@@ -45,16 +45,22 @@ These are project-agnostic enough to ship as-is. Copy from this skill's [resourc
 |---|---|---|
 | `plan-feature` | [resources/foundation-skills/plan-feature/SKILL.md](resources/foundation-skills/plan-feature/SKILL.md) | Author phased implementation plans for a new feature, with interview-driven scoping. |
 | `create-spec` | [resources/foundation-skills/create-spec/SKILL.md](resources/foundation-skills/create-spec/SKILL.md) | Turn a raw feature prompt into a structured spec doc. |
-| `create-qa-use-cases` | [resources/foundation-skills/create-qa-use-cases/SKILL.md](resources/foundation-skills/create-qa-use-cases/SKILL.md) | Bootstrap a project's `QA_USE_CASES.md` from the active spec/plan. |
+| `create-qa-use-cases` | [resources/foundation-skills/create-qa-use-cases/SKILL.md](resources/foundation-skills/create-qa-use-cases/SKILL.md) | Bootstrap a project's `QA_USE_CASES.md` from the active spec/plan. **E2E-gated** — ship only when `foundation_skills.add-e2e-test` is `enabled`; QA use-cases exist to seed e2e specs, so a no-e2e project has no use for it. |
 | `open-pr-from-context` | [resources/foundation-skills/open-pr-from-context/](resources/foundation-skills/open-pr-from-context/) | Thin SKILL.md wrapper around [scripts/open-pr.sh](resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh) — bash script that publishes one `.vinta-ai-workflows/prs-context/{feature}/{phase}.md` file as a real PR + inline comments via the project's PR CLI (`gh` / `glab`). Used by `implement-plan` (when CLI + `yq`/`jq` are available) and standalone (to publish a `pending` file later). |
 | `prepare-worktree` | [resources/foundation-skills/prepare-worktree/](resources/foundation-skills/prepare-worktree/) | Provision a runnable, isolated git worktree for parallel feature work — symlink dep dirs (or copy / reinstall when the plan churns deps), copy + mutate env files, fork dev + test DBs when migrations are in scope, namespace docker-compose project + network, OS-sandbox the worktree so main-checkout writes are blocked (bundled [scripts/sandbox-run.sh](resources/foundation-skills/prepare-worktree/scripts/sandbox-run.sh) — `sandbox-exec` / `bwrap`), write a teardown-ready summary YAML. Used by `implement-plan` when Step 0 question (c) opts in; standalone for ad-hoc isolation. Opt-in (bucket A + ask-first via the bootstrap's **Optional foundation skills** interview). |
 
-These four reference each other:
+These reference each other:
 
-- `plan-feature` reads spec; dispatches `create-qa-use-cases` when the doc is missing.
+- `plan-feature` reads spec; dispatches `create-qa-use-cases` when the doc is missing (e2e-enabled projects only — see below).
 - `implement-plan` (bucket B below) writes per-phase PR-context files following [resources/prs-context-template.md](resources/prs-context-template.md), then invokes `open-pr-from-context` when a PR CLI is detected.
 
-Copy all four or none — they form a unit.
+The **always-on unit** is `plan-feature` + `create-spec` + `open-pr-from-context` — copy all three or none. `create-qa-use-cases` joins the unit **only when `foundation_skills.add-e2e-test` is `enabled`**; when add-e2e-test is disabled (or absent), don't ship it and set `foundation_skills.create-qa-use-cases: disabled` in `.vinta-ai-workflows.yaml` to match.
+
+**E2E stripping in `plan-feature`.** `plan-feature` ships verbatim but carries e2e-only regions delimited by `<!-- e2e:start -->` / `<!-- e2e:end -->` lines. When copying it, run an e2e pass:
+
+- **Always delete the marker lines themselves** (`<!-- e2e:start -->` / `<!-- e2e:end -->`) so they never reach the shipped file.
+- **When `foundation_skills.add-e2e-test` is `disabled` or absent**, also delete everything *between* each marker pair. Result: a no-e2e project gets a `plan-feature` with zero Playwright / `QA_USE_CASES.md` / `pr-screenshots/` / `add-e2e-test` references — no noise in the plans it authors.
+- **When `add-e2e-test` is `enabled`**, keep the enclosed content (strip only the markers).
 
 After copying, scan each for project-specific path references that no longer match the target (the bundled copies may still carry source-repo paths such as `<source-repo>/ai-plans/` or `apps/<service>/`). Replace with the target's paths from the inventory.
 
@@ -232,7 +238,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 ## Rules
 
 - **Don't ship copy-pasted source-project SKILL.md files unchanged.** Run search-and-replace for source project names / paths / commands before saving.
-- **Foundation set is a unit.** Always copy `plan-feature` + `create-spec` + `create-qa-use-cases` together — they reference each other.
+- **Foundation set is a unit.** Always copy `plan-feature` + `create-spec` + `open-pr-from-context` together — they reference each other. `create-qa-use-cases` joins only when `add-e2e-test` is enabled; when it's not, strip `plan-feature`'s e2e regions (the `<!-- e2e:start/end -->` pass) so no cross-link dangles.
 - **`implement-plan` is generated, not copied.** Its body has too much project-specific content for verbatim shipping.
 - **Optional skills (`add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`) are gated by user answer.** Don't ship them by default.
 - **Each skill solves one job.** Two unrelated checklists → split.
@@ -254,6 +260,6 @@ After all skills written:
 1. Each `ai-tools/skills/<name>/SKILL.md` has frontmatter `name` + `description`, plus markdown body.
 2. `name` field matches dir name.
 3. No `{{PLACEHOLDER}}` strings survive in any output skill.
-4. Foundation skills (plan-feature, create-spec, create-qa-use-cases) reference each other correctly via `[name](../<name>/SKILL.md)` links.
+4. Foundation skills (plan-feature, create-spec, open-pr-from-context — plus create-qa-use-cases when e2e is enabled) reference each other correctly via `[name](../<name>/SKILL.md)` links. When e2e is disabled, confirm `plan-feature` has **no** surviving `<!-- e2e:start/end -->` markers and no dangling link to `create-qa-use-cases` / `add-e2e-test`.
 5. `implement-plan` body cites real commands + the project's actual code host + branch / PR / co-author policy.
 6. Setup script ([vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md)) runs cleanly with the new skills in place.

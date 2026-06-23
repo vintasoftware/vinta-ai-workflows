@@ -55,6 +55,7 @@ Never flatten ten questions into one prose paragraph just because tool unavailab
 ### B. Scope & non-goals
 1. **Explicitly out of scope** for v1? Force non-goals list — where most plans drift.
 2. v1.x / v2 already implied? Name it so we don't bake assumptions into v1's data model.
+3. **Phase granularity:** one phase per spec use-case (more, smaller PRs) or allow bundling closely-related use-cases (fewer, larger phases)? **Default: one use-case per phase** — confirm or override. Drives the "One use-case per phase" rule under **Phase structure**.
 
 ### C. Data model & storage
 1. New table, new column on existing, JSONB blob, side table, no persistence?
@@ -179,25 +180,28 @@ Don't invent new top-level sections. Skip non-applicable (e.g. omit "API Design"
 
 ### Each phase MR-sized
 
-Reviewer reads diff in 30 minutes:
+Reviewer should read ≤1500 LoC + understand in isolation. Guidelines:
 
-- **Target**: ~100–300 LoC (tests included).
+- **Target**: Up to 1500 LoC (tests included).
 - **One concern per phase.** "Add field + write migration + wire into 4 use cases + update 3 SQL views" = four phases.
 - **Independently mergeable.** Phase N merged + Phase N+1 stalled → system still working. No half-finished features behind flag with no flag-on path.
 - **Own tests.** Every phase ships unit/integration tests. No "tests come in Phase 8."
 - **Acceptance criterion.** Each phase ends with one-line "Acceptance:" — literally testable.
 
-### One use-case per phase (mandatory)
+### One use-case per phase (default — confirm in Step 0)
 
-Every spec use-case (entries under **Decisions → Use-cases** in the SPEC) gets **its own phase**. Never bundle two use-cases in one phase even when the diff is tiny. Bundling = larger PR + reviewer needs context for both flows + rollback drags both. Cost of an extra phase = one PR header. Cost of a bundled regression = hotfix + split-after-the-fact.
+**Default ON.** Skip only when the Step 0 **Phase granularity** answer opted into bundling. When on: every spec use-case (entries under **Decisions → Use-cases** in the SPEC) gets **its own phase**. Never bundle two use-cases in one phase even when the diff is tiny. Bundling = larger PR + reviewer needs context for both flows + rollback drags both. Cost of an extra phase = one PR header. Cost of a bundled regression = hotfix + split-after-the-fact.
 
-Apply even when:
+When on, apply even when:
 - Two use-cases share the same endpoint — split anyway, the second phase is "wire use-case 2 into the existing endpoint." Reviewer reads ≤50 LoC.
 - Use-cases are CRUD on same entity — Create / Read / Update / Delete are four phases, not one.
 - "It's just one extra branch" — that branch hides edge cases. Separate phase forces explicit acceptance + tests for that branch.
 
+**If the user opted into bundling** (Step 0): group closely-related use-cases into one phase where it reduces churn, but each phase still stays MR-sized (≤1500 LoC), one concern, independently mergeable, with its own tests + acceptance. Bundling is a granularity dial, not a license for kitchen-sink phases.
+
 Cross-cutting infra (shared types, migration, scaffolding) lands in a foundation phase before the use-case phases. Each subsequent use-case phase consumes that scaffolding.
 
+<!-- e2e:start -->
 ### Phases creating new UI flow need happy-path E2E
 
 Every phase that introduces or substantially changes a user-facing flow (new page, new modal, new wizard step, new gated action) **must** ship a Playwright e2e test covering at least the happy path in the same MR. Follow the [add-e2e-test](../add-e2e-test/SKILL.md) skill: pick the next free `PA###` / `PR###` id, update [QA_USE_CASES.md](QA_USE_CASES.md), add the page object + spec. **No `QA_USE_CASES.md` in the project yet?** Run [create-qa-use-cases](../create-qa-use-cases/SKILL.md) first to bootstrap the doc from this plan + spec — add-e2e-test appends, it doesn't create.
@@ -205,6 +209,7 @@ Every phase that introduces or substantially changes a user-facing flow (new pag
 In the phase body, name the spec file path under **Tests → E2E**. If the phase is purely backend (API-only, bot, migration), skip — happy-path E2E only required when the phase reaches the browser.
 
 **Capture screenshots on every affected UI**: the e2e spec takes one screenshot per distinct rendered state (landing page, each modal/wizard step, success toast, final state) — not just the final state. Spec writes to Playwright's **default per-test output dir** via `testInfo.outputPath('<id>-<NN>-<view-slug>.png')` (zero-padded step number, kebab-case slug describing what's on screen). Never hard-code `pr-screenshots/` in the spec. After the suite runs, a copy step moves matching files from `test-results/**/` into `pr-screenshots/`. The `pr-screenshots/` directory is gitignored — author drags the files into the PR description in numeric order so reviewers see the journey, not just the destination. See [add-e2e-test](../add-e2e-test/SKILL.md) for the strict filename convention + spec example + copy command.
+<!-- e2e:end -->
 
 Doesn't fit → split: `Phase 4a — Static validation`, `Phase 4b — Resolution engine`, `Phase 4c — Apply engine`, `Phase 4d — View wiring`.
 
@@ -229,7 +234,9 @@ Spec use-case: {SPEC **Decisions → Use-cases** id/name this phase implements, 
 Tests:
 - **Unit**: {file path} — {what it covers}.
 - **Integration**: {file path} — {what it covers, including edge cases user flagged in Step 0, AND flag-off test proving existing callers see no behavior change}.
+<!-- e2e:start -->
 - **E2E** (only when this phase reaches the browser): {e2e/tests/<app>/<id>-<slug>.spec.ts} — happy path covering the new flow. Spec writes screenshots to the Playwright default output dir via `testInfo.outputPath(...)`; post-run copy step moves them into `pr-screenshots/<id>-<step>.png`. Follow [add-e2e-test](../add-e2e-test/SKILL.md).
+<!-- e2e:end -->
 
 **Suggested AI model**: {tier choice + why}. See "AI model selection".
 
@@ -285,7 +292,7 @@ Tests:
 - Existing test suite passes unchanged on on-branch.
 - Remove flag-parametrized tests no longer make sense.
 
-**Suggested AI model**: Tier 1 — `claude-haiku-4-5` / `gpt-5-nano` / `gemini-2.5-flash-lite`. Mechanical deletion + inlining; cheap models excel.
+**Suggested AI model**: Tier 1 (IDs in `resources/ai-models.yaml`). Mechanical deletion + inlining; cheap models excel.
 
 **Reusable skills**: none — pure cleanup.
 
@@ -306,41 +313,29 @@ Common mistake: leave cross-repo producer wiring for last, then discover the ups
 
 For each phase, suggest **cheapest/fastest model likely to one-shot work**. Iterating with cheap model usually beats burning Opus tokens on CRUD scaffold.
 
+**Concrete model IDs per tier live in [resources/ai-models.yaml](resources/ai-models.yaml) — read that file when writing each suggestion. Never recall model names from memory; they go stale as vendors ship.** The tiers below define *when* each applies (stable judgement); the IDs drift, and a nightly job keeps the resource current. Note the file's `last_verified` date — if it's far in the past, the IDs may be stale; flag that rather than trusting them blindly.
+
 ### Tier 1 — cheapest/fastest (boilerplate, exact-precedent edits)
 **Use for**: single migration adding column or index, exporting from `__init__.py`, registering admin, scaffolding empty Django app, thin serializer mirroring existing pattern verbatim.
-
-- Anthropic: `claude-haiku-4-5`
-- OpenAI: `gpt-5-nano` (fall back to `gpt-5-mini` if file has any branching logic)
-- Google: `gemini-2.5-flash-lite`
 
 ### Tier 2 — standard pattern application
 **Use for**: repository methods, DRF serializer with non-trivial validation, ViewSet wiring with filterset, pytest unit/integration tests against established fixtures, simple HStore/ArrayField additions.
 
-- Anthropic: `claude-haiku-4-5` (with iteration), step up to `claude-sonnet-4-6` if phase touches >3 files
-- OpenAI: `gpt-5-mini`
-- Google: `gemini-2.5-flash`
-
 ### Tier 3 — multi-file orchestration, business logic, SQL views
 **Use for**: use case coordinating across repositories with non-trivial branching, new `vw_*` view + non-managed model + migration, serializer with cross-field validation affecting use-case behavior, integration tests covering concurrency edges.
-
-- Anthropic: `claude-sonnet-4-6`
-- OpenAI: `gpt-5`
-- Google: `gemini-2.5-pro` (or `gemini-3-pro` for stronger code recall)
 
 ### Tier 4 — architectural / novel / hard
 **Use for**: cycle detection in user-mutable trees, transactional batch protocols with deferred constraints, partitioned-to-partitioned FK design, perf tuning slow query against partitioned hot table, debugging heisenbug.
 
-- Anthropic: `claude-opus-4-7` (`[1m]` 1M-context for large codebases)
-- OpenAI: `gpt-5` with extended thinking, or `o3` / `o4` for pure reasoning
-- Google: `gemini-3-pro` with thinking
-
 ### Writing the suggestion
 
-> **Suggested AI model**: Tier 1 — `claude-haiku-4-5` / `gpt-5-nano` / `gemini-2.5-flash-lite`. Single-field migration + model export, exact precedent in `@<app>/<module>/models/<file>.py`.
+Pick the tier from the rubric above, then pull the matching vendor IDs out of [resources/ai-models.yaml](resources/ai-models.yaml):
 
-When one tier doesn't fit:
+> **Suggested AI model**: Tier 1 (IDs in [resources/ai-models.yaml](resources/ai-models.yaml)). Single-field migration + model export, exact precedent in `@<app>/<module>/models/<file>.py`.
 
-> **Suggested AI model**: Tier 2 for repository + serializer (Haiku 4.5 / GPT-5 mini / Gemini Flash); step up to Tier 3 (`claude-sonnet-4-6`) for integration test spanning upsert → routing → reprocess.
+When one tier doesn't fit, name both:
+
+> **Suggested AI model**: Tier 2 for repository + serializer; step up to Tier 3 for the integration test spanning upsert → routing → reprocess. IDs per tier in [resources/ai-models.yaml](resources/ai-models.yaml).
 
 **Default to cheapest tier that plausibly works, not safest.** Cheap models failing fast beats expensive succeeding slowly.
 
@@ -402,11 +397,13 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Filename: `ai-plans/{TODAY}-{FEATURE_NAME}_IMPLEMENTATION_PLAN.md`.
 - [ ] **Goals + Non-goals** section present.
 - [ ] **Guiding Decisions** table — each row has *why*.
-- [ ] Phases MR-sized (~100–300 LoC) + independently mergeable.
+- [ ] Phases MR-sized (≤1500 LoC) + independently mergeable.
 - [ ] Phase numbering uses numbers + letters consistently.
-- [ ] **At least one phase per spec use-case** (entries under SPEC **Decisions → Use-cases**). No phase implements two use-cases. Cross-cutting scaffolding is its own foundation phase.
+- [ ] **Phase granularity matches the Step 0 answer.** Default (one-use-case-per-phase): at least one phase per spec use-case, no phase implements two use-cases. If bundling was chosen: grouped phases stay MR-sized, one concern, independently mergeable. Cross-cutting scaffolding is its own foundation phase either way.
 - [ ] Each phase has Goal / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / Suggested AI model / Reusable skills / Acceptance.
+<!-- e2e:start -->
 - [ ] Every phase introducing a new UI flow has an **E2E happy-path test** in its Tests block, with screenshot output to `pr-screenshots/`.
+<!-- e2e:end -->
 - [ ] Feature flag declared in **Guiding Decisions** (key, scope, default, flip-on criterion) **unless** **Guiding Decisions** explicitly justifies "no flag — purely additive surface".
 - [ ] ≥1 test per gated phase asserts flag-off behavior unchanged.
 - [ ] If flag declared, **final entry under Phased Rollout is dedicated flag-removal phase** with prerequisite (soak window), full deletion touch list, `grep` acceptance check.

@@ -11,6 +11,7 @@ JSON Schema (Draft 2020-12) contracts for every YAML file the vinta-ai-workflows
 | PR-context frontmatter | top-of-file YAML in `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` | [`prs-context-frontmatter.v1.schema.json`](prs-context-frontmatter.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
 | PR-context inline comments | YAML inside the ` ```yaml ... ``` ` fence under `# Comments` of the same file | [`prs-context-comments.v1.schema.json`](prs-context-comments.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
 | MCP preflight cache | `.vinta-ai-workflows/cache.yaml` (gitignored — per-developer-machine state) | [`mcp-preflight-cache.v1.schema.json`](mcp-preflight-cache.v1.schema.json) | rendered `systematic-debugging` SKILL.md (writes during Phase 0) | rendered `systematic-debugging` SKILL.md (reads at Phase 0 start) |
+| AI model tier table | `ai-tools/skills/plan-feature/resources/ai-models.yaml` (shipped verbatim with the `plan-feature` foundation skill; source: `skills/vinta-derive-skills/resources/foundation-skills/plan-feature/resources/ai-models.yaml`) | [`ai-models.v1.schema.json`](ai-models.v1.schema.json) | nightly `check-ai-models` job ([`scripts/check-ai-models.mjs`](../scripts/check-ai-models.mjs)) → auto-PR | `plan-feature` (per-phase model suggestion) |
 
 ## Versioning rules
 
