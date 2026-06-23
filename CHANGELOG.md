@@ -9,6 +9,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- pre-release: 0.2.0-alpha2 on 2026-06-13 -->
 
+### Added
+
+- **`plan-feature` AI model tier table extracted to a data resource +
+  nightly freshness job.** The per-tier model recommendations that used to
+  be hard-coded in `plan-feature/SKILL.md` now live in
+  `plan-feature/resources/ai-models.yaml` (ships verbatim with the skill;
+  schema: `schemas/ai-models.v1.schema.json`). The SKILL.md body keeps the
+  *tier-selection rubric* (stable judgement) and points at the resource for
+  concrete model IDs, so the prose no longer goes stale. A source-side
+  nightly GitHub Action (`.github/workflows/check-ai-models.yml`, runner
+  `scripts/check-ai-models.mjs`) checks the cited IDs against a **free,
+  no-key model aggregator** (models.dev, LiteLLM JSON as fallback) — no
+  vendor API keys required — flags IDs that disappear or that a newer
+  same-family model has superseded, and on drift has an LLM propose an
+  updated table that it opens as a reviewable PR (the optional LLM step is
+  the only one that uses a key). **Consumers**: re-sync the
+  `plan-feature` skill to pick up a refreshed table; the resource's
+  `last_verified` date signals how current it is.
+
 ### Changed
 
 - **Fixed bug on setup-ai-tools.mjs**: Sub agents were being generated 

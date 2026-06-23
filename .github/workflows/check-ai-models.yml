@@ -1,0 +1,67 @@
+name: check-ai-models
+
+# Nightly freshness check for the plan-feature AI model tier table.
+# Queries each vendor's live model-list API; on drift, asks an LLM to propose an
+# updated ai-models.yaml and opens (or updates) a PR. Tier placement is reviewed
+# by a human on the PR — nothing lands on main automatically.
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # 06:17 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install checker deps
+        run: npm install --no-save yaml
+
+      - name: Run AI model freshness check
+        id: check
+        # Detection is keyless (queries the free models.dev aggregator). ANTHROPIC_API_KEY
+        # is OPTIONAL and only powers the LLM table-proposal step; without it the job still
+        # detects drift and just skips the proposal.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node scripts/check-ai-models.mjs --write
+        continue-on-error: true # exit 1 means "drift"; the PR step handles it
+
+      - name: Open / update PR with proposed model table
+        if: steps.check.outputs.drift == 'true' && steps.check.outputs.has_proposal == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/refresh-ai-models
+          base: main
+          commit-message: 'chore: refresh plan-feature AI model tier table'
+          title: 'chore: refresh plan-feature AI model tier table'
+          body: |
+            Automated by the nightly `check-ai-models` job.
+
+            One or more model ids cited in `ai-models.yaml` no longer resolve
+            against the vendors' live model-list APIs. The table below was
+            re-proposed by an LLM; **review the tier placements** before merging —
+            the job flags drift but does not authoritatively assign tiers.
+
+            See the workflow run's job summary for the per-vendor dead/new report.
+
+            > Remember to bump `last_verified` if the proposal didn't, and to cut a
+            > release so target projects pick the change up via the normal sync flow.
+          labels: |
+            automated
+            ai-models
+
+      - name: Note when drift had no proposal
+        if: steps.check.outputs.drift == 'true' && steps.check.outputs.has_proposal != 'true'
+        run: |
+          echo "::warning::Model drift detected but no LLM proposal was produced (missing ANTHROPIC_API_KEY or proposal error). See job summary."

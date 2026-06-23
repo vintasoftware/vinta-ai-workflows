@@ -1,0 +1,98 @@
+# yaml-language-server: $schema=https://github.com/vintasoftware/vinta-ai-workflows/schemas/ai-models.v1.schema.json
+#
+# Per-tier AI model recommendations consumed by the `plan-feature` skill's
+# "AI model selection per phase" section. This file is the single source of
+# truth for concrete model IDs — the SKILL.md body carries the *selection
+# guidance* (when each tier applies, how to write the suggestion) but never
+# hard-codes model IDs, so the prose never goes stale.
+#
+# `last_verified` is the date a maintainer (or the nightly `check-ai-models`
+# job in vinta-ai-workflows) last confirmed every `id` below still exists.
+# Tier *placement* is human/LLM judgement — the job flags drift and proposes
+# edits, it does not blindly reassign tiers. See scripts/check-ai-models.mjs.
+schema_version: 1
+last_verified: 2026-06-22
+
+# Drift is checked against a free, no-key community aggregator (models.dev,
+# vendor-keyed with release dates + pricing), cross-checked against LiteLLM's
+# price/context JSON. No vendor API keys are needed to detect staleness — the
+# checker only needs network access. The vendors tracked are derived from the
+# `models:` keys under `tiers` below (anthropic / openai / google), which must
+# match the provider keys used by the aggregator.
+source:
+  primary: https://models.dev/api.json
+  fallback: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+
+# Tiers run cheapest/fastest (1) → architectural/hard (4). Default to the
+# cheapest tier that plausibly one-shots the work; a cheap model failing fast
+# beats an expensive one succeeding slowly.
+tiers:
+  - tier: 1
+    label: cheapest/fastest (boilerplate, exact-precedent edits)
+    use_for: >-
+      single migration adding column or index, exporting from __init__.py,
+      registering admin, scaffolding empty Django app, thin serializer
+      mirroring existing pattern verbatim.
+    models:
+      anthropic:
+        - id: claude-haiku-4-5
+      openai:
+        - id: gpt-5-nano
+          note: fall back to gpt-5-mini if file has any branching logic
+      google:
+        - id: gemini-2.5-flash-lite
+
+  - tier: 2
+    label: standard pattern application
+    use_for: >-
+      repository methods, DRF serializer with non-trivial validation, ViewSet
+      wiring with filterset, pytest unit/integration tests against established
+      fixtures, simple HStore/ArrayField additions.
+    models:
+      anthropic:
+        - id: claude-haiku-4-5
+          note: with iteration; step up to claude-sonnet-4-6 if phase touches >3 files
+        - id: claude-sonnet-4-6
+          note: step-up target when phase touches >3 files
+      openai:
+        - id: gpt-5-mini
+      google:
+        - id: gemini-2.5-flash
+
+  - tier: 3
+    label: multi-file orchestration, business logic, SQL views
+    use_for: >-
+      use case coordinating across repositories with non-trivial branching,
+      new vw_* view + non-managed model + migration, serializer with
+      cross-field validation affecting use-case behavior, integration tests
+      covering concurrency edges.
+    models:
+      anthropic:
+        - id: claude-sonnet-4-6
+      openai:
+        - id: gpt-5
+      google:
+        - id: gemini-2.5-pro
+        - id: gemini-3-pro
+          note: stronger code recall
+
+  - tier: 4
+    label: architectural / novel / hard
+    use_for: >-
+      cycle detection in user-mutable trees, transactional batch protocols
+      with deferred constraints, partitioned-to-partitioned FK design, perf
+      tuning slow query against partitioned hot table, debugging heisenbug.
+    models:
+      anthropic:
+        - id: claude-opus-4-7
+          note: "[1m] 1M-context variant for large codebases"
+      openai:
+        - id: gpt-5
+          note: with extended thinking
+        - id: o3
+          note: pure reasoning
+        - id: o4
+          note: pure reasoning
+      google:
+        - id: gemini-3-pro
+          note: with thinking

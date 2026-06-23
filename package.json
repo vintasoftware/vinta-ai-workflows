@@ -6,6 +6,12 @@
   "bin": {
     "vinta-ai-workflows": "./vinta-ai-workflows.mjs"
   },
+  "scripts": {
+    "check-ai-models": "node scripts/check-ai-models.mjs"
+  },
+  "devDependencies": {
+    "yaml": "^2.4.0"
+  },
   "files": [
     "vinta-ai-workflows.mjs",
     "skills",
