@@ -7,43 +7,6 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
-### Changed
-
-- **`implement-plan` / `amend-plan` decomposed into a modular "plan-execution
-  unit" of deterministic sub-skills.** The single ~440-line
-  `implement-plan-template.md` (and its `implement-plan-template-modular-substitutions.md`
-  sister file) are replaced by a thin **conductor** plus three co-shipped
-  single-purpose sub-skills, all rendered from
-  [skills/vinta-derive-skills/resources/plan-execution/](skills/vinta-derive-skills/resources/plan-execution/)
-  (`shell/` templates that `<!-- include -->` shared `partials/`):
-  - `implement-plan` — conductor: parse → classify → resolve one `WORKROOT`
-    → per-phase loop (dispatch) → track → report.
-  - `implement-phase` — compose prompt + pick model + spawn the implementer.
-  - `review-phase` — the three-layer review + fix loop, now shared by
-    `implement-plan`, `amend-plan`, **and** `systematic-debugging` (one review
-    implementation instead of three).
-  - `integrate-phase` — push + open PR via context file, rendered
-    commit-strategy-resolved.
-  The scattered runtime `if use_worktree` branches collapse into a single
-  `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` seam the conductor resolves once
-  and passes to every sub-skill as data; only two local, data-driven checks
-  remain (the sandbox spawn-wrap in `implement-phase`, the stray-write
-  backstop in `review-phase`). Under `commit_strategy = ask`, the former
-  dual-rendered branch/commit/PR bodies become **two** rendered
-  `integrate-phase-stacked` / `integrate-phase-modular` skills the conductor
-  dispatches by name — no more both-paths-in-one-file. `amend-plan` reuses
-  `review-phase` verbatim + the shared inner/outer verification loop, and
-  picks up the same `WORKROOT` uniformity, while keeping its own
-  history-rewriting topology. **Consumers**: re-sync — the target now gets
-  five plan-execution SKILL.md files (`implement-plan`, `implement-phase`,
-  `review-phase`, `integrate-phase` [or the two `ask` variants], `amend-plan`)
-  instead of two. The three new sub-skills are a co-shipped unit: always
-  generated with `implement-plan`, not individually opt-in (no new
-  `foundation_skills` enum entry, no new interview question). Runtime
-  behavior is unchanged; the decomposition is for reviewability + determinism.
-
-<!-- pre-release: 0.2.0-alpha3 on 2026-06-23 -->
-
 ### Added
 
 - **`implement-plan` outer-gate test scope is now configurable — and defaults
@@ -95,6 +58,81 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Consumers**: re-sync; the bootstrap now asks one more optional-skill
   question, and `review-phase` gains the escalation hook.
 
+- **`prepare-worktree` — write-guard for *in-process* subagent runtimes
+  (claude-code's Task tool).** `sandbox-run.sh` confines a *process*, so it
+  only works when the harness spawns subagents as subprocesses (`codex exec`,
+  a `claude -p` child). Claude Code runs subagents in-process — same OS
+  process, same tool pipeline, no child command to wrap — so a new
+  harness-config guard covers it instead. Two bundled scripts:
+  `prepare-worktree/scripts/claude-worktree-write-guard.py` (a `PreToolUse`
+  hook that fires for the orchestrator **and** every in-process Task subagent,
+  blocking the file-editing tools — `Edit`/`Write`/`MultiEdit`/`NotebookEdit`
+  — from writing outside the worktree; filesystem-only, no network impact) and
+  `prepare-worktree/scripts/gen-claude-sandbox-settings.sh` (generates the
+  worktree's `.claude/settings.json` wiring that hook, and optionally
+  Claude Code's **native** OS sandbox via `sandbox.filesystem.denyWrite`/
+  `allowWrite` under `--os-sandbox` to also block Bash-issued writes — noting
+  the native sandbox forces network isolation, so registry + git-remote hosts
+  must be allow-listed via `--allow-domain`). Same deny-main/allow-rest model
+  as `sandbox-run.sh`. Step 5.5 of `prepare-worktree` gains an *In-process
+  runtimes (claude-code)* subsection; `implement-plan` §1c makes the
+  previously hand-wavy "in-process runtime" branch concrete. **Consumers**:
+  re-sync `prepare-worktree` + `implement-plan` — the two new scripts ship
+  with the foundation-skill dir.
+
+### Fixed
+
+- **`prepare-worktree/scripts/sandbox-run.sh` — two correctness bugs.**
+  (1) The macOS profile temp file used `mktemp -t vinta-sandbox`, which fails
+  with "too few X's in template" under GNU `mktemp` (present on any machine
+  with coreutils on `PATH`, including many macOS setups) — the whole sandbox
+  path errored out; now uses an explicit `…/vinta-sandbox.XXXXXX` template
+  portable across BSD + GNU `mktemp`. (2) Callers must now pass
+  `--allow <main>/.git`: git worktrees write every commit into the main repo's
+  `.git` (`.git/worktrees/<name>/index.lock`, shared objects/refs), so a
+  deny-main that omits it made the subagent's own `git commit` fail with
+  `Operation not permitted`. `implement-plan` §1c's documented invocation +
+  checklist + rules are updated to include `<main>/.git` in the allow-set.
+
+### Changed
+
+- **`implement-plan` / `amend-plan` decomposed into a modular "plan-execution
+  unit" of deterministic sub-skills.** The single ~440-line
+  `implement-plan-template.md` (and its `implement-plan-template-modular-substitutions.md`
+  sister file) are replaced by a thin **conductor** plus three co-shipped
+  single-purpose sub-skills, all rendered from
+  [skills/vinta-derive-skills/resources/plan-execution/](skills/vinta-derive-skills/resources/plan-execution/)
+  (`shell/` templates that `<!-- include -->` shared `partials/`):
+  - `implement-plan` — conductor: parse → classify → resolve one `WORKROOT`
+    → per-phase loop (dispatch) → track → report.
+  - `implement-phase` — compose prompt + pick model + spawn the implementer.
+  - `review-phase` — the three-layer review + fix loop, now shared by
+    `implement-plan`, `amend-plan`, **and** `systematic-debugging` (one review
+    implementation instead of three).
+  - `integrate-phase` — push + open PR via context file, rendered
+    commit-strategy-resolved.
+  The scattered runtime `if use_worktree` branches collapse into a single
+  `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` seam the conductor resolves once
+  and passes to every sub-skill as data; only two local, data-driven checks
+  remain (the sandbox spawn-wrap in `implement-phase`, the stray-write
+  backstop in `review-phase`). Under `commit_strategy = ask`, the former
+  dual-rendered branch/commit/PR bodies become **two** rendered
+  `integrate-phase-stacked` / `integrate-phase-modular` skills the conductor
+  dispatches by name — no more both-paths-in-one-file. `amend-plan` reuses
+  `review-phase` verbatim + the shared inner/outer verification loop, and
+  picks up the same `WORKROOT` uniformity, while keeping its own
+  history-rewriting topology. **Consumers**: re-sync — the target now gets
+  five plan-execution SKILL.md files (`implement-plan`, `implement-phase`,
+  `review-phase`, `integrate-phase` [or the two `ask` variants], `amend-plan`)
+  instead of two. The three new sub-skills are a co-shipped unit: always
+  generated with `implement-plan`, not individually opt-in (no new
+  `foundation_skills` enum entry, no new interview question). Runtime
+  behavior is unchanged; the decomposition is for reviewability + determinism.
+
+<!-- pre-release: 0.2.0-alpha3 on 2026-06-23 -->
+
+### Added
+
 - **`plan-feature` AI model tier table extracted to a data resource +
   nightly freshness job.** The per-tier model recommendations that used to
   be hard-coded in `plan-feature/SKILL.md` now live in
@@ -136,42 +174,6 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prepare-worktree` + `implement-plan` to pick up the guard; the whole
   `prepare-worktree/` dir now ships (SKILL.md + `scripts/sandbox-run.sh`),
   so re-run the foundation-skill copy, not just the SKILL.md.
-
-- **`prepare-worktree` — write-guard for *in-process* subagent runtimes
-  (claude-code's Task tool).** `sandbox-run.sh` confines a *process*, so it
-  only works when the harness spawns subagents as subprocesses (`codex exec`,
-  a `claude -p` child). Claude Code runs subagents in-process — same OS
-  process, same tool pipeline, no child command to wrap — so a new
-  harness-config guard covers it instead. Two bundled scripts:
-  `prepare-worktree/scripts/claude-worktree-write-guard.py` (a `PreToolUse`
-  hook that fires for the orchestrator **and** every in-process Task subagent,
-  blocking the file-editing tools — `Edit`/`Write`/`MultiEdit`/`NotebookEdit`
-  — from writing outside the worktree; filesystem-only, no network impact) and
-  `prepare-worktree/scripts/gen-claude-sandbox-settings.sh` (generates the
-  worktree's `.claude/settings.json` wiring that hook, and optionally
-  Claude Code's **native** OS sandbox via `sandbox.filesystem.denyWrite`/
-  `allowWrite` under `--os-sandbox` to also block Bash-issued writes — noting
-  the native sandbox forces network isolation, so registry + git-remote hosts
-  must be allow-listed via `--allow-domain`). Same deny-main/allow-rest model
-  as `sandbox-run.sh`. Step 5.5 of `prepare-worktree` gains an *In-process
-  runtimes (claude-code)* subsection; `implement-plan` §1c makes the
-  previously hand-wavy "in-process runtime" branch concrete. **Consumers**:
-  re-sync `prepare-worktree` + `implement-plan` — the two new scripts ship
-  with the foundation-skill dir.
-
-### Fixed
-
-- **`prepare-worktree/scripts/sandbox-run.sh` — two correctness bugs.**
-  (1) The macOS profile temp file used `mktemp -t vinta-sandbox`, which fails
-  with "too few X's in template" under GNU `mktemp` (present on any machine
-  with coreutils on `PATH`, including many macOS setups) — the whole sandbox
-  path errored out; now uses an explicit `…/vinta-sandbox.XXXXXX` template
-  portable across BSD + GNU `mktemp`. (2) Callers must now pass
-  `--allow <main>/.git`: git worktrees write every commit into the main repo's
-  `.git` (`.git/worktrees/<name>/index.lock`, shared objects/refs), so a
-  deny-main that omits it made the subagent's own `git commit` fail with
-  `Operation not permitted`. `implement-plan` §1c's documented invocation +
-  checklist + rules are updated to include `<main>/.git` in the allow-set.
 
 ### Changed
 
