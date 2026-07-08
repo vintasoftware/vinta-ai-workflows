@@ -64,15 +64,45 @@ The **always-on unit** is `plan-feature` + `create-spec` + `open-pr-from-context
 
 After copying, scan each for project-specific path references that no longer match the target (the bundled copies may still carry source-repo paths such as `<source-repo>/ai-plans/` or `apps/<service>/`). Replace with the target's paths from the inventory.
 
-### B. Generate — `implement-plan`, `amend-plan`, `systematic-debugging` from templates
+### B. Generate — the **plan-execution unit** + `systematic-debugging` from templates
 
-Project-specific skills, generated from templates because their bodies cite real test commands, branch conventions, agent dispatch table, PR / co-author policy, or selected MCP tools:
+Project-specific skills, generated from templates because their bodies cite real test commands, branch conventions, agent dispatch table, PR / co-author policy, or selected MCP tools.
 
-- **`implement-plan`** — forward execution: drives a fresh plan phase-by-phase. From [resources/implement-plan-template.md](resources/implement-plan-template.md).
-- **`amend-plan`** — history rewriting: revises an in-flight plan, amends already-implemented phase commits, force-pushes, rebases stacked downstream branches. From [resources/amend-plan-template.md](resources/amend-plan-template.md). Companion to `implement-plan` — same agents, same review gates, same PR-context flow, opposite git topology direction.
-- **`systematic-debugging`** — root-cause-first debugging flow with project-specific reproduction commands and enforced observability MCP evidence-gathering. From [resources/systematic-debugging-template.md](resources/systematic-debugging-template.md) plus the **MCP-agnostic** evidence-categories block at [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md) — the rendered SKILL.md instructs the agent to list available MCP tools at runtime and map them to evidence categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards), instead of hardcoding tool names that go stale. **Opt-in** — only generated when `foundation_skills.systematic-debugging` is `enabled` in `.vinta-ai-workflows.yaml`. The free-form list of MCP server identifiers rendered into the body comes from `skills.systematic-debugging.observability_mcp_servers` in the same config.
+The forward-execution + amend flow is decomposed into a **plan-execution unit** — two thin conductors that dispatch to three shared single-purpose sub-skills. All five render from [resources/plan-execution/shell/](resources/plan-execution/shell/), which pulls shared bodies from [resources/plan-execution/partials/](resources/plan-execution/partials/) (see [Rendering the plan-execution unit](#rendering-the-plan-execution-unit) below):
 
-`implement-plan` and `amend-plan` consume the same placeholder set below — render each by substituting from the inventory + Step 0 interview answers. `systematic-debugging` reuses the same set plus two extra placeholders (`{{OBSERVABILITY_MCP_BLOCK}}`, `{{OBSERVABILITY_MCP_LIST}}`) rendered from the catalogue.
+- **`implement-plan`** — thin conductor: parse plan → classify phases → resolve one `WORKROOT` → per-phase loop (dispatch to the three sub-skills) → track → report. From `shell/implement-plan-template.md`.
+- **`amend-plan`** — thin conductor: history rewriting (revise plan, amend commits, force-push, rebase stacked downstreams, refresh PR-context). From `shell/amend-plan-template.md`. Reuses `implement-phase` (for `amend-existing` rewrites) + `review-phase` (verbatim), keeps its own git topology.
+- **`implement-phase`** — compose implementer prompt + pick model + spawn one implementer subagent. From `shell/implement-phase-template.md`.
+- **`review-phase`** — three-layer review + fix loop. From `shell/review-phase-template.md`. **Shared by all three conductors** (implement-plan, amend-plan, systematic-debugging).
+- **`integrate-phase`** — push the reviewed phase + open PR via context file. From `shell/integrate-phase-template.md`, rendered **commit-strategy-resolved** (see the [commit-strategy substitution table](#commit_strategy_-substitution-table)).
+
+The five are a **co-shipped unit**: `implement-plan` is always generated, so `implement-phase` / `review-phase` / `integrate-phase` are always generated alongside it (they are its decomposition, not independently opt-in — there is no `foundation_skills` enum entry for them, and the bootstrap interview never asks about them). `amend-plan` is likewise always generated. They are separate `ai-tools/skills/<name>/SKILL.md` files so each can be reviewed and evolved on its own.
+
+- **`systematic-debugging`** — root-cause-first debugging flow with project-specific reproduction commands and enforced observability MCP evidence-gathering. From [resources/systematic-debugging-template.md](resources/systematic-debugging-template.md) plus the **MCP-agnostic** evidence-categories block at [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md) — the rendered SKILL.md instructs the agent to list available MCP tools at runtime and map them to evidence categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards), instead of hardcoding tool names that go stale. **Opt-in** — only generated when `foundation_skills.systematic-debugging` is `enabled` in `.vinta-ai-workflows.yaml`. The free-form list of MCP server identifiers rendered into the body comes from `skills.systematic-debugging.observability_mcp_servers` in the same config. It reuses `review-phase` for its Phase 4 review gate (an `invoke [review-phase]` reference — always resolvable because the plan-execution unit is always shipped).
+
+Every plan-execution shell + `systematic-debugging` consumes the placeholder set below — render each by substituting from the inventory + Step 0 interview answers. `systematic-debugging` reuses the same set plus two extra placeholders (`{{OBSERVABILITY_MCP_BLOCK}}`, `{{OBSERVABILITY_MCP_LIST}}`) rendered from the catalogue.
+
+#### Rendering the plan-execution unit
+
+Shells under `plan-execution/shell/` are thin — most content lives in `plan-execution/partials/` and is spliced in at render time. Per shell, in order:
+
+1. **Expand includes.** Replace every include directive with the referenced partial content:
+   - `<!-- include: partials/<file>.md -->` — the whole partial body.
+   - `<!-- include: partials/<file>.md#BLOCK -->` — only the block between `<!-- block-begin: BLOCK -->` / `<!-- block-end: BLOCK -->` (markers excluded). Includes may nest (e.g. `implementer-prompt.md#FULL` itself includes `#INNER_OUTER_LOOP`) — expand recursively.
+   - `<!-- include: partials/commit-strategy/<RESOLVED>.md#BLOCK -->` — bind `<RESOLVED>` to the project's `policies.commit_strategy` (`stacked` → `stacked.md`, `modular` → `modular.md`). For `ask`, see the split below.
+   - Ignore the `rendering-guidance` appendix at the bottom of `commit-strategy/modular.md` — it is derive-time reference for the `{{MODULAR_*}}` placeholders, not shippable content.
+2. **Substitute `{{PLACEHOLDER}}`** using the table below (+ the commit-strategy table).
+3. **Write** the fully-expanded, fully-substituted body to `ai-tools/skills/<name>/SKILL.md`. No `<!-- include -->` marker and no `{{...}}` may survive in the shipped file.
+
+**The `WORKROOT` seam.** The conductor resolves `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` once (`partials/worktree-seam.md#WORKROOT_RESOLUTION`) and every sub-skill uses them as data — this is why the rendered skills carry no scattered `if use_worktree` branches. `<WORKROOT>` / `<BASE_BRANCH>` / `<main_checkout>` / `<RESOLVED>` are **angle-bracket runtime slots the agent fills at execution time**, not `{{...}}` derive-time placeholders — leave them verbatim in the shipped file.
+
+**`ask` → two `integrate-phase` variants, no dual-render.** When `policies.commit_strategy = ask`, render `integrate-phase-template.md` **twice**:
+- `ai-tools/skills/integrate-phase-stacked/SKILL.md` — `<RESOLVED>` = `stacked`, `{{INTEGRATE_PHASE_NAME}}` = `integrate-phase-stacked`.
+- `ai-tools/skills/integrate-phase-modular/SKILL.md` — `<RESOLVED>` = `modular`, `{{INTEGRATE_PHASE_NAME}}` = `integrate-phase-modular`.
+
+The conductor's `{{INTEGRATE_PHASE_DISPATCH}}` then renders as a one-line runtime dispatch on `run_options.commit_strategy_resolved` (see the commit-strategy table). For `stacked` / `modular` projects, `integrate-phase-template.md` renders **once** to `ai-tools/skills/integrate-phase/` with a single topology body and no runtime branch.
+
+The remaining per-shell placeholders:
 
 | Placeholder | Source | Example |
 |---|---|---|
@@ -99,35 +129,42 @@ Project-specific skills, generated from templates because their bodies cite real
 | `{{ANTI_GIT_ADD_ALL_REASON}}` | derived from common artifacts in target | `secrets, .env files, build artifacts, .auth/ live in the tree` |
 | `{{STAGE_PATTERN}}` | derived from monorepo shape | `apps/... lib/... e2e/... ai-plans/...` or `<app>/... tests/... ai-plans/...` |
 | `{{PROJECT_SKILLS_LIST}}` | computed from skills emitted | comma-separated names of the skills the project actually has |
-| `{{AGENT_DISPATCH_TABLE}}` | from [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) output | markdown table mapping phase shapes → agent type |
+| `{{AGENT_DISPATCH_TABLE}}` | from [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) output | markdown table mapping phase shapes → agent type. Rendered into `implement-phase`. |
+| `{{INTEGRATE_PHASE_NAME}}` | derived from `policies.commit_strategy` | The integrate-phase skill's own `name:` + dir. `integrate-phase` for `stacked` / `modular`; `integrate-phase-stacked` / `integrate-phase-modular` for the two `ask` renders. |
+| `{{INTEGRATE_PHASE_DISPATCH}}` | derived from `policies.commit_strategy` | How the `implement-plan` conductor names the integrate step. `stacked` / `modular`: `` [integrate-phase](../integrate-phase/SKILL.md) ``. `ask`: `` the resolved integrate-phase variant — [integrate-phase-stacked](../integrate-phase-stacked/SKILL.md) when `run_options.commit_strategy_resolved = stacked-branches`, else [integrate-phase-modular](../integrate-phase-modular/SKILL.md) ``. |
+| `{{INTEGRATE_PHASE_LINK}}` | derived from `policies.commit_strategy` | Path used by `amend-plan`'s PR-template cross-reference. `../integrate-phase/SKILL.md` for `stacked` / `modular`; `../integrate-phase-stacked/SKILL.md` for `ask` (amend-plan only runs under the stacked topology). |
 | `{{OBSERVABILITY_MCP_BLOCK}}` | rendered from [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md) | the verbatim "Phase 0 evidence categories" block — same content for every project. When `skills.systematic-debugging.observability_mcp_servers` is empty, renders the no-tools fallback paragraph instead. The block is MCP-agnostic on purpose: tool names are discovered at runtime, not baked at generation time. |
 | `{{OBSERVABILITY_MCP_LIST}}` | derived from `skills.systematic-debugging.observability_mcp_servers` | comma-separated MCP server identifiers as the user named them at bootstrap (e.g. `sentry, datadog, our-internal-traces`). Renders `none configured` when empty. |
 | `{{DEPENDENCY_LICENSE_BLOCK}}` | derived from `policies.dependency_licenses` | Top-level `## Adding new third-party dependencies` section. Empty string when `enforcement: off` or the block is absent. When `block` / `warn`: short paragraph naming the enforcement mode + the forbidden SPDX list + the pre-install check (`npm view <pkg> license`, PyPI metadata, etc.) + a one-line pointer to the **Dependency licenses** section in [AGENTS.md](AGENTS.md) for the full table including `allowed_overrides` and `notes`. See [resources/dependency-license-block.md](resources/dependency-license-block.md) for the canonical body. |
 | `{{DEPENDENCY_LICENSE_LAYER1_CHECK}}` | derived from `policies.dependency_licenses` | Layer 1 review checklist item. Empty string when `enforcement: off`. When `block` / `warn`: `6. **Dependency license scan**: \`git diff package.json pyproject.toml ...\` (project-relevant manifests) — for every added dep look up its SPDX license (\`npm view <pkg> license\`, PyPI metadata, repo \`LICENSE\`). A license in \`policies.dependency_licenses.forbidden_spdx\` and not in \`allowed_overrides\` is a BLOCKER (when \`block\`) or a SHOULD-FIX (when \`warn\`). A missing / \`UNKNOWN\` / undeclared license is **always a BLOCKER** regardless of enforcement mode — there is no override to silently bless undisclosed terms.` |
 | `{{DEPENDENCY_LICENSE_RULE_LINE}}` | derived from `policies.dependency_licenses` | Important-rules bullet. Empty string when `enforcement: off`. When `block`: `- **License check before any new dep.** Refuse \`npm add\` / \`pnpm add\` / \`pip install\` / \`poetry add\` / \`uv add\` / \`cargo add\` / \`go get\` when the package's SPDX license is in the forbidden list — see AGENTS.md **Dependency licenses**. User can grant a one-off override after acknowledging the violation; record the override in \`policies.dependency_licenses.allowed_overrides\` before re-running.` When `warn`: same line but `Proceed but record the violation in the phase report` instead of `Refuse`. |
-| `{{COMMIT_STRATEGY_*}}` family (`{{COMMIT_STRATEGY_STEP0_QUESTION}}`, `{{COMMIT_STRATEGY_STEP0_TRAILER}}`, `{{COMMIT_STRATEGY_CONFIRM_NOTE}}`, `{{BRANCH_NAMING_PATTERN_SUMMARY}}`, `{{BRANCH_NAMING_BLOCK}}`, `{{PER_PHASE_COMMIT_BLOCK}}`, `{{PR_OPEN_TIMING_BLOCK}}`, `{{PRS_CONTEXT_FILE_PATH_DESCRIPTION}}`, `{{TRACKING_BRANCH_FIELD}}`, `{{TRACKING_PHASE_BRANCH_FIELD}}`, `{{FINAL_REPORT_BRANCH_SUMMARY}}`, `{{BRANCH_CHECKLIST_LINE}}`, `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}`) | Step 0 (`policies.commit_strategy`) | Render based on the project's commit strategy (`stacked-branches` / `modular-commits` / `ask`). See the per-placeholder substitution table immediately after this row for the three columns. The `{{BRANCH_PUSH_HEADING}}` placeholder above is also part of this family — its substitution depends on the strategy. |
+| `{{COMMIT_STRATEGY_*}}` family (`{{COMMIT_STRATEGY_STEP0_QUESTION}}`, `{{COMMIT_STRATEGY_STEP0_TRAILER}}`, `{{COMMIT_STRATEGY_CONFIRM_NOTE}}`, `{{BRANCH_NAMING_PATTERN_SUMMARY}}`, `{{BRANCH_NAMING_BLOCK}}`, `{{PER_PHASE_COMMIT_BLOCK}}`, `{{PR_OPEN_TIMING_BLOCK}}`, `{{PRS_CONTEXT_FILE_PATH}}`, `{{TRACKING_BRANCH_FIELD}}`, `{{TRACKING_PHASE_BRANCH_FIELD}}`, `{{FINAL_REPORT_BRANCH_SUMMARY}}`, `{{BRANCH_CHECKLIST_LINE}}`, `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}`, `{{BRANCH_PUSH_HEADING}}`) | Step 0 (`policies.commit_strategy`) | Render based on the project's commit strategy (`stacked-branches` / `modular-commits` / `ask`). Multi-line blocks now come from the commit-strategy partials; see the substitution table immediately after this row. |
 
 ### `{{COMMIT_STRATEGY_*}}` substitution table
 
-Per-placeholder rendering for each enum value of `policies.commit_strategy`. The `ask` column embeds **both** branch / commit / PR paths gated by inline runtime markers (`If \`run_options.commit_strategy_resolved = "modular-commits"\`:` ... `Else (\`stacked-branches\`):` ...) — same pattern already used for `pause_between_phases` / `generate_inline_comments`.
+The multi-line blocks now live in the partials `plan-execution/partials/commit-strategy/{stacked,modular}.md` (marker-delimited blocks). The single-line values are documented in each partial's footer comment. Bind the block/value from the partial matching `policies.commit_strategy`. The `{{MODULAR_EXAMPLE_*}}` + `{{MODULAR_COMMIT_MESSAGE_FORMAT_BLOCK}}` placeholders inside `modular.md`'s `PER_PHASE_COMMIT` block are resolved from that partial's own **rendering-guidance appendix** (driven by `policies.commit_style` — conventional / imperative / other); that appendix is derive-time reference only and is never shipped.
 
-| Placeholder | `stacked-branches` substitution | `modular-commits` substitution | `ask` substitution |
-|---|---|---|---|
-| `{{COMMIT_STRATEGY_STEP0_QUESTION}}` | empty string | empty string | a third opt-in block analogous to 4a/4b: `\n\n   c. **Commit strategy?** *"This project's commit_strategy is set to ask. Pick one for this run: one branch + one PR per phase (stacked), or one branch + one PR for the whole plan with one atomic commit per logical unit (modular)?"* Options: \`Stacked branches — one branch + PR per phase\`, \`Modular commits — atomic commits, one PR for whole plan\`. Cache answer in tracking under \`run_options.commit_strategy_resolved\`.` (note: the substitution starts with `\n\n` because the placeholder hugs the end of the preceding paragraph in the template — under stacked / modular the placeholder vanishes without leaving a stray blank line) |
-| `{{COMMIT_STRATEGY_STEP0_TRAILER}}` | empty string | empty string | ` Commit-strategy behavior follows \`run_options.commit_strategy_resolved\`.` (note: leading space — appended to the previous sentence) |
-| `{{COMMIT_STRATEGY_CONFIRM_NOTE}}` | empty string | empty string | ` + \`run_options.commit_strategy_resolved\`` (leading ` + ` — appends to the captured-options list) |
-| `{{BRANCH_NAMING_PATTERN_SUMMARY}}` | ``branch naming pattern (default: `plan/{plan-id-kebab}/phase-{phase-id}`)`` | ``plan branch (one branch for whole plan: `plan/{plan-id-kebab}`)`` | ``branch naming pattern (depends on `run_options.commit_strategy_resolved` — resolved at Step 0)`` |
-| `{{BRANCH_NAMING_BLOCK}}` | the current per-phase stacked block: `Branch naming: \`plan/{plan-id-kebab}/phase-{phase.id}\`.\n\n**First executed phase** (branches from \`{{DEFAULT_BRANCH}}\`):\n\`\`\`bash\ngit checkout {{DEFAULT_BRANCH}}\ngit pull --ff-only\ngit checkout -b plan/{plan-id-kebab}/phase-{phase.id}\n# subagent's commits land on this branch\ngit push -u origin plan/{plan-id-kebab}/phase-{phase.id}\n\`\`\`\n\n**Subsequent phases** (stacked on the previous phase's branch):\n\`\`\`bash\ngit checkout plan/{plan-id-kebab}/phase-{prev.id}\ngit checkout -b plan/{plan-id-kebab}/phase-{phase.id}\ngit push -u origin plan/{plan-id-kebab}/phase-{phase.id}\n\`\`\`` | single-branch block — see [Phase 3 substitution body](#modular-commits-branch-naming-block) | both blocks gated by `if run_options.commit_strategy_resolved == "modular-commits"` runtime markers |
-| `{{PER_PHASE_COMMIT_BLOCK}}` | the current 4-step stacked block (steps 7–10 of Step 1a): `7. Stage right files (NEVER \`git add -A\` — {{ANTI_GIT_ADD_ALL_REASON}}). Stage explicitly: \`git add {{STAGE_PATTERN}}\`.\n8. Commit with the repo's style — look at \`git log -10 --oneline\` first. {{COMMIT_STYLE_LINE}}.\n9. {{COAUTHOR_INSTRUCTION_LINE}}\n10. {{PUSH_INSTRUCTION_LINE}}` | the modular-commits multi-commit block — see [Phase 3 substitution body](#modular-commits-per-phase-commit-block) | both blocks gated by runtime markers |
-| `{{PR_OPEN_TIMING_BLOCK}}` | empty string (current behavior: PR opens per phase after review) | `**PR opens once after Phase 1 passes review.** Subsequent phases push commits to the same plan branch and append an "Phase {N} complete" comment to the PR (or the orchestrator re-runs \`open-pr.sh\` with the existing context file path — the script is idempotent for existing PRs).` | both blocks gated by runtime markers |
-| `{{PRS_CONTEXT_FILE_PATH_DESCRIPTION}}` | `` a `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` file `` | `` a single `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md` file (one PR per plan, not per phase) `` | `` either `.../phase-{phase.id}.md` or `.../plan.md` depending on `run_options.commit_strategy_resolved` `` |
-| `{{TRACKING_BRANCH_FIELD}}` | empty string (per-phase branch lives under `{{TRACKING_PHASE_BRANCH_FIELD}}`) | `top-level \`plan_branch:\` field` (single branch for whole plan) | both gated by runtime markers |
-| `{{TRACKING_PHASE_BRANCH_FIELD}}` | `, branch, base` (per-phase fields kept inline) | empty string (no per-phase branch under modular) | both gated by runtime markers |
-| `{{FINAL_REPORT_BRANCH_SUMMARY}}` | `branches pushed (with bases, in stack order)` | ``single plan branch `plan/{plan-id-kebab}` with commit log organized by phase`` | dynamic per resolved strategy |
-| `{{BRANCH_CHECKLIST_LINE}}` | `Stacked branch created; pushed.` | `Plan branch updated with phase commits; pushed.` | dynamic per resolved strategy |
-| `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}` | empty string | block of 3 extra checklist items (commit units planned upfront; each commit = one unit; tests in same commit as code; no "and" in commit messages) — see [Phase 3 substitution body](#modular-commits-checklist-block) | both variants gated by runtime markers |
+**Where each block lands, and how `ask` is handled:**
+- `BRANCH_NAMING` + `PR_OPEN_TIMING` land in **`integrate-phase`**. Under `ask`, `integrate-phase` is rendered **twice** (once per strategy — see [Rendering the plan-execution unit](#rendering-the-plan-execution-unit)); each variant bakes in one strategy's blocks with **no runtime marker**. The conductor dispatches by name via `{{INTEGRATE_PHASE_DISPATCH}}`.
+- `PER_PHASE_COMMIT` lands in **`implement-phase`** (the implementer prompt's working instructions). `implement-phase` is not split, so under `ask` it embeds **both** strategy blocks gated by inline runtime markers (`If \`run_options.commit_strategy_resolved = "modular-commits"\`: … Else (\`stacked-branches\`): …`) — same pattern as `pause_between_phases` / `generate_inline_comments`.
+- `CHECKLIST` + all single-line values land in the single **`implement-plan`** conductor; under `ask` they render dynamically on `run_options.commit_strategy_resolved` (runtime markers for the block, inline `If … Else …` for single-line values).
 
-For `{{BRANCH_PUSH_HEADING}}` the substitutions are: `Push stacked branch` (stacked) / `Push to plan branch` (modular) / `Push branch` (ask — heading stays generic; the body inside the section explains both flows under runtime markers).
+| Placeholder | Lands in | `stacked-branches` | `modular-commits` | `ask` |
+|---|---|---|---|---|
+| `{{COMMIT_STRATEGY_STEP0_QUESTION}}` | implement-plan | empty string | empty string | a third opt-in block analogous to 4a/4b: `\n\n   c. **Commit strategy?** *"This project's commit_strategy is set to ask. Pick one for this run: one branch + one PR per phase (stacked), or one branch + one PR for the whole plan with one atomic commit per logical unit (modular)?"* Options: \`Stacked branches — one branch + PR per phase\`, \`Modular commits — atomic commits, one PR for whole plan\`. Cache answer in tracking under \`run_options.commit_strategy_resolved\`.` (starts with `\n\n`; under stacked / modular the placeholder vanishes without a stray blank line) |
+| `{{COMMIT_STRATEGY_STEP0_TRAILER}}` | implement-plan | empty string | empty string | ` Commit-strategy behavior follows \`run_options.commit_strategy_resolved\`.` (leading space) |
+| `{{COMMIT_STRATEGY_CONFIRM_NOTE}}` | implement-plan | empty string | empty string | ` + \`run_options.commit_strategy_resolved\`` (leading ` + `) |
+| `{{BRANCH_NAMING_PATTERN_SUMMARY}}` | implement-plan | `stacked.md` footer value | `modular.md` footer value | ``branch naming pattern (depends on `run_options.commit_strategy_resolved` — resolved at Step 0)`` |
+| `{{BRANCH_NAMING_BLOCK}}` | integrate-phase | `stacked.md#BRANCH_NAMING` | `modular.md#BRANCH_NAMING` | baked per-variant (no runtime marker) |
+| `{{PER_PHASE_COMMIT_BLOCK}}` | implement-phase | `stacked.md#PER_PHASE_COMMIT` | `modular.md#PER_PHASE_COMMIT` | both blocks gated by runtime markers |
+| `{{PR_OPEN_TIMING_BLOCK}}` | integrate-phase | `stacked.md#PR_OPEN_TIMING` | `modular.md#PR_OPEN_TIMING` | baked per-variant (no runtime marker) |
+| `{{PRS_CONTEXT_FILE_PATH}}` | implement-plan + integrate-phase | `stacked.md` footer value | `modular.md` footer value | ``either `.../phase-{phase.id}.md` or `.../plan.md` depending on `run_options.commit_strategy_resolved` `` |
+| `{{TRACKING_BRANCH_FIELD}}` | implement-plan | `stacked.md` footer value (empty) | `modular.md` footer value | both gated by runtime markers |
+| `{{TRACKING_PHASE_BRANCH_FIELD}}` | implement-plan | `stacked.md` footer value (`, branch, base`) | `modular.md` footer value (empty) | both gated by runtime markers |
+| `{{FINAL_REPORT_BRANCH_SUMMARY}}` | implement-plan | `stacked.md` footer value | `modular.md` footer value | dynamic per resolved strategy |
+| `{{BRANCH_CHECKLIST_LINE}}` | implement-plan | `stacked.md` footer value | `modular.md` footer value | dynamic per resolved strategy |
+| `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}` | implement-plan | `stacked.md#CHECKLIST` (empty) | `modular.md#CHECKLIST` (3 items) | both variants gated by runtime markers |
+| `{{BRANCH_PUSH_HEADING}}` | integrate-phase | `Push stacked branch` | `Push to plan branch` | baked per-variant (`Push stacked branch` / `Push to plan branch`) |
 
 ### `{{COMMIT_STRATEGY_REFUSAL_BLOCK}}` (amend-plan only)
 
@@ -158,15 +195,20 @@ Amending under modular commits requires rewriting an arbitrary number of inline 
 Refuse with this guidance; do not proceed.
 ```
 
-The Phase 3 substitution bodies referenced above (`{{BRANCH_NAMING_BLOCK}}` modular variant, `{{PER_PHASE_COMMIT_BLOCK}}` modular variant, `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}` modular variant) live in [resources/implement-plan-template-modular-substitutions.md](resources/implement-plan-template-modular-substitutions.md) — a sister file that derive-skills reads when rendering `modular-commits` or `ask`.
+The commit-strategy block bodies (branch naming, per-phase commit, PR-open timing, checklist) for both strategies live in [resources/plan-execution/partials/commit-strategy/](resources/plan-execution/partials/commit-strategy/) — `stacked.md` + `modular.md`. derive-skills reads the one matching `policies.commit_strategy` (both, under `ask`).
 
-Render each template with substitutions, write to:
+Render each template (expand includes → substitute placeholders → write), producing:
 
-- `ai-tools/skills/implement-plan/SKILL.md` (from `implement-plan-template.md`)
-- `ai-tools/skills/amend-plan/SKILL.md` (from `amend-plan-template.md`)
+- `ai-tools/skills/implement-plan/SKILL.md` (from `plan-execution/shell/implement-plan-template.md`)
+- `ai-tools/skills/implement-phase/SKILL.md` (from `plan-execution/shell/implement-phase-template.md`)
+- `ai-tools/skills/review-phase/SKILL.md` (from `plan-execution/shell/review-phase-template.md`)
+- `ai-tools/skills/integrate-phase/SKILL.md` (from `plan-execution/shell/integrate-phase-template.md`) — **or**, under `ask`, `ai-tools/skills/integrate-phase-stacked/SKILL.md` + `ai-tools/skills/integrate-phase-modular/SKILL.md` (same template rendered twice)
+- `ai-tools/skills/amend-plan/SKILL.md` (from `plan-execution/shell/amend-plan-template.md`)
 - `ai-tools/skills/systematic-debugging/SKILL.md` (from `systematic-debugging-template.md`) — only when `foundation_skills.systematic-debugging: enabled`
 
-Validate each output: every `{{PLACEHOLDER}}` should be replaced; if any survive, the template needs a new substitution rule. `implement-plan` and `amend-plan` share the same placeholder set — fix substitutions for both at the same time. `systematic-debugging` adds the two MCP-related placeholders; if a project picks an observability tool the catalogue doesn't list, ask the user for a free-form snippet (heading, required calls, fields to extract) and inline it before saving — and consider upstreaming the snippet to [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md).
+The first five are the **plan-execution unit** — render them together (they share partials + placeholders + cross-links); a change to one partial ripples to every shell that includes it.
+
+Validate each output before saving: **no `<!-- include: … -->` marker and no `{{PLACEHOLDER}}` may survive** (angle-bracket runtime slots like `<WORKROOT>` / `<BASE_BRANCH>` / `<RESOLVED-already-bound>` are expected to remain — they are execution-time, not derive-time). If a placeholder survives, the shell/partial needs a substitution rule. Cross-link check: the conductor's links to `implement-phase` / `review-phase` / the integrate variant resolve, and `amend-plan` / `systematic-debugging` → `review-phase` resolve. `systematic-debugging` adds the two MCP-related placeholders; if a project picks an observability tool the catalogue doesn't list, ask the user for a free-form snippet (heading, required calls, fields to extract) and inline it before saving — and consider upstreaming the snippet to [resources/systematic-debugging-mcp-tools.md](resources/systematic-debugging-mcp-tools.md).
 
 ### C. Optional — ask the user
 
@@ -239,7 +281,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 
 - **Don't ship copy-pasted source-project SKILL.md files unchanged.** Run search-and-replace for source project names / paths / commands before saving.
 - **Foundation set is a unit.** Always copy `plan-feature` + `create-spec` + `open-pr-from-context` together — they reference each other. `create-qa-use-cases` joins only when `add-e2e-test` is enabled; when it's not, strip `plan-feature`'s e2e regions (the `<!-- e2e:start/end -->` pass) so no cross-link dangles.
-- **`implement-plan` is generated, not copied.** Its body has too much project-specific content for verbatim shipping.
+- **The plan-execution unit is generated, not copied.** `implement-plan` + `implement-phase` + `review-phase` + `integrate-phase` + `amend-plan` all have too much project-specific content for verbatim shipping. They are separate files but a **co-shipped unit** — never emit the conductors without the three sub-skills; a conductor whose `[implement-phase]` / `[review-phase]` / integrate link dangles is a broken skill.
 - **Optional skills (`add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`) are gated by user answer.** Don't ship them by default.
 - **Each skill solves one job.** Two unrelated checklists → split.
 - **Reference real files in the target.** Skill links must point to existing paths.
@@ -248,7 +290,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 
 ## Pitfalls
 
-- **Forgetting to substitute placeholders in `implement-plan`.** A surviving `{{TEST_CMD}}` is a runtime confusion. Validate before saving.
+- **Forgetting to substitute placeholders (or expand includes) in the plan-execution skills.** A surviving `{{TEST_CMD}}` or `<!-- include: … -->` is a runtime confusion. Expand every include, substitute every `{{…}}`, and validate before saving. (Angle-bracket runtime slots like `<WORKROOT>` are meant to stay.)
 - **Copying foundation skills and forgetting to scrub source-project paths.** Bundled copies may still carry source-repo paths (e.g. `<source-repo>/ai-plans/`, `apps/<service>/`). Replace with the target's paths.
 - **Asking too many questions for optional skills.** If `vinta-analyze-codebase` shows no e2e dir and the user clearly has no e2e setup, it's OK to skip the question and not ship `add-e2e-test`. Use judgment.
 - **Skipping the foundation copy because "the user already has them".** They probably don't. Confirm by reading the target's `ai-tools/skills/` (if it exists at all). If it does have these, ask the user "refresh from bundled copies, or keep what you have?".
@@ -261,5 +303,6 @@ After all skills written:
 2. `name` field matches dir name.
 3. No `{{PLACEHOLDER}}` strings survive in any output skill.
 4. Foundation skills (plan-feature, create-spec, open-pr-from-context — plus create-qa-use-cases when e2e is enabled) reference each other correctly via `[name](../<name>/SKILL.md)` links. When e2e is disabled, confirm `plan-feature` has **no** surviving `<!-- e2e:start/end -->` markers and no dangling link to `create-qa-use-cases` / `add-e2e-test`.
-5. `implement-plan` body cites real commands + the project's actual code host + branch / PR / co-author policy.
-6. Setup script ([vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md)) runs cleanly with the new skills in place.
+5. **Plan-execution unit intact.** All five files exist; no surviving `<!-- include -->` markers; the conductor's `[implement-phase]` / `[review-phase]` / integrate-phase links resolve, and `amend-plan` + `systematic-debugging` (when shipped) → `[review-phase]` resolve. Under `ask`: both `integrate-phase-stacked` + `integrate-phase-modular` exist and the conductor's dispatch line names both.
+6. `implement-plan` (+ the plan-execution sub-skills) cite real commands + the project's actual code host + branch / PR / co-author policy.
+7. Setup script ([vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md)) runs cleanly with the new skills in place.

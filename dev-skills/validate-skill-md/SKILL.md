@@ -52,12 +52,11 @@ Anything else under frontmatter → warn (unknown key).
 
 Allowlist: any file whose path matches `*-template.md` is allowed to contain `{{...}}` strings. Specifically:
 
-- `skills/vinta-derive-skills/resources/implement-plan-template.md`
-- `skills/vinta-derive-skills/resources/amend-plan-template.md`
+- `skills/vinta-derive-skills/resources/plan-execution/shell/*-template.md` — the plan-execution unit shells (`implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`).
 - `skills/vinta-derive-skills/resources/systematic-debugging-template.md`
 - `skills/vinta-derive-skills/resources/prs-context-template.md`
 
-These are *not* SKILL.md files — they're templates rendered by `vinta-derive-skills`. The lint walker skips them entirely.
+The walker only processes files literally named `SKILL.md`, so it never touches these templates **or** the shared fragments under `skills/vinta-derive-skills/resources/plan-execution/partials/` (`*.md`, not `*-template.md`, not `SKILL.md`). Both templates and partials legitimately keep `{{PLACEHOLDER}}` strings and `<!-- include: … -->` markers — they are rendered/expanded by `vinta-derive-skills` before shipping. Do not add them to the SKILL.md walk.
 
 For everything else: any string matching `\{\{[A-Z_][A-Z0-9_]*\}\}` is an error. Report file + line.
 

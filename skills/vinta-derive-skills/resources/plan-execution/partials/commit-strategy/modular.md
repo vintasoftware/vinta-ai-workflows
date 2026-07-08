@@ -1,36 +1,29 @@
-# Modular-commits substitutions for `implement-plan-template.md`
+<!-- Partial: commit-strategy / modular-commits. Folds in the former implement-plan-template-modular-substitutions.md. Blocks consumed by implement-phase (PER_PHASE_COMMIT) + integrate-phase (BRANCH_NAMING, PR_OPEN_TIMING) + conductor (CHECKLIST). All git calls use `git -C <WORKROOT>`; the first executed phase branches off `<BASE_BRANCH>` — both resolved once by the conductor (see worktree-seam.md#WORKROOT_RESOLUTION). The rendering-guidance appendix at the bottom is read by derive-skills to resolve the {{MODULAR_*}} placeholders; it is NOT part of any shipped block. -->
 
-This file holds the substitution bodies for the `{{COMMIT_STRATEGY_*}}` placeholder family when `policies.commit_strategy = modular-commits`. The `stacked-branches` substitutions are inline in the parent placeholder table in [SKILL.md](../SKILL.md). The `ask` variant emits **both** the stacked and the modular bodies gated by inline runtime markers — see [Phase 4 ask-mode substitutions](#ask-mode-substitutions) at the bottom.
-
-Each section below is delimited by `<!-- substitution: {{PLACEHOLDER}} -->` markers so derive-skills can extract the block by name. The block's content is everything between the open and close markers, **excluding** the markers themselves.
-
-## `{{BRANCH_NAMING_BLOCK}}` (modular)
-
-<!-- substitution-begin: BRANCH_NAMING_BLOCK -->
+<!-- block-begin: BRANCH_NAMING -->
 Branch naming: `plan/{plan-id-kebab}` (one branch for the whole plan — no per-phase suffix).
 
-**First executed phase** (branches from `{{DEFAULT_BRANCH}}`):
+**First executed phase** (branches from `<BASE_BRANCH>`, already made current by the conductor):
+
 ```bash
-git checkout {{DEFAULT_BRANCH}}
-git pull --ff-only
-git checkout -b plan/{plan-id-kebab}
+git -C <WORKROOT> checkout <BASE_BRANCH>
+git -C <WORKROOT> checkout -b plan/{plan-id-kebab}
 # subagent's atomic unit commits land on this branch
-git push -u origin plan/{plan-id-kebab}
+git -C <WORKROOT> push -u origin plan/{plan-id-kebab}
 ```
 
 **Subsequent phases** (stay on the same plan branch — no new branch):
+
 ```bash
-git checkout plan/{plan-id-kebab}
+git -C <WORKROOT> checkout plan/{plan-id-kebab}
 # subagent's atomic unit commits land on this branch
-git push origin plan/{plan-id-kebab}
+git -C <WORKROOT> push origin plan/{plan-id-kebab}
 ```
 
 The branch carries every phase's commits in plan order. Reviewers read the commit log top-to-bottom as a table of contents of the implementation.
-<!-- substitution-end: BRANCH_NAMING_BLOCK -->
+<!-- block-end: BRANCH_NAMING -->
 
-## `{{PER_PHASE_COMMIT_BLOCK}}` (modular)
-
-<!-- substitution-begin: PER_PHASE_COMMIT_BLOCK -->
+<!-- block-begin: PER_PHASE_COMMIT -->
 7. **Plan commit units before staging.** List the logical units this phase produces (e.g. `3 services + 1 use case update + 1 init export`). Each unit = **one** commit. Tests for that unit travel **in the same commit** as the code they test — never a separate commit.
 8. For each unit, in order:
    a. Stage exactly that unit's files: `git add <explicit paths>` (NEVER `git add -A` — {{ANTI_GIT_ADD_ALL_REASON}}). Tests for the unit go in the same `git add`.
@@ -76,11 +69,35 @@ Tests for a unit belong **in the same commit** as that unit. Never commit tests 
 | "The user can squash later" | Squashing destroys the logical history this discipline exists to preserve. |
 | "It's faster to do one commit" | Planning units takes 2 minutes; reviewing a 2000-line blob takes much longer. |
 | "The changes are all related" | Related ≠ same unit. Services that depend on each other still get separate commits. |
-<!-- substitution-end: PER_PHASE_COMMIT_BLOCK -->
+<!-- block-end: PER_PHASE_COMMIT -->
+
+<!-- block-begin: PR_OPEN_TIMING -->
+**PR opens once — after Phase 1 passes review.** Subsequent phases push their atomic unit commits to the same plan branch (`plan/{plan-id-kebab}`); the orchestrator re-runs [open-pr.sh](../open-pr-from-context/scripts/open-pr.sh) against the same plan-level prs-context file at `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md`. The script is idempotent for already-open PRs — it updates the body, appends new inline comments, and posts a `Phase {N} complete — pushed M commits` PR comment.
+<!-- block-end: PR_OPEN_TIMING -->
+
+<!-- block-begin: CHECKLIST -->
+- [ ] Commit units listed upfront before any staging.
+- [ ] Each commit covers exactly one logical unit (no "and" in commit messages).
+- [ ] Tests landed in the same commit as the code they cover (never a separate test-only commit).
+- [ ] All unit commits pushed to `plan/{plan-id-kebab}` at end of phase.
+<!-- block-end: CHECKLIST -->
+
+<!-- Single-line values (derive-skills substitutes these into the shells directly):
+     BRANCH_PUSH_HEADING            = Push to plan branch
+     BRANCH_NAMING_PATTERN_SUMMARY  = plan branch (one branch for whole plan: `plan/{plan-id-kebab}`)
+     PRS_CONTEXT_FILE_PATH          = a single `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md` file (one PR per plan, not per phase)
+     TRACKING_BRANCH_FIELD          = top-level `plan_branch:` field
+     TRACKING_PHASE_BRANCH_FIELD    = (empty — no per-phase branch under modular)
+     FINAL_REPORT_BRANCH_SUMMARY    = single plan branch `plan/{plan-id-kebab}` with commit log organized by phase
+     BRANCH_CHECKLIST_LINE          = Plan branch updated with phase commits; pushed. -->
+
+<!-- ===================================================================== -->
+<!-- rendering-guidance (read by derive-skills; NOT shipped in any block)  -->
+<!-- ===================================================================== -->
 
 ### Conditional example messages (driven by `policies.commit_style`)
 
-derive-skills resolves the six `{{MODULAR_EXAMPLE_*}}` placeholders + the `{{MODULAR_COMMIT_MESSAGE_FORMAT_BLOCK}}` from this table when rendering `{{PER_PHASE_COMMIT_BLOCK}}`:
+derive-skills resolves the six `{{MODULAR_EXAMPLE_*}}` placeholders + the `{{MODULAR_COMMIT_MESSAGE_FORMAT_BLOCK}}` from this table when rendering the `PER_PHASE_COMMIT` block above:
 
 | Placeholder | `commit_style = conventional` | `commit_style = imperative` | `commit_style = other` |
 |---|---|---|---|
@@ -147,52 +164,3 @@ WIP
 add stuff
 Implement full record copy feature   ← too broad, should be split
 ```
-
-## `{{PR_OPEN_TIMING_BLOCK}}` (modular)
-
-<!-- substitution-begin: PR_OPEN_TIMING_BLOCK -->
-**PR opens once — after Phase 1 passes review.** Subsequent phases push their atomic unit commits to the same plan branch (`plan/{plan-id-kebab}`); the orchestrator re-runs [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) against the same plan-level prs-context file at `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md`. The script is idempotent for already-open PRs — it updates the body, appends new inline comments, and posts an `Phase {N} complete — pushed M commits` PR comment.
-
-<!-- substitution-end: PR_OPEN_TIMING_BLOCK -->
-
-## `{{COMMIT_STRATEGY_CHECKLIST_BLOCK}}` (modular)
-
-<!-- substitution-begin: COMMIT_STRATEGY_CHECKLIST_BLOCK -->
-- [ ] Commit units listed upfront before any staging.
-- [ ] Each commit covers exactly one logical unit (no "and" in commit messages).
-- [ ] Tests landed in the same commit as the code they cover (never a separate test-only commit).
-- [ ] All unit commits pushed to `plan/{plan-id-kebab}` at end of phase.
-<!-- substitution-end: COMMIT_STRATEGY_CHECKLIST_BLOCK -->
-
-## Other modular substitutions (single-line — listed for completeness)
-
-| Placeholder | Modular substitution |
-|---|---|
-| `{{BRANCH_PUSH_HEADING}}` | `Push to plan branch` |
-| `{{BRANCH_NAMING_PATTERN_SUMMARY}}` | ``plan branch (one branch for whole plan: `plan/{plan-id-kebab}`)`` |
-| `{{PRS_CONTEXT_FILE_PATH_DESCRIPTION}}` | `` a single `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md` file (one PR per plan, not per phase) `` |
-| `{{TRACKING_BRANCH_FIELD}}` | `top-level \`plan_branch:\` field` |
-| `{{TRACKING_PHASE_BRANCH_FIELD}}` | empty string (no per-phase branch under modular) |
-| `{{FINAL_REPORT_BRANCH_SUMMARY}}` | ``single plan branch `plan/{plan-id-kebab}` with commit log organized by phase`` |
-| `{{BRANCH_CHECKLIST_LINE}}` | `Plan branch updated with phase commits; pushed.` |
-| `{{COMMIT_STRATEGY_STEP0_QUESTION}}` | empty string (modular is set as the project default; nothing to ask) |
-| `{{COMMIT_STRATEGY_STEP0_TRAILER}}` | empty string |
-| `{{COMMIT_STRATEGY_CONFIRM_NOTE}}` | empty string |
-
-## Ask-mode substitutions
-
-When `policies.commit_strategy = ask`, derive-skills renders **both** the stacked-branches and the modular-commits bodies for each multi-line placeholder, gated by inline runtime markers the agent reads at execution time:
-
-```markdown
-**If `run_options.commit_strategy_resolved = "modular-commits"`:**
-
-<modular substitution body here>
-
-**Else (`run_options.commit_strategy_resolved = "stacked-branches"`):**
-
-<stacked substitution body here>
-```
-
-Single-line placeholders under ask use the same gating pattern but inline (`If modular: <a> · Else (stacked): <b>`).
-
-For the Step 0 question itself (`{{COMMIT_STRATEGY_STEP0_QUESTION}}`), the ask substitution is the AskUserQuestion block documented in the parent placeholder table in [SKILL.md](../SKILL.md) — same content used to populate the resolved value.
