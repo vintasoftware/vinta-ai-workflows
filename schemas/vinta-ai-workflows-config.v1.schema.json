@@ -260,6 +260,11 @@
           "properties": {
             "pause_between_phases": { "type": "boolean", "default": false },
             "generate_inline_comments": { "type": "boolean", "default": false },
+            "full_test_suite": {
+              "description": "Default answer to Step 0 question (d) — what each phase's outer gate runs for tests. False (default) = quick path: the outer gate runs only the scoped test suite covering the apps/files the phase touched (new tests still pass individually in the inner loop). True = run the full repo test suite in every phase's outer gate, guarding against regressions in untouched code at the cost of slower phases. The repo-wide type/build gate runs every phase either way. Per-run prompt still asks; this is the suggested default shown.",
+              "type": "boolean",
+              "default": false
+            },
             "use_worktree": {
               "description": "Default answer to Step 0 question (c) — whether `implement-plan` should provision an isolated git worktree (via `prepare-worktree`) and run every phase's subagent inside it. False = run in the current checkout. True = create one shared worktree at the start of the plan run; all phase branches stack inside it. Per-run prompt still asks; this is the suggested default shown.",
               "type": "boolean",

@@ -46,6 +46,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`implement-plan` outer-gate test scope is now configurable — and defaults
+  to the quick path.** Each phase's outer gate still always runs the repo-wide
+  type/build gate, but for tests it now runs **only the scoped suite** covering
+  the apps/files that phase touched by default, instead of the whole repo suite
+  every phase (new tests still pass individually in the inner loop). This
+  **flips the previous default** (full suite every phase → scoped) to make
+  multi-phase plans materially faster. Opt back into the full suite per run via
+  the new Step 0 question (d), or set the default in
+  `.vinta-ai-workflows.yaml` under
+  `run_options.implement-plan.full_test_suite: true`. New config field
+  (`run_options.implement-plan.full_test_suite`, boolean, default `false`);
+  threaded from the conductor into `implement-phase` (outer-gate marker in the
+  implementer prompt) and `review-phase` (Layer 1 verifies whichever gate the
+  flag selects); recorded in `TRACKING_{plan-id}.md` `run_options`.
+
 - **`deslop-comments` foundation skill — Simple-English comment cleanup, now
   part of the review flow.** Rewrites comments + doc blocks touched during a
   task into Simple English (strips AI-slop vocabulary and negative framing;

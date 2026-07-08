@@ -52,11 +52,13 @@ Parse once, reuse for every phase:
 
       Skip this question entirely when `foundation_skills.prepare-worktree` is `disabled` in `.vinta-ai-workflows.yaml`: record `run_options.use_worktree = false`; surface a one-line note that worktree isolation is available if the team opts in via [vinta-sync-ai-tools](../../skills/vinta-sync-ai-tools/SKILL.md).
 
+   d. **Full test suite each phase?** *"Each phase's outer gate always runs the repo-wide type/build gate. For tests, do you want the quick path (run only the scoped suite covering the apps/files that phase touched — faster phases) or the full repo test suite every phase (slower, but guards against regressions in untouched code)? New tests still pass individually in the inner loop either way."* Options: `Quick — scoped tests only each phase (default)`, `Full — run the whole test suite each phase`. Default = value of `run_options.implement-plan.full_test_suite` in `.vinta-ai-workflows.yaml` (`Quick`/false when unset). Records `run_options.full_test_suite` (`true` only for the `Full` answer).
+
    PR opening itself is **not** asked here — it's governed by the project's PR creation policy captured at bootstrap (see `{{PR_POLICY_BLOCK}}` above). When that policy = "agents create PRs", the {{INTEGRATE_PHASE_DISPATCH}} step always opens the PR via [open-pr.sh](../open-pr-from-context/scripts/open-pr.sh) regardless of the comment opt-in.{{COMMIT_STRATEGY_STEP0_QUESTION}}
 
-5. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, {{BRANCH_NAMING_PATTERN_SUMMARY}}, captured `run_options.pause_between_phases` + `run_options.generate_inline_comments` + `run_options.use_worktree`{{COMMIT_STRATEGY_CONFIRM_NOTE}}{{PR_REMINDER_LINE}}.
+5. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, {{BRANCH_NAMING_PATTERN_SUMMARY}}, captured `run_options.pause_between_phases` + `run_options.generate_inline_comments` + `run_options.use_worktree` + `run_options.full_test_suite`{{COMMIT_STRATEGY_CONFIRM_NOTE}}{{PR_REMINDER_LINE}}.
 
-   Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`. Worktree isolation follows `run_options.use_worktree`.{{COMMIT_STRATEGY_STEP0_TRAILER}}
+   Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`. Worktree isolation follows `run_options.use_worktree`. Outer-gate test scope follows `run_options.full_test_suite`.{{COMMIT_STRATEGY_STEP0_TRAILER}}
 
 <!-- include: partials/worktree-seam.md#WORKROOT_RESOLUTION -->
 
@@ -68,13 +70,13 @@ For each phase that's `not is_cross_repo and not is_flag_removal`, in plan order
 
 ### 1a. Implement
 
-Invoke [implement-phase](../implement-phase/SKILL.md), passing the phase record, the plan-level decisions (**Goals + Non-goals**, **Guiding Decisions**, the relevant **Data Model Changes** subsection), the prior-phase tracking summaries, and `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER`. It returns the implementer's report.
+Invoke [implement-phase](../implement-phase/SKILL.md), passing the phase record, the plan-level decisions (**Goals + Non-goals**, **Guiding Decisions**, the relevant **Data Model Changes** subsection), the prior-phase tracking summaries, `run_options.full_test_suite`, and `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER`. It returns the implementer's report.
 
 **Model escalation.** implement-phase escalates one tier + retries once on a clear capability gap. After Tier 4 fails, it stops and hands back the failure — update tracking with `❌`, post the report to the user, ask how to proceed. Don't silently re-derive tier.
 
 ### 1b. Review
 
-Invoke [review-phase](../review-phase/SKILL.md) against the phase diff, passing the phase body to walk, `WORKROOT`, `main_checkout`, and the `reviewer` / `fixer` agent types. It loops its three layers + fix loop until clean, then returns `PASS` (or the surfaced findings). Do not proceed to integrate while any layer is red.
+Invoke [review-phase](../review-phase/SKILL.md) against the phase diff, passing the phase body to walk, `WORKROOT`, `main_checkout`, `run_options.full_test_suite`, and the `reviewer` / `fixer` agent types. It loops its three layers + fix loop until clean, then returns `PASS` (or the surfaced findings). Do not proceed to integrate while any layer is red.
 
 ### 1c. Integrate
 
@@ -84,7 +86,7 @@ Invoke {{INTEGRATE_PHASE_DISPATCH}}, passing `WORKROOT` / `BASE_BRANCH`, the `{{
 
 Tracking lives at `{{PLAN_DIR}}/TRACKING_{plan-id}.md`. Commit on the **current** phase's branch — deletion in [Step 2](#step-2--final-report).
 
-Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `use_worktree`, `worktree_path`, `worktree_branch`, `worktree_summary`, `sandbox_tier` — last four only when `use_worktree = true`), {{TRACKING_BRANCH_FIELD}}, completed-phases (with status, model{{TRACKING_PHASE_BRANCH_FIELD}}, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
+Schema: feature-name, plan path, started/last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `full_test_suite`, `use_worktree`, `worktree_path`, `worktree_branch`, `worktree_summary`, `sandbox_tier` — last four only when `use_worktree = true`), {{TRACKING_BRANCH_FIELD}}, completed-phases (with status, model{{TRACKING_PHASE_BRANCH_FIELD}}, e2e+screenshots if any, 5–15 line summary), current phase, remaining phases, deferred phases.
 
 The conductor writes this from the git diff + the agent's summary — not from the agent's narration.
 
@@ -154,13 +156,13 @@ After all executable phases complete:
 - **Trust the plan's per-phase model suggestion.** Model selection lives in [implement-phase](../implement-phase/SKILL.md); the conductor never re-derives tiers.
 - **Don't re-implement what a project skill encodes.**
 {{UI_E2E_RULE_LINE}}
-- **Two-tier verification, in order, every phase.** Inner scoped, outer full repo — enforced inside [implement-phase](../implement-phase/SKILL.md).
+- **Two-tier verification, in order, every phase.** Inner scoped, then the outer gate — enforced inside [implement-phase](../implement-phase/SKILL.md). The outer gate always runs the repo-wide type/build gate; its test scope follows `run_options.full_test_suite` (scoped suite by default, full repo suite when opted in).
 - **Three-layer review, every phase, no exceptions** — [review-phase](../review-phase/SKILL.md) is not optional and not inlined here.
 - **Orchestrator never edits code.**
 - **Feature flags = gates, not toggles for tests.**
 - **Never remove a feature flag from this skill.**
 - **Stop on Tier-4 failure.**
-- **Honor opt-in flags.** `run_options.pause_between_phases` controls the [Per-phase pause gate](#1f-per-phase-pause-gate-opt-in); `run_options.generate_inline_comments` controls whether {{INTEGRATE_PHASE_DISPATCH}} drafts inline comments (always writes the file when that step runs at all — empty comments when off); `run_options.use_worktree` controls whether the [Resolve WORKROOT step](#step-05--resolve-workroot) provisions a worktree and thus what `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` resolve to.
+- **Honor opt-in flags.** `run_options.pause_between_phases` controls the [Per-phase pause gate](#1f-per-phase-pause-gate-opt-in); `run_options.generate_inline_comments` controls whether {{INTEGRATE_PHASE_DISPATCH}} drafts inline comments (always writes the file when that step runs at all — empty comments when off); `run_options.use_worktree` controls whether the [Resolve WORKROOT step](#step-05--resolve-workroot) provisions a worktree and thus what `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` resolve to; `run_options.full_test_suite` controls the outer-gate test scope ([Implement](#1a-implement) + [Review](#1b-review) Layer 1) — scoped suite by default, full repo suite when `true`.
 - **One worktree per plan run.** When `use_worktree = true`, provision once in the [Resolve WORKROOT step](#step-05--resolve-workroot) and reuse for every phase. Never spawn a second worktree mid-plan; never silently fall back to the main checkout on prepare-worktree failure (ask the user).
 - **Don't auto-tear-down the worktree.** Step 2 surfaces the teardown command; the user runs it when ready.
 - **`WORKROOT` is resolved once, used everywhere.** Every sub-skill takes `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` as data — no step re-derives worktree state. OS-level prevention (sandbox wrap in implement-phase when `SANDBOX_TIER = enforced`) plus the review-phase stray-write backstop keep main-checkout writes out; see [worktree-seam](../implement-phase/SKILL.md#3-spawn-the-subagent).
