@@ -53,6 +53,42 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prepare-worktree/` dir now ships (SKILL.md + `scripts/sandbox-run.sh`),
   so re-run the foundation-skill copy, not just the SKILL.md.
 
+- **`prepare-worktree` — write-guard for *in-process* subagent runtimes
+  (claude-code's Task tool).** `sandbox-run.sh` confines a *process*, so it
+  only works when the harness spawns subagents as subprocesses (`codex exec`,
+  a `claude -p` child). Claude Code runs subagents in-process — same OS
+  process, same tool pipeline, no child command to wrap — so a new
+  harness-config guard covers it instead. Two bundled scripts:
+  `prepare-worktree/scripts/claude-worktree-write-guard.py` (a `PreToolUse`
+  hook that fires for the orchestrator **and** every in-process Task subagent,
+  blocking the file-editing tools — `Edit`/`Write`/`MultiEdit`/`NotebookEdit`
+  — from writing outside the worktree; filesystem-only, no network impact) and
+  `prepare-worktree/scripts/gen-claude-sandbox-settings.sh` (generates the
+  worktree's `.claude/settings.json` wiring that hook, and optionally
+  Claude Code's **native** OS sandbox via `sandbox.filesystem.denyWrite`/
+  `allowWrite` under `--os-sandbox` to also block Bash-issued writes — noting
+  the native sandbox forces network isolation, so registry + git-remote hosts
+  must be allow-listed via `--allow-domain`). Same deny-main/allow-rest model
+  as `sandbox-run.sh`. Step 5.5 of `prepare-worktree` gains an *In-process
+  runtimes (claude-code)* subsection; `implement-plan` §1c makes the
+  previously hand-wavy "in-process runtime" branch concrete. **Consumers**:
+  re-sync `prepare-worktree` + `implement-plan` — the two new scripts ship
+  with the foundation-skill dir.
+
+### Fixed
+
+- **`prepare-worktree/scripts/sandbox-run.sh` — two correctness bugs.**
+  (1) The macOS profile temp file used `mktemp -t vinta-sandbox`, which fails
+  with "too few X's in template" under GNU `mktemp` (present on any machine
+  with coreutils on `PATH`, including many macOS setups) — the whole sandbox
+  path errored out; now uses an explicit `…/vinta-sandbox.XXXXXX` template
+  portable across BSD + GNU `mktemp`. (2) Callers must now pass
+  `--allow <main>/.git`: git worktrees write every commit into the main repo's
+  `.git` (`.git/worktrees/<name>/index.lock`, shared objects/refs), so a
+  deny-main that omits it made the subagent's own `git commit` fail with
+  `Operation not permitted`. `implement-plan` §1c's documented invocation +
+  checklist + rules are updated to include `<main>/.git` in the allow-set.
+
 ### Changed
 
 - **`plan-feature` — per-phase PR-size target raised from ~100–300 LoC to
