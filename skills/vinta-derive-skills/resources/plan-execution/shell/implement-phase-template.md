@@ -13,6 +13,7 @@ Execution unit invoked by [implement-plan](../implement-plan/SKILL.md) (and by [
 - Plan-level decisions: **Goals + Non-goals**, **Guiding Decisions**, the relevant **Data Model Changes** subsection.
 - Prior-phase summaries (the tracking file's "Completed Phases" section).
 - `WORKROOT`, `BASE_BRANCH`, `SANDBOX_TIER` — resolved once by the conductor ([Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot)).
+- `run_options.full_test_suite` — resolves the outer gate's test scope in the composed prompt's `{If run_options.full_test_suite = true:}` marker (false = scoped suite only; true = full repo suite).
 
 ## 1. Compose the agent prompt (token-efficient)
 

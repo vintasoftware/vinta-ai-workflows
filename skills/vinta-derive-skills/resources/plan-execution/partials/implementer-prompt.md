@@ -69,9 +69,10 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
    b. {{NEW_TEST_CMD_PATTERN}} for new tests individually.
    c. Scoped suite: {{SCOPED_TEST_PATTERN}}.
 4. Iterate 2–3 until **new tests pass individually** and the scoped suite is green. Do **not** advance to step 5 with red scoped tests.
-5. **Outer gate — full local verification, only after step 4 is green.** All MUST pass before staging:
-   a. **Type / build:** `{{BUILD_CMD}}`.
-   b. **Full test suite:** `{{TEST_CMD}}`.
+5. **Outer gate — local verification, only after step 4 is green.** All MUST pass before staging:
+   a. **Type / build:** `{{BUILD_CMD}}` — repo-wide, always.
+   b. **Tests:** by default run only the **scoped suite** `{{SCOPED_TEST_PATTERN}}` for the apps/files you touched — the new tests already passed individually in step 4b, so this re-confirms the touched surface without paying for the whole repo.
+      {If run_options.full_test_suite = true:} run the **full test suite** `{{TEST_CMD}}` instead of the scoped suite — this phase guards against regressions in untouched code too.
    {{E2E_OUTER_GATE_LINE}}
 6. Outer gate fails → return step 2 (fix regression), re-run inner loop, then 5a/5b/5c. **Never** commit, push, or proceed while any gate is red.
 <!-- block-end: INNER_OUTER_LOOP -->

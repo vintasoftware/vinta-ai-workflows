@@ -13,6 +13,7 @@ The single review implementation shared by every plan-execution conductor: [impl
 - The phase body to walk against (the **new** body when invoked by amend-plan).
 - `WORKROOT`, `SANDBOX_TIER` — resolved once by the conductor.
 - `main_checkout` — the repo root the run was invoked from (equals `WORKROOT` when no worktree).
+- `run_options.full_test_suite` — resolves which outer gate Layer 1 item 3 verifies ran (false = scoped suite; true = full repo suite).
 - The project's `reviewer` + `fixer` agent types.
 
 ## Review

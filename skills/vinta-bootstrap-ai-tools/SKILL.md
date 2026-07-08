@@ -267,6 +267,7 @@ run_options:
   implement-plan:
     pause_between_phases: false
     generate_inline_comments: false
+    full_test_suite: false  # default: each phase's outer gate runs scoped tests only; set true to run the full suite every phase
     use_worktree: <Optional foundation skills → prepare-worktree follow-up → default for Step 0 question (c); false unless team opted in>
   amend-plan:
     blast_radius_signal_threshold: 2

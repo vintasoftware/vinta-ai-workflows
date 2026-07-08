@@ -7,7 +7,7 @@ Three layers, all required, in order. The reviewing orchestrator never edits —
 
 1. `git -C <WORKROOT> status` + `git -C <WORKROOT> diff --stat`: confirm the file list matches the agent's report.
 2. **Read the full diff** for every changed file using `git -C <WORKROOT> diff`. Spot-checking is not enough.
-3. **Verify the outer gate** ran + green. Look in the report for explicit confirmation that `{{BUILD_CMD}}` AND `{{TEST_CMD}}` were executed + passed{{E2E_LAYER1_NOTE}}. Vague confirmation → **re-run yourself** (in `<WORKROOT>`).
+3. **Verify the outer gate** ran + green. By default that is `{{BUILD_CMD}}` (repo-wide) AND the scoped suite `{{SCOPED_TEST_PATTERN}}` covering the touched apps. {If run_options.full_test_suite = true:} the outer gate runs `{{BUILD_CMD}}` AND the full `{{TEST_CMD}}` instead — verify that. Look in the report for explicit confirmation the applicable gate was executed + passed{{E2E_LAYER1_NOTE}}. Vague confirmation → **re-run yourself** (in `<WORKROOT>`).
 4. **Scope creep**: file touched outside the expected surface area? Unrelated formatting churn? Surface it.
 5. **No-secrets scan**: `git -C <WORKROOT> diff` for `password|secret|token|api_key|AKIA|BEGIN [A-Z]+ KEY`.
 6. <!-- include: partials/worktree-seam.md#STRAY_WRITE_CHECK -->
