@@ -46,6 +46,40 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`deslop-comments` foundation skill — Simple-English comment cleanup, now
+  part of the review flow.** Rewrites comments + doc blocks touched during a
+  task into Simple English (strips AI-slop vocabulary and negative framing;
+  comment-only — no renames, no behavior change). Ships at
+  [skills/vinta-derive-skills/resources/foundation-skills/deslop-comments/SKILL.md](skills/vinta-derive-skills/resources/foundation-skills/deslop-comments/SKILL.md).
+  Wired as an **always-ship** bucket-A skill (new
+  `foundation_skills.deslop-comments` enum, added to the derive-skills bucket-A
+  table + always-on note, the bootstrap always-copy-verbatim list + outputs
+  tree + Step 0.5 YAML, and both foundation-shape replace lists) because
+  `review-phase` now depends on it: **Layer 2 gains a comment-hygiene check**
+  and the **fix loop dispatches a `fixer` to run `deslop-comments`** on the
+  phase's touched files for any comment-slop finding. Also invokable
+  standalone ("deslop these comments"). **Consumers**: re-sync to pick up the
+  skill and the `review-phase` comment-hygiene step.
+
+- **`thermo-nuclear-code-quality-review` foundation skill — opt-in deep
+  structural-maintainability audit.** A deliberately harsh, on-demand review
+  of a diff (abstraction quality, giant files, spaghetti-condition growth)
+  that hunts for "code-judo" reframes collapsing whole branches / helpers /
+  modes / layers rather than polishing them. Copy-verbatim foundation skill
+  (bucket A), read-only — it reports findings and hands each fix to the
+  `fixer` agent. Ships at
+  [skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/SKILL.md](skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/SKILL.md).
+  Wired as **opt-in / ask-first**: new `foundation_skills.thermo-nuclear-code-quality-review`
+  enum in `schemas/vinta-ai-workflows-config.v1.schema.json`, a new
+  question 6 in the bootstrap **Optional foundation skills** interview, and
+  the derive-skills bucket-A + foundation-shape lists. The `review-phase`
+  Layer 3 reviewer now applies a **condensed structural-simplification lens**
+  on every phase and escalates to this full audit only when a phase touches
+  core architecture, crosses ~1,000 lines, or surfaces a structural smell too
+  big to resolve inline — the deep pass never auto-runs on every diff.
+  **Consumers**: re-sync; the bootstrap now asks one more optional-skill
+  question, and `review-phase` gains the escalation hook.
+
 - **`plan-feature` AI model tier table extracted to a data resource +
   nightly freshness job.** The per-tier model recommendations that used to
   be hard-coded in `plan-feature/SKILL.md` now live in

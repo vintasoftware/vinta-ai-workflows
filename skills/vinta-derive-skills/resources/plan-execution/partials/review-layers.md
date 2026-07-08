@@ -26,6 +26,7 @@ Open the phase body alongside the diff and walk:
 {{E2E_LAYER2_CHECK}}
 6. **Feature-flag wiring** if the plan's **Guiding Decisions** declared a flag — flag-OFF is byte-for-byte pre-feature behavior, ≥1 test asserts it.
 7. **Cross-phase consistency** with prior tracking summaries.
+8. **Comment hygiene** — new or changed comments and doc blocks in the diff read as Simple English, one idea per sentence, no AI-slop vocabulary or negative framing, per the `deslop-comments` skill ([ai-tools/skills/deslop-comments/SKILL.md](ai-tools/skills/deslop-comments/SKILL.md)). Flag any that need rewriting; the fix loop dispatches a fixer to run `deslop-comments` on the phase's touched files.
 
 ## Layer 3 — Independent reviewer subagent
 
@@ -36,11 +37,13 @@ Reviewer prompt template — see the reviewer agent's body for the standard form
 - **SHOULD-FIX**: fix in-phase if cheap; else follow-up issue + tracking note.
 - **NIT**: ignore unless trivially cheap.
 
+The reviewer also applies a condensed **structural-simplification lens** — one question: is there an obvious "code-judo" reframe that would make whole branches, helpers, modes, or layers disappear, rather than polishing what's there? Routine phases stop at that one question. When the phase touched core architecture, pushed a file past ~1,000 lines, or the lens surfaces a structural smell too big to resolve inline, escalate to the full [thermo-nuclear-code-quality-review](ai-tools/skills/thermo-nuclear-code-quality-review/SKILL.md) skill against the phase diff — an opt-in deep audit, run deliberately, never on every phase.
+
 The reviewer finds nothing on a >300-LoC multi-file phase → suspicious. Read once more.
 
 ## Fix loop
 
-1. Spawn a **new** subagent — the project's `fixer` agent type ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md)). The fix prompt quotes the finding verbatim.
+1. Spawn a **new** subagent — the project's `fixer` agent type ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md)). The fix prompt quotes the finding verbatim. For comment-hygiene findings (Layer 2 item 8), the fix prompt tells the fixer to run the `deslop-comments` skill ([ai-tools/skills/deslop-comments/SKILL.md](ai-tools/skills/deslop-comments/SKILL.md)) scoped to the phase's touched files — comment-only edits, no behavior change.
 2. The `fixer`'s system prompt mandates re-running the inner loop + outer gate (in `<WORKROOT>`).
 3. After the fixer returns, redo Layer 1 in full + the affected portion of Layer 2.
 4. Loop until Layers 1, 2, 3 are all clean.
