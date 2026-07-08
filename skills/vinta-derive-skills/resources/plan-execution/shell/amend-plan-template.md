@@ -5,7 +5,7 @@ description: Adjust an existing implementation plan in `{{PLAN_DIR}}/` after imp
 
 # Amend Plan
 
-Revise a plan in [`{{PLAN_DIR}}/`]({{PLAN_DIR}}/) after work has begun. Companion to [implement-plan](../implement-plan/SKILL.md): same agents, same review gates, same PR-context flow — but the orchestrator's job here is **history rewriting** instead of forward execution.
+Revise a plan in [`{{PLAN_DIR}}/`]({{PLAN_DIR}}/) after work has begun. Companion conductor to [implement-plan](../implement-plan/SKILL.md): it reuses the same sub-skills ([implement-phase](../implement-phase/SKILL.md) for the body change, [review-phase](../review-phase/SKILL.md) for the gates) — but the orchestrator's job here is **history rewriting** instead of forward execution.
 
 The flow is destructive (force-push). Every modification is gated on user confirmation. Default disposition for any ambiguous case is "stop and ask" — never force-push without an explicit per-branch `Confirm` from the user.{{COMMIT_STRATEGY_REFUSAL_BLOCK}}
 
@@ -22,6 +22,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
 - {{COAUTHOR_POLICY_BLOCK}}
 - Default branch: `{{DEFAULT_BRANCH}}`.
 - Branch naming convention (set by [implement-plan](../implement-plan/SKILL.md)): `plan/{plan-id-kebab}/phase-{phase.id}`.
+- **`WORKROOT`.** Resolve once, same as the [implement-plan Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot): the main checkout by default, or the plan's worktree when `run_options.use_worktree = true` in the tracking file. Every `git` call below runs with `git -C <WORKROOT>`; when no worktree is in play, `WORKROOT` is the main checkout and the commands read exactly as in-place git.
 
 ## When to use
 
@@ -48,7 +49,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
 3. **Parse the plan.** Same structured fields as [implement-plan's "Extract structured fields" step](../implement-plan/SKILL.md#step-0--locate--parse-plan): plan id, **Goals + Non-goals** / **Guiding Decisions** / **Data Model Changes** / phase records from **Phased Rollout** / **Risk & Rollout Notes** through **Touch List**.
 
-4. **Read the tracking file** `{{PLAN_DIR}}/TRACKING_{plan-id}.md` if present. Its `Completed Phases` section tells you which phase branches were pushed and which model + base were used. If absent → `git branch -a | grep plan/{plan-id-kebab}` to enumerate pushed phase branches.
+4. **Read the tracking file** `{{PLAN_DIR}}/TRACKING_{plan-id}.md` if present. Its `Completed Phases` section tells you which phase branches were pushed, which model + base were used, and the `run_options` (including worktree state → `WORKROOT`). If absent → `git -C <WORKROOT> branch -a | grep plan/{plan-id-kebab}` to enumerate pushed phase branches.
 
 5. **Build a per-phase state map.** For every phase in the plan, record:
 
@@ -57,9 +58,9 @@ The flow is destructive (force-push). Every modification is gated on user confir
    | `phase.id`, `phase.title` | plan's **Phased Rollout** section |
    | `state` | one of `not-started` / `in-progress` / `implemented-not-merged` / `merged-to-default` |
    | `branch` | tracking file or git, pattern `plan/{plan-id-kebab}/phase-{id}` |
-   | `base` | tracking file or `git merge-base origin/<branch> <prev-branch>`; root phase bases on `{{DEFAULT_BRANCH}}` |
+   | `base` | tracking file or `git -C <WORKROOT> merge-base origin/<branch> <prev-branch>`; root phase bases on `{{DEFAULT_BRANCH}}` |
    | `pr_status` | `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{id}.md` frontmatter (`pending` / `published`) when the file exists |
-   | `merged_to_default` | `git branch --merged origin/{{DEFAULT_BRANCH}} | grep` against the branch |
+   | `merged_to_default` | `git -C <WORKROOT> branch --merged origin/{{DEFAULT_BRANCH}} | grep` against the branch |
 
    `merged-to-default = true` blocks any commit rewrite for that phase — see [Step 3 — Refuse force-pushes that can't work](#step-3--refuse-force-pushes-that-cant-work) below.
 
@@ -78,7 +79,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
    | `guiding-decisions-change` cascading into | ≥ 50% of implemented phases |
    | Phases in `merged-to-default` (immutable, must be `append-new`) | ≥ 2, AND remaining work also rewrites earlier phases |
    | New body materially changes the data-model contract from **Data Model Changes** | rewrite of >2 phases hinges on it |
-   | Estimated touched LoC across rewrites | ≥ 70% of original implementation diff size (rough estimate via `git diff --stat <base>..<branch>` summed across affected branches) |
+   | Estimated touched LoC across rewrites | ≥ 70% of original implementation diff size (rough estimate via `git -C <WORKROOT> diff --stat <base>..<branch>` summed across affected branches) |
    | Multi-author phase branches in the rewrite queue | ≥ 1 (force-push erases collaborator local state) |
    | Approved PRs in the rewrite queue | ≥ 2 (re-review burden becomes non-trivial) |
 
@@ -141,13 +142,13 @@ Always the first write. Plan file is durable; commits get rewritten next.
 
 ## Step 2 — Build the rewrite queue
 
-For each phase classified as needing commit rewrites (`body-rewrite` for already-implemented phases, downstream phases for `insert-new` / `body-rewrite` / `section-2-decision-change`), build a queue ordered by branch stack depth: parent first, children after.
+For each phase classified as needing commit rewrites (`body-rewrite` for already-implemented phases, downstream phases for `insert-new` / `body-rewrite` / `guiding-decisions-change`), build a queue ordered by branch stack depth: parent first, children after.
 
 For each entry record:
 
 - `branch`, `base` (parent in the stack — may be `{{DEFAULT_BRANCH}}` or another phase branch).
 - `change_kind`: `amend-existing` (modify the phase body's effect on the diff) or `rebase-only` (parent moved, no body change for this phase).
-- `commits_to_amend`: list of SHAs the orchestrator may rewrite (look at `git log <base>..<branch>`).
+- `commits_to_amend`: list of SHAs the orchestrator may rewrite (look at `git -C <WORKROOT> log <base>..<branch>`).
 
 Phases in `not-started` state are deferred to [implement-plan](../implement-plan/SKILL.md) — not rewritten here.
 
@@ -163,7 +164,7 @@ Before any write to remote, **block on these conditions**:
 
 3. **Branch protection rules block force-push.** `gh api repos/{owner}/{repo}/branches/{branch}/protection` (or `glab` equivalent). If the branch is protected, force-push will fail noisily — surface the rule, stop.
 
-4. **Multiple authors on the branch.** `git log --pretty=format:%ae <base>..<branch> | sort -u | wc -l` > 1 → other developers committed too. Force-push erases their local state. Surface, require explicit `Yes, I've coordinated with <names>` confirmation.
+4. **Multiple authors on the branch.** `git -C <WORKROOT> log --pretty=format:%ae <base>..<branch> | sort -u | wc -l` > 1 → other developers committed too. Force-push erases their local state. Surface, require explicit `Yes, I've coordinated with <names>` confirmation.
 
 If any block triggers and the user can't dismiss it: stop. Don't proceed further. Tell the user the rewrite path is unavailable; suggest an `append-new` phase as the fallback.
 
@@ -174,14 +175,14 @@ For each entry in the rewrite queue, in stack order:
 ### 4a. Check out the branch
 
 ```bash
-git fetch origin
-git checkout {branch}
-git reset --hard origin/{branch}
+git -C <WORKROOT> fetch origin
+git -C <WORKROOT> checkout {branch}
+git -C <WORKROOT> reset --hard origin/{branch}
 ```
 
 ### 4b. For `change_kind = amend-existing` only — apply the body change
 
-Spawn an implementer subagent. Prompt shape (token-efficient, mirrors the [implement-plan "Prepare agent prompt" step](../implement-plan/SKILL.md#1a-prepare-agent-prompt-token-efficient)):
+Spawn an implementer subagent. The prompt mirrors [implement-phase](../implement-phase/SKILL.md#1-compose-the-agent-prompt-token-efficient) but records the change differently (new commit on top by default, never a push). Compose:
 
 ```
 You are amending {phase.id}: {phase.title} of plan {plan.id}.
@@ -189,10 +190,13 @@ You are amending {phase.id}: {phase.title} of plan {plan.id}.
 ## Repo
 {{PROJECT_NAME}} ({{STACK_SUMMARY}}).
 
+## Working location
+Work inside `<WORKROOT>`. `cd` into it before any command.
+
 ## Read first
 1. AGENTS.md — repo conventions.
 2. {{PLAN_DIR}}/{plan-filename}, the **Goals + Non-goals**, **Guiding Decisions**, and **Data Model Changes** sections, plus the rewritten phase body inside **Phased Rollout**.
-3. The current diff: `git diff {base}...HEAD` — what's already on this branch.
+3. The current diff: `git -C <WORKROOT> diff {base}...HEAD` — what's already on this branch.
 
 ## What changed in the plan (verbatim)
 {Diff between old phase body and new — produce via `diff <(old-body) <(new-body)`. Or, if the plan was rewritten in place, the new body verbatim with a note "this replaces what was here before".}
@@ -212,17 +216,19 @@ Use `git commit --amend` ONLY when:
 - The user explicitly authorized amend in Step 0.
 
 {{DEPENDENCY_LICENSE_BLOCK}}
+```
 
-## Working instructions (same loops as implement-plan)
-1. Read existing code paths your changes touch.
-2. Edit. Match existing patterns.
-3. Inner loop: `{{LINT_CMD}}` → {{NEW_TEST_CMD_PATTERN}} → scoped suite ({{SCOPED_TEST_PATTERN}}).
-4. Iterate 2–3 until green.
-5. Outer gate: `{{BUILD_CMD}}` AND `{{TEST_CMD}}`{{E2E_OUTER_GATE_LINE}}.
-6. Stage explicitly: `git add {{STAGE_PATTERN}}`.
-7. Commit. {{COMMIT_STYLE_LINE}}.
-8. {{COAUTHOR_INSTRUCTION_LINE}}
-9. **Do NOT push. Do NOT force-push.** Orchestrator owns the remote.
+Then splice in the shared inner/outer verification loop verbatim:
+
+<!-- include: partials/implementer-prompt.md#INNER_OUTER_LOOP -->
+
+…and close the prompt with the amend-specific staging tail:
+
+```
+7. Stage explicitly: `git add {{STAGE_PATTERN}}`.
+8. Commit. {{COMMIT_STYLE_LINE}}.
+9. {{COAUTHOR_INSTRUCTION_LINE}}
+10. **Do NOT push. Do NOT force-push.** The orchestrator owns the remote.
 
 ## Required output
 - Status: SUCCESS or FAILURE.
@@ -233,26 +239,26 @@ Use `git commit --amend` ONLY when:
 
 For `change_kind = rebase-only` (downstream phase whose parent moved): skip the agent. The work is purely git topology.
 
-### 4c. Run the three-layer review (same as implement-plan)
+### 4c. Run the three-layer review
 
-Same Layer 1 / 2 / 3 / fix-loop as the [implement-plan "Thorough review" step](../implement-plan/SKILL.md#1d-thorough-review). The reviewer agent gets the **new** phase body to walk against. Layer 2 walks: every "Changes" item in the new body, every "Tests" entry, the new acceptance line.
+Invoke [review-phase](../review-phase/SKILL.md) against the rewritten branch, passing the **new** phase body to walk against and `WORKROOT`. Layer 2 walks: every "Changes" item in the new body, every "Tests" entry, the new acceptance line.
 
-Skip Layer 3 only when `change_kind = rebase-only` (no body change → no compliance walk). Layers 1 + 2 still apply (verify the rebase didn't lose unrelated work).
+Skip this step only when `change_kind = rebase-only` (no body change → no compliance walk). Even then, spot-run review-phase's Layer 1 mechanical checks to verify the rebase didn't lose unrelated work.
 
 ### 4d. Rebase onto the (possibly-rewritten) parent
 
 ```bash
 # parent's tip may have moved if it was rewritten earlier in the queue.
-git fetch origin
-PARENT_TIP=$(git rev-parse origin/{base})
-git rebase $PARENT_TIP
+git -C <WORKROOT> fetch origin
+PARENT_TIP=$(git -C <WORKROOT> rev-parse origin/{base})
+git -C <WORKROOT> rebase $PARENT_TIP
 ```
 
 Conflicts:
 
-1. **Spawn a fixer subagent** with the conflict body + new phase body + parent's tip diff. Same agent type as the [implement-plan "Fix loop" subsection](../implement-plan/SKILL.md#fix-loop).
-2. Fixer resolves, runs inner + outer gate.
-3. Orchestrator continues the rebase: `git rebase --continue`.
+1. **Spawn a fixer subagent** with the conflict body + new phase body + parent's tip diff. Same fixer agent type as [review-phase](../review-phase/SKILL.md#fix-loop).
+2. Fixer resolves, runs inner + outer gate (in `<WORKROOT>`).
+3. Orchestrator continues the rebase: `git -C <WORKROOT> rebase --continue`.
 
 Repeat until the rebase finishes clean. If the fixer can't resolve after one retry → stop. Surface to user; do not push a half-rebased branch.
 
@@ -266,7 +272,7 @@ Repeat until the rebase finishes clean. If the fixer can't resolve after one ret
 On confirm:
 
 ```bash
-git push --force-with-lease origin {branch}
+git -C <WORKROOT> push --force-with-lease origin {branch}
 ```
 
 **Use `--force-with-lease`, not `--force`.** It refuses to overwrite if the remote moved since the last fetch — protects against another developer's pushes the orchestrator didn't see.
@@ -278,12 +284,12 @@ If `--force-with-lease` rejects: another developer pushed. Stop. Re-fetch, re-ap
 For the rewritten branch, look for `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md`:
 
 - **File missing** — skip; nothing to refresh.
-- **File `status: pending`** — rewrite the file to reflect new title / description / comments per the [prs-context-template](prs-context-template.md). Status stays `pending`. The user will publish later via [open-pr-from-context](../foundation-skills/open-pr-from-context/SKILL.md).
+- **File `status: pending`** — rewrite the file to reflect new title / description / comments per the [prs-context-template](../../prs-context-template.md). Status stays `pending`. The user will publish later via [open-pr-from-context](../open-pr-from-context/SKILL.md).
 - **File `status: published`** — the existing PR is auto-updated by the force-push (GitHub/GitLab pick up the new tip). But:
   - Inline comments may now reference SHAs that no longer exist. They'll appear as "outdated" in the PR UI.
-  - If the new diff has materially different comment-worthy spots, regenerate the `# Comments` block, set `status: pending`, and re-run [open-pr.sh](../foundation-skills/open-pr-from-context/scripts/open-pr.sh) on the file. The script reuses the existing PR, posts new comments. Old "outdated" comments stay visible in the PR for audit; that's the platform's behavior.
+  - If the new diff has materially different comment-worthy spots, regenerate the `# Comments` block, set `status: pending`, and re-run [open-pr.sh](../open-pr-from-context/scripts/open-pr.sh) on the file. The script reuses the existing PR, posts new comments. Old "outdated" comments stay visible in the PR for audit; that's the platform's behavior.
 
-When rewriting the `# Description` body, **honor `project.pr_template_paths`** from `.vinta-ai-workflows.yaml` — same rule as step 2 of the [implement-plan "Open PR via context file" step](../implement-plan/SKILL.md#1f-open-pr-via-context-file): follow the project's PR template structure, fill new sections with phase-specific content from the rewritten body, leave un-fillable placeholders untouched. If the prior file used a different template than the project now declares (template was added or swapped between the original `implement-plan` run and this amend), prefer the current `pr_template_paths` choice — surface the change to the user when the body shape shifts visibly.
+When rewriting the `# Description` body, **honor `project.pr_template_paths`** from `.vinta-ai-workflows.yaml` — same rule as [integrate-phase]({{INTEGRATE_PHASE_LINK}})'s **Open PR via context file** step: follow the project's PR template structure, fill new sections with phase-specific content from the rewritten body, leave un-fillable placeholders untouched. If the prior file used a different template than the project now declares, prefer the current `pr_template_paths` choice — surface the change to the user when the body shape shifts visibly.
 
 Always include in the publish-log block at the bottom of the file:
 
@@ -319,29 +325,29 @@ After every queue entry processes:
 - **Never `--force`. Always `--force-with-lease`.** Protects against silent overwrites.
 - **Plan file edit is the first write.** Commit the new plan body before any branch rewrite. The plan is the contract; the branches are the artifact.
 - **Recommend restart when blast radius is high.** The blast-radius step inside Step 0 evaluates signals; ≥2 tripping signals → surface a restart option to the user before any force-push plan is shown. Don't quietly amend a half-rewrite of the whole plan.
-- **Never use `§N` shorthand to point at sections** — neither in this skill body, the rewritten plan body, the amendment log entry, nor any prs-context refresh. Always use the section's full name (and link when possible). `§N` references are hard for humans to follow and shift when section numbering moves.
+- **Never use `§N` shorthand to point at sections** — neither in this skill body, the rewritten plan body, the amendment log entry, nor any prs-context refresh. Always use the section's full name (and link when possible).
 - **Phases merged to `{{DEFAULT_BRANCH}}` are immutable.** Convert to `append-new` phases. Refuse to attempt rewrites.
 - **Confirm every force-push individually.** No batch "confirm all".
-- **Use `--force-with-lease`** (already stated; worth restating).
-- **Three-layer review on every rewritten branch.** Same standard as [implement-plan](../implement-plan/SKILL.md). The amendment isn't done until Layer 3 passes.
+- **`WORKROOT` is resolved once, used everywhere.** Every `git` call takes `git -C <WORKROOT>`; no per-step worktree branching.
+- **Three-layer review on every rewritten branch.** Same standard as [implement-plan](../implement-plan/SKILL.md) — via [review-phase](../review-phase/SKILL.md). The amendment isn't done until Layer 3 passes.
 - **PR-context file is a derived artifact.** Refresh it after the rewrite; never edit the file as a substitute for fixing the diff.
 - **Subagents commit but never push.** Orchestrator owns force-push. {{PR_RULE_TAIL}}.
 {{COAUTHOR_RULE_LINE}}
 {{DEPENDENCY_LICENSE_RULE_LINE}}
-- **Stop on Tier-4 failure** (model escalation, same rules as the [implement-plan "Pick model" step](../implement-plan/SKILL.md#1b-pick-model-from-plans-per-phase-suggestion)).
+- **Stop on Tier-4 failure** (model escalation, same rules as [implement-phase](../implement-phase/SKILL.md#pick-the-model-from-the-plans-per-phase-suggestion)).
 - **Stop on rebase failure** the fixer can't resolve in one retry. Don't ship half-rebased branches.
 
 ## Quick checklist (orchestrator, per amendment run)
 
 - [ ] User-requested change captured verbatim; classification determined (`body-rewrite` / `insert-new` / `append-new` / `guiding-decisions-change`).
-- [ ] Plan parsed; per-phase state map built (state, branch, base, pr_status, merged_to_default).
+- [ ] Plan parsed; per-phase state map built (state, branch, base, pr_status, merged_to_default); `WORKROOT` resolved from tracking `run_options`.
 - [ ] Blast-radius signals computed; `low` → straight to confirmation, `high-blast-radius` / `restart-recommended` → user offered `Restart` / `Amend in place` / `Stop` before the force-push plan is shown.
 - [ ] On `Restart` choice: new plan drafted (or hand-off to [plan-feature](../plan-feature/SKILL.md)); old plan annotated `Superseded`; tracking marked; this skill exits.
 - [ ] Step 3 refusals surfaced; force-push plan confirmed by user.
 - [ ] Plan file edited; amendment log entry appended; committed on `{{DEFAULT_BRANCH}}`.
 - [ ] Rewrite queue ordered by stack depth (parent first).
 - [ ] For each entry: body change applied (when `amend-existing`); inner + outer gate green.
-- [ ] Three-layer review on each rewritten branch; BLOCKERs fixed; SHOULD-FIX noted.
+- [ ] [review-phase](../review-phase/SKILL.md) run on each rewritten branch; BLOCKERs fixed; SHOULD-FIX noted.
 - [ ] Rebase onto rewritten parent; conflicts resolved via fixer; tests re-run.
 - [ ] `--force-with-lease` push confirmed and executed per branch.
 - [ ] PR-context file refreshed (pending or republished).

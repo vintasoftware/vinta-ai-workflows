@@ -8,7 +8,7 @@ description: Refresh the user's project skills under `ai-tools/skills/` against 
 [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) (specifically [vinta-derive-skills](../vinta-derive-skills/SKILL.md)) seeds a project's `ai-tools/skills/` directory from sources that live in this repo:
 
 - **Verbatim foundation skills** — copied as-is from `vinta-derive-skills/resources/foundation-skills/<name>/SKILL.md`.
-- **Templated skills** — `implement-plan/SKILL.md` is rendered from `vinta-derive-skills/resources/implement-plan-template.md` with project-specific values interpolated.
+- **Templated skills** — the plan-execution unit (`implement-plan` + `implement-phase` + `review-phase` + `integrate-phase` + `amend-plan`) is rendered from the shells under `vinta-derive-skills/resources/plan-execution/shell/` (which `<!-- include -->` shared `partials/`) with project-specific values interpolated; `systematic-debugging` from `vinta-derive-skills/resources/systematic-debugging-template.md`.
 - **Stack-derived skills** — drafted from prompts under `vinta-bootstrap-ai-tools/resources/stacks/<stack>/notes.md`.
 - **User-authored skills** — anything else the team added later. **Never overwritten.**
 

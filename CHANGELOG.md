@@ -7,6 +7,41 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
+### Changed
+
+- **`implement-plan` / `amend-plan` decomposed into a modular "plan-execution
+  unit" of deterministic sub-skills.** The single ~440-line
+  `implement-plan-template.md` (and its `implement-plan-template-modular-substitutions.md`
+  sister file) are replaced by a thin **conductor** plus three co-shipped
+  single-purpose sub-skills, all rendered from
+  [skills/vinta-derive-skills/resources/plan-execution/](skills/vinta-derive-skills/resources/plan-execution/)
+  (`shell/` templates that `<!-- include -->` shared `partials/`):
+  - `implement-plan` — conductor: parse → classify → resolve one `WORKROOT`
+    → per-phase loop (dispatch) → track → report.
+  - `implement-phase` — compose prompt + pick model + spawn the implementer.
+  - `review-phase` — the three-layer review + fix loop, now shared by
+    `implement-plan`, `amend-plan`, **and** `systematic-debugging` (one review
+    implementation instead of three).
+  - `integrate-phase` — push + open PR via context file, rendered
+    commit-strategy-resolved.
+  The scattered runtime `if use_worktree` branches collapse into a single
+  `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` seam the conductor resolves once
+  and passes to every sub-skill as data; only two local, data-driven checks
+  remain (the sandbox spawn-wrap in `implement-phase`, the stray-write
+  backstop in `review-phase`). Under `commit_strategy = ask`, the former
+  dual-rendered branch/commit/PR bodies become **two** rendered
+  `integrate-phase-stacked` / `integrate-phase-modular` skills the conductor
+  dispatches by name — no more both-paths-in-one-file. `amend-plan` reuses
+  `review-phase` verbatim + the shared inner/outer verification loop, and
+  picks up the same `WORKROOT` uniformity, while keeping its own
+  history-rewriting topology. **Consumers**: re-sync — the target now gets
+  five plan-execution SKILL.md files (`implement-plan`, `implement-phase`,
+  `review-phase`, `integrate-phase` [or the two `ask` variants], `amend-plan`)
+  instead of two. The three new sub-skills are a co-shipped unit: always
+  generated with `implement-plan`, not individually opt-in (no new
+  `foundation_skills` enum entry, no new interview question). Runtime
+  behavior is unchanged; the decomposition is for reviewability + determinism.
+
 <!-- pre-release: 0.2.0-alpha3 on 2026-06-23 -->
 
 ### Added
