@@ -7,6 +7,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
+<!-- pre-release: 0.2.0-alpha4 on 2026-07-08 -->
+
 ### Added
 
 - **`implement-plan` outer-gate test scope is now configurable — and defaults
