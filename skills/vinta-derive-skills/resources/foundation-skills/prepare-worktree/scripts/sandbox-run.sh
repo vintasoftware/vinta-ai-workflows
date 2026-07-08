@@ -75,7 +75,9 @@ fi
 
 # ---- macOS: sandbox-exec -----------------------------------------------------
 if command -v sandbox-exec >/dev/null 2>&1; then
-  profile=$(mktemp -t vinta-sandbox) || die "mktemp failed"
+  # Explicit XXXXXX template (portable across BSD mktemp on stock macOS and GNU
+  # mktemp from coreutils — `mktemp -t prefix` is not portable between them).
+  profile=$(mktemp "${TMPDIR:-/tmp}/vinta-sandbox.XXXXXX") || die "mktemp failed"
   trap 'rm -f "$profile"' EXIT
   {
     echo '(version 1)'
