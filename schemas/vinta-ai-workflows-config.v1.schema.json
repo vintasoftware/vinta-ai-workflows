@@ -212,6 +212,16 @@
           "description": "Provision a fully-runnable git worktree for parallel feature work — symlinks dep dirs, copies env files, forks dev / test DBs, namespaces docker-compose project + network, drops a summary YAML for mechanical teardown. Copy-verbatim foundation skill (bucket A). When `enabled`, project-level defaults (worktree root, deps strategy, compose network strategy) live under `skills.prepare-worktree`. Consumed by `implement-plan` when its Step 0 question (c) opts in — the orchestrator runs `prepare-worktree` once at the start of a plan run and threads the worktree path through every subagent's prompt so phases all stack inside the same isolated checkout.",
           "type": "string",
           "enum": ["enabled", "disabled"]
+        },
+        "thermo-nuclear-code-quality-review": {
+          "description": "Opt-in deep structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — harsher than the standard per-phase review. Copy-verbatim foundation skill (bucket A). Read-only; hands each fix to the `fixer` agent. Invoked deliberately by the user, or escalated from the `review-phase` Layer 3 structural-simplification lens; never auto-run on every diff.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        },
+        "deslop-comments": {
+          "description": "Rewrite comments and doc blocks touched during the current task into Simple English — strip AI-slop vocabulary and negative framing, comment-only (no renames, no behavior change). Copy-verbatim foundation skill (bucket A), always shipped: the `review-phase` Layer 2 comment-hygiene check and fix loop depend on it. Set `disabled` only if a project deliberately opts out of the review flow's comment-hygiene step.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
         }
       }
     },

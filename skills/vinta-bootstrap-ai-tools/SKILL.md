@@ -83,7 +83,7 @@ These bleed across sub-skills, so capture once now:
 
 ### D. Optional foundation skills
 
-Five skills are part of the foundation set but aren't always needed. Ask explicitly:
+Six skills are part of the foundation set but aren't always needed. Ask explicitly:
 
 1. **`add-e2e-test`** — does the project have e2e tests (Playwright / Cypress / similar) or plan to add them? `AskUserQuestion` options: `Yes — already has them`, `Yes — planning to add`, `No — skip`. If yes, [vinta-derive-skills](../vinta-derive-skills/SKILL.md)'s **Optional — ask the user** bucket follows up to ask whether the user has a template or wants to draft from scratch. **This answer also governs `create-qa-use-cases` and the e2e content inside `plan-feature`**: on `No — skip`, set `foundation_skills.create-qa-use-cases: disabled` too — derive-skills won't ship `create-qa-use-cases` and strips `plan-feature`'s `<!-- e2e:start/end -->` regions so no-e2e projects carry zero Playwright / `QA_USE_CASES.md` / `pr-screenshots/` references. On either `Yes`, set both `add-e2e-test` and `create-qa-use-cases` to `enabled`.
 2. **`add-env-var`** — does the project have a non-trivial env-var propagation flow (multiple files / build configs / CI updates per new var) or a single `.env` file is enough? `AskUserQuestion` options: `Yes — non-trivial flow`, `No — single .env is enough`. Skip if `No`.
@@ -112,7 +112,9 @@ Five skills are part of the foundation set but aren't always needed. Ask explici
    - Do **not** seed the cache file at bootstrap. The first debug run preflights all configured servers and writes the file then. An empty / missing `.vinta-ai-workflows/cache.yaml` is a valid initial state.
    - Mention to the user how to refresh: delete the file to re-preflight everything, or edit one entry's `status` to `dirty` to refresh that one server. Token rotated → cache will catch the auth error on the next call and flip the entry to `dirty` automatically.
 
-If the user answers "No" to any of the five, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above. `add-one-off-script` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/add-one-off-script/](../vinta-derive-skills/resources/foundation-skills/add-one-off-script/) — its body is project-agnostic; the per-project variability lives in the `skills.add-one-off-script.*` config block above and in env vars consumed at runtime. `prepare-worktree` is also copied verbatim from [vinta-derive-skills/resources/foundation-skills/prepare-worktree/](../vinta-derive-skills/resources/foundation-skills/prepare-worktree/) — same pattern: project-agnostic body, per-project defaults under `skills.prepare-worktree.*`.
+6. **`thermo-nuclear-code-quality-review`** — does the team want an opt-in, deliberately harsh structural-maintainability audit available on demand (abstraction quality, giant files, spaghetti-condition growth), separate from the standard per-phase review? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for long-lived codebases where structural drift is a real cost, or teams that already run deep quality passes before merging large work. It ships as a user-invoked skill and is also the escalation target for the `review-phase` Layer 3 structural-simplification lens; it is never auto-run on every diff. No follow-up config — the body is project-agnostic.
+
+If the user answers "No" to any of the six, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above. `add-one-off-script` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/add-one-off-script/](../vinta-derive-skills/resources/foundation-skills/add-one-off-script/) — its body is project-agnostic; the per-project variability lives in the `skills.add-one-off-script.*` config block above and in env vars consumed at runtime. `prepare-worktree` is also copied verbatim from [vinta-derive-skills/resources/foundation-skills/prepare-worktree/](../vinta-derive-skills/resources/foundation-skills/prepare-worktree/) — same pattern: project-agnostic body, per-project defaults under `skills.prepare-worktree.*`. `thermo-nuclear-code-quality-review` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/](../vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/) with no follow-up config — its body is fully project-agnostic.
 
 ### E. Existing AI artifacts (per-artifact disposition)
 
@@ -132,7 +134,7 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
 
-  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
+  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `deslop-comments`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
 
 - **Sub-agents** (each under any vendor `agents/` dir):
   - `Migrate to ai-tools/agents/<name>.yaml` — converts vendor-specific format → canonical YAML; `setup-ai-tools.mjs` re-emits per-vendor copies.
@@ -250,6 +252,8 @@ foundation_skills:
   systematic-debugging: <Optional foundation skills → systematic-debugging answer → enabled | disabled>
   add-one-off-script: <Optional foundation skills → add-one-off-script answer → enabled | disabled>
   prepare-worktree: <Optional foundation skills → prepare-worktree answer → enabled | disabled>
+  thermo-nuclear-code-quality-review: <Optional foundation skills → thermo-nuclear-code-quality-review answer → enabled | disabled>
+  deslop-comments: enabled  # always ships — review-phase Layer 2 comment-hygiene + fix loop depend on it
 
 foundation_agents:
   implementer: enabled
@@ -340,6 +344,7 @@ ai-tools/
 │   ├── plan-feature/SKILL.md            ← always (copied verbatim from derive-skills resources)
 │   ├── create-spec/SKILL.md             ← always (copied verbatim)
 │   ├── create-qa-use-cases/SKILL.md     ← always (copied verbatim)
+│   ├── deslop-comments/SKILL.md         ← always (copied verbatim; review-phase Layer 2 comment-hygiene + fix loop depend on it)
 │   ├── implement-plan/SKILL.md          ← always (conductor; generated from template, project-specific)
 │   ├── implement-phase/SKILL.md         ← always (plan-execution unit; co-shipped with implement-plan)
 │   ├── review-phase/SKILL.md            ← always (plan-execution unit; shared by implement-plan / amend-plan / systematic-debugging)
@@ -354,6 +359,7 @@ ai-tools/
 │   │       ├── one_off_script_base.py
 │   │       └── one_off_script_base.ts
 │   ├── prepare-worktree/SKILL.md       ← optional — only if user opts in (verbatim copy; project-agnostic body, defaults under skills.prepare-worktree.*)
+│   ├── thermo-nuclear-code-quality-review/SKILL.md ← optional — only if user opts in (verbatim copy; deep structural-maintainability audit, escalation target for review-phase Layer 3)
 │   ├── run-one-off-script-django/       ← optional sister skill — only when stack matches + user supplies template (authors Jupyter notebook / mgmt command runner + JupyterRuntime / DjangoMgmtRuntime adapter in the per-script folder)
 │   ├── run-one-off-script-medplum/      ← optional sister skill — only when stack matches + user supplies template (authors Medplum bot + MedplumBotRuntime adapter in the per-script folder)
 │   └── <stack-specific skills>/SKILL.md ← only if user supplied templates
@@ -382,9 +388,9 @@ Plus the symlinks + per-vendor generated files, set up by the install step.
 
 Foundation skills break into three buckets — see [vinta-derive-skills](../vinta-derive-skills/SKILL.md) for the full mechanics:
 
-- **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs).
+- **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`, `deslop-comments`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs). `deslop-comments` always ships because `review-phase`'s Layer 2 comment-hygiene check + fix loop dispatch it.
 - **Always generate**: the plan-execution unit — `implement-plan` (conductor) + its co-shipped sub-skills `implement-phase` / `review-phase` / `integrate-phase`, plus `amend-plan` (conductor). Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates + shared partials using interview answers + inventory. The sub-skills are not independently opt-in; they always ship with the conductors.
-- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, and (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship.
+- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, and (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship. `thermo-nuclear-code-quality-review`: if yes → copy the bundled SKILL.md verbatim (no follow-up config); if no → don't ship.
 
 Stack-specific skills + agents land in the target only when the user provides templates for them. If they don't have templates yet, the orchestrator records the detected stacks + skill categories as a TODO list the user can address later via [vinta-derive-skills](../vinta-derive-skills/SKILL.md) / [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) standalone runs.
 
