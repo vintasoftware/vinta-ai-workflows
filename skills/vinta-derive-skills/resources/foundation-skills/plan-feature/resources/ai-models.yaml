@@ -40,7 +40,7 @@ tiers:
         - id: gpt-5-nano
           note: fall back to gpt-5-mini if file has any branching logic
       google:
-        - id: gemini-2.5-flash-lite
+        - id: gemini-3.1-flash-lite
 
   - tier: 2
     label: standard pattern application
@@ -51,13 +51,13 @@ tiers:
     models:
       anthropic:
         - id: claude-haiku-4-5
-          note: with iteration; step up to claude-sonnet-4-6 if phase touches >3 files
-        - id: claude-sonnet-4-6
+          note: with iteration; step up to claude-sonnet-5 if phase touches >3 files
+        - id: claude-sonnet-5
           note: step-up target when phase touches >3 files
       openai:
         - id: gpt-5-mini
       google:
-        - id: gemini-2.5-flash
+        - id: gemini-3.5-flash
 
   - tier: 3
     label: multi-file orchestration, business logic, SQL views
@@ -68,11 +68,10 @@ tiers:
       covering concurrency edges.
     models:
       anthropic:
-        - id: claude-sonnet-4-6
+        - id: claude-sonnet-5
       openai:
         - id: gpt-5
       google:
-        - id: gemini-2.5-pro
         - id: gemini-3-pro
           note: stronger code recall
 
@@ -84,13 +83,11 @@ tiers:
       tuning slow query against partitioned hot table, debugging heisenbug.
     models:
       anthropic:
-        - id: claude-opus-4-7
+        - id: claude-opus-4-8
           note: "[1m] 1M-context variant for large codebases"
       openai:
         - id: gpt-5
           note: with extended thinking
-        - id: o3
-          note: pure reasoning
         - id: o4
           note: pure reasoning
       google:

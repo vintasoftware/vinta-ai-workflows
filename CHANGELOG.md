@@ -7,6 +7,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
+### Changed
+
+- **`plan-feature` AI model tiers refreshed to the current model
+  generation.** `plan-feature/resources/ai-models.yaml` now cites the latest
+  IDs: tier 1 `gemini-2.5-flash-lite` → `gemini-3.1-flash-lite`; tier 2
+  `claude-sonnet-4-6` → `claude-sonnet-5` (incl. the Haiku step-up note) and
+  `gemini-2.5-flash` → `gemini-3.5-flash`; tier 3 `claude-sonnet-4-6` →
+  `claude-sonnet-5` and the retired `gemini-2.5-pro` dropped in favor of
+  `gemini-3-pro`; tier 4 `claude-opus-4-7` → `claude-opus-4-8` and the retired
+  `o3` dropped in favor of `o4`. Tier *placement* is unchanged — only the
+  concrete IDs move. **Consumers**: re-sync to pick up the refreshed model
+  suggestions.
+
 <!-- pre-release: 0.2.0-alpha4 on 2026-07-08 -->
 
 ### Added
