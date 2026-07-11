@@ -222,6 +222,16 @@
           "description": "Rewrite comments and doc blocks touched during the current task into Simple English — strip AI-slop vocabulary and negative framing, comment-only (no renames, no behavior change). Copy-verbatim foundation skill (bucket A), always shipped: the `review-phase` Layer 2 comment-hygiene check and fix loop depend on it. Set `disabled` only if a project deliberately opts out of the review flow's comment-hygiene step.",
           "type": "string",
           "enum": ["enabled", "disabled"]
+        },
+        "handoff": {
+          "description": "Write or consume a session-continuation handoff document under `.vinta-ai-workflows/handoffs/` so a fresh agent session (or a different agent / teammate) can resume in-flight work without re-deriving context. Copy-verbatim foundation skill (bucket A), always shipped — its body is fully project-agnostic. Set `disabled` only if a project deliberately opts out.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        },
+        "handoff-to-client": {
+          "description": "Generate a markdown API-change handoff document for client teams consuming an API-only repo — endpoints added/changed/deprecated/removed on the current branch vs the default branch, with request/response shapes, breaking-change flags, and per-platform migration notes. Template-rendered (bucket B) from `vinta-derive-skills/resources/handoff-to-client-template.md` and opt-in (bucket C) — only ships when the bootstrap interview confirms an API-only repo with separate client codebases. When `enabled`, project-level configuration lives under `skills.handoff-to-client` (client platforms, API style, spec path, output dir).",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
         }
       }
     },
@@ -315,6 +325,38 @@
               "items": { "type": "string", "minLength": 1 },
               "uniqueItems": true,
               "default": []
+            }
+          }
+        },
+        "handoff-to-client": {
+          "description": "Configuration for the `handoff-to-client` foundation skill. Required when `foundation_skills.handoff-to-client` is `enabled`; ignored otherwise. Rendered into the skill body at derive time.",
+          "type": "object",
+          "required": ["client_platforms"],
+          "additionalProperties": false,
+          "properties": {
+            "client_platforms": {
+              "description": "Free-form list of the client codebases/platforms that consume this repo's API, as the team names them (e.g. `iOS (Swift)`, `Android (Kotlin)`, `web SPA (React)`, `partner integrations`). Rendered into the skill's audience line and per-operation migration-notes instruction. Must be non-empty — an API-only repo with no named consumers has no handoff audience.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true,
+              "minItems": 1
+            },
+            "api_style": {
+              "description": "The API paradigm, free-form (e.g. `REST`, `GraphQL`, `gRPC`, `REST + webhooks`). Drives how the rendered skill names operations (method+path vs query/mutation vs service/rpc).",
+              "type": "string",
+              "minLength": 1,
+              "default": "REST"
+            },
+            "api_spec_path": {
+              "description": "Repo-relative path to a machine-readable API spec (OpenAPI file, GraphQL schema, proto dir) plus, ideally, the command that regenerates it — e.g. `docs/openapi.yaml (regenerate: make openapi)`. When set, the rendered skill diffs the regenerated spec between base and branch as its primary change-enumeration source. Omit when no spec exists; the skill then works from route/serializer code alone.",
+              "type": "string",
+              "minLength": 1
+            },
+            "output_dir": {
+              "description": "Directory where generated client-handoff documents land, repo-relative.",
+              "type": "string",
+              "minLength": 1,
+              "default": ".vinta-ai-workflows/client-handoffs"
             }
           }
         },
