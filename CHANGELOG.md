@@ -7,6 +7,29 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
+### Changed
+
+- **E2E tests are now opt-in in both `plan-feature` and `implement-plan`,
+  because they make the implementation run a LOT slower.** Previously, for
+  e2e-enabled projects, `plan-feature` *required* a happy-path Playwright spec on
+  every phase that reached the browser, and `implement-plan` ran those specs in
+  every phase's outer gate + review layers — browser boot, seeded data, and
+  screenshot capture on each phase. Now:
+  - `plan-feature` gained a Step 0 (group I) **E2E coverage** question that
+    **defaults to NO**. When not opted in, phases ship unit + integration tests
+    only and carry no e2e spec, `QA_USE_CASES.md`, or `pr-screenshots/`
+    references; e2e can still be added later per-flow via `add-e2e-test`.
+  - `implement-plan` gained a Step 0 question **(e) Run E2E tests this run?**
+    (`run_options.run_e2e`, **default off**). Even when a plan carries e2e specs,
+    the outer-gate e2e step, the Layer 1 verification note, the Layer 2
+    walkthrough check, and the implementer report field only run when the user
+    opts in for that run. The shared review/debug e2e gate follows the same
+    `run_options.run_e2e` flag, so standalone `systematic-debugging` /
+    `amend-plan` runs skip e2e unless it is set.
+  **Consumers**: re-sync to pick up the opt-in questions. E2E-disabled projects
+  are unaffected (the e2e regions strip out as before).
+
+
 <!-- pre-release: 0.2.0-alpha6 on 2026-07-13 -->
 
 ### Changed
