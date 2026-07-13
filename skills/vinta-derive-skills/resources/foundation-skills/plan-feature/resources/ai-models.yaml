@@ -11,7 +11,7 @@
 # Tier *placement* is human/LLM judgement — the job flags drift and proposes
 # edits, it does not blindly reassign tiers. See scripts/check-ai-models.mjs.
 schema_version: 1
-last_verified: 2026-06-22
+last_verified: 2026-07-13
 
 # Drift is checked against a free, no-key community aggregator (models.dev,
 # vendor-keyed with release dates + pricing), cross-checked against LiteLLM's
@@ -37,8 +37,8 @@ tiers:
       anthropic:
         - id: claude-haiku-4-5
       openai:
-        - id: gpt-5-nano
-          note: fall back to gpt-5-mini if file has any branching logic
+        - id: gpt-5.6-luna
+          note: optimized for cost-sensitive workloads
       google:
         - id: gemini-3.1-flash-lite
 
@@ -70,7 +70,7 @@ tiers:
       anthropic:
         - id: claude-sonnet-5
       openai:
-        - id: gpt-5
+        - id: gpt-5.6-terra
       google:
         - id: gemini-3-pro
           note: stronger code recall
@@ -86,10 +86,8 @@ tiers:
         - id: claude-opus-4-8
           note: "[1m] 1M-context variant for large codebases"
       openai:
-        - id: gpt-5
-          note: with extended thinking
-        - id: o4
-          note: pure reasoning
+        - id: gpt-5.6-sol
+          note: Frontier model for complex professional work
       google:
         - id: gemini-3-pro
           note: with thinking
