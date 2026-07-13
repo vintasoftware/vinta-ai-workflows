@@ -11,18 +11,74 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`plan-feature` AI model tiers refreshed to the current model
   generation.** `plan-feature/resources/ai-models.yaml` now cites the latest
-  IDs: tier 1 `gemini-2.5-flash-lite` → `gemini-3.1-flash-lite`; tier 2
-  `claude-sonnet-4-6` → `claude-sonnet-5` (incl. the Haiku step-up note) and
-  `gemini-2.5-flash` → `gemini-3.5-flash`; tier 3 `claude-sonnet-4-6` →
-  `claude-sonnet-5` and the retired `gemini-2.5-pro` dropped in favor of
-  `gemini-3-pro`; tier 4 `claude-opus-4-7` → `claude-opus-4-8` and the retired
-  `o3` dropped in favor of `o4`. Tier *placement* is unchanged — only the
+  IDs: tier 1 `gemini-2.5-flash-lite` → `gemini-3.1-flash-lite` and 
+  `gpt-5-nano` → `gpt-5.6-luna`; tier 2 `claude-sonnet-4-6` → `claude-sonnet-5` 
+  (incl. the Haiku step-up note) and `gemini-2.5-flash` → `gemini-3.5-flash`; tier 3 
+  `claude-sonnet-4-6` → `claude-sonnet-5` and the retired `gemini-2.5-pro` 
+  dropped in favor of `gemini-3-pro` and the retired `gpt-5` dropped in favor of
+  `gpt-5.6-terra`; tier 4 `claude-opus-4-7` → `claude-opus-4-8` and the retired
+  `o3` dropped in favor of `gpt-5.6-sol`. Tier *placement* is unchanged — only the
   concrete IDs move. **Consumers**: re-sync to pick up the refreshed model
   suggestions.
 
-<!-- pre-release: 0.2.0-alpha4 on 2026-07-08 -->
+### Fixed
+
+- **`implement-plan` stacked-branches now opens each phase PR against its
+  parent phase, not the default branch.** The git branch topology was already
+  stacked correctly (each phase branches off the previous phase's branch), but
+  nothing told the orchestrator what to write into the prs-context `base`
+  field, so it defaulted to `<BASE_BRANCH>` and **every stacked PR targeted the
+  default branch** — collapsing the stack and showing each PR the cumulative
+  diff. The stacked commit-strategy partial now spells out the PR base per
+  phase (first phase → default branch; every subsequent phase → the previous
+  phase's branch), the shared `pr-context` write step no longer defaults `base`
+  blindly, and the `prs-context` template comment states the rule. Modular /
+  single-PR strategies are unaffected (one PR against the default branch).
+  **Consumers**: re-sync to pick up the corrected `base` resolution; existing
+  PRs opened against the wrong base must be re-targeted manually.
+
+<!-- pre-release: 0.2.0-alpha5 on 2026-07-13 -->
 
 ### Added
+
+
+- **`handoff` foundation skill — session-continuation handoff docs between
+  agents.** Write mode captures the current task (goal, verified-vs-unverified
+  state, decisions + rejected alternatives, landmines, single concrete next
+  step) into `.vinta-ai-workflows/handoffs/{date}-{slug}.md`, gathering state
+  from the repo — never from memory; resume mode reads a handoff, verifies its
+  claims against the repo before trusting them, and continues from the doc's
+  next step. Ships at
+  [skills/vinta-derive-skills/resources/foundation-skills/handoff/SKILL.md](skills/vinta-derive-skills/resources/foundation-skills/handoff/SKILL.md).
+  Wired as an **always-ship** bucket-A skill: new
+  `foundation_skills.handoff` enum entry (schema), derive-skills bucket-A
+  table + always-ships note, bootstrap always-copy-verbatim list + outputs
+  tree + Step 0.5 YAML (`handoff: enabled`), and both foundation-shape
+  replace lists. No bootstrap interview question — it always ships.
+
+- **`handoff-to-client` foundation skill — API-change handoff docs for
+  API-only repos (opt-in, template-rendered).** Generates a self-contained
+  markdown document for the client teams consuming the repo's API: every
+  endpoint/operation added / changed / deprecated / removed on the current
+  branch vs the default branch, with request/response shapes derived from the
+  code (or a regenerated API spec), auth/error changes, breaking-change flags
+  judged from the strictest plausible client, one realistic example per
+  operation, and per-platform migration notes. Template at
+  [skills/vinta-derive-skills/resources/handoff-to-client-template.md](skills/vinta-derive-skills/resources/handoff-to-client-template.md)
+  (bucket B + C). New schema fields: `foundation_skills.handoff-to-client`
+  enum entry and the `skills.handoff-to-client` config block
+  (`client_platforms` — required non-empty array, `api_style`,
+  `api_spec_path`, `output_dir` — default
+  `.vinta-ai-workflows/client-handoffs`). New template placeholders
+  `{{API_STYLE}}`, `{{CLIENT_PLATFORMS_LIST}}`, `{{CLIENT_HANDOFF_DIR}}`,
+  `{{API_SPEC_BLOCK}}` documented in the derive-skills placeholder table.
+  Bootstrap gains **Optional foundation skills question 7** (asked only when
+  the inventory suggests an API-only repo) plus a four-part config follow-up;
+  Step 0.5 YAML, outputs tree, optional-bucket lists, and both
+  foundation-shape replace lists updated. **Consumers**: API-only projects
+  re-sync + answer the new interview question to enable it.
+
+<!-- pre-release: 0.2.0-alpha4 on 2026-07-08 -->
 
 - **`implement-plan` outer-gate test scope is now configurable — and defaults
   to the quick path.** Each phase's outer gate still always runs the repo-wide
