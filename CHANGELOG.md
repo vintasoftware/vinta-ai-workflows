@@ -30,7 +30,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are unaffected (the e2e regions strip out as before).
 
 
-<!-- pre-release: 0.2.0-alpha6 on 2026-07-13 -->
+<!-- pre-release: 0.2.0-alpha7 on 2026-07-13 -->
 
 ### Changed
 
