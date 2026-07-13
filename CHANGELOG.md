@@ -7,9 +7,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
-<!-- pre-release: 0.2.0-alpha4 on 2026-07-08 -->
-
 ### Added
+
+<!-- pre-release: 0.2.0-alpha5 on 2026-07-13 -->
 
 - **`handoff` foundation skill — session-continuation handoff docs between
   agents.** Write mode captures the current task (goal, verified-vs-unverified
@@ -46,6 +46,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Step 0.5 YAML, outputs tree, optional-bucket lists, and both
   foundation-shape replace lists updated. **Consumers**: API-only projects
   re-sync + answer the new interview question to enable it.
+
+<!-- pre-release: 0.2.0-alpha4 on 2026-07-08 -->
 
 - **`implement-plan` outer-gate test scope is now configurable — and defaults
   to the quick path.** Each phase's outer gate still always runs the repo-wide
