@@ -6,7 +6,7 @@ feature_name: <FEATURE_NAME>             # UPPERCASE_WITH_UNDERSCORES, matches p
 phase_id: <phase-id>                     # e.g. "1", "4a"
 phase_title: <phase title>               # verbatim from the plan's Phased Rollout section
 branch: plan/<feature-kebab>/phase-<id>  # branch the PR opens from
-base: <main | plan/<feature-kebab>/phase-<prev-id>>  # target branch for the PR
+base: <main | plan/<feature-kebab>/phase-<prev-id>>  # PR target branch. Stacked: FIRST phase = default branch; every LATER phase = the PREVIOUS phase's branch (not the default branch). Modular / single-PR: default branch.
 created_at: <ISO 8601 timestamp>
 status: pending                          # `pending` until published; `published` after CLI run
 pr_url:                                  # set by open-pr-from-context after publishing

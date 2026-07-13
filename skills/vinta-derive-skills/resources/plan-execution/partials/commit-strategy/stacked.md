@@ -19,6 +19,11 @@ git -C <WORKROOT> checkout plan/{plan-id-kebab}/phase-{prev.id}
 git -C <WORKROOT> checkout -b plan/{plan-id-kebab}/phase-{phase.id}
 git -C <WORKROOT> push -u origin plan/{plan-id-kebab}/phase-{phase.id}
 ```
+
+**PR base per phase** (the `base` field written into the prs-context frontmatter — this is what `gh pr create --base` / `glab mr create --target-branch` opens the PR against; getting it wrong makes every stacked PR target `<BASE_BRANCH>` instead of its parent phase):
+
+- **First executed phase** → `base = <BASE_BRANCH>`.
+- **Subsequent phases** → `base = plan/{plan-id-kebab}/phase-{prev.id}` (the previous phase's branch, **not** `<BASE_BRANCH>`). The PR must open against its parent phase so the diff shows only this phase's changes and the stack reviews cleanly.
 <!-- block-end: BRANCH_NAMING -->
 
 <!-- block-begin: PER_PHASE_COMMIT -->
