@@ -1,6 +1,6 @@
 {
   "name": "vinta-ai-workflows",
-  "version": "0.2.0-alpha5",
+  "version": "0.2.0-alpha6",
   "description": "Bootstrap AI tooling (AGENTS.md, skills, sub-agents) across Claude Code, Codex, Cursor, and VS Code + GitHub Copilot.",
   "type": "module",
   "bin": {

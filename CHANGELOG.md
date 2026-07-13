@@ -7,6 +7,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — YYYY-MM-DD
 
+<!-- pre-release: 0.2.0-alpha6 on 2026-07-13 -->
+
 ### Changed
 
 - **`plan-feature` AI model tiers refreshed to the current model
