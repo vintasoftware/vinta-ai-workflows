@@ -2,14 +2,14 @@
 
 Bootstrap AI tooling — AGENTS.md, sub-agents, project skills, multi-vendor wiring — into any project, then get out of the way.
 
-Distributed as a private npm package (`vinta-ai-workflows`) with a CLI that installs / updates / uninstalls a set of one-shot bootstrap skills into the project's vendor-specific skill directories (Claude Code, Codex, Cursor, VS Code + GitHub Copilot).
+Distributed as an npm package (`vinta-ai-workflows`) with a CLI that installs / updates / uninstalls a set of one-shot bootstrap skills into the project's vendor-specific skill directories (Claude Code, Codex, Cursor, VS Code + GitHub Copilot).
 
 ## Quick start
 
 ```bash
 # 1. Add the package to the target project.
 cd ~/code/my-project
-npm install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git#0.1.0
+npm install -D vinta-ai-workflows
 
 # 2. Install the bootstrap skills for your AI tool.
 npx vinta-ai-workflows install --tool claude-code
@@ -28,7 +28,7 @@ npx vinta-ai-workflows uninstall --tool claude-code
 npm uninstall vinta-ai-workflows
 ```
 
-Prerequisites: Node ≥ 18, SSH access to the private repo (or a registry token if your team mirrors it).
+Pin a version for determinism with `npm install -D vinta-ai-workflows@0.2.0`. Prerequisites: Node ≥ 18.
 
 ## Why this is useful
 
@@ -208,9 +208,21 @@ Standalone re-invocation works at every step — kick `create-spec` again when t
 
 Quick inventory of what `vinta-bootstrap-ai-tools` writes into your repo's `ai-tools/` layout (and exposes via per-vendor wiring at `.claude/skills/`, `.agents/skills/`, etc.). Two disclaimers up front:
 
-> **Optional foundation skills are gated by the bootstrap interview.** `systematic-debugging`, `add-e2e-test`, `add-env-var`, and `add-one-off-script` ship **only** if the user says yes during `vinta-bootstrap-ai-tools` Step 0 (or later opts in via `vinta-sync-ai-tools`). They are not in every bootstrapped project. The opt-in is recorded in `.vinta-ai-workflows.yaml` under `foundation_skills.*.enabled` and is sticky across syncs.
+> **Optional foundation skills are gated by the bootstrap interview.** `systematic-debugging`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, and `handoff-to-client` ship **only** if the user says yes during `vinta-bootstrap-ai-tools` Step 0 (or later opts in via `vinta-sync-ai-tools`). They are not in every bootstrapped project. The opt-in is recorded in `.vinta-ai-workflows.yaml` under `foundation_skills.*.enabled` and is sticky across syncs.
 >
 > **Stack-specific skills and sub-agents are user-supplied.** This package ships **detection signals + category lists** per stack ([resources/stacks/](skills/vinta-bootstrap-ai-tools/resources/stacks/) — Django, Medplum, Next.js App Router, Python package, TypeScript monorepo), not the bodies. When a stack is detected, the orchestrator asks the user for a path / URL to their team's existing template. If no template exists, the category is recorded as a gap in the final summary, not auto-drafted. Bodies are project- and team-specific; one shared template doesn't fit every team's conventions.
+
+### New in the 0.2.0 releases
+
+The 0.2.0 alpha line adds five foundation skills and restructures plan execution. Two ship in every bootstrapped project, three are opt-in:
+
+- **`handoff` (always)** — writes a session-continuation doc to `.vinta-ai-workflows/handoffs/` so a fresh session, a different agent, or a teammate can resume in-flight work without re-deriving context. Write mode gathers the goal, what's verified vs. still assumed, decisions and the alternatives rejected, landmines, and the single concrete next step **from the repo, never from memory**. Resume mode reads a handoff and re-checks its claims against the repo before trusting them.
+- **`deslop-comments` (always)** — rewrites the comments and doc blocks a task touched into Simple English, stripping AI-slop vocabulary and negative framing. Comment-only: no renames, no behavior change. It's wired into the review flow — `review-phase` Layer 2 gained a comment-hygiene check and dispatches a `fixer` to run this skill on any comment-slop finding — and is also invokable standalone ("deslop these comments").
+- **`prepare-worktree` (opt-in)** — provisions a fully-runnable git worktree for parallel plan work so a long-running plan can build, test, migrate, and hit databases without disturbing the main checkout. It reads the plan plus `.gitignore` / manifests / env / docker config and decides per ignored path whether to symlink, copy, or fork (dev DB, env files, compose project name). It also ships an OS-level write-guard — `sandbox-run.sh` (`sandbox-exec` / `bwrap`) for subprocess runtimes and a `PreToolUse` hook for Claude Code's in-process subagents — so a stray write back to the main checkout fails at the kernel layer instead of relying on a cooperative "stay in the worktree" instruction. `implement-plan` Step 0 question (c) opts a run into it.
+- **`thermo-nuclear-code-quality-review` (opt-in)** — a deliberately harsh, on-demand structural-maintainability audit of a diff (abstraction quality, giant files, spaghetti-condition growth) that hunts for "code-judo" reframes collapsing whole branches / helpers / modes / layers rather than polishing them. Read-only — it reports findings and hands each fix to a `fixer`. `review-phase` Layer 3 now applies a condensed version of this lens on every phase and escalates to the full audit only when a phase touches core architecture, crosses ~1,000 lines, or surfaces a structural smell too big to fix inline.
+- **`handoff-to-client` (opt-in, API-only repos)** — generates a self-contained markdown document for the client teams consuming the repo's API: every endpoint / operation added, changed, deprecated, or removed on the current branch vs. the default branch, with request/response shapes derived from the code, auth + error changes, breaking-change flags judged from the strictest plausible client, one realistic example per operation, and per-platform migration notes. Template-rendered from `skills.handoff-to-client.*` config (required `client_platforms`, plus `api_style` / `api_spec_path` / `output_dir`).
+
+Alongside the new skills, **`implement-plan` was decomposed into a modular plan-execution unit** — a thin conductor plus three co-shipped single-purpose sub-skills (`implement-phase`, `review-phase`, `integrate-phase`). `review-phase` is now the one review implementation shared by `implement-plan`, `amend-plan`, and `systematic-debugging`. The behavior is unchanged; the split is for reviewability and determinism. Two more knobs land in `.vinta-ai-workflows.yaml`: **`agent_models`** (set a tier per `reviewer` / `fixer` / `worktree_prep` / `integrate` so the review sub-agents and mechanical steps aren't stuck on the runtime default), and **E2E tests are now opt-in** in both `plan-feature` and `implement-plan` (they make runs materially slower; default off, re-enable per-run or per-project).
 
 ### Foundation skills (project-agnostic)
 
@@ -227,10 +239,15 @@ Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
 | `review-phase` | always (unit) | Plan-execution sub-skill: the three-layer review (mechanical / plan-compliance / independent reviewer) + fix loop. Shared by `implement-plan`, `amend-plan`, and `systematic-debugging`. |
 | `integrate-phase` | always (unit) | Plan-execution sub-skill: push the reviewed phase along the project's commit strategy + open the PR via context file. Under `commit_strategy = ask`, ships as `integrate-phase-stacked` + `integrate-phase-modular`. |
 | `amend-plan` | always (generated) | History-rewriting companion to `implement-plan` — revises in-flight plans, amends prior-phase commits, force-pushes, rebases stacked downstream branches. Reuses `review-phase` + `implement-phase`'s shared prompt loop. |
+| [`handoff`](skills/vinta-derive-skills/resources/foundation-skills/handoff/SKILL.md) | always | Session-continuation handoff doc → `.vinta-ai-workflows/handoffs/`. **Write** captures goal, verified-vs-unverified state, decisions + rejected alternatives, landmines, and the single next step — gathered from the repo, never memory. **Resume** verifies a handoff's claims against the repo before continuing from its next step. |
+| [`deslop-comments`](skills/vinta-derive-skills/resources/foundation-skills/deslop-comments/SKILL.md) | always | Rewrite comments + doc blocks touched during a task into Simple English (strips AI-slop vocabulary + negative framing; comment-only — no renames, no behavior change). `review-phase` Layer 2 depends on it; also invokable standalone. |
 | `systematic-debugging` | **opt-in** | Root-cause-first debugging with project-specific repro commands + MCP evidence-gathering (error tracking, traces, logs, metrics, alerts). Renders from a catalogue of observability MCP servers the user declares. |
 | `add-e2e-test` | **opt-in** | Add an e2e test. Body covers e2e framework, page-object pattern, auth/storage-state, seed helpers, tenant scoping, screenshot conventions. |
 | `add-env-var` | **opt-in** | Propagate a new env var through every layer (`.env.example`, build tool envPrefix, build cache hash, app config, AGENTS.md, CI, deploy injection). |
 | [`add-one-off-script`](skills/vinta-derive-skills/resources/foundation-skills/add-one-off-script/SKILL.md) | **opt-in** | Author one-off operational scripts (backfills, cleanups, ad-hoc fixes). Ships a `BaseOneOffScript` class (Python + TS) enforcing dry-run default, idempotency, batched DB ops, segmented CSV backups, signal-safe interruption, multi-sink logging. |
+| [`prepare-worktree`](skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md) | **opt-in** | Provision a fully-runnable git worktree for parallel plan work — reads the plan + `.gitignore` + manifests + env / docker config and decides per ignored path whether to **symlink / copy / fork** (dev DB, env files, compose project name). Ships an OS-level write-guard (`sandbox-run.sh` + a Claude Code `PreToolUse` hook) so stray writes to the main checkout fail at the kernel layer. `implement-plan` Step 0 question (c) opts a run into it. |
+| [`thermo-nuclear-code-quality-review`](skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/SKILL.md) | **opt-in** | Deliberately harsh structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — hunting "code-judo" reframes that collapse whole branches / helpers / modes / layers. Read-only; hands each fix to `fixer`. `review-phase` Layer 3 runs a condensed lens every phase and escalates to this full audit on core-architecture / ~1000-line / structurally-smelly phases. |
+| `handoff-to-client` | **opt-in** | (API-only repos) Generate a self-contained API-change handoff doc for the client teams consuming the repo's API — every endpoint / operation added / changed / deprecated / removed vs the default branch, with request/response shapes, auth + error changes, breaking-change flags, one example per operation, and per-platform migration notes. Template-rendered from `skills.handoff-to-client.*` config (client platforms, API style, spec path). |
 
 ### Foundation sub-agents (project-agnostic)
 
@@ -251,7 +268,7 @@ Bootstrap is a snapshot. `vinta-ai-workflows` keeps shipping — new foundation 
 ### The flow at a glance
 
 ```bash
-# 1. Pull the new package version (or update the git+ssh ref).
+# 1. Pull the new package version.
 npm update vinta-ai-workflows
 
 # 2. Run the sync skill from your AI tool.
@@ -314,11 +331,27 @@ To bring a previously-bootstrapped project up to date with a newer package versi
 
 ## Install variants
 
-The package is private. Two install paths.
+The package is published to the public npm registry. Three install paths.
 
-### A. From git+ssh (no registry needed)
+### A. From the npm registry (default)
 
-Each developer's GitHub SSH key needs read access to the repo. Then:
+```bash
+# inside the target project
+npm  install -D vinta-ai-workflows
+pnpm add  -D   vinta-ai-workflows
+yarn add  -D   vinta-ai-workflows
+bun  add  -d   vinta-ai-workflows
+```
+
+Pin a version when you want determinism:
+
+```bash
+npm install -D vinta-ai-workflows@0.2.0
+```
+
+### B. From git+ssh (an unreleased ref)
+
+Use this to install a branch or commit that isn't published yet — each developer's GitHub SSH key needs read access to the repo:
 
 ```bash
 # inside the target project
@@ -334,28 +367,12 @@ Pin a tag/commit when you want determinism:
 npm install -D git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git#0.1.0
 ```
 
-### B. From GitHub Packages (if/when published)
-
-In the project root, add `.npmrc`:
-
-```ini
-@vinta:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
-```
-
-Export `GITHUB_TOKEN` (a Personal Access Token with `read:packages` and the `repo` scope for private repos), then:
-
-```bash
-npm install -D vinta-ai-workflows
-```
-
-### One-shot via npx (no install)
+### C. One-shot via npx (no install)
 
 If you don't want the dep tracked in `package.json`:
 
 ```bash
-npx -y -p git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git \
-  vinta-ai-workflows install --tool all
+npx -y -p vinta-ai-workflows vinta-ai-workflows install --tool all
 ```
 
 ### Picking a tool
