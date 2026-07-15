@@ -30,7 +30,7 @@ Open the phase body alongside the diff and walk:
 
 ## Layer 3 — Independent reviewer subagent
 
-After Layers 1–2 pass, spawn a **separate** subagent (different session, no implementation context) using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)). Read-only by design.
+After Layers 1–2 pass, spawn a **separate** subagent (different session, no implementation context) using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) at the model resolved from `agent_models.reviewer` (see the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step; unset → runtime default). Read-only by design.
 
 Reviewer prompt template — see the reviewer agent's body for the standard form. Triage findings:
 - **BLOCKER**: must fix before the phase is pushed (the conductor's integrate step).
@@ -43,7 +43,7 @@ The reviewer finds nothing on a >300-LoC multi-file phase → suspicious. Read o
 
 ## Fix loop
 
-1. Spawn a **new** subagent — the project's `fixer` agent type ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md)). The fix prompt quotes the finding verbatim. For comment-hygiene findings (Layer 2 item 8), the fix prompt tells the fixer to run the `deslop-comments` skill ([ai-tools/skills/deslop-comments/SKILL.md](ai-tools/skills/deslop-comments/SKILL.md)) scoped to the phase's touched files — comment-only edits, no behavior change.
+1. Spawn a **new** subagent — the project's `fixer` agent type ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md)) at the model resolved from `agent_models.fixer` (see the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step; unset → runtime default). The fix prompt quotes the finding verbatim. For comment-hygiene findings (Layer 2 item 8), the fix prompt tells the fixer to run the `deslop-comments` skill ([ai-tools/skills/deslop-comments/SKILL.md](ai-tools/skills/deslop-comments/SKILL.md)) scoped to the phase's touched files — comment-only edits, no behavior change.
 2. The `fixer`'s system prompt mandates re-running the inner loop + outer gate (in `<WORKROOT>`).
 3. After the fixer returns, redo Layer 1 in full + the affected portion of Layer 2.
 4. Loop until Layers 1, 2, 3 are all clean.

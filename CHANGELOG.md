@@ -9,6 +9,39 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 <!-- pre-release: 0.2.0-alpha7 on 2026-07-13 -->
 
+### Added
+
+- **Project-wide model selection for the review sub-agents and mechanical
+  steps, via a new optional `agent_models` section in
+  `.vinta-ai-workflows.yaml`.** Until now only the per-phase *implementer*
+  model was configurable (each plan phase's `**Suggested AI model**:` line);
+  the reviewer, the fixer, and the mechanical steps (worktree prep, opening
+  the PR / integrate) always inherited the runtime default. `agent_models`
+  maps each of `reviewer` / `fixer` / `worktree_prep` / `integrate` to a
+  **tier (1–4)** into the same `plan-feature/resources/ai-models.yaml` table
+  the implementer uses — so no model IDs are hard-coded and the nightly
+  `check-ai-models` job keeps them fresh. Behavior:
+  - `review-phase` spawns the reviewer at `agent_models.reviewer` and the
+    fixer at `agent_models.fixer` **as the project default** — a plan phase
+    can override either for that phase via an optional `**Review models**:`
+    line (per-phase override wins → else `agent_models` → else runtime
+    default). Lets a plan raise the review model on its few critical /
+    high-blast-radius phases without changing the project-wide setting.
+  - `implement-plan` **delegates** the mechanical steps to a cheap subagent
+    when `agent_models.worktree_prep` / `agent_models.integrate` is set —
+    provisioning the worktree and pushing + opening the PR run on the
+    configured model instead of the conductor's (usually pricier) session.
+    The PR-context file + `open-pr.sh` stays the only PR-creation path.
+  - `plan-feature` phases always pick the implementer model
+    (`**Suggested AI model**:`) and MAY add an optional `**Review models**:`
+    line to override the reviewer / fixer tier for that phase; the mechanical
+    models stay config-only.
+  Every key is optional and backward-compatible: an unset key (or the whole
+  section absent) means that spawn keeps using the runtime default.
+  **Consumers**: re-sync to pick up the `agent_models` bootstrap question and
+  the updated plan-execution skills; existing configs are unaffected until
+  they add the section.
+
 ### Changed
 
 - **E2E tests are now opt-in in both `plan-feature` and `implement-plan`,

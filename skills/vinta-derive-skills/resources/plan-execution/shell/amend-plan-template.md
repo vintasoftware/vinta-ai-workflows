@@ -126,7 +126,7 @@ Always the first write. Plan file is durable; commits get rewritten next.
    - Letter: `1b` between `1` (relabeled `1a`) and `2`. Requires renaming `1` → `1a` inside **Phased Rollout** + updating downstream references.
    Ask the user. Default: decimal — no rename of existing ids.
 
-3. **Appends** — new `## Phase N+1` block at end of **Phased Rollout**. Same shape as siblings: Goal, Suggested AI model, reusable_skills, Changes, Tests, Acceptance.
+3. **Appends** — new `## Phase N+1` block at end of **Phased Rollout**. Same shape as siblings: Goal, Suggested AI model, optional Review models, reusable_skills, Changes, Tests, Acceptance.
 
 4. **Guiding Decisions changes** — rewrite the affected row. Add a one-line note at the top of **Guiding Decisions** ("**Amended YYYY-MM-DD**: replaced storage shape from X to Y; affects phases 2, 3, 4.") so reviewers see what shifted. Reference the changed row by its **Decision** column name, not by a `§N.M` shorthand.
 
@@ -241,7 +241,7 @@ For `change_kind = rebase-only` (downstream phase whose parent moved): skip the 
 
 ### 4c. Run the three-layer review
 
-Invoke [review-phase](../review-phase/SKILL.md) against the rewritten branch, passing the **new** phase body to walk against and `WORKROOT`. Layer 2 walks: every "Changes" item in the new body, every "Tests" entry, the new acceptance line.
+Invoke [review-phase](../review-phase/SKILL.md) against the rewritten branch, passing the **new** phase body to walk against, `WORKROOT`, and the `reviewer` / `fixer` agent types with their `agent_models` tiers plus this phase's `reviewer_model_tier` / `fixer_model_tier` overrides (parsed from the rewritten body's `**Review models**:` line, null when absent). Layer 2 walks: every "Changes" item in the new body, every "Tests" entry, the new acceptance line.
 
 Skip this step only when `change_kind = rebase-only` (no body change → no compliance walk). Even then, spot-run review-phase's Layer 1 mechanical checks to verify the rebase didn't lose unrelated work.
 

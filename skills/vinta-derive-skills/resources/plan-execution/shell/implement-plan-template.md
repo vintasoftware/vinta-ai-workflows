@@ -37,7 +37,7 @@ Parse once, reuse for every phase:
    - **Goals + Non-goals** section — verbatim, used in every phase prompt.
    - **Guiding Decisions** section — verbatim. Pay attention to: feature flag (key, scope, default, flip-on criterion), storage shape, tenant scoping, API contract decisions.
    - **Data Model Changes** section — keep full body; later phases reference earlier subsections.
-   - **Phased Rollout** section — parse into phase records: `{ id, title, goal, body, spec_use_case, suggested_model_tier, reusable_skills, has_e2e, acceptance, is_cross_repo, is_flag_removal }`.
+   - **Phased Rollout** section — parse into phase records: `{ id, title, goal, body, spec_use_case, suggested_model_tier, reviewer_model_tier, fixer_model_tier, reusable_skills, has_e2e, acceptance, is_cross_repo, is_flag_removal }`. `reviewer_model_tier` / `fixer_model_tier` come from the phase's optional `**Review models**:` line (null when the phase doesn't override — most phases).
    - **Risk & Rollout Notes**, **Open Questions**, **Touch List** sections — keep available; include in phase prompts only when relevant.
 3. **Classify each phase**: `is_cross_repo`, `is_flag_removal` — the conductor does NOT auto-execute these (see [Cross-repo phases](#cross-repo-phases) + [Flag-removal phase](#flag-removal-phase-always-out-of-scope)).
 4. **Ask the user three opt-in questions** via `AskUserQuestion`. Defaults are project-specific (see below); record every answer in tracking under `run_options`:
@@ -60,6 +60,14 @@ Parse once, reuse for every phase:
 
    Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`. Worktree isolation follows `run_options.use_worktree`. Outer-gate test scope follows `run_options.full_test_suite`.{{E2E_RUN_OPTION_TRAILER}}{{COMMIT_STRATEGY_STEP0_TRAILER}}
 
+## Agent models — reviewer, fixer, and mechanical steps
+
+The per-phase **implementer** model stays plan-owned (each phase's `**Suggested AI model**:` line — see [implement-phase](../implement-phase/SKILL.md)). Every *other* model this conductor spawns — the review sub-agents and the mechanical steps — is chosen from `.vinta-ai-workflows.yaml`'s `agent_models` section, never from the plan. Read that section once in [Step 0](#step-0--locate--parse-plan) alongside `run_options`.
+
+<!-- include: partials/agent-models.md#TIER_RESOLVE -->
+
+<!-- include: partials/agent-models.md#MECHANICAL_DELEGATION -->
+
 <!-- include: partials/worktree-seam.md#WORKROOT_RESOLUTION -->
 
 <!-- include: partials/worktree-seam.md#WORKROOT_TOPOLOGY_RULE -->
@@ -76,11 +84,11 @@ Invoke [implement-phase](../implement-phase/SKILL.md), passing the phase record,
 
 ### 1b. Review
 
-Invoke [review-phase](../review-phase/SKILL.md) against the phase diff, passing the phase body to walk, `WORKROOT`, `main_checkout`, `run_options.full_test_suite`{{E2E_RUN_OPTION_TRACKING}}, and the `reviewer` / `fixer` agent types. It loops its three layers + fix loop until clean, then returns `PASS` (or the surfaced findings). Do not proceed to integrate while any layer is red.
+Invoke [review-phase](../review-phase/SKILL.md) against the phase diff, passing the phase body to walk, `WORKROOT`, `main_checkout`, `run_options.full_test_suite`{{E2E_RUN_OPTION_TRACKING}}, and the `reviewer` / `fixer` agent types with their `agent_models.reviewer` / `agent_models.fixer` tiers **plus this phase's `reviewer_model_tier` / `fixer_model_tier` overrides (null when the phase didn't set a `**Review models**:` line)**. review-phase prefers a phase override over the `agent_models` default. It loops its three layers + fix loop until clean, then returns `PASS` (or the surfaced findings). Do not proceed to integrate while any layer is red.
 
 ### 1c. Integrate
 
-Invoke {{INTEGRATE_PHASE_DISPATCH}}, passing `WORKROOT` / `BASE_BRANCH`, the `{{PR_POLICY_BLOCK}}` policy, and `run_options.generate_inline_comments`. It pushes the branch and routes the PR through the context file, returning the branch + PR-context path + status.
+Invoke {{INTEGRATE_PHASE_DISPATCH}}, passing `WORKROOT` / `BASE_BRANCH`, the `{{PR_POLICY_BLOCK}}` policy, and `run_options.generate_inline_comments`. It pushes the branch and routes the PR through the context file, returning the branch + PR-context path + status. This is a mechanical step: when `agent_models.integrate` is set, run it as a delegated subagent per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern (the delegate pushes + writes the PR-context file + runs `open-pr.sh`, then reports the branch / path / status back); when unset, run it inline. Either way the PR-context file + `open-pr.sh` is the only PR-creation path.
 
 ### 1d. Update tracking file
 
@@ -151,9 +159,10 @@ After all executable phases complete:
 - **Read AGENTS.md** in every phase prompt.
 - **Stage explicitly.** No `git add -A`.
 - **Subagents work in fresh sessions.** Each phase = a new subagent. Tracking + plan files = the context handoff.
-- **Conductor owns git topology.** Subagents commit but never branch, push, {{PR_RULE_TAIL}}.
+- **Conductor owns git topology.** Phase-work subagents (implementer / reviewer / fixer) commit but never branch, push, {{PR_RULE_TAIL}}. The one exception is a **mechanical `integrate` delegate** spawned per `agent_models.integrate` — it exists precisely to run the conductor's integrate step (push + PR via `open-pr.sh`) on a cheaper model, and the conductor still dictates the branch/base topology it uses.
 {{COAUTHOR_RULE_LINE}}
-- **Trust the plan's per-phase model suggestion.** Model selection lives in [implement-phase](../implement-phase/SKILL.md); the conductor never re-derives tiers.
+- **Trust the plan's per-phase model suggestion.** Implementer model selection lives in [implement-phase](../implement-phase/SKILL.md); the conductor never re-derives tiers.
+- **Reviewer / fixer / mechanical-step models come from `agent_models`, not the plan.** Resolve each configured tier via the [Agent models](#agent-models--reviewer-fixer-and-mechanical-steps) step; an unset key means the spawn uses the runtime default. The plan never names these models.
 - **Don't re-implement what a project skill encodes.**
 {{UI_E2E_RULE_LINE}}
 - **Two-tier verification, in order, every phase.** Inner scoped, then the outer gate — enforced inside [implement-phase](../implement-phase/SKILL.md). The outer gate always runs the repo-wide type/build gate; its test scope follows `run_options.full_test_suite` (scoped suite by default, full repo suite when opted in).

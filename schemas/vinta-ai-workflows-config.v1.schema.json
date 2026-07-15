@@ -245,6 +245,37 @@
         "fixer": { "type": "string", "enum": ["enabled", "disabled"] }
       }
     },
+    "agent_models": {
+      "description": "Per-role / per-task model selection for the plan-execution family, expressed as **tiers** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml`. Each consuming skill resolves a tier to a concrete model at runtime: take that tier's `models`, filter to the vendors the runtime exposes, pick the cheapest survivor. This keeps the config free of hard-coded model IDs (which go stale) — the nightly `check-ai-models` job keeps the tier table fresh. Every key is optional; an unset key (or the whole section absent) means the spawn uses the runtime's default model, i.e. today's behavior. These are the **project defaults**: the `reviewer` / `fixer` tiers here can be overridden per phase by a plan's optional `**Review models**:` line (a phase override wins over the value here for that phase only — see `plan-feature`). The per-phase implementer model is NOT here — that stays owned by each plan phase's `**Suggested AI model**:` line. The mechanical steps (`worktree_prep`, `integrate`) are never plan-named.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": {
+          "description": "Default tier for the independent reviewer subagent spawned by `review-phase` (Layer 3). Reviewing wants a capable model — Tier 3 is the usual default. A plan phase's `**Review models**:` line can override this for that phase. Unset (and no phase override) → runtime default.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "fixer": {
+          "description": "Default tier for the fixer subagent spawned by `review-phase`'s fix loop to apply one reviewer finding. Narrow, well-specified edits — Tier 2 is the usual default. A plan phase's `**Review models**:` line can override this for that phase. Unset (and no phase override) → runtime default.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "worktree_prep": {
+          "description": "Tier for the mechanical worktree-provisioning step (`prepare-worktree`), which `implement-plan` / `amend-plan` run once at the start of a worktree-enabled run. When set, the conductor delegates the step to a subagent at this tier instead of running it inline in its own (usually pricier) session. Mechanical, precedent-driven work — Tier 1 is the usual default. Unset → conductor runs it inline. Irrelevant when `foundation_skills.prepare-worktree` is `disabled`.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "integrate": {
+          "description": "Tier for the mechanical integrate step (`integrate-phase`: push the phase branch + open/update the PR via the bundled `open-pr.sh`) that `implement-plan` runs once per phase. When set, the conductor delegates the step to a subagent at this tier instead of running it inline. Mechanical git + PR-context work — Tier 1 is the usual default. Unset → conductor runs it inline. The PR-context file + `open-pr.sh` remains the only PR-creation path regardless of who runs the step.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        }
+      }
+    },
     "stacks": {
       "description": "Stack templates applied at bootstrap (e.g. `medplum`, `django`, `nextjs-app-router`).",
       "type": "array",
