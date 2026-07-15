@@ -5,9 +5,7 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — YYYY-MM-DD
-
-<!-- pre-release: 0.2.0-alpha7 on 2026-07-13 -->
+## [0.2.0] — 2026-07-15
 
 ### Added
 
@@ -41,6 +39,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Consumers**: re-sync to pick up the `agent_models` bootstrap question and
   the updated plan-execution skills; existing configs are unaffected until
   they add the section.
+
+<!-- pre-release: 0.2.0-alpha7 on 2026-07-13 -->
 
 ### Changed
 
