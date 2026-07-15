@@ -81,6 +81,8 @@ These bleed across sub-skills, so capture once now:
 
    Lands in `.vinta-ai-workflows.yaml` `policies.commit_strategy`. Drives the `implement-plan` template's branch / commit / PR-opening flow + the `amend-plan` skill's supported-strategies check.
 
+9. **Agent model tiers (optional).** The plan-execution family picks the **implementer** model per phase from the plan itself, but the **reviewer**, **fixer**, and the mechanical steps (**worktree prep**, **opening the PR / integrate**) have no model input unless the project sets one. Offer to pin each to a **tier** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml` — so review runs on a capable model while cheap mechanical work runs on a cheap one. `AskUserQuestion`: `Use recommended defaults (reviewer 3, fixer 2, worktree prep 1, integrate 1)`, `Customize each`, `Leave unset — every spawn uses the runtime default`. On `Customize each`, ask a per-role tier (1–4) for `reviewer` / `fixer` / `worktree_prep` / `integrate`. Land the chosen tiers in `.vinta-ai-workflows.yaml` `agent_models`; omit any role the user leaves unset (unset → runtime default). Recommend the defaults for most teams; recommend `Leave unset` only when the runtime exposes a single model anyway. Note `worktree_prep` is a no-op unless `prepare-worktree` is enabled, and setting `worktree_prep` / `integrate` makes `implement-plan` delegate those steps to a cheap subagent instead of running them inline.
+
 ### D. Optional foundation skills
 
 Seven skills are part of the foundation set but aren't always needed. Ask explicitly:
@@ -269,6 +271,15 @@ foundation_agents:
   implementer: enabled
   reviewer: enabled
   fixer: enabled
+
+# Only emit the roles the user chose in the "Agent model tiers" question (C.9).
+# Omit the whole block on "Leave unset"; omit any individual role left unset.
+# Each value is a tier (1–4) into ai-tools/skills/plan-feature/resources/ai-models.yaml.
+agent_models:
+  reviewer: <C.9 → reviewer tier, default 3>
+  fixer: <C.9 → fixer tier, default 2>
+  worktree_prep: <C.9 → worktree_prep tier, default 1; omit when prepare-worktree disabled>
+  integrate: <C.9 → integrate tier, default 1>
 
 stacks: <Stack detection → matched stacks>
 stack_specialist_agents: <empty unless user supplied templates>

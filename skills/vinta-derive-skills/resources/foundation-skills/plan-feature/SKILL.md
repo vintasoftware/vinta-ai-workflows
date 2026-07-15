@@ -245,6 +245,8 @@ Tests:
 
 **Suggested AI model**: {tier choice + why}. See "AI model selection".
 
+**Review models** (optional — omit for the project defaults): reviewer Tier {N}, fixer Tier {N} — {why this phase warrants a non-default review model}. See "AI model selection".
+
 **Reusable skills**: {invoke `Skill(name)` — see "Project skills"}.
 
 Acceptance: {one literal statement true after merge + deploy of this phase, only this phase}.
@@ -318,6 +320,15 @@ Common mistake: leave cross-repo producer wiring for last, then discover the ups
 
 For each phase, suggest **cheapest/fastest model likely to one-shot work**. Iterating with cheap model usually beats burning Opus tokens on CRUD scaffold.
 
+**Scope: the plan always picks the *implementer* model, and MAY override the reviewer / fixer models per phase.**
+
+- `**Suggested AI model**:` drives the implementer subagent that writes the phase — **required on every phase**.
+- `**Review models**:` (optional) overrides the reviewer and/or fixer tier **for this phase only**. Use it when a phase is riskier than average — high blast-radius change, subtle concurrency / transaction logic, security-sensitive surface, a migration that's hard to undo — and you want a more capable reviewer or fixer than the project default. Name a tier for reviewer, fixer, or both; omit either to leave that role on the default.
+- **Precedence** (resolved by `implement-plan` / `review-phase`): a phase's `**Review models**:` override wins → else the project-wide `agent_models.reviewer` / `agent_models.fixer` tier in `.vinta-ai-workflows.yaml` → else the runtime default. So the project keeps sane defaults and the plan only speaks up for the phases that need a different review model.
+- The mechanical-step models (worktree prep, opening the PR / integrate) are **not** plan-owned — they stay under `agent_models` in `.vinta-ai-workflows.yaml`. Don't add worktree/PR model hints to a phase; they'd be ignored.
+
+**Most phases carry only the implementer line.** Add `**Review models**:` deliberately, for the few phases that earn it — not by default on every phase.
+
 **Concrete model IDs per tier live in [resources/ai-models.yaml](resources/ai-models.yaml) — read that file when writing each suggestion. Never recall model names from memory; they go stale as vendors ship.** The tiers below define *when* each applies (stable judgement); the IDs drift, and a nightly job keeps the resource current. Note the file's `last_verified` date — if it's far in the past, the IDs may be stale; flag that rather than trusting them blindly.
 
 ### Tier 1 — cheapest/fastest (boilerplate, exact-precedent edits)
@@ -341,6 +352,14 @@ Pick the tier from the rubric above, then pull the matching vendor IDs out of [r
 When one tier doesn't fit, name both:
 
 > **Suggested AI model**: Tier 2 for repository + serializer; step up to Tier 3 for the integration test spanning upsert → routing → reprocess. IDs per tier in [resources/ai-models.yaml](resources/ai-models.yaml).
+
+### Overriding the review models on a critical phase (optional)
+
+Add a `**Review models**:` line **only** when the phase justifies a non-default reviewer / fixer. Pick the tier from the same rubric — a higher tier for the *review* of a delicate change, not for its authoring:
+
+> **Review models**: reviewer Tier 4 — this phase rewrites the transactional batch-apply protocol with deferred constraints; a subtle ordering bug here corrupts data, so the independent review runs on the most capable model. Fixer left on the project default.
+
+Name only the role you're changing (`reviewer`, `fixer`, or both). Omitting the line entirely — the common case — leaves both roles on the project's `agent_models` defaults.
 
 **Default to cheapest tier that plausibly works, not safest.** Cheap models failing fast beats expensive succeeding slowly.
 
@@ -406,6 +425,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Phase numbering uses numbers + letters consistently.
 - [ ] **Phase granularity matches the Step 0 answer.** Default (one-use-case-per-phase): at least one phase per spec use-case, no phase implements two use-cases. If bundling was chosen: grouped phases stay MR-sized, one concern, independently mergeable. Cross-cutting scaffolding is its own foundation phase either way.
 - [ ] Each phase has Goal / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / Suggested AI model / Reusable skills / Acceptance.
+- [ ] `**Review models**:` appears **only** on phases that justify a non-default reviewer / fixer (not on every phase); each such line names a tier + why. Phases without it inherit the project's `agent_models` defaults.
 <!-- e2e:start -->
 - [ ] **If e2e coverage was opted into at Step 0:** every phase introducing a new UI flow has an **E2E happy-path test** in its Tests block, with screenshot output to `pr-screenshots/`. If it was not opted into (default), **no phase carries an e2e spec** and there is no `QA_USE_CASES.md` / `pr-screenshots/` reference.
 <!-- e2e:end -->

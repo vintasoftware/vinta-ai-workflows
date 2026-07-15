@@ -13,7 +13,7 @@ Resolve three values **once**, before any phase runs, and record them in trackin
 
 **When `use_worktree = false`:** set `WORKROOT` = main checkout, `BASE_BRANCH = {{DEFAULT_BRANCH}}`, `SANDBOX_TIER = none`. Make `BASE_BRANCH` current + up to date: `git -C <WORKROOT> checkout {{DEFAULT_BRANCH}} && git -C <WORKROOT> pull --ff-only`. Jump to Step 1.
 
-**When `use_worktree = true`:** invoke [prepare-worktree](../prepare-worktree/SKILL.md) **once**:
+**When `use_worktree = true`:** run [prepare-worktree](../prepare-worktree/SKILL.md) **once**. This is a mechanical step: when `agent_models.worktree_prep` is set, **delegate it to a subagent** per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern (hand the subagent prepare-worktree's SKILL.md + the inputs below; consume its returned `worktree_path` / `worktree_branch` / `worktree_summary` / `sandbox_tier` report). When the tier is unset, run it inline — the steps below read the same either way:
 
 1. **Inputs.** Plan path (so prepare-worktree can read it for deps / migrations / env / compose churn — see prepare-worktree's **Plan inspection** step), suggested worktree name = `plan-{plan-id-kebab}`, plan-driven mode.
 2. **Pre-run sanity.** Confirm no existing worktree at the target path (`git worktree list | grep <name>` — refuse if collision). Confirm `git -C <main_checkout> status` of the main checkout (warn if dirty; defer to prepare-worktree's **Sanity checks** step for the call).

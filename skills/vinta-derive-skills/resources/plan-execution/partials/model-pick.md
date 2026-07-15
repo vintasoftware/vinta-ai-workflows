@@ -2,7 +2,7 @@
 <!-- block-begin: MODEL_PICK -->
 ## Pick the model from the plan's per-phase suggestion
 
-**The plan owns model selection — this skill does not re-derive tiers and doesn't assume a vendor.** Each phase carries a `**Suggested AI model**:` line listing one model per vendor.
+**The plan owns the *implementer* model — this skill does not re-derive tiers and doesn't assume a vendor.** Each phase carries a `**Suggested AI model**:` line listing one model per vendor. (The reviewer / fixer models default to `.vinta-ai-workflows.yaml`'s `agent_models` section, though a phase's optional `**Review models**:` line can override them for that phase; the mechanical-step models are `agent_models`-only. All of that is handled by `review-phase` / the conductor, not this implementer step.)
 
 Pick:
 
