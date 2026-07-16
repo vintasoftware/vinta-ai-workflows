@@ -5,6 +5,24 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — YYYY-MM-DD
+
+### Changed
+
+- **`prepare-worktree` foundation skill — rebalanced Step 3b (test database)
+  to be stack-agnostic.** The section previously led with a detailed
+  `pytest-django` recipe (with `vitest`/`jest` and Rails as one-liners),
+  which read as Django-centric. It now opens with the stack-agnostic
+  principle — give the worktree its own test DB name, inject it through
+  whatever channel the runner already reads (env var or per-worktree config
+  override), and never edit tracked test config in place — then lists the
+  runners as equal-weight illustrations grouped by *how they take config*:
+  env-var runners (`vitest`/`jest`, `go test`, `cargo test`), config-file
+  runners (`pytest-django`), convention-based runners (Rails), and
+  compose-based test DBs. No behavior change; the pytest-django mechanics
+  (`conftest_worktree.py`, don't touch the tracked `conftest.py`) are
+  preserved. **Consumers**: re-sync to pick up the reworded skill body.
+
 ## [0.2.0] — 2026-07-15
 
 ### Added

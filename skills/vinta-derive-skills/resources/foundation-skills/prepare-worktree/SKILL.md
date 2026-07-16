@@ -147,10 +147,12 @@ Record the chosen strategy + the forked DB name in the worktree summary (written
 
 A different beast — tests on the same engine but a different DB name (`<main_db>_test`, `test_<repo>`). Parallel worktrees running tests against the same `<main_db>_test` will overwrite each other's fixtures and produce flaky failures.
 
-- **`pytest-django` / `pytest`** — set `--reuse-db` per worktree via a per-worktree `DJANGO_SETTINGS_MODULE` env, OR override `DATABASES['default']['NAME']` to `<main_db>_test_wt_<name>` in `conftest.py` when the env var `WORKTREE_NAME` is set. Drop a `conftest_worktree.py` patch in the worktree (don't edit `conftest.py` in tracked code — too easy to commit by accident).
-- **`vitest` / `jest`** — set `TEST_DATABASE_URL` per worktree; ensure the test setup respects it.
-- **Rails** — `DATABASE_URL` for the `test` env, `<main_db>_test_wt_<name>`.
-- **Docker-compose-based test DB** — see the **Docker / compose isolation** step below; per-worktree compose project name fixes it.
+**The principle (stack-agnostic):** give the worktree its own test DB name (`<main_db>_test_wt_<name>`), inject it through whatever channel the test runner already reads (an env var or a per-worktree config override), and **never edit tracked test config in place** — a worktree-local override or an env var is safe; a change to a committed config file is one `git add -A` away from leaking into main. How each runner exposes that channel:
+
+- **Env-var runners (`vitest` / `jest`, `go test`, `cargo test`, most CI-shaped suites)** — set `TEST_DATABASE_URL` (or the suite's equivalent) per worktree and confirm the test setup reads it. Simplest case; no file edits at all.
+- **Config-file runners (`pytest-django` / `pytest`)** — set `--reuse-db` per worktree via a per-worktree `DJANGO_SETTINGS_MODULE`, OR override `DATABASES['default']['NAME']` to `<main_db>_test_wt_<name>` guarded on a `WORKTREE_NAME` env var. Put the override in a `conftest_worktree.py` in the worktree — don't touch the tracked `conftest.py`.
+- **Convention-based runners (Rails)** — point the `test` env's `DATABASE_URL` at `<main_db>_test_wt_<name>`.
+- **Docker-compose-based test DB (any stack)** — see the **Docker / compose isolation** step below; a per-worktree compose project name fixes it.
 
 If `test_infra_change = true` → fork the test DB unconditionally. If `false` and the user says "share is fine" → still flag the race risk; offer a one-line fix to switch later.
 
