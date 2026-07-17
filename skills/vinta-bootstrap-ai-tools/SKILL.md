@@ -312,6 +312,10 @@ skills:
     compose_network: per-worktree
     test_db_strategy: <prepare-worktree follow-up — fork-on-schema-change | always-fork | share>
     summary_dir: .vinta-ai-workflows/worktrees
+    # Compose volume keys safe to keep shared across worktrees (read-only dep/venv
+    # caches only — NEVER a data/DB volume). Empty = fork every external/named
+    # volume (safest). See prepare-worktree Step 4a.
+    shared_volumes: []
 
   # Only emit this block when foundation_skills.add-one-off-script = enabled.
   add-one-off-script:

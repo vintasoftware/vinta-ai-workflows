@@ -5,7 +5,72 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.1] — YYYY-MM-DD
+## [0.3.0] — YYYY-MM-DD
+
+### Fixed
+
+- **`prepare-worktree` — data-corruption bug: `COMPOSE_PROJECT_NAME` alone does
+  NOT isolate a per-worktree docker-compose stack, so worktrees could run a
+  second database server against the main checkout's data volume.** Step 4
+  assumed `COMPOSE_PROJECT_NAME` fully isolates a compose stack. It does not for
+  two very common patterns: (1) volumes declared `external: true` and/or pinned
+  to a fixed top-level `name:` — the project name namespaces containers and
+  networks but NOT these volumes, so every worktree's `db` service mounted the
+  **same physical volume**; and (2) fixed host port bindings
+  (`ports: - "5432:5432"`) — published to the same host port across compose
+  projects. On a Django + docker-compose project (2026-07-17) this ran two
+  Postgres postmasters against one PGDATA for a whole test run; when the
+  worktree stack was `docker compose down`'d, its Postgres removed the shared
+  `postmaster.pid` and the **main checkout's database self-terminated**
+  (recovered on restart — luck, not safety). The fix also corrects a deeper
+  conceptual error: Step 3a's "share the DB (don't fork)" is now explicit that
+  *share* means share a **connection to a single already-running server** — for
+  a compose-delivered DB the data volumes are **always forked, independent of
+  `schema_change` / `test_db_strategy`**, because the worktree runs its own
+  server and two servers on one volume is corruption.
+
+  **User impact / migration:** existing worktrees provisioned before this fix
+  are **unsafe to boot their DB compose stack while the main stack is up** —
+  they share main's data volume. For an already-provisioned worktree, regenerate
+  the override without re-running the whole skill:
+
+  ```bash
+  ai-tools/skills/prepare-worktree/scripts/gen-compose-worktree-override.sh \
+    --main <main-checkout-root> --worktree <worktree-path> --name <name> \
+    --out <summary_dir>/<name>.docker-compose.override.yml
+  echo "COMPOSE_FILE=<base-compose-file>:<override-path>" >> <worktree>/.env
+  ```
+
+  Then confirm the worktree's resolved DB volume name differs from main's before
+  booting its stack. **Consumers**: re-sync (`vinta-sync-ai-tools`) to pick up
+  the new script, the reworked Step 4/Step 3a, and the `shared_volumes` config.
+
+### Added
+
+- **`prepare-worktree` bundled script
+  `scripts/gen-compose-worktree-override.sh`.** Detects the compose isolation
+  leaks above entirely from `docker compose config --format json` (no project /
+  service / volume name hardcoded) and emits a **generated, out-of-tree**
+  compose override that re-pins every `external:`/fixed-`name:` volume to a
+  non-external, worktree-namespaced volume (`<project>_wt_<name>_<volkey>`) and
+  strips fixed host-port publishing (via compose's `!override []` — a plain
+  `ports: []` merges/appends in Compose v2+; verified on Docker Compose v5.1.1).
+  The override is written under `<summary_dir>/` and wired in via
+  `COMPOSE_FILE=<base>:<override>` appended to the worktree's **copied** `.env`,
+  so **no tracked compose file is ever mutated**. Volumes safe to keep shared
+  (a read-only dep/venv cache) are exempted via `--share-volume`.
+- **`skills.prepare-worktree.shared_volumes` config field** (array of compose
+  volume keys, default `[]`). Lists volumes safe to keep shared across worktrees
+  — read-only dep/venv caches only, never a data/DB volume. Feeds
+  `gen-compose-worktree-override.sh --share-volume`. Added to the config schema
+  and the bootstrap template's `prepare-worktree` block.
+- **`prepare-worktree` Step 4a "Neutralize compose isolation leaks"**, a
+  Verification invariant that boots the worktree's DB service and asserts its
+  resolved data volume name differs from main's (failing provisioning loudly
+  otherwise), a matching Pitfall + Rules entry, and a `state.compose` summary
+  schema extension (per-volume fork decisions, override path, stripped ports)
+  so teardown is mechanical (`docker volume rm` the forked names; `rm` the
+  override — never `down -v`, which would nuke shared volumes).
 
 ### Changed
 

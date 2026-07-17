@@ -420,10 +420,16 @@
               "default": "fork-on-schema-change"
             },
             "summary_dir": {
-              "description": "Where per-worktree summary YAMLs land. Default `.vinta-ai-workflows/worktrees` — covered by the umbrella gitignore added in 0.1.3. The skill writes `<summary_dir>/<name>.yaml` per provisioned worktree; teardown reads it.",
+              "description": "Where per-worktree summary YAMLs land. Default `.vinta-ai-workflows/worktrees` — covered by the umbrella gitignore added in 0.1.3. The skill writes `<summary_dir>/<name>.yaml` per provisioned worktree; teardown reads it. The generated compose override (see `shared_volumes`) also lands here as `<summary_dir>/<name>.docker-compose.override.yml`.",
               "type": "string",
               "minLength": 1,
               "default": ".vinta-ai-workflows/worktrees"
+            },
+            "shared_volumes": {
+              "description": "Compose volume KEYS (as they appear under top-level `volumes:` in the project's compose config) that are safe to keep SHARED across worktrees — a read-only dep/venv/asset cache with no write churn. The skill's compose-isolation step (Step 4a) forks EVERY `external:`/fixed-`name:` volume into a worktree-namespaced copy by default (COMPOSE_PROJECT_NAME does not isolate those, and two servers on one DATA volume corrupts the store); volumes listed here are exempted and stay shared. NEVER list a database/data volume here. Passed through to `scripts/gen-compose-worktree-override.sh --share-volume`. Empty/omitted = fork every leaky volume (safest).",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "default": []
             }
           }
         },

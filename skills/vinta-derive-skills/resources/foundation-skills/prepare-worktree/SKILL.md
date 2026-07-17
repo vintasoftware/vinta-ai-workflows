@@ -109,6 +109,8 @@ Default: **copy** for pnpm + npm + cargo + go; **reinstall** for poetry + venv +
 
 `env_change = true` → `cp <main>/.env <worktree>/.env`. Then mutate per the **Database fork** step (DB URL) + the **Docker / compose isolation** step (compose project name).
 
+**Compose forces a copy.** If the project uses compose, the [4a](#4a--neutralize-compose-isolation-leaks) sub-step appends `COMPOSE_FILE=…` to the worktree's `.env` — a mutation. So a compose project ALWAYS needs a copied `.env` (or a copied `.envrc`) even when `env_change = false`; a symlinked `.env` would leak the `COMPOSE_FILE` line into main. Treat "project uses compose" as an independent reason to copy `.env`.
+
 `.env.example` is **always** symlinked — it's committed; the worktree should keep tracking it.
 
 ### 2c — Skip rules
@@ -129,6 +131,11 @@ Whatever the app reads + writes during local dev. Detect the connection string s
 2. Project config files: `config/database.yml` (Rails), `database.ini`, `prisma/schema.prisma`'s `datasource`, `knexfile.js`, Django `settings.py`'s `DATABASES`.
 3. Docker compose service env: `services.db.environment.POSTGRES_DB`.
 
+**First, determine HOW the DB is delivered — this changes what "share" even means.** Two deliveries:
+
+- **External server** — the DB runs on a server the worktree only *connects* to (a system Postgres, an RDS instance, a compose service the worktree does NOT boot its own copy of). Here "share" = point the worktree's connection string at the one already-running server. Fork = clone into a new DB *on that same server*.
+- **Per-worktree compose stack** — the DB is delivered *through the worktree's own `docker compose up`* (a `db` service the worktree boots). Here the worktree runs its **own server process**. "Share" the way the connection-string sense means is impossible without corruption: booting a second server against the same data volume is two postmasters on one PGDATA. **For compose-delivered DBs the data volumes are ALWAYS forked, independent of `schema_change`** — see the [Neutralize compose isolation leaks](#4a--neutralize-compose-isolation-leaks) sub-step, which does the volume fork mechanically. `schema_change = false` may still let you skip *cloning main's data* into the forked volume (boot empty + migrate), but it never authorizes a shared data volume.
+
 For each detected DB, ask the user (`AskUserQuestion`) once:
 
 - **Fork the DB** — recommended when `schema_change = true` or when the plan's phases run destructive migrations. Strategy depends on the engine:
@@ -137,7 +144,7 @@ For each detected DB, ask the user (`AskUserQuestion`) once:
   - **SQLite (file-based)** — `cp <main>/db.sqlite3 <worktree>/db.sqlite3`. Symlink would defeat the point.
   - **Mongo / Redis / Elasticsearch** — engine-specific clone, OR per-worktree DB name / key prefix (`REDIS_URL=redis://localhost:6379/<index>` with a free index; `MONGODB_URI=mongodb://localhost:27017/<db>_wt_<name>`).
 
-- **Share the DB (don't fork)** — only safe when `schema_change = false` AND there's no risk of conflicting writes. Symlink the SQLite file or point the worktree's env at the same URL. Warn explicitly: "DB shared with main checkout — destructive ops here will be visible in main."
+- **Share the DB (don't fork)** — means share a *connection to a single already-running server*, nothing more. Only safe when the DB is an **external server** (NOT compose-delivered — see the delivery check above) AND `schema_change = false` AND there's no risk of conflicting writes. Symlink the SQLite file or point the worktree's env at the same URL. Warn explicitly: "DB shared with main checkout — destructive ops here will be visible in main." **Never read this bullet as permission to point a second per-worktree compose server at a shared data volume** — that is not sharing a connection, it is running two servers on one data directory, and it corrupts the store regardless of `schema_change`.
 
 - **Stub the DB** — point the worktree at a fresh empty DB (`createdb <main_db>_wt_<name>` + run all migrations + seed if a seed exists). Best when the feature needs schema parity but no production data.
 
@@ -168,10 +175,15 @@ If the project has a `docker-compose.yml` / `compose.yaml` / `docker-compose.ove
 
 1. Set `COMPOSE_PROJECT_NAME=<repo>_<worktree-name>` in the worktree's `.env` (or in a `.envrc` if the project uses direnv). Then `docker compose up` inside the worktree spins a fresh container set.
 
-2. **Shared network** — if the worktree's app needs to reach services running in the *main* checkout's compose stack (a queue, a cache, a search index that's expensive to spin twice), put them on an external network:
+   **`COMPOSE_PROJECT_NAME` is necessary but NOT sufficient.** It namespaces containers and networks, and auto-named volumes — but it does **not** isolate two very common compose patterns: volumes declared `external: true` and/or pinned to a fixed top-level `name:`, and services with fixed host port bindings (`ports: - "5432:5432"`). A shared *database* volume is the dangerous one: two worktree stacks (or a worktree stack + main's stack) mount the same physical volume, so two server processes run against one data directory → corruption. The next sub-step closes both leaks mechanically.
+
+2. **Neutralize compose isolation leaks** — see [4a](#4a--neutralize-compose-isolation-leaks) below. Run this whenever the project has compose, before ever booting the worktree's stack.
+
+3. **Shared network** — if the worktree's app needs to reach services running in the *main* checkout's compose stack (a queue, a cache, a search index that's expensive to spin twice), put them on an external network:
 
    ```yaml
-   # docker-compose.override.yml in the worktree (or in main; pick one place)
+   # Add to the SAME out-of-tree override the 4a sub-step generates — NOT a
+   # tracked docker-compose.override.yml at the worktree root (see 4a for why).
    networks:
      shared:
        external: true
@@ -184,9 +196,44 @@ If the project has a `docker-compose.yml` / `compose.yaml` / `docker-compose.ove
 
    Or use `network_mode: host` if the project uses that pattern. Decide once per project and record in `.vinta-ai-workflows.yaml` → `run_options.prepare-worktree.compose_network: per-worktree | shared-external | host`.
 
-3. **Linters / formatters / test runners that run inside docker** (a Dockerfile-based `pnpm test`, a `lint` target that mounts source into a sidecar container) — these MUST run with the worktree's `COMPOSE_PROJECT_NAME`. Otherwise concurrent runs hit the same container and one wins. The standard fix: ensure the project's lint/test scripts read `COMPOSE_PROJECT_NAME` from env instead of hard-coding it.
+4. **Linters / formatters / test runners that run inside docker** (a Dockerfile-based `pnpm test`, a `lint` target that mounts source into a sidecar container) — these MUST run with the worktree's `COMPOSE_PROJECT_NAME`. Otherwise concurrent runs hit the same container and one wins. The standard fix: ensure the project's lint/test scripts read `COMPOSE_PROJECT_NAME` from env instead of hard-coding it.
 
-4. **Per-worktree volumes** — let compose auto-create volumes namespaced by project name. Don't manually `external: true` data volumes (defeats isolation).
+5. **Per-worktree volumes** — for a volume the project leaves un-named, compose auto-namespaces it by project name and it's already isolated. But projects routinely pin data volumes with `external: true` or a fixed `name:` (for good reasons of their own — you must NOT edit their committed compose to "fix" that). Those are the leaks the [4a](#4a--neutralize-compose-isolation-leaks) sub-step re-pins in a generated override. Never touch the tracked compose file to change a volume's isolation; the override is the only lever.
+
+### 4a — Neutralize compose isolation leaks
+
+Runs whenever the project has any compose file, before the worktree's stack is ever booted. Fully project-agnostic — every decision is driven by `docker compose config --format json`, no project / service / volume name is hardcoded.
+
+**1. Generate the override.** Run the bundled [scripts/gen-compose-worktree-override.sh](scripts/gen-compose-worktree-override.sh):
+
+```bash
+override=$(scripts/gen-compose-worktree-override.sh \
+  --main     <main-checkout-root> \
+  --worktree <worktree-path> \
+  --name     <worktree-name> \
+  --out      <summary_dir>/<name>.docker-compose.override.yml \
+  --share-volume <volkey>...)   # 0+ volumes safe to keep shared (see below)
+```
+
+The script renders the resolved config from the main checkout and, for the worktree:
+- re-pins every volume that is `external: true` OR carries a fixed top-level `name:` to a **non-external, worktree-namespaced** volume (`<project>_wt_<name>_<volkey>`), so the worktree's server writes to its OWN physical volume;
+- strips host port publishing from every service that publishes a fixed port (via compose's `!override []` — a plain `ports: []` **merges/appends** in Compose v2+ and would NOT strip it; verified on Docker Compose v5.1.1);
+- leaves alone any volume already namespaced by project name (auto-named), and any volume the caller passes via `--share-volume` (a read-only dep/venv cache with no dep churn is safe to keep shared — the config's `shared_volumes` list feeds this arg).
+
+The script exits non-zero with a clear message if `docker compose` is unavailable or the config doesn't parse; surface that and stop (don't boot a stack you couldn't prove is isolated).
+
+**2. Write it OUT OF TREE and wire it in via the copied `.env`.** The override goes to `<summary_dir>/<name>.docker-compose.override.yml` (under the already-ignored `.vinta-ai-workflows/` umbrella) — **NOT** a `docker-compose.override.yml` at the worktree root. Rationale: a root `docker-compose.override.yml` is auto-loaded by compose, but it is frequently a **tracked** file (it was in the project that hit the 2026-07-17 incident); writing the generated override there pollutes the worktree diff and risks `git add -A` leaking it into main. Instead, wire it in by appending to the worktree's **copied** `.env`:
+
+```bash
+# The generator prints exactly this line (base:override) on stderr — use it verbatim.
+echo "COMPOSE_FILE=<base-compose-file>:<ABSOLUTE-override-path>" >> <worktree>/.env
+```
+
+`COMPOSE_FILE` makes compose load base + override for every `docker compose` call in the worktree without touching any tracked file. The **override path must be absolute** — it lives under `<summary_dir>` (outside the worktree), so a bare basename wouldn't resolve from the worktree's compose project dir; the generator prints the absolute path for you (and on stdout, for `$(...)` capture). The base file stays relative — the worktree carries its own tracked copy. **This requires `.env` to be COPIED, not symlinked** — appending to a symlinked `.env` leaks the line into main. If the **Env files** step decided `env_change = false` (symlink), flip `.env` to a copy here (compose isolation is itself an env change) and note it in the summary. Use the exact base compose filename the generator reports (`compose.yaml` vs `docker-compose.yml`).
+
+**3. Record the decision.** Write the per-volume fork decisions and the override path into the summary YAML's `state.compose` (see the **Write the summary file** step). The override's own `volumes:` block is the teardown manifest — each pinned `name:` is a `docker volume rm` target.
+
+**Relation to `test_db_strategy`.** The `test_db_strategy: fork-on-schema-change` config governs the **test-DB axis only** (Step 3b — which test DB *name* the runner targets). It says nothing about compose data volumes and must **never** be read as permission to share the compose stack's volumes. Volume forking here is unconditional for compose-delivered DBs, independent of `schema_change` and independent of `test_db_strategy`.
 
 ## Step 5 — Other shared infra to fork
 
@@ -305,6 +352,14 @@ state:
   compose:
     project_name: <repo>_<worktree-name>
     network_strategy: per-worktree | shared-external | host
+    override_path: <summary_dir>/<name>.docker-compose.override.yml   # null when no compose
+    base_compose_file: docker-compose.yml    # the base file COMPOSE_FILE prepends
+    forked_volumes:                          # [] when nothing leaked; teardown removes each name
+      - volume_key: pgdata                   # the compose key
+        reason: external | fixed-name        # why it leaked past COMPOSE_PROJECT_NAME
+        forked_name: <repo>_wt_<name>_pgdata # the worktree-namespaced physical volume
+    shared_volumes: [virtualenv]             # leaky volumes deliberately kept shared (--share-volume)
+    ports_stripped_from: [db, cache]         # services whose fixed host ports the override removed
   other:
     redis_db_index: <int>
     s3_prefix: wt-<name>/
@@ -348,7 +403,12 @@ guard is active; the orchestrator's post-run stray-write check is the backstop.
 When the plan is merged / abandoned:
   git worktree remove <path>
   <drop-db command>          # if fork strategy was `fork`
-  docker compose -p <project_name> down -v   # if compose was forked
+  # Compose (if forked). Do NOT use `down -v` — it can also nuke SHARED volumes
+  # (a fixed-name dep/venv cache). Bring the stack down, then remove only the
+  # worktree-namespaced volumes the override created:
+  docker compose -p <project_name> down
+  docker volume rm <each state.compose.forked_volumes[].forked_name>
+  rm <override_path>         # the generated out-of-tree compose override
 
 The summary file at `.vinta-ai-workflows/worktrees/<name>.yaml` records every
 decision for mechanical teardown.
@@ -373,7 +433,10 @@ A sibling skill / explicit command — not auto-run by this skill. Steps:
 1. Confirm no uncommitted changes in the worktree (`git -C <path> status`).
 2. `git worktree remove <path>` (or `--force` after explicit confirmation if the user is fine losing work).
 3. Drop the forked DB (`dropdb <forked_name>`, `DROP DATABASE`, `rm <sqlite-file>`, …) — read the strategy from the summary YAML.
-4. `docker compose -p <project_name> down -v` for forked compose.
+4. Compose teardown (read `state.compose` from the summary YAML):
+   - `docker compose -p <project_name> down` — **not `down -v`**; a bare `down -v` also removes shared volumes (a fixed-name dep/venv cache in `state.compose.shared_volumes`), which belong to main.
+   - `docker volume rm <forked_name>` for each entry in `state.compose.forked_volumes` — these are the worktree-only volumes the generated override created; removing them is safe and leaves main's / shared volumes untouched.
+   - `rm <state.compose.override_path>` — delete the generated out-of-tree override.
 5. Remove `.vinta-ai-workflows/worktrees/<name>.yaml`.
 
 Every step gated on user confirmation when the worktree has un-pushed branches.
@@ -382,6 +445,7 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 
 - **Symlink for reads, copy for writes, fork for state.** This is the only mental model that scales. Default to fork when unsure — disk is cheap, corrupted main-checkout DBs are not.
 - **Never share a writable DB across worktrees by default.** The race conditions are subtle and the failure mode is silent data corruption.
+- **`COMPOSE_PROJECT_NAME` does not isolate `external:`/fixed-`name:` volumes or fixed host ports — always run the [4a](#4a--neutralize-compose-isolation-leaks) generator.** For a compose-delivered DB the data volumes are forked *unconditionally* (independent of `schema_change` and `test_db_strategy`): the worktree runs its own server, and two servers on one volume is corruption. "Share the DB" only ever means share a connection to a single already-running server, never a second server on shared storage. The fix is a generated, out-of-tree override + a `COMPOSE_FILE` line in the copied `.env` — never an edit to any tracked compose file. Verify the volume-differs invariant before declaring the worktree runnable.
 - **Every fork decision lands in `.vinta-ai-workflows/worktrees/<name>.yaml`.** Teardown reads it; humans grep it; agents resuming a stalled plan read it. No decision lives only in conversation memory.
 - **Worktree root governed by runtime conventions.** claude-code uses `.claude/worktrees/`; other harnesses use sibling dirs. Don't fight the harness — match it.
 - **Don't mutate the main checkout from this skill.** Every write goes to the worktree or to `.vinta-ai-workflows/`. Forking a Postgres DB is the one exception (the new DB lives in the same server) — document it loudly in the summary.
@@ -397,6 +461,9 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 - **Symlinking `node_modules` for a `pnpm add` phase.** The new package writes back through the symlink into the main checkout's store. Detect dep churn in the **Plan inspection** step and copy/reinstall instead.
 - **Forking the dev DB but forgetting the test DB.** Tests still hit the shared test DB and stomp on parallel worktrees' fixtures. Both axes need their own decision in the **Database fork** step.
 - **Forgetting `COMPOSE_PROJECT_NAME`.** Containers from worktree-A overwrite worktree-B's containers; volumes get nuked. Set it in `.env` so every `docker compose` call inherits.
+- **Trusting `COMPOSE_PROJECT_NAME` to isolate `external:`/fixed-`name:` volumes and fixed host ports — it does NOT.** These defeat the project-name namespace: every worktree's compose stack mounts the SAME external/named volume and binds the SAME host port. For a DB volume that means two server processes on one data directory — the 2026-07-17 corruption incident (a worktree's `docker compose down` deleted the shared `postmaster.pid` and the main checkout's Postgres self-terminated). The fix is the [4a](#4a--neutralize-compose-isolation-leaks) generated out-of-tree override, never an edit to the tracked compose file. Verify the invariant (Verification step 6), don't assume it.
+- **Confusing "share the DB" (a connection to one running server) with "share the data volume" (a second server on shared storage).** The first can be safe when `schema_change = false`; the second is always corruption. `schema_change = false` and `test_db_strategy` never authorize a shared compose data volume — see [3a](#3a--dev--app-database).
+- **Writing the compose override to the worktree-root `docker-compose.override.yml`.** It's auto-loaded (convenient) but often a *tracked* file — the generated override then shows up in the diff and one `git add -A` leaks it into main. Write it under `<summary_dir>/` and wire it in via `COMPOSE_FILE` in the COPIED `.env` ([4a](#4a--neutralize-compose-isolation-leaks)).
 - **Sharing a Redis DB without per-worktree prefix.** Tests writing `user:123` collide across worktrees. Pick an index OR a key prefix.
 - **Copying `node_modules` for yarn PnP / absolute-path setups.** The copy carries baked-in paths from the main checkout. Reinstall instead — pnpm's relative-symlink store is the safe-to-copy exception.
 - **Forgetting to `--allow` the `.vinta-ai-workflows` dir under sandbox.** It's shared/symlinked but the run *writes* it (summary YAMLs, prs-context). If it's not an `--allow` exception, those writes hit the read-only main subtree and fail mid-run. Pass it alongside the worktree path.
@@ -415,4 +482,7 @@ After the **Write the summary file** step writes the summary:
 3. `git -C <worktree-path> status` is clean (no accidental file additions from the prep step).
 4. The summary YAML parses (`python3 -c "import yaml; yaml.safe_load(open('.vinta-ai-workflows/worktrees/<name>.yaml'))"`).
 5. `WORKTREE.md` exists at the worktree root with accurate fork / share annotations.
-6. Optional smoke test: run a single new-test command in the worktree (e.g. `pytest -x tests/health.py`) — confirms env vars resolved, DB reachable, deps importable.
+6. **Compose volume-isolation invariant (when the DB is compose-delivered).** This is the checked form of the footgun that caused the 2026-07-17 incident — do not skip it when the project boots its DB via compose. From the worktree:
+   - Resolve the worktree's DB data volume: `docker compose config --format json | <read the db service's data volume `source`, then that volume's `.name`>`. Assert it **differs** from the main checkout's resolved DB volume name (run the same read in `<main-checkout-root>`). If they're equal, the override didn't take — **fail provisioning loudly**; do not proceed.
+   - Boot only the DB service in the worktree (`docker compose up -d <db-service>`), then confirm the **main checkout's** DB container is still healthy/running afterward (`docker inspect`/`pg_isready` against main's DB). Bring the worktree DB back down. A main-DB disturbance here means isolation failed — fail provisioning.
+7. Optional smoke test: run a single new-test command in the worktree (e.g. `pytest -x tests/health.py`) — confirms env vars resolved, DB reachable, deps importable.
