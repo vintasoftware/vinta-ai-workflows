@@ -241,6 +241,7 @@ Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
 | `amend-plan` | always (generated) | History-rewriting companion to `implement-plan` — revises in-flight plans, amends prior-phase commits, force-pushes, rebases stacked downstream branches. Reuses `review-phase` + `implement-phase`'s shared prompt loop. |
 | [`handoff`](skills/vinta-derive-skills/resources/foundation-skills/handoff/SKILL.md) | always | Session-continuation handoff doc → `.vinta-ai-workflows/handoffs/`. **Write** captures goal, verified-vs-unverified state, decisions + rejected alternatives, landmines, and the single next step — gathered from the repo, never memory. **Resume** verifies a handoff's claims against the repo before continuing from its next step. |
 | [`deslop-comments`](skills/vinta-derive-skills/resources/foundation-skills/deslop-comments/SKILL.md) | always | Rewrite comments + doc blocks touched during a task into Simple English (strips AI-slop vocabulary + negative framing; comment-only — no renames, no behavior change). `review-phase` Layer 2 depends on it; also invokable standalone. |
+| `write-unit-test` | default-on (generated) | Write durable unit tests for a unit of behavior, enforcing six framework-agnostic rules + this project's captured test conventions, with runner- and stack-specific best-practice packs. Ships automatically whenever a unit-test framework is detected (set `disabled` to opt out). Generated from a template; config under `skills.write-unit-test.*`. See below. |
 | `systematic-debugging` | **opt-in** | Root-cause-first debugging with project-specific repro commands + MCP evidence-gathering (error tracking, traces, logs, metrics, alerts). Renders from a catalogue of observability MCP servers the user declares. |
 | `add-e2e-test` | **opt-in** | Add an e2e test. Body covers e2e framework, page-object pattern, auth/storage-state, seed helpers, tenant scoping, screenshot conventions. |
 | `add-env-var` | **opt-in** | Propagate a new env var through every layer (`.env.example`, build tool envPrefix, build cache hash, app config, AGENTS.md, CI, deploy injection). |
@@ -248,6 +249,26 @@ Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
 | [`prepare-worktree`](skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md) | **opt-in** | Provision a fully-runnable git worktree for parallel plan work — reads the plan + `.gitignore` + manifests + env / docker config and decides per ignored path whether to **symlink / copy / fork** (dev DB, env files, compose project name). Ships an OS-level write-guard (`sandbox-run.sh` + a Claude Code `PreToolUse` hook) so stray writes to the main checkout fail at the kernel layer. `implement-plan` Step 0 question (c) opts a run into it. |
 | [`thermo-nuclear-code-quality-review`](skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/SKILL.md) | **opt-in** | Deliberately harsh structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — hunting "code-judo" reframes that collapse whole branches / helpers / modes / layers. Read-only; hands each fix to `fixer`. `review-phase` Layer 3 runs a condensed lens every phase and escalates to this full audit on core-architecture / ~1000-line / structurally-smelly phases. |
 | `handoff-to-client` | **opt-in** | (API-only repos) Generate a self-contained API-change handoff doc for the client teams consuming the repo's API — every endpoint / operation added / changed / deprecated / removed vs the default branch, with request/response shapes, auth + error changes, breaking-change flags, one example per operation, and per-platform migration notes. Template-rendered from `skills.handoff-to-client.*` config (client platforms, API style, spec path). |
+
+#### `write-unit-test` in depth
+
+Agents write tests that pass but assert too little, mock everything, leave data behind, or couple to internals — this skill exists so you don't have to babysit that. It bakes in **six framework-agnostic rules** that hold for every test in every stack:
+
+1. **Mock only genuine externals** — never the unit under test, its local collaborators, or the DB.
+2. **Assert the full expected value**, not counts or truthiness (`assert result`, `len(x) == 3` are too weak).
+3. **Leave no trace** — transaction-rollback where available, else clean up in teardown (runs on failure too).
+4. **No external service** that can't run in dev/test — stub at the boundary.
+5. **Test logic stays literal** — no loops/conditionals recomputing the expected value.
+6. **Decouple from internals** — assert observable state/output; survive a behavior-preserving rewrite.
+
+Plus a "run it green, then break the code to watch it go red" step and a name-for-the-behavior / one-reason-to-fail convention.
+
+**Framework guidance ships as best-practice packs on two independent axes**, so a project only ever receives advice for frameworks it actually uses (a FastAPI repo never gets Django guidance; a pure library gets no web-framework pack):
+
+- **Runner pack** (`resources/packs/runners/`) — how to structure, assert, and mock. One, picked by the detected test runner: `pytest`, `vitest`, or `jest`.
+- **Stack pack(s)** (`resources/packs/stacks/`) — DB isolation, framework client, domain mocks. Every matched stack's pack ships (a project can match several — e.g. Next.js + React, or TanStack Start + React): `django`, `fastapi`, `flask`, `medplum`, `react`, `nextjs`, `tanstack-start`, `react-router`, `prisma`, plus pure-library packs `python-package` / `typescript-package` for framework-less packages.
+
+**Project preferences are captured at bootstrap** (and inferred from an existing suite, then confirmed) under `skills.write-unit-test.*`: `test_style` (classes vs functions), `data_setup` (factories / fixtures / inline), `assertion_style`, `db_isolation`, plus free-form `additional_conventions`. Each defaults to `framework-default`, deferring to the pack. New frameworks slot in by adding a pack under [`write-unit-test-packs/`](skills/vinta-derive-skills/resources/write-unit-test-packs/) and a detection signal — no schema change.
 
 ### Foundation sub-agents (project-agnostic)
 

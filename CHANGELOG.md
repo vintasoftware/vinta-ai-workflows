@@ -5,6 +5,72 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`write-unit-test` foundation skill (template-rendered, default-on when a
+  unit-test framework is detected).** A new foundation skill that ships into
+  target projects' `ai-tools/skills/write-unit-test/` to write durable unit
+  tests. The body enforces six universal rules regardless of framework — mock
+  only genuine externals (never the unit under test / DB / local collaborators),
+  assert the **full** expected output (not counts or truthiness), clean up
+  created data or run inside a rolled-back transaction, never hit an external
+  service that can't run in dev/test, keep test logic literal (no loops /
+  conditionals recomputing the expectation), and decouple from implementation
+  internals — plus a self-review checklist and a "run it green, then break it to
+  see it go red" step.
+  - Rendered from
+    [`skills/vinta-derive-skills/resources/write-unit-test-template.md`](skills/vinta-derive-skills/resources/write-unit-test-template.md)
+    (bucket B). New placeholders: `{{FRAMEWORK_PACKS_LIST}}`,
+    `{{FRAMEWORK_PACK_LOADER_BLOCK}}`, `{{PROJECT_TEST_PREFERENCES_BLOCK}}`,
+    `{{ADDITIONAL_CONVENTIONS_BLOCK}}` (reuses the existing `{{TEST_CMD}}` /
+    `{{NEW_TEST_CMD_PATTERN}}` / `{{SCOPED_TEST_NOTE}}` / `{{PROJECT_NAME}}` /
+    `{{STACK_SUMMARY}}` set). All four new placeholders are documented in the
+    `vinta-derive-skills` placeholder table.
+  - **Best-practice packs on two independent axes** (the framework-specific
+    "sub-skills"), verbatim references under
+    [`skills/vinta-derive-skills/resources/write-unit-test-packs/`](skills/vinta-derive-skills/resources/write-unit-test-packs/).
+    `derive-skills` copies only what the project matches into
+    `ai-tools/skills/write-unit-test/resources/packs/` so framework-specific
+    advice never ships to a project that doesn't use that framework (a FastAPI
+    repo never receives Django guidance; a pure library gets no web-framework
+    pack):
+    - **Runner packs** (`packs/runners/`, stack-agnostic — structure /
+      assertions / mocking): `pytest.md`, `vitest.md`, `jest.md`. One selected
+      by `inventory.tests.unit_framework`.
+    - **Stack packs** (`packs/stacks/`, DB isolation / framework client / domain
+      mocks): `django.md`, `fastapi.md`, `flask.md`, `medplum.md`, `react.md`,
+      `nextjs.md`, `tanstack-start.md`, `react-router.md`, `prisma.md`,
+      `python-package.md`, `typescript-package.md`. Every pack whose stack the inventory matched
+      ships (a project can match several — e.g. Next.js + React, or TanStack
+      Start + React); a repo with no web framework (a standalone TS/Python package like
+      an open-source lib) gets its `*-package.md` and no more; when nothing
+      matches, the runner pack ships alone. Missing packs for a present
+      framework are recorded as a gap (candidate for a new pack via
+      `add-foundation-skill`).
+  - **Schema:** new `foundation_skills.write-unit-test` enum
+    (`enabled` / `disabled`) and a new `skills.write-unit-test` config block —
+    `test_style` (functions / classes / framework-default), `data_setup`
+    (factories / fixtures / inline / framework-default), `assertion_style`
+    (plain-assert / framework-methods / framework-default), `db_isolation`
+    (transaction-rollback / truncate / recreate / framework-default), and a
+    free-form `additional_conventions[]`. All optional; every field defaults to
+    `framework-default`.
+  - **Bootstrap:** `write-unit-test` is **default-on, not an opt-in** — the
+    interview sets `foundation_skills.write-unit-test: enabled` whenever a
+    unit-test framework was detected, `disabled` otherwise. New Project-conventions
+    interview item **C.9 (Test conventions for `write-unit-test`)** captures the
+    four preferences + extras, pre-filled from inference on existing projects.
+    (The former C.9 "Agent model tiers" is now **C.10**; its Step 0.5 references
+    were updated.) Step 0.5 emits the `skills.write-unit-test` block; the outputs
+    tree, the three-buckets paragraph, and the `Replace with Vinta foundation
+    version` foundation-shape list all now list `write-unit-test`.
+  - **Inference:** `vinta-analyze-codebase` §6 (Tests) now reads a sample of the
+    existing unit tests and reports a `tests.conventions` block
+    (`test_style` / `data_setup` / `assertion_style` / `db_isolation` / `extras`,
+    each `framework-default` when mixed / greenfield) that seeds the C.9 defaults.
+
 ## [0.3.0] — 2026-07-17
 
 ### Fixed
