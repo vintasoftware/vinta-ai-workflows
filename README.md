@@ -260,6 +260,8 @@ Agents write tests that pass but assert too little, mock everything, leave data 
 4. **No external service** that can't run in dev/test — stub at the boundary.
 5. **Test logic stays literal** — no loops/conditionals recomputing the expected value.
 6. **Decouple from internals** — assert observable state/output; survive a behavior-preserving rewrite.
+7. **Kill nondeterminism** — control every entropy source (clock, randomness, timezone/locale, iteration/DB order, concurrency); a flaky test is worse than none. Don't over-fit brittle text either — assert a stable anchor (error code, role, i18n key) for error messages and UI copy, not the exact churning prose.
+8. **Cover the branches** — aim high (95%+ branch coverage): every error path, guard, and edge gets a case. Coverage is the floor; correct assertions are the point.
 
 Plus a "run it green, then break the code to watch it go red" step and a name-for-the-behavior / one-reason-to-fail convention.
 

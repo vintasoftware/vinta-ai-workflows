@@ -20,12 +20,14 @@ A test should fail when the behavior breaks and pass when it's correct — nothi
 ## Rules
 
 1. **Mock only genuine externals** (third-party HTTP, payment/email/SMS, clock, randomness). Never mock the unit under test, its local collaborators, the DB, or your own pure functions.
-2. **Assert the full value**, not counts or truthiness. `assert result`, `toBeTruthy()`, `len(x) == 3` are too weak. Assert contents and order for collections.
+2. **Assert the full value**, not counts or truthiness. `assert result`, `toBeTruthy()`, `len(x) == 3` are too weak. Assert contents and order for collections. **But don't over-fit brittle text** — for human-facing strings (error messages, UI copy, i18n) assert a stable anchor (an error code/type, a role, an i18n key, a substring), not the exact prose that churns.
 3. **Leave no trace** — transaction-rollback harness where available; else clean up in teardown, and make teardown run on failure. Never depend on another test's data.
 4. **No external service** that can't run in dev/test. Stub at the boundary.
 5. **Test logic stays literal** — no loops/conditionals computing the expected value. Parametrize to cover cases; keep each expectation a literal.
 6. **Decouple from internals** — assert observable state/output, not private methods or call counts. The test survives a behavior-preserving rewrite.
 7. **One behavior per test**, named for what it pins (`returns_zero_for_empty_cart`).
+8. **Kill nondeterminism** — control every entropy source (clock, randomness, timezone/locale, iteration/DB order, concurrency). Freeze/inject them; a test that passes only sometimes is worse than none.
+9. **Cover the branches, not just the happy path** — aim high (95%+ branch coverage): each error path, guard, and edge (empty, boundary, null) gets a case. Coverage is the floor, correct assertions are the point.
 
 ## Project preferences
 

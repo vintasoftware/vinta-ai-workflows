@@ -22,6 +22,7 @@ Test-runner idioms for Jest. Stack-agnostic — framework-client and domain-mock
 - **Mock only genuine externals, at the boundary.** `jest.mock("./module")`, `jest.fn()` for callbacks, `jest.spyOn(obj, "method")` for one method. Don't mock the unit under test or pure helpers.
 - **Reset between tests.** Set `clearMocks: true` (and consider `restoreMocks: true`) in the Jest config, or `afterEach(() => jest.restoreAllMocks())`. Stale mock state between tests is a top flake source.
 - **HTTP:** use **MSW** (`setupServer`) to intercept at the network layer and return canned responses — the real client path runs. Never let a real request out. Prefer MSW over hand-mocking `fetch`/`axios`.
+- **Complex APIs (e.g. LLM endpoints):** when hand-writing responses is impractical, record real traffic once and replay it from a committed cassette — [PollyJS](https://github.com/Netflix/pollyjs) or `nock`'s `nock.back`. Scrub secrets/PII from the recording, commit it, and never re-hit the live API in CI. Re-record deliberately when the contract changes.
 - **Time:** `jest.useFakeTimers()` + `jest.setSystemTime(...)`, `jest.useRealTimers()` in teardown. Don't assert on `Date.now()` live.
 - Prefer dependency injection over `jest.mock` when practical — fewer module-graph surprises.
 

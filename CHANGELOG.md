@@ -78,6 +78,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     existing unit tests and reports a `tests.conventions` block
     (`test_style` / `data_setup` / `assertion_style` / `db_isolation` / `extras`,
     each `framework-default` when mixed / greenfield) that seeds the C.9 defaults.
+  - **Review-driven refinements** (PR #21): two universal rules added — **kill
+    nondeterminism** (clock / randomness / timezone / ordering / concurrency → no
+    flaky tests) and **cover the branches** (aim 95%+ branch coverage); the
+    full-value assertion rule now carves out **brittle human-facing text** (assert
+    a stable anchor — error code, role, i18n key — for error/UI strings, not exact
+    prose). Runner packs gained a **record/replay cassette** note for complex APIs
+    like LLM endpoints (PollyJS / `nock.back` for JS, `vcrpy` / `betamax` for
+    Python). The Medplum pack gained a **`MockClient` limitations** section
+    (pre-seeded example resources skew unfiltered searches, partial search-param
+    support, server-only behavior not enforced — defer those to integration/e2e).
 
 ## [0.3.0] — 2026-07-17
 

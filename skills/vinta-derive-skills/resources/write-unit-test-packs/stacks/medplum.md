@@ -8,6 +8,15 @@ Medplum-specific testing — the mock client, FHIR resources, bots, React provid
 - Give each test its own `MockClient` (or reset between tests) so resources one test creates don't leak into the next.
 - Seed only the resources the assertion needs; let the mock default the rest.
 
+## MockClient limitations — it is not a full FHIR server
+
+`MockClient` is an in-memory approximation. A green MockClient test does not prove the real server behaves the same — know the gaps:
+
+- **It comes pre-seeded.** MockClient ships with example resources already created (Patients, Practitioners, and others). An **unfiltered** `searchResources('Patient')` returns those *plus* what your test created — so **never assert on unfiltered search counts**. Filter to what your test made (a unique `identifier` / tag), or assert the specific resource by id/fields.
+- **Search support is partial.** Even with the FHIR index wired up (below), not every search parameter, modifier, chained search, `_include` / `_revinclude`, or `_filter` matches server semantics. Prefer filtering on simple, well-supported params in tests; if a filter behaves oddly, check server semantics before assuming your code is wrong.
+- **Server-only behavior isn't enforced.** Access policies / auth scoping, subscriptions, and some operations (`$everything`, GraphQL, batch/transaction edge cases) plus bot-execution nuances are approximated or absent. Anything whose contract depends on the server enforcing it belongs in an integration/e2e test, not a MockClient unit test.
+- **Consult the team's MockClient extensions + internal Medplum testing docs** for the current maintained limitation list and any local wrappers that patch gaps — they track the Medplum version. Canonical setup + helpers live in the `medplum-snippet-catalog`.
+
 ## Search filtering — indexed once at setup, never per test
 
 - **`MockClient` search filters only work if the FHIR search parameters are indexed in the test process.** Symptom: a resource comes back from an unfiltered `searchResources`, but `searchResources` / `searchOne` **with** a filter (`family=`, `birthdate=`, …) silently returns nothing. That means the index is missing, not that your data is wrong.

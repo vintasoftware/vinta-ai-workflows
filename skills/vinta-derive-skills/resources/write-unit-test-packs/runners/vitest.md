@@ -22,6 +22,7 @@ Test-runner idioms for Vitest. Stack-agnostic — framework-client and domain-mo
 - **Mock only genuine externals, at the boundary.** `vi.mock("./module")` for a whole module, `vi.fn()` for a passed-in callback, `vi.spyOn(obj, "method")` for one method. Don't mock the unit under test or pure helpers that run fine.
 - **Reset between tests.** Set `test: { clearMocks: true }` (or `restoreMocks: true`) in the Vitest config, or `afterEach(() => vi.restoreAllMocks())` — stale mock state leaking between tests is a top flake source.
 - **HTTP:** use **MSW** (`setupServer`) to intercept at the network layer and return canned responses — the code under test runs its real fetch/axios path. Never let a real request out. Prefer MSW over mocking `fetch` directly (which couples to the client).
+- **Complex APIs (e.g. LLM endpoints):** when hand-writing responses is impractical, record real traffic once and replay it from a committed cassette — [PollyJS](https://github.com/Netflix/pollyjs) or `nock`'s `nock.back`. Scrub secrets/PII from the recording, commit it, and never re-hit the live API in CI. Re-record deliberately when the contract changes.
 - **Time:** `vi.useFakeTimers()` + `vi.setSystemTime(...)`, and `vi.useRealTimers()` in teardown. Don't assert on `Date.now()` live.
 - **Modules with side effects on import:** prefer dependency injection over `vi.mock` when you can — fewer module-graph surprises.
 

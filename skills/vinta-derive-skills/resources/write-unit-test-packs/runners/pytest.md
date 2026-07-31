@@ -21,6 +21,7 @@ Test-runner idioms for pytest. Stack-agnostic — DB isolation and framework-cli
 
 - **`mocker` (`pytest-mock`)** — `mocker.patch("module.where_its_used.thing")`, patching where the name is *looked up*, not where it's defined. Auto-undone at teardown.
 - **HTTP:** `responses` (requests) / `respx` (httpx) — assert the outbound request, return a canned response. `pytest-socket` (`--disable-socket`) is a good CI guard against stray real calls.
+- **Complex APIs (e.g. LLM endpoints):** when hand-writing responses is impractical, record real traffic once and replay it from a committed cassette — `vcrpy` (`@pytest.mark.vcr`) or `betamax`. Scrub secrets/PII from the cassette, commit it, and never re-hit the live API in CI. Re-record deliberately when the contract changes.
 - **Time/randomness:** `freezegun` (`@freeze_time`) or inject a clock; seed or patch `random`.
 - Don't patch your own pure functions or the unit under test — that tests the mock.
 
