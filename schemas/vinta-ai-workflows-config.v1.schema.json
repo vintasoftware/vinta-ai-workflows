@@ -232,6 +232,11 @@
           "description": "Generate a markdown API-change handoff document for client teams consuming an API-only repo — endpoints added/changed/deprecated/removed on the current branch vs the default branch, with request/response shapes, breaking-change flags, and per-platform migration notes. Template-rendered (bucket B) from `vinta-derive-skills/resources/handoff-to-client-template.md` and opt-in (bucket C) — only ships when the bootstrap interview confirms an API-only repo with separate client codebases. When `enabled`, project-level configuration lives under `skills.handoff-to-client` (client platforms, API style, spec path, output dir).",
           "type": "string",
           "enum": ["enabled", "disabled"]
+        },
+        "write-unit-test": {
+          "description": "Write durable unit tests for a unit of behavior — mock only genuine externals, assert the full expected output (not counts/truthiness), clean up created data or run inside a rolled-back transaction, never hit an external service that can't run in dev/test, keep test logic literal, and decouple from implementation internals. Template-rendered (bucket B) from `vinta-derive-skills/resources/write-unit-test-template.md`, with best-practice packs copied verbatim into the skill's `resources/packs/` on two independent axes — one runner pack (`runners/`: pytest / vitest / jest) selected by the detected test framework, plus a stack pack per matched stack (`stacks/`: django / fastapi / flask / medplum / react / nextjs / tanstack-start / react-router / prisma / python-package / typescript-package) so framework-specific advice ships only when that framework is present. Default-on: bootstrap sets `enabled` whenever `vinta-analyze-codebase` detects a unit-test framework, `disabled` when none is found (there's nothing to render against). When `enabled`, project-level test conventions live under `skills.write-unit-test` (test style, data setup, assertion style, DB isolation, inferred extra conventions).",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
         }
       }
     },
@@ -477,6 +482,44 @@
               "description": "S3 key prefix for uploads. Falls back to `ONE_OFF_S3_PREFIX` env, default `one-off-runs/`. Trailing slash recommended.",
               "type": "string",
               "default": "one-off-runs/"
+            }
+          }
+        },
+        "write-unit-test": {
+          "description": "Configuration for the `write-unit-test` foundation skill. Optional when `foundation_skills.write-unit-test` is `enabled` — every field defaults to `framework-default`, deferring to the shipped framework pack. At bootstrap, values are inferred from the existing test suite (see `vinta-analyze-codebase` inventory `tests.conventions`) and confirmed by the user; on a greenfield project they're asked directly. Rendered into the skill body at derive time.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "test_style": {
+              "description": "Whether new tests are written as standalone functions or grouped in test classes. `functions` (pytest-style `def test_x()`), `classes` (TestCase / describe-block grouping), or `framework-default` (defer to the framework pack — functions for pytest/vitest/jest, classes for Django TestCase). Inferred from the dominant shape in the existing suite.",
+              "type": "string",
+              "enum": ["functions", "classes", "framework-default"],
+              "default": "framework-default"
+            },
+            "data_setup": {
+              "description": "How test data is constructed. `factories` (factory classes like factory_boy / FactoryBot / builder helpers — preferred when the project has them), `fixtures` (framework fixtures / fixture files), `inline` (built in the test body), or `framework-default`. Inferred from `tests.test_data_helpers` and the dominant pattern in the suite.",
+              "type": "string",
+              "enum": ["factories", "fixtures", "inline", "framework-default"],
+              "default": "framework-default"
+            },
+            "assertion_style": {
+              "description": "Which assertion form new tests use. `plain-assert` (Python plain `assert` / pytest introspection, or JS `expect`), `framework-methods` (`unittest` `self.assertEqual` family), or `framework-default`. Inferred from the existing suite — a pytest suite that already uses plain `assert` sets `plain-assert`; a `TestCase`-heavy suite sets `framework-methods`.",
+              "type": "string",
+              "enum": ["plain-assert", "framework-methods", "framework-default"],
+              "default": "framework-default"
+            },
+            "db_isolation": {
+              "description": "How data created by a test is undone between tests. `transaction-rollback` (each test runs in a transaction rolled back at teardown — preferred where supported), `truncate` (tables truncated between tests, e.g. Django TransactionTestCase), `recreate` (schema/DB rebuilt), or `framework-default`. Inferred from the test base classes / fixtures in use.",
+              "type": "string",
+              "enum": ["transaction-rollback", "truncate", "recreate", "framework-default"],
+              "default": "framework-default"
+            },
+            "additional_conventions": {
+              "description": "Free-form project-specific test conventions the four structured fields can't capture — inferred from the existing suite at bootstrap (e.g. `co-locate tests next to source as *.test.ts`, `one assertion per test`, `name tests should_<behavior>_when_<condition>`, `mock the network with our recorded-cassette helper`) or supplied by the user. Rendered verbatim into the skill body's project-conventions section. Empty array is fine — the universal rules + framework pack already cover the essentials.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true,
+              "default": []
             }
           }
         }

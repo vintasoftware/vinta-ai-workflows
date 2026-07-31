@@ -62,6 +62,8 @@ Match top-level deps against this table:
 | `flask` | Flask |
 | `pytest` | pytest |
 | `mypy`, `ruff`, `black` | Python lint/type tools |
+| `@tanstack/react-start`, `@tanstack/start` | TanStack Start (check `@tanstack/react-router`) |
+| `react-router`, `react-router-dom`, `@react-router/*` | React Router |
 | `tRPC`, `@trpc/*` | tRPC |
 | `prisma`, `@prisma/client` | Prisma |
 | `drizzle-orm` | Drizzle |
@@ -94,6 +96,12 @@ For each app/package: name + path + framework (cross-ref the [Frameworks (from d
 - Unit / integration: where are they? `apps/*/src/**/*.test.ts`, `tests/`, `__tests__/`, `<pkg>/tests/unit`, `<pkg>/tests/integration`. Glob.
 - E2E: `e2e/`, `playwright/`, `cypress/`. Read fixtures + setup files for: auth strategy, seed helpers, tenant scoping in seeds.
 - Test data: factories, fixtures, mocks. Note conventions (`@medplum/mock`, `factory_boy`, MSW, etc).
+- **Unit-test conventions (feeds `write-unit-test`).** Read a representative sample of existing unit tests (not e2e) and infer the **dominant** pattern for each axis below. These pre-fill `skills.write-unit-test.*` in the bootstrap interview (group C.9), so the shipped skill matches the suite instead of imposing a house style. Report `framework-default` for any axis where the suite is mixed or there's no signal (greenfield):
+  - **test_style** — `functions` (standalone `def test_x` / bare `it(...)`) vs `classes` (`TestCase` subclasses, `describe` grouping). Which dominates?
+  - **data_setup** — `factories` (factory_boy / FactoryBot / builder helpers — cross-ref `test_data_helpers`), `fixtures` (pytest fixtures / fixture files / `setUpTestData`), or `inline` (objects built in the test body).
+  - **assertion_style** — `plain-assert` (Python `assert` / JS `expect`) vs `framework-methods` (`self.assertEqual`-family).
+  - **db_isolation** — `transaction-rollback` (Django `TestCase`, pytest-django `db`, SQLAlchemy savepoint fixtures), `truncate` (`TransactionTestCase`), or `recreate`. Read the test base classes / DB fixtures to tell.
+  - **extras** — any other recurring convention worth carrying (test file co-location + naming pattern, one-assertion-per-test, a house HTTP-mock helper / recorded-cassette pattern, custom assertion helpers). List them; they seed `additional_conventions`.
 
 ### 7. Deploy / release model
 
@@ -155,7 +163,7 @@ This is a load-bearing input for the rest of the bootstrap flow — surface ever
 For each skill, also classify:
 
 - `vinta-managed` — directory name starts with `vinta-` (installed by `vinta-ai-workflows`; can be left alone or refreshed via that CLI).
-- `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`). `implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`.
+- `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `write-unit-test`). `implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`.
 - `project-custom` — anything else; written by the team.
 
 **Sub-agents** — list every agent file with its name + description:
@@ -273,6 +281,12 @@ tests:
   e2e_framework: playwright | cypress | none
   e2e_paths: [<path>]
   test_data_helpers: [<file>]   # factories, mock clients, seed scripts
+  conventions:                  # inferred dominant patterns → skills.write-unit-test.* (framework-default when mixed / no signal)
+    test_style: functions | classes | framework-default
+    data_setup: factories | fixtures | inline | framework-default
+    assertion_style: plain-assert | framework-methods | framework-default
+    db_isolation: transaction-rollback | truncate | recreate | framework-default
+    extras: [<free-form recurring convention>]   # seeds additional_conventions; [] when none
 
 deploy:
   targets: [vercel, aws-ecs, heroku, k8s, medplum-bots, npm-publish, ...]

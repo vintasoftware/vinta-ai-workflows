@@ -81,7 +81,19 @@ These bleed across sub-skills, so capture once now:
 
    Lands in `.vinta-ai-workflows.yaml` `policies.commit_strategy`. Drives the `implement-plan` template's branch / commit / PR-opening flow + the `amend-plan` skill's supported-strategies check.
 
-9. **Agent model tiers (optional).** The plan-execution family picks the **implementer** model per phase from the plan itself, but the **reviewer**, **fixer**, and the mechanical steps (**worktree prep**, **opening the PR / integrate**) have no model input unless the project sets one. Offer to pin each to a **tier** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml` — so review runs on a capable model while cheap mechanical work runs on a cheap one. `AskUserQuestion`: `Use recommended defaults (reviewer 3, fixer 2, worktree prep 1, integrate 1)`, `Customize each`, `Leave unset — every spawn uses the runtime default`. On `Customize each`, ask a per-role tier (1–4) for `reviewer` / `fixer` / `worktree_prep` / `integrate`. Land the chosen tiers in `.vinta-ai-workflows.yaml` `agent_models`; omit any role the user leaves unset (unset → runtime default). Recommend the defaults for most teams; recommend `Leave unset` only when the runtime exposes a single model anyway. Note `worktree_prep` is a no-op unless `prepare-worktree` is enabled, and setting `worktree_prep` / `integrate` makes `implement-plan` delegate those steps to a cheap subagent instead of running them inline.
+9. **Test conventions for `write-unit-test`.** The `write-unit-test` foundation skill ships **by default whenever a unit-test framework is detected** (item 2 above) — it's not an opt-in in group D. Capture the project's test conventions so the rendered skill matches the suite instead of imposing a house style. Land them under `skills.write-unit-test.*` in `.vinta-ai-workflows.yaml`.
+
+   **On an existing project, infer first, then confirm.** [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md#6-tests)'s `tests.conventions` block reports the dominant patterns it read from the suite (test style, data setup, assertion style, DB isolation, plus any recurring extras). Present those inferred values as the defaults and ask only "these match? anything to change?". On a greenfield project with no tests yet, ask directly (recommend `framework-default` for all four — the shipped framework pack already encodes the idiomatic choice). Skip this item entirely when no test framework was detected (`foundation_skills.write-unit-test: disabled`).
+
+   Four structured `AskUserQuestion` fields (each offers a `Framework default` option — pick it to defer to the pack):
+   - **Test style** — `Standalone functions`, `Test classes`, `Framework default`. → `test_style`.
+   - **Test-data setup** — `Factory classes / builders`, `Fixtures`, `Inline in the test`, `Framework default`. → `data_setup`.
+   - **Assertion style** — `Plain assert / expect`, `Framework assertion methods (self.assertEqual …)`, `Framework default`. → `assertion_style`.
+   - **DB isolation** — `Transaction rollback`, `Truncate between tests`, `Recreate schema/DB`, `Framework default`. → `db_isolation`.
+
+   **Additional conventions (optional).** Open prose: *"Any recurring test conventions the four fields above don't capture? (e.g. 'co-locate tests as `*.test.ts` next to source', 'name tests `should_<behavior>_when_<condition>`', 'mock HTTP with our recorded-cassette helper'.)"* On an existing project, seed this from the extras `vinta-analyze-codebase` surfaced and let the user trim. Each entry lands in `skills.write-unit-test.additional_conventions[]`. Leave empty when there's nothing project-specific — the universal rules + framework pack already cover the essentials.
+
+10. **Agent model tiers (optional).** The plan-execution family picks the **implementer** model per phase from the plan itself, but the **reviewer**, **fixer**, and the mechanical steps (**worktree prep**, **opening the PR / integrate**) have no model input unless the project sets one. Offer to pin each to a **tier** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml` — so review runs on a capable model while cheap mechanical work runs on a cheap one. `AskUserQuestion`: `Use recommended defaults (reviewer 3, fixer 2, worktree prep 1, integrate 1)`, `Customize each`, `Leave unset — every spawn uses the runtime default`. On `Customize each`, ask a per-role tier (1–4) for `reviewer` / `fixer` / `worktree_prep` / `integrate`. Land the chosen tiers in `.vinta-ai-workflows.yaml` `agent_models`; omit any role the user leaves unset (unset → runtime default). Recommend the defaults for most teams; recommend `Leave unset` only when the runtime exposes a single model anyway. Note `worktree_prep` is a no-op unless `prepare-worktree` is enabled, and setting `worktree_prep` / `integrate` makes `implement-plan` delegate those steps to a cheap subagent instead of running them inline.
 
 ### D. Optional foundation skills
 
@@ -144,7 +156,7 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
 
-  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `deslop-comments`, `handoff`, `handoff-to-client`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
+  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `deslop-comments`, `handoff`, `handoff-to-client`, `write-unit-test`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
 
 - **Sub-agents** (each under any vendor `agents/` dir):
   - `Migrate to ai-tools/agents/<name>.yaml` — converts vendor-specific format → canonical YAML; `setup-ai-tools.mjs` re-emits per-vendor copies.
@@ -266,20 +278,21 @@ foundation_skills:
   deslop-comments: enabled  # always ships — review-phase Layer 2 comment-hygiene + fix loop depend on it
   handoff: enabled  # always ships — project-agnostic session-continuation handoff docs
   handoff-to-client: <Optional foundation skills → handoff-to-client answer → enabled | disabled; only asked for API-only repos>
+  write-unit-test: <enabled when a unit-test framework was detected (Project conventions → Test framework(s)); disabled when none found — default-on, not an opt-in>
 
 foundation_agents:
   implementer: enabled
   reviewer: enabled
   fixer: enabled
 
-# Only emit the roles the user chose in the "Agent model tiers" question (C.9).
+# Only emit the roles the user chose in the "Agent model tiers" question (C.10).
 # Omit the whole block on "Leave unset"; omit any individual role left unset.
 # Each value is a tier (1–4) into ai-tools/skills/plan-feature/resources/ai-models.yaml.
 agent_models:
-  reviewer: <C.9 → reviewer tier, default 3>
-  fixer: <C.9 → fixer tier, default 2>
-  worktree_prep: <C.9 → worktree_prep tier, default 1; omit when prepare-worktree disabled>
-  integrate: <C.9 → integrate tier, default 1>
+  reviewer: <C.10 → reviewer tier, default 3>
+  fixer: <C.10 → fixer tier, default 2>
+  worktree_prep: <C.10 → worktree_prep tier, default 1; omit when prepare-worktree disabled>
+  integrate: <C.10 → integrate tier, default 1>
 
 stacks: <Stack detection → matched stacks>
 stack_specialist_agents: <empty unless user supplied templates>
@@ -304,6 +317,17 @@ skills:
     api_style: <handoff-to-client follow-up — REST | GraphQL | gRPC | free-form>
     api_spec_path: <handoff-to-client follow-up — repo-relative spec path + regen command; omit when none>
     output_dir: .vinta-ai-workflows/client-handoffs
+
+  # Only emit this block when foundation_skills.write-unit-test = enabled.
+  # Values come from Project conventions → C.9 (Test conventions), inferred from the
+  # existing suite (analyze-codebase tests.conventions) and confirmed. Omit any field
+  # left at framework-default and the whole block when there's nothing but defaults.
+  write-unit-test:
+    test_style: <C.9 → functions | classes | framework-default>
+    data_setup: <C.9 → factories | fixtures | inline | framework-default>
+    assertion_style: <C.9 → plain-assert | framework-methods | framework-default>
+    db_isolation: <C.9 → transaction-rollback | truncate | recreate | framework-default>
+    additional_conventions: <C.9 → free-form array of extra conventions inferred/supplied; [] when none>
 
   # Only emit this block when foundation_skills.prepare-worktree = enabled.
   prepare-worktree:
@@ -388,6 +412,11 @@ ai-tools/
 │   ├── add-env-var/SKILL.md             ← optional — only if user opts in
 │   ├── systematic-debugging/SKILL.md    ← optional — only if user opts in (template-rendered)
 │   ├── handoff-to-client/SKILL.md       ← optional — only for API-only repos, if user opts in (template-rendered; config under skills.handoff-to-client.*)
+│   ├── write-unit-test/                 ← default-on when a unit-test framework was detected (template-rendered; config under skills.write-unit-test.*)
+│   │   ├── SKILL.md
+│   │   └── resources/packs/             ← verbatim packs for the detected runner + matched stacks only
+│   │       ├── runners/<runner>.md      ← one: pytest.md / vitest.md / jest.md
+│   │       └── stacks/<stack>.md        ← only matched: django / fastapi / flask / medplum / react / nextjs / tanstack-start / react-router / prisma / python-package / typescript-package
 │   ├── add-one-off-script/              ← optional — only if user opts in (verbatim copy + bundled BaseOneOffScript + LocalRuntime templates)
 │   │   ├── SKILL.md
 │   │   └── resources/
@@ -424,7 +453,7 @@ Plus the symlinks + per-vendor generated files, set up by the install step.
 Foundation skills break into three buckets — see [vinta-derive-skills](../vinta-derive-skills/SKILL.md) for the full mechanics:
 
 - **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`, `deslop-comments`, `handoff`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs). `deslop-comments` always ships because `review-phase`'s Layer 2 comment-hygiene check + fix loop dispatch it. `handoff` always ships because its session-continuation body is fully project-agnostic.
-- **Always generate**: the plan-execution unit — `implement-plan` (conductor) + its co-shipped sub-skills `implement-phase` / `review-phase` / `integrate-phase`, plus `amend-plan` (conductor). Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates + shared partials using interview answers + inventory. The sub-skills are not independently opt-in; they always ship with the conductors.
+- **Always generate**: the plan-execution unit — `implement-plan` (conductor) + its co-shipped sub-skills `implement-phase` / `review-phase` / `integrate-phase`, plus `amend-plan` (conductor). Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates + shared partials using interview answers + inventory. The sub-skills are not independently opt-in; they always ship with the conductors. `write-unit-test` is also template-rendered but **conditionally generated** — it ships whenever a unit-test framework was detected (not an opt-in question, not ask-first): the rendered body bakes in the project's test command + captured `skills.write-unit-test.*` conventions, and the verbatim packs land in its `resources/packs/` — one runner pack for the detected test framework plus a stack pack per matched stack (Django / FastAPI / Flask / Medplum / React / Next.js / TanStack Start / React Router / Prisma / pure-package), so framework-specific advice only ships when that framework is present. A few stack packs also apply a one-time project-setup step at derive time (e.g. Medplum wires the two FHIR-indexing Vitest setup files — `test.globalSetup.ts` + `test.setup.ts` — into the Vitest config so `MockClient` search filtering works) — a project mutation done once, not per test.
 - **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `handoff-to-client`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, and (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship. `thermo-nuclear-code-quality-review`: if yes → copy the bundled SKILL.md verbatim (no follow-up config); if no → don't ship. `handoff-to-client`: asked only for API-only repos; if yes → render the bundled template using `skills.handoff-to-client.*` (client platforms, API style, spec path, output dir) from its follow-ups; if no → don't ship.
 
 Stack-specific skills + agents land in the target only when the user provides templates for them. If they don't have templates yet, the orchestrator records the detected stacks + skill categories as a TODO list the user can address later via [vinta-derive-skills](../vinta-derive-skills/SKILL.md) / [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) standalone runs.
