@@ -8,6 +8,13 @@ Medplum-specific testing — the mock client, FHIR resources, bots, React provid
 - Give each test its own `MockClient` (or reset between tests) so resources one test creates don't leak into the next.
 - Seed only the resources the assertion needs; let the mock default the rest.
 
+## Search filtering — indexed once at setup, never per test
+
+- **`MockClient` search filters only work if the FHIR search parameters are indexed in the test process.** Symptom: a resource comes back from an unfiltered `searchResources`, but `searchResources` / `searchOne` **with** a filter (`family=`, `birthdate=`, …) silently returns nothing. That means the index is missing, not that your data is wrong.
+- This is wired **once** at bootstrap via two Vitest setup files: `test.globalSetup.ts` (indexes the bundles once in the main process, shares `globalSchema.types` to workers) registered under `test.globalSetup`, and `test.setup.ts` (assigns the shared index at module scope) registered under `test.setupFiles`. **Do not add `indexStructureDefinitionBundle` / `indexSearchParameterBundle` inside a test or a per-test `beforeAll`** — rely on the project-level setup. If filters mysteriously fail, check both files are registered in `vitest.config.*`, not that each test indexes.
+- One deliberate exception: `validateResource` (or anything reading @medplum/core's type store) **before any resource is created** throws `Unknown data type` — index structure definitions in that one test if you hit it.
+- Version alignment matters: `@medplum/core`, `@medplum/definitions`, `@medplum/mock`, and `@medplum/fhirtypes` must be on **matching versions** — a skew causes confusing index/search failures.
+
 ## FHIR resource assertions
 
 - Assert on the **resource fields you care about by value** — `patient.name[0].family`, `observation.valueQuantity.value` — not just `resource.id` truthiness or a search count. A wrong resource with an id still passes a truthiness check.

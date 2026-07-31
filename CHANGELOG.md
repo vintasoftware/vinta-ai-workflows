@@ -49,6 +49,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       matches, the runner pack ships alone. Missing packs for a present
       framework are recorded as a gap (candidate for a new pack via
       `add-foundation-skill`).
+    - **Stack packs may carry a one-time project-setup step**, applied at derive
+      time (not per test). Medplum ships the two Vitest setup files
+      `medplum-test.globalSetup.ts` + `medplum-test.setup.ts` (FHIR search-parameter
+      indexing shared across workers via `provide`/`inject`, so `MockClient`
+      search filtering works) — the derive flow installs them and registers both
+      `test.globalSetup` + `test.setupFiles` in the Vitest config; the `medplum.md`
+      pack only references it. Bundled verbatim (dated headers) from the team's
+      `medplum-snippet-catalog` (`TestSetup/`) so bootstrap stays offline-safe.
   - **Schema:** new `foundation_skills.write-unit-test` enum
     (`enabled` / `disabled`) and a new `skills.write-unit-test` config block —
     `test_style` (functions / classes / framework-default), `data_setup`
