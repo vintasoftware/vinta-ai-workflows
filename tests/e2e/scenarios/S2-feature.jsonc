@@ -1,0 +1,19 @@
+// S2 — Feature delivery pipeline (PLAN §5). create-spec → plan-feature →
+// implement-plan against the `current/` harness. The core "prompt to healthy,
+// merged code" path.
+{
+  "id": "S2-feature",
+  "fixture": "medplum-provider",
+  "state": "current",
+  "steps": [
+    { "invoke": "/create-spec",    "input": "tasks/feature.md", "answers": "tasks/feature.answers.md" },
+    { "invoke": "/plan-feature",   "answers": "tasks/feature.answers.md" },
+    { "invoke": "/implement-plan", "autonomous": true }
+  ],
+  "graders": ["artifacts-spec", "artifacts-plan", "app-tests-pass", "git-tree-healthy"],
+  "expect": {
+    // implement-plan should produce stacked phase branches based off the right base.
+    "stackedBranches": true
+  },
+  "budget": { "maxWallSec": 1800 }
+}

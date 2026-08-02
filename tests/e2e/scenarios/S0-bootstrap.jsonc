@@ -1,0 +1,18 @@
+// S0 — Bootstrap (PLAN §5). Proves `install` + `/vinta-bootstrap-ai-tools`
+// work on a CLEAN repo (no ai-tools/). Runs against the `clean/` fixture state.
+{
+  "id": "S0-bootstrap",
+  "fixture": "medplum-provider",
+  "state": "clean",
+  "steps": [
+    {
+      "invoke": "/vinta-bootstrap-ai-tools",
+      "input": "tasks/bootstrap.md",
+      "answers": "tasks/bootstrap.answers.md"
+    }
+  ],
+  // artifacts-bootstrap: AGENTS.md + schema-valid sub-agents + config present.
+  // git-tree-healthy: the bootstrap lands as clean, conventionally-scoped commits.
+  "graders": ["artifacts-bootstrap", "git-tree-healthy"],
+  "budget": { "maxWallSec": 1200 }
+}

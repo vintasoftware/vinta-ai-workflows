@@ -60,6 +60,12 @@ logs/
 coverage/
 .nyc_output/
 
+# e2e harness — raw run output (regenerated each run) and vendored fixture apps
+# (large, external — built on demand by each fixture's vendor.mjs, never committed)
+results/
+tests/e2e/fixtures/*/states/
+tests/e2e/fixtures/*/.upstream-cache/
+
 # Local-only Claude Code / vendor artifacts (not committed from the source repo)
 # — except the dev-skills symlinks committed at the repo root, which give every
 # developer auto-discovery of the maintenance skills under dev-skills/ without
