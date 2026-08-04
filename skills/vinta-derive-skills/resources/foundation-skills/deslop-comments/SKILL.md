@@ -1,15 +1,17 @@
 ---
 name: deslop-comments
-description: Rewrite code comments and docs touched during the current conversation into Simple English, stripping AI-slop / AI-lingo vocabulary and negative framing. Use when the user says "deslop these comments", "clean up the comments we just wrote", "rewrite this in plain English", or after a review flags comments as convoluted/AI-sounding. Comment-only - never changes function names, APIs, or behavior.
+description: Rewrite code comments and docs touched during the current conversation into Simple English, stripping AI-slop / AI-lingo vocabulary and negative framing. Use when the user says "deslop these comments", "clean up the comments we just wrote", "rewrite this in plain English", or after a review flags comments as convoluted/AI-sounding. Also accepts a prose file as an explicit scope (PR description, plan doc, PR-context file) - same rules, applied to the prose. Text-only - never changes function names, APIs, or behavior.
 ---
 
 # Deslop comments
 
-Rewrites comments and doc blocks into short, direct Simple English. This is a comment-only pass: no renames, no logic changes, no behavior changes.
+Rewrites comments and doc blocks into short, direct Simple English. This is a text-only pass: no renames, no logic changes, no behavior changes.
 
 ## Scope
 
 Default scope is **files the current task actually created or edited** - find the candidate set with `git diff --name-only` / `git status --short` against the base the conversation started from. If the user names specific files, a directory, or a Pull Request instead, use that scope.
+
+A named scope can be a prose file rather than code - a PR description, a plan doc, a `.vinta-ai-workflows/prs-context/` file. Same rules, applied to the prose itself; see the note at the end of Process.
 
 Do not expand scope to a file just because the agent `Read` it or reviewed it in passing - a debugging or review session routinely reads many unrelated files, and reading one is not authorization to rewrite its comments. If there is no edited-file set and no explicit scope from the user, ask which files to cover.
 
@@ -61,6 +63,8 @@ Rewrite a comment if it has any of:
 4. After editing, confirm the diff is comment-only: `git diff -- <files>` should show no code-line changes, only comment text.
 5. Run the project's lint/typecheck on touched files (e.g. `pnpm biome check <files>`, `pnpm --filter <pkg> typecheck`) to confirm nothing broke.
 6. Summarize what changed in 1-2 sentences - don't restate every line edited.
+
+**When the target is a prose file** there are no comment markers to find, so step 2 reads the prose sections instead. Steps 4-5 don't apply either: there is no code to break, and the file may be gitignored (prs-context files are), so re-read it to confirm only prose changed. Keep the document's structure exactly as you found it - headings, section order, list and checklist markers, `<!-- HTML comment -->` placeholders, code fences, links, and any paths or line numbers the file uses to point at code. Everything else is the same.
 
 ## Example
 

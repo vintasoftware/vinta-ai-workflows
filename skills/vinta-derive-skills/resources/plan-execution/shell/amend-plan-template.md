@@ -289,6 +289,8 @@ For the rewritten branch, look for `.vinta-ai-workflows/prs-context/{feature-keb
   - Inline comments may now reference SHAs that no longer exist. They'll appear as "outdated" in the PR UI.
   - If the new diff has materially different comment-worthy spots, regenerate the `# Comments` block, set `status: pending`, and re-run [open-pr.sh](../open-pr-from-context/scripts/open-pr.sh) on the file. The script reuses the existing PR, posts new comments. Old "outdated" comments stay visible in the PR for audit; that's the platform's behavior.
 
+Whenever you rewrite any of `# Title`, `# Description`, or `# Comments`, finish by running the `deslop-comments` skill ([deslop-comments](../deslop-comments/SKILL.md)) over the file with the file path as the explicit scope, so the rewritten text stays in Simple English same as [integrate-phase]({{INTEGRATE_PHASE_LINK}}) does when it first writes the file. Structure, frontmatter, and comment line targets stay untouched.
+
 When rewriting the `# Description` body, **honor `project.pr_template_paths`** from `.vinta-ai-workflows.yaml` — same rule as [integrate-phase]({{INTEGRATE_PHASE_LINK}})'s **Open PR via context file** step: follow the project's PR template structure, fill new sections with phase-specific content from the rewritten body, leave un-fillable placeholders untouched. If the prior file used a different template than the project now declares, prefer the current `pr_template_paths` choice — surface the change to the user when the body shape shifts visibly.
 
 Always include in the publish-log block at the bottom of the file:

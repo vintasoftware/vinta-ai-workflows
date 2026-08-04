@@ -5,6 +5,29 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — YYYY-MM-DD
+
+### Changed
+
+- **PR context is now written in Simple English.** `integrate-phase` runs
+  `deslop-comments` over the prs-context file it just wrote, before `open-pr.sh`
+  publishes it, so the PR title, the description body, and every inline comment
+  read as Simple English — one idea per sentence, current behavior stated
+  directly, no AI-slop vocabulary. The project's PR-template structure survives
+  the pass untouched. `amend-plan` runs the same pass whenever it rewrites a
+  prs-context file after a force-push. New step 5 in
+  [`partials/pr-context.md`](skills/vinta-derive-skills/resources/plan-execution/partials/pr-context.md)
+  (the old steps 5–7 shift to 6–8); the writing rules are also stated up front in
+  [`prs-context-template.md`](skills/vinta-derive-skills/resources/prs-context-template.md)
+  so the first draft comes out clean. No config change — `deslop-comments`
+  already always ships.
+- **`deslop-comments` says what to do when the scope is a prose file.** The skill
+  already accepted an explicit file scope, but its Process steps assumed code:
+  find the comment markers, verify with `git diff`, run lint / typecheck. A short
+  note now covers the prose case — read the prose sections instead of comment
+  blocks, skip lint / typecheck, and re-read the file to verify since a
+  prs-context file is gitignored. The vocabulary and framing rules are unchanged.
+
 ## [0.4.0] — 2026-07-31
 
 ### Added
