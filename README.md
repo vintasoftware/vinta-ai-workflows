@@ -241,7 +241,7 @@ Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
 | `amend-plan` | always (generated) | History-rewriting companion to `implement-plan` — revises in-flight plans, amends prior-phase commits, force-pushes, rebases stacked downstream branches. Reuses `review-phase` + `implement-phase`'s shared prompt loop. |
 | [`handoff`](skills/vinta-derive-skills/resources/foundation-skills/handoff/SKILL.md) | always | Session-continuation handoff doc → `.vinta-ai-workflows/handoffs/`. **Write** captures goal, verified-vs-unverified state, decisions + rejected alternatives, landmines, and the single next step — gathered from the repo, never memory. **Resume** verifies a handoff's claims against the repo before continuing from its next step. |
 | [`deslop-comments`](skills/vinta-derive-skills/resources/foundation-skills/deslop-comments/SKILL.md) | always | Rewrite comments + doc blocks touched during a task into Simple English, and delete the ones that shouldn't exist at all — where-used lists, another module's internals, restatements of the code, deferred-work notes, paths not taken (comment-only; no renames, no behavior change). `review-phase` Layer 2 depends on it, `integrate-phase` / `amend-plan` run it over the PR-context file, and it's invokable standalone. |
-| `write-unit-test` | default-on (generated) | Write durable unit tests for a unit of behavior, enforcing six framework-agnostic rules + this project's captured test conventions, with runner- and stack-specific best-practice packs. Ships automatically whenever a unit-test framework is detected (set `disabled` to opt out). Generated from a template; config under `skills.write-unit-test.*`. See below. |
+| `write-unit-test` | default-on (generated) | Write durable unit tests for a unit of behavior, enforcing nine framework-agnostic rules + this project's captured test conventions, with runner- and stack-specific best-practice packs. Ships automatically whenever a unit-test framework is detected (set `disabled` to opt out). Generated from a template; config under `skills.write-unit-test.*`. See below. |
 | `systematic-debugging` | **opt-in** | Root-cause-first debugging with project-specific repro commands + MCP evidence-gathering (error tracking, traces, logs, metrics, alerts). Renders from a catalogue of observability MCP servers the user declares. |
 | `add-e2e-test` | **opt-in** | Add an e2e test. Body covers e2e framework, page-object pattern, auth/storage-state, seed helpers, tenant scoping, screenshot conventions. |
 | `add-env-var` | **opt-in** | Propagate a new env var through every layer (`.env.example`, build tool envPrefix, build cache hash, app config, AGENTS.md, CI, deploy injection). |
@@ -252,7 +252,7 @@ Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
 
 #### `write-unit-test` in depth
 
-Agents write tests that pass but assert too little, mock everything, leave data behind, or couple to internals — this skill exists so you don't have to babysit that. It bakes in **six framework-agnostic rules** that hold for every test in every stack:
+Agents write tests that pass but assert too little, mock everything, leave data behind, or couple to internals — this skill exists so you don't have to babysit that. It bakes in **nine framework-agnostic rules** that hold for every test in every stack:
 
 1. **Mock only genuine externals** — never the unit under test, its local collaborators, or the DB.
 2. **Assert the full expected value**, not counts or truthiness (`assert result`, `len(x) == 3` are too weak).
@@ -260,8 +260,9 @@ Agents write tests that pass but assert too little, mock everything, leave data 
 4. **No external service** that can't run in dev/test — stub at the boundary.
 5. **Test logic stays literal** — no loops/conditionals recomputing the expected value.
 6. **Decouple from internals** — assert observable state/output; survive a behavior-preserving rewrite.
-7. **Kill nondeterminism** — control every entropy source (clock, randomness, timezone/locale, iteration/DB order, concurrency); a flaky test is worse than none. Don't over-fit brittle text either — assert a stable anchor (error code, role, i18n key) for error messages and UI copy, not the exact churning prose.
-8. **Cover the branches** — aim high (95%+ branch coverage): every error path, guard, and edge gets a case. Coverage is the floor; correct assertions are the point.
+7. **One behavior per test**, named for what it pins (`returns_zero_for_empty_cart`).
+8. **Kill nondeterminism** — control every entropy source (clock, randomness, timezone/locale, iteration/DB order, concurrency); a flaky test is worse than none. Don't over-fit brittle text either — assert a stable anchor (error code, role, i18n key) for error messages and UI copy, not the exact churning prose.
+9. **Cover the branches** — aim high (95%+ branch coverage): every error path, guard, and edge gets a case. Coverage is the floor; correct assertions are the point.
 
 Plus a "run it green, then break the code to watch it go red" step and a name-for-the-behavior / one-reason-to-fail convention.
 
