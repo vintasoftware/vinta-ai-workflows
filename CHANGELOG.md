@@ -21,12 +21,34 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [`prs-context-template.md`](skills/vinta-derive-skills/resources/prs-context-template.md)
   so the first draft comes out clean. No config change — `deslop-comments`
   already always ships.
-- **`deslop-comments` says what to do when the scope is a prose file.** The skill
-  already accepted an explicit file scope, but its Process steps assumed code:
-  find the comment markers, verify with `git diff`, run lint / typecheck. A short
-  note now covers the prose case — read the prose sections instead of comment
-  blocks, skip lint / typecheck, and re-read the file to verify since a
-  prs-context file is gitignored. The vocabulary and framing rules are unchanged.
+- **`deslop-comments` now deletes comments, not just rewrites them.** The pass
+  used to reword whatever it found; deleting a comment is now a normal outcome.
+  The "What counts as slop" list splits accordingly — rules 1–5 are rewordings,
+  rules 6–12 are usually deletions — and seven new rules cover the comments that
+  should not exist at any length: **where-used lists** (call-site inventories go
+  stale the first time someone adds a caller), **another module's internals
+  explained from here**, **one decision explained in several places** (write the
+  reason once at the site that makes the decision), **restating the code**, **a
+  comment standing in for a name** (report the rename, don't edit the comment),
+  **plans and deferred work** ("temporary until Y"), and **paths not taken**
+  ("tried X, settled on Y"). A new **essay-voice** rule bans sayings, metaphor,
+  and "it looks like X but is really Y" framing, and the buzzword table grew by
+  roughly a dozen entries (`gloss`, `roll-call`, `signal`, `the tell`, `unpick`,
+  `papering over`, `strictly worse`, `earns its place`, …).
+
+  Process gained four steps: check comments next to changed code for claims that
+  are no longer true (nothing else catches a stale comment — no test, no type
+  error, no lint rule), decide delete-or-reword before editing, collect
+  duplicates across the whole file set before editing any of it, and grep the
+  result for the skill's own buzzword list, since those words get written and
+  then skimmed past. The summary now reports comment counts before and after,
+  plus any comment found to be factually wrong.
+
+  A new **"When the fix is not a comment edit"** section covers the case where
+  the real fix is a test, a rename, or a function split: leave the comment,
+  report it with the file and what must exist first. "What to leave alone" gains
+  a matching guard — keep the reason a non-obvious line exists, and shorten the
+  wording instead. This pass removes noise, not knowledge.
 
 ## [0.4.0] — 2026-07-31
 
