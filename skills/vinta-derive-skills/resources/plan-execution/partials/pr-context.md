@@ -41,9 +41,11 @@ Two project-level signals decide the actual behavior:
 
 4. **Write the prs-context file** at {{PRS_CONTEXT_FILE_PATH}}, following [resources/prs-context-template.md](../../prs-context-template.md). Frontmatter: `plan_id`, `feature_name`, `phase_id`, `phase_title`, `branch`, `base`, `created_at`, `status: pending`, empty `pr_url`. **`base` is the branch the PR opens against — resolve it per the commit strategy, never default it to `<BASE_BRANCH>` blindly:** for stacked branches only the first executed phase bases on `<BASE_BRANCH>`; every subsequent phase bases on the **previous phase's branch** (see the PR-base rule under the {{BRANCH_PUSH_HEADING}} step above). For a single plan-level PR (modular / one-PR strategies) `base = <BASE_BRANCH>`. Body sections: `# Title` (single-line PR title), `# Description` (Markdown body — uses the project's PR template structure from step 2 when one exists), `# Comments` (YAML list of `{file, start_line, end_line?, side, body}` — empty list when comments are off).
 
-5. **Confirm `.vinta-ai-workflows/prs-context/` is in `.gitignore`.** [vinta-install-ai-tools-setup](../../../vinta-install-ai-tools-setup/SKILL.md) runs the multi-vendor setup script which appends `.vinta-ai-workflows/prs-context/` on its first invocation. If an older bootstrap missed it, append it now.
+5. **Deslop the prose.** Run the `deslop-comments` skill ([deslop-comments](../deslop-comments/SKILL.md)) over the file you just wrote, passing {{PRS_CONTEXT_FILE_PATH}} as the explicit scope. `# Title`, the `# Description` body, and every `# Comments` `body` must read as Simple English: one idea per sentence, current behavior stated directly instead of "not X" framing, and no AI-slop vocabulary (`gate`, `guard`, `backstop`, `surface`, `leverage`, `plumb`, `canonical`, …). Keep precise domain terms, and keep the project's PR-template structure intact — section headings, `<!-- HTML comment -->` placeholders, and checklist lines stay exactly as step 2 wrote them. This pass rewrites prose only: it never touches the frontmatter, the section layout, or which file and lines a comment targets. Do it before `open-pr.sh` runs, since the published PR body and comments come straight from this file.
 
-6. **Run `open-pr.sh`** (only when policy = agents create PRs). Detect a usable CLI (`gh` for GitHub, `glab` for GitLab) plus the script's other deps (`yq`, `jq`):
+6. **Confirm `.vinta-ai-workflows/prs-context/` is in `.gitignore`.** [vinta-install-ai-tools-setup](../../../vinta-install-ai-tools-setup/SKILL.md) runs the multi-vendor setup script which appends `.vinta-ai-workflows/prs-context/` on its first invocation. If an older bootstrap missed it, append it now.
+
+7. **Run `open-pr.sh`** (only when policy = agents create PRs). Detect a usable CLI (`gh` for GitHub, `glab` for GitLab) plus the script's other deps (`yq`, `jq`):
 
    ```bash
    bash ai-tools/skills/open-pr-from-context/scripts/open-pr.sh {{PRS_CONTEXT_FILE_PATH}}
@@ -57,5 +59,5 @@ Two project-level signals decide the actual behavior:
 
    When policy = "branches only": **don't run the script.** File stays `status: pending`.
 
-7. **Skill wrapper** — [open-pr-from-context](../open-pr-from-context/SKILL.md) is available for ad-hoc invocation (after the run, on a different machine, etc.). The orchestrator can call the script directly here; the skill is for humans.
+8. **Skill wrapper** — [open-pr-from-context](../open-pr-from-context/SKILL.md) is available for ad-hoc invocation (after the run, on a different machine, etc.). The orchestrator can call the script directly here; the skill is for humans.
 <!-- block-end: PR_CONTEXT -->

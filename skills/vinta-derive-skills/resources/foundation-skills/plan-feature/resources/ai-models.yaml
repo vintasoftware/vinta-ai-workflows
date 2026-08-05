@@ -51,7 +51,6 @@ tiers:
     models:
       anthropic:
         - id: claude-haiku-4-5
-          note: with iteration; step up to claude-sonnet-5 if phase touches >3 files
         - id: claude-sonnet-5
           note: step-up target when phase touches >3 files
       openai:
@@ -84,7 +83,6 @@ tiers:
     models:
       anthropic:
         - id: claude-opus-4-8
-          note: "[1m] 1M-context variant for large codebases"
       openai:
         - id: gpt-5.6-sol
           note: Frontier model for complex professional work

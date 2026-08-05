@@ -12,6 +12,10 @@ status: pending                          # `pending` until published; `published
 pr_url:                                  # set by open-pr-from-context after publishing
 ---
 
+Everything below the frontmatter is prose a human reads on the PR, so write it in
+**Simple English** — see [Write it in Simple English](#write-it-in-simple-english)
+at the bottom of this file.
+
 # Title
 
 <single-line PR title — follow project commit style; keep ≤72 chars>
@@ -89,3 +93,24 @@ Plan sections have **names** (`Goals + Non-goals`, `Guiding Decisions`, `Data Mo
 - Boilerplate matching nearby files.
 - Standard patterns documented in AGENTS.md.
 - Test bodies whose names already describe the assertion.
+
+## Write it in Simple English
+
+The title, the description, and every comment `body` are read by a human reviewer.
+Write them the way the `deslop-comments` skill
+(`ai-tools/skills/deslop-comments/SKILL.md`) asks for:
+
+- One idea per sentence. Split the dense multi-clause sentence instead of nesting it.
+- Say what the code does now. Lead with "not X" only when the reader would
+  otherwise get it wrong — a real gotcha, an edge case, or the reason behind a fix.
+- Plain engineering words, not AI buzzwords: "check" instead of `gate` / `guard`,
+  "use" instead of `leverage` / `utilize`, "show" or "return" instead of `surface`,
+  "pass" or "connect" instead of `plumb` / `wire`, "created" instead of `mint`,
+  "rule" or "constraint" instead of `invariant`. Keep a word when it is the precise
+  domain term (`opaque` for a token, `idempotent` for a handler, framework and
+  database vocabulary).
+- Keep proper nouns verbatim: plan and phase names, the plan's section names,
+  branch names, flag names, file paths, identifiers from the code.
+
+`implement-plan` runs `deslop-comments` over this file before publishing it, so
+anything that slips through gets rewritten there — but write it clean the first time.
