@@ -265,6 +265,8 @@ Agents write tests that pass but assert too little, mock everything, leave data 
 
 Plus a "run it green, then break the code to watch it go red" step and a name-for-the-behavior / one-reason-to-fail convention.
 
+The skill also covers the bug-fix case, in a **Regression tests** section. The test has to fail without the fix, so revert the fix to check when the test came second. Name it for what must not happen. Assert the cause too, when the visible symptom can look right while the bug is still there. Record a state that settles instead of only its final value. When no test can cover the regression, the PR says so.
+
 **Framework guidance ships as best-practice packs on two independent axes**, so a project only ever receives advice for frameworks it actually uses (a FastAPI repo never gets Django guidance; a pure library gets no web-framework pack):
 
 - **Runner pack** (`resources/packs/runners/`) — how to structure, assert, and mock. One, picked by the detected test runner: `pytest`, `vitest`, or `jest`.

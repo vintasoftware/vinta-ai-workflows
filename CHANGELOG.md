@@ -5,6 +5,28 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — YYYY-MM-DD
+
+### Changed
+
+- **`write-unit-test` now covers the bug-fix case.** The shipped skill body
+  gains a **Regression tests** section. A bug fix ships a test that fails
+  without the fix; when the test came second, revert the fix to check. Name the
+  test for what must not happen. Assert the cause too, when the visible symptom
+  can look right while the bug is still there. Record a state that settles
+  instead of only its final value. This adds one narrow exception to universal
+  rule 6, which otherwise keeps tests decoupled from internals. When no test can
+  cover the regression, the PR says so and a comment gives the reason.
+- **`stacks/react.md`** shows how to record a value on every render, so a bug in
+  a state that settles cannot hide behind the final UI. It also notes that
+  `waitFor` hides the same bug.
+- **`systematic-debugging`** Phase 3 accepts the case where the fix came before
+  the test: revert the fix to prove the test fails. Phase 4 covers the
+  regression no test can reach, and the verification checklist asks for the
+  revert check.
+- **`deslop-comments`** rule 2 no longer accepts a bug fix as a reason to keep
+  "not X, it's Y" framing. The regression test is the record.
+
 ## [0.5.0] — 2026-08-05
 
 ### Changed

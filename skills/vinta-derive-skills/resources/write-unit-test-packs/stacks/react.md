@@ -18,6 +18,11 @@ Component-testing idioms with React Testing Library. Loaded **only when the proj
 - Mock HTTP at the network layer with **MSW** (see the runner pack), so components run their real fetch path. For a component that loads data, `await screen.findBy...` the settled UI rather than mocking the fetching hook.
 - Pure logic (reducers, formatters, custom hooks without UI) — test directly, no render. Hooks: `renderHook` + `act`.
 
+## Regression tests on state that settles
+
+- When the bug is a wrong intermediate state that ends up correct, asserting the final UI passes even with the bug present. Record the value on every render instead: push it to an array inside the `renderHook` callback, or from a test-only child in a rendered tree. Then assert the whole sequence — `expect(states).toEqual(["loading", "ready"])` catches the extra skeleton that `findByText` never sees.
+- `await waitFor` hides the same bug. It retries until the assertion passes, so it cannot see a state that was wrong and then corrected.
+
 ## Isolation
 
 - Clean up is automatic per test with the Testing Library auto-cleanup; don't share rendered state between tests. Reset mocks in `afterEach` (see runner pack).

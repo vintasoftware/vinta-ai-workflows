@@ -22,7 +22,7 @@ Do not expand scope to a file just because the agent `Read` it or reviewed it in
 Rules 1-5 are usually reworded. Rules 6-12 are usually deleted.
 
 1. **Dense, multi-clause sentences** that try to explain everything at once instead of one idea per sentence. Split a sentence that adds a second thought.
-2. **Negative / before-state framing** - describing removed code, or leading with "not X" when X was never the point. Keep "not X, it's Y" only for a genuine edge case or a non-obvious gotcha.
+2. **Negative / before-state framing** - describing removed code, or leading with "not X" when X was never the point. Keep "not X, it's Y" only for a genuine edge case or a non-obvious gotcha. A regression test records a bug fix; a comment does not. Keep a comment about a bug fix only when no test can cover the regression, and then say why.
 3. **AI buzzwords** in place of plain software engineering vocabulary. Common offenders and their replacements:
    - `gate` / `gates` / `gating` → "check", "decides whether to show...", "authentication check", "feature check"
    - `guard` → "check" / "prevent"
