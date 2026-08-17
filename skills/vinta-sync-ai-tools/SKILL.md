@@ -58,6 +58,7 @@ For each change record, decide its bucket:
 | `config-schema-change` | Adds a field to the config schema or bumps its major. Migrate the config; ask user to fill new required fields. |
 | `not-applicable` | Project opted out (`disabled` in config) or never applicable (e.g. stack-specific change for a stack the project doesn't use). |
 | `tooling` | Setup-script / gitignore / packaging changes that propagate transparently — no per-change question; apply if approved as a batch. |
+| `layout-migration` | The project's on-disk layout has to move before the new surface works. Never batched — one question, with the file moves listed. See "One-time migrations" below. |
 
 Cross-check via file diff: every `affects-project` change should correspond to a real file delta between `OLD_VERSION`'s source (reachable via git tag in the clone) and `NEW_VERSION`'s source. Diffs without changelog entries → flag as orphan (see step 2).
 
@@ -126,9 +127,11 @@ In order:
 
 3. **`affects-project` accepts** — re-render the relevant template (for `implement-plan` / `amend-plan`) or re-copy the foundation skill body (for verbatim ones — delegated to [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)). Use the values in `.vinta-ai-workflows.yaml` as the substitution source. Validate every `{{PLACEHOLDER}}` is resolved.
 
-4. **`tooling` accepts** — run setup-ai-tools.mjs from the new package version in idempotent mode. The script handles gitignore append, vendor symlinks, vendor agent file regeneration.
+4. **`layout-migration` accepts** — run the migration from "One-time migrations" below **before** the setup script, so the script wires the vendors against the final layout.
 
-5. Re-validate every YAML file under the project against its schema (`.vinta-ai-workflows.yaml`, `ai-tools/agents/*.yaml`, any `.vinta-ai-workflows/prs-context/**/*.md` frontmatter blocks). Surface validation failures; don't silently proceed.
+5. **`tooling` accepts** — run setup-ai-tools.mjs from the new package version in idempotent mode. The script handles gitignore append, vendor symlinks, vendor agent file regeneration.
+
+6. Re-validate every YAML file under the project against its schema (`.vinta-ai-workflows.yaml`, `ai-tools/agents/*.yaml`, any `.vinta-ai-workflows/prs-context/**/*.md` frontmatter blocks). Surface validation failures; don't silently proceed.
 
 ### 7. Bump version + final report
 
@@ -165,6 +168,40 @@ Run on first sync against a project without `.vinta-ai-workflows.yaml`:
 
 Then re-enter step 1 of the main flow.
 
+## One-time migrations
+
+### `ai-tools/AGENTS.md` → root `AGENTS.md` (0.6.0)
+
+**Detect**: root `AGENTS.md` is a symlink (`test -L AGENTS.md`) and `ai-tools/AGENTS.md` exists. A project bootstrapped on 0.6.0 or later already has the doc at the root as a regular file — skip.
+
+**Why**: the doc was read from the root through the symlink, so its links were written as repo-root paths. That broke them whenever the real file was opened at `ai-tools/AGENTS.md` — on GitHub, in a file tree, in any editor that follows the real path. Moving the file to the root makes one set of links correct everywhere.
+
+**Steps** — ask once via `AskUserQuestion` (`Apply` / `Skip` / `Show the file list`), then:
+
+1. `rm AGENTS.md` (the symlink), `git mv ai-tools/AGENTS.md AGENTS.md`. Use `git mv` so the file's history follows it.
+2. Fix links **inside** the doc. They were already repo-root-relative, so most need no change — but verify every one from the root:
+
+   ```bash
+   grep -noE '\]\(([^)]+)\)' AGENTS.md | sed -E 's/\]\(//; s/\)$//' | while IFS=: read -r line target; do
+     path="${target%%#*}"
+     case "$path" in http*|"") continue ;; esac
+     [ -e "$path" ] || echo "BROKEN line $line: $target"
+   done
+   ```
+
+3. Fix links **pointing at** the doc from inside `ai-tools/`. Every `ai-tools/skills/<name>/SKILL.md` sits three levels below the root, so the link is `../../../AGENTS.md`. Files at other depths (e.g. `ai-tools/rules/*.md`, two levels down) need `../../AGENTS.md`. Bare `[AGENTS.md](AGENTS.md)` links inside a skill folder were always broken — they resolved to a non-existent sibling — and get the same fix.
+4. Rewrite prose references to the old path in the canonical sources: `ai-tools/agents/*.yaml`, `ai-tools/skills/**/SKILL.md`, any `ai-tools/rules/*.md`. `ai-tools/AGENTS.md` → `AGENTS.md`.
+5. Re-run the setup script so the vendor aliases repoint: `CLAUDE.md → AGENTS.md` (claude), `.github/copilot-instructions.md → ../AGENTS.md` (copilot). The generated vendor agent files under `.claude/agents/`, `.cursor/agents/`, `.github/agents/`, `.codex/agents/` are regenerated from the YAMLs in step 4 — don't hand-edit them.
+6. Confirm nothing live still points at the old path:
+
+   ```bash
+   grep -rn "ai-tools/AGENTS.md" --exclude-dir=node_modules --exclude-dir=.git .
+   ```
+
+   Historical records (`ai-plans/*.md`, changelogs, past plan docs) are dated snapshots — leave them. Surface the list to the user and let them decide.
+
+**Order matters**: run this migration *before* `setup-ai-tools.mjs`. Running the new script against the old layout leaves `.github/copilot-instructions.md` pointing at `../AGENTS.md`, which resolves through the surviving root symlink — it works, but hides the fact that the migration hasn't happened.
+
 ## Pitfalls
 
 - **Hand-edited rendered skill bodies.** `vinta-sync-ai-tools` re-renders templates from the config — any inline edits the user made to the rendered `ai-tools/skills/<name>/SKILL.md` will be overwritten on `Apply`. Surface a warning when re-rendering would clobber a body the user touched (heuristic: file modified after the bootstrap commit). Default action: ask before overwriting.
@@ -173,6 +210,7 @@ Then re-enter step 1 of the main flow.
 - **Orphan diffs.** Surfaced, never auto-applied. Ask the maintainer to add a changelog entry; don't try to interpret an undocumented change.
 - **Breaking schema bump (`schema_version: N → N+1`).** Migration code must come from the package's release notes. If migration data is missing, stop — don't guess.
 - **Sticky opt-outs.** A user who accepted `add-env-var: disabled` once stays disabled across sync runs. To re-offer, manually flip to `enabled` in `.vinta-ai-workflows.yaml` and re-run sync.
+- **A `layout-migration` skipped but the tooling batch applied.** The setup script runs fine against the pre-migration layout, so nothing errors — the project just sits half-migrated, with skill links still written for the old depth. Record the skip in the final report and re-offer the migration on the next sync (unlike a skipped foundation skill, a layout migration is not sticky).
 
 ## Verification
 
@@ -182,3 +220,4 @@ Then re-enter step 1 of the main flow.
 4. **Schema bump**: new field added with default; `schema_version` bumped if major changed; payload still validates.
 5. **Bootstrap from missing config**: `.vinta-ai-workflows.yaml` written with reverse-extracted values; user confirms before main flow runs.
 6. **Orphan diff**: changelog has no entry for a real file change; sync surfaces it at the end without applying.
+7. **Layout migration applied**: `AGENTS.md` is a regular file at the root, `ai-tools/AGENTS.md` is gone, `grep -rn "ai-tools/AGENTS.md"` returns only historical records, and both link checks in "One-time migrations" print nothing.

@@ -113,7 +113,7 @@ There is no build, no test suite, no lint config in this repo. Verification is a
 
 ## Self-recursive bootstrap
 
-This repo's tooling exists to bootstrap *other* repos. Don't try to bootstrap this repo with itself. If you need to author a `ai-tools/AGENTS.md` for a target project, that's `vinta-write-agents-md`'s job, run inside that project — not a `cp`-from-here operation.
+This repo's tooling exists to bootstrap *other* repos. Don't try to bootstrap this repo with itself. If you need to author an `AGENTS.md` for a target project, that's `vinta-write-agents-md`'s job, run inside that project — not a `cp`-from-here operation.
 
 This `AGENTS.md` is hand-maintained for *this* repo. Update it when:
 - Adding a new top-level directory.

@@ -26,6 +26,66 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   revert check.
 - **`deslop-comments`** rule 2 no longer accepts a bug fix as a reason to keep
   "not X, it's Y" framing. The regression test is the record.
+- **`AGENTS.md` now lands at the repo root as a regular file, not at
+  `ai-tools/AGENTS.md` behind a root symlink.** The doc was always *read* from
+  the root through that symlink, so its links were written as repo-root paths —
+  which broke the moment anyone opened the real file at `ai-tools/AGENTS.md`, on
+  GitHub or in an editor that follows the real path. One location means one set
+  of links that resolves for every reader. `ai-tools/` still owns skills,
+  sub-agent definitions, and the setup script; only the conventions doc moved
+  out. Mirrors the change [vintasoftware/building-blocks#403](https://github.com/vintasoftware/building-blocks/pull/403)
+  made by hand, so the next sync into that repo no longer reverts it.
+
+  Wiring that changed in
+  [`setup-ai-tools.mjs`](skills/vinta-install-ai-tools-setup/resources/setup-ai-tools.mjs):
+
+  - The script no longer creates a root `AGENTS.md` symlink. It creates the
+    per-vendor aliases instead — `CLAUDE.md → AGENTS.md` when `claude` is a
+    selected vendor, `.github/copilot-instructions.md → ../AGENTS.md` when
+    `copilot` is. Both are gated on `--only`, matching the script's own rule
+    that unlisted vendors are left untouched.
+  - `ensureSymlink` now resolves a link's target relative to the link's own
+    directory and throws when it does not exist. Before, a link to a missing
+    file was created anyway: the script printed "Symlinks ensured" and exited 0
+    while leaving a dangling link that reads as an empty instruction file to an
+    agent.
+
+  Skills link the doc as `../../../AGENTS.md` — the depth from
+  `ai-tools/skills/<name>/SKILL.md`, and the same depth through every vendor
+  symlink (`.claude/skills/<name>/SKILL.md`, `.agents/…`, `.cursor/…`,
+  `.github/…`). The `implement-plan` / `amend-plan` templates and the
+  dependency-license block previously emitted a bare `[AGENTS.md](AGENTS.md)`,
+  which resolved to a non-existent file inside the skill's own folder; the
+  `systematic-debugging` template was one level short at `../../AGENTS.md`. All
+  four are fixed.
+
+- **`vinta-write-agents-md` writes to the repo root.** Its output section now
+  states the doc's links must be repo-root-relative, and its verification adds a
+  link-resolution check run from the root.
+
+- **`vinta-install-ai-tools-setup` requires a root `AGENTS.md` up front.** The
+  prerequisite check asks for a regular file at the root and routes projects on
+  the old layout to the sync migration below.
+
+### Added
+
+- **`vinta-sync-ai-tools` migrates projects off the old layout.** New
+  `layout-migration` classification bucket — never batched with `tooling`, one
+  question of its own — plus a step-by-step migration for
+  `ai-tools/AGENTS.md` → root `AGENTS.md`: `git mv` so history follows the file,
+  link checks in both directions, a prose sweep over `ai-tools/**` for the old
+  path, and the setup-script re-run ordered *after* the move. Projects
+  bootstrapped on 0.6.0 or later skip it.
+
+  A skipped layout migration is **not** sticky the way a declined foundation
+  skill is — the next sync re-offers it. Nothing errors in the meantime: the new
+  script runs fine against the old layout, because `.github/copilot-instructions.md`
+  → `../AGENTS.md` still resolves through the surviving root symlink. That is
+  what makes the half-migrated state easy to miss, so the final report names it.
+
+- **`vinta-analyze-codebase` recognizes the legacy layout.** A root `AGENTS.md`
+  that is a symlink into `ai-tools/AGENTS.md` is recorded as a finding for the
+  sync skill to act on.
 
 ## [0.5.0] — 2026-08-05
 

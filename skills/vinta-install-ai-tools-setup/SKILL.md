@@ -5,7 +5,7 @@ description: Install the multi-vendor `setup-ai-tools.mjs` script in the target 
 
 # Install ai-tools setup
 
-The setup script reads `ai-tools/AGENTS.md`, `ai-tools/skills/`, and `ai-tools/agents/*.yaml` (canonical sources) and emits per-vendor copies + symlinks. This skill installs the script + its package wiring + runs it for the first time.
+The setup script reads root `AGENTS.md`, `ai-tools/skills/`, and `ai-tools/agents/*.yaml` (canonical sources) and emits per-vendor copies + symlinks. This skill installs the script + its package wiring + runs it for the first time.
 
 ## Output
 
@@ -16,7 +16,7 @@ The setup script reads `ai-tools/AGENTS.md`, `ai-tools/skills/`, and `ai-tools/a
 
 ## Inputs
 
-- `ai-tools/AGENTS.md` (from [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md))
+- `AGENTS.md` at the repo root (from [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md))
 - `ai-tools/agents/*.yaml` (from [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md))
 - `ai-tools/skills/<name>/SKILL.md` (from [vinta-derive-skills](../vinta-derive-skills/SKILL.md))
 - Step 0 vendor selection from the [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md#a-scope) **Scope → Vendor coverage** answer.
@@ -25,7 +25,9 @@ The setup script reads `ai-tools/AGENTS.md`, `ai-tools/skills/`, and `ai-tools/a
 
 ### 1. Prerequisite check
 
-`ai-tools/AGENTS.md` exists. `ai-tools/agents/*.yaml` has at least the foundation trio (`implementer`, `reviewer`, `fixer`). `ai-tools/skills/` is non-empty.
+`AGENTS.md` exists at the repo root — as a **regular file**, not a symlink. `ai-tools/agents/*.yaml` has at least the foundation trio (`implementer`, `reviewer`, `fixer`). `ai-tools/skills/` is non-empty.
+
+If the project predates the move to the root (a root `AGENTS.md` symlink pointing at `ai-tools/AGENTS.md`), migrate before running the script — `git mv ai-tools/AGENTS.md AGENTS.md` after deleting the symlink, then fix the relative links inside the doc and the links pointing at it from `ai-tools/**`. [vinta-sync-ai-tools](../vinta-sync-ai-tools/SKILL.md) does this as a guided migration.
 
 If any are missing → stop. Route the user back to the relevant sub-skill ([vinta-write-agents-md](../vinta-write-agents-md/SKILL.md), [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md), [vinta-derive-skills](../vinta-derive-skills/SKILL.md)).
 
@@ -92,7 +94,7 @@ Expected output: list of symlinks ensured, list of generated per-vendor files, l
 
 For each vendor in the user's selection:
 
-- **Claude Code**: `ls .claude/agents/` lists every agent's `.md`. `ls .claude/skills/` (or `ls -L`) lists every skill dir. `cat AGENTS.md` resolves to the canonical content.
+- **Claude Code**: `ls .claude/agents/` lists every agent's `.md`. `ls .claude/skills/` (or `ls -L`) lists every skill dir. `cat CLAUDE.md` resolves to the root `AGENTS.md` content.
 - **Cursor**: `ls .cursor/agents/` + `ls .cursor/skills/`. Open Cursor and check that the agent + skill panels surface them.
 - **VS Code Copilot**: `ls .github/agents/` lists `*.agent.md`. `ls .github/skills/` lists skill dirs. `cat .github/copilot-instructions.md` resolves to the canonical AGENTS.md.
 - **Codex**: `ls .codex/agents/` lists `*.toml`. Each TOML opens cleanly + has `name` / `description` / `sandbox_mode` / `developer_instructions` fields.
@@ -105,8 +107,8 @@ Stage:
 - `ai-tools/` (canonical sources + script)
 - `package.json` (script alias + yaml dep)
 - `pnpm-lock.yaml` / `package-lock.json` / `yarn.lock` (after install)
-- `AGENTS.md` (root symlink)
-- `.claude/`, `.cursor/`, `.github/agents/`, `.github/skills/`, `.github/copilot-instructions.md`, `.codex/agents/`, `.agents/skills/` — whichever vendors selected
+- `AGENTS.md` (regular file at the repo root)
+- `CLAUDE.md`, `.claude/`, `.cursor/`, `.github/agents/`, `.github/skills/`, `.github/copilot-instructions.md`, `.codex/agents/`, `.agents/skills/` — whichever vendors selected
 
 Commit message style matches the project's convention captured during the bootstrap interview's **Project conventions** group. Default: `Bootstrap ai-tools layout (AGENTS.md, skills, sub-agents, vendor wiring)`.
 
@@ -117,7 +119,7 @@ The setup script is **selective by vendor** but **destructive within a vendor**:
 - For vendors in `--only` (or all four by default): the script `rm -rf` the target dir and regenerates. Hand-edits to per-vendor files are lost.
 - For vendors NOT in `--only`: the script leaves their files untouched.
 
-**Always edit the canonical sources** (`ai-tools/agents/*.yaml`, `ai-tools/skills/`, `ai-tools/AGENTS.md`). Generated vendor files are derived; they get overwritten on the next run.
+**Always edit the canonical sources** (`ai-tools/agents/*.yaml`, `ai-tools/skills/`, root `AGENTS.md`). Generated vendor files are derived; they get overwritten on the next run.
 
 ## Pitfalls
 
@@ -134,5 +136,5 @@ Final smoke test:
 1. `pnpm setup:ai-tools` runs cleanly, no errors.
 2. Spot-check one agent file in each selected vendor — content matches the canonical YAML.
 3. Spot-check one skill — the skill description shows up in the vendor's UI (Claude `/help`, Cursor agent panel, Copilot chat slash menu, Codex slash menu).
-4. Edit `ai-tools/AGENTS.md` (add a comment line). Confirm the change appears in `cat AGENTS.md` (root symlink) + each selected vendor's instruction-file path.
+4. Edit `AGENTS.md` (add a comment line). Confirm the change appears at each selected vendor's instruction-file path (`CLAUDE.md`, `.github/copilot-instructions.md`).
 5. Edit `ai-tools/agents/implementer.yaml` (e.g. tweak description). Re-run setup. Confirm changes propagate to all selected vendor agent files.

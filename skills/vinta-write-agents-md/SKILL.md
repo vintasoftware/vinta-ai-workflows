@@ -1,6 +1,6 @@
 ---
 name: vinta-write-agents-md
-description: Synthesize `ai-tools/AGENTS.md` from the inventory produced by [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) plus a focused interview for what the analysis can't see. Used by [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) as step 2; also runnable standalone to refresh AGENTS.md after a major refactor. Project-agnostic — sections are the same shape across stacks, content adapts. Symlinked into root `AGENTS.md` so Claude Code, Cursor, Codex, VS Code Copilot all read it natively.
+description: Synthesize the repo-root `AGENTS.md` from the inventory produced by [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) plus a focused interview for what the analysis can't see. Used by [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) as step 2; also runnable standalone to refresh AGENTS.md after a major refactor. Project-agnostic — sections are the same shape across stacks, content adapts. Lives at the repo root so Claude Code, Cursor, Codex, VS Code Copilot all read it natively and its relative links resolve for every reader.
 ---
 
 # Write AGENTS.md
@@ -9,7 +9,11 @@ The canonical project-conventions document. Read by every AI tool. Single source
 
 ## Output
 
-`ai-tools/AGENTS.md`. The setup script symlinks `AGENTS.md` at root and `.github/copilot-instructions.md` to it.
+`AGENTS.md` at the **repo root**, as a regular file — not inside `ai-tools/`, not a symlink. Every other AI-tooling artifact lives under `ai-tools/`; this one doc is the exception, because the tools that read it expect it at the root and because its relative links must resolve the same way whether an agent reads it from the root or a human opens it on GitHub.
+
+The setup script symlinks the per-vendor aliases to it: `CLAUDE.md` (when `claude` is a selected vendor) and `.github/copilot-instructions.md` (when `copilot` is).
+
+Write the doc's internal links as **repo-root-relative paths** (`ai-tools/rules/testing.md`, `docs/ARCHITECTURE.md`) — that is what resolves from the root. Skills that link *back* to it from `ai-tools/skills/<name>/SKILL.md` use `../../../AGENTS.md`.
 
 ## Inputs
 
@@ -197,7 +201,7 @@ VAR_TWO
 
 ## Examples to study before writing
 
-If the source repo (the one defining `vinta-bootstrap-ai-tools`) has a real `AGENTS.md`, read it first as a worked example. Vinta's lives at `ai-tools/AGENTS.md` in the bootstrap-defining repo. Note its sectioning + density before writing the target's.
+If the source repo (the one defining `vinta-bootstrap-ai-tools`) has a real `AGENTS.md`, read it first as a worked example. Vinta's lives at the root of the bootstrap-defining repo. Note its sectioning + density before writing the target's.
 
 ## Verification
 
@@ -207,7 +211,17 @@ After writing:
 2. Every claim cites a file or convention source.
 3. Section headings match the skeleton above (or skipped sections are explicit).
 4. Length: 200–400 lines for a typical project. Shorter = probably under-specified. Longer = probably duplicating docs/ content.
-5. `pnpm setup:ai-tools` (or whichever vendors selected) re-runs cleanly after the file is in place — confirms the symlinks point at it.
+5. Every relative link in the doc resolves **from the repo root** — the script that checks it, run from the root, prints nothing:
+
+   ```bash
+   grep -noE '\]\(([^)]+)\)' AGENTS.md | sed -E 's/\]\(//; s/\)$//' | while IFS=: read -r line target; do
+     path="${target%%#*}"
+     case "$path" in http*|"") continue ;; esac
+     [ -e "$path" ] || echo "BROKEN line $line: $target"
+   done
+   ```
+
+6. `pnpm setup:ai-tools` (or whichever vendors selected) re-runs cleanly after the file is in place — confirms the vendor aliases point at it. The script throws if `AGENTS.md` is missing from the root.
 
 ## Pitfalls
 

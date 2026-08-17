@@ -17,7 +17,7 @@ Execution counterpart to [plan-feature](../plan-feature/SKILL.md). Plan = contra
 
 ## Working assumptions
 
-- Repo: {{PROJECT_NAME}} ({{STACK_SUMMARY}}). Conventions: [AGENTS.md](AGENTS.md).
+- Repo: {{PROJECT_NAME}} ({{STACK_SUMMARY}}). Conventions: [AGENTS.md](../../../AGENTS.md).
 - Plan files: [`{{PLAN_DIR}}/YYYY-MM-DD-FEATURE_NAME_IMPLEMENTATION_PLAN.md`]({{PLAN_DIR}}/).
 - Lint: `{{LINT_CMD}}`. Format: `{{FORMAT_CMD}}`.
 - Type / build gate: `{{BUILD_CMD}}`{{TYPECHECK_NOTE}}.
