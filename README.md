@@ -20,7 +20,7 @@ npx vinta-ai-workflows install --tool claude-code
 #   Claude Code → /vinta-bootstrap-ai-tools
 
 # 4. Review and commit the generated layout.
-git add ai-tools/ AGENTS.md .claude/ .codex/ .cursor/ .github/ .agents/
+git add ai-tools/ AGENTS.md CLAUDE.md .claude/ .codex/ .cursor/ .github/ .agents/
 git commit -m "Bootstrap ai-tools layout"
 
 # 5. Remove the builder skills — one-shot done.
@@ -53,7 +53,7 @@ After bootstrap, the project ships with **three foundation skills** that take a 
    └─────────────────┘      pushed to GitHub / GitLab / etc.
 ```
 
-You also get: an `AGENTS.md` tuned to the codebase, project-specific sub-agents and skills derived from the actual stack, and per-vendor wiring so Claude Code / Codex / Cursor / Copilot all see the same artifacts.
+You also get: an `AGENTS.md` tuned to the codebase — a regular file at the repo root, with per-vendor aliases (`CLAUDE.md`, `.github/copilot-instructions.md`) symlinked to it — project-specific sub-agents and skills derived from the actual stack, and per-vendor wiring so Claude Code / Codex / Cursor / Copilot all see the same artifacts.
 
 **The project keeps getting better without re-bootstrapping.** `vinta-ai-workflows` ships new foundation skills, sharper templates, schema additions, and best-practice updates lifted from real projects. A bootstrapped repo pulls those in via [`vinta-sync-ai-tools`](#staying-in-sync-with-upstream) — one command from the AI tool, per-change `Apply` / `Skip` / `Show diff` gating, opt-outs sticky across runs, schema migrations automatic. No manual re-scaffolding, no clobbered hand-tuning, no drift between projects on the same package version. This is treated as a first-class capability of the package, not an afterthought.
 
@@ -206,7 +206,7 @@ Standalone re-invocation works at every step — kick `create-spec` again when t
 
 ## Cheat sheet — what lands in your project
 
-Quick inventory of what `vinta-bootstrap-ai-tools` writes into your repo's `ai-tools/` layout (and exposes via per-vendor wiring at `.claude/skills/`, `.agents/skills/`, etc.). Two disclaimers up front:
+Quick inventory of what `vinta-bootstrap-ai-tools` writes into your repo's `ai-tools/` layout — plus `AGENTS.md` at the repo root, the one artifact that lives outside it — and exposes via per-vendor wiring at `.claude/skills/`, `.agents/skills/`, etc. Two disclaimers up front:
 
 > **Optional foundation skills are gated by the bootstrap interview.** `systematic-debugging`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, and `handoff-to-client` ship **only** if the user says yes during `vinta-bootstrap-ai-tools` Step 0 (or later opts in via `vinta-sync-ai-tools`). They are not in every bootstrapped project. The opt-in is recorded in `.vinta-ai-workflows.yaml` under `foundation_skills.*.enabled` and is sticky across syncs.
 >

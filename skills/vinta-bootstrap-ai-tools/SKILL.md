@@ -1,13 +1,13 @@
 ---
 name: vinta-bootstrap-ai-tools
-description: Bootstrap a project's AI-tooling layout (`ai-tools/AGENTS.md`, `ai-tools/skills/`, `ai-tools/agents/*.yaml`) plus the multi-vendor setup script that wires the canonical sources into Claude Code, Cursor, Codex, and VS Code Copilot. Project-agnostic — adapts to whatever stack it finds. Detects langs, frameworks, build tools, deploy paths, multi-tenancy patterns, and CI conventions, interviews the user for the gaps, then drafts AGENTS.md, the foundation sub-agents (implementer / reviewer / fixer), and a starter set of project-specific skills. Stack-specific skill + agent templates (Medplum, Django, …) live as resources and get copied when the detected stack matches. Use when invoked in a fresh repo that doesn't yet have an `ai-tools/` directory, or to refresh an existing one. Orchestrates several sub-skills — see "Sub-skill flow" below.
+description: Bootstrap a project's AI-tooling layout (root `AGENTS.md`, `ai-tools/skills/`, `ai-tools/agents/*.yaml`) plus the multi-vendor setup script that wires the canonical sources into Claude Code, Cursor, Codex, and VS Code Copilot. Project-agnostic — adapts to whatever stack it finds. Detects langs, frameworks, build tools, deploy paths, multi-tenancy patterns, and CI conventions, interviews the user for the gaps, then drafts AGENTS.md, the foundation sub-agents (implementer / reviewer / fixer), and a starter set of project-specific skills. Stack-specific skill + agent templates (Medplum, Django, …) live as resources and get copied when the detected stack matches. Use when invoked in a fresh repo that doesn't yet have an `ai-tools/` directory, or to refresh an existing one. Orchestrates several sub-skills — see "Sub-skill flow" below.
 ---
 
 # Bootstrap AI tools
 
 This skill produces, in the target repo:
 
-- `ai-tools/AGENTS.md` — universal project conventions read by Claude Code, Cursor, Codex, Copilot.
+- `AGENTS.md` at the **repo root** — universal project conventions read by Claude Code, Cursor, Codex, Copilot. The one AI-tooling doc that lives outside `ai-tools/`: the tools expect it at the root, and its relative links only resolve for every reader from there.
 - `ai-tools/skills/<name>/SKILL.md` — domain-specific skills (always: foundation set + stack-matched copies).
 - `ai-tools/agents/<name>.yaml` — vendor-agnostic sub-agent definitions; the setup script materializes per-vendor copies.
 - `ai-tools/scripts/setup-ai-tools.mjs` + a `pnpm setup:ai-tools` (or equivalent) script alias.
@@ -20,7 +20,7 @@ Project-agnostic. Adapts to whatever the analysis finds. Stack-specific skill + 
 This orchestrator runs six sub-skills in order. Each is its own SKILL.md so it can be invoked standalone (e.g. to refresh just AGENTS.md without redoing analysis from scratch).
 
 1. [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) — walk the repo, build a structured inventory: languages, frameworks, build tools, test frameworks, deploy targets, monorepo shape, env model, multi-tenancy patterns, CI providers. Outputs an in-memory inventory the rest of the flow consumes.
-2. [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) — synthesize `ai-tools/AGENTS.md` from the inventory + a focused interview for what the analysis can't see.
+2. [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) — synthesize the root `AGENTS.md` from the inventory + a focused interview for what the analysis can't see.
 3. [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) — author `ai-tools/agents/*.yaml`. Always emits the foundation trio (`implementer`, `reviewer`, `fixer`); adds stack-specific specialists when the user supplies a template for a matched stack.
 4. [vinta-derive-skills](../vinta-derive-skills/SKILL.md) — author `ai-tools/skills/*/SKILL.md`. Always copies the project-agnostic foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`) verbatim from its bundled resources. Generates `implement-plan` from a parameterized template using project specifics. Asks the user whether the optional `add-e2e-test` and `add-env-var` skills are needed. Asks for stack-specific templates per matched stack.
 5. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) — copy the canonical `setup-ai-tools.mjs` into `ai-tools/scripts/`, wire the package script alias, run setup, verify all vendor paths resolve.
@@ -43,7 +43,7 @@ The bootstrap orchestrator doesn't need to invoke it directly. It just needs to 
 - Repo has a partial setup and the user wants to refresh / extend it. (This orchestrator is idempotent in spirit — sub-skills read what's there before writing.)
 - Forking the Vinta conventions into a new project.
 
-If the repo already has `ai-tools/AGENTS.md`, **do not overwrite** without explicit confirmation. The orchestrator's first interview question covers this.
+If the repo already has an `AGENTS.md` (at the root, or at the legacy `ai-tools/AGENTS.md` path), **do not overwrite** without explicit confirmation. The orchestrator's first interview question covers this.
 
 ## Interview (Step 0 — before any sub-skill runs)
 
@@ -147,8 +147,8 @@ If the user answers "No" to any of the seven, that skill won't ship. If the user
 For each artifact, read it (frontmatter + body), then ask the user via `AskUserQuestion`:
 
 - **Instruction docs** (`AGENTS.md`, `CLAUDE.md`, etc.):
-  - `Merge into new ai-tools/AGENTS.md` — `vinta-write-agents-md` folds existing content into the canonical sections, preserving anything still accurate.
-  - `Keep as-is, link from ai-tools/AGENTS.md` — leave the file in place, reference it.
+  - `Merge into new AGENTS.md` — `vinta-write-agents-md` folds existing content into the canonical sections at the repo root, preserving anything still accurate.
+  - `Keep as-is, link from AGENTS.md` — leave the file in place, reference it.
   - `Replace from scratch` — discard existing, draft fresh from inventory + interview.
 
 - **Skills** (each under any vendor `skills/` dir):
@@ -173,7 +173,7 @@ Scan the repo root for `DESIGN.md` (case-insensitive). Per [Design.md with Curso
 
 If present, ask via `AskUserQuestion`:
 
-- `Keep and wire into AI tooling` (recommended) — leave file untouched at repo root; reference it from `ai-tools/AGENTS.md`; when `cursor` is in **Scope → Vendor coverage**, write `.cursor/rules/design.mdc` (Cursor Project Rules, Option A from the linked blog post) so Cursor auto-loads it before generating UI files.
+- `Keep and wire into AI tooling` (recommended) — leave file untouched at repo root; reference it from `AGENTS.md`; when `cursor` is in **Scope → Vendor coverage**, write `.cursor/rules/design.mdc` (Cursor Project Rules, Option A from the linked blog post) so Cursor auto-loads it before generating UI files.
 - `Keep as-is, don't reference` — leave the file alone; no AGENTS.md mention, no Cursor rule.
 - `Drop` — delete (rare; confirm twice before removing).
 
@@ -391,12 +391,14 @@ No skill / agent content lives in `resources/stacks/<stack>/`. That's by design 
 After Step 0.5 + all six sub-skills run, the target repo has:
 
 ```
+AGENTS.md                                   ← project conventions, at the repo root as a regular
+                                              file (not under ai-tools/, not a symlink) so its
+                                              relative links resolve for every reader
 .vinta-ai-workflows.yaml                    ← single source of truth (Step 0.5)
                                               schema: schemas/vinta-ai-workflows-config.v1.schema.json
 .vinta-ai-workflows/                        ← gitignored local state (only when systematic-debugging enabled)
 └── cache.yaml                              ← MCP preflight cache, schema: mcp-preflight-cache.v1.schema.json
 ai-tools/
-├── AGENTS.md
 ├── skills/
 │   ├── plan-feature/SKILL.md            ← always (copied verbatim from derive-skills resources)
 │   ├── create-spec/SKILL.md             ← always (copied verbatim)
@@ -448,7 +450,7 @@ ai-plans/                                 ← created by migrate-plans-specs (st
                                             write to this layout)
 ```
 
-Plus the symlinks + per-vendor generated files, set up by the install step.
+Plus the symlinks + per-vendor generated files, set up by the install step. The doc aliases among them (`CLAUDE.md`, `.github/copilot-instructions.md`) point at the root `AGENTS.md` and are created only for selected vendors.
 
 Foundation skills break into three buckets — see [vinta-derive-skills](../vinta-derive-skills/SKILL.md) for the full mechanics:
 
@@ -481,7 +483,7 @@ Stack-specific skills + agents land in the target only when the user provides te
 
 After all sub-skills finish:
 
-1. `ls -la ai-tools/` — confirm AGENTS.md, skills/, agents/, scripts/ all exist.
+1. `ls -la AGENTS.md ai-tools/` — confirm root `AGENTS.md` is a regular file and `ai-tools/` has skills/, agents/, scripts/.
 2. `node ai-tools/scripts/setup-ai-tools.mjs` — runs cleanly, no errors.
 3. Each selected vendor's directory has the expected files: `.claude/agents/*.md`, `.cursor/agents/*.md`, `.github/agents/*.agent.md`, `.codex/agents/*.toml`.
 4. Spot-check one skill, one agent: open SKILL.md / `<agent>.yaml` and confirm content describes THIS project (not a copy-pasted template with `<placeholder>` strings).

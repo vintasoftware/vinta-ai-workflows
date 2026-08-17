@@ -120,7 +120,7 @@
           "type": "string"
         },
         "dependency_licenses": {
-          "description": "Third-party dependency license policy. Captured at bootstrap; rendered into `ai-tools/AGENTS.md` (`## Dependency licenses` section) and the `implement-plan` / `amend-plan` skill bodies so the implementer / reviewer agents check a new dep's SPDX license against `forbidden_spdx` before running any install command (`npm add`, `pnpm add`, `pip install`, `poetry add`, `uv add`, `cargo add`, `go get`, etc.). When `enforcement: block`, the agent must refuse the install and surface the violation to the user; `warn` records the violation in the phase report but proceeds; `off` skips the check entirely.",
+          "description": "Third-party dependency license policy. Captured at bootstrap; rendered into the repo-root `AGENTS.md` (`## Dependency licenses` section) and the `implement-plan` / `amend-plan` skill bodies so the implementer / reviewer agents check a new dep's SPDX license against `forbidden_spdx` before running any install command (`npm add`, `pnpm add`, `pip install`, `poetry add`, `uv add`, `cargo add`, `go get`, etc.). When `enforcement: block`, the agent must refuse the install and surface the violation to the user; `warn` records the violation in the phase report but proceeds; `off` skips the check entirely.",
           "type": "object",
           "required": ["enforcement", "forbidden_spdx"],
           "additionalProperties": false,

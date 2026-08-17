@@ -144,7 +144,7 @@ This is a load-bearing input for the rest of the bootstrap flow — surface ever
 
 **Instruction documents** — search for any of these and capture their content:
 
-- `AGENTS.md` (root + per-app in monorepos).
+- `AGENTS.md` (root + per-app in monorepos; also the legacy `ai-tools/AGENTS.md` path).
 - `CLAUDE.md`, `.cursorrules`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`.
 - Codex / Cursor / Copilot instructions inside vendor dirs (`.codex/AGENTS.md`, etc.).
 - Anything tagged "AI conventions" / "Coding agent guide" / "LLM rules" in CONTRIBUTING / docs.
@@ -186,7 +186,8 @@ For each agent, also classify:
 
 - `ai-tools/scripts/setup-ai-tools.mjs` (Vinta canonical multi-vendor setup).
 - `package.json#scripts.setup:ai-tools` or similar alias.
-- Symlinks: `AGENTS.md → ai-tools/AGENTS.md`, `.claude/skills → ../ai-tools/skills`, etc.
+- Symlinks: `CLAUDE.md → AGENTS.md`, `.github/copilot-instructions.md → ../AGENTS.md`, `.claude/skills → ../ai-tools/skills`, etc.
+- **Legacy layout**: a root `AGENTS.md` that is a *symlink* into `ai-tools/AGENTS.md` predates the move of the doc to the repo root. Record it — [vinta-sync-ai-tools](../vinta-sync-ai-tools/SKILL.md) migrates it.
 
 **Plan/spec docs** — flag presence (full inventory comes later from [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md)):
 

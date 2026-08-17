@@ -161,7 +161,7 @@ When this skill runs inside [implement-plan](../implement-plan/SKILL.md) (the in
 
 For the review gate in Phase 4, this skill shares [review-phase](../review-phase/SKILL.md) with implement-plan and amend-plan — one review implementation across all three, so a bug fix meets the same three-layer bar as any planned phase.
 
-For new test scaffolding, defer to the project's test conventions captured in [AGENTS.md](../../AGENTS.md). For env / config issues uncovered in Phase 0, route to the project's `add-env-var` skill if shipped (`{{PROJECT_SKILLS_LIST}}`).
+For new test scaffolding, defer to the project's test conventions captured in [AGENTS.md](../../../AGENTS.md). For env / config issues uncovered in Phase 0, route to the project's `add-env-var` skill if shipped (`{{PROJECT_SKILLS_LIST}}`).
 
 ## Verification checklist (apply before claiming a bug fixed)
 

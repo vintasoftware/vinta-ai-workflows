@@ -11,7 +11,7 @@ The rendered section sits **directly before** `## Working instructions` so subag
 ```markdown
 ## Adding new third-party dependencies
 
-Before running any install command (`npm add`, `pnpm add`, `yarn add`, `pip install`, `poetry add`, `uv add`, `cargo add`, `go get`, `gem install`, equivalents), check the package's SPDX license against the project's forbidden list — see the **Dependency licenses** section in [AGENTS.md](AGENTS.md) for the full list, the per-package overrides, and any project-specific notes.
+Before running any install command (`npm add`, `pnpm add`, `yarn add`, `pip install`, `poetry add`, `uv add`, `cargo add`, `go get`, `gem install`, equivalents), check the package's SPDX license against the project's forbidden list — see the **Dependency licenses** section in [AGENTS.md](../../../AGENTS.md) for the full list, the per-package overrides, and any project-specific notes.
 
 Quick lookup:
 

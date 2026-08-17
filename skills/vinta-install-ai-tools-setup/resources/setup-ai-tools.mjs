@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// Setup script: wire ai-tools/{AGENTS.md,skills,agents/*.yaml} into every supported vendor.
+// Setup script: wire AGENTS.md + ai-tools/{skills,agents/*.yaml} into every supported vendor.
 //
 // Source of truth:
-//   - ai-tools/AGENTS.md           — universal project conventions (markdown).
+//   - AGENTS.md                    — universal project conventions (markdown). Lives at the
+//                                    repo root so its relative links resolve for every reader.
 //   - ai-tools/skills/<name>/      — universal skills (SKILL.md format converges across
 //                                    Claude Code, Cursor, Codex, VS Code Copilot — symlinked).
 //   - ai-tools/agents/<name>.yaml  — vendor-agnostic sub-agent definitions. This script
@@ -10,7 +11,7 @@
 //                                    format each tool expects (markdown, .agent.md, .toml).
 //
 // What this script does:
-//   1. Symlinks ai-tools/AGENTS.md + ai-tools/skills/ into each vendor's expected paths.
+//   1. Symlinks AGENTS.md + ai-tools/skills/ into each vendor's expected paths.
 //   2. Reads each ai-tools/agents/<name>.yaml.
 //   3. For every supported vendor, generates a target file with vendor-specific frontmatter
 //      / format. Vendor-specific overrides come from the YAML's `overrides:<vendor>:` block;
@@ -122,6 +123,12 @@ const DEFAULTS = {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function ensureSymlink(target, linkPath) {
+  // `target` is relative to the link's own directory, so resolve it from there.
+  // A missing target would produce a broken link that reads as empty to an agent.
+  const resolved = join(dirname(linkPath), target);
+  if (!existsSync(resolved)) {
+    throw new Error(`[setup-ai-tools] cannot link ${linkPath} → ${target}: ${resolved} does not exist`);
+  }
   mkdirSync(dirname(linkPath), { recursive: true });
   let existing;
   try {
@@ -285,21 +292,27 @@ function emitCodex(name, doc, body) {
 
 const gitignoreAdded = ensureGitignoreEntries(['.vinta-ai-workflows/']);
 
-// ── Stage 1: stable symlinks (skills + AGENTS.md) ────────────────────────
+// ── Stage 1: stable symlinks (skills + vendor doc aliases) ───────────────
 
-// Universal anchors — always set up regardless of --only selection.
-ensureSymlink('ai-tools/AGENTS.md', 'AGENTS.md');
+// AGENTS.md is a real file at the repo root. Each vendor that reads it under a
+// different filename gets a symlink below.
+//
+// Skills are symlinked into .agents/, .claude/, .cursor/, and .github/, so a
+// SKILL.md always sits at <top-level-dir>/skills/<name>/SKILL.md — three levels
+// below the root through every path. That is why SKILL.md files link the doc as
+// `../../../AGENTS.md`. Keep new skills dirs at <top-level-dir>/skills.
 ensureSymlink('../ai-tools/skills', '.agents/skills');
 
 // Vendor-specific symlinks — gated on SELECTED.
 if (SELECTED.has('claude')) {
+  ensureSymlink('AGENTS.md', 'CLAUDE.md');
   ensureSymlink('../ai-tools/skills', '.claude/skills');
 }
 if (SELECTED.has('cursor')) {
   ensureSymlink('../ai-tools/skills', '.cursor/skills');
 }
 if (SELECTED.has('copilot')) {
-  ensureSymlink('../ai-tools/AGENTS.md', '.github/copilot-instructions.md');
+  ensureSymlink('../AGENTS.md', '.github/copilot-instructions.md');
   ensureSymlink('../ai-tools/skills', '.github/skills');
 }
 // Codex shares `.agents/skills` (already linked above) — no extra symlink needed.
@@ -367,9 +380,9 @@ if (gitignoreAdded.length) {
 }
 
 console.log('Symlinks ensured:');
-console.log('  AGENTS.md                          → ai-tools/AGENTS.md');
 console.log('  .agents/skills                     → ../ai-tools/skills');
 if (SELECTED.has('claude')) {
+  console.log('  CLAUDE.md                          → AGENTS.md');
   console.log('  .claude/skills                     → ../ai-tools/skills');
 }
 if (SELECTED.has('cursor')) {
@@ -377,7 +390,7 @@ if (SELECTED.has('cursor')) {
 }
 if (SELECTED.has('copilot')) {
   console.log('  .github/skills                     → ../ai-tools/skills');
-  console.log('  .github/copilot-instructions.md    → ../ai-tools/AGENTS.md');
+  console.log('  .github/copilot-instructions.md    → ../AGENTS.md');
 }
 console.log('');
 
