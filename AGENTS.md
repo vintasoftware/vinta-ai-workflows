@@ -44,10 +44,11 @@ Vendor auto-discovery is wired via committed symlinks at the repo root — no pe
 
 ## How to verify changes
 
-There is no build, no test suite, no lint config in this repo. Verification is a short fixed list:
+There is no build or lint config in this repo. Verification is a short fixed list:
 
 | Change touches | Verification |
 |---|---|
+| `skills/vinta-install-ai-tools-setup/resources/setup-ai-tools.mjs` | `npm test` runs the generator against a temporary target project and checks its generated files. |
 | `vinta-ai-workflows.mjs` | `node vinta-ai-workflows.mjs list` from repo root must succeed. `node vinta-ai-workflows.mjs install --tool claude-code --target /tmp/scratch --dry-run` must print a plausible plan. |
 | any `*.json` under `schemas/` | `python3 -c "import json; json.load(open('schemas/<file>'))"`. For non-trivial edits, validate a known-good payload against it with `ajv-cli` if available. |
 | any Python in `skills/.../resources/*.py` | `python3 -m py_compile <path>`. These files are templates copied into target projects, but they must be syntactically valid Python so consumers don't get a broken paste. |
