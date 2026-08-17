@@ -165,8 +165,8 @@ function resolveVendorConfig(doc, vendor) {
   return { ...base, ...overrides };
 }
 
-function escapeTomlBasic(s) {
-  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+function escapeTomlBasic(value) {
+  return JSON.stringify(String(value)).slice(1, -1);
 }
 
 function escapeTomlMultiline(body) {
