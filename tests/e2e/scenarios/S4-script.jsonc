@@ -1,0 +1,24 @@
+// S4 — One-off script (PLAN §5). `/add-one-off-script` for a task with a
+// checkable side effect. Runs against `current/`.
+{
+  "id": "S4-script",
+  "fixture": "medplum-provider",
+  "state": "current",
+  "steps": [
+    {
+      "invoke": "/add-one-off-script",
+      "input": "tasks/script.md",
+      "answers": "tasks/script.answers.md",
+      "autonomous": true
+    }
+  ],
+  "graders": ["script-output", "git-tree-healthy"],
+  "expect": {
+    "script": {
+      // Script must run non-interactively and emit the CSV artifact.
+      "run": "npx tsx scripts/one_off_2026_08_01_export_observations/run.ts",
+      "artifact": "scripts/one_off_2026_08_01_export_observations/out/observations.csv"
+    }
+  },
+  "budget": { "maxWallSec": 1200 }
+}
