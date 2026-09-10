@@ -11,6 +11,7 @@
  * failure paths too: a suite that leaks listeners fails the next run for a
  * reason that has nothing to do with the code under test.
  */
+import Database from 'better-sqlite3'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { networkInterfaces, tmpdir } from 'node:os'
@@ -27,14 +28,20 @@ import {
   OkResponseSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
+  HumanQuestionSchema,
   EventStream,
+  harnessCapabilities,
   startDaemon,
   runControl,
   type Daemon,
   type Frame,
   type RunControl,
 } from '../src/daemon/index.ts'
+import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
+import { CodexAdapter } from '../src/harness/codex.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
+import { OpencodeAdapter } from '../src/harness/opencode.ts'
+import type { StoredEvent } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
@@ -380,7 +387,13 @@ describe('snapshots', () => {
       holders: [{ resource: 'test-suite', nodeId: 'a', acquiredAt: expect.any(Number) }],
     })
     expect(snapshot.harnesses).toEqual([
-      { id: HARNESS, ceiling: 4, inFlight: 1, wakeAt: null },
+      {
+        id: HARNESS,
+        ceiling: 4,
+        inFlight: 1,
+        wakeAt: null,
+        capabilities: new ClaudeCodeAdapter().capabilities,
+      },
     ])
     lease.release()
   })
@@ -1118,5 +1131,155 @@ describe('cold start', () => {
       status: 'done',
     })
     expect(listed.runs[0]?.endedAt).toEqual(expect.any(Number))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 10: §7's capabilities on the wire
+// ---------------------------------------------------------------------------
+
+describe('harness capabilities', () => {
+  it('serves each adapter’s own declaration, so a UI copy cannot drift from it', async () => {
+    const workflow = makeWorkflow()
+    // Two harnesses in one run, so the snapshot has to key them apart.
+    const mixed = WorkflowSchema.parse({
+      ...workflow,
+      nodes: [
+        { id: 'a', name: 'A', prompt_ref: 'plan.md#a' },
+        { id: 'b', name: 'B', prompt_ref: 'plan.md#b', harness: 'codex' },
+      ],
+    })
+    const r = await rig({ workflow: mixed })
+
+    const snapshot = RunSnapshotSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}`)).body)
+    const served = new Map(snapshot.harnesses.map((state) => [state.id, state.capabilities]))
+
+    // The assertion that makes drift a test failure rather than a lie told to
+    // an operator: what the wire says is what the adapter object says.
+    for (const adapter of [new ClaudeCodeAdapter(), new CodexAdapter(), new OpencodeAdapter()]) {
+      expect(harnessCapabilities(adapter.id)).toEqual(adapter.capabilities)
+    }
+    expect(served.get('claude-code')).toEqual(new ClaudeCodeAdapter().capabilities)
+    expect(served.get('codex')).toEqual(new CodexAdapter().capabilities)
+    // The one field that differs between the two, spelled out: this is what
+    // the node view greys a control on.
+    expect(served.get('claude-code')?.inject).toBe(true)
+    expect(served.get('codex')?.inject).toBe(false)
+  })
+
+  it('declares nothing for a harness it does not ship, rather than guessing', async () => {
+    const r = await rig()
+    // A node registered under an out-of-tree id — a test double, an adapter
+    // this daemon has never heard of.
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'z',
+      type: 'node_registered',
+      payload: { wave: 1, harness: 'some-other-harness' },
+    })
+
+    const snapshot = RunSnapshotSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}`)).body)
+    const unknown = snapshot.harnesses.find((state) => state.id === 'some-other-harness')
+
+    expect(unknown).toBeDefined()
+    // Null is "undeclared", which the UI degrades on. It is not a block of
+    // falses masquerading as a declaration, and it is not an omitted key.
+    expect(unknown?.capabilities).toBeNull()
+    expect(harnessCapabilities('some-other-harness')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 11: §9.1 — delivery survives a restart without re-firing
+// ---------------------------------------------------------------------------
+
+describe('notification delivery across a restart', () => {
+  it('re-serves the journalled question after a restart without journalling a second one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-daemon-refire-'))
+    const first = openJournal(dir)
+    first.createRun(RUN_ID, makeWorkflow())
+
+    // The pause, exactly as the scheduler writes it: the question is journalled
+    // *before* the effect that raises the notification runs, which is what
+    // makes delivery once-per-pause a structural property rather than a flag.
+    first.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'human_question',
+      payload: {
+        effect_id: 'e-ask',
+        question: 'The branch is green. Ship it?',
+        kind: 'confirm',
+        context: { gateLogRef: 'unit' },
+      },
+    })
+    first.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'awaiting_human' } })
+    const before = first.events(RUN_ID, 0)
+    first.close()
+
+    // A new process over the same journal: the restart.
+    const journal = openJournal(dir)
+    const daemon = await startDaemon({ journal, pollMs: 5 })
+    daemon.register({
+      runId: RUN_ID,
+      // No `question` callback and no in-memory pause: whatever the restarted
+      // daemon serves came out of the log.
+      control: runControl({ statuses: {}, answer: () => {} }),
+      pools: new ResourcePools(makeWorkflow().resources, { agingMs: 0 }),
+      admission: { ceiling: () => 4, inFlight: () => 0, wakeAt: () => undefined },
+    })
+    cleanups.push(async () => {
+      await daemon.close()
+      journal.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    const detail = NodeDetailSchema.parse(
+      (await call(daemon, `/api/runs/${RUN_ID}/nodes/a`)).body,
+    )
+    expect(detail.question).toEqual({
+      question: 'The branch is green. Ship it?',
+      kind: 'confirm',
+      context: { gateLogRef: 'unit' },
+    })
+
+    // The whole of "does not re-fire": coming back up appended nothing. There
+    // is one pause in the log, so there is one notification to raise, and the
+    // effect that would have raised a second one never ran.
+    const after = journal.events(RUN_ID, 0)
+    const shape = (events: readonly StoredEvent[]) =>
+      events.map((event) => [event.type, 'nodeId' in event ? event.nodeId : null])
+    expect(shape(after)).toEqual(shape(before))
+    expect(after.filter((event) => event.type === 'human_question')).toHaveLength(1)
+    expect(journal.pendingQuestions(RUN_ID).map((pending) => pending.effectId)).toEqual(['e-ask'])
+
+    // …and it does so with no `notified` state anywhere: not a column, not a
+    // field on the wire, not a key in the payload. Delivery is derivable from
+    // `events`, which is the only reason it can survive a restart at all.
+    // A second connection rather than a peek at `Journal`'s private handle:
+    // the claim is about what is *stored*, and only the file can answer that.
+    const schema = new Database(join(dir, 'flow.db'))
+    const sql = (
+      schema.prepare('SELECT sql FROM sqlite_master WHERE sql IS NOT NULL').all() as {
+        sql: string
+      }[]
+    )
+      .map((row) => row.sql)
+      .join('\n')
+    schema.close()
+    expect(sql).not.toMatch(/notif/i)
+    expect(Object.keys(HumanQuestionSchema.shape)).toEqual([
+      'question',
+      'kind',
+      'choices',
+      'context',
+    ])
+    const question = after.find((event) => event.type === 'human_question')
+    expect(Object.keys(question?.payload as object).sort()).toEqual([
+      'context',
+      'effect_id',
+      'kind',
+      'question',
+    ])
   })
 })

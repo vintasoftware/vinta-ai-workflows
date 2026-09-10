@@ -10,7 +10,11 @@
  *   harness cannot do instead of failing when the operator tries. A message
  *   typed at a harness that cannot inject is not lost — the scheduler queues
  *   it — but saying "sent" would be a lie, so the box says what will actually
- *   happen before it is pressed.
+ *   happen before it is pressed. They come off the run snapshot, read from
+ *   the adapters themselves — this view used to consult a hand-copy of the
+ *   three adapters' blocks, which could drift from them silently and make
+ *   every sentence below a confident falsehood. A harness the daemon does not
+ *   ship declares nothing, and this view assumes nothing.
  * - **Nothing is optimistic.** An operation posts, and then the detail is
  *   re-read. The daemon's journal is what decides whether a message reached a
  *   session, and this view renders that answer rather than predicting it.
@@ -23,8 +27,7 @@
  * action the API cannot perform does not belong on a control.
  */
 import { useEffect, useState } from 'react'
-import type { NodeDetail } from '../../src/daemon/schemas.ts'
-import { capabilitiesOf, isKnownHarness } from './capabilities.ts'
+import type { NodeDetail, RunSnapshot } from '../../src/daemon/schemas.ts'
 import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
 import type { NodeStatus } from './projection.ts'
@@ -36,7 +39,31 @@ import { useRun } from './useRun.ts'
 /** Covers transcript growth, which journals no event to ride in on. */
 const REFRESH_MS = 2000
 
+type Capabilities = NonNullable<RunSnapshot['harnesses'][number]['capabilities']>
 type Question = NonNullable<NodeDetail['question']>
+
+/**
+ * What an undeclared harness is assumed to be able to do: nothing it has not
+ * claimed, except resume, which every adapter must support to be scheduled at
+ * all. The cost of this assumption is a note saying "queued" about a message
+ * that was in fact delivered live; the cost of the opposite is telling the
+ * operator their steering landed in a turn that never received it.
+ *
+ * It is also what a snapshot that has not arrived yet reads as, which is the
+ * conservative way round.
+ */
+const ASSUMED: Capabilities = {
+  inject: false,
+  interrupt: false,
+  resume: true,
+  pty: false,
+  permissionControl: false,
+}
+
+/** §7's block for this node's harness, off the wire. Null when undeclared. */
+function capabilitiesOf(snapshot: RunSnapshot | null, harness: string): Capabilities | null {
+  return snapshot?.harnesses.find((state) => state.id === harness)?.capabilities ?? null
+}
 type Answer = OperationBody<'answer'>['answer']
 
 export function NodeView({
@@ -48,7 +75,7 @@ export function NodeView({
   readonly runId: string
   readonly nodeId: string
 }) {
-  const { projection, connected } = useRun(client, runId)
+  const { projection, snapshot, connected } = useRun(client, runId)
   const tick = useNow(REFRESH_MS)
   const [detail, setDetail] = useState<NodeDetail | null>(null)
   const [reloads, setReloads] = useState(0)
@@ -142,6 +169,7 @@ export function NodeView({
 
       <Steering
         harness={detail.node.harness}
+        capabilities={capabilitiesOf(snapshot, detail.node.harness)}
         status={status}
         busy={busy}
         onOperate={(operation, body, done) => void operate(operation, body, done)}
@@ -271,11 +299,14 @@ function Pending({
  */
 function Steering({
   harness,
+  capabilities,
   status,
   busy,
   onOperate,
 }: {
   readonly harness: string
+  /** The adapter's own declaration, or null for a harness that made none. */
+  readonly capabilities: Capabilities | null
   readonly status: NodeStatus
   readonly busy: boolean
   readonly onOperate: <K extends NodeOperation>(
@@ -285,7 +316,7 @@ function Steering({
   ) => void
 }) {
   const [text, setText] = useState('')
-  const capabilities = capabilitiesOf(harness)
+  const declared = capabilities ?? ASSUMED
   const settled = status === 'done' || status === 'failed'
   const empty = text.trim() === ''
   const send = <K extends NodeOperation>(operation: K, body: OperationBody<K>, done: string) => {
@@ -305,9 +336,9 @@ function Steering({
         disabled={settled}
       />
       <p className="muted" data-delivery>
-        {delivery(harness, status, capabilities.inject)}
+        {delivery(harness, status, declared.inject)}
       </p>
-      {!capabilities.interrupt && !settled && (
+      {!declared.interrupt && !settled && (
         <p className="muted" data-redirect-note>
           {harness} cannot interrupt a running turn, so a redirect also lands at the next resume.
         </p>
@@ -347,10 +378,12 @@ function Steering({
         </button>
       </p>
       <p className="muted" data-takeover>
-        {capabilities.pty
+        {declared.pty
           ? 'Take over: the daemon does not serve a PTY channel yet.'
           : `Take over: ${harness} has no interactive takeover.`}
-        {isKnownHarness(harness) ? '' : ' Capabilities for this harness are unknown and assumed absent.'}
+        {capabilities === null
+          ? ' Capabilities for this harness are unknown and assumed absent.'
+          : ''}
       </p>
     </section>
   )

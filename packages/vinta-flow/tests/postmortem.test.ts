@@ -20,7 +20,13 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { computeWaves } from '../src/graph.ts'
-import type { NewEvent, NodeStatus, RunStatus, StoredEvent } from '../src/journal/events.ts'
+import type {
+  GateStatus,
+  NewEvent,
+  NodeStatus,
+  RunStatus,
+  StoredEvent,
+} from '../src/journal/events.ts'
 import {
   parsePostMortem,
   postMortem,
@@ -114,6 +120,16 @@ class Tape implements PostMortemSource {
     return this.push(ts, { runId: RUN, nodeId, type: 'node_status', payload: { status } })
   }
 
+  /** One journalled gate verdict. Ids and an exit code — never the gate's output. */
+  gate(ts: number, nodeId: string, gate: string, status: GateStatus): this {
+    return this.push(ts, {
+      runId: RUN,
+      nodeId,
+      type: 'gate_result',
+      payload: { gate, exit_code: status === 'passed' ? 0 : 1, status },
+    })
+  }
+
   /** Dispatched and settled, with nothing interesting in between. */
   ran(nodeId: string, from: number, to: number, settle: NodeStatus = 'done'): this {
     this.status(from, nodeId, 'running')
@@ -137,6 +153,9 @@ const cleanTape = (): Tape => {
 
 const gapOf = (report: PostMortem, kind: string) =>
   report.gaps.find((gap) => gap.kind === kind)
+
+/** With the integration record supplied, so only the journal's gaps are in play. */
+const report_ = (tape: Tape): PostMortem => postMortem(tape, RUN, { integration: [] })
 
 // ---------------------------------------------------------------------------
 // 1. Dependencies declared but never used
@@ -208,11 +227,71 @@ describe('dependencies discovered missing', () => {
     ])
   })
 
-  it('states that the evidence is ordering, not a proven gate result', () => {
+  it('states that the evidence is ordering when the run recorded no gate result', () => {
     const gap = gapOf(postMortem(discovered(), RUN, { integration: [] }), 'gate_result_unrecorded')
     expect(gap?.nodes).toEqual(['p3'])
-    expect(gap?.needs).toContain('an event recording each gate attempt')
+    expect(gap?.needs).toContain('a `gate_result` event for these phases')
     expect(gap?.needs).toContain('ordering evidence')
+    // No gate result to name, so the finding carries no gate.
+    expect(report_(discovered()).findings.missing_dependencies[0]?.gate).toBeUndefined()
+  })
+
+  /**
+   * The shape the journal used to lose entirely. `p3`'s gate goes red, a phase
+   * it does not depend on lands, the gate goes green — and the node never
+   * reaches `node_status: failed` at all, because the pipeline recovered on
+   * its own. Before gate results were journalled this run looked like a clean
+   * one, which made the most common missing dependency the least visible.
+   */
+  const gateRecovered = (): Tape => {
+    const tape = new Tape(chain()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.status(T0 + 12 * MIN, 'p3', 'running')
+    tape.gate(T0 + 20 * MIN, 'p3', 'unit', 'failed')
+    tape.ran('p2', T0 + 12 * MIN, T0 + 25 * MIN)
+    tape.gate(T0 + 30 * MIN, 'p3', 'unit', 'passed')
+    tape.status(T0 + 32 * MIN, 'p3', 'done')
+    tape.ran('p4', T0 + 33 * MIN, T0 + 43 * MIN)
+    return tape.end(T0 + 44 * MIN)
+  }
+
+  it('uses a recorded gate result as the window, and names the gate', () => {
+    const report = report_(gateRecovered())
+
+    expect(report.findings.missing_dependencies).toEqual([
+      {
+        node: 'p3',
+        depends_on: 'p2',
+        // The window is the gate's, not the node's: red at 20, green at 30.
+        failed_at_ms: T0 + 20 * MIN,
+        landed_at_ms: T0 + 25 * MIN,
+        passed_at_ms: T0 + 30 * MIN,
+        gate: 'unit',
+      },
+    ])
+  })
+
+  it('drops the gate gap for a run whose gates were recorded', () => {
+    const report = report_(gateRecovered())
+
+    expect(gapOf(report, 'gate_result_unrecorded')).toBeUndefined()
+    // The gap that is genuinely still open stays open.
+    expect(gapOf(report, 'dependency_use_unrecorded')).toBeDefined()
+    expect(report.findings.unused_dependencies).toEqual([])
+  })
+
+  /** A different gate going green proves nothing about the one that went red. */
+  it('does not close a red gate with another gate’s pass', () => {
+    const tape = new Tape(chain()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.status(T0 + 12 * MIN, 'p3', 'running')
+    tape.gate(T0 + 20 * MIN, 'p3', 'unit', 'failed')
+    tape.ran('p2', T0 + 12 * MIN, T0 + 25 * MIN)
+    tape.gate(T0 + 30 * MIN, 'p3', 'lint', 'passed')
+    tape.status(T0 + 32 * MIN, 'p3', 'blocked')
+    tape.end(T0 + 44 * MIN)
+
+    expect(report_(tape).findings.missing_dependencies).toEqual([])
   })
 
   it('does not propose an edge the graph already implies, nor one that would cycle', () => {

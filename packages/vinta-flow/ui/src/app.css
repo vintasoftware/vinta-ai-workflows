@@ -303,3 +303,27 @@ textarea {
 .tone-error {
   background: var(--tone-error);
 }
+
+/*
+ * §9.1's browser channel, where it becomes visible: the reminder opt-in, and
+ * the banner a refused permission degrades to (§10). The banner carries the
+ * same body the notification would have — a node id and a fixed reason.
+ */
+.notifications {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--tone-attention);
+  border-radius: 4px;
+  background: var(--surface);
+}

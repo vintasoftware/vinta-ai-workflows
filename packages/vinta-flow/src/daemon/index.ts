@@ -9,6 +9,7 @@ export {
   type RunControl,
 } from './control.ts'
 export { createApi, type ApiOptions } from './api.ts'
+export { harnessCapabilities } from './harnesses.ts'
 export { createStaticHandler, DEFAULT_UI_DIR, type StaticHandler } from './static.ts'
 export { EventStream, DEFAULT_POLL_MS } from './stream.ts'
 export { startDaemon, type Daemon, type DaemonOptions } from './server.ts'
@@ -19,6 +20,7 @@ export {
   EventFrameSchema,
   FrameSchema,
   GateQueueSchema,
+  HarnessCapabilitiesSchema,
   HarnessStateSchema,
   HumanQuestionSchema,
   IssueSchema,

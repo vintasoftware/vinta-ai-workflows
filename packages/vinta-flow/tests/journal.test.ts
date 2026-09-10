@@ -311,6 +311,69 @@ describe('journal', () => {
     })
   })
 
+  /**
+   * The gate lifecycle, round-tripped. Both variants are history rather than
+   * state: `leases` is the *current* holder set and is cleared on open, so
+   * folding these into it would resurrect capacity no live process holds —
+   * and the rebuild below proves they change no projection at all.
+   */
+  it('round-trips the gate lifecycle without projecting it', () => {
+    journal.createRun('r1', golden())
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'gate_pool',
+      payload: { phase: 'requested', resources: ['test-suite'] },
+    })
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'gate_pool',
+      payload: { phase: 'granted', resources: ['test-suite'] },
+    })
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'gate_result',
+      payload: { gate: 'tests', exit_code: 1, status: 'failed' },
+    })
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'gate_pool',
+      payload: { phase: 'released', resources: ['test-suite'] },
+    })
+
+    const nodesBefore = journal.nodes('r1')
+    const runBefore = journal.run('r1')
+    const eventsBefore = journal.events('r1')
+
+    journal.rebuildProjections()
+
+    expect(journal.nodes('r1')).toEqual(nodesBefore)
+    expect(journal.run('r1')).toEqual(runBefore)
+    // The invariant: the events themselves are untouched by a rebuild, which
+    // is what makes them the only durable truth here.
+    expect(journal.events('r1')).toEqual(eventsBefore)
+    expect(journal.events('r1').map((event) => event.type).slice(-4)).toEqual([
+      'gate_pool',
+      'gate_pool',
+      'gate_result',
+      'gate_pool',
+    ])
+    expect(journal.events('r1').at(-2)).toMatchObject({
+      nodeId: 'p1',
+      payload: { gate: 'tests', exit_code: 1, status: 'failed' },
+    })
+    // §5.3: identifiers, an exit code and a status. Whatever the gate printed
+    // is in `gates/tests.log` and has no field here it could have reached.
+    expect(Object.keys(journal.events('r1').at(-2)?.payload ?? {}).sort()).toEqual([
+      'exit_code',
+      'gate',
+      'status',
+    ])
+  })
+
   it('reconstructs a consistent projection after the writer is SIGKILLed', async () => {
     journal.createRun('r1', golden())
     journal.close()

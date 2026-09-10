@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { AdmissionControl } from '../src/admission/admission.ts'
+import { analyzeRun } from '../src/analytics/analytics.ts'
 import type { Clock } from '../src/admission/clock.ts'
 import type {
   AgentSession,
@@ -579,6 +580,70 @@ describe('capacity', () => {
     // And the single gate slot was never over-subscribed.
     expect(held.every((sample) => sample.gate === 1 && sample.lane >= 1)).toBe(true)
     expectDrained(r)
+  })
+
+  /**
+   * The wait above is real and, until these events existed, invisible: the
+   * scheduler took those pools through `leases`, a table cleared on open whose
+   * rows vanish on release, so §13.3's "is gate capacity the constraint, or
+   * lane count" was half unanswerable. All three edges are journalled, in
+   * order, per node — and `analyzeRun` reading them back off a *real* journal
+   * is what proves the producer and the consumer agree.
+   */
+  it('journals every edge of a gate-pool acquisition', async () => {
+    const nodes = ['a', 'b', 'c'].map((id) => node(id, [], { gates: ['unit'], pipeline: 'gate' }))
+    const r = rig(
+      makeWorkflow(nodes, {
+        resources: {
+          lane: { capacity: 3, kind: 'worktree' },
+          'test-suite': { capacity: 1, kind: 'semaphore' },
+        },
+        gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+        pipelines: {
+          gate: {
+            states: [
+              {
+                id: 'gate',
+                name: 'Gate',
+                position: { x: 0, y: 0 },
+                onEnter: [{ id: 'e-gate', definitionId: 'run_gate', params: {} }],
+              },
+              { id: 'done', name: 'Done', position: { x: 200, y: 0 } },
+            ],
+            transitions: [{ id: 't-done', from: 'gate', to: 'done' }],
+            initialStateIds: ['gate'],
+            finalStateIds: ['done'],
+          },
+        },
+        pipeline: 'gate',
+      }),
+    )
+
+    await r.scheduler.run()
+
+    for (const id of ['a', 'b', 'c']) {
+      const edges = r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'gate_pool' && event.nodeId === id)
+      expect(edges.map((event) => (event.payload as { phase: string }).phase)).toEqual([
+        'requested',
+        'granted',
+        'released',
+      ])
+      // Pool ids and a phase. Nothing about the gate's command or its output.
+      expect(edges.map((event) => Object.keys(event.payload).sort())).toEqual([
+        ['phase', 'resources'],
+        ['phase', 'resources'],
+        ['phase', 'resources'],
+      ])
+      expect((edges[0]?.payload as { resources: string[] }).resources).toEqual(['test-suite'])
+    }
+
+    // The consumer's half: a pool that used to come back `unattributed` is now
+    // measured off exactly these events, on a journal nothing hand-wrote.
+    const pool = analyzeRun(r.journal, 'run-1').pools.find((p) => p.resource === 'test-suite')
+    expect(pool).toMatchObject({ attribution: 'exact', capacity: 1, peakHeld: 1 })
+    expect(analyzeRun(r.journal, 'run-1').gaps).toEqual([])
   })
 })
 

@@ -19,6 +19,14 @@
  * **Two of the four findings are not in the journal at all, and are handled
  * differently for a reason.**
  *
+ * A third — `missing_dependencies` — is now journalled well enough to be
+ * worth reading. `gate_result` records each gate's id, exit code and status,
+ * so the window a phase spent broken is the window one *named gate* spent
+ * red, and the common recovery shape (gate fails, fixer runs, gate passes,
+ * node never marked `failed`) is visible at all. It is still ordering
+ * evidence, not proof: the finding says an undeclared phase landed while a
+ * named gate was red, not that landing it is what turned the gate green.
+ *
  * Conflicts are *observed*, but by `src/integration/`, in process: `mergeWave`
  * returns `ConflictRecord`s and no event carries them. So they are an *input*
  * here — pass the integrator's wave results — and their absence is a `gaps[]`
@@ -90,11 +98,19 @@ export const MissingDependencySchema = z
     failed_at_ms: z.number().int().describe('When the phase first failed.'),
     landed_at_ms: z.number().int().describe('When the undeclared phase reached `done`.'),
     passed_at_ms: z.number().int().describe('When the phase finally reached `done`.'),
+    gate: Id.optional().describe(
+      'The gate whose recorded result is the evidence: it failed at `failed_at_ms` and ' +
+        'passed at `passed_at_ms`. Absent when the run recorded no gate result for the ' +
+        'phase and the window came from its status transitions instead — a weaker signal, ' +
+        'flagged in `gaps`.',
+    ),
   })
   .describe(
     'A dependency the run discovered and the plan did not declare: the phase failed, an ' +
-      'undeclared phase landed, and only then did it pass. The evidence is ordering — the ' +
-      'journal records no gate result, so the causal link is not proven (see `gaps`).',
+      'undeclared phase landed, and only then did it pass. The evidence is still ordering — ' +
+      'a recorded gate result narrows the window to one gate and rules out an unrelated ' +
+      'failure, but it does not prove the undeclared phase is what fixed it. Confirm the ' +
+      'edge against the plan before adding it.',
   )
 
 export const WaveConflictSchema = z
@@ -265,12 +281,21 @@ export class RunNotFinishedError extends Error {
 
 const SETTLED: ReadonlySet<NodeStatus> = new Set<NodeStatus>(['done', 'failed', 'blocked'])
 
+/** One journalled gate verdict. Gate id, when, and whether it was green. */
+interface GateRun {
+  readonly gate: string
+  readonly ts: number
+  readonly passed: boolean
+}
+
 interface Trace {
   wave: number | null
   startedAtMs: number | null
   settledAtMs: number | null
   firstFailedAtMs: number | null
   lastDoneAtMs: number | null
+  /** Every `gate_result` for this node, in commit order. */
+  gates: GateRun[]
 }
 
 const newTrace = (): Trace => ({
@@ -279,6 +304,7 @@ const newTrace = (): Trace => ({
   settledAtMs: null,
   firstFailedAtMs: null,
   lastDoneAtMs: null,
+  gates: [],
 })
 
 /**
@@ -332,6 +358,11 @@ export function postMortem(
         if (next === 'done') trace.lastDoneAtMs = event.ts
         continue
       }
+      case 'gate_result': {
+        const { gate, status } = event.payload
+        traceOf(event.nodeId).gates.push({ gate, ts: event.ts, passed: status === 'passed' })
+        continue
+      }
       default:
         // Lane assignments, questions and steering describe how a node spent
         // its time, which is `analytics.ts`'s subject and not this module's.
@@ -376,6 +407,41 @@ export function postMortem(
 // ---------------------------------------------------------------------------
 
 /**
+ * The window a phase spent broken: when it first went red, and when the same
+ * thing went green again.
+ *
+ * Gate results are preferred over status transitions, and are the reason this
+ * finding is worth reading. A node that fails a gate, runs a fixer and passes
+ * never reaches `node_status: failed` at all — the pipeline recovered — so
+ * before gate results were journalled the single most common shape of a
+ * missing dependency was invisible here. Gate evidence also names *which*
+ * gate, which rules out the unrelated-failure reading: the same command went
+ * red and then green with an undeclared phase landing in between.
+ *
+ * The status window remains the fallback, unchanged, for a run whose gates
+ * recorded nothing (a host that supplies no `run_gate` body) and for a node
+ * that failed outright and was re-run.
+ */
+function recoveryWindow(
+  trace: Trace | undefined,
+): { readonly failedAt: number; readonly passedAt: number; readonly gate?: string } | undefined {
+  for (const [index, run] of (trace?.gates ?? []).entries()) {
+    if (run.passed) continue
+    const recovered = trace?.gates.find(
+      (later, at) => at > index && later.gate === run.gate && later.passed && later.ts > run.ts,
+    )
+    if (recovered !== undefined) {
+      return { failedAt: run.ts, passedAt: recovered.ts, gate: run.gate }
+    }
+  }
+
+  const failedAt = trace?.firstFailedAtMs
+  const passedAt = trace?.lastDoneAtMs
+  if (failedAt == null || passedAt == null || passedAt <= failedAt) return undefined
+  return { failedAt, passedAt }
+}
+
+/**
  * A phase that failed, and passed only after a phase it does not depend on had
  * landed.
  *
@@ -405,10 +471,9 @@ function missingDependencies(
   }
 
   for (const node of workflow.nodes) {
-    const trace = traces.get(node.id)
-    const failedAt = trace?.firstFailedAtMs
-    const passedAt = trace?.lastDoneAtMs
-    if (failedAt == null || passedAt == null || passedAt <= failedAt) continue
+    const window = recoveryWindow(traces.get(node.id))
+    if (window === undefined) continue
+    const { failedAt, passedAt } = window
 
     const declared = ancestors(node.id)
     const downstream = new Set(transitiveDependents(workflow.nodes, node.id))
@@ -423,6 +488,7 @@ function missingDependencies(
         failed_at_ms: failedAt,
         landed_at_ms: landedAt,
         passed_at_ms: passedAt,
+        ...(window.gate === undefined ? {} : { gate: window.gate }),
       })
     }
   }
@@ -546,19 +612,30 @@ function gaps(
     })
   }
 
-  const failed = workflow.nodes
+  // Gate results *are* journalled now, so this gap narrowed from "every failed
+  // node" to "the failed nodes this run recorded none for" — a host that
+  // supplies no `run_gate` body, or a node that failed before reaching a gate.
+  // Their `missing_dependencies` entries carry no `gate` and rest on the node's
+  // status transitions alone, which is the weaker evidence the reader must know
+  // about. Nodes whose gates *were* recorded are no longer listed here: keeping
+  // them would be a stale gap, which is its own kind of lie.
+  const unrecorded = workflow.nodes
     .map((node) => node.id)
-    .filter((id) => traces.get(id)?.firstFailedAtMs != null)
-  if (failed.length > 0) {
+    .filter((id) => {
+      const trace = traces.get(id)
+      return trace?.firstFailedAtMs != null && trace.gates.length === 0
+    })
+  if (unrecorded.length > 0) {
     found.push({
       kind: 'gate_result_unrecorded',
-      nodes: failed,
+      nodes: unrecorded,
       needs:
-        'an event recording each gate attempt — gate id, exit status and the node it ran ' +
-        'for. Gate output goes to a log file and the result reaches no event, so a failure ' +
-        'in the log is a failure of unknown cause. Every `missing_dependencies` entry is ' +
-        'therefore ordering evidence (failed, then an undeclared phase landed, then passed) ' +
-        'and not a proven causal link; confirm the edge against the plan before adding it.',
+        'a `gate_result` event for these phases — gate id, exit code and status, which the ' +
+        'executor writes for every gate it runs. This run recorded none for them, so a ' +
+        'failure in their gate log is a failure of unknown cause and any ' +
+        '`missing_dependencies` entry naming them is ordering evidence (failed, then an ' +
+        'undeclared phase landed, then passed) rather than a failure of one identified ' +
+        'gate; confirm the edge against the plan before adding it.',
     })
   }
 

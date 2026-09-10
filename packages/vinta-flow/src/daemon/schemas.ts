@@ -25,6 +25,7 @@
  * become a second copy of it.
  */
 import { z } from 'zod'
+import type { HarnessCapabilities } from '../harness/adapter.ts'
 import type { NodeStatus, RunStatus } from '../journal/events.ts'
 
 /** Compile-time exhaustiveness: a new status must be added to the enum below. */
@@ -120,6 +121,37 @@ export const ResourceStateSchema = z.strictObject({
   holders: z.array(z.string()),
 })
 
+/**
+ * §7's capability block, on the wire.
+ *
+ * It lives on the harness rather than on the node because that is whose
+ * property it is. A node carries a harness *id*; repeating the block per node
+ * would put thirty copies of one fact in a snapshot and make it possible for
+ * two of them to disagree — the same drift this field exists to end, moved
+ * inside a single response.
+ *
+ * The keys are held to the adapter interface at compile time below, and the
+ * values are read off the adapters themselves in `harnesses.ts`, so there is
+ * no second declaration of what a harness can do.
+ */
+export const HarnessCapabilitiesSchema = z.strictObject({
+  /** Deliver a message into a running turn. */
+  inject: z.boolean(),
+  interrupt: z.boolean(),
+  /** Continue a prior session by id. */
+  resume: z.boolean(),
+  /** Interactive takeover. */
+  pty: z.boolean(),
+  /** Non-interactive tool permission policy. */
+  permissionControl: z.boolean(),
+})
+
+type WireCapability = keyof z.infer<typeof HarnessCapabilitiesSchema>
+
+/** Compile-time, both ways: a capability added or dropped by §7 breaks here. */
+export type _CapabilitiesCovered = Covers<keyof HarnessCapabilities, WireCapability> &
+  Covers<WireCapability, keyof HarnessCapabilities>
+
 /** §6.1's per-harness state: the discovered ceiling and any wait window. */
 export const HarnessStateSchema = z.strictObject({
   id: z.string(),
@@ -127,6 +159,13 @@ export const HarnessStateSchema = z.strictObject({
   inFlight: z.number().int(),
   /** Epoch ms, or null when the harness is not parked. */
   wakeAt: z.number().int().nullable(),
+  /**
+   * What this harness can do, or null when the daemon has no adapter under
+   * that id — a test double, an out-of-tree adapter. Null is not "nothing":
+   * it is "not declared", and the UI degrades to assuming nothing rather than
+   * claiming a capability nobody stated.
+   */
+  capabilities: HarnessCapabilitiesSchema.nullable(),
 })
 
 /**

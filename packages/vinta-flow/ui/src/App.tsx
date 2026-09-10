@@ -13,6 +13,7 @@
 import { useEffect, useState } from 'react'
 import type { Client } from './client.ts'
 import { NodeView } from './Node.tsx'
+import { Notifications } from './Notifications.tsx'
 import { Run } from './Run.tsx'
 import { Runs } from './Runs.tsx'
 
@@ -41,6 +42,8 @@ export function App({ client }: { readonly client: Client }) {
         <h1>
           <a href="#/">vinta-flow</a>
         </h1>
+        {/* §9.1's browser channel: its opt-in, and its degrade when refused. */}
+        <Notifications />
       </header>
       {view()}
     </main>

@@ -477,6 +477,13 @@ export class Journal {
         // Steering is journalled for the record, not projected: what it did to
         // the node shows up as the status and question events it caused.
         return
+      case 'gate_pool':
+      case 'gate_result':
+        // History, deliberately not a projection. `leases` is the *current*
+        // holder set and must not survive a restart, so folding these into it
+        // would resurrect capacity no live process holds; `analytics.ts` and
+        // `postmortem.ts` read them from `events`, where the history is.
+        return
     }
   }
 

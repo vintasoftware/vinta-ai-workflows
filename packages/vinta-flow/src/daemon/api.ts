@@ -28,6 +28,7 @@ import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import type { DaemonRun } from './control.ts'
+import { harnessCapabilities } from './harnesses.ts'
 import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
@@ -286,6 +287,8 @@ export function createApi(options: ApiOptions): Hono {
         ceiling: run.admission.ceiling(id),
         inFlight: run.admission.inFlight(id),
         wakeAt: run.admission.wakeAt(id) ?? null,
+        // Read off the adapter, never restated — see `harnesses.ts`.
+        capabilities: harnessCapabilities(id),
       })),
     }
   }

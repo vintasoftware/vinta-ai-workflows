@@ -18,6 +18,13 @@
  * package — `src/gates/runner.ts` and `src/integration/` hold the pieces, but
  * nothing composes them — so the default below supplies no facts. Injecting one
  * through `RunDeps` is how a host closes that gap today.
+ *
+ * **The post-mortem is emitted here.** It is true at exactly one moment —
+ * after `run_ended` — and the scheduler journals that as it returns, so this
+ * is the only place that moment is reachable while the journal is still open.
+ * Conflicts are not journalled by anything, so `deps.waveResults` is how a
+ * host with an `Integrator` hands them over; without it the artifact says
+ * "unrecorded" rather than "none".
  */
 import { parseArgs } from 'node:util'
 
@@ -28,8 +35,13 @@ import type { HarnessAdapter } from '../harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
-import { openJournal } from '../journal/journal.ts'
+import { openJournal, type Journal } from '../journal/journal.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
+import {
+  postMortem,
+  writePostMortem,
+  type IntegrationWaveRecord,
+} from '../postmortem/postmortem.ts'
 import { ResourcePools } from '../resources/pools.ts'
 import { createScheduler, type RunStop } from '../scheduler/index.ts'
 import type { Workflow } from '../types.ts'
@@ -51,6 +63,15 @@ export interface RunDeps {
   readonly adapters?: Readonly<Record<string, HarnessAdapter>>
   /** Defaults to `<workflow id>-<base36 timestamp>`. */
   readonly runId?: string
+  /**
+   * The integrator's wave results, read once the run has ended (§13.6).
+   * Conflicts are returned by `mergeWave` in process and no event carries
+   * them, so a host that owns the `Integrator` is the only thing that can
+   * supply them. A callback rather than a value because the merges have not
+   * happened yet when this is passed. Omitted, the post-mortem records
+   * `integration_record_unavailable` — "unrecorded", never "clean".
+   */
+  readonly waveResults?: () => readonly IntegrationWaveRecord[]
   /** Called once the daemon is up and the scheduler has been registered. */
   readonly onStarted?: (daemon: Daemon) => void
 }
@@ -139,6 +160,12 @@ export async function runCommand(
 
   try {
     const report = await scheduler.run()
+    // `scheduler.run` journalled `run_ended`, which is the one moment a
+    // post-mortem is true (§13.6). Emitted before the `finally` closes the
+    // journal, and before the exit code is decided: a failed run is exactly
+    // the run whose plan the next one most needs to learn from.
+    emitPostMortem(journal, runId, deps, io)
+
     const failed = Object.entries(report.statuses)
       .filter(([, status]) => status === 'failed')
       .map(([id]) => id)
@@ -158,6 +185,25 @@ export async function runCommand(
     admission.close()
     await daemon.close()
     journal.close()
+  }
+}
+
+/**
+ * Writes `runs/<id>/postmortem.json` (§13.6), the artifact `plan-feature`
+ * reads when planning the next feature in this repo.
+ *
+ * Never fatal. The run is over and its journal is intact by the time this
+ * runs; failing the command because a derived report could not be written
+ * would throw away the work to report on the reporting. The message carries
+ * identifiers and a path, like every other line here.
+ */
+function emitPostMortem(journal: Journal, runId: string, deps: RunDeps, io: Io): void {
+  try {
+    const integration = deps.waveResults?.()
+    const report = postMortem(journal, runId, integration === undefined ? {} : { integration })
+    io.out(`vinta-flow: post-mortem written to ${writePostMortem(journal.root, report)}`)
+  } catch {
+    io.err(`vinta-flow: run ${runId} produced no post-mortem.`)
   }
 }
 

@@ -14,7 +14,7 @@
  * directory that is removed afterwards — including the ones the purge tests
  * try, and fail, to escape.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,6 +29,7 @@ import { serveCommand } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
 import type { Daemon } from '../src/daemon/index.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
+import { parsePostMortem } from '../src/postmortem/postmortem.ts'
 
 // ---------------------------------------------------------------------------
 // Rig
@@ -367,6 +368,95 @@ describe('vinta-flow run', () => {
 
     const token = (daemon as unknown as Daemon).token
     expect(io.all().filter((line) => line.includes(token))).toHaveLength(1)
+  })
+
+  /**
+   * §13.6's artifact, at the path `plan-feature` reads. A post-mortem is true
+   * at exactly one moment — after `run_ended` — and this command is the only
+   * place that moment is reachable with the journal still open, so a run that
+   * ends without writing one leaves the planner nothing to compound on.
+   */
+  it('writes a post-mortem that validates against its own schema', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a'), node('b', ['a'])]))
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'pm-run',
+    })
+
+    expect(code).toBe(OK)
+    const artifact = join(dir, '.vinta-flow', 'runs', 'pm-run', 'postmortem.json')
+    expect(existsSync(artifact)).toBe(true)
+
+    const parsed = parsePostMortem(JSON.parse(readFileSync(artifact, 'utf8')))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.report).toMatchObject({
+      schema_version: 1,
+      run_id: 'pm-run',
+      workflow_id: 'cli-fixture',
+      run: { status: 'done', node_count: 2 },
+    })
+    // Nothing observes dependency use, so the finding stays empty and its gap
+    // stays in the file. That is this artifact's whole discipline.
+    expect(parsed.report.findings.unused_dependencies).toEqual([])
+    expect(parsed.report.gaps.map((gap) => gap.kind)).toContain('dependency_use_unrecorded')
+    expect(io.out.some((line) => line.includes('post-mortem written to'))).toBe(true)
+  })
+
+  /**
+   * Conflicts reach no event — `mergeWave` returns them in process — so the
+   * host hands them over or the artifact says "unrecorded". Both readings are
+   * pinned here, because an empty `wave_conflicts` means something different
+   * under each.
+   */
+  it('records conflicts from the integrator’s wave results, and their absence as a gap', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a'), node('b')]))
+    const io = recorder()
+
+    await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'conflict-run',
+      waveResults: () => [
+        { wave: 1, conflicts: [{ nodes: ['a', 'b'], paths: ['src/models.py'], rounds: 2 }] },
+      ],
+    })
+
+    const withRecord = parsePostMortem(
+      JSON.parse(
+        readFileSync(join(dir, '.vinta-flow', 'runs', 'conflict-run', 'postmortem.json'), 'utf8'),
+      ),
+    )
+    expect(withRecord.ok).toBe(true)
+    if (!withRecord.ok) return
+    expect(withRecord.report.findings.wave_conflicts).toEqual([
+      { wave: 1, nodes: ['a', 'b'], paths: ['src/models.py'], fix_rounds: 2 },
+    ])
+    expect(withRecord.report.gaps.map((gap) => gap.kind)).not.toContain(
+      'integration_record_unavailable',
+    )
+
+    // The same run without the record: empty findings, and a gap that says so.
+    const bare = makeTemp()
+    const barePath = writeJson(bare, 'workflow.json', workflowJson([node('a'), node('b')]))
+    await runCommand([barePath, '--repo', bare], recorder().io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'bare-run',
+    })
+    const withoutRecord = parsePostMortem(
+      JSON.parse(
+        readFileSync(join(bare, '.vinta-flow', 'runs', 'bare-run', 'postmortem.json'), 'utf8'),
+      ),
+    )
+    expect(withoutRecord.ok).toBe(true)
+    if (!withoutRecord.ok) return
+    expect(withoutRecord.report.findings.wave_conflicts).toEqual([])
+    expect(withoutRecord.report.gaps.map((gap) => gap.kind)).toContain(
+      'integration_record_unavailable',
+    )
   })
 })
 

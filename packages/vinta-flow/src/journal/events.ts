@@ -47,6 +47,21 @@ export type HumanAnswer = string | number | boolean | null
 export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort'
 
 /**
+ * Which edge of a gate-pool acquisition a `gate_pool` event marks.
+ *
+ * All three are needed and none is redundant: `requested` → `granted` is the
+ * queue time §13.3 asks for, and `granted` → `released` is the occupancy
+ * window without which saturation cannot be computed at all. The scheduler
+ * also writes a `leases` row at the grant, but that table is cleared on open
+ * and its rows are deleted on release, so it carries no history — see the note
+ * on `leases` in `journal.ts`.
+ */
+export type GatePoolPhase = 'requested' | 'granted' | 'released'
+
+/** The gate runner's verdict, as journalled. Mirrors `GateStatus` in `gates/runner.ts`. */
+export type GateStatus = 'passed' | 'failed' | 'timed_out'
+
+/**
  * Where the operation went. `sent` reached the live session; `queued` is
  * waiting for the node's next resume (§9's queue for harnesses that cannot
  * inject); `delivered` is that queue draining; `ignored` is an operation on a
@@ -92,6 +107,23 @@ interface NodePayloads {
     readonly op: OperatorOp
     readonly text?: string
     readonly delivery: OperatorDelivery
+  }
+  /**
+   * One edge of a gate-pool acquisition, for the whole set the gate needs —
+   * acquisition is all-or-nothing and in one `pools.acquire` call (§6), so a
+   * per-resource event would claim an ordering the scheduler does not have.
+   * Pool ids only; which gate is about to run is `gate_result`'s subject.
+   */
+  gate_pool: { readonly phase: GatePoolPhase; readonly resources: readonly string[] }
+  /**
+   * What one gate returned. Identifiers, an exit code and a status — the
+   * gate's *output* is repository content and stays in `gates/<id>.log`
+   * (§5.3, §11), which is why there is no field here it could reach.
+   */
+  gate_result: {
+    readonly gate: string
+    readonly exit_code: number
+    readonly status: GateStatus
   }
 }
 

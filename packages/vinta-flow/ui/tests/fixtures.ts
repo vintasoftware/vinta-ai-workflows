@@ -43,8 +43,38 @@ export function resource(id: string, capacity: number, held: number, holders: st
   return { id, kind: 'semaphore', capacity, held, holders }
 }
 
-export function harness(id: string, ceiling: number, inFlight: number, wakeAt: number | null = null): HarnessState {
-  return { id, ceiling, inFlight, wakeAt }
+type Capabilities = HarnessState['capabilities']
+
+/**
+ * §7's block, as the daemon serves it. `null` is the wire's "this harness
+ * declared nothing" — an out-of-tree adapter or a test double — and is what
+ * the node view must degrade on rather than assume through.
+ */
+export const CLAUDE_CODE_CAPABILITIES = {
+  inject: true,
+  interrupt: true,
+  resume: true,
+  pty: true,
+  permissionControl: true,
+} as const satisfies NonNullable<Capabilities>
+
+/** Codex's, which differs from claude-code's in exactly the field that matters. */
+export const CODEX_CAPABILITIES = {
+  inject: false,
+  interrupt: true,
+  resume: true,
+  pty: true,
+  permissionControl: true,
+} as const satisfies NonNullable<Capabilities>
+
+export function harness(
+  id: string,
+  ceiling: number,
+  inFlight: number,
+  wakeAt: number | null = null,
+  capabilities: Capabilities = CLAUDE_CODE_CAPABILITIES,
+): HarnessState {
+  return { id, ceiling, inFlight, wakeAt, capabilities }
 }
 
 export function snapshot(parts: Partial<RunSnapshot> = {}): RunSnapshot {

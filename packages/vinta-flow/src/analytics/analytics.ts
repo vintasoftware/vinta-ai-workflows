@@ -27,8 +27,8 @@
  * queued for exactly four minutes". It also means this module survives the
  * journal growing methods.
  *
- * **What the log can and cannot attribute.** Four of the five ways a node
- * spends time are recorded and are reported exactly:
+ * **What the log attributes.** All five ways a node spends time are recorded
+ * and are reported exactly:
  *
  * | bucket          | derived from                                            |
  * |-----------------|---------------------------------------------------------|
@@ -36,17 +36,18 @@
  * | working         | lane held, node not parked                              |
  * | capacity wait   | `node_status: waiting_on_capacity` → the next `running`  |
  * | suspended       | `node_status: awaiting_human` → the next `running`       |
+ * | gate-pool queue | `gate_pool: requested` → the matching `granted`          |
  *
- * The fifth — time queued for a **gate's** pool — is **not recorded anywhere**.
- * The scheduler takes those pools with `journal.acquireLease`, which writes a
- * `leases` row: a table that is cleared on open and whose rows are deleted on
- * release, so it carries no grant time that outlives the wait and no history at
- * all. No event marks the attempt, the grant or the release. That time is
- * therefore inside `workingMs`, indistinguishable from an agent turn, and this
- * module reports `gatePoolQueueMs: null` and a `gate_pool_queue_unrecorded`
- * gap rather than a zero or an inferred number. §6.1 already had to put
- * capacity waits in a side table for the same reason the event union has no
- * room for this; the fix is an event, not an estimate here.
+ * The fifth is a *subset* of `workingMs`, not a sixth share of the span: the
+ * node holds its lane throughout the wait (§6), so counting it separately
+ * would break the reconciliation below. It is reported alongside the split
+ * rather than carved out of it.
+ *
+ * Gate-pool occupancy comes from the same three edges: `granted` → `released`
+ * is one hold, and sweeping the holds gives every gate pool the peak, busy and
+ * saturated figures the `lane` pool has always had. `leases` is still written
+ * at the grant, but it is the *current* holder set — cleared on open, deleted
+ * on release — and no history is read out of it here.
  *
  * **The attribution reconciles, exactly.** Two identities hold on every run,
  * complete or in progress, and are the point of the module:
@@ -93,7 +94,7 @@ export interface AnalyzeOptions {
 
 /**
  * Where one node's span went. The four figures partition it exactly; the
- * fifth is a subset of `workingMs` that the journal cannot separate out.
+ * fifth is a subset of `workingMs`, reported beside it.
  */
 export interface TimeSplit {
   /** `finishedAtMs - startedAtMs`, or `asOf - startedAtMs` while in flight. 0 if never dispatched. */
@@ -101,9 +102,9 @@ export interface TimeSplit {
   /** Dispatched, waiting for a lane slot. Summed over every attempt, including post-capacity-wait retries. */
   readonly laneQueueMs: number
   /**
-   * Lane held and the node not parked. Agent turns, gate runs — **and** any
-   * time spent queued for a gate's pool, which the event log does not mark.
-   * Read it as "holding a lane and not visibly waiting", not as "running".
+   * Lane held and the node not parked: agent turns, gate runs, and the wait
+   * for a gate's pool — which `gatePoolQueueMs` separates out without leaving
+   * this bucket, because the lane is held throughout it.
    */
   readonly workingMs: number
   /** `waiting_on_capacity`: a vendor refused a spawn and the node is inside a backoff window (§6.1). */
@@ -111,11 +112,11 @@ export interface TimeSplit {
   /** `awaiting_human`: parked on an `await_human` question or an operator pause (§9.1). */
   readonly suspendedMs: number
   /**
-   * Time inside `workingMs` spent queued for a gate's pool. Always `null`
-   * today: nothing in the event vocabulary records a gate-pool acquisition.
-   * A number here would be an invention — see `AttributionGap`.
+   * Time inside `workingMs` spent queued for a gate's pool, summed over every
+   * acquisition. Derived from the `gate_pool` edges the scheduler writes, so
+   * 0 means "never waited", not "not recorded".
    */
-  readonly gatePoolQueueMs: number | null
+  readonly gatePoolQueueMs: number
 }
 
 export interface NodeAnalytics {
@@ -149,8 +150,8 @@ export interface CriticalPathStep {
 
 /**
  * What one pool cost the run. `unattributed` is not "zero contention" — it is
- * "the log does not say", which for every pool but `lane` is currently the
- * only truthful answer.
+ * "the log does not say", which now happens only when a pool's own events are
+ * missing from a journal that nonetheless recorded gates needing it.
  */
 export type PoolContention =
   | {
@@ -193,7 +194,19 @@ export interface LaneIdleness {
   readonly freeWallMs: number
 }
 
-export type AttributionGapKind = 'gate_pool_queue_unrecorded' | 'gate_pool_occupancy_unrecorded'
+/**
+ * The one figure this module can still fail to have.
+ *
+ * `gate_pool_events_missing` is not "gate pools are unmeasurable" — they are,
+ * from the three edges the scheduler journals. It is the narrower and now
+ * detectable case: a run that recorded a `gate_result` for a gate declaring
+ * `requires`, with no `gate_pool` event naming that pool. A journal written
+ * before the vocabulary carried these edges reads exactly like this, and so
+ * does a pool taken by something other than the scheduler. Reporting zero
+ * occupancy for such a pool would be the same lie the old gaps existed to
+ * prevent, pointed the other way.
+ */
+export type AttributionGapKind = 'gate_pool_events_missing'
 
 /**
  * A figure the journal cannot supply. Carried in the report rather than thrown
@@ -265,6 +278,11 @@ interface Trace {
   holds: Interval[]
   /** Lane-queue intervals, for the `lane` pool's `queuedMs`. */
   queues: Interval[]
+  gatePoolQueueMs: number
+  /** An acquisition requested and not yet granted. */
+  gateWait: { readonly from: number; readonly resources: readonly string[] } | null
+  /** An acquisition granted and not yet released. */
+  gateHold: { readonly from: number; readonly resources: readonly string[] } | null
 }
 
 const newTrace = (): Trace => ({
@@ -281,6 +299,9 @@ const newTrace = (): Trace => ({
   holdFrom: null,
   holds: [],
   queues: [],
+  gatePoolQueueMs: 0,
+  gateWait: null,
+  gateHold: null,
 })
 
 /** Statuses at which the node has settled and given everything back. */
@@ -342,12 +363,50 @@ export function analyzeRun(
   let lastEventMs = 0
   const traces = new Map<string, Trace>()
 
+  // Per-pool occupancy and queueing, accumulated across nodes: a pool's
+  // timeline is the union of every node's holds on it, which is exactly what
+  // makes saturation a fact about the pool rather than about one node.
+  const poolHolds = new Map<string, Interval[]>()
+  const poolQueuedMs = new Map<string, number>()
+  /** Pools any `gate_pool` event named, and gates any `gate_result` reported. */
+  const poolsSeen = new Set<string>()
+  const gatesRun = new Set<string>()
+
   const traceOf = (nodeId: string): Trace => {
     const existing = traces.get(nodeId)
     if (existing !== undefined) return existing
     const fresh = newTrace()
     traces.set(nodeId, fresh)
     return fresh
+  }
+
+  const addQueue = (resources: readonly string[], from: number, to: number): void => {
+    const ms = Math.max(0, to - from)
+    for (const resource of resources) {
+      poolQueuedMs.set(resource, (poolQueuedMs.get(resource) ?? 0) + ms)
+    }
+  }
+
+  const addHold = (resources: readonly string[], from: number, to: number): void => {
+    if (to <= from) return
+    for (const resource of resources) {
+      const held = poolHolds.get(resource) ?? []
+      held.push({ from, to })
+      poolHolds.set(resource, held)
+    }
+  }
+
+  /** Closes whatever a node still had open on a gate pool at `at`. */
+  const closeGate = (trace: Trace, at: number): void => {
+    if (trace.gateWait !== null) {
+      trace.gatePoolQueueMs += Math.max(0, at - trace.gateWait.from)
+      addQueue(trace.gateWait.resources, trace.gateWait.from, at)
+      trace.gateWait = null
+    }
+    if (trace.gateHold !== null) {
+      addHold(trace.gateHold.resources, trace.gateHold.from, at)
+      trace.gateHold = null
+    }
   }
 
   for (const event of events) {
@@ -402,6 +461,38 @@ export function analyzeRun(
         if (trace.phase === null) openPhase(trace, 'working', event.ts)
         continue
       }
+      case 'gate_pool': {
+        // The three edges §13.3 needs. The node stays in `working` throughout:
+        // it is holding its lane the whole time (§6), so the wait is measured
+        // beside the split rather than carved out of it.
+        const trace = traceOf(event.nodeId)
+        const { phase, resources } = event.payload
+        for (const resource of resources) poolsSeen.add(resource)
+        if (phase === 'requested') {
+          trace.gateWait = { from: event.ts, resources }
+          continue
+        }
+        if (phase === 'granted') {
+          const wait = trace.gateWait
+          if (wait !== null) {
+            trace.gatePoolQueueMs += Math.max(0, event.ts - wait.from)
+            addQueue(wait.resources, wait.from, event.ts)
+            trace.gateWait = null
+          }
+          trace.gateHold = { from: event.ts, resources }
+          continue
+        }
+        if (trace.gateHold !== null) {
+          addHold(trace.gateHold.resources, trace.gateHold.from, event.ts)
+          trace.gateHold = null
+        }
+        continue
+      }
+      case 'gate_result':
+        // Read only to tell "this pool was never busy" from "this journal
+        // never recorded the pool" — see `attributionGaps`.
+        gatesRun.add(event.payload.gate)
+        continue
       default:
         // `human_question`, `human_answered` and `node_operation` are recorded
         // for other readers; the time they describe is already in the status
@@ -423,6 +514,7 @@ export function analyzeRun(
   for (const trace of traces.values()) {
     closePhase(trace, observedAsOfMs)
     closeHold(trace, observedAsOfMs)
+    closeGate(trace, observedAsOfMs)
   }
 
   const nodes: NodeAnalytics[] = []
@@ -449,7 +541,7 @@ export function analyzeRun(
         workingMs: trace.workingMs,
         capacityWaitMs: trace.capacityWaitMs,
         suspendedMs: trace.suspendedMs,
-        gatePoolQueueMs: null,
+        gatePoolQueueMs: trace.gatePoolQueueMs,
       },
     })
   }
@@ -462,6 +554,9 @@ export function analyzeRun(
 
   const laneCapacity = workflow.resources[LANE]?.capacity ?? 0
   const laneSegments = sweep(laneHolds, startedAtMs, observedAsOfMs)
+  poolHolds.set(LANE, laneHolds)
+  poolQueuedMs.set(LANE, laneQueuedMs)
+  const unrecorded = unrecordedPools(workflow, gatesRun, poolsSeen)
 
   return {
     runId,
@@ -475,9 +570,9 @@ export function analyzeRun(
     criticalPath: path,
     tailGapMs,
     criticalPathMs,
-    pools: poolContention(workflow, laneSegments, laneQueuedMs),
+    pools: poolContention(workflow, poolHolds, poolQueuedMs, unrecorded, startedAtMs, observedAsOfMs),
     laneIdleness: laneIdleness(laneCapacity, laneSegments, elapsedMs),
-    gaps: attributionGaps(workflow),
+    gaps: attributionGaps(unrecorded),
   }
 }
 
@@ -605,24 +700,38 @@ function sweep(intervals: readonly Interval[], from: number, to: number): Segmen
   return segments
 }
 
+/**
+ * Every pool, measured the same way. `lane`'s holds come from its
+ * `node_assigned` grants and a gate pool's from its `gate_pool` edges, but
+ * once both are intervals the arithmetic is one loop — which is the point of
+ * journalling the gate edges at all.
+ */
 function poolContention(
   workflow: Workflow,
-  laneSegments: readonly Segment[],
-  laneQueuedMs: number,
+  holds: ReadonlyMap<string, readonly Interval[]>,
+  queued: ReadonlyMap<string, number>,
+  unrecorded: ReadonlySet<string>,
+  from: number,
+  to: number,
 ): PoolContention[] {
   const pools: PoolContention[] = []
   const names = [LANE, ...Object.keys(workflow.resources).filter((id) => id !== LANE)]
 
   for (const resource of names) {
     const capacity = workflow.resources[resource]?.capacity ?? 0
-    if (resource !== LANE) {
-      pools.push({ resource, capacity, attribution: 'unattributed', reason: 'gate_pool_occupancy_unrecorded' })
+    if (unrecorded.has(resource)) {
+      pools.push({
+        resource,
+        capacity,
+        attribution: 'unattributed',
+        reason: 'gate_pool_events_missing',
+      })
       continue
     }
     let peakHeld = 0
     let busyMs = 0
     let saturatedMs = 0
-    for (const segment of laneSegments) {
+    for (const segment of sweep(holds.get(resource) ?? [], from, to)) {
       const ms = segment.to - segment.from
       peakHeld = Math.max(peakHeld, segment.held)
       if (segment.held > 0) busyMs += ms
@@ -635,7 +744,7 @@ function poolContention(
       peakHeld,
       busyMs,
       saturatedMs,
-      queuedMs: laneQueuedMs,
+      queuedMs: queued.get(resource) ?? 0,
     })
   }
   return pools
@@ -665,31 +774,52 @@ function laneIdleness(
 }
 
 /**
+ * Pools this run demonstrably used and demonstrably did not record.
+ *
+ * The evidence has to be positive in both directions, which is why it is a
+ * `gate_result` and not the mere existence of the pool in the workflow: a pool
+ * no gate ever ran against was genuinely idle, and calling that unrecorded
+ * would be the stale gap this module just stopped emitting. A gate that
+ * *ran* while needing the pool, with no `gate_pool` event naming it, is the
+ * one case left where zero would be a lie.
+ */
+function unrecordedPools(
+  workflow: Workflow,
+  gatesRun: ReadonlySet<string>,
+  poolsSeen: ReadonlySet<string>,
+): Set<string> {
+  const missing = new Set<string>()
+  for (const gateId of gatesRun) {
+    for (const resource of workflow.gates[gateId]?.requires ?? []) {
+      if (resource !== LANE && !poolsSeen.has(resource)) missing.add(resource)
+    }
+  }
+  return missing
+}
+
+/**
  * What the journal cannot tell you, stated. Emitted per pool rather than once,
  * because "we cannot measure `test-suite`" is a different sentence from "we
  * cannot measure gate pools in general", and a report is read one pool at a
  * time.
+ *
+ * Empty on any run the current scheduler produced — the two gaps this module
+ * used to emit unconditionally are closed by the `gate_pool` edges, and a gap
+ * left standing after its cause is fixed is a lie in the other direction.
  */
-function attributionGaps(workflow: Workflow): AttributionGap[] {
-  const gatePools = Object.keys(workflow.resources).filter((id) => id !== LANE)
-  if (gatePools.length === 0) return []
+function attributionGaps(unrecorded: ReadonlySet<string>): AttributionGap[] {
+  if (unrecorded.size === 0) return []
   return [
     {
-      kind: 'gate_pool_queue_unrecorded',
-      resources: gatePools,
+      kind: 'gate_pool_events_missing',
+      resources: [...unrecorded].sort(),
       needs:
-        'an event marking a gate pool acquisition being attempted and granted. ' +
-        'The scheduler takes these pools through `leases`, a table cleared on ' +
-        'open whose rows are deleted on release, so no grant time survives the ' +
-        'wait. Gate-pool queue time is inside `workingMs` and is not separable.',
-    },
-    {
-      kind: 'gate_pool_occupancy_unrecorded',
-      resources: gatePools,
-      needs:
-        'an event marking a gate pool lease being released. Without both edges ' +
-        'there is no occupancy timeline, so saturation and contention for these ' +
-        'pools cannot be computed at all.',
+        'the `gate_pool` events the scheduler writes around a gate acquisition — ' +
+        'requested, granted, released. This run recorded a gate result for a gate ' +
+        'requiring these pools but no acquisition of them, which is what a journal ' +
+        'written before those events existed looks like, and what a pool taken ' +
+        'outside the scheduler looks like. Queue time and occupancy for them are ' +
+        'unknown rather than zero.',
     },
   ]
 }

@@ -24,7 +24,14 @@ import {
   type RunAnalytics,
 } from '../src/analytics/analytics.ts'
 import { computeWaves } from '../src/graph.ts'
-import type { NewEvent, NodeStatus, RunStatus, StoredEvent } from '../src/journal/events.ts'
+import type {
+  GatePoolPhase,
+  GateStatus,
+  NewEvent,
+  NodeStatus,
+  RunStatus,
+  StoredEvent,
+} from '../src/journal/events.ts'
 import type { Workflow, WorkflowInput } from '../src/types.ts'
 import { parseWorkflow } from '../src/validate.ts'
 
@@ -37,6 +44,7 @@ const RUN = 'run-1'
 const workflow = (
   nodes: WorkflowInput['nodes'],
   resources: WorkflowInput['resources'] = { lane: { capacity: 4, kind: 'worktree' } },
+  gates: WorkflowInput['gates'] = {},
 ): Workflow => {
   const result = parseWorkflow({
     schema_version: 1,
@@ -44,6 +52,7 @@ const workflow = (
     base_branch: 'main',
     defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
     resources,
+    gates,
     nodes,
   } satisfies WorkflowInput)
   if (!result.ok) throw new Error('test workflow fixture is invalid')
@@ -114,6 +123,33 @@ class Tape implements AnalyticsSource {
     return this.push(ts, { runId: RUN, nodeId, type: 'node_assigned', payload: { lane } })
   }
 
+  /** One edge of a gate-pool acquisition, exactly as the scheduler writes it. */
+  gatePool(ts: number, nodeId: string, phase: GatePoolPhase, resources: readonly string[]): this {
+    return this.push(ts, { runId: RUN, nodeId, type: 'gate_pool', payload: { phase, resources } })
+  }
+
+  /** A gate that queued for `resources` from `from`, was granted at `granted`, ran until `to`. */
+  gated(
+    nodeId: string,
+    resources: readonly string[],
+    from: number,
+    granted: number,
+    to: number,
+  ): this {
+    this.gatePool(from, nodeId, 'requested', resources)
+    this.gatePool(granted, nodeId, 'granted', resources)
+    return this.gatePool(to, nodeId, 'released', resources)
+  }
+
+  gateResult(ts: number, nodeId: string, gate: string, status: GateStatus = 'passed'): this {
+    return this.push(ts, {
+      runId: RUN,
+      nodeId,
+      type: 'gate_result',
+      payload: { gate, exit_code: status === 'passed' ? 0 : 1, status },
+    })
+  }
+
   /** A node dispatched, granted a lane and finished, with no waiting in between. */
   ran(nodeId: string, from: number, to: number, laneAt = from): this {
     this.status(from, nodeId, 'running')
@@ -145,6 +181,11 @@ const expectReconciles = (report: RunAnalytics): void => {
   for (const node of report.nodes) {
     const { spanMs, laneQueueMs, workingMs, capacityWaitMs, suspendedMs } = node.split
     expect(laneQueueMs + workingMs + capacityWaitMs + suspendedMs).toBe(spanMs)
+    // The fifth figure is a *subset* of `workingMs`, not a fifth share of the
+    // span: the node holds its lane while it queues for a gate pool (§6). A
+    // gate-pool wait that escaped `workingMs` would break the identity above,
+    // so it is checked here rather than left implicit in the docs.
+    expect(node.split.gatePoolQueueMs).toBeLessThanOrEqual(workingMs)
   }
   const walked =
     report.criticalPath.reduce((total, step) => total + step.gapMs + step.split.spanMs, 0) +
@@ -276,18 +317,22 @@ describe('queue-wait attribution', () => {
     expect(nodeOf(report, 'a').split).toMatchObject({ laneQueueMs: 0, workingMs: 100, spanMs: 100 })
   })
 
-  it('reports gate-pool queueing as unrecorded rather than as zero', () => {
+  /**
+   * A run with no gate acquisitions in it queued for no gate pool. That is a
+   * measurement, not an absence — which is the whole difference between this
+   * and the `null` this figure used to be.
+   */
+  it('reports zero gate-pool queueing on a run with no gate acquisitions', () => {
     const report = analyzeRun(contended(), RUN)
 
-    expect(nodeOf(report, 'b').split.gatePoolQueueMs).toBeNull()
-    expect(report.gaps.map((gap) => gap.kind)).toEqual([
-      'gate_pool_queue_unrecorded',
-      'gate_pool_occupancy_unrecorded',
-    ])
-    expect(report.gaps[0]?.resources).toEqual(['test-suite'])
+    expect(nodeOf(report, 'b').split.gatePoolQueueMs).toBe(0)
+    expect(report.gaps).toEqual([])
     expect(poolOf(report, 'test-suite')).toMatchObject({
-      attribution: 'unattributed',
-      reason: 'gate_pool_occupancy_unrecorded',
+      attribution: 'exact',
+      peakHeld: 0,
+      busyMs: 0,
+      saturatedMs: 0,
+      queuedMs: 0,
     })
   })
 
@@ -346,11 +391,166 @@ describe('queue-wait attribution', () => {
       workingMs: 200,
       laneQueueMs: 0,
       capacityWaitMs: 0,
-      gatePoolQueueMs: null,
+      gatePoolQueueMs: 0,
     })
     // §6: the lane is held across a pause, so the pool stays busy through it.
     expect(poolOf(report, 'lane')).toMatchObject({ busyMs: 500 })
     expectReconciles(report)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Gate pools — §13.3's other half: is gate capacity the constraint, or lanes?
+// ---------------------------------------------------------------------------
+
+describe('gate pools', () => {
+  const RESOURCES = {
+    lane: { capacity: 2, kind: 'worktree' },
+    'test-suite': { capacity: 1, kind: 'semaphore' },
+  } as const satisfies WorkflowInput['resources']
+
+  const GATES = {
+    tests: { cmd: 'pnpm test', requires: ['test-suite'], timeout_s: 600 },
+  } as const satisfies WorkflowInput['gates']
+
+  /**
+   * Two nodes, one gate slot. `a` takes it at 100 and holds it to 300; `b`
+   * asks at 200 and is granted only when `a` gives it back. Every number
+   * below is a subtraction over those four instants, which is exactly what the
+   * `leases` table could not express.
+   */
+  const queued = (): Tape => {
+    const wf = workflow([phase('a'), phase('b')], RESOURCES, GATES)
+    return new Tape(wf)
+      .begin(0)
+      .status(0, 'a', 'running')
+      .lane(0, 'a')
+      .status(0, 'b', 'running')
+      .lane(0, 'b', `${RUN}-lane-2`)
+      .gated('a', ['test-suite'], 100, 100, 300)
+      .gated('b', ['test-suite'], 200, 300, 500)
+      .status(400, 'a', 'done')
+      .status(600, 'b', 'done')
+      .end(600)
+  }
+
+  it('measures gate-pool queue time as a real number', () => {
+    const report = analyzeRun(queued(), RUN)
+
+    // `a` was granted the moment it asked; `b` waited 200→300 for `a`'s slot.
+    expect(nodeOf(report, 'a').split.gatePoolQueueMs).toBe(0)
+    expect(nodeOf(report, 'b').split.gatePoolQueueMs).toBe(100)
+  })
+
+  /**
+   * The assertion the whole design has to survive: a fifth figure that is a
+   * subset of `workingMs` must not disturb the partition of the span, and the
+   * critical path must still account for the run exactly.
+   */
+  it('reconciles exactly with a gate-pool wait inside the span', () => {
+    expectReconciles(analyzeRun(queued(), RUN))
+  })
+
+  it('measures a non-lane pool exactly instead of reporting it unattributed', () => {
+    const report = analyzeRun(queued(), RUN)
+
+    expect(poolOf(report, 'test-suite')).toEqual({
+      resource: 'test-suite',
+      capacity: 1,
+      attribution: 'exact',
+      // Held 100→300 by `a` and 300→500 by `b`: one slot, never two.
+      peakHeld: 1,
+      busyMs: 400,
+      // Capacity 1, so every busy millisecond is a saturated one — which is
+      // the number that says the gate, not the lane count, was the constraint.
+      saturatedMs: 400,
+      queuedMs: 100,
+    })
+    expect(report.gaps).toEqual([])
+  })
+
+  /**
+   * A pool two nodes hold at once is not saturated at capacity 2, and the
+   * report has to say so — otherwise "buy more gate slots" reads as the
+   * answer to every run.
+   */
+  it('separates busy from saturated on a pool with room', () => {
+    const wf = workflow([phase('a'), phase('b')], {
+      lane: { capacity: 2, kind: 'worktree' },
+      'test-suite': { capacity: 2, kind: 'semaphore' },
+    })
+    const tape = new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 500)
+      .ran('b', 0, 500, 0)
+      .gated('a', ['test-suite'], 100, 100, 400)
+      .gated('b', ['test-suite'], 200, 200, 300)
+      .end(500)
+
+    expect(poolOf(analyzeRun(tape, RUN), 'test-suite')).toMatchObject({
+      capacity: 2,
+      attribution: 'exact',
+      peakHeld: 2,
+      busyMs: 300, // 100→400
+      saturatedMs: 100, // 200→300, the only stretch with both slots taken
+      queuedMs: 0,
+    })
+  })
+
+  /** A wait still open when the window ends is a floor, not nothing. */
+  it('counts a wait still open at the edge of the observed window', () => {
+    const wf = workflow([phase('a')], RESOURCES, GATES)
+    const tape = new Tape(wf)
+      .begin(0)
+      .status(0, 'a', 'running')
+      .lane(0, 'a')
+      .gatePool(100, 'a', 'requested', ['test-suite'])
+
+    const report = analyzeRun(tape, RUN, { nowMs: 400 })
+
+    expect(nodeOf(report, 'a').split.gatePoolQueueMs).toBe(300)
+    expect(poolOf(report, 'test-suite')).toMatchObject({ queuedMs: 300, busyMs: 0 })
+    expectReconciles(report)
+  })
+
+  /**
+   * The gap that replaced the two this module used to emit. It fires on
+   * positive evidence in both directions — a gate that ran, needing a pool
+   * whose acquisition was never journalled — which is what a run recorded
+   * before these events existed looks like. Reporting zero occupancy for it
+   * would be the same lie, pointed the other way.
+   */
+  it('reports a pool as unattributed when a gate ran without journalling its acquisition', () => {
+    const wf = workflow([phase('a')], RESOURCES, GATES)
+    const tape = new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 400)
+      .gateResult(200, 'a', 'tests')
+      .end(400)
+
+    const report = analyzeRun(tape, RUN)
+
+    expect(report.gaps.map((gap) => gap.kind)).toEqual(['gate_pool_events_missing'])
+    expect(report.gaps[0]?.resources).toEqual(['test-suite'])
+    expect(poolOf(report, 'test-suite')).toMatchObject({
+      attribution: 'unattributed',
+      reason: 'gate_pool_events_missing',
+    })
+    // The lane pool is measured from its own events and is unaffected.
+    expect(poolOf(report, 'lane')).toMatchObject({ attribution: 'exact', busyMs: 400 })
+  })
+
+  /** A gate that ran and journalled its acquisition leaves nothing unknown. */
+  it('emits no gap when the acquisition was journalled', () => {
+    const wf = workflow([phase('a')], RESOURCES, GATES)
+    const tape = new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 400)
+      .gated('a', ['test-suite'], 100, 100, 300)
+      .gateResult(300, 'a', 'tests')
+      .end(400)
+
+    expect(analyzeRun(tape, RUN).gaps).toEqual([])
   })
 })
 

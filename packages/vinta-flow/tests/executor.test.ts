@@ -488,6 +488,89 @@ describe('gate caching', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 5b. The gate's result is journalled; the gate's output is not
+// ---------------------------------------------------------------------------
+
+describe('journalled gate results', () => {
+  /** A gate that fails loudly, printing something no event may ever contain. */
+  const noisy = (exit: number): Workflow =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'noisy',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      gates: {
+        unit: { cmd: `echo SECRET-FROM-THE-REPO; echo on-stderr >&2; exit ${exit}`, timeout_s: 30 },
+      },
+      nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['unit'] }],
+    })
+
+  const assign = (rig: Rig): void => {
+    rig.journal.append({
+      runId: RUN_ID,
+      nodeId: 'p1',
+      type: 'node_assigned',
+      payload: { lane: (rig.lanes[0] as ExecutorLane).name },
+    })
+  }
+
+  const gateResults = (rig: Rig): { gate: string; exit_code: number; status: string }[] =>
+    rig.journal
+      .events(RUN_ID)
+      .filter((event) => event.type === 'gate_result')
+      .map((event) => event.payload as { gate: string; exit_code: number; status: string })
+
+  it('records the gate id, its exit code and its status', async () => {
+    const rig = setup(() => noisy(3))
+    assign(rig)
+
+    const outcome = await rig.invoke('p1', 'run_gate')
+
+    expect(outcome.facts?.gate?.['exit_code']).toBe(3)
+    expect(gateResults(rig)).toEqual([{ gate: 'unit', exit_code: 3, status: 'failed' }])
+  })
+
+  it('records a passing gate as passed with exit code 0', async () => {
+    const rig = setup(() => noisy(0))
+    assign(rig)
+
+    await rig.invoke('p1', 'run_gate')
+
+    expect(gateResults(rig)).toEqual([{ gate: 'unit', exit_code: 0, status: 'passed' }])
+  })
+
+  /**
+   * The line this step is not allowed to cross. Gate output is repository
+   * content verbatim (§5.3, §11): it belongs in `gates/unit.log` and nowhere
+   * else. This asserts against *every* event payload in the run, not just the
+   * gate's, so a future field that quietly carried a line of it fails here.
+   */
+  it('keeps the gate’s output in the log file and out of every event payload', async () => {
+    const rig = setup(() => noisy(3))
+    assign(rig)
+
+    await rig.invoke('p1', 'run_gate')
+
+    const log = join(rig.journal.root, 'runs', RUN_ID, 'nodes', 'p1', 'gates', 'unit.log')
+    expect(readFileSync(log, 'utf8')).toContain('SECRET-FROM-THE-REPO')
+
+    const payloads = JSON.stringify(rig.journal.events(RUN_ID).map((event) => event.payload))
+    expect(payloads).not.toContain('SECRET-FROM-THE-REPO')
+    expect(payloads).not.toContain('on-stderr')
+    // Not even the gate's command, which is repository text of its own.
+    expect(payloads).not.toContain('echo')
+    // Identifiers, an exit code and a status — the whole payload.
+    expect(
+      rig.journal
+        .events(RUN_ID)
+        .filter((event) => event.type === 'gate_result')
+        .map((event) => Object.keys(event.payload).sort()),
+    ).toEqual([['exit_code', 'gate', 'status']])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 6. git_branch / git_merge / open_pr
 // ---------------------------------------------------------------------------
 

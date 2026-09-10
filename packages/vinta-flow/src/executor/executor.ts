@@ -58,6 +58,12 @@
  * entry point that takes no `pools` precisely so this mistake is unwritable.
  * A hit still skips the run entirely, which is where the value was.
  *
+ * **`run_gate` journals its verdict.** One `gate_result` per gate that ran —
+ * gate id, exit code, status — because a gate result that reaches only the
+ * guard context dies with the step, and §13.6 has to be able to say that this
+ * gate failed, something landed, and then it passed. The gate's *output* is
+ * not in it and cannot be: the payload has no field it would fit in.
+ *
  * **Identifiers only, everywhere.** Gate output goes to the gate log, agent
  * output to the transcript, diffs and hunks stay in the worktree. Nothing in
  * this file puts any of them into a fact, an error, a tracking record or a
@@ -252,6 +258,16 @@ export class RunEffectExecutor implements EffectExecutor {
         logPath: this.#options.journal.gateLogPath(this.#options.runId, nodeId, gateId),
       })
       const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
+      // The result reaches the journal; the output does not. §13.6's
+      // missing-dependency finding needs to know that *this* gate failed and
+      // later passed, which is a fact about ids and an exit code — the lines
+      // the gate printed stay in `log_ref`'s file, and nothing here reads them.
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        nodeId,
+        type: 'gate_result',
+        payload: { gate: gateId, exit_code: exitCode, status: result.status },
+      })
       last = {
         id: gateId,
         exit_code: exitCode,

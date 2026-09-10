@@ -35,6 +35,7 @@
 import { useEffect, useState } from 'react'
 import type { RunSnapshot } from '../../src/daemon/schemas.ts'
 import type { Client } from './client.ts'
+import { notifier } from './notifications.ts'
 import { applyFrame, EMPTY_PROJECTION, type Projection } from './projection.ts'
 
 const RECONNECT_MS = 300
@@ -95,6 +96,10 @@ export function useRun(client: Client, runId: string): RunView {
           if (stopped) return
           cursor = Math.max(cursor, frame.cursor)
           writeCursor(runId, cursor)
+          // §9.1's browser channel reads the same frames the projection does:
+          // the pause is a journalled event, so a notification is a fold over
+          // the log rather than a flag anything has to write.
+          notifier.ingest(runId, frame.events)
           setProjection((current) => applyFrame(current, frame))
           refresh()
         },

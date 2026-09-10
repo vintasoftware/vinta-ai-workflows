@@ -19,6 +19,10 @@
  *   node, which is what makes the wait-for graph acyclic.
  * - **A node holds its lane while queued for a gate.** An idle lane is just
  *   disk, and `capacity(lane) > capacity(test-suite)` is the healthy shape.
+ *   All three edges of that acquisition — requested, granted, released — are
+ *   journalled as `gate_pool`, because "is gate capacity the constraint, or
+ *   lane count" (§13.3) is answerable only from the wait and the occupancy,
+ *   and `leases` keeps neither past the release.
  * - **Never hold a resource across `await_human`.** A suspended node keeps its
  *   lane — the human is being asked about the work in that lane — and its gate
  *   pools go back immediately.
@@ -60,6 +64,7 @@ import type { AdmissionControl } from '../admission/admission.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
+  GatePoolPhase,
   HumanQuestion,
   NodeStatus,
   OperatorDelivery,
@@ -714,8 +719,13 @@ export class Scheduler {
     const needs = this.#gateNeeds(state.node, invocation.effect.params['gate'])
     if (needs.length === 0) return
 
+    // Both edges are journalled, and the request goes in *before* the await:
+    // the wait is the fact §13.3 wants, and an event written after the grant
+    // could only report a queue time it had already lost.
+    this.#gatePool(state, 'requested', needs)
     state.gateLease = await this.#options.pools.acquire(needs)
     state.gateHeld = needs
+    this.#gatePool(state, 'granted', needs)
     for (const resource of needs) this.#options.journal.acquireLease(resource, state.node.id)
   }
 
@@ -737,10 +747,22 @@ export class Scheduler {
     if (state.gateLease === null) return
     state.gateLease.release()
     state.gateLease = null
+    this.#gatePool(state, 'released', state.gateHeld)
     for (const resource of state.gateHeld) {
       this.#options.journal.releaseLease(resource, state.node.id)
     }
     state.gateHeld = []
+  }
+
+  /** One edge of a gate-pool acquisition. Pool ids and a phase — nothing else. */
+  #gatePool(state: NodeState, phase: GatePoolPhase, resources: readonly string[]): void {
+    if (resources.length === 0) return
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'gate_pool',
+      payload: { phase, resources: [...resources] },
+    })
   }
 
   #release(state: NodeState): void {
