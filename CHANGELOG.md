@@ -9,14 +9,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Two new opt-in foundation skills for browser QA: `qa-frontend` and
+- **Two new opt-in foundation skills for browser QA: `dev-desk-check` and
   `qa-review`.** Every QA path in this package was Playwright-shaped:
   `create-qa-use-cases` generates a human checklist that nothing executes, and
   `run_options.run_e2e` defaults off because the suite is slow. These two drive
   a real browser through the app as a user, judge what renders, and produce
   evidence someone who wasn't there can trust.
 
-  `qa-frontend` is the engineer path: it takes a plan from the branch diff (vs
+  `dev-desk-check` is the engineer path: it takes a plan from the branch diff (vs
   the PR's real base, resolved per `project.code_host` — "no PR" and "the CLI
   failed" are different answers, and only the first falls back to the default
   branch), from ids in the project's QA use-cases doc, or from a ticket. It
@@ -24,7 +24,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-environment write policy before the browser opens, keeps an incremental
   write ledger with a reversal recorded per entry, and writes a report plus a
   PR `Q.A.` section. Template-rendered from
-  `vinta-derive-skills/resources/qa-frontend-template.md`. It is **not** wired
+  `vinta-derive-skills/resources/dev-desk-check-template.md`. It is **not** wired
   into `implement-plan`'s phase gate — a browser pass per phase is too slow,
   the same reasoning that keeps `run_e2e` off — and it hand-rolls no browser
   tooling: with no browser skill or MCP in the harness it says so and stops.
@@ -39,12 +39,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checklist the repo keeps updating is worse than no snapshot. From
   `vinta-derive-skills/resources/qa-review-template.md`.
 
-- **New `foundation_skills` enum entries `qa-frontend` and `qa-review`** in
+- **New `foundation_skills` enum entries `dev-desk-check` and `qa-review`** in
   `schemas/vinta-ai-workflows-config.v1.schema.json`. They are **independent**
   opt-ins — a project can take the engineer path alone, the review path alone,
   or both — and both render from one shared config block.
 
-- **New `skills.qa-frontend` config block**, read by both skills. Guard rails
+- **New `skills.dev-desk-check` config block**, read by both skills. Guard rails
   are data, not prose: `environments.<name>` carries `base_url`, optional
   `api_url` / `api_health_path`, an opt-in-by-absence `frontend_start` (no key
   means probe and stop — a second dev server on an occupied port silently
@@ -66,7 +66,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to hosted storage would move records outside the managed platform's access
   controls and audit logging.
 
-- **New `run_options.qa-frontend` block** — `screenshots`, `scope`
+- **New `run_options.dev-desk-check` block** — `screenshots`, `scope`
   (`diff` / `use-cases` / `description`), `browser`, `dry_run`. Read by both
   skills; `qa-review` ignores what has no meaning without a checkout.
 
@@ -85,7 +85,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`vinta-update-project-skills` now flags `qa-review` for re-render on a
   config change**, not only on a template change. Its body inlines facts its
-  holder cannot look up, so a changed `skills.qa-frontend` makes the shipped
+  holder cannot look up, so a changed `skills.dev-desk-check` makes the shipped
   copy stale; the render carries a generation date and source commit to compare
   against.
 

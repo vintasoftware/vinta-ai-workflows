@@ -238,13 +238,13 @@
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
-        "qa-frontend": {
-          "description": "Drive a real browser through the app as a user, judge what renders, and produce evidence someone who wasn't there can trust — the manual counterpart to `add-e2e-test`'s automation. Plan source is the branch diff, ids from the project's QA use-cases doc, or a ticket. Template-rendered (bucket B) from `vinta-derive-skills/resources/qa-frontend-template.md` and opt-in (bucket C). Invoked deliberately — never wired into `implement-plan`'s phase gate, because a browser pass per phase is too slow (the same reasoning that keeps `run_options.run_e2e` off). When `enabled`, project-level configuration lives under `skills.qa-frontend` — the same block `qa-review` renders from.",
+        "dev-desk-check": {
+          "description": "Drive a real browser through the app as a user, judge what renders, and produce evidence someone who wasn't there can trust — the manual counterpart to `add-e2e-test`'s automation. Plan source is the branch diff, ids from the project's QA use-cases doc, or a ticket. Template-rendered (bucket B) from `vinta-derive-skills/resources/dev-desk-check-template.md` and opt-in (bucket C). Invoked deliberately — never wired into `implement-plan`'s phase gate, because a browser pass per phase is too slow (the same reasoning that keeps `run_options.run_e2e` off). When `enabled`, project-level configuration lives under `skills.dev-desk-check` — the same block `qa-review` renders from.",
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
         "qa-review": {
-          "description": "Portable QA pass for product managers and designers — the same browser walk and report shape as `qa-frontend` with git, diffs, dev servers, service probes, PR edits and database access stripped out. Template-rendered (bucket B) from `vinta-derive-skills/resources/qa-review-template.md` and opt-in (bucket C), rendered **self-contained**: no relative links and no repo-dependent commands, so the single `SKILL.md` works when dropped at `~/.claude/skills/qa-review/SKILL.md` by someone with no checkout. Reads the same `skills.qa-frontend` config block; this enum and `foundation_skills.qa-frontend` are independent opt-ins, so a project can take the engineer path alone, the review path alone, or both.",
+          "description": "Portable QA pass for product managers and designers — the same browser walk and report shape as `dev-desk-check` with git, diffs, dev servers, service probes, PR edits and database access stripped out. Template-rendered (bucket B) from `vinta-derive-skills/resources/qa-review-template.md` and opt-in (bucket C), rendered **self-contained**: no relative links and no repo-dependent commands, so the single `SKILL.md` works when dropped at `~/.claude/skills/qa-review/SKILL.md` by someone with no checkout. Reads the same `skills.dev-desk-check` config block; this enum and `foundation_skills.dev-desk-check` are independent opt-ins, so a project can take the engineer path alone, the review path alone, or both.",
           "type": "string",
           "enum": ["enabled", "disabled"]
         }
@@ -352,8 +352,8 @@
             }
           }
         },
-        "qa-frontend": {
-          "description": "Per-run defaults for `qa-frontend` and `qa-review`. Both read this one block; `qa-review` ignores the options that have no meaning without a checkout. The skill still asks per run — these are the suggested defaults shown.",
+        "dev-desk-check": {
+          "description": "Per-run defaults for `dev-desk-check` and `qa-review`. Both read this one block; `qa-review` ignores the options that have no meaning without a checkout. The skill still asks per run — these are the suggested defaults shown.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -561,8 +561,8 @@
             }
           }
         },
-        "qa-frontend": {
-          "description": "Configuration for the `qa-frontend` **and** `qa-review` foundation skills — both render from this one block. Required when either `foundation_skills.qa-frontend` or `foundation_skills.qa-review` is `enabled`; ignored otherwise. Guard rails are data, not prose: a project declares its policy per environment and the rendered skill enforces exactly what it was given. **Never put a credential here** — `auth.accounts[].where` is a pointer to where a secret lives, not the secret.",
+        "dev-desk-check": {
+          "description": "Configuration for the `dev-desk-check` **and** `qa-review` foundation skills — both render from this one block. Required when either `foundation_skills.dev-desk-check` or `foundation_skills.qa-review` is `enabled`; ignored otherwise. Guard rails are data, not prose: a project declares its policy per environment and the rendered skill enforces exactly what it was given. **Never put a credential here** — `auth.accounts[].where` is a pointer to where a secret lives, not the secret.",
           "type": "object",
           "required": ["environments"],
           "additionalProperties": false,

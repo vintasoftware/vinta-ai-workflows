@@ -1,9 +1,9 @@
 ---
-name: qa-frontend
-description: Drive a real browser through {{PROJECT_NAME}} as a user and report what actually renders — the manual pass that complements automated e2e. Takes a plan from the branch diff, from QA use-case ids, or from a ticket; preflights services, frontend and backend for the chosen environment ({{QA_ENVIRONMENT_NAMES}}); walks the flows; and writes an evidence-backed report to {{QA_REPORT_DIR}} plus a Q.A. section on the PR. Enforces this project's per-environment write policy and data-sensitivity rules before it opens the browser. Use when the user says "QA this branch", "check this in the browser", "does this actually work", "walk through the new flow", or before handing a UI change to review.
+name: dev-desk-check
+description: Drive a real browser through {{PROJECT_NAME}} as a user and report what actually renders — the manual pass that complements automated e2e. Takes a plan from the branch diff, from QA use-case ids, or from a ticket; preflights services, frontend and backend for the chosen environment ({{QA_ENVIRONMENT_NAMES}}); walks the flows; and writes an evidence-backed report to {{QA_REPORT_DIR}} plus a Q.A. section on the PR. Enforces this project's per-environment write policy and data-sensitivity rules before it opens the browser. Use when the user says "desk check this branch", "QA this branch", "check this in the browser", "does this actually work", "walk through the new flow", or before handing a UI change to review.
 ---
 
-# QA frontend
+# Dev desk check
 
 {{PROJECT_NAME}} ({{STACK_SUMMARY}}) ships UI changes that nothing walks end to end. This skill drives a real
 browser through the running app the way a user would, judges what actually renders, and leaves evidence
@@ -27,7 +27,7 @@ Enumerate the browser-driving tools this harness actually exposes right now — 
 Chrome DevTools MCP server, a browser or computer-use tool the runtime ships, a browser skill installed
 alongside this one. Pick by preference:
 
-1. The tool named in `run_options.qa-frontend.browser`, if it is present and responding.
+1. The tool named in `run_options.dev-desk-check.browser`, if it is present and responding.
 2. Otherwise any other browser-driving tool the harness exposes. Say which one you fell back to, and why, in
    the report's **Run** line — a reader comparing two runs needs to know they used different eyes.
 
@@ -44,8 +44,8 @@ invoking message already named the environment or the plan source, take it and d
 - **Environment** — options are exactly the declared environment names from the table below. Never invent one,
   never point the browser at a URL that is not in the table.
 - **Plan source** — `Branch diff`, `QA use-case ids`, `Ticket / description`. Default the highlighted option
-  to `run_options.qa-frontend.scope`.
-- **Screenshots** — `On` / `Off`, defaulting to `run_options.qa-frontend.screenshots`. Always asked, even when
+  to `run_options.dev-desk-check.scope`.
+- **Screenshots** — `On` / `Off`, defaulting to `run_options.dev-desk-check.screenshots`. Always asked, even when
   the default is obvious (see Phase 2).
 
 Anything genuinely free-form — which ticket, which use-case ids, which account role — is asked as open prose,
@@ -95,7 +95,7 @@ produces a report that looks authoritative and tests the wrong thing.
 Resolve everything Step 0 left open, and state the resolved set back in one line before Phase 3:
 
 - **`--screenshots`** — resolved **explicitly, every run**, never assumed. Defaults come from
-  `run_options.qa-frontend.screenshots`, but a default is not a decision: a run that silently captured nothing
+  `run_options.dev-desk-check.screenshots`, but a default is not a decision: a run that silently captured nothing
   leaves a report a reader cannot check, and a run that silently captured everything can put restricted
   records on disk. Whatever the answer, screenshot handling stays bounded by the environment's
   `data_sensitivity`. Captures land under `{{QA_REPORT_DIR}}`, alongside the report and the write ledger.
@@ -107,7 +107,7 @@ Resolve everything Step 0 left open, and state the resolved set back in one line
 - **`--browser`** — the tool actually selected above, not the configured preference.
 - **`--writes`** — may only relax **within** the environment's declared `writes` policy, never upgrade past
   it. `--writes=allow` against a `forbidden` environment is refused, not honoured.
-- **`--dry_run`** — from `run_options.qa-frontend.dry_run` unless the operator overrode it. See the end of
+- **`--dry_run`** — from `run_options.dev-desk-check.dry_run` unless the operator overrode it. See the end of
   Phase 3b for where a dry run stops.
 
 ## Phase 3 — Preflight
@@ -117,7 +117,7 @@ that is down produces failures indistinguishable from product bugs, and a run th
 dead queue spends its findings section describing the outage.
 
 <!-- rendering note: {{QA_SERVICES_BLOCK}} owns its own `### Services pre-check` heading (h3 — it nests inside
-this phase). Do not add a literal heading above it. When `skills.qa-frontend.services` is absent or empty the
+this phase). Do not add a literal heading above it. When `skills.dev-desk-check.services` is absent or empty the
 placeholder renders to the empty string and the whole region disappears, heading and all. -->
 
 {{QA_SERVICES_BLOCK}}
@@ -127,7 +127,7 @@ placeholder renders to the empty string and the whole region disappears, heading
 {{QA_PREFLIGHT_BLOCK}}
 
 <!-- rendering note: {{QA_FEATURE_FLAGS_BLOCK}} owns its own `### Feature flags` heading. Do not add a literal
-heading above it. When `skills.qa-frontend.feature_flags` is absent or its `system` is `none`, the placeholder
+heading above it. When `skills.dev-desk-check.feature_flags` is absent or its `system` is `none`, the placeholder
 renders to the empty string and the whole region disappears, heading and all — the alternative ships dead
 advice about a flag system this project does not use. -->
 
@@ -185,7 +185,7 @@ Nothing else in the plan mutates. Confirm the environment and scope to proceed.
 6. **Writes carry synthetic values only.** Never real client or patient data as input. Under `phi`, the ledger records opaque IDs, not field values.
 7. **Setup writes stay propose-only in every environment.** Feature flags, seeds and migrations have a blast radius unrelated to the test — flipping a flag in production turns a feature on for every user it applies to, which is a release decision, not a QA step. Hand the operator a ready-to-run command plus its reverse and wait. App-data writes relax; setup writes do not.
 
-When `run_options.qa-frontend.dry_run` is true, print this block — the full plan, the resolved flags, the
+When `run_options.dev-desk-check.dry_run` is true, print this block — the full plan, the resolved flags, the
 preflight results and every write the run would require, with its reversal — and **stop here**. Do not open
 the browser. A dry run's whole value is that it shows what a real run would touch while nothing has been
 touched yet, so say explicitly that nothing was walked and nothing was written.
@@ -244,7 +244,7 @@ in. Resume only once they confirm. Never read a credential out of a `.env`, a va
 manager, a fixture or the operator's earlier messages, and never echo one anywhere.
 
 <!-- rendering note: {{QA_DESIGN_SOURCE_BLOCK}} owns its own `### The design pass` heading. Do not add a
-literal heading above it. When `skills.qa-frontend.design_source` is absent or its `type` is `none`, the
+literal heading above it. When `skills.dev-desk-check.design_source` is absent or its `type` is `none`, the
 placeholder renders to the empty string and the whole region disappears, heading and all. The rule that a
 skipped design pass is recorded under *Not tested* with its reason and never silently dropped is therefore
 also guaranteed from outside this region, by the Verification section's requirement that every planned surface
@@ -300,7 +300,7 @@ skeleton:
 ```markdown
 # QA report — <plan source> — <environment> — <YYYY-MM-DD HH:MM TZ>
 
-**Run**: qa-frontend · **Browser**: <tool> · **Screenshots**: <on | off> · **Dry run**: <yes | no>
+**Run**: dev-desk-check · **Browser**: <tool> · **Screenshots**: <on | off> · **Dry run**: <yes | no>
 **Plan source**: <diff vs <base> | use cases <ids> | ticket/description>
 **Environment**: <name> — <base_url> · writes: <free | confirm | forbidden> · data sensitivity: <none | client | phi>
 **Services**: <name: up | down | unknown>, … (omit this line when no services are declared)

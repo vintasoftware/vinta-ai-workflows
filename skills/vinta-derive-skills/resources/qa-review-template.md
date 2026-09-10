@@ -97,7 +97,7 @@ password, in any environment, and never reads one out of a file, a note or an ea
 
 <!-- rendering note: {{QA_FEATURE_FLAGS_BLOCK}} brings its own h3 heading, in reviewer language (e.g.
 `### Settings that turn features on`), and renders to the **empty string** when
-`skills.qa-frontend.feature_flags` is absent or its `system` is `none`.
+`skills.dev-desk-check.feature_flags` is absent or its `system` is `none`.
 That is safe here: it is the trailing block of a step that has other content, so nothing is orphaned and no
 numbered heading disappears. The qa-review variant names the *setting* in the words a reviewer would use and
 never the name of the system behind it. -->
@@ -157,7 +157,7 @@ exactly like a bug in the product unless you are watching for it.
 
 ## Step 6 — Compare against the design
 
-<!-- rendering note: unlike the qa-frontend variant, the qa-review variant of {{QA_DESIGN_SOURCE_BLOCK}} is
+<!-- rendering note: unlike the dev-desk-check variant, the qa-review variant of {{QA_DESIGN_SOURCE_BLOCK}} is
 **never** the empty string, because the heading above it is a numbered step and a vanished heading would leave
 a hole in the sequence the reader is following. When the project declares no design source it renders the
 single line: `There is no design to compare against on this project. Note that under *Not tested* and move
