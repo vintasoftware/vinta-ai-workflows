@@ -8,9 +8,9 @@ description: Drive a real browser through {{PROJECT_NAME}} as a user and report 
 {{PROJECT_NAME}} ({{STACK_SUMMARY}}) ships UI changes that nothing walks end to end. This skill drives a real
 browser through the running app the way a user would, judges what actually renders, and leaves evidence
 someone who wasn't in the session can trust. It is the manual counterpart to automated e2e, not a substitute:
-[add-e2e-test](../add-e2e-test/SKILL.md) owns automation, this owns the human-eye pass.
+`add-e2e-test` owns automation, this owns the human-eye pass.
 
-It exists because the manual checklist has no tooling. [create-qa-use-cases](../create-qa-use-cases/SKILL.md)
+It exists because the manual checklist has no tooling. `create-qa-use-cases`
 writes flows in user language specifically so a person can walk them, and then nothing executes them; the
 automated suite that would cover the same ground is opt-in and usually skipped. So the whole job is to judge
 **what renders, not what exists**. A component that compiles, a route that is registered, a query that returns
@@ -300,7 +300,7 @@ skeleton:
 ```markdown
 # QA report — <plan source> — <environment> — <YYYY-MM-DD HH:MM TZ>
 
-**Run**: dev-desk-check · **Browser**: <tool> · **Screenshots**: <on | off> · **Dry run**: <yes | no>
+**Run**: dev-desk-check · **Browser**: <tool> · **Viewport**: <width>x<height> · **Screenshots**: <on | off> · **Dry run**: <yes | no>
 **Plan source**: <diff vs <base> | use cases <ids> | ticket/description>
 **Environment**: <name> — <base_url> · writes: <free | confirm | forbidden> · data sensitivity: <none | client | phi>
 **Services**: <name: up | down | unknown>, … (omit this line when no services are declared)
