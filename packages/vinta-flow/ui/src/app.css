@@ -170,6 +170,115 @@ ul {
   background: var(--tone-active);
 }
 
+/* The node view. Same plainness: one column of panels, no design system. */
+
+.node .panel {
+  margin-top: 12px;
+}
+
+.node .panels .panel {
+  margin-top: 0;
+}
+
+textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+
+.controls button {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.controls button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.question {
+  border-color: var(--tone-attention);
+}
+
+.question-context {
+  color: var(--muted);
+}
+
+.ref {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 8px;
+  margin: 0;
+}
+
+.ref dt {
+  color: var(--muted);
+}
+
+.ref dd {
+  margin: 0;
+}
+
+.gates pre,
+.entry-body {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gates pre {
+  max-height: 200px;
+  overflow: auto;
+  background: var(--canvas);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+/* The window (see Transcript.tsx) scrolls; only what is inside it is mounted. */
+.entries {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.entries li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.entry-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0;
+}
+
+.entry-author {
+  font-weight: 600;
+}
+
+.entry-author[data-author='operator'] {
+  color: var(--tone-attention);
+}
+
+.entry-author[data-author='tool'],
+.entry-author[data-author='system'] {
+  color: var(--muted);
+}
+
 .chip {
   display: inline-block;
   padding: 1px 8px;

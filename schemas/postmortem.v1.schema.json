@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/postmortem.v1.schema.json",
+  "title": "vinta-flow plan post-mortem",
+  "description": "What one finished `vinta-flow` run learned about the plan that produced it: dependencies that were never used, dependencies discovered missing, same-wave phases that conflicted, and phases whose duration diverged from their wave. Ids, waves, paths, durations and counts only. Lives at `.vinta-flow/runs/<run-id>/postmortem.json` in a target project, emitted by `vinta-flow` after a run ends and read by `plan-feature` when planning the next feature in the same repo. GENERATED from packages/vinta-flow/src/postmortem/postmortem.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional URL of this schema, for editor validation. Ignored at runtime.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "number",
+      "const": 1,
+      "description": "Schema major version. Bumped only on breaking changes."
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "The workflow this run executed."
+    },
+    "plan_ref": {
+      "description": "The human-readable plan the workflow was emitted alongside, if it named one.",
+      "type": "string"
+    },
+    "run": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "done",
+            "failed"
+          ]
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "ended_at_ms": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "node_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "wave_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "status",
+        "started_at_ms",
+        "ended_at_ms",
+        "elapsed_ms",
+        "node_count",
+        "wave_count"
+      ],
+      "additionalProperties": false,
+      "description": "The run this describes. Always finished — an unfinished run has no post-mortem."
+    },
+    "findings": {
+      "type": "object",
+      "properties": {
+        "unused_dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The dependent phase."
+              },
+              "depends_on": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The upstream phase the edge names."
+              }
+            },
+            "required": [
+              "node",
+              "depends_on"
+            ],
+            "additionalProperties": false,
+            "description": "One dependency edge, by id. The plan’s own `artifact` prose is deliberately not carried: the reader has the plan, and this file must stay free of repository text."
+          },
+          "description": "Edges whose artifact the dependent never needed. Empty on every run today: nothing observes dependency use, and the schedule cannot substitute. See `gaps`."
+        },
+        "missing_dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The phase that failed and later passed."
+              },
+              "depends_on": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The undeclared phase that landed in between."
+              },
+              "failed_at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When the phase first failed."
+              },
+              "landed_at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When the undeclared phase reached `done`."
+              },
+              "passed_at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "When the phase finally reached `done`."
+              }
+            },
+            "required": [
+              "node",
+              "depends_on",
+              "failed_at_ms",
+              "landed_at_ms",
+              "passed_at_ms"
+            ],
+            "additionalProperties": false,
+            "description": "A dependency the run discovered and the plan did not declare: the phase failed, an undeclared phase landed, and only then did it pass. The evidence is ordering — the journal records no gate result, so the causal link is not proven (see `gaps`)."
+          }
+        },
+        "wave_conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "wave": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "The wave whose merge produced the conflict."
+              },
+              "nodes": {
+                "minItems": 2,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "description": "The phases that both own the contested paths."
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Repository paths that conflicted. Paths, never hunks."
+              },
+              "fix_rounds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Conflict-fixer rounds the resolution took. High is a strong split signal."
+              }
+            },
+            "required": [
+              "wave",
+              "nodes",
+              "paths",
+              "fix_rounds"
+            ],
+            "additionalProperties": false,
+            "description": "Two same-wave phases that actually fought over the same code at integration."
+          }
+        },
+        "duration_divergences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "wave": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "span_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Dispatch to final settle, including fix rounds."
+              },
+              "wave_baseline_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Median span of the *other* dispatched phases in the same wave."
+              },
+              "ratio": {
+                "type": "number",
+                "description": "`span_ms / wave_baseline_ms`, rounded to two decimals."
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "longer",
+                  "shorter"
+                ],
+                "description": "`longer`: the phase set the wave’s wall clock on its own."
+              }
+            },
+            "required": [
+              "node",
+              "wave",
+              "span_ms",
+              "wave_baseline_ms",
+              "ratio",
+              "direction"
+            ],
+            "additionalProperties": false,
+            "description": "A phase whose real duration was wildly out of line with its wave placement — which is exactly what makes the next plan’s parallelism estimate wrong."
+          }
+        }
+      },
+      "required": [
+        "unused_dependencies",
+        "missing_dependencies",
+        "wave_conflicts",
+        "duration_divergences"
+      ],
+      "additionalProperties": false
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "dependency_use_unrecorded",
+              "gate_result_unrecorded",
+              "integration_record_unavailable"
+            ]
+          },
+          "needs": {
+            "type": "string",
+            "description": "What would have to be recorded for the finding to exist."
+          },
+          "edges": {
+            "description": "The edges the gap applies to.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "The dependent phase."
+                },
+                "depends_on": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "The upstream phase the edge names."
+                }
+              },
+              "required": [
+                "node",
+                "depends_on"
+              ],
+              "additionalProperties": false,
+              "description": "One dependency edge, by id. The plan’s own `artifact` prose is deliberately not carried: the reader has the plan, and this file must stay free of repository text."
+            }
+          },
+          "nodes": {
+            "description": "The phases the gap applies to.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          }
+        },
+        "required": [
+          "kind",
+          "needs"
+        ],
+        "additionalProperties": false,
+        "description": "A finding this run could not produce, and why. Carried in the artifact rather than thrown or defaulted to an empty list: a reader that treats an empty finding as “nothing happened” has to reach past an explicit statement that nothing was recorded."
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "workflow_id",
+    "run",
+    "findings",
+    "gaps"
+  ],
+  "additionalProperties": false
+}

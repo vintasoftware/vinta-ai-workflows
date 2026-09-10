@@ -10,10 +10,19 @@
  * Nothing here waits on real time: the multi-hour projections below complete in
  * milliseconds, which is the observable proof that the clock is virtual.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { MockAdapter } from '../src/harness/mock.ts'
-import { formatSimulation, simulate, type SimulationReport } from '../src/simulate/index.ts'
+import { STANDARD_PHASE_ID } from '../src/pipeline/standard.ts'
+import {
+  DEFAULT_AGENT_TURN_MS,
+  DEFAULT_GATE_MS,
+  formatSimulation,
+  simulate,
+  type SimulationReport,
+} from '../src/simulate/index.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 
 const HARNESS = 'claude-code'
@@ -416,5 +425,51 @@ describe('virtual time', () => {
     expect(poolById(report, 'lane').saturatedMs).toBe(min(720))
     expect(elapsedMs).toBeLessThan(min(720))
     expect(elapsedMs).toBeLessThan(10_000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7: the shipped pipeline, on the golden workflow's graph
+//
+// Every projection above drives a hand-written one-turn machine, which is why
+// nothing here covered `standard-phase` — the pipeline `defaults.pipeline`
+// names when a workflow authors none, and therefore the one almost every real
+// plan runs. Simulating it over the golden workflow's graph is the regression
+// guard for that gap: it is a whole-pipeline assertion that every guard in the
+// shipped machine resolves, on the clean path, for a graph with a fan-out, a
+// fan-in and a second harness.
+//
+// The fixture's own `pipelines['standard-phase']` is dropped deliberately. A
+// declared id shadows a built-in of the same name, and that copy is the *schema*
+// fixture — the same graph with almost no effects, so a parser test never waits
+// on an agent. Simulated as written, its `gate` state runs no `run_gate`, so
+// nothing ever produces `gate.exit_code`, neither `t-gate-pass` nor
+// `t-gate-fail` can match, and the run sticks: `p1` failed, `p2`–`p4` blocked.
+// That is the fixture being effect-less, not the shipped pipeline being wrong.
+// ---------------------------------------------------------------------------
+
+describe('the shipped standard-phase', () => {
+  it('projects a clean run over the golden workflow’s graph', async () => {
+    const raw = JSON.parse(
+      readFileSync(join(import.meta.dirname, 'fixtures/golden-workflow.json'), 'utf8'),
+    ) as Record<string, unknown>
+    const { pipelines: _schemaFixture, ...graph } = raw
+    const workflow = WorkflowSchema.parse(graph)
+
+    expect(workflow.defaults.pipeline).toBe(STANDARD_PHASE_ID)
+    expect(workflow.pipelines).toEqual({})
+
+    const report = await simulate({ workflow })
+
+    expect(report.status).toBe('completed')
+    expect(report.stop).toBeUndefined()
+    expect(report.statuses).toEqual({ p1: 'done', p2: 'done', p3: 'done', p4: 'done' })
+
+    // Two turns per node on the clean path — implementer, then reviewer — plus
+    // the node's gates. `p1` alone, then `p2` and `p3` in parallel, then `p4`.
+    const busy = (id: string): number =>
+      report.nodes.find((node_) => node_.id === id)?.busyMs ?? -1
+    expect(busy('p1')).toBe(2 * DEFAULT_AGENT_TURN_MS + 2 * DEFAULT_GATE_MS)
+    expect(busy('p4')).toBe(2 * DEFAULT_AGENT_TURN_MS + DEFAULT_GATE_MS)
   })
 })

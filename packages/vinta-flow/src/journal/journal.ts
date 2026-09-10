@@ -252,6 +252,34 @@ export class Journal {
     return this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) as RunRow | undefined
   }
 
+  /**
+   * Every run the store knows about, newest first.
+   *
+   * The daemon's run list is this, not its in-process registry: a run is a row
+   * folded out of `run_started`, so it survives the process that started it.
+   * Listing the registry instead would make a restart look like a machine with
+   * no history — the runs are still on disk, still resumable, and invisible.
+   */
+  runs(): RunRow[] {
+    return this.db
+      .prepare('SELECT * FROM runs ORDER BY started_at DESC, id DESC')
+      .all() as RunRow[]
+  }
+
+  /**
+   * The id of the newest event for a run, or 0 when it has none.
+   *
+   * This is the cursor a snapshot reflects. Read it *before* the projections
+   * it accompanies and the pair can only err towards a replay — the fold is
+   * idempotent — never towards a gap.
+   */
+  lastEventId(runId: string): number {
+    const row = this.db
+      .prepare('SELECT MAX(id) AS id FROM events WHERE run_id = ?')
+      .get(runId) as { id: number | null }
+    return row.id ?? 0
+  }
+
   nodes(runId: string): NodeRow[] {
     return this.db
       .prepare('SELECT * FROM nodes WHERE run_id = ? ORDER BY node_id')

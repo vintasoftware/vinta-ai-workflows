@@ -96,6 +96,12 @@ export const RunListResponseSchema = z.strictObject({ runs: z.array(RunSummarySc
 
 export const NodeSummarySchema = z.strictObject({
   nodeId: z.string(),
+  /**
+   * The display name from the frozen workflow (§5.3), not the row: node rows
+   * are projected from events and the name is plan prose, not run state. Falls
+   * back to the id for a node the snapshot no longer declares.
+   */
+  name: z.string(),
   status: z.enum(NODE_STATUSES),
   wave: z.number().int(),
   lane: z.string().nullable(),
@@ -136,9 +142,33 @@ export const GateQueueSchema = z.strictObject({
   ),
 })
 
+/**
+ * One dependency, as §10's graph draws it: an arrow from the upstream node to
+ * the one that needs it, labelled with what it needs. `artifact` is required
+ * in the workflow schema for exactly this reason — an unlabelled edge says
+ * only that an order exists, not why.
+ */
+export const RunEdgeSchema = z.strictObject({
+  /** The upstream node id — the dependency. */
+  from: z.string(),
+  /** The node that declared the dependency. */
+  to: z.string(),
+  artifact: z.string(),
+})
+
 export const RunSnapshotSchema = z.strictObject({
   run: RunSummarySchema,
+  /**
+   * The id of the newest event this snapshot reflects, or 0 for a run with
+   * none. A client with no stored position streams from here: it is already
+   * current as of this id, so `?since=<cursor>` costs no replay and can skip
+   * nothing — the cursor is read before the projections beside it, so it can
+   * only lag them, never lead them.
+   */
+  cursor: z.number().int(),
   nodes: z.array(NodeSummarySchema),
+  /** The frozen workflow's dependencies, in declaration order (§10). */
+  edges: z.array(RunEdgeSchema),
   resources: z.array(ResourceStateSchema),
   gateQueue: GateQueueSchema,
   harnesses: z.array(HarnessStateSchema),

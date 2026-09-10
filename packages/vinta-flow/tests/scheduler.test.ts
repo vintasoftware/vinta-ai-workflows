@@ -800,10 +800,12 @@ describe('standard-phase under the scheduler', () => {
       'spawn_agent',
       'spawn_agent',
       'run_gate',
+      // Tracking before the merge: the phase record has to be in the commit
+      // the wave branch merges — see the `integrate` state in `standard.ts`.
+      'write_tracking',
       'git_merge',
       'git_push',
       'open_pr',
-      'write_tracking',
     ])
     expectDrained(r)
   })

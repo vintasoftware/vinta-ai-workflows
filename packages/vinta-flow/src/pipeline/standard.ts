@@ -99,11 +99,20 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       id: 'integrate',
       name: 'Integrate',
       position: { x: 600, y: 0 },
+      // Tracking first, and the order is load-bearing rather than tidy.
+      //
+      // `phase-<id>.md` is the lane's own file, committed *on the phase's own
+      // branch* (`parallel-lanes.md#TRACKING_DIR`) — that commit is how the
+      // record reaches anybody. Written last, it lands after the wave merge has
+      // already happened, after the branch was pushed and after the PR was
+      // opened, so it reaches none of the three: the wave branch does not carry
+      // it, the pushed branch does not have it, and it is not in the PR diff.
+      // It has to be part of what gets merged, so it is written before the merge.
       onEnter: [
+        { id: 'e-tracking', definitionId: 'write_tracking', params: { scope: 'phase' } },
         { id: 'e-merge', definitionId: 'git_merge', params: { strategy: '--no-ff' } },
         { id: 'e-push', definitionId: 'git_push' },
         { id: 'e-pr', definitionId: 'open_pr', params: { draft: true } },
-        { id: 'e-tracking', definitionId: 'write_tracking', params: { scope: 'phase' } },
       ],
     },
     { id: 'done', name: 'Done', position: { x: 800, y: 0 }, data: { outcome: 'done' } },

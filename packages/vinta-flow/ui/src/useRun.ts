@@ -16,6 +16,16 @@
  *   `sessionStorage` so a reload resumes where the tab left off instead of
  *   replaying the run. It is a read position, not state: losing it costs a
  *   replay, and the fold is idempotent, so a replay costs nothing.
+ * - **A cold start begins at the snapshot's cursor, not at zero.** The
+ *   snapshot is already current as of `snapshot.cursor` — the daemon reads
+ *   that id before the projections beside it, so it can only lag them — which
+ *   is why a tab with no stored position can start there and skip nothing.
+ *   Starting at zero instead would replay the entire journal to render a
+ *   screen the snapshot had already drawn. This is what makes the socket wait
+ *   on the first snapshot: opening it earlier would mean opening it at a
+ *   position we do not know yet. A snapshot that *fails* still starts the
+ *   stream, from the stored cursor or from zero — a dead read endpoint is not
+ *   a reason to stop watching the run.
  *
  * A dropped socket reconnects on a fixed delay. A frame that does not match
  * the daemon's schema does not: a server this client cannot read will not
@@ -46,6 +56,7 @@ export function useRun(client: Client, runId: string): RunView {
   useEffect(() => {
     let stopped = false
     let cursor = readCursor(runId)
+    let opened = false
     let detach: (() => void) | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
 
@@ -55,11 +66,24 @@ export function useRun(client: Client, runId: string): RunView {
           if (stopped) return
           setSnapshot(next)
           setError(null)
+          // Only the first snapshot decides where to start; later ones are
+          // re-reads of live scheduler state and the socket is already open.
+          start(next.cursor)
         },
         (cause: unknown) => {
-          if (!stopped) setError(messageOf(cause))
+          if (stopped) return
+          setError(messageOf(cause))
+          start(0)
         },
       )
+    }
+
+    /** Opens the stream once, at the later of the stored and offered cursors. */
+    const start = (offered: number): void => {
+      if (opened || stopped) return
+      opened = true
+      cursor = Math.max(cursor, offered)
+      open()
     }
 
     const open = (): void => {
@@ -87,7 +111,6 @@ export function useRun(client: Client, runId: string): RunView {
     }
 
     refresh()
-    open()
 
     return () => {
       stopped = true

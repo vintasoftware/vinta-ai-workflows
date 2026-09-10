@@ -16,7 +16,9 @@
     "ui:dev": "vite --config ui/vite.config.ts",
     "ui:build": "vite build --config ui/vite.config.ts",
     "schema:gen": "node --experimental-strip-types src/schema/generate.ts",
-    "schema:check": "node --experimental-strip-types src/schema/generate.ts --check"
+    "schema:check": "node --experimental-strip-types src/schema/generate.ts --check",
+    "postmortem:schema:gen": "node --experimental-strip-types src/postmortem/generate.ts",
+    "postmortem:schema:check": "node --experimental-strip-types src/postmortem/generate.ts --check"
   },
   "license": "MIT",
   "dependencies": {

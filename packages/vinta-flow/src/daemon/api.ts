@@ -28,6 +28,7 @@ import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import type { DaemonRun } from './control.ts'
+import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
   AnswerRequestSchema,
@@ -54,12 +55,32 @@ export interface ApiOptions {
   readonly token: string
   /** Live view of the registry — a run registered after start is reachable. */
   readonly runs: ReadonlyMap<string, DaemonRun>
+  /** Where the built UI lives. Defaults to this package's `dist/ui`. */
+  readonly uiDir?: string
 }
 
 export function createApi(options: ApiOptions): Hono {
   const { journal, runs } = options
   const workflows = new Map<string, Workflow>()
+  const ui = createStaticHandler(options.uiDir ?? DEFAULT_UI_DIR)
   const app = new Hono()
+
+  /**
+   * The app shell, before the token check and only ever before it (§10).
+   *
+   * The reasoning for serving these bytes unauthenticated is in `static.ts`.
+   * What matters here is the boundary: this middleware declines every path
+   * under `/api` and the WebSocket path, so the one route that does not
+   * require a token cannot become a way to reach a route that does. Everything
+   * it can answer with comes out of the UI directory.
+   */
+  app.use('*', async (c, next) => {
+    const path = new URL(c.req.url).pathname
+    if (path === '/api' || path.startsWith('/api/') || path === '/ws') return await next()
+    const method = c.req.method
+    if (method !== 'GET' && method !== 'HEAD') return await next()
+    return ui(path, method)
+  })
 
   /** §11: every request, without exception, including the ones that 404. */
   app.use('*', async (c, next) => {
@@ -70,13 +91,13 @@ export function createApi(options: ApiOptions): Hono {
 
   app.notFound((c) => fail(c, 404, 'not_found'))
 
+  /**
+   * Every run on disk, not every run this process started (§5.3). The journal
+   * outlives the daemon; a list drawn from the in-memory registry would report
+   * a restarted machine as one with no history.
+   */
   app.get('/api/runs', (c) => {
-    const summaries: RunSummary[] = []
-    for (const runId of runs.keys()) {
-      const row = journal.run(runId)
-      if (row !== undefined) summaries.push(runSummary(row))
-    }
-    return c.json({ runs: summaries })
+    return c.json({ runs: journal.runs().map(runSummary) satisfies RunSummary[] })
   })
 
   app.get('/api/runs/:runId', (c) => {
@@ -103,7 +124,7 @@ export function createApi(options: ApiOptions): Hono {
 
     const detail: NodeDetail = {
       runId,
-      node: nodeSummary(node),
+      node: nodeSummary(node, declared?.name ?? node.node_id),
       diff: { branch: node.branch, baseBranch: node.base_branch, lane: node.lane },
       transcript: {
         stream,
@@ -215,7 +236,12 @@ export function createApi(options: ApiOptions): Hono {
   }
 
   function snapshot(run: DaemonRun, row: RunRow, wf: Workflow): RunSnapshot {
+    // Read before the projections below, so the cursor can only lag what this
+    // snapshot shows. A client resuming from it may replay an event it already
+    // sees the effect of — the fold is idempotent — but can never miss one.
+    const cursor = journal.lastEventId(row.id)
     const nodes = journal.nodes(row.id)
+    const names = new Map(wf.nodes.map((node) => [node.id, node.name]))
     const mine = new Set(nodes.map((node) => node.node_id))
     const leases = journal.leases().filter((lease) => mine.has(lease.holder_node))
 
@@ -226,7 +252,18 @@ export function createApi(options: ApiOptions): Hono {
 
     return {
       run: runSummary(row),
-      nodes: nodes.map(nodeSummary),
+      cursor,
+      nodes: nodes.map((node) => nodeSummary(node, names.get(node.node_id) ?? node.node_id)),
+      // The graph's edges come from the frozen workflow, which is the only
+      // place they exist: a dependency is plan structure, not run state, so no
+      // event carries one and no node row could.
+      edges: wf.nodes.flatMap((node) =>
+        node.depends_on.map((dependency) => ({
+          from: dependency.node,
+          to: node.id,
+          artifact: dependency.artifact,
+        })),
+      ),
       resources: Object.entries(wf.resources).map(([id, resource]) => ({
         id,
         kind: resource.kind,
@@ -265,9 +302,10 @@ function runSummary(row: RunRow): RunSummary {
   }
 }
 
-function nodeSummary(row: NodeRow): RunSnapshot['nodes'][number] {
+function nodeSummary(row: NodeRow, name: string): RunSnapshot['nodes'][number] {
   return {
     nodeId: row.node_id,
+    name,
     status: row.status,
     wave: row.wave,
     lane: row.lane,

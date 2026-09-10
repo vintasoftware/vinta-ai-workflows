@@ -18,10 +18,17 @@
  *   endpoint and the status code, and nothing else.
  */
 import {
+  AddContextRequestSchema,
+  AnswerRequestSchema,
   FrameSchema,
+  NoArgsRequestSchema,
+  NodeDetailSchema,
+  OkResponseSchema,
+  RedirectRequestSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
   type EventFrame,
+  type NodeDetail,
   type RunSnapshot,
   type RunSummary,
 } from '../../src/daemon/schemas.ts'
@@ -30,6 +37,30 @@ import type { z } from 'zod'
 /** Mirrors `daemon/auth.ts`'s `TOKEN_QUERY`; that module is Node-only. */
 const TOKEN_QUERY = 'token'
 const WS_PATH = '/ws'
+
+/**
+ * How much transcript the node view asks for. The endpoint tails — it never
+ * pages backwards — so this is the whole window the operator can scroll, and
+ * the view windows it again before it reaches the DOM.
+ */
+export const TRANSCRIPT_LIMIT = 500
+
+/**
+ * The five operations of §9, keyed by their endpoint segment and carrying the
+ * daemon's own request schema. Bodies are validated here before they are sent:
+ * the daemon rejects an unknown key with a 400, and a client that can only
+ * post what the schema accepts cannot earn one.
+ */
+const OPERATIONS = {
+  context: AddContextRequestSchema,
+  redirect: RedirectRequestSchema,
+  pause: NoArgsRequestSchema,
+  abort: NoArgsRequestSchema,
+  answer: AnswerRequestSchema,
+} as const
+
+export type NodeOperation = keyof typeof OPERATIONS
+export type OperationBody<K extends NodeOperation> = z.infer<(typeof OPERATIONS)[K]>
 
 export type StreamClose = 'closed' | 'invalid_frame'
 
@@ -43,6 +74,15 @@ export interface StreamHandlers {
 export interface Client {
   readonly runs: () => Promise<readonly RunSummary[]>
   readonly snapshot: (runId: string) => Promise<RunSnapshot>
+  /** The node view's read: transcript tail, gate logs, diff ref, question (§10). */
+  readonly node: (runId: string, nodeId: string) => Promise<NodeDetail>
+  /** One §9 operation. Resolves when the daemon accepted it, and returns nothing. */
+  readonly operate: <K extends NodeOperation>(
+    runId: string,
+    nodeId: string,
+    operation: K,
+    body: OperationBody<K>,
+  ) => Promise<void>
   /** Tails `runId` from after `since`. The returned function detaches. */
   readonly stream: (runId: string, since: number, handlers: StreamHandlers) => () => void
 }
@@ -58,6 +98,25 @@ export function createClient(origin: string, token: string): Client {
     },
     async snapshot(runId) {
       return await get(`/api/runs/${encodeURIComponent(runId)}`, RunSnapshotSchema)
+    },
+    async node(runId, nodeId) {
+      return await get(`${nodePath(runId, nodeId)}?limit=${TRANSCRIPT_LIMIT}`, NodeDetailSchema)
+    },
+    async operate(runId, nodeId, operation, body) {
+      const path = `${nodePath(runId, nodeId)}/${operation}`
+      const parsed = OPERATIONS[operation].safeParse(body)
+      // The body never reaches this message: it is steering text the operator
+      // typed, and an error is the one place it must not be copied to (§11).
+      if (!parsed.success) throw new Error(`${path}: request did not match the daemon schema`)
+      const response = await fetch(`${origin}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(parsed.data),
+      })
+      if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
+      if (!OkResponseSchema.safeParse(await response.json()).success) {
+        throw new Error(`${path}: response did not match the daemon schema`)
+      }
     },
     stream(runId, since, handlers) {
       const url = new URL(WS_PATH, origin)
@@ -99,6 +158,10 @@ export function createClient(origin: string, token: string): Client {
     if (!parsed.success) throw new Error(`${path}: response did not match the daemon schema`)
     return parsed.data
   }
+}
+
+function nodePath(runId: string, nodeId: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}`
 }
 
 function readFrame(data: unknown): EventFrame | null {

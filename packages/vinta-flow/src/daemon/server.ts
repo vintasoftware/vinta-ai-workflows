@@ -56,6 +56,11 @@ export interface DaemonOptions {
   /** Defaults to a fresh 256-bit random token. Supplying one is for tests. */
   readonly token?: string
   readonly pollMs?: number
+  /**
+   * Where the built UI is read from (§10). Defaults to this package's
+   * `dist/ui`; supplying one is for tests. Nothing outside it is ever served.
+   */
+  readonly uiDir?: string
   /** Where the `--host` warning goes. `console.warn` by default. */
   readonly warn?: (message: string) => void
 }
@@ -86,7 +91,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     )
   }
 
-  const app = createApi({ journal: options.journal, token, runs })
+  const app = createApi({
+    journal: options.journal,
+    token,
+    runs,
+    ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
+  })
   const stream = new EventStream(options.journal, options.pollMs ?? DEFAULT_POLL_MS)
   const sockets = new WebSocketServer({ noServer: true })
 

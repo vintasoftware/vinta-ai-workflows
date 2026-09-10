@@ -131,6 +131,45 @@ describe('journal', () => {
     expect(journal.run('r1')?.status).toBe('failed')
   })
 
+  it('lists every run across a close and reopen, newest first', () => {
+    journal.createRun('r1', golden())
+    journal.append({ runId: 'r1', type: 'run_ended', payload: { status: 'done' } })
+    journal.createRun('r2', golden())
+    journal.close()
+
+    // A new process, with nothing in memory. The runs are still there, which
+    // is the difference between a daemon restart and an empty machine.
+    journal = openJournal(projectDir)
+    expect(journal.runs().map((run) => [run.id, run.status])).toEqual([
+      ['r2', 'running'],
+      ['r1', 'done'],
+    ])
+    // And it is still only a projection: dropping it changes nothing.
+    journal.rebuildProjections()
+    expect(journal.runs().map((run) => [run.id, run.status])).toEqual([
+      ['r2', 'running'],
+      ['r1', 'done'],
+    ])
+  })
+
+  it('reports the newest event id per run, and 0 for a run with none', () => {
+    journal.createRun('r1', golden())
+    journal.createRun('r2', golden())
+    const last = journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'node_status',
+      payload: { status: 'running' },
+    })
+
+    // The cursor is per run, so a busy neighbour never advances a quiet one.
+    expect(journal.lastEventId('r1')).toBe(last)
+    expect(journal.lastEventId('r1')).toBe(journal.events('r1').at(-1)?.id)
+    expect(journal.lastEventId('r2')).toBeLessThan(last)
+    expect(journal.events('r1', journal.lastEventId('r1'))).toEqual([])
+    expect(journal.lastEventId('nothing-here')).toBe(0)
+  })
+
   it('clears leases on open, because no process survives to hold one', () => {
     journal.acquireLease('test-suite', 'p1')
     expect(journal.leases()).toHaveLength(1)

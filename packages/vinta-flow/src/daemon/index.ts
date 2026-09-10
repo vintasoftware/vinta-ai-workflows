@@ -9,6 +9,7 @@ export {
   type RunControl,
 } from './control.ts'
 export { createApi, type ApiOptions } from './api.ts'
+export { createStaticHandler, DEFAULT_UI_DIR, type StaticHandler } from './static.ts'
 export { EventStream, DEFAULT_POLL_MS } from './stream.ts'
 export { startDaemon, type Daemon, type DaemonOptions } from './server.ts'
 export {
@@ -27,6 +28,7 @@ export {
   OkResponseSchema,
   RedirectRequestSchema,
   ResourceStateSchema,
+  RunEdgeSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
   RunSummarySchema,

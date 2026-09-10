@@ -37,20 +37,26 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
     [snapshot, projection],
   )
 
-  // The snapshot carries no edges and no display names — `/api/runs/:runId`
-  // serves node rows, not the frozen workflow — so the graph is drawn from the
-  // rows it does serve. Edges and names appear here the day the API serves them.
+  // Names, waves and edges all come off the snapshot: they are the frozen
+  // workflow's, which `/api/runs/:runId` reads and this view must not. Status
+  // is the one field the stream overrides, above.
+  const edges = snapshot?.edges
   const dag = useMemo<Dag>(
     () => ({
       nodes: nodes.map((node) => ({
         id: node.nodeId,
-        name: node.nodeId,
+        name: node.name,
         status: node.status,
         wave: node.wave,
       })),
-      edges: [],
+      edges: (edges ?? []).map((edge) => ({
+        id: `${edge.from}->${edge.to}`,
+        from: edge.from,
+        to: edge.to,
+        artifact: edge.artifact,
+      })),
     }),
-    [nodes],
+    [nodes, edges],
   )
 
   if (snapshot === null) {
@@ -87,7 +93,12 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
       <DagView dag={dag} selected={selected} onSelect={setSelected} />
 
       <div className="panels">
-        <Nodes nodes={nodes} selected={selected} onSelect={setSelected} />
+        <Nodes
+          runId={snapshot.run.runId}
+          nodes={nodes}
+          selected={selected}
+          onSelect={setSelected}
+        />
         <Pools resources={snapshot.resources} />
         <GateQueue queue={snapshot.gateQueue} now={now} />
         <Harnesses harnesses={snapshot.harnesses} now={now} />
@@ -97,10 +108,12 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
 }
 
 function Nodes({
+  runId,
   nodes,
   selected,
   onSelect,
 }: {
+  readonly runId: string
   readonly nodes: readonly RunSnapshot['nodes'][number][]
   readonly selected: string | null
   readonly onSelect: (nodeId: string) => void
@@ -119,6 +132,7 @@ function Nodes({
               <th>Harness</th>
               <th>Lane</th>
               <th>Status</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -134,6 +148,15 @@ function Nodes({
                 <td>{node.lane ?? '—'}</td>
                 <td>
                   <Chip tone={nodeTone(node.status)}>{nodeLabel(node.status)}</Chip>
+                </td>
+                <td>
+                  {/* The node view (§10). A fragment, so the token in the
+                      page's query string is neither copied nor dropped. */}
+                  <a
+                    href={`#/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(node.nodeId)}`}
+                  >
+                    Open
+                  </a>
                 </td>
               </tr>
             ))}

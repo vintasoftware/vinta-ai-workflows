@@ -254,6 +254,27 @@ Two habits pay for themselves:
 
 Don't contort the plan for concurrency, though. A genuinely sequential feature is a chain of waves of one, and that is a correct plan.
 
+### Read the previous runs' post-mortems before drawing the graph
+
+Every plan you write is a guess about coupling. Every plan the orchestrator *ran* turned that guess into evidence, and it wrote the evidence down: one `postmortem.json` per finished run under `.vinta-flow/runs/<run-id>/`, plus any copy the team committed beside its plan as `ai-plans/<feature-kebab>.postmortem.json`. **Read them before the `**Depends on**:` lines, not after.** Newest first, and all of them — one run is an anecdote, three runs saying the same thing about the same layer is a rule about this codebase.
+
+```bash
+ls -t .vinta-flow/runs/*/postmortem.json ai-plans/*.postmortem.json 2>/dev/null | head -5
+```
+
+Each file carries `findings` and `gaps`. Use them like this:
+
+- **`missing_dependencies`** — a phase failed, a phase it did *not* declare landed, and only then did it pass. The previous plan was missing that edge. If this feature couples the same two layers, **declare the edge here**, naming the artifact. Entry is ordering evidence, not proof (the file's own `gate_result_unrecorded` gap says so) — confirm the coupling exists in the code before you draw it.
+- **`wave_conflicts`** — two same-wave phases that actually fought, with the contested `paths`. Cross-check those paths against this plan's **Touch List**: two phases of yours touching one of them in the same wave is the same defect repeating. Add the edge, or split so only one phase owns the file.
+- **`duration_divergences`** — `direction: "longer"` means that phase set its wave's wall clock alone, so every peer you parallelised it with bought nothing; keep comparable-size work together and let the long pole start in wave 1. `"shorter"` means a small phase sat behind a long one and could have been folded in or moved earlier. Sizing, never time estimates in the plan body.
+- **`unused_dependencies`** — edges the run proved nobody needed. Drop the equivalent edge here. **Empty is not evidence of a tight graph**: check `gaps` first, because a `dependency_use_unrecorded` entry means dependency use was never measured on that run, not that every edge earned its place.
+
+Rules for using them:
+
+- **Match by artifact and path, never by phase id.** `p3` in an old run is not `Phase 3` here. The transferable fact is "the serializer phase needed the migration phase's column", not the id.
+- **A finding is an input, not plan content.** Don't quote post-mortems in the plan body, don't cite run ids, don't add a section about them. They change edges, waves and splits — that's all the reader should ever see.
+- **No post-mortems in the repo?** Nothing to do, and nothing to say about it. Draw the graph from the code.
+
 ### Each phase MR-sized
 
 Reviewer should read ≤1500 LoC + understand in isolation. Guidelines:
@@ -729,6 +750,7 @@ Read the two renderings against each other: `p2` and `p3` both name only `p1`, s
 - **No phase that breaks build if merged alone.** Each independently mergeable AND independently reversible.
 - **No `**Depends on**:` edge you can't justify with an artifact.** "It's later in the list" is not a dependency; it's a chain that costs the team a week of wall-clock for nothing.
 - **No two same-wave phases rewriting the same file.** Either add the edge or split differently.
+- **No repeating a defect a post-mortem already recorded.** A `wave_conflicts` entry on those paths, or a `missing_dependencies` entry between those layers, means the last run already paid for the lesson; drawing the same graph again wastes it.
 - **No plan without its `.workflow.json` sibling, and no sibling that disagrees with the plan.** Different nodes, different edges, different waves, a `prompt_ref` pointing at a phase that was renumbered — all of them mean the two files were edited separately instead of derived from the same `**Depends on**:` lines.
 - **No phase requiring manual `kubectl` / SSH / "remember to run X"** without Risk & Rollout Notes checklist.
 - **No assuming user wants what they asked for.** Watch for "wait, also…" + update plan.
@@ -756,6 +778,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] **Execution graph** table is the first thing under **Phased Rollout**, and its waves match what the `**Depends on**:` lines imply.
 - [ ] Graph is acyclic; the flag-removal phase depends on every gated phase.
 - [ ] Same-wave phases checked against the **Touch List** for file overlap; real overlaps either serialized with an edge or called out explicitly under the graph table.
+- [ ] Post-mortems from previous runs (`.vinta-flow/runs/*/postmortem.json`, plus any committed beside a plan) read **before** the graph was drawn; every finding either changed an edge, a wave or a split, or was consciously dismissed as not applying to this feature.
 - [ ] Slow-moving / cross-repo work sits in wave 1, and no in-repo phase depends on a cross-repo phase when it only needs the contract.
 - [ ] `**Review models**:` appears **only** on phases that justify a non-default reviewer / fixer (not on every phase); each such line names a tier + why. Phases without it inherit the project's `agent_models` defaults.
 <!-- e2e:start -->

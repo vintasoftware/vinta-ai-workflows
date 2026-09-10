@@ -11,7 +11,7 @@
  * failure paths too: a suite that leaks listeners fails the next run for a
  * reason that has nothing to do with the code under test.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -169,7 +169,11 @@ afterEach(async () => {
 })
 
 async function rig(
-  options: { readonly host?: string; readonly workflow?: Workflow } = {},
+  options: {
+    readonly host?: string
+    readonly workflow?: Workflow
+    readonly uiDir?: string
+  } = {},
 ): Promise<Rig> {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-daemon-'))
   const journal = openJournal(dir)
@@ -182,6 +186,7 @@ async function rig(
   const daemon = await startDaemon({
     journal,
     ...(options.host === undefined ? {} : { host: options.host }),
+    ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
     pollMs: 5,
     warn: (message) => warnings.push(message),
   })
@@ -353,6 +358,19 @@ describe('snapshots', () => {
       ['a', 'pending', 1],
       ['b', 'pending', 2],
     ])
+
+    // §10's graph: display names, waves and the dependency edges with the
+    // artifact they are labelled with, all out of the frozen workflow.
+    expect(snapshot.nodes.map((node) => [node.nodeId, node.name])).toEqual([
+      ['a', 'A'],
+      ['b', 'B'],
+    ])
+    expect(snapshot.edges).toEqual([{ from: 'a', to: 'b', artifact: "a's model" }])
+    // The waves are the ones the run was registered with, not a second count.
+    expect(snapshot.nodes.map((node) => node.wave)).toEqual(
+      r.journal.nodes(RUN_ID).map((node) => node.wave),
+    )
+
     expect(snapshot.resources).toEqual([
       { id: 'lane', kind: 'worktree', capacity: 2, held: 1, holders: ['a'] },
       { id: 'test-suite', kind: 'semaphore', capacity: 1, held: 1, holders: ['a'] },
@@ -907,5 +925,198 @@ describe('shutdown', () => {
     // Several poll intervals: a timer still running would have sent by now.
     await sleep(40)
     expect(sent).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9: the app shell (§10)
+// ---------------------------------------------------------------------------
+
+/** A built bundle, plus a file beside it that no request may ever reach. */
+function bundle(): { readonly uiDir: string; readonly secret: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-ui-'))
+  const uiDir = join(dir, 'ui')
+  mkdirSync(join(uiDir, 'assets'), { recursive: true })
+  writeFileSync(join(uiDir, 'index.html'), '<!doctype html><div id="root"></div>\n')
+  writeFileSync(join(uiDir, 'assets', 'app.js'), 'console.log("shell")\n')
+  writeFileSync(join(dir, 'outside.txt'), 'not-for-the-browser\n')
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+  return { uiDir, secret: 'not-for-the-browser' }
+}
+
+interface Fetched {
+  readonly status: number
+  readonly type: string
+  readonly text: string
+}
+
+/** A raw GET: static responses are not JSON, and one of them must not be. */
+async function raw(
+  daemon: Daemon,
+  path: string,
+  options: { readonly token?: string | null; readonly method?: string } = {},
+): Promise<Fetched> {
+  const token = options.token === undefined ? daemon.token : options.token
+  const response = await fetch(`${daemon.url}${path}`, {
+    method: options.method ?? 'GET',
+    headers: token === null ? {} : { authorization: `Bearer ${token}` },
+  })
+  return {
+    status: response.status,
+    type: response.headers.get('content-type') ?? '',
+    text: await response.text(),
+  }
+}
+
+describe('the built UI', () => {
+  it('serves the shell and its assets', async () => {
+    const built = bundle()
+    const r = await rig({ uiDir: built.uiDir })
+
+    const index = await raw(r.daemon, '/')
+    expect(index.status).toBe(200)
+    expect(index.type).toContain('text/html')
+    expect(index.text).toContain('<div id="root">')
+
+    const asset = await raw(r.daemon, '/assets/app.js')
+    expect(asset.status).toBe(200)
+    expect(asset.type).toContain('text/javascript')
+    expect(asset.text).toContain('shell')
+  })
+
+  it('falls back to index.html on a deep link, and 404s a missing asset', async () => {
+    const built = bundle()
+    const r = await rig({ uiDir: built.uiDir })
+
+    // A client route, not a file: the app owns everything past the origin.
+    const deep = await raw(r.daemon, `/runs/${RUN_ID}/nodes/a`)
+    expect(deep.status).toBe(200)
+    expect(deep.type).toContain('text/html')
+    expect(deep.text).toContain('<div id="root">')
+
+    // A request that named a file and missed it is not a document. Serving
+    // HTML there turns a missing bundle chunk into a parse error elsewhere.
+    expect((await raw(r.daemon, '/assets/missing.js')).status).toBe(404)
+  })
+
+  it('refuses a path that resolves outside the UI directory', async () => {
+    const built = bundle()
+    const r = await rig({ uiDir: built.uiDir })
+
+    // Percent-encoded, because `new URL` collapses a literal `../` before any
+    // handler sees it — the encoded form is the one that actually arrives.
+    for (const path of [
+      '/%2e%2e%2foutside.txt',
+      '/assets/%2e%2e%2f%2e%2e%2foutside.txt',
+      '/..%2f..%2fpackage.json',
+    ]) {
+      const refused = await raw(r.daemon, path)
+      expect([path, refused.status]).toEqual([path, 403])
+      expect(refused.text).not.toContain(built.secret)
+    }
+  })
+
+  it('says how to build the bundle rather than 404ing, when it is absent', async () => {
+    const r = await rig({ uiDir: join(tmpdir(), 'vinta-flow-ui-that-was-never-built') })
+
+    const index = await raw(r.daemon, '/')
+    expect(index.status).toBe(503)
+    expect(index.type).toContain('text/plain')
+    expect(index.text).toContain('ui:build')
+    expect(index.text).toContain('dist/ui')
+  })
+
+  it('is reachable without a token, and is not a way into the API', async () => {
+    const built = bundle()
+    const r = await rig({ uiDir: built.uiDir })
+
+    // The decision (see daemon/static.ts): the shell carries no run data and a
+    // browser cannot present a token for a subresource, so these bytes are
+    // open…
+    expect((await raw(r.daemon, '/', { token: null })).status).toBe(200)
+    expect((await raw(r.daemon, '/assets/app.js', { token: null })).status).toBe(200)
+
+    // …and nothing else moved. Every API path, and the upgrade, still refuse.
+    for (const path of ['/api/runs', `/api/runs/${RUN_ID}`, `/api/runs/${RUN_ID}/nodes/a`, '/api']) {
+      const refused = await raw(r.daemon, path, { token: null })
+      expect([path, refused.status]).toEqual([path, 401])
+      expect(refused.type).toContain('application/json')
+      expect(refused.text).not.toContain('<div id="root">')
+    }
+    expect(await connect(r.daemon, `?run=${RUN_ID}`)).toEqual({ status: 401 })
+
+    // An encoded path that dodges the `/api` prefix reaches the file server
+    // rather than the router — and the file server answers only out of the UI
+    // directory, so what comes back is the shell and never a snapshot.
+    const smuggled = await raw(r.daemon, '/api%2f..%2fruns', { token: null })
+    expect(smuggled.text).not.toContain(RUN_ID)
+    expect(smuggled.text).not.toContain('workflowId')
+    // And the token still buys the API, so none of this weakened it.
+    expect((await raw(r.daemon, '/api/runs')).status).toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 10: the snapshot's cursor, and the run list after a restart
+// ---------------------------------------------------------------------------
+
+describe('cold start', () => {
+  it("streams from the snapshot's cursor with no gap and no duplicate", async () => {
+    const r = await rig()
+    // Events before the snapshot: the backlog a cold client must not replay.
+    const before = [
+      r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'running' } }),
+      r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'done' } }),
+    ]
+
+    const snapshot = RunSnapshotSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}`)).body)
+    expect(snapshot.cursor).toBe(before[1])
+    // The projection the snapshot shows is at least as new as its cursor.
+    expect(snapshot.nodes.find((node) => node.nodeId === 'a')?.status).toBe('done')
+
+    // …and events after it: the ones the client must receive.
+    const after = [
+      r.journal.append({ runId: RUN_ID, nodeId: 'b', type: 'node_status', payload: { status: 'running' } }),
+      r.journal.append({ runId: RUN_ID, nodeId: 'b', type: 'node_status', payload: { status: 'done' } }),
+    ]
+
+    const connection = await connect(
+      r.daemon,
+      `?run=${RUN_ID}&since=${snapshot.cursor}&token=${r.daemon.token}`,
+    )
+    if (!('socket' in connection)) throw new Error('handshake refused')
+    const frame = EventFrameSchema.parse(await until(() => connection.frames[0], 'the first frame'))
+
+    // No gap: both events past the cursor arrived. No duplicate: nothing the
+    // snapshot already accounted for came with them.
+    expect(frame.events.map((event) => event.id)).toEqual(after)
+    expect(frame.events.every((event) => !before.includes(event.id))).toBe(true)
+    expect(frame.cursor).toBe(after[1])
+  })
+
+  it('lists runs the journal knows about, not runs this process started', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-daemon-restart-'))
+    const first = openJournal(dir)
+    first.createRun('run-old', makeWorkflow())
+    first.append({ runId: 'run-old', type: 'run_ended', payload: { status: 'done' } })
+    first.close()
+
+    // A brand new process, holding a registry with nothing in it.
+    const journal = openJournal(dir)
+    const daemon = await startDaemon({ journal, pollMs: 5 })
+    cleanups.push(async () => {
+      await daemon.close()
+      journal.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    const listed = RunListResponseSchema.parse((await call(daemon, '/api/runs')).body)
+    expect(listed.runs).toHaveLength(1)
+    expect(listed.runs[0]).toMatchObject({
+      runId: 'run-old',
+      workflowId: 'daemon-flow',
+      status: 'done',
+    })
+    expect(listed.runs[0]?.endedAt).toEqual(expect.any(Number))
   })
 })

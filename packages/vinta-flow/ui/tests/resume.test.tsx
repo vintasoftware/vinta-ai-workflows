@@ -65,6 +65,55 @@ test('a reload mid-run rebuilds the same view from a snapshot and its cursor', a
   expect(stub.connections[1]?.sent).toEqual([3])
 })
 
+test('a cold start opens the stream at the snapshot’s cursor, not at zero', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    // The journal already holds two events, and the snapshot is current as of
+    // the second: `cursor` is read before the projections beside it (§10).
+    snapshots: {
+      [RUN_ID]: snapshot({ cursor: 2, nodes: [node('impl', 'waiting_on_capacity')] }),
+    },
+    events: [statusEvent('impl', 'running'), statusEvent('impl', 'waiting_on_capacity')],
+  })
+  daemon = stub
+  // No stored position: this tab has never seen this run.
+  expect(sessionStorage.length).toBe(0)
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(stub.connections).toHaveLength(1))
+  // The whole point: the journal is not replayed to draw a screen the snapshot
+  // already drew.
+  expect(stub.connections[0]?.since).toBe(2)
+  expect(stub.connections[0]?.sent).toEqual([])
+  await waitFor(() =>
+    expect(cardColorOf(container, 'impl')).toBe('var(--vdag-status-waiting_on_capacity)'),
+  )
+
+  // And nothing after it is missed.
+  stub.emit(statusEvent('impl', 'done'))
+  await waitFor(() => expect(cardColorOf(container, 'impl')).toBe('var(--vdag-status-done)'))
+  expect(stub.connections[0]?.sent).toEqual([3])
+})
+
+test('a stored cursor beats a snapshot that has moved on without this tab', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ cursor: 0, nodes: [node('impl', 'pending')] }) },
+  })
+  daemon = stub
+  const first = renderApp(stub, RUN_ROUTE)
+  stub.emit(statusEvent('impl', 'running'))
+  await waitFor(() => expect(cardColorOf(first.container, 'impl')).toBe('var(--vdag-status-running)'))
+  first.unmount()
+
+  // A snapshot whose cursor lags the tab's own position must not rewind it:
+  // `since` is the later of the two, so no event is delivered twice.
+  renderApp(stub, RUN_ROUTE)
+  await waitFor(() => expect(stub.connections).toHaveLength(2))
+  expect(stub.connections[1]?.since).toBe(1)
+  expect(stub.connections[1]?.sent).toEqual([])
+})
+
 test('a dropped socket reconnects from its cursor and replays nothing', async () => {
   const stub = await startStubDaemon({
     runs: [runSummary()],

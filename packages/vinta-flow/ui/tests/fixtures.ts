@@ -3,7 +3,8 @@
  * field the API adds or renames fails to compile here before it can fail in a
  * browser.
  */
-import type { RunSnapshot, RunSummary } from '../../src/daemon/schemas.ts'
+import type { AgentEvent } from '../../src/harness/adapter.ts'
+import type { NodeDetail, RunSnapshot, RunSummary } from '../../src/daemon/schemas.ts'
 
 export const RUN_ID = 'run-1'
 
@@ -27,6 +28,7 @@ export function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
 export function node(nodeId: string, status: NodeStatus, wave = 0): NodeSummary {
   return {
     nodeId,
+    name: nodeId,
     status,
     wave,
     lane: 'lane-1',
@@ -48,7 +50,9 @@ export function harness(id: string, ceiling: number, inFlight: number, wakeAt: n
 export function snapshot(parts: Partial<RunSnapshot> = {}): RunSnapshot {
   return {
     run: runSummary(),
+    cursor: 0,
     nodes: [],
+    edges: [],
     resources: [],
     gateQueue: { waiting: 0, holders: [] },
     harnesses: [],
@@ -58,4 +62,25 @@ export function snapshot(parts: Partial<RunSnapshot> = {}): RunSnapshot {
 
 export function statusEvent(nodeId: string, status: NodeStatus) {
   return { nodeId, type: 'node_status', payload: { status } }
+}
+
+/**
+ * A transcript entry, typed as the harness's own `AgentEvent`. The journal
+ * stores exactly this stream (§5.3) and the API serves it as `unknown`, so
+ * typing the fixture is the only place the shape can be held to the source.
+ */
+export function entry(event: AgentEvent): AgentEvent {
+  return event
+}
+
+export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {
+  return {
+    runId: RUN_ID,
+    node: node('impl', 'running'),
+    diff: { branch: 'feature/impl', baseBranch: 'main', lane: 'lane-1' },
+    transcript: { stream: 'transcript', entries: [] },
+    gates: [],
+    question: null,
+    ...parts,
+  }
 }
