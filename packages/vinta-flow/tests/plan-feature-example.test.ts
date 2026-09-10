@@ -118,6 +118,25 @@ describe('plan-feature worked example', () => {
     }
   })
 
+  it('forks a database per role, and gives the two roles different names', () => {
+    // A lane's copy is named from `name` and the lane, never from the role, so
+    // `dev` and `test` sharing one `name` would collapse to one forked database
+    // and one template. The skill states that; this is what states it here.
+    const project = parsed().project
+    expect(project?.migrate_cmd).toBeTruthy()
+
+    const dev = project?.databases.dev
+    const test = project?.databases.test
+    expect(dev?.engine).toBe('postgres')
+    expect(test?.engine).toBe('postgres')
+    if (dev?.engine !== 'postgres' || test?.engine !== 'postgres') throw new Error('unreachable')
+
+    expect(dev.name).not.toBe(test.name)
+    expect(dev.connection_url_var).not.toBe(test.connection_url_var)
+    // A committed file beside the plan: the env var is a name, the server a host.
+    for (const db of [dev, test]) expect(db.server_url).not.toMatch(/@/)
+  })
+
   it('overrides the model only where the phase tier differs from the default', () => {
     const workflow = parsed()
     const overridden = workflow.nodes.filter((node) => node.model !== undefined).map((n) => n.id)

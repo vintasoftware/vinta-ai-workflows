@@ -388,7 +388,12 @@ export function analyzeRun(
   }
 
   const addHold = (resources: readonly string[], from: number, to: number): void => {
-    if (to <= from) return
+    // `to === from` is kept, not dropped. A fast gate is granted and released
+    // inside one millisecond: it contributes no elapsed time — `busyMs` of 0 is
+    // right — but the slot *was* held, and discarding it here made `peakHeld`
+    // read 0 or 1 for the same run depending on machine load. Only a genuinely
+    // inverted interval is meaningless.
+    if (to < from) return
     for (const resource of resources) {
       const held = poolHolds.get(resource) ?? []
       held.push({ from, to })
@@ -673,6 +678,53 @@ interface Segment {
  * `[from, to]`. Clamped to the window, so a hold still open at the edge
  * contributes exactly the part inside it.
  */
+/**
+ * Most slots held at once, counted from the holds themselves rather than from
+ * swept time segments.
+ *
+ * A hold granted and released inside the same millisecond has zero duration and
+ * therefore contributes no segment: `busyMs` of 0 is correct, but the slot *was*
+ * held and a peak of 0 is not. Fast gates do exactly this, so deriving the peak
+ * from elapsed time made the figure depend on clock granularity — it read 1 or 0
+ * for the same run depending on machine load, which is how it surfaced.
+ *
+ * Holds are half-open, so two back-to-back holds are one slot reused, not two
+ * concurrent ones. That alone would erase the zero-width case again, so the two
+ * are counted separately and combined: a zero-width hold sits on top of whatever
+ * spans genuinely cover its instant.
+ */
+function peakConcurrent(intervals: readonly Interval[], from: number, to: number): number {
+  const spans: { from: number; to: number }[] = []
+  const instants = new Map<number, number>()
+  for (const interval of intervals) {
+    const start = Math.max(interval.from, from)
+    const end = Math.min(interval.to, to)
+    if (end < start) continue
+    if (end === start) instants.set(start, (instants.get(start) ?? 0) + 1)
+    else spans.push({ from: start, to: end })
+  }
+
+  const points = spans.flatMap((span) => [
+    { at: span.from, delta: 1 },
+    { at: span.to, delta: -1 },
+  ])
+  // A release at t frees the slot a grant at t takes.
+  points.sort((a, b) => a.at - b.at || a.delta - b.delta)
+
+  let held = 0
+  let peak = 0
+  for (const point of points) {
+    held += point.delta
+    peak = Math.max(peak, held)
+  }
+
+  for (const [at, count] of instants) {
+    const covering = spans.filter((span) => span.from <= at && at < span.to).length
+    peak = Math.max(peak, covering + count)
+  }
+  return peak
+}
+
 function sweep(intervals: readonly Interval[], from: number, to: number): Segment[] {
   const deltas = new Map<number, number>()
   const bump = (at: number, delta: number): void => {
@@ -728,12 +780,20 @@ function poolContention(
       })
       continue
     }
-    let peakHeld = 0
+    const held = holds.get(resource) ?? []
+    // Clamped, because the pool never grants beyond capacity and a figure above
+    // it would be reporting something that cannot have happened. It is reachable
+    // only through zero-width holds: two fast gates that take and release the
+    // same slot inside one millisecond are, at this resolution, indistinguishable
+    // from two concurrent ones. Where they differ, sequential is the truth the
+    // pool guarantees — so the clamp is the honest reading rather than a patch.
+    const peakHeld = capacity > 0
+      ? Math.min(capacity, peakConcurrent(held, from, to))
+      : peakConcurrent(held, from, to)
     let busyMs = 0
     let saturatedMs = 0
-    for (const segment of sweep(holds.get(resource) ?? [], from, to)) {
+    for (const segment of sweep(held, from, to)) {
       const ms = segment.to - segment.from
-      peakHeld = Math.max(peakHeld, segment.held)
       if (segment.held > 0) busyMs += ms
       if (capacity > 0 && segment.held >= capacity) saturatedMs += ms
     }

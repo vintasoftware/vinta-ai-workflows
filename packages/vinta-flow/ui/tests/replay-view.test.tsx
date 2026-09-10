@@ -75,6 +75,26 @@ function screenState(container: HTMLElement, nodeIds: readonly string[]) {
 }
 
 /**
+ * Samples `read` until two consecutive samples agree, so a comparison is made
+ * against a screen that has stopped moving rather than one caught mid-fold.
+ *
+ * Waiting on a specific element is not enough here: the live view folds a whole
+ * log off the socket, and no single element's final value implies every other
+ * one has arrived.
+ */
+async function settled<T>(read: () => T, tries = 50): Promise<T> {
+  let previous = JSON.stringify(read())
+  for (let i = 0; i < tries; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const current = read()
+    const serialized = JSON.stringify(current)
+    if (serialized === previous) return current
+    previous = serialized
+  }
+  throw new Error('screen never settled')
+}
+
+/**
  * A short history with a non-status event in the middle, so a position is
  * proved to be a position in the *log* rather than a count of transitions.
  */
@@ -183,7 +203,13 @@ test('a run replayed to its end is the live view of that run', async () => {
     expect(cardColorOf(live.container, 'review')).toBe('var(--vdag-status-failed)'),
   )
   await waitFor(() => expect(live.container.querySelector('.run-head .chip')?.textContent).toBe('failed'))
-  const liveState = screenState(live.container, ids)
+  // Neither condition above proves the whole log has been folded: the chip can
+  // read `failed` straight off the snapshot before a single frame arrives, and
+  // `review` settling says nothing about a node whose status event comes later
+  // in the log. Sampling here caught the live view mid-fold, which is what made
+  // this test fail about one full-suite run in three. Wait for the rendered
+  // state to stop moving instead.
+  const liveState = await settled(() => screenState(live.container, ids))
 
   cleanup()
   sessionStorage.clear()

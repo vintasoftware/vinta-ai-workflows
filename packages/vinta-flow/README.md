@@ -1,0 +1,280 @@
+# vinta-flow
+
+Runs a `plan-feature` plan as a real, code-orchestrated run: independent phases are scheduled concurrently across git worktree lanes, each phase's branch is cut from its own dependencies, expensive gates queue behind capacity limits instead of stampeding, and a browser UI shows the graph, the transcripts and the queue while it happens.
+
+The executable artifact is `ai-plans/<feature>.workflow.json` — the file `plan-feature` writes beside every plan. Its schema is [`schemas/workflow.v1.schema.json`](../../schemas/workflow.v1.schema.json) at the repo root, generated from [`src/types.ts`](src/types.ts).
+
+[SPEC.md](SPEC.md) is the authority for everything below. Where this README and the spec disagree, the spec is right and this file is stale.
+
+**Status: private workspace package.** `vinta-flow` is not published to npm and is not part of the `vinta-ai-workflows` package that `npx vinta-ai-workflows install` puts in your project — the root `files` whitelist excludes `packages/`. You get it by cloning this repository. It is also **macOS and Linux only** for now; Windows is planned and not started.
+
+## It does not replace the skills path
+
+The zero-install path still works and is still the default. `implement-plan` — the prompt-shaped orchestrator that ships into projects as a skill — runs the same plan with no daemon installed, and that property is the whole value of `vinta-ai-workflows` in a client repo.
+
+`vinta-flow` is an opt-in upgrade for projects that want a scheduler, a UI and a journal instead of a conductor prompt. The two are readings of one description of the same semantics (the partials under `skills/vinta-derive-skills/resources/plan-execution/partials/`), so a plan written for one runs on the other. Nothing about installing this changes what `plan-feature` emits: it writes `workflow.json` unconditionally, daemon or no daemon.
+
+## Requirements
+
+- **Node 22 or newer.**
+- **git 2.17 or newer**, with worktree support. `doctor` checks both.
+- **A harness CLI you are already logged into** — `claude`, `codex` or `opencode`. See [Harnesses](#harnesses).
+- Docker Compose, only if your workflow's `project` block declares a `compose`-delivered database.
+
+## Install and run
+
+```bash
+git clone https://github.com/vintasoftware/vinta-ai-workflows
+cd vinta-ai-workflows
+pnpm install
+```
+
+There is no build step and no bin link, because the package is private. Run the CLI by its path — the file is executable and its shebang asks Node for the TypeScript flags it needs:
+
+```bash
+/path/to/vinta-ai-workflows/packages/vinta-flow/src/cli/bin.ts --help
+```
+
+Give it a name you will actually type:
+
+```bash
+alias vinta-flow=/path/to/vinta-ai-workflows/packages/vinta-flow/src/cli/bin.ts
+```
+
+`node packages/vinta-flow/src/cli/bin.ts` does **not** work: that bypasses the shebang, and Node's strip-only TypeScript mode rejects the parameter properties the adapters use.
+
+Every command runs against a project checkout — your project, not this one. `--repo <dir>` names it; with no flag it is the current directory.
+
+## The five commands
+
+| Command | What it does |
+|---|---|
+| `doctor <workflow.json> [--repo <dir>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. |
+| `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
+| `serve [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon and prints the URL to open. |
+| `run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon *and* executes the workflow. Exits when the run ends. |
+| `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-flow/runs/`. |
+
+`--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-flow <command> --help` prints the command's own options.
+
+Exit codes are three, so a script can tell the cases apart: `0` success, `1` the command ran and the answer was no, `2` the command line was wrong.
+
+## Walkthrough — two phases in parallel
+
+A repository with two phases that depend on nothing, so both belong to wave 1 and both run at once.
+
+**1. Have a workflow.** `plan-feature` writes one beside every plan. By hand, the smallest one that runs two phases in parallel:
+
+```jsonc
+{
+  "$schema": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
+  "schema_version": 1,
+  "id": "widget-tags",
+  "plan_ref": "ai-plans/2026-09-10-WIDGET_TAGS_IMPLEMENTATION_PLAN.md",
+  "base_branch": "main",
+  "defaults": { "harness": "claude-code", "model": "claude-sonnet-5", "pipeline": "standard-phase" },
+  "resources": {
+    "lane":       { "capacity": 2, "kind": "worktree" },
+    "test-suite": { "capacity": 1, "kind": "semaphore" }
+  },
+  "gates": {
+    "types": { "cmd": "npm run typecheck", "timeout_s": 300 },
+    "unit":  { "cmd": "npm test", "requires": ["test-suite"], "timeout_s": 1800 }
+  },
+  "nodes": [
+    { "id": "p1", "name": "Tag model", "depends_on": [],
+      "prompt_ref": "ai-plans/2026-09-10-WIDGET_TAGS_IMPLEMENTATION_PLAN.md#phase-1",
+      "touches": ["src/tag.js"], "gates": ["types", "unit"] },
+    { "id": "p2", "name": "Tag list endpoint", "depends_on": [],
+      "prompt_ref": "ai-plans/2026-09-10-WIDGET_TAGS_IMPLEMENTATION_PLAN.md#phase-2",
+      "touches": ["src/list.js"], "gates": ["types", "unit"] }
+  ]
+}
+```
+
+**2. Prepare the project.** Two things, both one-time and both easy to discover the hard way:
+
+- Add `.vinta-flow/` to the project's `.gitignore`. Nothing adds it for you, and what lands there holds your repository's contents verbatim — see [What `.vinta-flow/` holds](#what-vinta-flow-holds). Add `.vinta-ai-workflows/worktrees/` too: a run writes one summary per lane there, and every one of them is absolute paths and machine-local state.
+- Commit the harness permissions a phase needs. A lane is a worktree of your repository, so committed settings travel into it; without them the agents run headless with nothing able to approve a prompt, and each phase ends its turn asking for permission it will never get. For `claude-code` that is a `.claude/settings.json`:
+
+  ```json
+  { "permissions": { "defaultMode": "acceptEdits", "allow": ["Bash", "Read", "Write", "Edit", "Glob", "Grep"] } }
+  ```
+
+  Scope it to what your phases actually need; this is the permissive end.
+
+**3. Preflight.**
+
+```console
+$ vinta-flow doctor ai-plans/widget-tags.workflow.json
+vinta-flow doctor
+
+  PASS  harness claude-code: installed and authenticated (2.1.236 (Claude Code))
+  PASS  git: 2.54.0
+  PASS  git worktrees: usable
+  PASS  docker compose: not required by this project
+  PASS  disk: 2 lanes + 1 integration worktree needs 0 MiB, 28.4 GiB free
+  PASS  lane summaries: none yet — lanes will be provisioned fresh
+
+0 failed, 0 warned, 6 passed
+A run can start.
+```
+
+Every check runs even after one fails, so one report names everything wrong at minute zero. A `FAIL` blocks the run; a `WARN` means it starts degraded — a lane whose forked database has no `reset_cmd` is the usual one, and it just means the lane is single-use.
+
+**4. Project the schedule.** `simulate` drives the real scheduler on a virtual clock against a mock harness. It is the cheapest way to see whether the graph is actually parallel, and whether the lane count or a gate pool is the constraint:
+
+```console
+$ vinta-flow simulate ai-plans/widget-tags.workflow.json
+Simulated run — projection, not a prediction.
+
+Projected wall clock: 1h
+
+Critical path
+  p2 (wave 1)  0s → 1h  work 50m, queued 10m
+
+Nodes
+  node                 wave  status      start       finish      work        queued
+  p1                   1     done        0s          50m         50m         0s
+  p2                   1     done        0s          1h          50m         test-suite 10m
+
+Pools
+  pool                 capacity  peak  busy        saturated   queued
+  lane                 2         2     1h          50m         0s
+  test-suite           1         1     20m         20m         10m
+```
+
+Both phases start at `0s` — that is the parallelism the plan claimed, confirmed before a model turn is spent. `p2` finishes ten minutes later only because `test-suite` has capacity 1 and `p1` was holding it.
+
+**5. Run it.**
+
+```console
+$ vinta-flow run ai-plans/widget-tags.workflow.json
+vinta-flow: daemon listening on http://127.0.0.1:52765
+Open this URL. It carries the access token, so treat it as a secret:
+  http://127.0.0.1:52765/?token=<the-token-printed-here>
+vinta-flow: run widget-tags-mtvodosx started (2 nodes).
+```
+
+The daemon comes up before the first node dispatches, so you can open the URL and watch. Both phases are assigned a lane immediately and implement concurrently, each in its own worktree under `.vinta-flow/lanes/`, on its own branch cut from `base_branch`:
+
+```console
+$ git branch
+* main
++ plan/widget-tags/phase-p1
++ plan/widget-tags/phase-p2
++ wt/widget-tags-mtvodosx-integ
+  wt/widget-tags-mtvodosx-lane-1
+  wt/widget-tags-mtvodosx-lane-2
+```
+
+`plan/…/phase-<id>` is the phase's own branch; `wt/…` are the branches the lane and integration worktrees are checked out on. When the run ends, read [What this walkthrough does not yet reach](#what-this-walkthrough-does-not-yet-reach) before you read the last two lines it prints.
+
+**6. Read what happened, then clean up.** A finished run leaves its worktrees, branches and databases in place on purpose — they are the evidence. The post-mortem is written at the end and is what `plan-feature` reads before drawing the next feature's graph:
+
+```console
+$ cat .vinta-flow/runs/<run-id>/postmortem.json
+$ vinta-flow purge <run-id> --dry-run
+$ vinta-flow purge <run-id>
+```
+
+### What this walkthrough does not yet reach
+
+Every step above is transcribed from a real run of exactly these commands. This is the part it does not reach: **a node does not currently reach `done` under the shipped `standard-phase` pipeline**, so the run ends with
+
+```console
+vinta-flow: post-mortem written to .../.vinta-flow/runs/widget-tags-mtvodosx/postmortem.json
+vinta-flow: failed nodes: p1, p2
+vinta-flow: run widget-tags-mtvodosx completed.
+```
+
+The cause is that agent prompt composition is not implemented. The scheduler hands the harness `node.prompt_ref` — the *reference* to the phase brief — as the entire prompt, identically for every role; the `spawn_agent` effect's `prompt_template` parameter is declared in the effect catalog and read by nothing. The implementer copes: it finds the plan, reads the phase, and writes the code, which is why each lane's worktree really does contain that phase's work. The reviewer does not, because nothing tells it to end its turn with `VERDICT: pass`. A turn with no verdict falls back to `fail` — deliberately, since merging on a reviewer's silence is the wrong default — so the node loops through its fix rounds and then fails, and its gates never run.
+
+So today `run` is verifiably a *scheduler* end to end — two lanes, two branches, concurrent implementation, a journal, a post-mortem — and is not yet a *merged wave branch*. `simulate` is the end-to-end path that completes, which is also why it is the honest way to size `resources.lane` for a plan.
+
+## What `.vinta-flow/` holds
+
+Everything a run writes lives inside the project, never in a global cache directory, so the project's own retention rules reach it:
+
+```
+.vinta-flow/
+  flow.db                       # SQLite event log — opaque identifiers only
+  gate-cache.db                 # gate results keyed by (gate id, lane tree hash)
+  lanes/<lane>/                 # the lane worktrees, and .templates/ for forked DBs
+  runs/<run-id>/
+    workflow.json               # the snapshot frozen at run start
+    postmortem.json             # written once the run has ended
+    nodes/<node-id>/
+      transcript.jsonl          # normalized agent events
+      raw.jsonl                 # the harness's native stream
+      gates/<gate-id>.log       # the gate's output
+```
+
+**Transcripts and gate logs contain repository contents verbatim** — files the agent read, diffs it produced, test output. Treat that directory as a copy of your source, because it is one. `flow.db` is different by design: structured log fields carry only run, node and session identifiers, never file contents or record data.
+
+Two things follow. **Add `.vinta-flow/` to `.gitignore`** — the daemon does not do it for you, and an unignored store commits your transcripts. And **purge on a schedule if the repository carries a data-handling obligation.**
+
+One directory sits outside the store: a run writes a per-lane summary to `.vinta-ai-workflows/worktrees/<lane>.yaml`, in the layout `prepare-worktree` defines. Those hold absolute paths and lane state rather than repository contents, but they are machine-local and belong in `.gitignore` as well.
+
+**Retention default: keep until purged.** Nothing under `.vinta-flow/` expires, rotates, or is deleted on its own; a run's directory survives until someone removes it. `purge` is the mechanism:
+
+```console
+$ vinta-flow purge --dry-run          # every run, listed, nothing deleted
+$ vinta-flow purge <run-id>           # names every path, then asks
+$ vinta-flow purge <run-id> --yes     # for scripts
+```
+
+It removes the run *directory* — snapshot, transcripts, raw streams, gate logs. It does not touch `flow.db`, which holds the identifiers the post-mortem is built from and no repository contents. A run id is a single name, never a path: anything containing a separator or `..` is refused before anything is unlinked.
+
+## The URL is the credential
+
+There is no login, no account and no session. The daemon mints a random token at boot, requires it on every request including the WebSocket upgrade, and prints it exactly once, on stdout, in the URL:
+
+```
+vinta-flow: daemon listening on http://127.0.0.1:52765
+Open this URL. It carries the access token, so treat it as a secret:
+  http://127.0.0.1:52765/?token=<the-token-printed-here>
+```
+
+That line is the only place in this package's output where the token ever appears. It is not in the "listening on" line, not in warnings, not in errors — so pasting a log into a ticket is safe, and pasting *that* URL into a ticket publishes the run.
+
+**`--host` is explicit and warned about.** The default bind is `127.0.0.1`. Any other value makes the daemon reachable from other machines, and the daemon prints a warning naming the host — on stderr, where it cannot be mistaken for part of the URL. Anyone who can reach the daemon and holds the token can drive the run: there is no per-user access control, by design. Prefer an SSH port-forward to `--host` for a daemon on a bigger box.
+
+## Harnesses
+
+Three adapters: `claude-code`, `codex`, `opencode`. They are process supervisors around a CLI you have already logged into.
+
+**Subscription authentication only. The daemon never handles an API key** — it does not read a credential store, never prompts for a secret, and never forwards one. `doctor` *reports* on authentication and never performs it: if a harness is logged out, the check fails and prints the command **you** run to log in.
+
+Point the adapter at a specific binary with an environment variable, which overrides the bare name on `PATH`:
+
+| Harness | Variable | Default |
+|---|---|---|
+| `claude-code` | `VINTA_FLOW_CLAUDE_BIN` | `claude` |
+| `codex` | `VINTA_FLOW_CODEX_BIN` | `codex` |
+| `opencode` | `VINTA_FLOW_OPENCODE_BIN` | `opencode` |
+
+**The harness's own permission configuration governs what an agent may do in a lane.** `vinta-flow` passes no permission flags and cannot answer a permission prompt: a headless session that stops to ask simply ends its turn having done nothing. A lane is a worktree of your repository, so committed settings travel into it — for `claude-code`, a `.claude/settings.json` that grants the tools your phases need is what makes a run able to write at all.
+
+## Limits worth knowing before you rely on it
+
+- **macOS and Linux only.** Windows is planned, and no part of it is done.
+- **One project, one run at a time** per daemon. The journal is keyed by run id, so this is a boundary rather than a design limit — but it is today's boundary.
+- **A node does not reach `done` yet** under the shipped pipeline. See [What this walkthrough does not yet reach](#what-this-walkthrough-does-not-yet-reach).
+- **A projection is not a prediction.** `simulate` answers "given these durations, what schedule follows", and three things it cannot know:
+  - **It cannot predict an agent's turn length.** The durations are yours; the schedule is its answer to them.
+  - **Harness concurrency ceilings are not modelled.** A mock session drains instantly, so admission control never blocks. A run that a vendor would throttle projects as if it were not throttled.
+  - **It simulates the clean path.** Every review passes, every gate exits zero, no phase needs a fix round.
+
+## Developing on it
+
+From this directory:
+
+```bash
+pnpm run typecheck
+pnpm test
+pnpm run schema:check              # workflow.v1 vs src/types.ts
+pnpm run postmortem:schema:check   # postmortem.v1 vs src/postmortem/postmortem.ts
+```
+
+`schemas/workflow.v1.schema.json` and `schemas/postmortem.v1.schema.json` are **generated** and drift-checked. Edit the zod source and regenerate with `schema:gen` / `postmortem:schema:gen`; never hand-edit the JSON.
