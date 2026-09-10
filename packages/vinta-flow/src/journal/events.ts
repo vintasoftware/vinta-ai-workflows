@@ -21,6 +21,39 @@ export type NodeStatus =
   | 'done'
   | 'failed'
 
+/**
+ * §9.1's question, as it is journalled. The pause is the question — a bare
+ * flag would survive a restart while the thing the operator has to answer
+ * would not, which is the same as not surviving at all.
+ */
+export type HumanQuestionKind = 'confirm' | 'choice' | 'text'
+
+export interface HumanQuestion {
+  readonly question: string
+  readonly kind: HumanQuestionKind
+  readonly choices?: readonly string[]
+  /** What the node view renders alongside the question. References, not content. */
+  readonly context?: {
+    readonly diffRef?: string
+    readonly gateLogRef?: string
+    readonly transcriptCursor?: number
+  }
+}
+
+/** The scalar the answer re-enters the guard context with, as `human.answer`. */
+export type HumanAnswer = string | number | boolean | null
+
+/** The §9 operations that steer a node. `take over` is a PTY attach, not an event. */
+export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort'
+
+/**
+ * Where the operation went. `sent` reached the live session; `queued` is
+ * waiting for the node's next resume (§9's queue for harnesses that cannot
+ * inject); `delivered` is that queue draining; `ignored` is an operation on a
+ * node that has already settled and has nothing left to steer.
+ */
+export type OperatorDelivery = 'sent' | 'queued' | 'delivered' | 'ignored'
+
 /** Events about a run as a whole. */
 interface RunPayloads {
   run_started: { readonly workflow_id: string; readonly base_branch: string }
@@ -40,6 +73,25 @@ interface NodePayloads {
     readonly branch?: string
     readonly base_branch?: string
     readonly session_id?: string
+  }
+  /**
+   * §9.1's pause, question and all. Journalled *before* the effect that raises
+   * the notification, so a daemon that comes back up reads the pending
+   * question out of the log instead of re-asking it: delivery is once per
+   * pause, and the pause is this row.
+   */
+  human_question: HumanQuestion & { readonly effect_id: string }
+  /** The answer. It re-enters the guard context as `human.answer` (§9.1). */
+  human_answered: { readonly effect_id: string; readonly answer: HumanAnswer }
+  /**
+   * One §9 operation. `text` is the operator's own steering message: it is
+   * payload, exactly as a transcript entry is, and it never reaches a log line
+   * or an error string.
+   */
+  node_operation: {
+    readonly op: OperatorOp
+    readonly text?: string
+    readonly delivery: OperatorDelivery
   }
 }
 

@@ -172,6 +172,106 @@ describe('journal', () => {
     expect(tail.map((entry) => entry.i)).toEqual([1997, 1998, 1999])
   })
 
+  it('carries a human-gate question across a restart, without re-asking it', () => {
+    journal.createRun('r1', golden())
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'human_question',
+      payload: {
+        effect_id: 'e-ask',
+        question: 'The review found two migrations. Ship the branch?',
+        kind: 'choice',
+        choices: ['ship', 'hold'],
+        context: { diffRef: 'phase/p1', gateLogRef: 'unit', transcriptCursor: 42 },
+      },
+    })
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'node_status',
+      payload: { status: 'awaiting_human' },
+    })
+
+    const asked = journal.pendingQuestion('r1', 'p1')
+    expect(asked).toMatchObject({
+      runId: 'r1',
+      nodeId: 'p1',
+      effectId: 'e-ask',
+      question: {
+        question: 'The review found two migrations. Ship the branch?',
+        kind: 'choice',
+        choices: ['ship', 'hold'],
+        context: { diffRef: 'phase/p1', gateLogRef: 'unit', transcriptCursor: 42 },
+      },
+    })
+
+    // The restart: every scrap of in-memory state goes, and the projections
+    // with it. What comes back must come back out of `events` alone.
+    journal.close()
+    journal = openJournal(projectDir)
+    journal.rebuildProjections()
+
+    expect(journal.pendingQuestion('r1', 'p1')).toEqual(asked)
+    expect(journal.pendingQuestions('r1')).toEqual([asked])
+    expect(journal.nodes('r1').find((row) => row.node_id === 'p1')?.status).toBe('awaiting_human')
+    // Delivery is once per pause (§9.1): replaying the log re-derives the
+    // question but does not append a second ask for anything to notify on.
+    expect(journal.events('r1').filter((event) => event.type === 'human_question')).toHaveLength(1)
+  })
+
+  it('stops projecting a question once it is answered, or the node settles', () => {
+    journal.createRun('r1', golden())
+    const ask = (nodeId: string) =>
+      journal.append({
+        runId: 'r1',
+        nodeId,
+        type: 'human_question',
+        payload: { effect_id: 'e-ask', question: 'Ship it?', kind: 'confirm' },
+      })
+    ask('p1')
+    ask('p2')
+    expect(journal.pendingQuestions('r1').map((q) => q.nodeId)).toEqual(['p1', 'p2'])
+
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'human_answered',
+      payload: { effect_id: 'e-ask', answer: 'ship' },
+    })
+    // An abort ends the pause without answering it; the question goes too.
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p2',
+      type: 'node_status',
+      payload: { status: 'failed' },
+    })
+
+    const incremental = journal.pendingQuestions('r1')
+    expect(incremental).toEqual([])
+
+    journal.rebuildProjections()
+    expect(journal.pendingQuestions('r1')).toEqual(incremental)
+  })
+
+  it('journals a steering operation with its text, projecting nothing', () => {
+    journal.createRun('r1', golden())
+    journal.append({
+      runId: 'r1',
+      nodeId: 'p1',
+      type: 'node_operation',
+      payload: { op: 'add_context', text: 'the other index is the fast one', delivery: 'sent' },
+    })
+
+    const before = journal.nodes('r1')
+    journal.rebuildProjections()
+    expect(journal.nodes('r1')).toEqual(before)
+    expect(journal.events('r1').at(-1)).toMatchObject({
+      type: 'node_operation',
+      payload: { op: 'add_context', text: 'the other index is the fast one', delivery: 'sent' },
+    })
+  })
+
   it('reconstructs a consistent projection after the writer is SIGKILLed', async () => {
     journal.createRun('r1', golden())
     journal.close()

@@ -548,6 +548,16 @@ Steps are phrased as Karpathy's `step → verify` pairs. Dependencies are declar
 
 Wave 1 is four independent lanes. The critical path runs 2 → 5 → 6 → 7 → 10 → 11 → 15 → 16.
 
+**Steps the plan missed, discovered while building it.** Each was found by a unit failing to be buildable without it, which is the point of pairing every step with a verification:
+
+| # | Step | Why the plan missed it |
+|---|---|---|
+| 10b | **Live session registry + the four §9 operations.** The scheduler must keep an `AgentSession` handle per running node so add-context, redirect, pause and abort can reach it. | §9 lists the operations and §7 gives `AgentSession` the methods, so the capability looked present. Nothing said *who holds the handle*, and the answer is the scheduler — the only component that knows a node is running. Until this exists the daemon can only return 409 for four of five operations. |
+| 10c | **Human-gate question in the journal.** An event variant carrying `{question, kind, choices, context}` and its answer. | §9.1 promises the pause "is journaled alongside the pause" and survives a restart. The event union is closed and no variant's payload could carry it, so the promise was unimplementable as written. |
+| 29b | **CLI entrypoint.** `bin`, argv parsing, and subcommands for `doctor`, `run`, `simulate`, `serve`, `purge`. | Every step produced a library surface and assumed a CLI existed to call it. None does — `runDoctor` returns an exit code nobody passes to `process.exit`, and `--host` (§11) has no flag to be. |
+
+Two smaller gaps are recorded rather than scheduled, because both are one-line additions to a module whose owner should make them: `ResourcePools` publishes an aggregate `waiting` count with no per-waiter identity, so §10's "gate queue **with positions**" cannot be served as specified; and `Journal` has no `runs()` listing, so §10's Runs view cannot show historical runs after a daemon restart.
+
 Wave 7 is gated on Wave 6 by explicit decision: Windows starts only once every requirement is working, tested and polished on macOS and Linux.
 
 ---
@@ -557,6 +567,16 @@ Wave 7 is gated on Wave 6 by explicit decision: Windows starts only once every r
 Proposed rather than requested. Each is here because it is cheap given the architecture already specified and pays for itself in the product's own terms; none is speculative flexibility.
 
 **13.1 Dry-run / simulation mode.** Run the scheduler end to end against a mock adapter that only sleeps, using per-node duration estimates. Validates the graph, the resource sizing and the projected wall clock before a single model turn is spent. This is the step-9 test harness exposed as a product feature, so its marginal cost is a CLI flag and a UI button. It is also the honest way to answer "should `max_parallel_lanes` be 3 or 6 on this plan" without paying to find out.
+
+Estimates are per **agent turn**, not per node — `standard-phase` spawns at least two on the clean path. The critical path is derived by walking the *observed* schedule backwards rather than by finding the longest path by duration, so a chain made long by queueing shows up as the critical path it actually was.
+
+Three limits the projection must state rather than let a reader assume:
+
+- **It cannot predict an agent's turn length.** It answers "given these durations, what schedule follows" — not "how long will this take".
+- **Harness concurrency ceilings are not modelled.** Admission control releases its slot when the session stream drains, and a mock session drains instantly, so the only constraints a projection applies are the workflow's own pools. A run that would be throttled by a vendor limit projects as if it were not.
+- ~~Pool aging is not exercised.~~ **Closed.** `ResourcePools` now takes an optional `now` and defaults to the system clock, so a virtual-clock consumer reaches the aging bypass rather than silently running strict FIFO and reporting a schedule the real pool would not produce.
+
+A dry run also creates and deletes a throwaway journal, because `Journal` is mandatory and disk-backed. A feature defined by having no side effects should not need one; an in-memory journal would remove the last of them.
 
 **13.2 Run replay.** The journal is already append-only and the UI already renders a projection of it, so scrubbing a finished run back through its DAG states is a slider over `events` — near-free. It is the difference between "the run failed" and "here is the minute it went wrong", and it is how a reviewer understands what happened without reading four transcripts.
 

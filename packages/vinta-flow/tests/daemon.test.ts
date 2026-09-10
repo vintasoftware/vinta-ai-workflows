@@ -70,9 +70,28 @@ const GATED = {
       id: 'gate',
       name: 'Gate',
       position: { x: 0, y: 0 },
-      onEnter: [{ id: 'e-ask', definitionId: 'await_human', params: { reason: 'ship-it' } }],
+      onEnter: [
+        {
+          id: 'e-ask',
+          definitionId: 'await_human',
+          params: {
+            question: 'The branch is green. Ship it?',
+            kind: 'choice',
+            choices: ['ship', 'hold'],
+            context: { diffRef: 'phase/a' },
+          },
+        },
+      ],
     },
-    { id: 'done', name: 'Done', position: { x: 200, y: 0 }, data: { outcome: 'done' } },
+    {
+      id: 'done',
+      name: 'Done',
+      position: { x: 200, y: 0 },
+      // Runs after the answer, so the guard context it sees is the assertion
+      // that `human.answer` really reached the pipeline.
+      onEnter: [{ id: 'e-track', definitionId: 'write_tracking', params: { scope: 'phase' } }],
+      data: { outcome: 'done' },
+    },
   ],
   transitions: [{ id: 't-answered', from: 'gate', to: 'done', guard: "human.answer == 'ship'" }],
   initialStateIds: ['gate'],
@@ -611,7 +630,16 @@ describe('human gates', () => {
 
     const pools = new ResourcePools(workflow.resources, { agingMs: 0 })
     const admission = new AdmissionControl({ journal, runId: RUN_ID, ceilings: { [HARNESS]: 4 } })
-    const executor: EffectExecutor = { execute: async () => ({}) }
+    const seen: { effectId: string; answer: unknown }[] = []
+    const executor: EffectExecutor = {
+      execute: async (invocation) => {
+        seen.push({
+          effectId: invocation.effect.id,
+          answer: invocation.context.human?.['answer'] ?? null,
+        })
+        return {}
+      },
+    }
     const scheduler: Scheduler = createScheduler({
       workflow,
       runId: RUN_ID,
@@ -643,6 +671,16 @@ describe('human gates', () => {
       'node a to park',
     )
 
+    // The question comes off the journal projection, not off live host state:
+    // `runControl(scheduler)` supplies no `question` callback at all.
+    const parked = await call(daemon, `/api/runs/${RUN_ID}/nodes/a`)
+    expect(NodeDetailSchema.parse(parked.body).question).toEqual({
+      question: 'The branch is green. Ship it?',
+      kind: 'choice',
+      choices: ['ship', 'hold'],
+      context: { diffRef: 'phase/a' },
+    })
+
     const answered = await call(daemon, `/api/runs/${RUN_ID}/nodes/a/answer`, {
       method: 'POST',
       body: { answer: 'ship' },
@@ -661,7 +699,95 @@ describe('human gates', () => {
 
     const report = await running
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+
+    // §9.1: the answer entered the guard context, which is what a pipeline
+    // branches on — the transition out of the gate is guarded on exactly this.
+    expect(seen.filter((call_) => call_.effectId === 'e-track')).toEqual([
+      { effectId: 'e-track', answer: 'ship' },
+      { effectId: 'e-track', answer: 'ship' },
+    ])
+    // Answered pauses stop being pending, and both nodes gave everything back.
+    expect(journal.pendingQuestions(RUN_ID)).toEqual([])
     expect(pools.held('lane')).toBe(0)
+    expect(pools.waiting).toBe(0)
+    expect(journal.leases()).toEqual([])
+  })
+
+  it('drives the four §9 operations against a real scheduler over the API', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-daemon-ops-'))
+    const journal = openJournal(dir)
+    const workflow = makeWorkflow('gated')
+    journal.createRun(RUN_ID, workflow)
+
+    const pools = new ResourcePools(workflow.resources, { agingMs: 0 })
+    const admission = new AdmissionControl({ journal, runId: RUN_ID, ceilings: { [HARNESS]: 4 } })
+    const scheduler: Scheduler = createScheduler({
+      workflow,
+      runId: RUN_ID,
+      journal,
+      pools,
+      admission,
+      adapters: { [HARNESS]: new MockAdapter({ id: HARNESS }) },
+      executor: { execute: async () => ({}) },
+      laneRoot: join(dir, 'lanes'),
+    })
+
+    const daemon = await startDaemon({ journal, pollMs: 5 })
+    daemon.register({ runId: RUN_ID, control: runControl(scheduler), pools, admission })
+    cleanups.push(async () => {
+      await daemon.close()
+      admission.close()
+      journal.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    const running = scheduler.run()
+    await until(
+      () => (scheduler.statuses['a'] === 'awaiting_human' ? true : undefined),
+      'node a to park',
+    )
+
+    // None of these answer 200 by pretending: the mechanism behind each one is
+    // the scheduler's, and a verb with no mechanism would still be a 409.
+    for (const operation of [
+      { path: 'context', body: { text: 'watch the unique index' } },
+      { path: 'redirect', body: { instruction: 'use a migration' } },
+      { path: 'pause', body: {} },
+    ]) {
+      const result = await call(daemon, `/api/runs/${RUN_ID}/nodes/a/${operation.path}`, {
+        method: 'POST',
+        body: operation.body,
+      })
+      expect([operation.path, result.status]).toEqual([operation.path, 200])
+    }
+
+    const aborted = await call(daemon, `/api/runs/${RUN_ID}/nodes/b/abort`, {
+      method: 'POST',
+      body: {},
+    })
+    expect(aborted.status).toBe(200)
+
+    scheduler.answer('a', { human: { answer: 'ship' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'failed' })
+    const operations = journal
+      .events(RUN_ID)
+      .filter((event) => event.type === 'node_operation')
+      .map((event) => event.payload as { op: string; delivery: string })
+    expect(operations).toEqual([
+      // Node `a` is parked, so both steering messages queue; the pause is a
+      // recorded no-op on a node that is already waiting for the operator.
+      { op: 'add_context', text: 'watch the unique index', delivery: 'queued' },
+      { op: 'redirect', text: 'use a migration', delivery: 'queued' },
+      { op: 'pause', delivery: 'ignored' },
+      { op: 'abort', delivery: 'sent' },
+      // …and both are delivered into the guard context when `a` resumes.
+      { op: 'add_context', text: 'watch the unique index', delivery: 'delivered' },
+      { op: 'redirect', text: 'use a migration', delivery: 'delivered' },
+    ])
+    expect(pools.held('lane')).toBe(0)
+    expect(journal.leases()).toEqual([])
   })
 })
 

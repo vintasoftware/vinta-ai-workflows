@@ -267,19 +267,22 @@ async function checkCompose(bin: string, required: boolean): Promise<CheckResult
 // disk
 // ---------------------------------------------------------------------------
 
-const gib = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+const size = (bytes: number): string =>
+  bytes < 1024 ** 3
+    ? `${Math.round(bytes / 1024 ** 2)} MiB`
+    : `${(bytes / 1024 ** 3).toFixed(1)} GiB`
 
 /** §8: the probe runs against `lanes + 1` — the integration worktree costs the same. */
 async function checkDisk(options: DoctorOptions, laneCount: number): Promise<CheckResult> {
   const perLane = options.perLaneBytes ?? (await measureBytes(options.repoPath))
   const probe = await probePoolDisk(options.poolRoot, perLane, laneCount + 1)
-  const need = `${laneCount} lanes + 1 integration worktree needs ${gib(probe.requiredBytes)}`
-  if (probe.fits) return pass('disk', `disk: ${need}, ${gib(probe.availableBytes)} free`)
+  const need = `${laneCount} lanes + 1 integration worktree needs ${size(probe.requiredBytes)}`
+  if (probe.fits) return pass('disk', `disk: ${need}, ${size(probe.availableBytes)} free`)
   return flag(
     'disk',
-    `disk: ${need}, only ${gib(probe.availableBytes)} free`,
+    `disk: ${need}, only ${size(probe.availableBytes)} free`,
     'fail',
-    `free ${gib(probe.requiredBytes - probe.availableBytes)} on the volume holding ${options.poolRoot}, ` +
+    `free ${size(probe.requiredBytes - probe.availableBytes)} on the volume holding ${options.poolRoot}, ` +
       'or lower resources.lane.capacity in the workflow',
   )
 }

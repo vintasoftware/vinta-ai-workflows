@@ -1,0 +1,186 @@
+/*
+ * One stylesheet, no design system. The tone colours are the canvas's own
+ * status colours (`--vdag-status-*`), so the graph and the panels beside it
+ * agree — waiting is amber in both places, and nothing but a real failure is
+ * ever red.
+ */
+:root {
+  --surface: #ffffff;
+  --canvas: #f4f5f7;
+  --line: #c4c8cf;
+  --text: #1b1f24;
+  --muted: #6b7280;
+  --tone-idle: #9ca3af;
+  --tone-active: #1c7ed6;
+  --tone-wait: #f08c00;
+  --tone-attention: #ae3ec9;
+  --tone-ok: #087f5b;
+  --tone-error: #e03131;
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.app-head h1 {
+  font-size: 16px;
+  margin: 0 0 16px;
+}
+
+a {
+  color: #3b5bdb;
+}
+
+h2,
+h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.empty {
+  color: var(--muted);
+  margin: 4px 0;
+}
+
+.error {
+  color: var(--tone-error);
+  margin: 8px 0;
+}
+
+.run-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.run-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.live {
+  color: var(--tone-ok);
+}
+
+.live.off {
+  color: var(--tone-wait);
+}
+
+.dag {
+  display: block;
+  height: 360px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+th,
+td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+tr[aria-current='true'] {
+  background: var(--canvas);
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pools li,
+.harnesses li,
+.holders li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.pool-head,
+.harnesses li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--canvas);
+  overflow: hidden;
+  margin: 4px 0;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--tone-active);
+}
+
+.chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #ffffff;
+  background: var(--tone-idle);
+}
+
+.tone-active {
+  background: var(--tone-active);
+}
+.tone-wait {
+  background: var(--tone-wait);
+}
+.tone-attention {
+  background: var(--tone-attention);
+}
+.tone-ok {
+  background: var(--tone-ok);
+}
+.tone-error {
+  background: var(--tone-error);
+}

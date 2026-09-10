@@ -6,13 +6,12 @@
  * the run. That forwarding is declared here as a narrow interface rather than
  * as a dependency on `Scheduler`, for two reasons:
  *
- * - **The scheduler only implements two of the five.** `Scheduler` has
- *   `answer` (§9.1) and `statuses`; add-context, redirect, pause and abort all
- *   need a live `AgentSession` handle, which is the harness unit's to own and
- *   which no step has wired into the scheduler yet. Declaring the port lets
- *   this step ship the transport, the validation and the auth without
- *   pretending the mechanism behind two of the verbs exists. `runControl`
- *   below is the adapter that fills in what `Scheduler` really does have.
+ * - **The host, not `Scheduler`, is the contract.** `Scheduler` now implements
+ *   add-context, redirect, pause and abort on top of the session registry it
+ *   keeps, and `runControl` forwards to whatever of them the object it is
+ *   handed actually has. A host that supplies fewer — an out-of-tree runner,
+ *   or a test double — still gets a `RunControl`, and the verbs behind the
+ *   mechanism it lacks refuse rather than quietly succeeding.
  * - **It is what makes the acceptance test honest.** A test that asserts "the
  *   operation reached the scheduler" against a real agent run is asserting
  *   about a model's mood. Against this port it asserts about a call.
@@ -41,10 +40,10 @@ export interface RunControl {
   /** §9 — kill the session, mark failed, block dependents. */
   abortNode(nodeId: string): void | Promise<void>
   /**
-   * The question a node is parked on (§9.1). Optional because no journal event
-   * variant and no `await_human` param carries this shape yet — a host that
-   * knows the question can surface it; one that does not reports the pause
-   * alone, which the `awaiting_human` status already says.
+   * The question a node is parked on (§9.1). Optional, and rarely needed: the
+   * journal projects the pending question out of the `human_question` event,
+   * which is what the API serves and what survives a restart. This is the
+   * escape hatch for a host that parks a node without journalling the pause.
    */
   question?(nodeId: string): HumanQuestion | undefined
 }
@@ -83,21 +82,43 @@ export class UnsupportedOperation extends Error {}
  * the node was killed.
  */
 export function runControl(
-  scheduler: Pick<RunControl, 'answer' | 'statuses'>,
+  scheduler: Pick<RunControl, 'answer' | 'statuses'> &
+    Partial<Omit<RunControl, 'answer' | 'statuses'>>,
   operations: Partial<Omit<RunControl, 'answer' | 'statuses'>> = {},
 ): RunControl {
   const unsupported = (verb: string) => (): never => {
     throw new UnsupportedOperation(verb)
   }
+  // Destructured off the prototype, so every forward re-binds `this` to the
+  // scheduler: these are class methods reaching private state.
+  const { addContext, redirect, pause, abortNode, question } = scheduler
+  const own =
+    operations.question ??
+    (question === undefined ? undefined : (nodeId: string) => question.call(scheduler, nodeId))
+
   return {
     get statuses() {
       return scheduler.statuses
     },
     answer: (nodeId, facts) => scheduler.answer(nodeId, facts),
-    addContext: operations.addContext ?? unsupported('add_context'),
-    redirect: operations.redirect ?? unsupported('redirect'),
-    pause: operations.pause ?? unsupported('pause'),
-    abortNode: operations.abortNode ?? unsupported('abort'),
-    ...(operations.question === undefined ? {} : { question: operations.question }),
+    addContext:
+      operations.addContext ??
+      (addContext === undefined
+        ? unsupported('add_context')
+        : (nodeId, text) => addContext.call(scheduler, nodeId, text)),
+    redirect:
+      operations.redirect ??
+      (redirect === undefined
+        ? unsupported('redirect')
+        : (nodeId, instruction) => redirect.call(scheduler, nodeId, instruction)),
+    pause:
+      operations.pause ??
+      (pause === undefined ? unsupported('pause') : (nodeId) => pause.call(scheduler, nodeId)),
+    abortNode:
+      operations.abortNode ??
+      (abortNode === undefined
+        ? unsupported('abort')
+        : (nodeId) => abortNode.call(scheduler, nodeId)),
+    ...(own === undefined ? {} : { question: own }),
   }
 }

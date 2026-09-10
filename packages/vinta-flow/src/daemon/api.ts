@@ -110,7 +110,7 @@ export function createApi(options: ApiOptions): Hono {
         entries: journal.tailTranscript(runId, node.node_id, limit, stream),
       },
       gates,
-      question: question(found.run, node),
+      question: question(runId, found.run, node),
     }
     return c.json(detail)
   })
@@ -148,6 +148,22 @@ export function createApi(options: ApiOptions): Hono {
   return app
 
   // -------------------------------------------------------------------------
+
+  /**
+   * §9.1's question. The journal is asked first and the host second: the
+   * pending question is projected from the `human_question` event, which is
+   * what makes it outlive a daemon restart and a UI reload alike. Validated on
+   * the way out either way — a shape the UI cannot rely on is worse than none.
+   */
+  function question(runId: string, run: DaemonRun, node: NodeRow): NodeDetail['question'] {
+    if (node.status !== 'awaiting_human') return null
+    const raw =
+      journal.pendingQuestion(runId, node.node_id)?.question ??
+      run.control.question?.(node.node_id)
+    if (raw === undefined) return null
+    const parsed = HumanQuestionSchema.safeParse(raw)
+    return parsed.success ? parsed.data : null
+  }
 
   function workflow(runId: string): Workflow {
     const cached = workflows.get(runId)
@@ -236,19 +252,6 @@ export function createApi(options: ApiOptions): Hono {
       })),
     }
   }
-}
-
-/**
- * §9.1's question, when the host can supply one. Validated on the way out: it
- * comes from a host callback, and an unchecked shape here would be a contract
- * the UI cannot rely on.
- */
-function question(run: DaemonRun, node: NodeRow): NodeDetail['question'] {
-  if (node.status !== 'awaiting_human') return null
-  const raw = run.control.question?.(node.node_id)
-  if (raw === undefined) return null
-  const parsed = HumanQuestionSchema.safeParse(raw)
-  return parsed.success ? parsed.data : null
 }
 
 function runSummary(row: RunRow): RunSummary {

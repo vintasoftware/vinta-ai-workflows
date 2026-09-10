@@ -57,10 +57,16 @@ export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
   },
   await_human: {
     id: 'await_human',
-    params: ['reason'],
+    params: ['question', 'kind', 'choices', 'context', 'reason'],
     description:
       'Asks the operator a question and suspends the run. The only verb with control-flow ' +
-      'meaning to the interpreter; the answer re-enters the guard context as `human.answer`.',
+      'meaning to the interpreter; the answer re-enters the guard context as `human.answer`. ' +
+      'The params carry §9.1’s question shape: `question` is what the operator is asked, ' +
+      '`kind` is confirm | choice | text, `choices` are the options a choice offers, and ' +
+      '`context` names what the node view renders beside it — `diffRef`, `gateLogRef`, ' +
+      '`transcriptCursor`. `reason` is the older one-line form and still reads as the ' +
+      'question when no `question` is given. The host journals the whole shape with the ' +
+      'pause, which is what makes the question outlive a daemon restart.',
   },
   notify: {
     id: 'notify',

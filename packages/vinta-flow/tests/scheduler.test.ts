@@ -19,10 +19,16 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { AdmissionControl } from '../src/admission/admission.ts'
 import type { Clock } from '../src/admission/clock.ts'
-import type { SpawnRefusalKind } from '../src/harness/adapter.ts'
+import type {
+  AgentSession,
+  HarnessAdapter,
+  HarnessCapabilities,
+  SpawnRefusalKind,
+} from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
+import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import { createScheduler, type Scheduler } from '../src/scheduler/index.ts'
@@ -70,6 +76,69 @@ interface Call {
   readonly nodeId: string
   readonly effect: string
   readonly verb: EffectId
+  /** The guard context the effect saw — where a queued steering message lands. */
+  readonly context: GuardContext
+}
+
+/**
+ * Wraps an adapter so its session stalls after `session_started` until the
+ * test lets it go. Without it a `MockAdapter` run drains in microtasks and
+ * there is no moment at which a §9 operation could reach a live session —
+ * which is exactly the moment these tests are about.
+ */
+function stalling(inner: HarnessAdapter): {
+  readonly adapter: HarnessAdapter
+  /** True while a session is parked mid-stream. */
+  live(): boolean
+  release(): void
+} {
+  let parked = 0
+  let open!: () => void
+  const gate = new Promise<void>((resolve) => {
+    open = resolve
+  })
+
+  const adapter: HarnessAdapter = {
+    id: inner.id,
+    capabilities: inner.capabilities,
+    preflight: () => inner.preflight(),
+    async spawn(task) {
+      const outcome = await inner.spawn(task)
+      if (!outcome.ok) return outcome
+      const session = outcome.session
+      const stalled: AgentSession = {
+        id: session.id,
+        events: {
+          async *[Symbol.asyncIterator]() {
+            let first = true
+            for await (const event of session.events) {
+              yield event
+              if (first) {
+                first = false
+                parked += 1
+                await gate
+                parked -= 1
+              }
+            }
+          },
+        },
+        send: (text) => session.send(text),
+        interrupt: () => session.interrupt(),
+        kill: () => session.kill(),
+      }
+      return { ok: true, session: stalled }
+    },
+  }
+  return { adapter, live: () => parked > 0, release: () => open() }
+}
+
+/** Polls `read` until it is true. Nothing here waits on a fixed delay. */
+async function until(read: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 200; i += 1) {
+    if (read()) return
+    await flush(1)
+  }
+  throw new Error(`timed out waiting for ${label}`)
 }
 
 interface Recorder extends EffectExecutor {
@@ -96,6 +165,7 @@ function recorder(
         nodeId,
         effect: invocation.effect.id,
         verb: invocation.effect.definitionId,
+        context: invocation.context,
       }
       calls.push(call)
       tap?.(call)
@@ -121,6 +191,8 @@ interface Rig {
   readonly calls: Call[]
   readonly advance: (ms: number) => Promise<void>
   readonly poolNames: readonly string[]
+  /** Present when `stall` was asked for: holds every session open mid-stream. */
+  readonly stall: { live(): boolean; release(): void }
 }
 
 const cleanups: (() => void)[] = []
@@ -136,6 +208,9 @@ function rig(
     readonly outcomes?: Readonly<Record<string, EffectOutcome | readonly EffectOutcome[]>>
     readonly tap?: (call: Call) => void
     readonly register?: boolean
+    /** Holds every session open after `session_started`, for the §9 operations. */
+    readonly stall?: boolean
+    readonly capabilities?: Partial<HarnessCapabilities>
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-scheduler-'))
@@ -150,7 +225,9 @@ function rig(
   const adapter = new MockAdapter({
     id: HARNESS,
     ...(options.spawns === undefined ? {} : { spawns: options.spawns }),
+    ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
   })
+  const stall = stalling(adapter)
   const admission = new AdmissionControl({
     journal,
     runId,
@@ -169,7 +246,7 @@ function rig(
     journal,
     pools,
     admission,
-    adapters: { [HARNESS]: adapter },
+    adapters: { [HARNESS]: options.stall === true ? stall.adapter : adapter },
     executor,
     laneRoot: join(dir, 'lanes'),
   })
@@ -188,8 +265,24 @@ function rig(
     calls: executor.calls,
     advance,
     poolNames: Object.keys(workflow.resources),
+    stall,
   }
 }
+
+/** Every journalled §9 operation for a node, in order. */
+const operationsOf = (rig_: Rig, nodeId: string): unknown[] =>
+  rig_.journal
+    .events('run-1')
+    .filter((event) => event.type === 'node_operation' && event.nodeId === nodeId)
+    .map((event) => event.payload)
+
+/** The node's normalized transcript, which is where a session's own record is. */
+const transcriptOf = (rig_: Rig, nodeId: string): { type: string; text?: string; result?: string }[] =>
+  rig_.journal.tailTranscript('run-1', nodeId, 100) as {
+    type: string
+    text?: string
+    result?: string
+  }[]
 
 /** No leaked leases: every pool back to zero, and nobody still queued. */
 function expectDrained(rig_: Rig): void {
@@ -261,6 +354,32 @@ const LONG = {
   finalStateIds: ['done'],
 }
 
+/**
+ * The gate and the agent in one state, so the node is still holding the gate
+ * pool while its session is live — the shape an operator pause has to unwind.
+ */
+const GATE_WORK = {
+  states: [
+    {
+      id: 'work',
+      name: 'Work',
+      position: { x: 0, y: 0 },
+      onEnter: [
+        { id: 'e-gate', definitionId: 'run_gate', params: {} },
+        spawn('e-work', 'implementer'),
+      ],
+    },
+    { id: 'wrap', name: 'Wrap', position: { x: 200, y: 0 }, onEnter: [spawn('e-wrap', 'reviewer')] },
+    { id: 'done', name: 'Done', position: { x: 400, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [
+    { id: 't-wrap', from: 'work', to: 'wrap' },
+    { id: 't-done', from: 'wrap', to: 'done' },
+  ],
+  initialStateIds: ['work'],
+  finalStateIds: ['done'],
+}
+
 /** A gate, then a question — the two resources rules in one machine. */
 const GATED = {
   states: [
@@ -298,7 +417,13 @@ function makeWorkflow(
     resources: options.resources ?? { lane: { capacity: options.lanes ?? 4, kind: 'worktree' } },
     gates: options.gates ?? {},
     nodes,
-    pipelines: options.pipelines ?? { solo: SOLO, explode: EXPLODE, long: LONG, gated: GATED },
+    pipelines: options.pipelines ?? {
+      solo: SOLO,
+      explode: EXPLODE,
+      long: LONG,
+      gated: GATED,
+      'gate-work': GATE_WORK,
+    },
   })
 }
 
@@ -701,6 +826,274 @@ describe('standard-phase under the scheduler', () => {
     expect(r.calls.filter((call) => call.effect === 'e-fix')).toHaveLength(2)
     expect(report.statuses).toEqual({ a: 'failed', b: 'blocked' })
     expect(r.calls.some((call) => call.effect === 'e-failed')).toBe(true)
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8: the four remaining operations of §9
+//
+// Each one needs a live `AgentSession`, so every test here holds one open
+// mid-stream with `stall` and drives the operation against it. The session is
+// `MockAdapter`'s own, so what it did is visible where a real one would be
+// visible: in the node's transcript.
+// ---------------------------------------------------------------------------
+
+describe('§9 operations', () => {
+  it('sends added context into the live session and journals it', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.addContext('a', 'the composite index is the fast one')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // The message reached the session: §15's rule is that it shows up in the
+    // transcript of the run it steered.
+    expect(transcriptOf(r, 'a')).toContainEqual({
+      type: 'user_message',
+      text: 'the composite index is the fast one',
+    })
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'add_context', text: 'the composite index is the fast one', delivery: 'sent' },
+    ])
+    expectDrained(r)
+  })
+
+  it('queues added context for a harness that cannot inject, and delivers it on the resume', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), {
+      stall: true,
+      capabilities: { inject: false },
+    })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    // No throw at the operator, even though `session.send` would reject here.
+    await r.scheduler.addContext('a', 'prefer a migration over a backfill')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(transcriptOf(r, 'a').some((entry) => entry.type === 'user_message')).toBe(false)
+    // Delivered on the node's next resume, into the guard context every later
+    // effect reads — including the one that composes the next agent turn.
+    const next = r.calls.find((call) => call.effect === 'e-2')
+    expect(next?.context.human?.['pending_context']).toBe('prefer a migration over a backfill')
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'add_context', text: 'prefer a migration over a backfill', delivery: 'queued' },
+      { op: 'add_context', text: 'prefer a migration over a backfill', delivery: 'delivered' },
+    ])
+    expectDrained(r)
+  })
+
+  it('interrupts the live session on a redirect and carries the instruction into the resume', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.redirect('a', 'use the queue, not a cron')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // The interrupt reached the session: its first turn ended early and said so.
+    expect(transcriptOf(r, 'a')).toContainEqual({ type: 'session_ended', result: 'interrupted' })
+    const next = r.calls.find((call) => call.effect === 'e-2')
+    expect(next?.context.human?.['pending_context']).toBe('use the queue, not a cron')
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'redirect', text: 'use the queue, not a cron', delivery: 'queued' },
+      { op: 'redirect', text: 'use the queue, not a cron', delivery: 'delivered' },
+    ])
+    expectDrained(r)
+  })
+
+  it('pauses after the current turn, keeping the lane and giving the gate slot back', async () => {
+    const workflow = makeWorkflow([node('a', [], { gates: ['unit'], pipeline: 'gate-work' })], {
+      resources: {
+        lane: { capacity: 2, kind: 'worktree' },
+        'test-suite': { capacity: 1, kind: 'semaphore' },
+      },
+      gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+    })
+    const r = rig(workflow, { stall: true })
+
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    // The gate pool is held right now, and the pause has to give it back.
+    expect(r.pools.held('test-suite')).toBe(1)
+
+    await r.scheduler.pause('a')
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+
+    // §6 and §9.1: the lane stays — the human is being asked about the work in
+    // it — and the expensive slot is freed at once.
+    expect(r.pools.held('lane')).toBe(1)
+    expect(r.pools.held('test-suite')).toBe(0)
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question.kind).toBe('confirm')
+    expect(operationsOf(r, 'a')).toEqual([{ op: 'pause', delivery: 'sent' }])
+
+    r.scheduler.answer('a', { human: { answer: 'resume' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.journal.pendingQuestion('run-1', 'a')).toBeUndefined()
+    expectDrained(r)
+  })
+
+  it('aborts a node: kills the session, fails it, and blocks exactly its dependents', async () => {
+    const workflow = makeWorkflow([node('a'), node('b', ['a']), node('c', ['b']), node('d')])
+    const r = rig(workflow, { stall: true })
+
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.abortNode('a')
+
+    // Containment is immediate: the operator does not wait for the node's own
+    // loop to unwind before seeing what the abort took with it.
+    expect(r.scheduler.statuses['a']).toBe('failed')
+    expect(r.scheduler.statuses['b']).toBe('blocked')
+    expect(r.scheduler.statuses['c']).toBe('blocked')
+    expect(r.scheduler.statuses['d']).not.toBe('blocked')
+
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed', b: 'blocked', c: 'blocked', d: 'done' })
+    expect(report.failures).toEqual({ a: 'aborted by the operator' })
+    expect(transcriptOf(r, 'a')).toContainEqual({ type: 'session_ended', result: 'interrupted' })
+    expect(operationsOf(r, 'a')).toEqual([{ op: 'abort', delivery: 'sent' }])
+    expectDrained(r)
+  })
+
+  it('aborts a node that is parked on a question, without stranding its lane', async () => {
+    const workflow = makeWorkflow([node('a', [], { pipeline: 'gated' }), node('b', ['a'])])
+    const r = rig(workflow)
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+    expect(r.journal.pendingQuestion('run-1', 'a')).toBeDefined()
+
+    await r.scheduler.abortNode('a')
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed', b: 'blocked' })
+    // The pause ended without being answered, so nothing is still pending on it.
+    expect(r.journal.pendingQuestion('run-1', 'a')).toBeUndefined()
+    expectDrained(r)
+  })
+
+  it('records every operation on a node that is not running, and throws at none of them', async () => {
+    const workflow = makeWorkflow([node('a', [], { pipeline: 'explode' }), node('b', ['a'])])
+    const r = rig(workflow)
+    const report = await r.scheduler.run()
+    expect(report.statuses).toEqual({ a: 'failed', b: 'blocked' })
+
+    // Every verb, against a failed node and against a blocked one. An operator
+    // clicking a button on a node that settled a second ago gets a recorded
+    // no-op, never a rejected promise nobody is waiting on.
+    await expect(
+      Promise.all([
+        r.scheduler.addContext('a', 'too late'),
+        r.scheduler.redirect('a', 'too late'),
+        r.scheduler.pause('a'),
+        r.scheduler.abortNode('a'),
+        r.scheduler.addContext('b', 'too late'),
+        r.scheduler.redirect('b', 'too late'),
+        r.scheduler.pause('b'),
+        r.scheduler.abortNode('b'),
+      ]),
+    ).resolves.toHaveLength(8)
+
+    expect(r.scheduler.statuses).toEqual({ a: 'failed', b: 'blocked' })
+    for (const nodeId of ['a', 'b']) {
+      expect(operationsOf(r, nodeId)).toEqual([
+        { op: 'add_context', text: 'too late', delivery: 'ignored' },
+        { op: 'redirect', text: 'too late', delivery: 'ignored' },
+        { op: 'pause', delivery: 'ignored' },
+        { op: 'abort', delivery: 'ignored' },
+      ])
+    }
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9: §9.1's question, journalled with the pause
+// ---------------------------------------------------------------------------
+
+describe('human gates journal their question', () => {
+  it('journals the whole question shape from the effect params, and the answer', async () => {
+    const asking = {
+      states: [
+        {
+          id: 'gate',
+          name: 'Gate',
+          position: { x: 0, y: 0 },
+          onEnter: [
+            {
+              id: 'e-ask',
+              definitionId: 'await_human',
+              params: {
+                question: 'Two migrations landed. Ship the branch?',
+                kind: 'choice',
+                choices: ['ship', 'hold'],
+                context: { diffRef: 'phase/a', gateLogRef: 'unit', transcriptCursor: 7 },
+              },
+            },
+          ],
+        },
+        { id: 'done', name: 'Done', position: { x: 200, y: 0 }, data: { outcome: 'done' } },
+      ],
+      transitions: [{ id: 't-done', from: 'gate', to: 'done', guard: "human.answer == 'ship'" }],
+      initialStateIds: ['gate'],
+      finalStateIds: ['done'],
+    }
+    const r = rig(makeWorkflow([node('a')], { pipelines: { asking }, pipeline: 'asking' }))
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+
+    expect(r.journal.pendingQuestion('run-1', 'a')).toMatchObject({
+      effectId: 'e-ask',
+      question: {
+        question: 'Two migrations landed. Ship the branch?',
+        kind: 'choice',
+        choices: ['ship', 'hold'],
+        context: { diffRef: 'phase/a', gateLogRef: 'unit', transcriptCursor: 7 },
+      },
+    })
+    // Asked once. A second ask is a second notification, which §9.1 forbids.
+    expect(
+      r.journal.events('run-1').filter((event) => event.type === 'human_question'),
+    ).toHaveLength(1)
+
+    r.scheduler.answer('a', { human: { answer: 'ship' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(
+      r.journal.events('run-1').find((event) => event.type === 'human_answered')?.payload,
+    ).toEqual({ effect_id: 'e-ask', answer: 'ship' })
+    expect(r.journal.pendingQuestions('run-1')).toEqual([])
+    expectDrained(r)
+  })
+
+  it('falls back to the older one-line `reason` param as the question', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'gated' })]))
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question).toEqual({
+      question: 'gate-review',
+      kind: 'confirm',
+    })
+
+    r.scheduler.answer('a', { human: { answer: 'ship' } })
+    await running
     expectDrained(r)
   })
 })

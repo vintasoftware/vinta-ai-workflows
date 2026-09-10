@@ -34,6 +34,13 @@
  *   checked against the harness wake times (§6.1) and is only a deadlock when
  *   no harness is parked.
  *
+ * The §9 operations live here for the same reason: they are *when* work stops
+ * and starts, told to the run from outside. Each one needs the live
+ * `AgentSession` the spawn is holding, so the scheduler keeps a one-slot
+ * registry per node that opens when admission grants a session and closes when
+ * its stream ends. What each operation did is journalled — the operator's own
+ * steering text included, as event payload and never as a log field.
+ *
  * **Never spinning is structural, not a timer.** The loop waits on a promise
  * that only a state change resolves; a capacity wait is one harness timer owned
  * by admission control. There is no poll interval anywhere in this file.
@@ -51,12 +58,17 @@
 import { join } from 'node:path'
 import type { AdmissionControl } from '../admission/admission.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
-import type { AgentTask, HarnessAdapter } from '../harness/adapter.ts'
-import type { NodeStatus } from '../journal/events.ts'
+import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
+import type {
+  HumanQuestion,
+  NodeStatus,
+  OperatorDelivery,
+  OperatorOp,
+} from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import { createPipelineRun, type StepResult } from '../pipeline/interpreter.ts'
+import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { Node, Pipeline, Workflow } from '../types.ts'
@@ -108,10 +120,36 @@ class CapacityRetry extends Error {
 /** `fatal` only — a broken harness, which is the one refusal that fails a node. */
 class SpawnFatal extends Error {}
 
+/**
+ * Unwinds a node the operator aborted (§9). It carries no message: the node is
+ * already marked failed, with its reason, by the time this is thrown.
+ */
+class Aborted extends Error {}
+
 interface NodeState {
   readonly node: Node
   readonly pipeline: Pipeline
   status: NodeStatus
+  /**
+   * The live agent turn, for the four §9 operations that need one. Set the
+   * moment admission grants a session and cleared when its stream ends, so
+   * "is this node steerable right now" is one null check rather than a guess
+   * from its status.
+   */
+  live: { readonly session: AgentSession; readonly adapter: HarnessAdapter } | null
+  /**
+   * Operator text that had nowhere to go — no live session, or a harness that
+   * cannot inject — waiting for the node's next resume (§9). The queue lives
+   * here because the resume does, and each entry remembers which operation
+   * put it there so the delivery is journalled as what it is.
+   */
+  pending: { readonly op: OperatorOp; readonly text: string }[]
+  /** Set by `pause`; honoured after the current turn, never inside it. */
+  pauseRequested: boolean
+  /** Set by `abortNode`. Every step checks it, so a killed node stops stepping. */
+  aborted: boolean
+  /** The effect the node is parked on, for the answer event that closes it. */
+  parkedEffectId: string | null
   /** Fixer runs taken so far. The `fix_rounds` fact the interpreter reads. */
   fixRounds: number
   lane: string | null
@@ -147,6 +185,11 @@ export class Scheduler {
         node,
         pipeline,
         status: 'pending',
+        live: null,
+        pending: [],
+        pauseRequested: false,
+        aborted: false,
+        parkedEffectId: null,
         fixRounds: 0,
         lane: null,
         laneLease: null,
@@ -211,7 +254,105 @@ export class Scheduler {
       throw new Error(`node "${nodeId}" is not awaiting an answer`)
     }
     state.resume = null
+    const answer = facts.human?.['answer']
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'human_answered',
+      payload: {
+        effect_id: state.parkedEffectId ?? '',
+        answer: answer === undefined ? null : answer,
+      },
+    })
+    state.parkedEffectId = null
     resume(facts)
+  }
+
+  // -------------------------------------------------------------------------
+  // The four remaining operations of §9
+  //
+  // Each one is journalled, whatever it managed to do, and each one is defined
+  // on a node that is not running: an operator clicking a button on a node
+  // that finished half a second ago must get a recorded no-op, not a rejected
+  // promise nobody is waiting on.
+  // -------------------------------------------------------------------------
+
+  /**
+   * §9 — `session.send(text)` where the harness can inject, and otherwise a
+   * queue drained into the node's next resume. The refusal a harness without
+   * `inject` would raise is not the operator's to see, so it is never asked.
+   */
+  async addContext(nodeId: string, text: string): Promise<void> {
+    const state = this.#stateOf(nodeId)
+    if (this.#settledNode(state)) return this.#operation(state, 'add_context', text, 'ignored')
+
+    const live = state.live
+    if (live !== null && live.adapter.capabilities.inject) {
+      await live.session.send(text)
+      this.#operation(state, 'add_context', text, 'sent')
+      return
+    }
+    state.pending.push({ op: 'add_context', text })
+    this.#operation(state, 'add_context', text, 'queued')
+  }
+
+  /**
+   * §9 — interrupt, then the new instruction. The instruction rides the same
+   * queue as added context: an interrupted turn is over, so §9's other reading
+   * of this verb — "resume with an amended prompt" — is the one that can
+   * actually deliver it.
+   */
+  async redirect(nodeId: string, instruction: string): Promise<void> {
+    const state = this.#stateOf(nodeId)
+    if (this.#settledNode(state)) {
+      return this.#operation(state, 'redirect', instruction, 'ignored')
+    }
+
+    const live = state.live
+    if (live !== null && live.adapter.capabilities.interrupt) await live.session.interrupt()
+    state.pending.push({ op: 'redirect', text: instruction })
+    this.#operation(state, 'redirect', instruction, 'queued')
+  }
+
+  /**
+   * §9 — finish the current turn, then `await_human`. The flag is read between
+   * steps, never inside one: killing a turn to pause it is what abort is for.
+   */
+  async pause(nodeId: string): Promise<void> {
+    const state = this.#stateOf(nodeId)
+    if (state.status !== 'running') return this.#operation(state, 'pause', undefined, 'ignored')
+    state.pauseRequested = true
+    this.#operation(state, 'pause', undefined, 'sent')
+  }
+
+  /**
+   * §9 — kill the session, mark the node failed, block its dependents. The
+   * node is failed here rather than when its own loop unwinds, so an operator
+   * who aborts sees the containment immediately; the loop discovers the abort
+   * at its next step and stops without failing the node a second time.
+   */
+  async abortNode(nodeId: string): Promise<void> {
+    const state = this.#stateOf(nodeId)
+    if (this.#settledNode(state)) return this.#operation(state, 'abort', undefined, 'ignored')
+
+    state.aborted = true
+    this.#operation(state, 'abort', undefined, 'sent')
+
+    const live = state.live
+    state.live = null
+    if (live !== null) await live.session.kill()
+
+    const resume = state.resume
+    state.resume = null
+    state.parkedEffectId = null
+    this.#fail(state, 'aborted by the operator')
+    // The node's own loop unwinds a turn later, and the run can settle before
+    // it does — so the resources go back here rather than there. `#release` is
+    // idempotent, so the unwinding loop repeating it changes nothing.
+    this.#release(state)
+    // A parked node is asleep on a promise nobody else will settle; waking it
+    // is how it reaches the abort check and stops stepping.
+    if (resume !== null) resume({})
   }
 
   /** Node statuses as of now. A projection of the same facts the journal holds. */
@@ -311,9 +452,13 @@ export class Scheduler {
         // and the reason `admit` hands back a wait rather than performing one.
         this.#release(state)
 
+        // Already failed, already contained: unwinding is all that is left.
+        if (error instanceof Aborted) return
+
         if (error instanceof CapacityRetry) {
           this.#setStatus(state, 'waiting_on_capacity')
           await error.waitFor()
+          if (state.aborted) return
           this.#setStatus(state, 'running')
           continue
         }
@@ -342,16 +487,17 @@ export class Scheduler {
     let result: StepResult = await run.start()
     while (true) {
       // Gate pools live for one step. A step that ends in a suspension gives
-      // them back at the suspension, which is §6's "never across await_human".
+      // them back at the suspension, which is §6's "never across await_human"
+      // — and which an operator pause below reaches by the same path.
       this.#releaseGate(state)
+      if (state.aborted) throw new Aborted()
 
       if (result.kind === 'suspended') {
-        this.#setStatus(state, 'awaiting_human')
-        const facts = await new Promise<GuardContext>((resolve) => {
-          state.resume = resolve
-        })
-        this.#setStatus(state, 'running')
-        result = await run.resume(facts)
+        // The question itself was journalled when the effect ran; here the
+        // node only records which pause it is asleep on.
+        state.parkedEffectId = result.effectId
+        const facts = await this.#park(state)
+        result = await run.resume(this.#withPending(state, run, facts))
         continue
       }
       if (result.kind === 'final') {
@@ -359,8 +505,93 @@ export class Scheduler {
       }
       if (result.kind === 'stuck') throw new Error(result.reason)
 
-      result = await run.send({ facts: { fix_rounds: state.fixRounds } })
+      // §9's pause, taken between turns: the lane stays, the gate pools are
+      // already back, and the node waits on the same promise a human gate does.
+      if (state.pauseRequested) {
+        state.pauseRequested = false
+        const effectId = `operator-pause:${state.node.id}`
+        this.#ask(state, effectId, {
+          question: 'The operator paused this node. Resume it?',
+          kind: 'confirm',
+        })
+        state.parkedEffectId = effectId
+        const facts = await this.#park(state)
+        result = await run.send({
+          facts: this.#withPending(state, run, { ...facts, fix_rounds: state.fixRounds }),
+        })
+        continue
+      }
+
+      result = await run.send({
+        facts: this.#withPending(state, run, { fix_rounds: state.fixRounds }),
+      })
     }
+  }
+
+  /**
+   * Parks a node on an unanswered question: `awaiting_human`, its lane still
+   * held, waiting on the promise `answer` resolves. The one place a node
+   * sleeps, so the one place an abort has to be able to wake it.
+   */
+  async #park(state: NodeState): Promise<GuardContext> {
+    this.#setStatus(state, 'awaiting_human')
+    const facts = await new Promise<GuardContext>((resolve) => {
+      state.resume = resolve
+    })
+    if (state.aborted) throw new Aborted()
+    this.#setStatus(state, 'running')
+    return facts
+  }
+
+  /**
+   * Drains the operator's queue into the facts the node resumes with (§9).
+   * A harness that cannot inject has no port for this text mid-turn, so the
+   * guard context is where it lands: a plan can branch on it, and the effect
+   * that composes the next prompt reads it from the same place it reads every
+   * other fact.
+   */
+  #withPending(state: NodeState, run: PipelineRun, facts: GuardContext): GuardContext {
+    if (state.pending.length === 0) return facts
+    const queued = state.pending.splice(0)
+    for (const entry of queued) this.#operation(state, entry.op, entry.text, 'delivered')
+    const text = queued.map((entry) => entry.text).join('\n')
+    return { ...facts, human: { ...run.context.human, ...facts.human, pending_context: text } }
+  }
+
+  /** Journals §9.1's question. The pause *is* this event — see `events.ts`. */
+  #ask(state: NodeState, effectId: string, question: HumanQuestion): void {
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'human_question',
+      payload: { ...question, effect_id: effectId },
+    })
+  }
+
+  /** One §9 operation, recorded. `text` is payload, never a log field. */
+  #operation(
+    state: NodeState,
+    op: OperatorOp,
+    text: string | undefined,
+    delivery: OperatorDelivery,
+  ): void {
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'node_operation',
+      payload: { op, delivery, ...(text === undefined ? {} : { text }) },
+    })
+  }
+
+  #stateOf(nodeId: string): NodeState {
+    const state = this.#states.get(nodeId)
+    if (state === undefined) throw new Error(`unknown node "${nodeId}"`)
+    return state
+  }
+
+  /** Done, failed or blocked: there is nothing left in flight to steer. */
+  #settledNode(state: NodeState): boolean {
+    return state.status === 'done' || state.status === 'failed' || state.status === 'blocked'
   }
 
   /** A final state means failure only when its host `data` says so. */
@@ -377,9 +608,16 @@ export class Scheduler {
   #effects(state: NodeState): EffectExecutor {
     return {
       execute: async (invocation: EffectInvocation): Promise<EffectOutcome> => {
+        if (state.aborted) throw new Aborted()
         const verb = invocation.effect.definitionId
         if (verb === 'spawn_agent') return await this.#spawn(state, invocation)
         if (verb === 'run_gate') await this.#acquireGate(state, invocation)
+        // The question is journalled before the host executor runs, because
+        // the host executor is what raises the notification: the record of the
+        // pause exists first, so a restart reads it instead of re-asking.
+        if (verb === 'await_human') {
+          this.#ask(state, invocation.effect.id, questionOf(invocation.effect.params))
+        }
         return await this.#options.executor.execute(invocation)
       },
     }
@@ -412,6 +650,9 @@ export class Scheduler {
     if (outcome.status === 'failed') throw new SpawnFatal(outcome.message)
     if (outcome.status === 'retry') throw new CapacityRetry(outcome.wait)
 
+    // The registry: exactly as long-lived as the turn it points at, so a §9
+    // operation can never reach a session whose stream has already ended.
+    state.live = { session: outcome.session, adapter }
     try {
       for await (const event of outcome.session.events) {
         journal.appendTranscript(runId, state.node.id, event)
@@ -420,9 +661,11 @@ export class Scheduler {
         }
       }
     } finally {
+      state.live = null
       // Frees the harness in-flight slot: the ceiling counts running agents.
       outcome.release()
     }
+    if (state.aborted) throw new Aborted()
 
     // A fix round is a fixer turn, not a state called `fix`.
     if (params['role'] === 'fixer') state.fixRounds += 1
@@ -562,6 +805,45 @@ export class Scheduler {
       iterations: this.#iterations,
     }
   }
+}
+
+/**
+ * §9.1's question, read out of the effect's params (§5.2 keeps params as data,
+ * so this reads them defensively rather than trusting a schema that does not
+ * exist). `reason` is the older one-line form and still reads as the question.
+ */
+function questionOf(params: Readonly<Record<string, unknown>>): HumanQuestion {
+  const kind = params['kind']
+  const choices = params['choices']
+  const context = questionContext(params['context'])
+  const question =
+    typeof params['question'] === 'string'
+      ? params['question']
+      : typeof params['reason'] === 'string'
+        ? params['reason']
+        : 'This node is waiting for the operator.'
+
+  return {
+    question,
+    kind: kind === 'choice' || kind === 'text' ? kind : 'confirm',
+    ...(Array.isArray(choices)
+      ? { choices: choices.filter((choice): choice is string => typeof choice === 'string') }
+      : {}),
+    ...(context === undefined ? {} : { context }),
+  }
+}
+
+/** References the node view renders beside the question — never content. */
+function questionContext(value: unknown): HumanQuestion['context'] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  const context: { diffRef?: string; gateLogRef?: string; transcriptCursor?: number } = {}
+  if (typeof raw['diffRef'] === 'string') context.diffRef = raw['diffRef']
+  if (typeof raw['gateLogRef'] === 'string') context.gateLogRef = raw['gateLogRef']
+  if (Number.isInteger(raw['transcriptCursor'])) {
+    context.transcriptCursor = raw['transcriptCursor'] as number
+  }
+  return Object.keys(context).length === 0 ? undefined : context
 }
 
 /** Convenience constructor, matching the shape the rest of the package uses. */

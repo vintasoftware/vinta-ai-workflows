@@ -37,6 +37,16 @@ export interface ResourcePoolsOptions {
    * for keeping otherwise-idle capacity busy.
    */
   readonly agingMs?: number
+  /**
+   * Source of the wall clock the aging window is measured against. Defaults to
+   * the system clock.
+   *
+   * It is a seam because aging is the one policy here that depends on time
+   * passing, and a consumer driving a virtual clock (the dry-run projection,
+   * §13.1) could otherwise never reach the bypass — it would silently run
+   * strict FIFO and report a schedule the real pool would not produce.
+   */
+  readonly now?: () => number
 }
 
 const DEFAULT_AGING_MS = 500
@@ -56,6 +66,7 @@ interface Waiter {
 export class ResourcePools {
   readonly #pools: Map<string, Pool>
   readonly #agingMs: number
+  readonly #now: () => number
   #queue: Waiter[] = []
 
   constructor(resources: Readonly<Record<string, Resource>>, options: ResourcePoolsOptions = {}) {
@@ -63,6 +74,7 @@ export class ResourcePools {
       Object.entries(resources).map(([id, r]) => [id, { capacity: r.capacity, held: 0 }]),
     )
     this.#agingMs = options.agingMs ?? DEFAULT_AGING_MS
+    this.#now = options.now ?? (() => Date.now())
   }
 
   /**
@@ -74,7 +86,7 @@ export class ResourcePools {
     for (const name of canonical) this.#pool(name)
 
     return new Promise<Lease>((grant) => {
-      this.#queue.push({ needs: canonical, enqueuedAt: Date.now(), grant })
+      this.#queue.push({ needs: canonical, enqueuedAt: this.#now(), grant })
       this.#pump()
     })
   }
@@ -99,7 +111,7 @@ export class ResourcePools {
    * it, so the scan can only ever bypass holders that are still young.
    */
   #pump(): void {
-    const now = Date.now()
+    const now = this.#now()
     const reserved = new Set<string>()
     const granted = new Set<Waiter>()
 

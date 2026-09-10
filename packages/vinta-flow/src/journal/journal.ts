@@ -37,7 +37,7 @@ import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { Workflow } from '../types.ts'
 import { formatIssues, parseWorkflow } from '../validate.ts'
-import type { NewEvent, NodeStatus, RunStatus, StoredEvent } from './events.ts'
+import type { HumanQuestion, NewEvent, NodeStatus, RunStatus, StoredEvent } from './events.ts'
 
 export interface RunRow {
   readonly id: string
@@ -60,6 +60,21 @@ export interface NodeRow {
   readonly session_id: string | null
 }
 
+/**
+ * A pause nobody has answered yet (§9.1). Folded out of `human_question` and
+ * unfolded by `human_answered` or by the node settling some other way, so it
+ * is a cache of the log like every other projection here — never a second
+ * source of truth.
+ */
+export interface PendingQuestion {
+  readonly runId: string
+  readonly nodeId: string
+  /** The `await_human` effect the node parked on, or the operator pause id. */
+  readonly effectId: string
+  readonly askedAt: number
+  readonly question: HumanQuestion
+}
+
 export interface LeaseRow {
   readonly resource: string
   readonly holder_node: string
@@ -68,6 +83,14 @@ export interface LeaseRow {
 
 /** `transcript.jsonl` is the normalized AgentEvent stream; `raw.jsonl` is harness-native. */
 export type TranscriptStream = 'transcript' | 'raw'
+
+interface QuestionRow {
+  readonly run_id: string
+  readonly node_id: string
+  readonly effect_id: string
+  readonly asked_at: number
+  readonly question_json: string
+}
 
 interface EventRow {
   readonly id: number
@@ -108,6 +131,15 @@ CREATE TABLE IF NOT EXISTS nodes (
   base_branch TEXT,
   harness TEXT NOT NULL,
   session_id TEXT,
+  PRIMARY KEY (run_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS questions (
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  effect_id TEXT NOT NULL,
+  asked_at INTEGER NOT NULL,
+  question_json TEXT NOT NULL,
   PRIMARY KEY (run_id, node_id)
 );
 
@@ -210,6 +242,7 @@ export class Journal {
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM runs').run()
       this.db.prepare('DELETE FROM nodes').run()
+      this.db.prepare('DELETE FROM questions').run()
       const rows = this.db.prepare('SELECT * FROM events ORDER BY id').all() as EventRow[]
       for (const row of rows) this.project(toStoredEvent(row))
     })()
@@ -223,6 +256,26 @@ export class Journal {
     return this.db
       .prepare('SELECT * FROM nodes WHERE run_id = ? ORDER BY node_id')
       .all(runId) as NodeRow[]
+  }
+
+  /**
+   * The question a node is parked on, or `undefined` when it is not parked.
+   * This is the read that makes §9.1's pause survive a restart: the daemon
+   * serves it from here rather than from whatever host happened to ask it.
+   */
+  pendingQuestion(runId: string, nodeId: string): PendingQuestion | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM questions WHERE run_id = ? AND node_id = ?')
+      .get(runId, nodeId) as QuestionRow | undefined
+    return row === undefined ? undefined : toPendingQuestion(row)
+  }
+
+  /** Every unanswered pause in a run. The boot path for a daemon coming back up. */
+  pendingQuestions(runId: string): PendingQuestion[] {
+    const rows = this.db
+      .prepare('SELECT * FROM questions WHERE run_id = ? ORDER BY node_id')
+      .all(runId) as QuestionRow[]
+    return rows.map(toPendingQuestion)
   }
 
   acquireLease(resource: string, holderNode: string): void {
@@ -357,6 +410,10 @@ export class Journal {
         this.db
           .prepare('UPDATE nodes SET status = ? WHERE run_id = ? AND node_id = ?')
           .run(event.payload.status, event.runId, event.nodeId)
+        // A node that settled is no longer parked on anything, however it got
+        // there — an abort while suspended ends the question without answering
+        // it, and a pause left dangling in this table would outlive the run.
+        if (SETTLED.has(event.payload.status)) this.dropQuestion(event.runId, event.nodeId)
         return
       case 'node_assigned':
         // COALESCE so a patch that omits a field leaves the projected one alone.
@@ -375,7 +432,41 @@ export class Journal {
             event.nodeId,
           )
         return
+      case 'human_question': {
+        const { effect_id, ...question } = event.payload
+        this.db
+          .prepare(
+            'INSERT OR REPLACE INTO questions (run_id, node_id, effect_id, asked_at, question_json)' +
+              ' VALUES (?, ?, ?, ?, ?)',
+          )
+          .run(event.runId, event.nodeId, effect_id, event.ts, JSON.stringify(question))
+        return
+      }
+      case 'human_answered':
+        this.dropQuestion(event.runId, event.nodeId)
+        return
+      case 'node_operation':
+        // Steering is journalled for the record, not projected: what it did to
+        // the node shows up as the status and question events it caused.
+        return
     }
+  }
+
+  private dropQuestion(runId: string, nodeId: string): void {
+    this.db.prepare('DELETE FROM questions WHERE run_id = ? AND node_id = ?').run(runId, nodeId)
+  }
+}
+
+/** Statuses past which a pending question cannot still be pending. */
+const SETTLED: ReadonlySet<NodeStatus> = new Set<NodeStatus>(['done', 'failed', 'blocked'])
+
+function toPendingQuestion(row: QuestionRow): PendingQuestion {
+  return {
+    runId: row.run_id,
+    nodeId: row.node_id,
+    effectId: row.effect_id,
+    askedAt: row.asked_at,
+    question: JSON.parse(row.question_json) as HumanQuestion,
   }
 }
 
