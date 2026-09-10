@@ -37,6 +37,7 @@ import {
 } from '../src/executor/index.ts'
 import { GateCache } from '../src/gates/cache.ts'
 import type {
+  AgentSession,
   AgentTask,
   HarnessAdapter,
   HarnessCapabilities,
@@ -87,6 +88,7 @@ const PASSING: MockScript = {
 class ScriptedAdapter implements HarnessAdapter {
   readonly spawned: AgentTask[] = []
   readonly capabilities: HarnessCapabilities
+  #sessions = 0
 
   constructor(
     readonly id: string,
@@ -101,7 +103,37 @@ class ScriptedAdapter implements HarnessAdapter {
 
   async spawn(task: AgentTask): Promise<SpawnOutcome> {
     this.spawned.push(task)
-    return await new MockAdapter({ id: this.id, script: this.script(task) }).spawn(task)
+    const outcome = await new MockAdapter({ id: this.id, script: this.script(task) }).spawn(task)
+    if (!outcome.ok) return outcome
+    // Choosing the script per spawn means a *new* `MockAdapter` per spawn,
+    // which restarts its session counter — so without this every cold session
+    // in this file is handed the same id. That is invisible until §15, and then
+    // it is worse than a missing test: "the reviewer is not inside the
+    // implementer's session" would pass on two distinct sessions that merely
+    // share a name. No real harness reissues an id, and neither does this.
+    const id = task.resumeSessionId ?? `${this.id}-session-${(this.#sessions += 1)}`
+    return { ok: true, session: renamed(outcome.session, id) }
+  }
+}
+
+/**
+ * The same session under a caller-chosen id, `session_started` included — the
+ * event is what the scheduler records, so renaming only the handle would leave
+ * the ledger holding the id this wrapper was built to replace.
+ */
+function renamed(session: AgentSession, id: string): AgentSession {
+  return {
+    id,
+    events: {
+      async *[Symbol.asyncIterator]() {
+        for await (const event of session.events) {
+          yield event.type === 'session_started' ? { ...event, sessionId: id } : event
+        }
+      },
+    },
+    send: (text) => session.send(text),
+    interrupt: () => session.interrupt(),
+    kill: () => session.kill(),
   }
 }
 
@@ -456,6 +488,43 @@ describe('the fix loop', () => {
     // implementer, reviewer, (gate red) fixer, reviewer — then the gate is green.
     const spawned = rig.adapters['claude-code']?.spawned ?? []
     expect(spawned.filter((task) => task.nodeId === 'p1')).toHaveLength(4)
+  })
+
+  it('continues the implementer’s session for the fixer, and sends it a delta', async () => {
+    // §15 end to end, with real worktrees and a real git history — the one
+    // place the two halves of the feature are checked *together*. Resuming a
+    // session while re-sending the whole brief wastes the saving; sending a
+    // delta into a session that was never opened asks an agent to fix findings
+    // it has never seen. Either half alone passes its own unit tests.
+    const rig = setup((root) => flakyGate(root, 2), { script: PASSING })
+    await within(60_000, rig.run(), 'the fix loop')
+
+    const spawned = (rig.adapters['claude-code']?.spawned ?? []).filter(
+      (task) => task.nodeId === 'p1',
+    )
+    const [implement, review, fix, reReview] = spawned
+
+    // Both slots open cold; neither inherits anything.
+    expect(implement?.resumeSessionId).toBeUndefined()
+    expect(review?.resumeSessionId).toBeUndefined()
+
+    // The fixer continues `main` — the session that wrote the code.
+    expect(fix?.resumeSessionId).toBeDefined()
+    // The re-review continues `review`, and the two are different sessions:
+    // the reviewer must never end up inside the session it is reviewing.
+    expect(reReview?.resumeSessionId).toBeDefined()
+    expect(fix?.resumeSessionId).not.toBe(reReview?.resumeSessionId)
+
+    // And the prompts match the sessions. A continuation says so in as many
+    // words and carries no brief; the cold prompt that opened the slot does.
+    expect(fix?.prompt).toContain('same session')
+    expect(implement?.prompt).not.toContain('same session')
+    expect(fix?.prompt.length).toBeLessThan((implement?.prompt ?? '').length)
+
+    // The one thing a reviewer continuation may never drop: without it the
+    // executor reads no verdict and takes the fail-closed default on a node
+    // that just passed (§15.3).
+    expect(reReview?.prompt).toContain(VERDICT_MARKER)
   })
 
   it('exhausted fix rounds fail the node and block its dependents', async () => {

@@ -477,6 +477,13 @@ export class Journal {
         // Steering is journalled for the record, not projected: what it did to
         // the node shows up as the status and question events it caused.
         return
+      case 'node_session':
+        // History, like the gate rows below. The *current* session id is
+        // already projected by `node_assigned`; this row is the per-turn
+        // decision behind it, which only means anything as a sequence — one
+        // `reused` row overwriting another in a projection would answer
+        // "is reuse working" with the last turn rather than the run (§15).
+        return
       case 'gate_pool':
       case 'gate_result':
         // History, deliberately not a projection. `leases` is the *current*

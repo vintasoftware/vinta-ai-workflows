@@ -68,6 +68,7 @@ import {
   classifier,
   operatorGuidance,
   probe,
+  resumeContext,
   signalGroup,
 } from './shared.ts'
 
@@ -168,13 +169,35 @@ const mapItem = (raw: unknown, phase: 'started' | 'updated' | 'completed'): Agen
 const mapUsage = (raw: unknown): AgentEvent[] => {
   const usage = asRecord(raw)
   if (usage === undefined) return []
+  const cacheRead = asNumber(usage['cached_input_tokens'])
+  const cacheWrite = asNumber(usage['cache_write_input_tokens'])
+  // **`input_tokens` here is inclusive of the cached prefix**, which is the one
+  // trap in this mapping (§15.6). Codex passes through the OpenAI Responses
+  // shape, where `input_tokens` is the whole prompt and `cached_input_tokens`
+  // names the part of it that was served from cache; Anthropic reports the
+  // opposite — `input_tokens` is the fresh remainder and the cache counts sit
+  // beside it. Carried through unchanged, one harness's `input` would mean
+  // "prompt" and another's "prompt minus cache", and both a cross-harness sum
+  // and any cache-hit share computed from it would be quietly wrong.
+  //
+  // So the cached part is subtracted here and `input` means the same thing in
+  // every adapter: the fresh prefix, with `cacheRead`/`cacheWrite` beside it
+  // and the three summing to the whole prompt. The subtraction is floored
+  // because a vendor is not owed arithmetic consistency; the alternative is a
+  // negative token count in a run total.
+  const reported = asNumber(usage['input_tokens']) ?? 0
+  const fresh = Math.max(0, reported - (cacheRead ?? 0) - (cacheWrite ?? 0))
   // Codex reports tokens only; it prices nothing, so `costUsd` is omitted
-  // rather than guessed from a rate that varies by plan.
+  // rather than guessed from a rate that varies by plan. A cache field it did
+  // not send stays absent for the same reason a missing cost does: unknown is
+  // not zero, and §15.6 has to be able to tell them apart.
   return [
     {
       type: 'usage',
-      input: asNumber(usage['input_tokens']) ?? 0,
+      input: fresh,
       output: asNumber(usage['output_tokens']) ?? 0,
+      ...(cacheRead === undefined ? {} : { cacheRead }),
+      ...(cacheWrite === undefined ? {} : { cacheWrite }),
     },
   ]
 }
@@ -237,6 +260,18 @@ export function mapCliEvent(raw: unknown): AgentEvent[] {
  * machinery is shared (`classifier`).
  */
 const SIGNATURES: readonly RefusalSignature[] = [
+  {
+    // §15.4. `classifier` hoists this row above the rest and only consults it
+    // when the task carried a `resumeSessionId` — `exec resume <id>` is the
+    // only invocation that can be refused for one. Codex calls the thing three
+    // names depending on which layer answers (thread on the wire, session in
+    // the CLI, rollout on disk), so all three are listed rather than trusting
+    // whichever one the current release happens to print.
+    kind: 'stale_session',
+    reason: 'resume-session-unknown',
+    pattern:
+      /no (thread|session|rollout) found|(thread|session|rollout)[^\n]{0,40}\b(not ?found|not exist|no longer exists|expired|unknown|invalid)\b|could not (find|resume|load)[^\n]{0,40}(thread|session|rollout)/,
+  },
   {
     kind: 'fatal',
     reason: 'binary-not-found',
@@ -471,7 +506,7 @@ export class CodexAdapter implements HarnessAdapter {
         ...spec.options,
       })
     } catch (error) {
-      return classifySpawnFailure(String(error), null, task.nodeId)
+      return classifySpawnFailure(String(error), null, task.nodeId, resumeContext(task))
     }
 
     // A closed pipe is how a refused spawn presents; it must not become an
@@ -576,12 +611,12 @@ export class CodexAdapter implements HarnessAdapter {
 
       child.on('error', (error) => {
         if (session !== undefined) return session.settleOnExit()
-        settle(classifySpawnFailure(String(error), null, task.nodeId))
+        settle(classifySpawnFailure(String(error), null, task.nodeId, resumeContext(task)))
       })
 
       child.on('close', (code) => {
         if (session !== undefined) return session.settleOnExit()
-        settle(classifySpawnFailure(diagnostics, code, task.nodeId))
+        settle(classifySpawnFailure(diagnostics, code, task.nodeId, resumeContext(task)))
       })
     })
   }

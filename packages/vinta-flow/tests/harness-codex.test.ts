@@ -57,6 +57,9 @@ const fakeBin = (body: string): string => {
 const VERSION_CASE = `case "$1" in --version) echo "codex-cli 0.147.0"; exit 0;; esac`
 const LOGGED_IN = `case "$1$2" in loginstatus) echo "Logged in using ChatGPT"; exit 0;; esac`
 
+/** Well-formed and never issued: the shape of a thread id the vendor has forgotten. */
+const UNISSUED_SESSION = '00000000-0000-4000-8000-000000000000'
+
 // ---------------------------------------------------------------------------
 
 describe('JsonLines framing', () => {
@@ -162,9 +165,40 @@ describe('CLI frame mapping', () => {
       }),
     ).toEqual([
       // Codex prices nothing, so `costUsd` is absent rather than guessed.
-      { type: 'usage', input: 17960, output: 5 },
+      //
+      // `input` is 17960 − 11264: this vendor's `input_tokens` is the *whole*
+      // prompt with the cached part inside it, where Anthropic's is the fresh
+      // remainder with the cache counted beside it (§15.6). Carried through
+      // raw, a cross-harness token sum would mean two different things at
+      // once, and a cache-read share computed from it would be wrong by
+      // exactly the cached prefix. The subtraction is what makes `input` mean
+      // the same thing in all three adapters.
+      { type: 'usage', input: 6696, output: 5, cacheRead: 11264, cacheWrite: 0 },
       { type: 'session_ended', result: 'ok' },
     ])
+  })
+
+  it('omits a cache counter the CLI did not send rather than reporting a zero', () => {
+    // Unknown is not zero (§15.6): a turn that reported no cache figures must
+    // not aggregate as one that achieved a 0% hit rate.
+    const [usage] = mapCliEvent({
+      type: 'turn.completed',
+      usage: { input_tokens: 900, output_tokens: 30 },
+    })
+    expect(usage).toEqual({ type: 'usage', input: 900, output: 30 })
+    expect(usage).not.toHaveProperty('cacheRead')
+    expect(usage).not.toHaveProperty('cacheWrite')
+  })
+
+  it('never reports a negative token count when the vendor’s own figures disagree', () => {
+    // The subtraction is floored. A vendor is not owed arithmetic consistency,
+    // and a negative count would poison every total it is summed into.
+    expect(
+      mapCliEvent({
+        type: 'turn.completed',
+        usage: { input_tokens: 10, cached_input_tokens: 40, output_tokens: 1 },
+      })[0],
+    ).toEqual({ type: 'usage', input: 0, output: 1, cacheRead: 40 })
   })
 
   it('maps a failed turn to an error carrying only a classified reason token', () => {
@@ -280,6 +314,44 @@ describe('spawn refusal classification', () => {
     expect(kindOf('something nobody has ever seen', 3)).toBe('fatal')
   })
 
+  it('calls a refused resume stale — but only where a session id was carried', () => {
+    // §15.4's rule in both directions. Codex names the thing three ways
+    // depending on which layer answers, and none of them is stale when there
+    // was no token to expire.
+    for (const prose of [
+      'Error: thread not found: 5f2c1b90',
+      'no session found for the given id',
+      'could not load rollout for 5f2c1b90',
+    ]) {
+      expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: true }).kind).toBe(
+        'stale_session',
+      )
+      expect(kindOf(prose)).toBe('fatal')
+    }
+  })
+
+  it('reads a stale session ahead of a pattern that would otherwise match it', () => {
+    // Why the row is hoisted rather than merely listed: read as `transient`,
+    // a forgotten session would be waited on forever — it does not come back.
+    const prose = 'stream disconnected: thread not found'
+    expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: true }).kind).toBe('stale_session')
+    expect(kindOf(prose)).toBe('transient')
+  })
+
+  it('never waits on a stale session, and never quotes the vendor about one', () => {
+    const refusal = classifySpawnFailure(
+      'thread not found: 5f2c1b90; retry after 60 seconds',
+      1,
+      'phase-7',
+      { resuming: true },
+    )
+    expect(refusal.kind).toBe('stale_session')
+    // Not a wait: the answer is one retry on a fresh session, now (§15.4).
+    expect(refusal.retryAfter).toBe(undefined)
+    expect(refusal.message.includes('resume-session-unknown')).toBe(true)
+    expect(refusal.message.includes('5f2c1b90')).toBe(false)
+  })
+
   it('never puts vendor prose in the refusal message', () => {
     const refusal = classifySpawnFailure("You've hit your usage limit", 1, 'phase-7')
     expect(refusal.message.includes('phase-7')).toBe(true)
@@ -292,14 +364,16 @@ describe('spawn refusal classification', () => {
       "You've hit your usage limit. Try again in 2 hours 30 minutes.",
       1,
       'phase-1',
-      now,
+      { now },
     )
     expect(withReset.retryAfter?.toISOString()).toBe('2026-01-01T12:30:00.000Z')
-    expect(classifySpawnFailure('429 rate limit', 1, 'phase-1', now).retryAfter).toBe(undefined)
+    expect(classifySpawnFailure('429 rate limit', 1, 'phase-1', { now }).retryAfter).toBe(undefined)
   })
 
   it('never attaches a retry time to fatal, which is not a wait', () => {
-    const refusal = classifySpawnFailure('not logged in; retry after 60 seconds', 1, 'n', new Date())
+    const refusal = classifySpawnFailure('not logged in; retry after 60 seconds', 1, 'n', {
+      now: new Date(),
+    })
     expect(refusal.kind).toBe('fatal')
     expect(refusal.retryAfter).toBe(undefined)
   })
@@ -490,6 +564,22 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
     expect(waitMs >= 7_200_000 && waitMs < 7_260_000).toBe(true)
   })
 
+  it('classifies a refused resume as stale only when the task carried the id', async () => {
+    // The wiring §15.4 turns on, through a real process: the identical CLI
+    // failure is a stale token only for the spawn that offered one. Without
+    // it there was nothing to expire, so it keeps its ordinary reading.
+    const bin = fakeBin(
+      `${VERSION_CASE}\ncat > /dev/null\necho 'Error: thread not found: 5f2c1b90' >&2\nexit 1`,
+    )
+    const adapter = new CodexAdapter({ bin })
+
+    const resumed = await adapter.spawn({ ...task(), resumeSessionId: '5f2c1b90' })
+    expect(resumed.ok === false && resumed.kind).toBe('stale_session')
+
+    const cold = await adapter.spawn(task())
+    expect(cold.ok === false && cold.kind).toBe('fatal')
+  })
+
   it('classifies a binary that is not there at all', async () => {
     const outcome = await new CodexAdapter({ bin: join(makeTemp(), 'nope') }).spawn(task())
     expect(outcome.ok).toBe(false)
@@ -510,7 +600,14 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
 
   it('returns an injected refusal of every kind without starting a process', async () => {
     const adapter = new CodexAdapter({ bin: join(makeTemp(), 'never-run') })
-    for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'fatal'] as const) {
+    for (const kind of [
+      'rate_limit',
+      'concurrency',
+      'quota',
+      'transient',
+      'stale_session',
+      'fatal',
+    ] as const) {
       adapter.refuseNext(kind)
       const outcome = await adapter.spawn(task())
       expect(outcome.ok).toBe(false)
@@ -561,16 +658,22 @@ if (!live.installed || !live.authenticated) {
       // need no recording — `detach` is what proves there is no orphan.
       attachPty: (sessionId, attach) => real.attachPty(sessionId, attach),
     }
+    const task: AgentTask = {
+      nodeId: 'contract',
+      cwd: makeRepo(),
+      prompt: 'Reply with exactly: ok',
+      // Codex model slugs are account- and plan-gated, so the contract runs
+      // on whatever this machine's CLI is configured to use.
+      model: '',
+    }
     return {
       adapter,
-      task: {
-        nodeId: 'contract',
-        cwd: makeRepo(),
-        prompt: 'Reply with exactly: ok',
-        // Codex model slugs are account- and plan-gated, so the contract runs
-        // on whatever this machine's CLI is configured to use.
-        model: '',
-      },
+      task,
+      // A well-formed id no account has ever been issued, which is the only
+      // way to observe the real CLI's wording for a thread it does not have
+      // (§15.4). Where the vendor changes that wording this is the test that
+      // says so — the pattern table cannot notice on its own.
+      staleResumeTask: { ...task, resumeSessionId: UNISSUED_SESSION },
       forceRefusal: real.refuseNext.bind(real),
       // A real codex turn is a network round trip plus CLI startup: roughly a
       // second to spawn and several more to drain. The contract's default

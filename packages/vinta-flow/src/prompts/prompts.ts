@@ -38,6 +38,13 @@
  * parser does not accept would fail every node silently, so the two cannot be
  * allowed to drift apart.
  *
+ * Every role has two forms of prompt, selected by `continuation` (§15.3): the
+ * cold one, for a session that has never seen this phase, and a delta for one
+ * that already holds the brief, the plan-level bounds and its own prior work.
+ * The three rules above bind both — and the third binds the delta hardest,
+ * because a reviewer continuation that dropped `VERDICT_MARKER` would look like
+ * a harmless trim and fail every node it touched.
+ *
  * **A prompt carries repository content; nothing else here may.** The brief,
  * the dependency summaries and the review findings are the *point* of a prompt
  * and are handed to the agent. They never reach a log line, an error message, a
@@ -120,6 +127,20 @@ export interface SpawnPromptRequest {
   readonly workspace: string | null
   /** The guard context of this invocation: the gate that failed, the verdict. */
   readonly facts: GuardContext
+  /**
+   * True where this turn **continues a session that already ran** (§15.3): the
+   * fixer picking up the implementer's session, or the reviewer picking up its
+   * own across rounds. The scheduler decides this — it owns the ledger and
+   * knows whether the entry was usable — and this module only decides what a
+   * continued turn is told.
+   *
+   * Absent or false is the cold prompt, byte for byte as before, and that is
+   * the only safe default: a delta sent into a session that does not carry the
+   * brief instructs an agent to fix findings against work it has never seen.
+   * §15.2 is the other half of that rule — every invalid ledger entry must fall
+   * back to a fresh session *and* a non-continuation prompt.
+   */
+  readonly continuation?: boolean
 }
 
 /**
@@ -142,6 +163,18 @@ export function composeSpawnPrompt(request: SpawnPromptRequest): string {
     )
   }
   if (request.workspace === null) return node.prompt_ref
+
+  // A continued turn is a delta (§15.3). It is composed from the journal alone:
+  // the brief and the plan-level sections are deliberately not resolved, since
+  // resolving a document this prompt will not carry could only fail a turn over
+  // a reference it does not use — and the cold prompt that opened this session
+  // already read them.
+  if (request.continuation === true) {
+    const resumed = resume(request, request.workspace)
+    if (role === 'implementer') return renderImplementerContinuation(resumed)
+    if (role === 'reviewer') return renderReviewerContinuation(resumed)
+    return renderFixerContinuation(resumed)
+  }
 
   const materials = gather(request, request.workspace)
   if (role === 'implementer') return renderImplementer(materials)
@@ -176,12 +209,26 @@ function knownTemplate(template: unknown, nodeId: string): AgentRole {
 // Materials
 // ---------------------------------------------------------------------------
 
-interface Materials {
+/**
+ * What a *continued* turn is composed from: identifiers, the lane, and the
+ * facts of the turn that just ended. Everything a cold prompt reads off disk is
+ * absent by construction rather than by convention — a continuation renderer
+ * cannot re-send a brief it was never handed, which is the one mistake §15.3 is
+ * about.
+ */
+interface Continuation {
   readonly workflow: Workflow
   readonly node: Node
   readonly workspace: string
   readonly branch: string
   readonly baseBranch: string
+  /** The reviewer's findings, when this node's last turn was a review. */
+  readonly findings: string | null
+  readonly facts: GuardContext
+}
+
+/** What a cold turn is composed from: the above, plus everything read off disk. */
+interface Materials extends Continuation {
   readonly brief: string
   /**
    * The plan's own bounding sections — Goals + Non-goals, Guiding Decisions —
@@ -190,12 +237,10 @@ interface Materials {
    */
   readonly planContext: readonly string[]
   readonly dependencies: readonly DependencyContext[]
-  /** The reviewer's findings, when this node's last turn was a review. */
-  readonly findings: string | null
-  readonly facts: GuardContext
 }
 
-function gather(request: SpawnPromptRequest, workspace: string): Materials {
+/** The identifiers and turn facts both prompt forms are built on. */
+function resume(request: SpawnPromptRequest, workspace: string): Continuation {
   const { workflow, node, runId, journal } = request
   const row = journal.nodes(runId).find((candidate) => candidate.node_id === node.id)
 
@@ -207,6 +252,16 @@ function gather(request: SpawnPromptRequest, workspace: string): Materials {
     // fallbacks only ever cover a pipeline that spawns before it branches.
     branch: row?.branch ?? 'HEAD',
     baseBranch: row?.base_branch ?? workflow.base_branch,
+    findings: lastReport(journal, runId, node.id),
+    facts: request.facts,
+  }
+}
+
+function gather(request: SpawnPromptRequest, workspace: string): Materials {
+  const { workflow, node, runId, journal } = request
+
+  return {
+    ...resume(request, workspace),
     brief: resolveBrief(workspace, node.id, node.prompt_ref),
     planContext: workflow.plan_context_refs.map((ref) =>
       resolveBrief(workspace, node.id, ref, 'plan_context_refs'),
@@ -217,8 +272,6 @@ function gather(request: SpawnPromptRequest, workspace: string): Materials {
       artifact: node.depends_on.find((dep) => dep.node === id)?.artifact ?? null,
       summary: lastReport(journal, runId, id),
     })),
-    findings: lastReport(journal, runId, node.id),
-    facts: request.facts,
   }
 }
 
@@ -444,8 +497,12 @@ function buildsOn(materials: Materials): string[] {
   return lines
 }
 
-/** The node's gates: the outer gate the phase has to survive, as commands. */
-function gateList(materials: Materials): string[] {
+/**
+ * The node's gates: the outer gate the phase has to survive, as commands. Read
+ * off the workflow, not off the lane, so a continued turn can restate them
+ * without any of the materials a cold prompt resolves from disk.
+ */
+function gateList(materials: Continuation): string[] {
   const gates = materials.node.gates.flatMap((id) => {
     const gate = materials.workflow.gates[id]
     return gate === undefined ? [] : [`   - ${id}: \`${gate.cmd}\``]
@@ -495,6 +552,25 @@ function renderReviewer(materials: Materials): string {
     '',
     'Triage each finding as BLOCKER, SHOULD-FIX or NIT.',
     '',
+    ...verdictProtocol(),
+  ])
+}
+
+/**
+ * The verdict protocol, in the one place both reviewer prompts read it from.
+ *
+ * `readVerdict` above is what the executor runs over the reviewer's last words,
+ * and this is what asks for the form it accepts — the module header's third
+ * rule. A continuation is where that rule is easiest to break: the delta looks
+ * like a nudge to an agent that was already told the protocol two turns ago, so
+ * dropping it feels harmless. It is not. Nothing carries a verdict between
+ * turns; every turn is parsed on its own and a turn that states none takes the
+ * fail-closed default, which fails the node and burns its fix rounds on a
+ * review nobody asked for. So this block is not optional in either form, and
+ * sharing it is what stops one of them from drifting.
+ */
+function verdictProtocol(): string[] {
+  return [
     '## How to report',
     'List your findings, each with its triage level, file and line. Then end your',
     'final message with one line, exactly:',
@@ -504,7 +580,7 @@ function renderReviewer(materials: Materials): string {
     `Use \`${VERDICT_MARKER} fail\` if any BLOCKER stands. That line is read by the`,
     'orchestrator; a turn that ends without it is taken as a failure, so it must be',
     'the last thing you write.',
-  ])
+  ]
 }
 
 function renderFixer(materials: Materials): string {
@@ -532,13 +608,138 @@ function renderFixer(materials: Materials): string {
   ])
 }
 
+// ---------------------------------------------------------------------------
+// Continuation renderers (§15.3)
+// ---------------------------------------------------------------------------
+//
+// A continued turn is handed to a session that already holds the phase brief,
+// the plan-level bounds, the dependency closure and its own prior work. Each
+// renderer below is therefore a *delta*: the facts that are new since that
+// session last spoke, and what to do about them. Re-sending the brief here
+// would not merely waste the prefix these prompts exist to cache — it would
+// tell an agent to implement what it has already implemented, and tell a
+// reviewer to review a diff it has already reviewed.
+//
+// What a delta may still restate is anything the *host* knows and the session
+// cannot: which turn this is, what came back from the gate or the reviewer, and
+// the machine-read protocol the executor parses. Those are cheap, and each of
+// them is wrong to leave out.
+
+/**
+ * The fixer, continuing the implementer's own session.
+ *
+ * It opens by claiming the plan's bounds are already above, which the *cold*
+ * fixer is never given — deliberately, since handing the plan's goals to an
+ * agent told to change one named thing only widens it. Both are right: the
+ * session this continues is the implementer's, and the implementer was given
+ * them. The line is true of the context window, not of the fixer's own prompt.
+ */
+function renderFixerContinuation(materials: Continuation): string {
+  const { node } = materials
+  return section([
+    `Still ${node.id}: ${node.name}, same branch \`${materials.branch}\`, same session.`,
+    'You have the phase brief, the plan’s bounds and your own work above — none of',
+    'it is repeated here, and none of it has changed.',
+    '',
+    '## What came back',
+    ...failure(materials, [
+      'The review did not pass and recorded no findings. Re-read your own diff',
+      'against the phase brief already above, and fix what does not match it.',
+    ]),
+    '',
+    '## What to do',
+    'Change exactly what is named above and nothing else. Everything else on this',
+    'branch stays as it is — an unrelated edit here is scope creep the next review',
+    'will send back, and it costs a fix round you may need. Then re-run the inner',
+    'loop, and these, until they are green:',
+    ...gateList(materials),
+    '',
+    '## Required output',
+    '- Status: SUCCESS or FAILURE, and why.',
+    '- Files modified, paths only.',
+    '- What you changed for each finding, and any finding you did not act on.',
+  ])
+}
+
+function renderReviewerContinuation(materials: Continuation): string {
+  const { node } = materials
+  return section([
+    `Still reviewing ${node.id}: ${node.name}. A fixer has acted on the findings you`,
+    'raised above; the phase brief and the plan’s bounds are unchanged and already',
+    'in this session, so only the diff is new.',
+    'You still review rather than edit: report every issue, fix none of them.',
+    '',
+    '## What to re-review',
+    'The diff as it now stands:',
+    `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
+    'Read it again in full. A fix moves lines you had already accepted, so a diff',
+    'you only re-read around the findings is one you have not read.',
+    '',
+    '## What to decide',
+    '1. Each finding you raised: addressed, addressed in a way that breaks something',
+    '   else, or not addressed. Say which, per finding.',
+    '2. Anything the fix itself introduced — a new problem in new code is a new',
+    '   finding, at its own triage level.',
+    '3. Nothing else. Do not re-open what you already passed, and do not raise a',
+    '   finding you could have raised last round: the fixer cannot be sent back',
+    '   forever, and a moving bar is how a sound phase runs out of fix rounds.',
+    '',
+    'Triage each finding as BLOCKER, SHOULD-FIX or NIT.',
+    '',
+    // Restated in full, every round. See `verdictProtocol` for why this is not
+    // the sort of repetition a delta is allowed to drop.
+    ...verdictProtocol(),
+  ])
+}
+
+/**
+ * The implementer, resumed rather than re-briefed.
+ *
+ * This turn is not a new instruction: the session was interrupted — it waited
+ * for lane capacity, or an operator took its terminal over (§9) and handed it
+ * back. So the delta says what the session cannot know for itself, which is
+ * that it is running again and that the worktree may have moved underneath it.
+ */
+function renderImplementerContinuation(materials: Continuation): string {
+  const { node } = materials
+  return section([
+    `Resuming ${node.id}: ${node.name}. Pick up exactly where you left off — nothing`,
+    'above is superseded and nothing about the phase has changed.',
+    `You are in \`${materials.workspace}\`, on branch \`${materials.branch}\`.`,
+    '',
+    '## Before you carry on',
+    'Run `git status` and `git diff` first. This session was interrupted, and an',
+    'operator may have edited or committed in this worktree while it was paused, so',
+    'what is on disk is the truth about your progress and your memory of it is not.',
+    'If the work is already finished and committed, say so in your report instead of',
+    'redoing it — re-implementing what is already committed is the one failure this',
+    'message exists to prevent.',
+    '',
+    '## What is left',
+    'Finish the working instructions you were given, in the order you were given',
+    'them, ending on a green outer gate:',
+    ...gateList(materials),
+    'Then file the single final report those instructions asked for.',
+  ])
+}
+
 /**
  * The gate's log reference where a gate failed, and the reviewer's findings
  * otherwise. Read from the facts of this turn rather than guessed from the
  * transcript: after a red gate the last thing in the transcript is the review
  * that passed, which is not what needs fixing.
+ *
+ * `absent` is the one line that cannot be shared between the two prompt forms:
+ * a cold fixer is pointed at the phase body printed below it, and a continued
+ * one at the body already in its own context, which is nowhere on the page.
  */
-function failure(materials: Materials): string[] {
+function failure(
+  materials: Continuation,
+  absent: readonly string[] = [
+    'The review did not pass. Re-read the diff against the phase body below and',
+    'fix what does not match it.',
+  ],
+): string[] {
   const gate = materials.facts.gate
   const exitCode = gate?.['exit_code']
   if (typeof exitCode === 'number' && exitCode !== 0) {
@@ -552,9 +753,7 @@ function failure(materials: Materials): string[] {
     ]
   }
 
-  return materials.findings === null
-    ? ['The review did not pass. Re-read the diff against the phase body below and', 'fix what does not match it.']
-    : ['The reviewer reported:', '', materials.findings]
+  return materials.findings === null ? [...absent] : ['The reviewer reported:', '', materials.findings]
 }
 
 /** Joins rendered lines and trims the trailing blank a block naturally leaves. */

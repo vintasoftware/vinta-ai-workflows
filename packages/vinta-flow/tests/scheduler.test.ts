@@ -227,6 +227,8 @@ function rig(
     readonly capabilities?: Partial<HarnessCapabilities>
     /** `LanePool.recycle`'s seam: called as a used lane is handed on (§8). */
     readonly recycleLane?: (name: string) => Promise<void>
+    /** Session ids this harness has forgotten (§15.4). */
+    readonly staleSessions?: readonly string[]
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-scheduler-'))
@@ -242,6 +244,7 @@ function rig(
     id: HARNESS,
     ...(options.spawns === undefined ? {} : { spawns: options.spawns }),
     ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+    ...(options.staleSessions === undefined ? {} : { staleSessions: options.staleSessions }),
   })
   const stall = stalling(adapter)
   const admission = new AdmissionControl({
@@ -295,6 +298,13 @@ const operationsOf = (rig_: Rig, nodeId: string): unknown[] =>
   rig_.journal
     .events('run-1')
     .filter((event) => event.type === 'node_operation' && event.nodeId === nodeId)
+    .map((event) => event.payload)
+
+/** Every §15 session decision for a node, in order. */
+const sessionsOf = (rig_: Rig, nodeId: string): unknown[] =>
+  rig_.journal
+    .events('run-1')
+    .filter((event) => event.type === 'node_session' && event.nodeId === nodeId)
     .map((event) => event.payload)
 
 /** The node's normalized transcript, which is where a session's own record is. */
@@ -420,6 +430,101 @@ const GATED = {
   finalStateIds: ['done'],
 }
 
+const slotSpawn = (id: string, role: string, session: string): Record<string, unknown> => ({
+  id,
+  definitionId: 'spawn_agent',
+  params: { role, session },
+})
+
+/** Two turns on one slot (§15.1): the second must continue the first. */
+const REUSE = {
+  states: [
+    {
+      id: 'first',
+      name: 'First',
+      position: { x: 0, y: 0 },
+      onEnter: [slotSpawn('e-first', 'implementer', 'main')],
+    },
+    {
+      id: 'second',
+      name: 'Second',
+      position: { x: 200, y: 0 },
+      onEnter: [slotSpawn('e-second', 'implementer', 'main')],
+    },
+    { id: 'done', name: 'Done', position: { x: 400, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [
+    { id: 't-second', from: 'first', to: 'second' },
+    { id: 't-done', from: 'second', to: 'done' },
+  ],
+  initialStateIds: ['first'],
+  finalStateIds: ['done'],
+}
+
+/** Two slots that must never cross: the shape `standard-phase` actually uses. */
+const SLOTS = {
+  states: [
+    {
+      id: 'work',
+      name: 'Work',
+      position: { x: 0, y: 0 },
+      onEnter: [slotSpawn('e-work', 'implementer', 'main')],
+    },
+    {
+      id: 'review',
+      name: 'Review',
+      position: { x: 200, y: 0 },
+      onEnter: [slotSpawn('e-review', 'reviewer', 'review')],
+    },
+    {
+      id: 'rework',
+      name: 'Rework',
+      position: { x: 400, y: 0 },
+      onEnter: [slotSpawn('e-rework', 'implementer', 'main')],
+    },
+    { id: 'done', name: 'Done', position: { x: 600, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [
+    { id: 't-review', from: 'work', to: 'review' },
+    { id: 't-rework', from: 'review', to: 'rework' },
+    { id: 't-done', from: 'rework', to: 'done' },
+  ],
+  initialStateIds: ['work'],
+  finalStateIds: ['done'],
+}
+
+/**
+ * Fix rounds on the implementer's slot. `check` carries no effects and exists
+ * only to give the loop somewhere to evaluate `fix_rounds` from, exactly as
+ * `standard-phase` evaluates it on the way out of `fix`.
+ */
+const FIXES = {
+  states: [
+    {
+      id: 'implement',
+      name: 'Implement',
+      position: { x: 0, y: 0 },
+      onEnter: [slotSpawn('e-implement', 'implementer', 'main')],
+    },
+    {
+      id: 'fix',
+      name: 'Fix',
+      position: { x: 200, y: 0 },
+      onEnter: [slotSpawn('e-fix', 'fixer', 'main')],
+    },
+    { id: 'check', name: 'Check', position: { x: 400, y: 0 } },
+    { id: 'done', name: 'Done', position: { x: 600, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [
+    { id: 't-fix', from: 'implement', to: 'fix' },
+    { id: 't-check', from: 'fix', to: 'check' },
+    { id: 't-again', from: 'check', to: 'fix', guard: 'fix_rounds < node.max_fix_rounds' },
+    { id: 't-done', from: 'check', to: 'done', guard: 'fix_rounds >= node.max_fix_rounds' },
+  ],
+  initialStateIds: ['implement'],
+  finalStateIds: ['done'],
+}
+
 function makeWorkflow(
   nodes: readonly Record<string, unknown>[],
   options: {
@@ -444,6 +549,9 @@ function makeWorkflow(
       long: LONG,
       gated: GATED,
       'gate-work': GATE_WORK,
+      reuse: REUSE,
+      slots: SLOTS,
+      fixes: FIXES,
     },
   })
 }
@@ -1450,6 +1558,212 @@ describe('human gates journal their question', () => {
 
     r.scheduler.answer('a', { human: { answer: 'ship' } })
     await running
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9: session reuse (§15)
+// ---------------------------------------------------------------------------
+
+describe('session slots', () => {
+  it('continues the slot’s session on the next turn', async () => {
+    const workflow = makeWorkflow([node('a', [], { pipeline: 'reuse' })])
+    const r = rig(workflow)
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    const [first, second] = r.adapter.spawned
+    // The first turn opens the session; nothing to continue yet.
+    expect(first?.resumeSessionId).toBeUndefined()
+    // The second continues it — the whole point of §15.
+    expect(second?.resumeSessionId).toBe('claude-code-session-1')
+    expectDrained(r)
+  })
+
+  it('journals what each turn decided, with the id it continued', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]))
+    await r.scheduler.run()
+
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
+    ])
+  })
+
+  it('keeps the reviewer out of the session it is reviewing', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'slots' })]))
+    await r.scheduler.run()
+
+    const [work, review, rework] = r.adapter.spawned
+    expect(work?.resumeSessionId).toBeUndefined()
+    // A separate slot: the reviewer opens its own session rather than
+    // inheriting the implementer's and grading its own work from inside it.
+    expect(review?.resumeSessionId).toBeUndefined()
+    // ...and the implementer picks its own session back up, not the reviewer's.
+    expect(rework?.resumeSessionId).toBe('claude-code-session-1')
+    expectDrained(r)
+  })
+
+  it('starts fresh on a harness that cannot resume, and says so', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), {
+      capabilities: { resume: false },
+    })
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned.map((task) => task.resumeSessionId)).toEqual([undefined, undefined])
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_resume_capability' },
+      { slot: 'main', disposition: 'fresh', reason: 'no_resume_capability' },
+    ])
+    expectDrained(r)
+  })
+
+  it('starts fresh once the slot hits its turn ceiling', async () => {
+    const workflow = WorkflowSchema.parse({
+      ...makeWorkflow([node('a', [], { pipeline: 'reuse' })]),
+      defaults: { harness: HARNESS, model: 'opus', pipeline: 'reuse', max_session_turns: 1 },
+    })
+    const r = rig(workflow)
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned.map((task) => task.resumeSessionId)).toEqual([undefined, undefined])
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'fresh', reason: 'turn_ceiling' },
+    ])
+    expectDrained(r)
+  })
+
+  it('forgets its sessions when a capacity refusal re-drives the node', async () => {
+    // The lane usually comes back with the same *name* — the free list hands
+    // back what was just released — and is then recycled, so the worktree the
+    // sessions describe is gone while nothing about the name says so. Resuming
+    // into it would give an agent a memory of files it wrote and a tree with
+    // none of them.
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })], { lanes: 1 }), {
+      // First turn admitted, then a refusal that unwinds the whole attempt.
+      spawns: ['ok', 'rate_limit', 'ok', 'ok'],
+    })
+    const run = r.scheduler.run()
+    await until(() => r.pools.held('lane') === 0, 'the node to release its lane')
+    await r.advance(2_000)
+    const report = await run
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // Attempt two starts from the initial state with an empty ledger, so its
+    // first turn is cold — not a continuation of a session from attempt one.
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-2' },
+    ])
+    expectDrained(r)
+  })
+
+  it('records nothing for a pipeline that named no slot', async () => {
+    // The regression guard: every workflow written before §15 must behave
+    // exactly as it did, which means a cold session every turn and a silent journal.
+    const r = rig(makeWorkflow([node('a')]))
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned.map((task) => task.resumeSessionId)).toEqual([undefined])
+    expect(sessionsOf(r, 'a')).toEqual([])
+    expectDrained(r)
+  })
+})
+
+describe('the last fix round (§15.5)', () => {
+  it('reuses the implementer’s session, then escalates the final round', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'fixes', max_fix_rounds: 2 })]))
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    const [implement, firstFix, lastFix] = r.adapter.spawned
+    expect(implement?.resumeSessionId).toBeUndefined()
+    // The agent that wrote the code fixes it: it knows why the code is that way.
+    expect(firstFix?.resumeSessionId).toBe('claude-code-session-1')
+    // And when that failed, the work goes to an agent that has not seen it —
+    // the original assumptions are now the likeliest suspect.
+    expect(lastFix?.resumeSessionId).toBeUndefined()
+
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
+      { slot: 'main', disposition: 'fresh', reason: 'final_fix_round' },
+    ])
+    expectDrained(r)
+  })
+
+  it('does not escalate a single-round budget', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'fixes', max_fix_rounds: 1 })]))
+    await r.scheduler.run()
+
+    const [, onlyFix] = r.adapter.spawned
+    expect(onlyFix?.resumeSessionId).toBe('claude-code-session-1')
+    expectDrained(r)
+  })
+})
+
+describe('a session the vendor has forgotten (§15.4)', () => {
+  it('retries once, cold, and the node still completes', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), {
+      staleSessions: ['claude-code-session-1'],
+    })
+    const report = await r.scheduler.run()
+
+    // Not a failure and not a capacity wait: the run finishes normally.
+    expect(report.statuses).toEqual({ a: 'done' })
+    // Two turns ran. The second was refused with the stale token and
+    // immediately re-spawned without one.
+    expect(r.adapter.spawned).toHaveLength(2)
+    expect(r.adapter.spawned[1]?.resumeSessionId).toBeUndefined()
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'fresh', reason: 'stale_session' },
+    ])
+    expectDrained(r)
+  })
+
+  it('retries cold when a resuming spawn comes back broken, whatever it was called', async () => {
+    // The safety net, not the classification. The vendor wording each adapter
+    // matches on was inferred rather than observed, and a pattern that misses
+    // would otherwise turn a routine expired token into a failed node and a
+    // blocked subtree. The second turn is the resuming one.
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), {
+      spawns: ['ok', 'fatal', 'ok'],
+    })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned[1]?.resumeSessionId).toBeUndefined()
+    expectDrained(r)
+  })
+
+  it('lets a cold spawn fail immediately, because a retry would change nothing', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), { spawns: ['fatal'] })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    // One attempt. A broken harness must not be spawned against twice per turn.
+    expect(r.adapter.spawned).toHaveLength(0)
+    expectDrained(r)
+  })
+
+  it('does not park the harness, so other nodes are untouched', async () => {
+    // The reason `stale_session` is not a `CapacityRefusalKind`: parking would
+    // stall every other node behind one node's expired token.
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { pipeline: 'reuse' }), node('b', [], { pipeline: 'reuse' })],
+        { lanes: 2 },
+      ),
+      { staleSessions: ['claude-code-session-1', 'claude-code-session-2'] },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.status).toBe('completed')
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
     expectDrained(r)
   })
 })

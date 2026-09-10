@@ -380,10 +380,64 @@ describe('server event mapping', () => {
       map(mapper, { type: 'message.updated', properties: { info: { id: 'msg_3', sessionID: SESSION, role: 'user' } } }),
     ).toEqual([])
 
+    // The zeroes are reported ones: these messages carried a `cache` object
+    // saying nothing was read or written, which is a cold turn and not an
+    // absence of information (§15.6).
     expect(map(mapper, idle())).toEqual([
-      { type: 'usage', input: 200, output: 40, costUsd: 0.05 },
+      { type: 'usage', input: 200, output: 40, costUsd: 0.05, cacheRead: 0, cacheWrite: 0 },
       { type: 'session_ended', result: 'ok' },
     ])
+  })
+
+  it('sums the cache counters the provider reported, alongside the tokens', () => {
+    // §15.6. opencode nests them under `tokens.cache`, outside `tokens.input` —
+    // so the three sum to the prompt and none double-counts another.
+    const mapper = new OpencodeEventMapper(SESSION)
+    const message = (id: string, read: number, write: number): unknown => ({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id,
+          sessionID: SESSION,
+          role: 'assistant',
+          tokens: { input: 100, output: 20, reasoning: 0, cache: { read, write } },
+          cost: 0,
+        },
+      },
+    })
+    map(mapper, message('msg_1', 9_000, 500))
+    map(mapper, message('msg_2', 1_000, 0))
+
+    expect(map(mapper, idle())[0]).toEqual({
+      type: 'usage',
+      input: 200,
+      output: 40,
+      cacheRead: 10_000,
+      cacheWrite: 500,
+    })
+  })
+
+  it('reports no cache figures at all where the provider reported none', () => {
+    // Unknown is not zero (§15.6): a provider that says nothing about caching
+    // must not aggregate as one that achieved a 0% hit rate.
+    const mapper = new OpencodeEventMapper(SESSION)
+    map(mapper, {
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: 'msg_1',
+          sessionID: SESSION,
+          role: 'assistant',
+          tokens: { input: 100, output: 20, reasoning: 0 },
+          cost: 0,
+        },
+      },
+    })
+
+    const usage = map(mapper, idle())[0]
+    expect(usage).toEqual({ type: 'usage', input: 100, output: 20 })
+    expect(usage).not.toHaveProperty('cacheRead')
+    expect(usage).not.toHaveProperty('cacheWrite')
   })
 
   it('ends a turn that reported no usage with no usage event', () => {
@@ -505,6 +559,44 @@ describe('spawn refusal classification', () => {
     expect(kindOf('something nobody has ever seen', 3)).toBe('fatal')
   })
 
+  it('calls a refused resume stale — but only where a session id was carried', () => {
+    // §15.4 in both directions. The bare 404 is the case the guard earns: on
+    // the session's own URL it means the server has forgotten it, and with no
+    // resumed id in play it means whatever a 404 usually means.
+    for (const [prose, code] of [
+      ['http 404 {"data":{"name":"Session.NotFound"}}', 404],
+      ['session not found', 400],
+      ['unknown session', 400],
+    ] as const) {
+      expect(classifySpawnFailure(prose, code, 'phase-1', { resuming: true }).kind).toBe(
+        'stale_session',
+      )
+      expect(kindOf(prose, code)).not.toBe('stale_session')
+    }
+  })
+
+  it('reads a stale session ahead of a pattern that would otherwise match it', () => {
+    // Why the row is hoisted rather than merely listed: a 404 body carrying an
+    // upstream diagnostic would otherwise be waited on as transient, and a
+    // session the server has pruned does not come back after a backoff.
+    const prose = 'http 404 {"message":"fetch failed"}'
+    expect(classifySpawnFailure(prose, 404, 'phase-1', { resuming: true }).kind).toBe(
+      'stale_session',
+    )
+    expect(kindOf(prose, 404)).toBe('transient')
+  })
+
+  it('never waits on a stale session, and never quotes the server about one', () => {
+    const refusal = classifySpawnFailure('http 404 retry-after: 60', 404, 'phase-7', {
+      resuming: true,
+    })
+    expect(refusal.message).toBe(
+      'opencode refused to spawn node phase-7: resume-session-unknown (code 404)',
+    )
+    // Not a wait: the answer is one retry on a fresh session, now (§15.4).
+    expect(refusal.retryAfter).toBe(undefined)
+  })
+
   it('never puts a response body in the refusal message', () => {
     const refusal = classifySpawnFailure('http 429 {"message":"slow down, friend"}', 429, 'phase-7')
     expect(refusal.message).toBe('opencode refused to spawn node phase-7: rate-limited (code 429)')
@@ -512,13 +604,15 @@ describe('spawn refusal classification', () => {
 
   it('carries a reported reset time and omits it when none was reported', () => {
     const now = new Date('2026-01-01T10:00:00.000Z')
-    const withReset = classifySpawnFailure('http 429 retry-after: 90', 429, 'phase-1', now)
+    const withReset = classifySpawnFailure('http 429 retry-after: 90', 429, 'phase-1', { now })
     expect(withReset.retryAfter?.toISOString()).toBe('2026-01-01T10:01:30.000Z')
-    expect(classifySpawnFailure('http 429 rate limit', 429, 'phase-1', now).retryAfter).toBe(undefined)
+    expect(classifySpawnFailure('http 429 rate limit', 429, 'phase-1', { now }).retryAfter).toBe(undefined)
   })
 
   it('never attaches a retry time to fatal, which is not a wait', () => {
-    const refusal = classifySpawnFailure('http 401 unauthorized retry-after: 60', 401, 'n', new Date())
+    const refusal = classifySpawnFailure('http 401 unauthorized retry-after: 60', 401, 'n', {
+      now: new Date(),
+    })
     expect(refusal.kind).toBe('fatal')
     expect(refusal.retryAfter).toBe(undefined)
   })
@@ -683,7 +777,7 @@ describe('spawn against a stub server', () => {
         { type: 'assistant_text', text: 'working' },
         { type: 'tool_use', id: 'call_1', name: 'read', input: { path: 'a.ts' } },
         { type: 'tool_result', id: 'call_1', ok: true, summary: 'ok' },
-        { type: 'usage', input: 3, output: 4, costUsd: 0.01 },
+        { type: 'usage', input: 3, output: 4, costUsd: 0.01, cacheRead: 0, cacheWrite: 0 },
         { type: 'session_ended', result: 'ok' },
       ])
     } finally {
@@ -863,6 +957,28 @@ describe('spawn against a stub server', () => {
     }
   })
 
+  it('classifies a 404 on a resumed session as stale, and on a fresh one as not', async () => {
+    // The wiring §15.4 turns on, end to end through a real socket: the same
+    // status on the same route means "your token is gone" only when a token
+    // was handed to us. A session this adapter created moments ago cannot be
+    // stale, whatever the server says about it.
+    const stub = await startStub()
+    stub.promptStatus = 404
+    const adapter = new OpencodeAdapter({ baseUrl: stub.url })
+    try {
+      const resumed = await adapter.spawn(task({ resumeSessionId: 'ses_pruned' }))
+      expect(resumed.ok === false && resumed.kind).toBe('stale_session')
+      // Not a wait, so nothing is scheduled for later (§15.4).
+      expect(resumed.ok === false ? resumed.retryAfter : 'spawned').toBe(undefined)
+
+      const fresh = await adapter.spawn(task())
+      expect(fresh.ok === false && fresh.kind === 'stale_session').toBe(false)
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
   it('classifies a logged-out server as fatal and an overloaded one as transient', async () => {
     const stub = await startStub()
     const adapter = new OpencodeAdapter({ baseUrl: stub.url })
@@ -884,7 +1000,14 @@ describe('spawn against a stub server', () => {
     // No server anywhere near this address: a forced refusal must short-circuit.
     const adapter = new OpencodeAdapter({ baseUrl: 'http://127.0.0.1:1' })
     try {
-      for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'fatal'] as const) {
+      for (const kind of [
+        'rate_limit',
+        'concurrency',
+        'quota',
+        'transient',
+        'stale_session',
+        'fatal',
+      ] as const) {
         adapter.refuseNext(kind)
         const outcome = await adapter.spawn(task())
         expect(outcome.ok).toBe(false)
@@ -1102,11 +1225,22 @@ if (!live.installed || !live.authenticated) {
       // that it opens anything.
       attachPty: (sessionId) => liveAdapter.attachPty(sessionId),
     }
+    const liveTask: AgentTask = {
+      nodeId: 'contract',
+      cwd: liveCwd,
+      prompt: 'Reply with exactly: ok',
+      model: '',
+    }
     return {
       adapter,
       // Short enough that the whole run settles inside the contract's own
       // five-second budget, and cheap enough to run on every commit.
-      task: { nodeId: 'contract', cwd: liveCwd, prompt: 'Reply with exactly: ok', model: '' },
+      task: liveTask,
+      // A session id this server never issued, which is the only way to see
+      // what it actually answers for one it does not have (§15.4). Where the
+      // answer changes shape this is the test that says so — the pattern table
+      // cannot notice on its own.
+      staleResumeTask: { ...liveTask, resumeSessionId: 'ses_vintaflowcontractnosuchsession' },
       forceRefusal: liveAdapter.refuseNext.bind(liveAdapter),
       dispose: async () => {
         for (const session of started) await session.kill()

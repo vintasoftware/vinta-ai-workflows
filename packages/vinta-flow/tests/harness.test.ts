@@ -2,7 +2,12 @@ import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent, AgentTask } from '../src/harness/adapter.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
-import { ERRORING_SCRIPT, MockAdapter, type MockAdapterOptions } from '../src/harness/mock.ts'
+import {
+  CACHED_SCRIPT,
+  ERRORING_SCRIPT,
+  MockAdapter,
+  type MockAdapterOptions,
+} from '../src/harness/mock.ts'
 
 const TASK: AgentTask = {
   nodeId: 'phase-1',
@@ -13,9 +18,21 @@ const TASK: AgentTask = {
   model: 'sonnet',
 }
 
+/** A token this mock has been told it no longer has (§15.4). */
+const FORGOTTEN_SESSION = 'a-session-the-vendor-pruned'
+
 const fixture = (options: MockAdapterOptions = {}) => {
-  const adapter = new MockAdapter(options)
-  return { adapter, task: TASK, forceRefusal: adapter.refuseNext.bind(adapter) }
+  const adapter = new MockAdapter({ staleSessions: [FORGOTTEN_SESSION], ...options })
+  return {
+    adapter,
+    task: TASK,
+    // The mock is the only adapter that can produce a forgotten session
+    // without a vendor, so it is the one that runs the contract's
+    // `stale_session` assertions everywhere rather than only where three CLIs
+    // are installed and logged in.
+    staleResumeTask: { ...TASK, resumeSessionId: FORGOTTEN_SESSION },
+    forceRefusal: adapter.refuseNext.bind(adapter),
+  }
 }
 
 // Both branches of every capability-conditional assertion have to be exercised
@@ -81,6 +98,45 @@ describe('mock adapter', () => {
     const adapter = new MockAdapter()
     const outcome = await adapter.spawn({ ...TASK, resumeSessionId: 'prior-session' })
     expect(outcome.ok && outcome.session.id).toBe('prior-session')
+  })
+
+  it('refuses a forgotten session as stale, and resumes every other id', async () => {
+    // The two halves of §15.4 on one adapter: the token it was told to forget
+    // is refused, and the next spawn — the fresh retry the host answers with —
+    // goes through. A refusal is not work, so it leaves `spawned` alone.
+    const adapter = new MockAdapter({ staleSessions: ['gone'] })
+    const refused = await adapter.spawn({ ...TASK, resumeSessionId: 'gone' })
+    expect(refused.ok === false && refused.kind).toBe('stale_session')
+    expect(refused.ok === false && refused.message.includes('phase-1')).toBe(true)
+
+    const retried = await adapter.spawn(TASK)
+    expect(retried.ok).toBe(true)
+    expect(adapter.spawned.length).toBe(1)
+  })
+
+  it('does not call a spawn stale when it carried no session id at all', async () => {
+    // There was nothing to be forgotten, so the id being on the forget-list is
+    // beside the point — the spawn is ordinary.
+    const adapter = new MockAdapter({ staleSessions: [TASK.nodeId, 'gone'] })
+    expect((await adapter.spawn(TASK)).ok).toBe(true)
+  })
+
+  it('plays back the cache counters a continued turn reports', async () => {
+    // §15.6's fixture: a resumed turn whose prefix came off the vendor's cache
+    // instead of being rebuilt. `DEFAULT_SCRIPT` reports neither counter, which
+    // is what a harness that does not report them looks like, and accounting
+    // has to keep the two apart.
+    const cached = await collect(new MockAdapter({ script: CACHED_SCRIPT }))
+    expect(cached.find((e) => e.type === 'usage')).toEqual({
+      type: 'usage',
+      input: 300,
+      output: 120,
+      cacheRead: 11_400,
+      cacheWrite: 900,
+    })
+    const cold = (await collect(new MockAdapter())).find((e) => e.type === 'usage')
+    expect(cold).not.toHaveProperty('cacheRead')
+    expect(cold).not.toHaveProperty('cacheWrite')
   })
 
   it('renders an injected message in the transcript where it was sent', async () => {

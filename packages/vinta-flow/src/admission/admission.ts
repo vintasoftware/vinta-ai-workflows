@@ -56,8 +56,22 @@ import type { Journal } from '../journal/journal.ts'
 import { type Clock, systemClock } from './clock.ts'
 import { CapacityWaitLog } from './waits.ts'
 
-/** Every refusal but `fatal` is a wait. */
-export type CapacityRefusalKind = Exclude<SpawnRefusalKind, 'fatal'>
+/**
+ * Every refusal that is a wait.
+ *
+ * Two kinds are excluded and for opposite reasons. `fatal` is not a wait
+ * because waiting will not fix a missing binary. `stale_session` is not a wait
+ * because there is nothing to wait *for*: the harness is healthy, has capacity,
+ * and has simply forgotten the session this task asked to continue (§15.4).
+ * Parking the harness on it would stall every other node behind one node's
+ * expired token, and letting it reach the AIMD controller would shrink the
+ * ceiling in response to something that says nothing about concurrency.
+ */
+export type CapacityRefusalKind = Exclude<SpawnRefusalKind, 'fatal' | 'stale_session'>
+
+/** Narrows a kind read back off disk to the ones that mean "wait". */
+const isWait = (kind: SpawnRefusalKind): kind is CapacityRefusalKind =>
+  kind !== 'fatal' && kind !== 'stale_session'
 
 /** What a harness is waiting on, for the UI and the one-shot notification. */
 export interface CapacityWait {
@@ -80,6 +94,13 @@ export type AdmissionOutcome =
     }
   /** `fatal` only: the harness is broken, and the node fails (§6.1). */
   | { readonly status: 'failed'; readonly message: string }
+  /**
+   * The `resumeSessionId` the task carried is gone (§15.4). Not a failure and
+   * not a wait: the caller drops the token, composes the full prompt instead of
+   * a continuation, and spawns again immediately. Nothing was parked and the
+   * ceiling did not move, so that retry is free to proceed.
+   */
+  | { readonly status: 'stale_session'; readonly message: string }
   | {
       readonly status: 'retry'
       readonly kind: CapacityRefusalKind
@@ -175,8 +196,12 @@ export class AdmissionControl {
     // this window — a restart is not news to them.
     for (const [harness, stored] of this.#waitLog.load(options.runId)) {
       // A harness the current configuration no longer knows about cannot be
-      // spawned on anyway, so its wait is nothing to resume.
-      if (stored.kind === 'fatal' || options.ceilings[harness] === undefined) continue
+      // spawned on anyway, so its wait is nothing to resume. Neither kind that
+      // is not a wait can legitimately be in this table — `#park` is the only
+      // writer and it is never reached by either — but the rows come back off
+      // disk as text, and a row that should not exist must not be able to park
+      // a healthy harness forever after a restart.
+      if (!isWait(stored.kind) || options.ceilings[harness] === undefined) continue
       const state = this.#state(harness)
       state.wakeAt = stored.wakeAt
       state.kind = stored.kind
@@ -222,6 +247,13 @@ export class AdmissionControl {
     // The slot goes back before anything else: a refused spawn holds nothing.
     this.#releaseSlot(state)
     if (outcome.kind === 'fatal') return { status: 'failed', message: outcome.message }
+    // Before `#park`, deliberately: this refusal is about one task's token, not
+    // about the harness, and neither the park nor the AIMD step may see it.
+    // `#onClean` is not called either — a stale token is no evidence the
+    // ceiling was safe, only that it was never tested.
+    if (outcome.kind === 'stale_session') {
+      return { status: 'stale_session', message: outcome.message }
+    }
 
     this.#park(adapter.id, state, outcome.kind, outcome.retryAfter)
     return this.#retry(state, task)

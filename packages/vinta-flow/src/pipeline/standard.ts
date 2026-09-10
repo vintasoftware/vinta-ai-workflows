@@ -25,7 +25,16 @@
  *   out of the interpreter.
  * - **A fix round is a `spawn_agent` with `role: 'fixer'`.** That is what the
  *   host counts into `fix_rounds`; the state happening to be called `fix` is
- *   not what makes it one.
+ *   not what makes it one. Note that this is why sharing the implementer's
+ *   session below leaves `max_fix_rounds` untouched — the budget counts roles,
+ *   not sessions.
+ * - **`session` names a slot to continue** (§15). `implement` and `fix` share
+ *   `main`, so the fixer continues the session that wrote the code rather than
+ *   paying for a cold context that has to be re-told the brief; `review` keeps
+ *   its own slot across rounds, so a re-review remembers what it flagged. The
+ *   reviewer is deliberately *not* on `main`: a reviewer sharing the
+ *   implementer's session would be grading its own work from inside its own
+ *   context. Omitting `session` entirely is what a pipeline does to opt out.
  * - **Effects resolve their own defaults** (`effects.ts`). `git_branch` with no
  *   `from` takes the dependency-derived base, `git_merge` with no `branch`
  *   merges the node's own phase branch, `run_gate` with no `gate` runs the
@@ -52,7 +61,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
         {
           id: 'e-implement',
           definitionId: 'spawn_agent',
-          params: { role: 'implementer', prompt_template: 'implementer' },
+          params: { role: 'implementer', prompt_template: 'implementer', session: 'main' },
         },
       ],
     },
@@ -67,7 +76,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
         {
           id: 'e-review',
           definitionId: 'spawn_agent',
-          params: { role: 'reviewer', prompt_template: 'reviewer' },
+          params: { role: 'reviewer', prompt_template: 'reviewer', session: 'review' },
         },
       ],
     },
@@ -79,7 +88,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
         {
           id: 'e-fix',
           definitionId: 'spawn_agent',
-          params: { role: 'fixer', prompt_template: 'fixer' },
+          params: { role: 'fixer', prompt_template: 'fixer', session: 'main' },
         },
       ],
     },

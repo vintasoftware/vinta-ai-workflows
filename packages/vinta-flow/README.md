@@ -211,7 +211,7 @@ $ git branch
   wt/widget-tags-mtvodosx-lane-2
 ```
 
-`plan/…/phase-<id>` is the phase's own branch; `wt/…` are the branches the lane and integration worktrees are checked out on. When the run ends, read [What this walkthrough does not yet reach](#what-this-walkthrough-does-not-yet-reach) before you read the last two lines it prints.
+`plan/…/phase-<id>` is the phase's own branch; `wt/…` are the branches the lane and integration worktrees are checked out on. When the run ends, read [What this walkthrough has and has not been run against](#what-this-walkthrough-has-and-has-not-been-run-against) before you read the last two lines it prints.
 
 **7. Read what happened, then clean up.** A finished run leaves its worktrees, branches and databases in place on purpose — they are the evidence. The post-mortem is written at the end and is what `plan-feature` reads before drawing the next feature's graph:
 
@@ -221,19 +221,15 @@ $ vinta-flow purge <run-id> --dry-run
 $ vinta-flow purge <run-id>
 ```
 
-### What this walkthrough does not yet reach
+### What this walkthrough has and has not been run against
 
-Every step above is transcribed from a real run of exactly these commands. This is the part it does not reach: **a node does not currently reach `done` under the shipped `standard-phase` pipeline**, so the run ends with
+Every step above is transcribed from a real run of exactly these commands, and that run predates agent prompt composition — at the time, the scheduler handed the harness `node.prompt_ref` as the entire prompt for every role, so the reviewer was never told to end its turn with `VERDICT: pass`, every node fell back to the fail-closed default, and the run ended with `failed nodes: p1, p2`.
 
-```console
-vinta-flow: post-mortem written to .../.vinta-flow/runs/widget-tags-mtvodosx/postmortem.json
-vinta-flow: failed nodes: p1, p2
-vinta-flow: run widget-tags-mtvodosx completed.
-```
+**That cause is fixed.** `spawn_agent`'s `prompt_template` now selects a composed, per-role prompt, and the shipped `standard-phase` pipeline is driven to `done` in the test suite against real git worktrees, real branches, real gate commands and real merges — including the fix loop, where a red gate produces a fixer and the next review passes. The verdict protocol the reviewer is asked for and the parser that reads it are one definition, so they cannot drift.
 
-The cause is that agent prompt composition is not implemented. The scheduler hands the harness `node.prompt_ref` — the *reference* to the phase brief — as the entire prompt, identically for every role; the `spawn_agent` effect's `prompt_template` parameter is declared in the effect catalog and read by nothing. The implementer copes: it finds the plan, reads the phase, and writes the code, which is why each lane's worktree really does contain that phase's work. The reviewer does not, because nothing tells it to end its turn with `VERDICT: pass`. A turn with no verdict falls back to `fail` — deliberately, since merging on a reviewer's silence is the wrong default — so the node loops through its fix rounds and then fails, and its gates never run.
+What has **not** happened is a live run with real agents since that landed. The mechanism is tested; the numbers in the walkthrough above are from the older run. Treat the failure output it describes as history rather than as current behaviour, and expect to be the first to see a full real-agent run reach a merged wave branch.
 
-So today `run` is verifiably a *scheduler* end to end — two lanes, two branches, concurrent implementation, a journal, a post-mortem — and is not yet a *merged wave branch*. `simulate` is the end-to-end path that completes, which is also why it is the honest way to size `resources.lane` for a plan.
+`simulate` remains the fastest way to size `resources.lane` for a plan, because it answers the scheduling question without spending a model turn.
 
 ## What `.vinta-flow/` holds
 
@@ -303,7 +299,7 @@ Point the adapter at a specific binary with an environment variable, which overr
 
 - **Windows is supported but less proven than macOS and Linux.** See [Platforms](#platforms) for exactly which parts, and which caveats you inherit.
 - **One project, one run at a time** per daemon. The journal is keyed by run id, so this is a boundary rather than a design limit — but it is today's boundary.
-- **A node does not reach `done` yet** under the shipped pipeline. See [What this walkthrough does not yet reach](#what-this-walkthrough-does-not-yet-reach).
+- **A full run with real agents has not been done since prompt composition landed.** The path is covered end to end by tests against real git worktrees, gates and merges, but the walkthrough's transcript is from an older run. See [What this walkthrough has and has not been run against](#what-this-walkthrough-has-and-has-not-been-run-against).
 - **A projection is not a prediction.** `simulate` answers "given these durations, what schedule follows", and three things it cannot know:
   - **It cannot predict an agent's turn length.** The durations are yours; the schedule is its answer to them.
   - **Harness concurrency ceilings are not modelled.** A mock session drains instantly, so admission control never blocks. A run that a vendor would throttle projects as if it were not throttled.

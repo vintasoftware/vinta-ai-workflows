@@ -96,7 +96,30 @@ export type AgentEvent =
   | { readonly type: 'tool_use'; readonly name: string; readonly input: unknown; readonly id: string }
   | { readonly type: 'tool_result'; readonly id: string; readonly ok: boolean; readonly summary: string }
   | { readonly type: 'permission_request'; readonly tool: string; readonly detail: unknown }
-  | { readonly type: 'usage'; readonly input: number; readonly output: number; readonly costUsd?: number }
+  | {
+      readonly type: 'usage'
+      readonly input: number
+      readonly output: number
+      readonly costUsd?: number
+      /**
+       * Prompt-cache tokens, where the harness reports them.
+       *
+       * Session reuse (§15) exists to turn a cold prompt into a cache read, and
+       * a saving nobody can measure is a claim rather than a result — so the
+       * two counters the vendors already emit are carried instead of dropped.
+       * `cacheRead` is prefix served from cache; `cacheWrite` is prefix written
+       * into it, which the first turn of a session pays and later turns do not.
+       *
+       * **Both are optional, and a missing one is not a zero** — the same rule
+       * `costUsd` follows. A harness that reports no cache figures must not be
+       * aggregated as having achieved a 0% hit rate; it has to be reported as
+       * unknown, or the run summary understates every harness but one.
+       *
+       * Counts, so §11 is untouched: no prompt text is implied by either.
+       */
+      readonly cacheRead?: number
+      readonly cacheWrite?: number
+    }
   | { readonly type: 'error'; readonly message: string }
   | { readonly type: 'session_ended'; readonly result: 'ok' | 'error' | 'interrupted' }
 
@@ -180,7 +203,30 @@ export interface PtyHandle {
  * Why a spawn was refused. Every kind but `fatal` is a wait, not a failure:
  * the node releases its resources and returns to pending (§6.1).
  */
-export type SpawnRefusalKind = 'rate_limit' | 'concurrency' | 'quota' | 'transient' | 'fatal'
+export type SpawnRefusalKind =
+  | 'rate_limit'
+  | 'concurrency'
+  | 'quota'
+  | 'transient'
+  /**
+   * The `resumeSessionId` this task carried is one the vendor no longer has —
+   * expired, pruned, or never theirs.
+   *
+   * Its own kind because it is neither of the two things around it, and
+   * collapsing it into either breaks a run. It is not a capacity wait: waiting
+   * changes nothing, because a forgotten session does not come back. It is not
+   * `fatal`: the harness is healthy and the work is fine — only the
+   * continuation token is stale, and dropping it plus re-sending the full
+   * prompt succeeds immediately. Session reuse (§15) makes that token the
+   * normal path, so a run must survive losing one; the caller's answer is
+   * exactly one retry with a fresh session (`scheduler.ts`).
+   *
+   * An adapter may only classify a refusal this way when the task actually
+   * carried a `resumeSessionId` — otherwise there was no token to be stale,
+   * and what it is looking at is something else.
+   */
+  | 'stale_session'
+  | 'fatal'
 
 export interface SpawnRefusal {
   readonly ok: false

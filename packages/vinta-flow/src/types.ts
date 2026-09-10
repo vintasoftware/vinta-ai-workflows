@@ -229,6 +229,16 @@ export const DefaultsSchema = z.strictObject({
   harness: z.enum(HARNESS_IDS),
   model: z.string().min(1),
   pipeline: Id,
+  max_session_turns: z
+    .number()
+    .int()
+    .min(1)
+    .default(12)
+    .describe(
+      'Turns one reused session slot may take before the next spawn starts fresh (§15.5). ' +
+        'A shared session only ever grows; without a ceiling a long node eventually dies on a ' +
+        'context-window error that reads as a broken harness.',
+    ),
 })
 
 export const WorkflowSchema = z

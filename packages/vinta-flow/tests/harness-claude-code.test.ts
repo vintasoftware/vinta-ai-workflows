@@ -50,6 +50,9 @@ const fakeBin = (body: string): string => {
 
 const VERSION_CASE = `case "$1" in --version) echo "1.2.3 (Claude Code)"; exit 0;; esac`
 
+/** Well-formed and never issued: the shape of a session id the vendor has forgotten. */
+const UNISSUED_SESSION = '00000000-0000-4000-8000-000000000000'
+
 // ---------------------------------------------------------------------------
 
 describe('JsonLines framing', () => {
@@ -140,6 +143,37 @@ describe('CLI frame mapping', () => {
       { type: 'usage', input: 1200, output: 340, costUsd: 0.0412 },
       { type: 'session_ended', result: 'ok' },
     ])
+  })
+
+  it('carries the cache counters off the same usage object', () => {
+    // §15.6. They were sitting unread beside the two counts this already
+    // mapped, which is the only reason session reuse was unmeasurable.
+    expect(
+      mapCliEvent({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 340,
+          cache_read_input_tokens: 18_400,
+          cache_creation_input_tokens: 2_100,
+        },
+      })[0],
+    ).toEqual({ type: 'usage', input: 1200, output: 340, cacheRead: 18_400, cacheWrite: 2_100 })
+  })
+
+  it('omits a cache counter the CLI did not send rather than reporting a zero', () => {
+    // A missing figure is unknown, and §15.6 turns unknown into "no hit rate
+    // to state" — while a reported 0 is a genuine cold turn. Emitting 0 here
+    // would erase the difference for every consumer downstream.
+    const usage = mapCliEvent({
+      type: 'result',
+      subtype: 'success',
+      usage: { input_tokens: 5, output_tokens: 6, cache_read_input_tokens: 0 },
+    })[0]
+    expect(usage).toEqual({ type: 'usage', input: 5, output: 6, cacheRead: 0 })
+    expect(usage).not.toHaveProperty('cacheWrite')
   })
 
   it('maps a failed result to an error carrying the status token only', () => {
@@ -263,14 +297,51 @@ describe('spawn refusal classification', () => {
       'usage limit reached; resets at 2026-01-01T15:30:00Z',
       1,
       'phase-1',
-      now,
+      { now },
     )
     expect(withReset.retryAfter?.toISOString()).toBe('2026-01-01T15:30:00.000Z')
-    expect(classifySpawnFailure('429 rate limit', 1, 'phase-1', now).retryAfter).toBe(undefined)
+    expect(classifySpawnFailure('429 rate limit', 1, 'phase-1', { now }).retryAfter).toBe(undefined)
+  })
+
+  it('calls a refused resume stale — but only where a session id was carried', () => {
+    // §15.4's rule, in both directions. The CLI's own wording for an id it no
+    // longer has, first with the token that was refused and then without one:
+    // with nothing to be stale, the same words are whatever they were before.
+    const prose = 'No conversation found with session ID: 5f2c1b90'
+    expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: true }).kind).toBe('stale_session')
+    expect(kindOf(prose)).toBe('fatal')
+    expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: false }).kind).toBe('fatal')
+  })
+
+  it('reads a stale session ahead of a pattern that would otherwise match it', () => {
+    // Why the row is hoisted rather than merely listed: a vendor announcing a
+    // forgotten session in the same breath as a network word would otherwise
+    // be classified `transient` and waited on forever — a session nobody has
+    // does not come back after a backoff.
+    const prose = 'ECONNRESET while resuming: no conversation found'
+    expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: true }).kind).toBe('stale_session')
+    expect(kindOf(prose)).toBe('transient')
+  })
+
+  it('never waits on a stale session, and never quotes the vendor about one', () => {
+    const refusal = classifySpawnFailure(
+      'No conversation found with session ID: 5f2c1b90; retry after 60 seconds',
+      1,
+      'phase-7',
+      { resuming: true },
+    )
+    expect(refusal.kind).toBe('stale_session')
+    // Not a wait: the answer is one retry on a fresh session, now (§15.4).
+    expect(refusal.retryAfter).toBe(undefined)
+    expect(refusal.message.includes('phase-7')).toBe(true)
+    expect(refusal.message.includes('resume-session-unknown')).toBe(true)
+    expect(refusal.message.toLowerCase().includes('5f2c1b90')).toBe(false)
   })
 
   it('never attaches a retry time to fatal, which is not a wait', () => {
-    const refusal = classifySpawnFailure('not logged in; retry after 60 seconds', 1, 'n', new Date())
+    const refusal = classifySpawnFailure('not logged in; retry after 60 seconds', 1, 'n', {
+      now: new Date(),
+    })
     expect(refusal.kind).toBe('fatal')
     expect(refusal.retryAfter).toBe(undefined)
   })
@@ -412,6 +483,24 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
     expect(outcome.retryAfter?.toISOString()).toBe('2026-01-01T15:30:00.000Z')
   })
 
+  it('classifies a refused resume as stale only when the task carried the id', async () => {
+    // The wiring §15.4 turns on, through a real process: the identical CLI
+    // failure is a stale token only for the spawn that offered one. Without
+    // it there was nothing to expire, so it keeps its ordinary reading.
+    const bin = fakeBin(
+      // `head` rather than `cat`: this adapter keeps stdin open for injection,
+      // so a fake that waits for EOF waits forever.
+      `${VERSION_CASE}\nhead -n 1 > /dev/null\necho 'No conversation found with session ID: 5f2c1b90' >&2\nexit 1`,
+    )
+    const adapter = new ClaudeCodeAdapter({ bin })
+
+    const resumed = await adapter.spawn({ ...task(), resumeSessionId: '5f2c1b90' })
+    expect(resumed.ok === false && resumed.kind).toBe('stale_session')
+
+    const cold = await adapter.spawn(task())
+    expect(cold.ok === false && cold.kind).toBe('fatal')
+  })
+
   it('classifies a binary that is not there at all', async () => {
     const outcome = await new ClaudeCodeAdapter({ bin: join(makeTemp(), 'nope') }).spawn(task())
     expect(outcome.ok).toBe(false)
@@ -439,7 +528,14 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
 
   it('returns an injected refusal of every kind without starting a process', async () => {
     const adapter = new ClaudeCodeAdapter({ bin: join(makeTemp(), 'never-run') })
-    for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'fatal'] as const) {
+    for (const kind of [
+      'rate_limit',
+      'concurrency',
+      'quota',
+      'transient',
+      'stale_session',
+      'fatal',
+    ] as const) {
       adapter.refuseNext(kind)
       const outcome = await adapter.spawn(task())
       expect(outcome.ok).toBe(false)
@@ -483,6 +579,12 @@ if (!live.installed || !live.authenticated) {
       // need no recording — `detach` is what proves there is no orphan.
       attachPty: (sessionId, attach) => real.attachPty(sessionId, attach),
     }
+    const task: AgentTask = {
+      nodeId: 'contract',
+      cwd: makeTemp(),
+      prompt: 'Reply with exactly: ok',
+      model: 'haiku',
+    }
     return {
       adapter,
       // A measured live turn drains in ~3.4s, which leaves too little margin
@@ -491,7 +593,12 @@ if (!live.installed || !live.authenticated) {
       // exists to fail fast on a genuinely hung stream; it just isn't sized
       // to a good day.
       hangMs: 30_000,
-      task: { nodeId: 'contract', cwd: makeTemp(), prompt: 'Reply with exactly: ok', model: 'haiku' },
+      task,
+      // A well-formed id no account has ever been issued, which is the only
+      // way to observe the real CLI's wording for a session it does not have
+      // (§15.4). Where the vendor changes that wording this is the test that
+      // says so — the pattern table cannot notice on its own.
+      staleResumeTask: { ...task, resumeSessionId: UNISSUED_SESSION },
       forceRefusal: real.refuseNext.bind(real),
       dispose: async () => {
         for (const session of started) await session.kill()

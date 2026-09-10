@@ -30,8 +30,11 @@ export interface EffectDefinition {
 export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
   spawn_agent: {
     id: 'spawn_agent',
-    params: ['role', 'prompt_template', 'harness', 'model'],
-    description: 'Runs a coding agent in the node’s lane. `role` is one of AGENT_ROLES.',
+    params: ['role', 'prompt_template', 'harness', 'model', 'session'],
+    description:
+      'Runs a coding agent in the node’s lane. `role` is one of AGENT_ROLES. `session` names a ' +
+      'session slot to continue (§15): absent starts a fresh session every time, which is what ' +
+      'every pipeline written before slots existed keeps doing.',
   },
   run_gate: {
     id: 'run_gate',

@@ -27,6 +27,15 @@
  * caller cannot reach the figure without acknowledging in the type system that
  * it is not the whole one.
  *
+ * The cache counters (§15.6) follow that second rule exactly, and for a sharper
+ * version of the same reason. Session reuse exists to turn a cold prompt into a
+ * cache read, so the figure the run report wants is a *share* — and a share has
+ * a denominator, which means a harness reporting nothing must not fold into one
+ * as zeroes. Aggregated that way, one silent harness would drag the whole run's
+ * hit rate down and the feature would look like it had stopped working. So
+ * `CacheTotal` carries the same three statuses, and the tokens it divides by
+ * are only those of the sessions that reported.
+ *
  * Nothing here reads prompt text, assistant output or tool payloads. It matches
  * on `type`, takes three numbers and an opaque session id, and ignores the rest
  * of every entry.
@@ -56,10 +65,20 @@ export interface UsageSource {
 export interface SessionUsage {
   /** Opaque harness session id, or a synthetic key for a usage event with no session. */
   readonly sessionId: string
+  /**
+   * The prompt tokens the vendor processed fresh — cached ones are the two
+   * fields below and are *not* included here, in every adapter this package
+   * ships. `inputTokens + cacheReadTokens + cacheWriteTokens` is the whole
+   * prompt.
+   */
   readonly inputTokens: number
   readonly outputTokens: number
   /** Absent when the harness does not report cost. Absent is not zero. */
   readonly costUsd?: number
+  /** Prompt prefix served from cache. Absent where the harness reports none. */
+  readonly cacheReadTokens?: number
+  /** Prompt prefix written into cache — a first turn pays it, later ones do not. */
+  readonly cacheWriteTokens?: number
 }
 
 /**
@@ -103,12 +122,48 @@ export type CostTotal =
     }
   | { readonly status: 'unreported'; readonly missingSessions: number }
 
+/**
+ * Prompt-cache tokens, with their reporting status attached — `CostTotal`'s
+ * shape, for `CostTotal`'s reason (§15.6).
+ *
+ * `promptTokens` is the denominator of the cache-read share and is deliberately
+ * *not* the total's `inputTokens`: it counts only the sessions that reported
+ * cache figures at all. A share over a denominator that included the silent
+ * sessions would be arithmetic about a population it cannot describe.
+ *
+ * `complete` — every session that reported tokens also reported cache figures.
+ * `partial` — some did and some did not; the figures cover only those that did,
+ * which is why they are named `…SoFar`.
+ * `unreported` — nothing reported. There is no share to state, and stating 0%
+ * would be a claim about a harness that never spoke.
+ */
+export type CacheTotal =
+  | {
+      readonly status: 'complete'
+      readonly readTokens: number
+      readonly writeTokens: number
+      /** Fresh + cached prompt tokens across the reporting sessions. */
+      readonly promptTokens: number
+      readonly reportedSessions: number
+    }
+  | {
+      readonly status: 'partial'
+      readonly readTokensSoFar: number
+      readonly writeTokensSoFar: number
+      /** Covers the reporting sessions only — the share's honest denominator. */
+      readonly promptTokensSoFar: number
+      readonly reportedSessions: number
+      readonly missingSessions: number
+    }
+  | { readonly status: 'unreported'; readonly missingSessions: number }
+
 export interface UsageTotals {
   readonly inputTokens: number
   readonly outputTokens: number
   /** Sessions counted — one per session, however many turns a node took. */
   readonly sessions: number
   readonly cost: CostTotal
+  readonly cache: CacheTotal
 }
 
 export interface NodeUsage {
@@ -295,6 +350,22 @@ export function sumTotals(totals: readonly UsageTotals[]): UsageTotals {
       case 'unreported':
         break
     }
+    switch (one.cache.status) {
+      case 'complete':
+        acc.cacheRead += one.cache.readTokens
+        acc.cacheWrite += one.cache.writeTokens
+        acc.cachePrompt += one.cache.promptTokens
+        acc.cacheReported += one.cache.reportedSessions
+        break
+      case 'partial':
+        acc.cacheRead += one.cache.readTokensSoFar
+        acc.cacheWrite += one.cache.writeTokensSoFar
+        acc.cachePrompt += one.cache.promptTokensSoFar
+        acc.cacheReported += one.cache.reportedSessions
+        break
+      case 'unreported':
+        break
+    }
   }
   return seal(acc)
 }
@@ -317,9 +388,25 @@ interface Acc {
   sessions: number
   /** Sessions that reported a cost. `sessions - reported` is what is missing. */
   reported: number
+  cacheRead: number
+  cacheWrite: number
+  /** Prompt tokens of the cache-reporting sessions only — the share's denominator. */
+  cachePrompt: number
+  /** Sessions that reported either cache figure. */
+  cacheReported: number
 }
 
-const newAcc = (): Acc => ({ input: 0, output: 0, usd: 0, sessions: 0, reported: 0 })
+const newAcc = (): Acc => ({
+  input: 0,
+  output: 0,
+  usd: 0,
+  sessions: 0,
+  reported: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  cachePrompt: 0,
+  cacheReported: 0,
+})
 
 function addSession(acc: Acc, session: SessionUsage): void {
   acc.input += session.inputTokens
@@ -329,6 +416,17 @@ function addSession(acc: Acc, session: SessionUsage): void {
     acc.usd += session.costUsd
     acc.reported += 1
   }
+  // Either counter is enough to make the session a reporting one: a harness
+  // that read from cache and wrote nothing legitimately sends one of the two,
+  // and dropping such a session from the denominator would understate exactly
+  // the turns §15 is trying to produce.
+  const read = session.cacheReadTokens
+  const write = session.cacheWriteTokens
+  if (read === undefined && write === undefined) return
+  acc.cacheRead += read ?? 0
+  acc.cacheWrite += write ?? 0
+  acc.cachePrompt += session.inputTokens + (read ?? 0) + (write ?? 0)
+  acc.cacheReported += 1
 }
 
 function seal(acc: Acc): UsageTotals {
@@ -344,7 +442,56 @@ function seal(acc: Acc): UsageTotals {
             reportedSessions: acc.reported,
             missingSessions,
           }
-  return { inputTokens: acc.input, outputTokens: acc.output, sessions: acc.sessions, cost }
+  const missingCache = acc.sessions - acc.cacheReported
+  const cache: CacheTotal =
+    acc.cacheReported === 0
+      ? { status: 'unreported', missingSessions: missingCache }
+      : missingCache === 0
+        ? {
+            status: 'complete',
+            readTokens: acc.cacheRead,
+            writeTokens: acc.cacheWrite,
+            promptTokens: acc.cachePrompt,
+            reportedSessions: acc.cacheReported,
+          }
+        : {
+            status: 'partial',
+            readTokensSoFar: acc.cacheRead,
+            writeTokensSoFar: acc.cacheWrite,
+            promptTokensSoFar: acc.cachePrompt,
+            reportedSessions: acc.cacheReported,
+            missingSessions: missingCache,
+          }
+  return {
+    inputTokens: acc.input,
+    outputTokens: acc.output,
+    sessions: acc.sessions,
+    cost,
+    cache,
+  }
+}
+
+/**
+ * The cached share of the prompt, in `[0, 1]` — what §15 bought, in the one
+ * number that says it.
+ *
+ * `undefined` where nothing reported, and that is the point: a run whose
+ * harnesses report no cache figures has an *unknown* hit rate, not a zero one,
+ * and a caller that has to handle `undefined` cannot print the second by
+ * accident. It is also `undefined` for a total with no prompt tokens at all,
+ * because 0/0 is not 0%.
+ *
+ * On a `partial` total this is the share over the sessions that reported —
+ * honest about its own population, but not a statement about the whole run. A
+ * caller presenting it as one reads `cache.status` and says so.
+ */
+export function cacheReadShare(totals: UsageTotals): number | undefined {
+  const { cache } = totals
+  if (cache.status === 'unreported') return undefined
+  const prompt = cache.status === 'complete' ? cache.promptTokens : cache.promptTokensSoFar
+  if (prompt <= 0) return undefined
+  const read = cache.status === 'complete' ? cache.readTokens : cache.readTokensSoFar
+  return read / prompt
 }
 
 function sealAll(accs: ReadonlyMap<string, Acc>): Record<string, UsageTotals> {
@@ -366,22 +513,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The three numbers, and nothing else off the entry. A non-finite or negative
- * count is treated as no usage at all rather than poisoning a run total with
- * `NaN`; a non-finite cost drops the cost and leaves the tokens, which the
- * `partial` status then flags.
+ * The counts, and nothing else off the entry. A non-finite or negative count is
+ * treated as no usage at all rather than poisoning a run total with `NaN`; a
+ * non-finite cost drops the cost and leaves the tokens, which the `partial`
+ * status then flags. A cache figure that fails the same check drops the same
+ * way, and drops to *absent* rather than to 0 — an unreadable figure is exactly
+ * as unknown as an unsent one (§15.6).
  */
-function readTokens(
-  entry: Record<string, unknown>,
-): { inputTokens: number; outputTokens: number; costUsd?: number } | null {
+function readTokens(entry: Record<string, unknown>): Omit<SessionUsage, 'sessionId'> | null {
   const input = entry['input']
   const output = entry['output']
   if (!isCount(input) || !isCount(output)) return null
   const cost = entry['costUsd']
+  const cacheRead = entry['cacheRead']
+  const cacheWrite = entry['cacheWrite']
   return {
     inputTokens: input,
     outputTokens: output,
     ...(typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? { costUsd: cost } : {}),
+    ...(isCount(cacheRead) ? { cacheReadTokens: cacheRead } : {}),
+    ...(isCount(cacheWrite) ? { cacheWriteTokens: cacheWrite } : {}),
   }
 }
 

@@ -56,6 +56,7 @@ import {
   classifier,
   operatorGuidance,
   probe,
+  resumeContext,
   signalGroup,
 } from './shared.ts'
 
@@ -165,11 +166,24 @@ const mapResult = (value: Record<string, unknown>): AgentEvent[] => {
     // this total is the sum of them; emitting both makes every consumer that
     // adds up `usage` events report double.
     const cost = asNumber(value['total_cost_usd'])
+    // The cache counters sit in the same object as the two token counts and
+    // were previously read past (§15.6). `input_tokens` here is the *fresh*
+    // prefix only — Anthropic reports cached prompt tokens under these two
+    // fields instead, not inside it — so the three add up to the whole prompt
+    // and none of them double-counts another.
+    //
+    // A field the CLI did not send stays absent rather than becoming 0: a
+    // session that reported no cache figures is unknown, and §15.6 needs that
+    // distinct from a session that genuinely read nothing from cache.
+    const cacheRead = asNumber(usage['cache_read_input_tokens'])
+    const cacheWrite = asNumber(usage['cache_creation_input_tokens'])
     events.push({
       type: 'usage',
       input: asNumber(usage['input_tokens']) ?? 0,
       output: asNumber(usage['output_tokens']) ?? 0,
       ...(cost === undefined ? {} : { costUsd: cost }),
+      ...(cacheRead === undefined ? {} : { cacheRead }),
+      ...(cacheWrite === undefined ? {} : { cacheWrite }),
     })
   }
   const subtype = asString(value['subtype'])
@@ -228,6 +242,18 @@ export function mapCliEvent(raw: unknown): AgentEvent[] {
  * machinery is shared (`classifier`).
  */
 const SIGNATURES: readonly RefusalSignature[] = [
+  {
+    // §15.4. `classifier` hoists this row above the rest and only consults it
+    // when the task carried a `resumeSessionId`, which is what keeps "no
+    // conversation found" from being read as a stale token on a spawn that
+    // never offered one. The CLI's own wording for `--resume <unknown id>` is
+    // "No conversation found with session ID: …"; the alternatives cover the
+    // phrasings it has used for an expired or unreadable transcript.
+    kind: 'stale_session',
+    reason: 'resume-session-unknown',
+    pattern:
+      /no (conversation|session) found|(session|conversation)[^\n]{0,40}\b(not ?found|not exist|no longer exists|expired|unknown|invalid)\b|could not (find|resume|load)[^\n]{0,40}(session|conversation)/,
+  },
   {
     kind: 'fatal',
     reason: 'binary-not-found',
@@ -461,7 +487,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
         ...spec.options,
       })
     } catch (error) {
-      return classifySpawnFailure(String(error), null, task.nodeId)
+      return classifySpawnFailure(String(error), null, task.nodeId, resumeContext(task))
     }
 
     // A closed pipe is how a refused spawn presents; it must not become an
@@ -558,12 +584,12 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
 
       child.on('error', (error) => {
         if (session !== undefined) return session.settleOnExit()
-        settle(classifySpawnFailure(String(error), null, task.nodeId))
+        settle(classifySpawnFailure(String(error), null, task.nodeId, resumeContext(task)))
       })
 
       child.on('close', (code) => {
         if (session !== undefined) return session.settleOnExit()
-        settle(classifySpawnFailure(diagnostics, code, task.nodeId))
+        settle(classifySpawnFailure(diagnostics, code, task.nodeId, resumeContext(task)))
       })
     })
   }

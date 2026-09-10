@@ -626,3 +626,78 @@ A dry run also creates and deletes a throwaway journal, because `Journal` is man
 ### Still open
 
 Nothing blocking. New questions will land here as implementation surfaces them.
+
+---
+
+## 15. Session reuse
+
+A node's pipeline spawns several agent turns — implement, review, fix, review again. Until now every one of them was a cold session: a new process, a new context window, and a prompt that re-sent the phase brief, the plan-level framing and the whole dependency closure from scratch. On the fix path that is paid twice more per round.
+
+Session reuse makes the fixer **continue the implementer's own session**, and the reviewer **continue its own across rounds**. The prompt for a continued turn is then a delta — the findings, and what to do about them — because everything else is already in the session. The saving is a prompt-cache hit on a prefix that was previously rebuilt from nothing.
+
+Almost none of this is new machinery. `AgentTask.resumeSessionId` and `capabilities.resume` are §7 as originally specified, and all four shipped adapters implement them. What was missing was a *policy*: nothing ever set the field except an operator detaching from a PTY takeover (§9). This section is that policy.
+
+### 15.1 Slots
+
+A node keeps a **session ledger**: a map from slot name to `{ harnessId, sessionId, lane }`. A slot is author-chosen vocabulary, exactly like a state id — the interpreter knows nothing about which slots exist.
+
+`spawn_agent` takes one new param, `session`:
+
+- **absent** — a fresh session, always. This is today's behaviour, so every workflow written before this section keeps its exact meaning.
+- **`session: '<slot>'`** — continue that slot's session where the ledger entry is valid, and otherwise start fresh and record the new id under it.
+
+`standard-phase` therefore reads: `implement` and `fix` both carry `session: 'main'`; `review` carries `session: 'review'`. Two lines of pipeline data are the whole feature at the authoring layer.
+
+**A fix round remains a `spawn_agent` with `role: 'fixer'`.** Counting keys off the role, never off the session or the state id (§5.2), so sharing the implementer's session leaves `max_fix_rounds` untouched.
+
+### 15.2 When an entry is invalid
+
+A ledger entry is usable only when all of these hold. Any failure means a fresh session **and the full, non-continuation prompt** — never a delta prompt against a session that does not exist.
+
+- **The harness matches.** A codex session id means nothing to claude-code.
+- **The lane matches.** A session is about a worktree: resumed into a different one it carries a history of paths and file states that no longer describe where it is standing. The entry therefore records its lane.
+
+  The stronger rule sits above it, because the lane name is not enough. On a capacity refusal a node releases its lane and re-drives its pipeline from the initial state, and the free list usually hands back *the lane it just released* — which `#prepareLane` then recycles, resetting the worktree under a name that did not change. **The whole ledger is therefore cleared at the start of every attempt**, and the lane check remains as the invariant that keeps the mistake unwritable rather than merely un-made.
+- **The adapter declares `capabilities.resume`.**
+- **The vendor still has the session** — which cannot be known in advance, so it is handled as a refusal (§15.4).
+- **The slot is under its turn ceiling** (§15.5).
+
+Every fresh-instead-of-continued decision is journalled with a fixed reason token. A silent fallback would make a run that quietly stopped reusing sessions indistinguishable from one that never started.
+
+### 15.3 Continuation prompts
+
+A continued turn gets a delta, composed by `src/prompts` behind a `continuation` flag. Re-sending the brief to an agent that has already acted on it is not merely wasteful — it instructs an agent to implement what it has already implemented.
+
+This puts one constraint on slot authoring. A continuation prompt tells the agent what it already has, and the fixer's says it has the plan's bounds — which is true because `fix` shares `main` with `implement`, and the implementer is the role that gets them. **A fixer slot must therefore be one an implementer opened.** A pipeline that gave its fix state a slot of its own would produce a delta claiming context that session was never given. Nothing checks this, because the composer cannot see which role opened a slot; it is an authoring rule, and the shipped pipeline follows it.
+
+A continuation also **does not resolve `prompt_ref` or `plan_context_refs` at all** — a delta does not carry them, and reading a document only to fail a turn over a reference it will not use trades a working turn for nothing. The cold prompt that opened the session already validated both.
+
+One rule is load-bearing beyond token economy: **a reviewer continuation always restates the `VERDICT:` protocol.** `readVerdict` is exported from `src/prompts` and imported by the executor precisely so the protocol and its parser cannot drift; a continuation that dropped the marker would take the fail-closed default on every node and burn the fix budget on reviews nobody asked for.
+
+### 15.4 A session the vendor has forgotten
+
+Resuming an id the vendor has expired or pruned fails the spawn. Before this section that classified as `fatal` and failed the node — acceptable when resume was an operator's rare manual path, and not acceptable once it is the default one.
+
+`SpawnRefusalKind` therefore gains **`stale_session`**, which is neither of the kinds around it. It is not a capacity wait: waiting changes nothing, because a forgotten session does not come back. It is not `fatal`: the harness is healthy and the work is fine — only the token is stale. The host's answer is exactly one retry with a fresh session and the full prompt, after which an ordinary failure is an ordinary failure.
+
+An adapter may classify a refusal this way **only when the task actually carried a `resumeSessionId`**. With no token there was nothing to be stale. The rule is enforced in `shared.ts` rather than per adapter: the stale rows are hoisted ahead of every other signature *and* gated on the resuming flag, so neither invariant depends on an adapter remembering to order its own table.
+
+**The vendor wording is inferred, not observed.** No real expired session was exercised against any of the three CLIs; the patterns cover each vendor's phrasing for a missing conversation, thread or rollout. A pattern that misses would otherwise turn a routine expired token into a dead node and a blocked subtree — far too much to lose to a string — so the host does not rely on the classification alone: **a spawn that carried a token and came back `fatal` is also retried once, cold.** A genuinely broken harness fails again identically one spawn later; a misread refusal recovers. A task with no token is never retried, because nothing about it would change. The classification stays worth having — it avoids the wasted spawn and names the reason in the journal — but it is an optimisation over the net rather than the thing keeping runs alive.
+
+### 15.5 Context growth, and the last fix round
+
+A shared session across implement plus N fix rounds only ever grows. `max_fix_rounds` bounds it loosely; a per-slot turn ceiling bounds it directly, forcing the next spawn fresh and journalling why. Without one, a long node eventually dies on a context-window error that reads as a broken harness.
+
+The ceiling has a second, better-motivated sibling. Reusing the implementer's session means **the agent that wrote the bug is the agent fixing it**, with every original assumption intact. That is usually the point — it knows why the code is the way it is — and occasionally exactly wrong, because the assumption *was* the bug. So **the final fix round goes fresh**: if the author cannot fix it in the rounds before last, the work is handed to an agent that has not seen it. The cost is one cold prompt on the path that was already heading for `failed`, and it recovers reviewer-style independence in the one case where it demonstrably matters.
+
+### 15.6 Measuring it
+
+A caching optimisation nobody measures is a claim rather than a result, and there was no cache accounting anywhere: the usage event carried input, output and cost, while the vendors' cache counters sat unread in the same objects.
+
+`AgentEvent`'s `usage` variant gains optional `cacheRead` and `cacheWrite`, aggregated through `src/usage` under the same rule `costUsd` already follows — **a missing figure is not a zero**, or a harness that reports nothing is aggregated as having achieved a 0% hit rate. `cacheReadShare` therefore returns `undefined` rather than `0` for an unreported total, and its denominator counts only the sessions that reported. Reused-versus-fresh session counts come from the journal's `node_session` rows beside them, so the report can state both what reuse was attempted and what it bought.
+
+**`input` is normalized to mean the fresh remainder, in every adapter.** This is the one place the harness layer does not pass a vendor's number through. Codex reports the OpenAI shape, where `input_tokens` is the *whole* prompt and `cached_input_tokens` names the cached subset of it; claude-code and opencode report the fresh remainder with the cache counts beside it. Carried through verbatim, one field would mean two different things inside a single aggregate and every cross-harness cache figure would be wrong by exactly the cached prefix. So codex subtracts, floored at zero, and the invariant `input + cacheRead + cacheWrite = the whole prompt` holds everywhere. The cost is that codex's reported `input` no longer matches what the codex CLI prints, which is the trade a cross-harness number requires.
+
+### 15.7 Interaction with takeover
+
+§9's PTY round trip stages a resumed id for the node's next spawn. With a ledger that id belongs to **the slot the taken-over turn was running under** — an operator who takes over a fixer turn must not have their session handed to whatever spawns next.

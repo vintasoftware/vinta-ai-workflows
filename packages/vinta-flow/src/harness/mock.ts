@@ -55,6 +55,17 @@ export interface MockAdapterOptions {
   readonly spawns?: readonly (SpawnRefusalKind | 'ok')[]
   /** Attached to refusals, as a harness-reported reset time would be. */
   readonly retryAfter?: Date
+  /**
+   * Session ids this harness has forgotten (§15.4). Resuming one of them is
+   * refused as `stale_session`; every other id still resumes, because a mock
+   * that only honoured ids it had itself issued could not play the ordinary
+   * case of a caller handing back an id from a previous run.
+   *
+   * It is a list rather than a flag so a test can drive the case the rule is
+   * actually about: the *same* adapter refusing one token and accepting the
+   * next, which is what a retry with a fresh session looks like from here.
+   */
+  readonly staleSessions?: readonly string[]
 }
 
 const DEFAULT_CAPABILITIES: HarnessCapabilities = {
@@ -73,6 +84,25 @@ export const DEFAULT_SCRIPT: MockScript = {
     { type: 'tool_result', id: 'tool-1', ok: true, summary: '42 lines' },
     { type: 'assistant_text', text: 'done' },
     { type: 'usage', input: 1200, output: 340 },
+  ],
+  result: 'ok',
+}
+
+/**
+ * A continued turn, as §15 makes the normal one: most of the prompt was already
+ * in the session and came back off the vendor's cache instead of being rebuilt,
+ * so `input` is small and `cacheRead` is most of the prefix.
+ *
+ * It exists so accounting can be driven end to end without a vendor. The two
+ * counters are optional on the event for a reason (§15.6) — `DEFAULT_SCRIPT`
+ * deliberately reports neither, which is what a harness that does not report
+ * them looks like, and an aggregate has to keep the two runs distinguishable
+ * rather than calling the silent one a 0% hit rate.
+ */
+export const CACHED_SCRIPT: MockScript = {
+  events: [
+    { type: 'assistant_text', text: 'continuing from where this session left off' },
+    { type: 'usage', input: 300, output: 120, cacheRead: 11_400, cacheWrite: 900 },
   ],
   result: 'ok',
 }
@@ -160,6 +190,7 @@ export class MockAdapter implements HarnessAdapter {
   readonly spawned: AgentTask[] = []
 
   #plan: (SpawnRefusalKind | 'ok')[]
+  readonly #stale: ReadonlySet<string>
   #forced: SpawnRefusalKind | null = null
   #sessions = 0
 
@@ -167,6 +198,7 @@ export class MockAdapter implements HarnessAdapter {
     this.id = options.id ?? 'mock'
     this.capabilities = { ...DEFAULT_CAPABILITIES, ...options.capabilities }
     this.#plan = [...(options.spawns ?? [])]
+    this.#stale = new Set(options.staleSessions ?? [])
   }
 
   /** Refuse the next spawn with this kind, whatever the plan says. */
@@ -190,6 +222,16 @@ export class MockAdapter implements HarnessAdapter {
         message: `${this.id} refused to spawn node ${task.nodeId}: ${planned}`,
       }
       return this.options.retryAfter ? { ...refusal, retryAfter: this.options.retryAfter } : refusal
+    }
+    // §15.4, and only where a token was actually carried: with none there is
+    // nothing to be stale. Refused before `spawned` is appended to, because a
+    // refusal is not work — admission control must not count it as such.
+    if (task.resumeSessionId !== undefined && this.#stale.has(task.resumeSessionId)) {
+      return {
+        ok: false,
+        kind: 'stale_session',
+        message: `${this.id} refused to spawn node ${task.nodeId}: resume-session-unknown`,
+      }
     }
     this.spawned.push(task)
     this.#sessions += 1

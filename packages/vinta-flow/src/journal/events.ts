@@ -61,6 +61,46 @@ export type GatePoolPhase = 'requested' | 'granted' | 'released'
 /** The gate runner's verdict, as journalled. Mirrors `GateStatus` in `gates/runner.ts`. */
 export type GateStatus = 'passed' | 'failed' | 'timed_out'
 
+/** Whether a spawn continued its slot's session or started a new one (§15). */
+export type SessionDisposition = 'reused' | 'fresh'
+
+/**
+ * Why a spawn started a fresh session instead of continuing one. A closed set,
+ * because these rows are what make "reuse is not happening" diagnosable — a
+ * free-text reason would be unqueryable, and a vendor's own words about a
+ * session are prose this payload may not carry (§11).
+ *
+ * `no_slot` is the ordinary case and not a degradation: a `spawn_agent` that
+ * names no `session` is asking for a cold turn, which is what every pipeline
+ * authored before §15 does.
+ */
+export type SessionFreshReason =
+  /** The effect named no slot. Today's default behaviour. */
+  | 'no_slot'
+  /** The slot has no entry yet — the first turn of a session has to be one. */
+  | 'no_prior_session'
+  /** This turn runs on a different harness than the one that opened the slot. */
+  | 'harness_changed'
+  /**
+   * The node is in a different lane than the slot's session ran in. A capacity
+   * refusal re-drives a node's whole pipeline in a fresh lane (§6.1, §15.2), and
+   * a session resumed into a worktree it has never seen would be reasoning about
+   * paths and file states that are no longer there.
+   */
+  | 'lane_changed'
+  /** The harness cannot continue a session at all (`capabilities.resume`). */
+  | 'no_resume_capability'
+  /** The slot hit `defaults.max_session_turns` (§15.5). */
+  | 'turn_ceiling'
+  /**
+   * The last fix round, deliberately handed to an agent that has not seen the
+   * work (§15.5). The author already tried and failed; its assumptions are now
+   * a liability rather than context.
+   */
+  | 'final_fix_round'
+  /** The vendor no longer has the session; the spawn was retried cold (§15.4). */
+  | 'stale_session'
+
 /**
  * Where the operation went. `sent` reached the live session; `queued` is
  * waiting for the node's next resume (§9's queue for harnesses that cannot
@@ -165,6 +205,28 @@ interface NodePayloads {
     readonly op: OperatorOp
     readonly text?: string
     readonly delivery: OperatorDelivery
+  }
+  /**
+   * What one spawn decided about its session slot (§15).
+   *
+   * Journalled at the spawn, which is the moment the decision is taken — not
+   * at `session_started`, which is when the *id* becomes known and which
+   * `node_assigned` already carries. A `fresh` row therefore always states why
+   * it was fresh, from a closed set of tokens: a run that quietly stopped
+   * reusing sessions and one that never started are otherwise identical from
+   * the outside, and the first is a bug while the second is a configuration.
+   *
+   * `session_id` is present only on a `reused` row, and is the id being
+   * continued. Ids are identifiers, exactly as `node_assigned.session_id` is;
+   * no prompt text, no agent output and no vendor prose reaches this payload.
+   */
+  node_session: {
+    readonly slot: string
+    readonly disposition: SessionDisposition
+    /** The id being continued. Present on `reused`, absent on `fresh`. */
+    readonly session_id?: string
+    /** Why fresh, from a closed set. Absent on `reused`. */
+    readonly reason?: SessionFreshReason
   }
   /**
    * One edge of a gate-pool acquisition, for the whole set the gate needs —

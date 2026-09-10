@@ -84,6 +84,7 @@ import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipelin
 import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
+import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import { composeSpawnPrompt } from '../prompts/index.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { Node, Pipeline, Workflow } from '../types.ts'
@@ -185,10 +186,24 @@ interface NodeState {
    */
   undelivered: string[]
   /**
+   * §15's session ledger: slot name to the session that slot last ran.
+   *
+   * Per node, never shared. Two nodes running the same phase pipeline both
+   * have a `main` slot and they are unrelated — the slot is vocabulary chosen
+   * by the pipeline author, and what makes one concrete is the node it belongs
+   * to.
+   */
+  sessions: Map<string, SessionEntry>
+  /**
    * The session id the node's **next** spawn continues from — §9's handoff
-   * token, set when an operator detaches from a takeover. It lives on the node
-   * rather than in the registry because the resume happens at the next spawn,
-   * which is the one moment `AgentTask.resumeSessionId` can be filled in.
+   * token, set when an operator detaches from a takeover.
+   *
+   * This is the **slot-less** path only. A takeover of a turn that named a slot
+   * writes back into the ledger instead (§15.7), because the id belongs to the
+   * slot that turn was running under: staging it here would hand an operator's
+   * fixer session to whichever role happened to spawn next. What is left here
+   * serves pipelines that opted out of slots entirely, where there is no slot
+   * to write to and the next spawn is the only possible destination.
    */
   resumeSessionId: string | null
   /** Set by `pause`; honoured after the current turn, never inside it. */
@@ -259,6 +274,7 @@ export class Scheduler {
       live: null,
       pending: [],
       undelivered: [],
+      sessions: new Map(),
       resumeSessionId: null,
       pauseRequested: false,
       aborted: false,
@@ -561,6 +577,17 @@ export class Scheduler {
       this.#options.journal.acquireLease(LANE, state.node.id)
       this.#assign(state, { lane: state.lane })
 
+      // §15's ledger does not survive an attempt. Empty on the first pass; on
+      // every one after it, the sessions it held describe work that is no
+      // longer on disk. A capacity refusal re-drives this pipeline from its
+      // initial state, and the lane it comes back to is either a different one
+      // or — far more often, since the free list hands back what was just
+      // released — the *same* one, which `#prepareLane` then recycles. Both
+      // cases end with a worktree the sessions do not describe, and only the
+      // first is visible from a lane name. Resuming into it would hand an agent
+      // a memory of files it created and a tree without them.
+      state.sessions.clear()
+
       try {
         await this.#prepareLane(state)
         const settled = await this.#drive(state)
@@ -807,7 +834,14 @@ export class Scheduler {
     const owed = [...state.undelivered, ...state.pending.map((entry) => entry.text)]
 
     const cwd = join(this.#options.laneRoot, state.lane as string)
-    const task: AgentTask = {
+
+    // §15's decision, taken before the task is built because the prompt
+    // depends on it: a continued session is handed a delta, and a cold one the
+    // whole brief. Getting that pairing wrong in either direction is worse
+    // than not reusing at all — a delta into a session that does not exist
+    // asks an agent to fix findings it has never seen, and a full brief into
+    // one that does asks it to implement what it already implemented.
+    const build = (plan: SessionPlan): AgentTask => ({
       nodeId: state.node.id,
       cwd,
       // Composed by `src/prompts`, selected by the effect's `prompt_template`.
@@ -825,22 +859,52 @@ export class Scheduler {
         // A dispatched node in a real run always has one.
         workspace: existsSync(cwd) ? cwd : null,
         facts: invocation.context,
+        continuation: plan.continuation,
       }),
       model: String(params['model'] ?? state.node.model ?? workflow.defaults.model),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
-      // §9's handoff token, coming back the other way: an operator who took
-      // this node over and detached left the id their terminal held, and this
-      // turn continues that session rather than starting a new one. Kept
-      // across a capacity retry, exactly like the operator's queue is, and
-      // spent only once a session is actually granted.
-      ...(state.resumeSessionId === null || !adapter.capabilities.resume
-        ? {}
-        : { resumeSessionId: state.resumeSessionId }),
+      // The handoff token: either the slot's session (§15) or, for a pipeline
+      // that named no slot, the id an operator's takeover left behind (§9).
+      // Kept across a capacity retry, exactly like the operator's queue is,
+      // and spent only once a session is actually granted.
+      ...(plan.resumeSessionId === null ? {} : { resumeSessionId: plan.resumeSessionId }),
+    })
+
+    let plan = this.#sessionPlan(state, params, adapter)
+    let outcome = await admission.admit(adapter, build(plan))
+
+    // §15.4: the vendor has forgotten the session this task asked to continue.
+    // Exactly one retry, cold and with the full prompt — the harness is
+    // healthy and nothing was parked, so this proceeds immediately rather than
+    // returning the node to the ready set.
+    //
+    // `failed` is here for the same reason, as a safety net rather than a
+    // classification. `stale_session` is recognised from vendor wording, and
+    // that wording was inferred rather than observed against a real expired
+    // session (§15.4). A pattern that misses turns a routine stale token into a
+    // dead node *and* a blocked subtree, which is far too much to lose to a
+    // string. So a spawn that carried a token and came back broken is retried
+    // once without one: a genuinely broken harness fails again identically, one
+    // spawn later, while a misread refusal recovers. A cold task is never
+    // retried — with no token there is nothing a retry would change.
+    if (plan.resumeSessionId !== null && (outcome.status === 'stale_session' || outcome.status === 'failed')) {
+      plan = {
+        slot: plan.slot,
+        resumeSessionId: null,
+        continuation: false,
+        reason: 'stale_session',
+        turns: 1,
+      }
+      outcome = await admission.admit(adapter, build(plan))
     }
 
-    const outcome = await admission.admit(adapter, task)
     if (outcome.status === 'failed') throw new SpawnFatal(outcome.message)
     if (outcome.status === 'retry') throw new CapacityRetry(outcome.wait)
+    // A second stale-session refusal on a task that carried no token at all.
+    // The adapter is contradicting its own contract (`adapter.ts`), and the
+    // one thing not to do is retry again: that is an unbounded loop against a
+    // vendor. Fail the node instead, with the adapter's status token.
+    if (outcome.status === 'stale_session') throw new SpawnFatal(outcome.message)
 
     // The task reached the harness, so the queue is spent. Only the entries
     // that were on it when the task was built: anything the operator typed
@@ -851,15 +915,29 @@ export class Scheduler {
     state.undelivered = []
     state.resumeSessionId = null
 
+    // Journalled here rather than at the decision: this is the first moment a
+    // turn is certain to happen. A capacity refusal unwinds and re-drives the
+    // whole node, and a row written before `admit` would claim a turn that
+    // never ran. A stale-session retry needs no second row either — the plan
+    // that won is the one carrying `stale_session`, so one row per turn still
+    // says what happened (§15).
+    this.#session(state, plan)
+    this.#remember(state, plan, adapter, outcome.session.id)
+
     // The registry: exactly as long-lived as the turn it points at, so a §9
     // operation can never reach a session whose stream has already ended.
     state.live = { session: outcome.session, adapter }
-    const withdraw = this.#offer(state, outcome.session, adapter, cwd)
+    const withdraw = this.#offer(state, outcome.session, adapter, cwd, plan.slot)
     try {
       for await (const event of outcome.session.events) {
         journal.appendTranscript(runId, state.node.id, event)
         if (event.type === 'session_started') {
           this.#assign(state, { session_id: event.sessionId })
+          // The authoritative id. `AgentSession.id` is what the adapter knew
+          // before the CLI spoke; a harness that mints its own on resume
+          // reports it here, and the ledger must hold the one the *next*
+          // resume has to name.
+          this.#remember(state, plan, adapter, event.sessionId)
         }
       }
     } finally {
@@ -874,6 +952,65 @@ export class Scheduler {
     if (params['role'] === 'fixer') state.fixRounds += 1
 
     return await this.#options.executor.execute(invocation)
+  }
+
+  /**
+   * §15.1's decision. The scheduler's only job here is to gather the inputs;
+   * the rules themselves are `sessions.ts`, where each one can be checked on
+   * its own rather than through whichever schedule a run happens to produce.
+   */
+  #sessionPlan(
+    state: NodeState,
+    params: Readonly<Record<string, unknown>>,
+    adapter: HarnessAdapter,
+  ): SessionPlan {
+    return planSession({
+      declaredSlot: params['session'],
+      role: params['role'],
+      canResume: adapter.capabilities.resume,
+      harnessId: adapter.id,
+      lane: state.lane,
+      ledger: state.sessions,
+      maxTurns: this.#workflow.defaults.max_session_turns,
+      fixRounds: state.fixRounds,
+      maxFixRounds: state.node.max_fix_rounds,
+      takeoverSessionId: state.resumeSessionId,
+    })
+  }
+
+  /** Writes the turn into the slot. Idempotent: `turns` comes from the plan. */
+  #remember(
+    state: NodeState,
+    plan: SessionPlan,
+    adapter: HarnessAdapter,
+    sessionId: string,
+  ): void {
+    if (plan.slot === null || state.lane === null) return
+    state.sessions.set(plan.slot, {
+      harnessId: adapter.id,
+      sessionId,
+      lane: state.lane,
+      turns: plan.turns,
+    })
+  }
+
+  /** §15's per-turn row. A slot name, a disposition and a closed-set reason. */
+  #session(state: NodeState, plan: SessionPlan): void {
+    if (plan.slot === null && plan.reason === 'no_slot') return
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'node_session',
+      // A slot-less continuation is §9's takeover handoff. It is still a reuse
+      // and still worth a row; `slot` names the operation rather than a slot
+      // that does not exist.
+      payload: {
+        slot: plan.slot ?? 'takeover',
+        disposition: plan.continuation ? 'reused' : 'fresh',
+        ...(plan.resumeSessionId === null ? {} : { session_id: plan.resumeSessionId }),
+        ...(plan.reason === null ? {} : { reason: plan.reason }),
+      },
+    })
   }
 
   /**
@@ -903,8 +1040,12 @@ export class Scheduler {
     session: AgentSession,
     adapter: HarnessAdapter,
     cwd: string,
+    slot: string | null,
   ): () => void {
     if (!adapter.capabilities.pty || adapter.attachPty === undefined) return () => {}
+    // Captured now, not read at the resume: the lane is what makes the id
+    // usable, and both are facts about *this* turn.
+    const lane = state.lane
     return this.#takeovers.offer(this.#options.runId, state.node.id, {
       adapter,
       sessionId: session.id,
@@ -918,7 +1059,22 @@ export class Scheduler {
         await this.#interruptLive(state)
       },
       resume: async (sessionId: string) => {
-        state.resumeSessionId = sessionId
+        // §15.7: the id belongs to the slot this turn was running under.
+        // Staging it on the node instead would hand an operator's fixer
+        // session to whichever role spawned next — a reviewer continuing the
+        // session it is supposed to be reviewing.
+        if (slot === null || lane === null) state.resumeSessionId = sessionId
+        else {
+          state.sessions.set(slot, {
+            harnessId: adapter.id,
+            sessionId,
+            lane,
+            // The operator's turn is this slot's turn, not an extra one: they
+            // took over the session that was already running, so the ceiling
+            // must not advance for a turn nobody spent a spawn on.
+            turns: state.sessions.get(slot)?.turns ?? 1,
+          })
+        }
         // The pause the interrupt asked for is over. Either the turn has not
         // ended yet and the request is simply dropped, or the node is parked
         // on it and this is the answer that lets it go. Nothing between those

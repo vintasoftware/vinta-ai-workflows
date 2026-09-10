@@ -218,6 +218,13 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "max_session_turns": {
+          "default": 12,
+          "description": "Turns one reused session slot may take before the next spawn starts fresh (§15.5). A shared session only ever grows; without a ceiling a long node eventually dies on a context-window error that reads as a broken harness.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       },
       "required": [

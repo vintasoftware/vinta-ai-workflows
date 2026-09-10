@@ -193,8 +193,24 @@ export class OpencodeEventMapper {
   readonly #started = new Set<string>()
   /** callID -> `tool_result` emitted. */
   readonly #settled = new Set<string>()
-  /** message id -> that message's totals, so an update cannot double-count. */
-  readonly #usage = new Map<string, { input: number; output: number; cost: number }>()
+  /**
+   * message id -> that message's totals, so an update cannot double-count.
+   *
+   * The cache figures are `undefined` rather than 0 where the message carried
+   * none: opencode's `tokens.cache` is populated by the provider, so a model
+   * behind a provider that reports nothing must aggregate as unknown and not
+   * as a message that read nothing from cache (§15.6).
+   */
+  readonly #usage = new Map<
+    string,
+    {
+      input: number
+      output: number
+      cost: number
+      cacheRead: number | undefined
+      cacheWrite: number | undefined
+    }
+  >()
   readonly #failed = new Set<string>()
   #errored = false
 
@@ -251,12 +267,30 @@ export class OpencodeEventMapper {
     let input = 0
     let output = 0
     let cost = 0
+    // Left undefined until a message actually reports one, then summed from
+    // there: a turn where no message carried cache figures reports none, while
+    // a turn where one did reports the sum over those that did. Seeding these
+    // at 0 would be the bug §15.6 names — an unreported harness aggregating as
+    // a 0% cache hit rate.
+    let cacheRead: number | undefined
+    let cacheWrite: number | undefined
     for (const totals of this.#usage.values()) {
       input += totals.input
       output += totals.output
       cost += totals.cost
+      if (totals.cacheRead !== undefined) cacheRead = (cacheRead ?? 0) + totals.cacheRead
+      if (totals.cacheWrite !== undefined) cacheWrite = (cacheWrite ?? 0) + totals.cacheWrite
     }
-    return [{ type: 'usage', input, output, ...(cost > 0 ? { costUsd: cost } : {}) }]
+    return [
+      {
+        type: 'usage',
+        input,
+        output,
+        ...(cost > 0 ? { costUsd: cost } : {}),
+        ...(cacheRead === undefined ? {} : { cacheRead }),
+        ...(cacheWrite === undefined ? {} : { cacheWrite }),
+      },
+    ]
   }
 
   #errorName(error: unknown): string {
@@ -272,10 +306,17 @@ export class OpencodeEventMapper {
 
     const tokens = asRecord(info['tokens'])
     if (tokens) {
+      // `tokens.cache` is opencode's own nesting of the two counters; `input`
+      // sits outside it and excludes them, so the three sum to the prompt.
+      const cache = asRecord(tokens['cache'])
+      const cacheRead = cache === undefined ? undefined : asNumber(cache['read'])
+      const cacheWrite = cache === undefined ? undefined : asNumber(cache['write'])
       this.#usage.set(messageId, {
         input: asNumber(tokens['input']) ?? 0,
         output: asNumber(tokens['output']) ?? 0,
         cost: asNumber(info['cost']) ?? 0,
+        cacheRead,
+        cacheWrite,
       })
     }
 
@@ -355,6 +396,21 @@ export class OpencodeEventMapper {
  * machinery is shared (`classifier`).
  */
 const SIGNATURES: readonly RefusalSignature[] = [
+  {
+    // §15.4. `classifier` hoists this row above the rest and only consults it
+    // when the caller says the failing request carried the resumed id — which
+    // here is one request and not the whole spawn: prompting a session the
+    // server has pruned 404s, while the server failing to boot must stay a
+    // server failure however the task was going to be resumed.
+    //
+    // A bare 404 is enough *under that guard*, because the URL it came back
+    // from was the session's own. Without the guard it would be indefensible:
+    // 404 is also what a wrong path or a version mismatch answers.
+    kind: 'stale_session',
+    reason: 'resume-session-unknown',
+    pattern:
+      /\b404\b|session[^\n]{0,40}\b(not ?found|not exist|no longer exists|expired|unknown|invalid)\b|unknown session/,
+  },
   {
     kind: 'fatal',
     reason: 'binary-not-found',
@@ -937,7 +993,13 @@ export class OpencodeAdapter implements HarnessAdapter {
     })
     if (!prompt.ok) {
       session.detach()
-      return classifySpawnFailure(prompt.text, prompt.status, task.nodeId)
+      // The only request in this spawn addressed to an id the caller handed
+      // us, so the only one whose failure can mean the id is stale (§15.4).
+      // A session this adapter just created cannot be stale, however the
+      // request failed — hence the flag tracks the *resume*, not the URL.
+      return classifySpawnFailure(prompt.text, prompt.status, task.nodeId, {
+        resuming: task.resumeSessionId !== undefined,
+      })
     }
 
     return { ok: true, session }

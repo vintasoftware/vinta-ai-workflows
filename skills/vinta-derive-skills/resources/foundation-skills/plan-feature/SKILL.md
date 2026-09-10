@@ -524,6 +524,7 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `defaults.harness` | The agent CLI the team runs — `claude-code`, `codex`, or `opencode`. `claude-code` unless the project says otherwise. |
 | `defaults.model` | The concrete model id for the tier **most** phases carry, pulled from [resources/ai-models.yaml](resources/ai-models.yaml). |
 | `defaults.pipeline` | `standard-phase` — see "The pipeline block". |
+| `defaults.max_session_turns` | Omit (defaults to 12). It caps how many turns one reused agent session may take before the executor starts a fresh one; the executor reuses sessions across a phase's implement and fix turns, so this is a context-window guard rather than something a plan tunes. |
 | `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the project's parallel-lane budget (3 when unstated); it is a hint, not a cap the plan enforces. |
 | `resources.<pool>` | One `{"kind": "semaphore"}` pool per expensive shared thing a gate contends for — the test database, the e2e browser grid, a staging deploy slot. `capacity: 1` when only one can run at a time. |
 | `gates.<id>` | The checks a phase must pass, as **shell commands run in the phase's lane** — the project's real typecheck / test / lint invocations, not an agent and not prose. Give the slow ones `requires` naming the pool they contend for, and a `timeout_s` that is generous rather than tight. |

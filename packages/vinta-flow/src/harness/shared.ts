@@ -27,7 +27,7 @@ import {
   type Platform,
   spawnOptionsFor,
 } from '../platform/platform.ts'
-import type { AgentEvent, SpawnRefusal, SpawnRefusalKind } from './adapter.ts'
+import type { AgentEvent, AgentTask, SpawnRefusal, SpawnRefusalKind } from './adapter.ts'
 
 // ---------------------------------------------------------------------------
 // Framing
@@ -193,14 +193,54 @@ export interface RefusalSignature {
   readonly pattern: RegExp
 }
 
+/**
+ * What the classifier needs to know about the spawn beyond what the vendor
+ * said. Both fields are things the *caller* knows and the output cannot state.
+ */
+export interface RefusalContext {
+  /** For resolving a reset time the vendor stated relative to now. */
+  readonly now?: Date
+  /**
+   * Whether the task carried an `AgentTask.resumeSessionId` (§15.4).
+   *
+   * It gates the `stale_session` rows entirely: with no token there was nothing
+   * to be stale, so a vendor saying "session not found" for some other reason
+   * must fall through to the ordinary table rather than be reported as a
+   * continuation the host should retry fresh. The caller passes it because only
+   * the caller knows — and it must be the *token that failed*, not merely a
+   * token that existed: opencode's server boot, for instance, can fail while a
+   * task carries a session id that was never in play.
+   */
+  readonly resuming?: boolean
+}
+
 export interface RefusalClassifier {
   /** What the CLI or server said on its way out, as a refusal value. */
-  classify(output: string, code: number | null, nodeId: string, now?: Date): SpawnRefusal
+  classify(
+    output: string,
+    code: number | null,
+    nodeId: string,
+    context?: RefusalContext,
+  ): SpawnRefusal
   /** The fixed label for whatever the vendor said, safe to put in a message field. */
   reasonFor(output: string): string
   /** Whether the named signature matches — how preflight recognizes a logged-out CLI. */
   matches(reason: string, output: string): boolean
 }
+
+/**
+ * The classification context for a one-process-per-turn adapter, where every
+ * failure on the way out belongs to the invocation that carried the token —
+ * `--resume <id>` and `exec resume <id>` are arguments of the very process
+ * whose diagnostics are being read, so there is no third state to distinguish.
+ *
+ * An adapter that talks to a long-lived server does *not* get to use this: a
+ * boot failure there is not the session id being refused, and passing it as one
+ * would turn "the server is down" into "retry with a fresh session" (§15.4).
+ */
+export const resumeContext = (task: AgentTask): RefusalContext => ({
+  resuming: task.resumeSessionId !== undefined,
+})
 
 /** `exit 3` / `exit signal`. A process failed and its exit code is the code. */
 const describeExit = (code: number | null): string => `exit ${code ?? 'signal'}`
@@ -218,23 +258,44 @@ const describeExit = (code: number | null): string => `exit ${code ?? 'signal'}`
  * `describeCode` renders the trailing parenthetical. It is a parameter because
  * the code means different things per adapter — an exit code where a process
  * failed, an HTTP status where a request did — and the operator reads it.
+ *
+ * `stale_session` rows are the one kind this function reorders (§15.4). They
+ * are hoisted ahead of the rest of the table and consulted only for a spawn
+ * that carried a session id, because both halves of that are invariants no
+ * adapter should be trusted to restate: a vendor announces a forgotten session
+ * with wording that reads as transient ("session not found", a bare 404), so a
+ * row sitting anywhere below `transient` would never win — and the same wording
+ * from a spawn with no token to be stale must *not* win at all.
  */
 export function classifier(
   harnessId: string,
   signatures: readonly RefusalSignature[],
   describeCode: (code: number | null) => string = describeExit,
 ): RefusalClassifier {
-  const find = (output: string): RefusalSignature | undefined =>
-    signatures.find((signature) => signature.pattern.test(output.toLowerCase()))
+  const general = signatures.filter((signature) => signature.kind !== 'stale_session')
+  const resumed = [
+    ...signatures.filter((signature) => signature.kind === 'stale_session'),
+    ...general,
+  ]
+
+  const find = (output: string, resuming: boolean): RefusalSignature | undefined =>
+    (resuming ? resumed : general).find((signature) =>
+      signature.pattern.test(output.toLowerCase()),
+    )
 
   return {
-    classify(output, code, nodeId, now = new Date()) {
+    classify(output, code, nodeId, context = {}) {
+      const now = context.now ?? new Date()
       const text = output.toLowerCase()
-      const matched = find(text)
+      const matched = find(text, context.resuming === true)
       const kind = matched?.kind ?? 'fatal'
       const reason = matched?.reason ?? 'unclassified'
-      // `fatal` is not a wait, so a reset time stated alongside one is noise.
-      const retryAfter = kind === 'fatal' ? undefined : parseRetryAfter(text, now)
+      // Neither of these is a wait, so a reset time stated alongside one is
+      // noise: `fatal` never runs again, and the answer to `stale_session` is
+      // an immediate retry with a fresh session (§15.4) — a delay would buy
+      // nothing, since a forgotten session does not come back.
+      const waiting = kind !== 'fatal' && kind !== 'stale_session'
+      const retryAfter = waiting ? parseRetryAfter(text, now) : undefined
       return {
         ok: false,
         kind,
@@ -243,7 +304,9 @@ export function classifier(
         ...(retryAfter === undefined ? {} : { retryAfter }),
       }
     },
-    reasonFor: (output) => find(output)?.reason ?? 'unclassified',
+    // Labels prose from a turn that already started, which by definition is not
+    // a spawn refusing a session id — so the stale rows stay out of it.
+    reasonFor: (output) => find(output, false)?.reason ?? 'unclassified',
     matches: (reason, output) => {
       const signature = signatures.find((entry) => entry.reason === reason)
       return signature?.pattern.test(output.toLowerCase()) ?? false

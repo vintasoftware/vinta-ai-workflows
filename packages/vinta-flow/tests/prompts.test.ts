@@ -33,6 +33,7 @@ import {
   composeSpawnPrompt,
   dependencyClosure,
   PromptError,
+  readVerdict,
   resolveBrief,
   VERDICT_MARKER,
   type PromptJournal,
@@ -174,6 +175,8 @@ function compose(
     readonly reports?: Readonly<Record<string, string>>
     readonly rows?: readonly Partial<NodeRow>[]
     readonly facts?: EffectInvocation['context']
+    /** §15.3: this turn continues a session that already ran. */
+    readonly continuation?: boolean
   } = {},
 ): string {
   const workflow = options.workflow ?? diamond()
@@ -190,6 +193,7 @@ function compose(
     }),
     workspace: options.dir === undefined ? workspace() : options.dir,
     facts: options.facts ?? {},
+    ...(options.continuation === undefined ? {} : { continuation: options.continuation }),
   })
 }
 
@@ -704,6 +708,310 @@ describe('the conflict-fixer prompt', () => {
     expect(prompt).toContain('--ours')
   })
 })
+
+// ---------------------------------------------------------------------------
+// 8. Continuation: the same role, told only what is new (§15.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * A continued turn is handed to a session that already holds the phase brief,
+ * the plan's bounds and its own prior work, so its prompt is a delta. Re-sending
+ * the brief there is not a wasted prefix — it instructs an agent to implement
+ * what it has already implemented.
+ *
+ * Every "does not contain" below is paired, in the same test, with the cold
+ * prompt that *does* contain the same string. A negative assertion against a
+ * string the renderer could never emit passes forever and proves nothing; the
+ * positive half is what makes each of these fail when a delta starts re-sending
+ * what the session already has.
+ */
+describe('a continuation prompt', () => {
+  const findings = 'BLOCKER: POST /folders does not validate parent_id.'
+  const reports = { 'api-layer': findings }
+  const reviewFailed = { review: { verdict: 'fail' } } as const
+
+  /** The phase brief text and a plan-level line, as the fixtures write them. */
+  const BRIEF = 'Add REST endpoints for folders.'
+  const NON_GOAL = '- Sharing a folder with another user.'
+
+  describe('for the fixer, continuing the implementer’s own session', () => {
+    it('carries the findings and drops the brief the session already holds', () => {
+      const dir = workspace(PLAN_SECTIONS)
+      const options = { dir, workflow: diamondWithPlanContext(), reports, facts: reviewFailed }
+      const cold = compose('api-layer', 'fixer', options)
+      const continued = compose('api-layer', 'fixer', { ...options, continuation: true })
+
+      // The delta still says what to change: findings are the whole point.
+      expect(continued).toContain(findings)
+      expect(continued).toContain('nothing else')
+
+      // The cold half proves the brief is something this renderer emits, so the
+      // absence below is a real difference rather than a string that was never
+      // in either prompt.
+      expect(cold).toContain(BRIEF)
+      expect(continued).not.toContain(BRIEF)
+      expect(cold).toContain('## The phase this branch is implementing')
+      expect(continued).not.toContain('## The phase this branch is implementing')
+    })
+
+    it('drops the plan-level sections too, and says why nothing is repeated', () => {
+      const dir = workspace(PLAN_SECTIONS)
+      const workflow = diamondWithPlanContext()
+      const options = { dir, workflow, reports, facts: reviewFailed }
+      // The fixer has never had plan-level context, cold or continued (§ the
+      // module header). The reviewer is where those sections do reach a prompt,
+      // so it is the control that proves this fixture really carries them.
+      const reviewer = compose('api-layer', 'reviewer', options)
+      const continued = compose('api-layer', 'fixer', { ...options, continuation: true })
+
+      expect(reviewer).toContain(NON_GOAL)
+      expect(reviewer).toContain('## Plan-level decisions')
+      expect(continued).not.toContain(NON_GOAL)
+      expect(continued).not.toContain('Plan-level')
+      expect(continued).toContain('none of')
+      expect(continued).toContain('is repeated here')
+    })
+
+    it('carries a red gate the same way the cold prompt does', () => {
+      const continued = compose('api-layer', 'fixer', {
+        reports: { 'api-layer': 'VERDICT: pass' },
+        facts: {
+          gate: { id: 'unit', exit_code: 1, status: 'failed', log_ref: '/runs/run-1/gates/unit.log' },
+        },
+        continuation: true,
+      })
+
+      expect(continued).toContain('Gate unit failed with exit code 1')
+      expect(continued).toContain('/runs/run-1/gates/unit.log')
+      expect(continued).toContain('unit: `pnpm test`')
+      // The gate, not the review that passed before it — same rule as cold.
+      expect(continued).not.toContain('VERDICT: pass')
+    })
+
+    it('does not point at a phase body that is not on the page', () => {
+      // With no findings recorded the cold prompt says "the phase body below",
+      // which is a lie in a delta: there is no body below.
+      const continued = compose('api-layer', 'fixer', { facts: reviewFailed, continuation: true })
+
+      expect(compose('api-layer', 'fixer', { facts: reviewFailed })).toContain('phase body below')
+      expect(continued).not.toContain('below')
+      expect(continued).toContain('already above')
+    })
+  })
+
+  describe('for the reviewer, continuing its own session across rounds', () => {
+    const continued = (): string =>
+      compose('api-layer', 'reviewer', {
+        rows: [
+          {
+            node_id: 'api-layer',
+            branch: 'plan/bookmarks/phase-api-layer',
+            base_branch: 'plan/bookmarks/phase-db-schema',
+          },
+        ],
+        continuation: true,
+      })
+
+    it('says the fixer acted and asks for the new diff, without re-sending the brief', () => {
+      const prompt = continued()
+
+      expect(prompt).toContain('A fixer has acted on the findings you')
+      // The diff command, over the branches the journal recorded for this node.
+      expect(prompt).toContain('plan/bookmarks/phase-db-schema...plan/bookmarks/phase-api-layer')
+      // It still reports rather than edits — the one standing rule of the role.
+      expect(prompt).toContain('report every issue, fix none of them')
+      expect(compose('api-layer', 'reviewer')).toContain(BRIEF)
+      expect(prompt).not.toContain(BRIEF)
+    })
+
+    it('restates the verdict protocol — the one thing a delta may never drop', () => {
+      const prompt = continued()
+
+      // Asserted through the exported marker, so a rename moves both halves.
+      expect(prompt).toContain(VERDICT_MARKER)
+      expect(prompt).toContain(`${VERDICT_MARKER} pass`)
+      expect(prompt).toContain(`${VERDICT_MARKER} fail`)
+      expect(prompt).toContain('a turn that ends without it is taken as a failure')
+    })
+
+    it('demands a line the exported parser reads back, in both outcomes', () => {
+      const prompt = continued()
+
+      expect(readVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
+      expect(readVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
+      // And what the parser makes of a reviewer that states nothing, which is
+      // what a delta with the protocol trimmed out would produce every round.
+      expect(readVerdict('The fix looks fine to me.')).toBeUndefined()
+    })
+
+    it('demands a line the executor itself reads back as the verdict', async () => {
+      const prompt = continued()
+
+      expect(await readBackVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
+      expect(await readBackVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
+    })
+  })
+
+  describe('for the implementer, resumed rather than re-briefed', () => {
+    it('is a nudge: the lane and the branch, and none of the cold materials', () => {
+      const dir = workspace(PLAN_SECTIONS)
+      const options = { dir, workflow: diamondWithPlanContext(), reports: DEPENDENCY_REPORTS }
+      const cold = compose('api-layer', 'implementer', options)
+      const prompt = compose('api-layer', 'implementer', { ...options, continuation: true })
+
+      expect(prompt).toContain('Resuming api-layer: API')
+      expect(prompt).toContain('Pick up exactly where you left off')
+      expect(prompt).toContain(dir)
+
+      // Each of the three things the session already holds, with the cold
+      // prompt standing as proof that this fixture really produces them.
+      expect(cold).toContain(BRIEF)
+      expect(prompt).not.toContain(BRIEF)
+      expect(cold).toContain('SCHEMA REPORT: added Folder with a parent_id column.')
+      expect(prompt).not.toContain('SCHEMA REPORT')
+      expect(cold).toContain(NON_GOAL)
+      expect(prompt).not.toContain(NON_GOAL)
+    })
+
+    it('tells it to read the worktree before trusting its own memory of it', () => {
+      // A resumed implementer was interrupted by a capacity wait or an operator
+      // takeover (§9), either of which can have moved the lane underneath it.
+      const prompt = compose('api-layer', 'implementer', { continuation: true })
+
+      expect(prompt).toContain('git status')
+      expect(prompt).toContain('say so in your report instead of')
+      expect(prompt).toContain('unit: `pnpm test`')
+    })
+  })
+
+  it('hands back the reference for a lane with no worktree, continued or not', () => {
+    // A projection never continues anything: there is no session and no
+    // checkout, and §15.2's fallback is a cold prompt, not a delta into thin air.
+    expect(compose('api-layer', 'fixer', { dir: null, continuation: true })).toBe(
+      'plan.md#api-layer',
+    )
+  })
+
+  it('is still refused for a conflict-fixer, which has no session to continue', () => {
+    expect(() => compose('api-layer', 'conflict-fixer', { continuation: true })).toThrow(
+      /integrator/,
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8b. The cold path is unchanged
+// ---------------------------------------------------------------------------
+
+/**
+ * `continuation` is a new branch through a module whose other branch was
+ * already shipping. Section 1b pins the implementer's cold output byte for
+ * byte; these pin the other two, because "unchanged" is a claim about every
+ * character and the two renderers that grew a sibling are exactly the ones a
+ * shared helper could quietly reword.
+ */
+describe('the cold prompt', () => {
+  it('composes the reviewer exactly as before', () => {
+    const dir = workspace()
+    expect(compose('api-layer', 'reviewer', { dir })).toBe(COLD_REVIEWER(dir))
+  })
+
+  it('composes the fixer exactly as before', () => {
+    const dir = workspace()
+    const prompt = compose('api-layer', 'fixer', {
+      dir,
+      reports: FIXER_REPORTS,
+      facts: { review: { verdict: 'fail' } },
+    })
+    expect(prompt).toBe(COLD_FIXER(dir))
+  })
+
+  it('treats an explicit continuation: false exactly as its absence', () => {
+    const dir = workspace()
+    for (const template of ['implementer', 'reviewer', 'fixer']) {
+      expect(
+        compose('api-layer', template, { dir, reports: FIXER_REPORTS, continuation: false }),
+      ).toBe(compose('api-layer', template, { dir, reports: FIXER_REPORTS }))
+    }
+  })
+})
+
+/** The dependency reports the closure tests use, reused as a cold-prompt control. */
+const DEPENDENCY_REPORTS = {
+  'db-schema': 'SCHEMA REPORT: added Folder with a parent_id column.',
+} as const
+
+/** The findings the cold fixer golden quotes back. */
+const FIXER_REPORTS = { 'api-layer': 'BLOCKER: POST /folders does not validate parent_id.' } as const
+
+const COLD_REVIEWER = (dir: string): string =>
+  `You are reviewing api-layer: API of plan bookmarks.
+You review: read, run and report, but never edit code. Every issue you find
+is reported, not fixed — a fixer agent acts on your findings after you.
+
+## What to review
+The diff of \`HEAD\` against its base \`main\`:
+    git -C ${dir} diff main...HEAD
+Read the full diff of every changed file. Spot-checking is not enough.
+
+## What that diff was supposed to implement
+## api-layer
+
+Add REST endpoints for folders.
+
+## The three layers, all of them, in order
+1. Mechanical. The changed-file list matches the report; the whole diff read;
+   the outer gate confirmed green — vague confirmation means you re-run it:
+   - unit: \`pnpm test\`
+   Scope creep and unrelated churn surfaced; a scan of the diff for secrets
+   (password, secret, token, api_key, AKIA, BEGIN … KEY).
+2. Plan compliance. Every change the phase body asked for is implemented;
+   every test it named exists and its assertions exercise the named behaviour;
+   the acceptance line is satisfiable by this diff; repo conventions followed;
+   new comments read as plain English, one idea per sentence.
+3. Independent judgment. Correctness, edge cases, and one structural question:
+   is there a reframe that would make whole branches, helpers or layers
+   disappear rather than be polished? Finding nothing in a large multi-file
+   diff is suspicious — read it again.
+
+Triage each finding as BLOCKER, SHOULD-FIX or NIT.
+
+## How to report
+List your findings, each with its triage level, file and line. Then end your
+final message with one line, exactly:
+    ${VERDICT_MARKER} pass
+or
+    ${VERDICT_MARKER} fail
+Use \`${VERDICT_MARKER} fail\` if any BLOCKER stands. That line is read by the
+orchestrator; a turn that ends without it is taken as a failure, so it must be
+the last thing you write.
+`
+
+const COLD_FIXER = (dir: string): string =>
+  `You are fixing api-layer: API of plan bookmarks.
+Work entirely inside \`${dir}\`, on branch \`HEAD\`.
+
+## What failed
+The reviewer reported:
+
+BLOCKER: POST /folders does not validate parent_id.
+
+## The phase this branch is implementing
+## api-layer
+
+Add REST endpoints for folders.
+
+## What to do
+Fix exactly what is listed above, and nothing else — an unrelated change here
+is scope creep the reviewer will send back. Then re-run the inner loop, and
+these, until they are green:
+   - unit: \`pnpm test\`
+
+## Required output
+- Status: SUCCESS or FAILURE, and why.
+- Files modified, paths only.
+- What you changed for each finding, and any finding you did not act on.
+`
 
 it('resolves every node of the diamond against the plan the fixture writes', () => {
   const dir = workspace()

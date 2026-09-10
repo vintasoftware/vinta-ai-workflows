@@ -62,6 +62,17 @@ export interface AdapterContractFixture {
    * at hour three of a run.
    */
   forceRefusal(kind: SpawnRefusalKind): void
+  /**
+   * A task carrying a `resumeSessionId` the vendor does not have — an id it
+   * never issued, or one it has since pruned (§15.4).
+   *
+   * Optional, and skipped when absent, because not every fixture can produce
+   * one: a double that resumes whatever id it is handed has no forgotten
+   * sessions to offer. Where a fixture *can*, this is the assertion that makes
+   * session reuse survivable — the classification is a per-vendor pattern
+   * table, and a table nothing exercises is a table that matches nothing.
+   */
+  readonly staleResumeTask?: AgentTask
   dispose?(): Promise<void>
   /**
    * How long any single await in this suite may take before it is called a
@@ -320,7 +331,40 @@ export function runAdapterContract(
       expect(alive(handle.pid)).toBe(false)
     })
 
-    for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'fatal'] as const) {
+    test('a session the vendor has forgotten is stale, not fatal', async (fixture, within) => {
+      // §15.4's whole point, and the reason it is here rather than only in each
+      // adapter's own file: the host answers `stale_session` with one retry on
+      // a fresh session, and answers `fatal` by failing the node. An adapter
+      // that reads a forgotten token as either of the kinds around it turns the
+      // ordinary case of session reuse — a token that aged out — into a dead
+      // run, and it does so identically for every vendor, so the invariant
+      // belongs where all of them are held to it.
+      const stale = fixture.staleResumeTask
+      if (stale === undefined) return
+      expect(fixture.adapter.capabilities.resume).toBe(true)
+
+      const outcome = await within('spawn with a stale session', fixture.adapter.spawn(stale))
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.kind).toBe('stale_session')
+
+      // And the same vendor wording with no token to be stale is *not* it:
+      // there was nothing to expire, so whatever went wrong went wrong for
+      // another reason and must keep its own classification.
+      const { resumeSessionId: _dropped, ...fresh } = stale
+      const cold = await within('spawn with no session', fixture.adapter.spawn(fresh))
+      expect(cold.ok === false && cold.kind === 'stale_session').toBe(false)
+      if (cold.ok) await within('kill', cold.session.kill())
+    })
+
+    for (const kind of [
+      'rate_limit',
+      'concurrency',
+      'quota',
+      'transient',
+      'stale_session',
+      'fatal',
+    ] as const) {
       test(`spawn returns a ${kind} refusal instead of throwing`, async (fixture, within) => {
         fixture.forceRefusal(kind)
         const outcome = await within('spawn', fixture.adapter.spawn(fixture.task))

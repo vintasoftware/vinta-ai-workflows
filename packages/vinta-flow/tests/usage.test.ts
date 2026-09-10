@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { openJournal } from '../src/journal/journal.ts'
 import type { AgentEvent } from '../src/harness/adapter.ts'
 import {
+  cacheReadShare,
   collectNodeUsage,
   collectRunUsage,
   sumTotals,
@@ -60,6 +61,19 @@ const session = (
   { type: 'session_started', sessionId },
   { type: 'assistant_text', text: 'work happened' },
   { type: 'usage', input, output, ...(costUsd === undefined ? {} : { costUsd }) },
+  { type: 'session_ended', result: 'ok' },
+]
+
+/** A session that reported cache figures too — a continued turn, in §15's terms. */
+const cachedSession = (
+  sessionId: string,
+  input: number,
+  output: number,
+  cacheRead: number,
+  cacheWrite: number,
+): AgentEvent[] => [
+  { type: 'session_started', sessionId },
+  { type: 'usage', input, output, cacheRead, cacheWrite },
   { type: 'session_ended', result: 'ok' },
 ]
 
@@ -221,6 +235,7 @@ describe('usage accounting', () => {
       outputTokens: 0,
       sessions: 0,
       cost: { status: 'unreported', missingSessions: 0 },
+      cache: { status: 'unreported', missingSessions: 0 },
     }
     expect(run.nodes.find((n) => n.nodeId === 'never')?.totals).toEqual(zero)
     expect(run.totals).toEqual(zero)
@@ -255,6 +270,89 @@ describe('usage accounting', () => {
     // A wave's breakdown covers only that wave's nodes.
     expect(Object.keys(run.waves[0]?.byModel ?? {})).toEqual(['haiku'])
     expect(Object.keys(run.waves[1]?.byModel ?? {}).sort()).toEqual(['opus', 'sonnet'])
+  })
+
+  it('sums the cache counters and states the share they bought', () => {
+    // §15.6: what session reuse actually returned, in the one number that says
+    // it. The denominator is the whole prompt — fresh plus cached — because a
+    // share of the fresh part alone is not a hit rate.
+    const wf = workflow([phase('p1')])
+    const source = fake(wf, {
+      p1: [
+        ...cachedSession('cold', 10_000, 100, 0, 10_000),
+        ...cachedSession('warm', 500, 100, 10_000, 0),
+      ],
+    })
+
+    const { totals } = collectNodeUsage(source, 'r1', 'p1')
+    expect(totals.cache).toEqual({
+      status: 'complete',
+      readTokens: 10_000,
+      writeTokens: 10_000,
+      promptTokens: 30_500,
+      reportedSessions: 2,
+    })
+    expect(cacheReadShare(totals)).toBeCloseTo(10_000 / 30_500)
+  })
+
+  it('says a cache hit rate is unknown rather than zero when nothing reported it', () => {
+    // The failure this exists to prevent: a harness that reports no cache
+    // figures aggregating as one that achieved a 0% hit rate, which would make
+    // session reuse look broken on every run that included one.
+    const wf = workflow([phase('silent'), phase('cold')])
+    const source = fake(wf, {
+      silent: session('s1', 900, 90),
+      // A harness that did report, and reported a genuine cold turn.
+      cold: cachedSession('s2', 900, 90, 0, 0),
+    })
+
+    const run = collectRunUsage(source, 'r1')
+    const silent = nodeTotals(run, 'silent')
+    const cold = nodeTotals(run, 'cold')
+
+    expect(silent.cache).toEqual({ status: 'unreported', missingSessions: 1 })
+    expect(cacheReadShare(silent)).toBe(undefined)
+    // The reported zero is a number, and it is 0% — distinctly.
+    expect(cacheReadShare(cold)).toBe(0)
+    expect(silent.cache).not.toHaveProperty('readTokens')
+
+    // Mixed, so the run total is partial: the figures cover the sessions that
+    // reported, and their names say as much.
+    expect(run.totals.cache).toEqual({
+      status: 'partial',
+      readTokensSoFar: 0,
+      writeTokensSoFar: 0,
+      promptTokensSoFar: 900,
+      reportedSessions: 1,
+      missingSessions: 1,
+    })
+    expect(run.totals.cache).not.toHaveProperty('readTokens')
+    // And it survives further aggregation, exactly as the cost status does.
+    expect(sumTotals(run.nodes.map((n) => n.totals))).toEqual(run.totals)
+  })
+
+  it('counts a session reporting only one of the two counters', () => {
+    // codex reports a cached-input count and nothing about writes. Dropping
+    // such a session from the denominator would understate exactly the turns
+    // §15 exists to produce.
+    const wf = workflow([phase('p1')])
+    const source = fake(wf, {
+      p1: [
+        { type: 'session_started', sessionId: 's1' },
+        { type: 'usage', input: 1_000, output: 50, cacheRead: 9_000 },
+        { type: 'session_ended', result: 'ok' },
+      ],
+    })
+
+    const { totals } = collectNodeUsage(source, 'r1', 'p1')
+    expect(totals.cache).toEqual({
+      status: 'complete',
+      readTokens: 9_000,
+      writeTokens: 0,
+      promptTokens: 10_000,
+      reportedSessions: 1,
+    })
+    expect(cacheReadShare(totals)).toBe(0.9)
   })
 
   it('counts usage that arrives with no session started, without folding it together', () => {
