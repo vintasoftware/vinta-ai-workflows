@@ -876,7 +876,14 @@ describe('§9 operations', () => {
     const report = await running
 
     expect(report.statuses).toEqual({ a: 'done' })
-    expect(transcriptOf(r, 'a').some((entry) => entry.type === 'user_message')).toBe(false)
+    // It reaches the transcript even though the harness cannot inject: the
+    // delivery moment differs (the next spawn, via `AgentTask.operatorText`),
+    // but the record of what the operator said must not. That is what §7's
+    // `user_message` variant exists for.
+    expect(transcriptOf(r, 'a')).toContainEqual({
+      type: 'user_message',
+      text: 'prefer a migration over a backfill',
+    })
     // Delivered on the node's next resume, into the guard context every later
     // effect reads — including the one that composes the next agent turn.
     const next = r.calls.find((call) => call.effect === 'e-2')

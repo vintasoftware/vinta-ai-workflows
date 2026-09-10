@@ -16,7 +16,7 @@
  * the tests from both sides at once. `corrupt` is the deliberate exception —
  * that is the test that proves the client is parsing at all.
  */
-import { createServer, type Server } from 'node:http'
+import { createServer, type Server, type ServerResponse } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
 import {
   EventFrameSchema,
@@ -71,13 +71,16 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
 
   const server: Server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
-    if (!authorized(request.headers.authorization, url)) return json(response, 401, { error: 'unauthorized', issues: null })
+    if (!authorized(request.headers.authorization, url)) {
+      return json(response, 401, { error: 'unauthorized', issues: null })
+    }
 
     if (url.pathname === '/api/runs') {
       return json(response, 200, RunListResponseSchema.parse({ runs: options.runs }))
     }
     const match = /^\/api\/runs\/([^/]+)$/.exec(url.pathname)
-    const snapshot = match?.[1] === undefined ? undefined : snapshots.get(decodeURIComponent(match[1]))
+    const snapshot =
+      match?.[1] === undefined ? undefined : snapshots.get(decodeURIComponent(match[1]))
     if (snapshot === undefined) return json(response, 404, { error: 'unknown_run', issues: null })
     if (options.corrupt === 'snapshot') return json(response, 200, { run: snapshot.run })
     return json(response, 200, RunSnapshotSchema.parse(snapshot))
@@ -88,7 +91,11 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     const runId = url.searchParams.get('run') ?? ''
     const since = Number(url.searchParams.get('since') ?? '0')
-    if (!authorized(request.headers.authorization, url) || url.pathname !== '/ws' || !snapshots.has(runId)) {
+    const allowed =
+      authorized(request.headers.authorization, url) &&
+      url.pathname === '/ws' &&
+      snapshots.has(runId)
+    if (!allowed) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
       socket.destroy()
       return
@@ -151,7 +158,11 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       cursor: last.id,
       events: pending,
     }
-    ws.send(JSON.stringify(options.corrupt === 'frame' ? { channel: 'events', events: 'nope' } : EventFrameSchema.parse(frame)))
+    const body =
+      options.corrupt === 'frame'
+        ? { channel: 'events', events: 'nope' }
+        : EventFrameSchema.parse(frame)
+    ws.send(JSON.stringify(body))
     state.cursor = last.id
     state.record.sent.push(...pending.map((event) => event.id))
   }
@@ -161,7 +172,7 @@ function authorized(authorization: string | undefined, url: URL): boolean {
   return authorization === `Bearer ${TOKEN}` || url.searchParams.get('token') === TOKEN
 }
 
-function json(response: import('node:http').ServerResponse, status: number, body: unknown): void {
+function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json' })
   response.end(JSON.stringify(body))
 }

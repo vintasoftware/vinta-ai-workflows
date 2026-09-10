@@ -47,5 +47,5 @@ test('the list shows status and elapsed, and opens a run without carrying the to
   if (open === null) throw new Error('no link')
   fireEvent.click(open)
   await waitFor(() => expect(screen.getByText('add-billing')).toBeDefined())
-  expect(container.querySelector('tr[data-node="impl"]')).not.toBe(null)
+  await waitFor(() => expect(container.querySelector('tr[data-node="impl"]')).not.toBe(null))
 })

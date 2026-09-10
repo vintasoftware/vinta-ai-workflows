@@ -24,9 +24,11 @@ import { doctorCommand, type DoctorOverrides } from '../src/cli/doctor.ts'
 import { FAILED, OK, USAGE, type Io } from '../src/cli/io.ts'
 import { main } from '../src/cli/index.ts'
 import { purgeCommand } from '../src/cli/purge.ts'
+import { runCommand } from '../src/cli/run.ts'
 import { serveCommand } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
 import type { Daemon } from '../src/daemon/index.ts'
+import { MockAdapter } from '../src/harness/mock.ts'
 
 // ---------------------------------------------------------------------------
 // Rig
@@ -316,6 +318,55 @@ describe('vinta-flow serve', () => {
     const io = recorder()
     expect(await serveCommand(['--port', 'eighty'], io.io)).toBe(USAGE)
     expect(io.err.join('\n')).toContain('--port must be an integer')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// run
+// ---------------------------------------------------------------------------
+
+describe('vinta-flow run', () => {
+  it('brings the daemon up before executing, and freezes the snapshot', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a'), node('b', ['a'])]))
+    const io = recorder()
+    let daemon: Daemon | null = null
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'cli-run',
+      onStarted: (started) => {
+        daemon = started
+      },
+    })
+
+    expect(code).toBe(OK)
+    expect(daemon).not.toBeNull()
+    // The URL is printed before the first node dispatches — §9's whole
+    // interaction model depends on being able to open it during the run.
+    expect(io.out.findIndex((line) => line.includes('token='))).toBeLessThan(
+      io.out.findIndex((line) => line.includes('cli-run completed')),
+    )
+    // §5.3: the snapshot the run executes, frozen into its own directory.
+    expect(existsSync(join(dir, '.vinta-flow', 'runs', 'cli-run', 'workflow.json'))).toBe(true)
+  })
+
+  it('never writes the token more than once here either', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    const io = recorder()
+    let daemon: Daemon | null = null
+
+    await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'token-run',
+      onStarted: (started) => {
+        daemon = started
+      },
+    })
+
+    const token = (daemon as unknown as Daemon).token
+    expect(io.all().filter((line) => line.includes(token))).toHaveLength(1)
   })
 })
 

@@ -63,6 +63,7 @@ import {
   asString,
   childEnv,
   classifier,
+  operatorGuidance,
   probe as probeBin,
   signalGroup,
 } from './shared.ts'
@@ -647,6 +648,16 @@ class OpencodeSession implements AgentSession {
     this.#release = null
   }
 
+  /**
+   * Operator steering delivered with the opening prompt (§9), recorded in the
+   * transcript as the operator's own message — the same place `send` puts it.
+   * Only the record: the text itself rides the prompt request.
+   */
+  noteOperator(text: string): void {
+    if (this.#ended) return
+    this.#queue.push({ type: 'user_message', text })
+  }
+
   get events(): AsyncIterable<AgentEvent> {
     return {
       [Symbol.asyncIterator]: (): AsyncIterator<AgentEvent> => {
@@ -885,10 +896,21 @@ export class OpencodeAdapter implements HarnessAdapter {
     // Subscribed first: an event that arrives between the prompt landing and
     // the subscription being made is an event the transcript never gets.
     session.attach()
+    // Queued operator steering (§9) is a second, labelled part of the same
+    // request rather than a second round trip: one POST cannot land half of
+    // an operator's correction. `inject` being true does not make this
+    // redundant — a node resumed after a capacity wait had no live session
+    // when the operator typed, so this spawn is its only delivery.
+    if (task.operatorText !== undefined) session.noteOperator(task.operatorText)
 
     const model = parseModel(task.model)
     const prompt = await postJson(`${server.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt_async`, {
-      parts: [{ type: 'text', text: task.prompt }],
+      parts: [
+        { type: 'text', text: task.prompt },
+        ...(task.operatorText === undefined
+          ? []
+          : [{ type: 'text', text: operatorGuidance(task.operatorText) }]),
+      ],
       ...(model === undefined ? {} : { model }),
     })
     if (!prompt.ok) {

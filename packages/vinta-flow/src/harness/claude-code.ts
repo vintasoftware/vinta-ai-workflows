@@ -50,6 +50,7 @@ import {
   asString,
   childEnv,
   classifier,
+  operatorGuidance,
   probe,
   signalGroup,
 } from './shared.ts'
@@ -459,6 +460,14 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     // business, and waiting on one to send the other would deadlock if it is
     // the latter.
     writeMessage(child, task.prompt)
+    // Steering that queued up while this node had no live session (§9). It is
+    // a second message rather than an addition to the brief, and it goes over
+    // stdin like the brief does — never argv. `inject` being true does not
+    // make this redundant: a node resumed after a capacity wait was not
+    // running when the operator typed, so a resume is the only delivery it has.
+    if (task.operatorText !== undefined) {
+      writeMessage(child, operatorGuidance(task.operatorText))
+    }
 
     return await this.#awaitStart(child, task)
   }
@@ -497,6 +506,13 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
               if (session !== undefined) continue
               session = new ClaudeCodeSession(event.sessionId, child, queue)
               queue.push(event)
+              // The operator's words in the record of the run they steered
+              // (§5.3, §15) — the same place `send` puts them. Pushed here
+              // rather than at the write above because the queue only becomes
+              // a stream anyone can read once the session exists.
+              if (task.operatorText !== undefined) {
+                queue.push({ type: 'user_message', text: task.operatorText })
+              }
               settle({ ok: true, session })
               continue
             }

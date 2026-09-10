@@ -37,8 +37,18 @@ body {
   margin: 0 0 16px;
 }
 
-a {
+a,
+.link {
   color: #3b5bdb;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 h2,

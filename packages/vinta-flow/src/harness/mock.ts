@@ -126,6 +126,15 @@ class MockSession implements AgentSession {
     yield { type: 'session_ended', result }
   }
 
+  /**
+   * Operator text carried on the task (§9), delivered at the start of the turn
+   * whatever `inject` says — that capability is about writing into a turn
+   * already running, and this is the moment before one.
+   */
+  deliverOperatorText(text: string): void {
+    this.#injected.push({ type: 'user_message', text })
+  }
+
   async send(text: string): Promise<void> {
     if (!this.capabilities.inject) throw new HarnessCapabilityError(this.harness, 'inject')
     this.#injected.push({ type: 'user_message', text })
@@ -182,9 +191,13 @@ export class MockAdapter implements HarnessAdapter {
     this.spawned.push(task)
     this.#sessions += 1
     const id = task.resumeSessionId ?? `${this.id}-session-${this.#sessions}`
-    return {
-      ok: true,
-      session: new MockSession(id, this.id, this.capabilities, this.options.script ?? DEFAULT_SCRIPT),
-    }
+    const session = new MockSession(
+      id,
+      this.id,
+      this.capabilities,
+      this.options.script ?? DEFAULT_SCRIPT,
+    )
+    if (task.operatorText !== undefined) session.deliverOperatorText(task.operatorText)
+    return { ok: true, session }
   }
 }

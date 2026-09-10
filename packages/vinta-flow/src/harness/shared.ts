@@ -55,6 +55,34 @@ export class JsonLines {
 }
 
 // ---------------------------------------------------------------------------
+// Operator steering
+// ---------------------------------------------------------------------------
+
+/**
+ * How `AgentTask.operatorText` is presented to an agent that could not be
+ * written to while it was running (§9).
+ *
+ * It is labelled rather than concatenated into the brief because the two have
+ * different authors: an agent handed one undifferentiated blob cannot tell a
+ * phase brief from a correction to it, and the correction is the part that is
+ * supposed to win. Shared so all three adapters say the same thing — an
+ * operator's steering must not mean different things per harness.
+ *
+ * This is task input on its way to the agent. It never reaches a log line, an
+ * error message or a process argument; each adapter delivers it over the same
+ * channel it sends the brief on, which for `codex` is stdin specifically so a
+ * brief never lands in the process table.
+ */
+export const operatorGuidance = (text: string): string =>
+  [
+    'The operator added the following guidance for this node while it was not',
+    'running. Treat it as a correction to the brief above: where the two',
+    'conflict, this wins.',
+    '',
+    text,
+  ].join('\n')
+
+// ---------------------------------------------------------------------------
 // Value coercion
 // ---------------------------------------------------------------------------
 

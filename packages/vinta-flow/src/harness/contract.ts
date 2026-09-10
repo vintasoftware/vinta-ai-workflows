@@ -231,6 +231,31 @@ export function runAdapterContract(
       expect(rest.some((e) => e.type === 'user_message' && e.text === text)).toBe(true)
     })
 
+    test('operator text on the task reaches the agent whatever inject says', async (fixture, within) => {
+      // The hole this closes: §9 says steering a harness that cannot inject is
+      // "queued and delivered on the next resume", and a queue that stops at
+      // the scheduler is steering the agent never hears. `inject` is about
+      // writing into a turn already running; this is delivered at the start of
+      // one, so *every* adapter owes it — including the two that can inject,
+      // whose nodes can still be resumed after a capacity wait with text
+      // queued from while they were down.
+      //
+      // Asserted through the transcript because that is the one observable
+      // every harness shares: an HTTP body, a stdin pipe and a JSON line are
+      // three different channels, and §5.3 makes this stream the record of
+      // what the agent was actually told.
+      const text = 'the operator says: keep the migration reversible'
+      const outcome = await within(
+        'spawn',
+        fixture.adapter.spawn({ ...fixture.task, operatorText: text }),
+      )
+      expect(outcome.ok).toBe(true)
+      if (!outcome.ok) throw new Error('contract: spawn refused where it was expected to succeed')
+
+      const events = await within('event stream', drain(iterate(outcome.session)))
+      expect(events.some((e) => e.type === 'user_message' && e.text === text)).toBe(true)
+    })
+
     for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'fatal'] as const) {
       test(`spawn returns a ${kind} refusal instead of throwing`, async (fixture, within) => {
         fixture.forceRefusal(kind)

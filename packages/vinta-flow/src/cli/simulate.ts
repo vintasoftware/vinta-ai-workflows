@@ -51,5 +51,18 @@ export async function simulateCommand(argv: readonly string[], io: Io): Promise<
   }
 
   io.out(formatSimulation(report))
-  return report.status === 'completed' ? OK : FAILED
+
+  // `completed` means every node *settled*, not that every node passed — a
+  // projection in which the first phase fails and the rest block is a settled
+  // run and an unrunnable plan, and exiting zero on it would make `simulate`
+  // useless in front of `run`. Node ids only; why a projected node failed is
+  // not in `SimulationReport` at all (see the note in the CLI's report).
+  const stuck = Object.entries(report.statuses)
+    .filter(([, status]) => status === 'failed' || status === 'blocked')
+    .map(([id]) => id)
+
+  if (stuck.length > 0) {
+    io.err(`vinta-flow: the projection did not complete cleanly: ${stuck.join(', ')}`)
+  }
+  return report.status === 'completed' && stuck.length === 0 ? OK : FAILED
 }

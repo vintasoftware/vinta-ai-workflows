@@ -123,13 +123,12 @@ function Nodes({
           </thead>
           <tbody>
             {nodes.map((node) => (
-              <tr
-                key={node.nodeId}
-                data-node={node.nodeId}
-                aria-current={node.nodeId === selected}
-                onClick={() => onSelect(node.nodeId)}
-              >
-                <td>{node.nodeId}</td>
+              <tr key={node.nodeId} data-node={node.nodeId} aria-current={node.nodeId === selected}>
+                <td>
+                  <button type="button" className="link" onClick={() => onSelect(node.nodeId)}>
+                    {node.nodeId}
+                  </button>
+                </td>
                 <td>{node.wave}</td>
                 <td>{node.harness}</td>
                 <td>{node.lane ?? '—'}</td>

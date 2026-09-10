@@ -144,6 +144,15 @@ interface NodeState {
    * put it there so the delivery is journalled as what it is.
    */
   pending: { readonly op: OperatorOp; readonly text: string }[]
+  /**
+   * Operator text a resume already drained into the guard context but that no
+   * agent has been handed yet. Two consumers, two clocks: the guard context is
+   * read at the resume, and the agent is only reachable at the next spawn. A
+   * node parked on a human gate hits the first well before the second, so
+   * dropping the text at the resume is exactly the hole that made `codex`
+   * steering inert.
+   */
+  undelivered: string[]
   /** Set by `pause`; honoured after the current turn, never inside it. */
   pauseRequested: boolean
   /** Set by `abortNode`. Every step checks it, so a killed node stops stepping. */
@@ -187,6 +196,7 @@ export class Scheduler {
         status: 'pending',
         live: null,
         pending: [],
+        undelivered: [],
         pauseRequested: false,
         aborted: false,
         parkedEffectId: null,
@@ -549,12 +559,17 @@ export class Scheduler {
    * guard context is where it lands: a plan can branch on it, and the effect
    * that composes the next prompt reads it from the same place it reads every
    * other fact.
+   *
+   * The guard context is not the *agent*, though, so the drained text is also
+   * staged for the node's next spawn, which is where `AgentTask.operatorText`
+   * carries it to the CLI.
    */
   #withPending(state: NodeState, run: PipelineRun, facts: GuardContext): GuardContext {
     if (state.pending.length === 0) return facts
     const queued = state.pending.splice(0)
     for (const entry of queued) this.#operation(state, entry.op, entry.text, 'delivered')
     const text = queued.map((entry) => entry.text).join('\n')
+    state.undelivered.push(text)
     return { ...facts, human: { ...run.context.human, ...facts.human, pending_context: text } }
   }
 
@@ -636,6 +651,14 @@ export class Scheduler {
     const { workflow, runId, journal, admission } = this.#options
     const adapter = this.#adapter(this.#harnessOf(state.node, params['harness']))
 
+    // §9's queue, on its way to the agent. Carried as its own field rather
+    // than folded into the brief so the adapter can present it as the
+    // operator's; nothing is cleared until a session is actually granted,
+    // because a capacity retry that swallowed it would lose the steering for
+    // good.
+    const carried = state.pending.length
+    const owed = [...state.undelivered, ...state.pending.map((entry) => entry.text)]
+
     const task: AgentTask = {
       nodeId: state.node.id,
       cwd: join(this.#options.laneRoot, state.lane as string),
@@ -644,11 +667,20 @@ export class Scheduler {
       // one exists.
       prompt: state.node.prompt_ref,
       model: String(params['model'] ?? state.node.model ?? workflow.defaults.model),
+      ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
     }
 
     const outcome = await admission.admit(adapter, task)
     if (outcome.status === 'failed') throw new SpawnFatal(outcome.message)
     if (outcome.status === 'retry') throw new CapacityRetry(outcome.wait)
+
+    // The task reached the harness, so the queue is spent. Only the entries
+    // that were on it when the task was built: anything the operator typed
+    // during the spawn itself is not in this turn and stays queued for the next.
+    for (const entry of state.pending.splice(0, carried)) {
+      this.#operation(state, entry.op, entry.text, 'delivered')
+    }
+    state.undelivered = []
 
     // The registry: exactly as long-lived as the turn it points at, so a §9
     // operation can never reach a session whose stream has already ended.

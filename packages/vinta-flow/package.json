@@ -4,12 +4,17 @@
   "private": true,
   "description": "Code-orchestrated parallel execution of plan-feature plans across agent harnesses.",
   "type": "module",
+  "bin": {
+    "vinta-flow": "./src/cli/bin.ts"
+  },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p ui/tsconfig.json",
     "test": "vitest run",
+    "ui:dev": "vite --config ui/vite.config.ts",
+    "ui:build": "vite build --config ui/vite.config.ts",
     "schema:gen": "node --experimental-strip-types src/schema/generate.ts",
     "schema:check": "node --experimental-strip-types src/schema/generate.ts --check"
   },

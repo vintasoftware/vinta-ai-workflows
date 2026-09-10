@@ -37,6 +37,24 @@ export interface AgentTask {
   readonly cwd: string
   readonly prompt: string
   readonly model: string
+  /**
+   * Steering the operator typed while this node had nowhere live to put it —
+   * a harness whose `inject` is false, or a node that was down on a capacity
+   * wait — waiting to be delivered at this spawn (§9).
+   *
+   * Deliberately **not** folded into `prompt`. The two have different authors,
+   * and an adapter has to be able to present this one *as the operator's*
+   * ("the operator added the following guidance") rather than concatenating it
+   * into a brief and leaving the agent to guess who said what. Every adapter
+   * delivers it, whatever its `inject` capability says: `inject` describes
+   * whether a *running turn* can be written to, and this is delivered at the
+   * start of one.
+   *
+   * Task input, exactly like `prompt`: it is legitimately handed to the agent
+   * and journalled as transcript payload, and it never goes into a log line,
+   * an error message, a refusal message, or a process argument.
+   */
+  readonly operatorText?: string
   /** Continue a prior session. Only meaningful where `capabilities.resume`. */
   readonly resumeSessionId?: string
 }

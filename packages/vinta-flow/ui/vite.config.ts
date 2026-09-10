@@ -10,6 +10,9 @@ import { defineConfig } from 'vite'
  * nothing.
  */
 export default defineConfig({
+  // The config lives beside the app, so the root is stated rather than
+  // inherited from wherever `pnpm` was invoked.
+  root: import.meta.dirname,
   base: './',
   plugins: [react()],
   build: { outDir: '../dist/ui', emptyOutDir: true },

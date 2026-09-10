@@ -10,6 +10,11 @@
  * than restarting a session behind the scheduler's back — a silent no-op would
  * leave an operator watching for an effect that can never arrive.
  *
+ * What closes that loop is `AgentTask.operatorText`: the queue the caller kept
+ * comes back on the next spawn or resume, and this adapter delivers it over
+ * stdin alongside the brief — the only moment it can, and the only channel
+ * that keeps it out of the process table.
+ *
  * The three properties `claude-code.ts` exists to guarantee hold here too, for
  * the same reasons, and this file follows its shape deliberately.
  *
@@ -57,6 +62,7 @@ import {
   asString,
   childEnv,
   classifier,
+  operatorGuidance,
   probe,
   signalGroup,
 } from './shared.ts'
@@ -463,7 +469,16 @@ export class CodexAdapter implements HarnessAdapter {
     // to be worth keeping out of the process table and out of `ARG_MAX`. Codex
     // reads it to EOF before the turn starts, which is the mechanical reason
     // `inject` is false.
-    child.stdin?.end(task.prompt)
+    //
+    // Queued operator steering (§9) rides the same pipe, for the same reason
+    // and one more: this spawn is the *only* moment codex can be told
+    // anything, so `--` on the command line would be both the wrong channel
+    // and a leak of what the operator typed into the process table.
+    child.stdin?.end(
+      task.operatorText === undefined
+        ? task.prompt
+        : `${task.prompt}\n\n${operatorGuidance(task.operatorText)}`,
+    )
 
     return await this.#awaitStart(child, task)
   }
@@ -512,6 +527,12 @@ export class CodexAdapter implements HarnessAdapter {
               if (session !== undefined) continue
               session = new CodexSession(event.sessionId, child, queue)
               queue.push(event)
+              // The operator's words in the record of the run they steered
+              // (§5.3, §15). `send` cannot put them there on this harness, so
+              // the spawn that actually delivered them does.
+              if (task.operatorText !== undefined) {
+                queue.push({ type: 'user_message', text: task.operatorText })
+              }
               settle({ ok: true, session })
               continue
             }
