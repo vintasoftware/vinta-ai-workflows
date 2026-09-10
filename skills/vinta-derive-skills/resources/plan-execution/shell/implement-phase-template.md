@@ -9,10 +9,10 @@ Execution unit invoked by [implement-plan](../implement-plan/SKILL.md) (and by [
 
 ## Inputs (passed by the conductor as data — this skill re-derives none of them)
 
-- `phase` record: `{ id, title, goal, body, spec_use_case, suggested_model_tier, reusable_skills, has_e2e, acceptance }`.
+- `phase` record: `{ id, title, goal, body, spec_use_case, depends_on, wave, base_branch, suggested_model_tier, reusable_skills, has_e2e, acceptance }`.
 - Plan-level decisions: **Goals + Non-goals**, **Guiding Decisions**, the relevant **Data Model Changes** subsection.
-- Prior-phase summaries (the tracking file's "Completed Phases" section).
-- `WORKROOT`, `BASE_BRANCH`, `SANDBOX_TIER` — resolved once by the conductor ([Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot)).
+- **Dependency-closure summaries** — the `phase-{id}.md` tracking entries for this phase's transitive dependencies, and only those. Not "everything finished so far": under parallel execution a sibling lane's work is not in this phase's base branch, and describing it as done makes the implementer code against files it cannot see.
+- `WORKROOT`, `SANDBOX_TIER` — **this lane's**, resolved by the conductor ([Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot)). `phase.base_branch` — the branch the conductor already created this phase's branch from, derived from `depends_on`.
 - `run_options.full_test_suite` — resolves the outer gate's test scope in the composed prompt's `{If run_options.full_test_suite = true:}` marker (false = scoped suite only; true = full repo suite).
 
 ## 1. Compose the agent prompt (token-efficient)
@@ -41,6 +41,8 @@ Use whatever agent-spawning primitive the runtime exposes. Pass:
 A phase that combines shapes → the agent type stays `implementer`, and the prompt lists every relevant SKILL.md. The agent type changes only when a stack-specialist's risk is the primary one.
 
 **Avoid bouncing the same phase between multiple agents.** Wanting to "hand off" mid-phase → the plan should have split into sub-phases instead.
+
+**Concurrent invocations are expected.** The conductor may have several lanes in flight, each running its own copy of this skill against a different phase. Nothing here is shared: the prompt, the model pick, the spawn, and the returned report all belong to one phase in one `WORKROOT`. Never read another lane's worktree, branch, or tracking entry — if this phase needs something from another phase, that is a dependency edge the plan should have declared.
 
 ## Output
 

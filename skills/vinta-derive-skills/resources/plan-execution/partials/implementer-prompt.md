@@ -1,4 +1,4 @@
-<!-- Partial: implementer-prompt — the token-efficient per-phase prompt. FULL = the forward-implementation prompt used by implement-phase. INNER_OUTER_LOOP = the read→edit→inner→outer verification steps (1–6), reused verbatim by amend-plan's 4b (which appends its own amend-specific commit / no-push tail instead of the commit-strategy block). The {If run_options.use_worktree = true:} markers are runtime gates the agent reads at execution time; derive-skills strips them entirely when foundation_skills.prepare-worktree is disabled (use_worktree can only ever be false). -->
+<!-- Partial: implementer-prompt — the token-efficient per-phase prompt. FULL = the forward-implementation prompt used by implement-phase. INNER_OUTER_LOOP = the read→edit→inner→outer verification steps (1–6), reused verbatim by amend-plan's 4b (which appends its own amend-specific commit / no-push tail instead of the commit-strategy block). The {If run_options.use_worktree = true:} and {If run_options.parallel_phases = true:} markers are runtime gates the agent reads at execution time; derive-skills strips both entirely when foundation_skills.prepare-worktree is disabled (use_worktree can only ever be false, and parallel execution requires a worktree). -->
 
 <!-- block-begin: FULL -->
 ```
@@ -14,11 +14,18 @@ every lint / test / build / migrate call runs there.
   `<WORKROOT>` is an isolated git worktree — do NOT touch the main checkout; its DB,
   env, and compose stack are intentionally separated. See `<WORKROOT>/WORKTREE.md` for
   what's forked vs shared (deps, dev DB, test DB, compose project name, env file).
-  {If run_options.sandbox_tier = enforced:} Writes to the main checkout are OS-blocked —
-  if you see `Operation not permitted` / `EROFS` on a write, you used a main-checkout
-  path by mistake; redo it against this worktree path.
-Branch base for this phase: `<phase-specific base>` — the orchestrator already created
-your phase branch there; commit straight to it.
+  {If run_options.sandbox_tier = enforced:} Writes outside this worktree are OS-blocked —
+  if you see `Operation not permitted` / `EROFS` on a write, you used a path outside
+  `<WORKROOT>` by mistake; redo it against this worktree path.
+{If run_options.parallel_phases = true:}
+  Other phases of this plan are being implemented **right now**, in sibling worktrees
+  next to yours. Never read or write any path outside `<WORKROOT>` — a sibling's tree is
+  mid-edit and mid-test, and a write there corrupts someone else's phase. Anything you
+  need from another phase is either already in your base branch or is a dependency the
+  plan failed to declare — say so in your report rather than reaching for it.
+Branch base for this phase: `<phase.base_branch>` — derived from this phase's
+**Depends on** set, not from plan order. The orchestrator already created your phase
+branch there; commit straight to it.
 
 ## Read first
 1. AGENTS.md — repo conventions.
@@ -32,8 +39,11 @@ your phase branch there; commit straight to it.
   Feature flag: `{flag-key}` — scope `{per-tenant|per-request}`, default `{false|true}`.
   Wire reads + writes per the plan's **Guiding Decisions** entry. Off-flag path = byte-for-byte pre-feature behavior.
 
-## What was already implemented in prior phases
-{Tracking file "Completed Phases" section. First executed phase: "Nothing yet — this is the first phase."}
+## What your phase builds on
+{The `phase-{id}.md` tracking summaries for this phase's transitive dependencies, in
+wave order. No dependencies: "Nothing yet — this phase starts from `<BASE_BRANCH>`."
+Sibling phases running in parallel are deliberately NOT listed: their work is not in
+your base branch and you must not code against it.}
 
 ## Your tasks (Phase {id} only)
 {phase.body verbatim, including Goal / Spec use-case / Feature flag / Changes / Tests / Acceptance lines}
@@ -57,7 +67,7 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 - Anything you couldn't do (with explanation).
 ```
 
-**Don't** dump the full plan into every prompt. Tracking summaries replace prior phases as context. Always include the **Goals + Non-goals** and **Guiding Decisions** sections plus the relevant **Data Model Changes** subsection — load-bearing decisions; phases reach back frequently.
+**Don't** dump the full plan into every prompt. Dependency-closure tracking summaries replace prior phases as context. Always include the **Goals + Non-goals** and **Guiding Decisions** sections plus the relevant **Data Model Changes** subsection — load-bearing decisions; phases reach back frequently.
 <!-- block-end: FULL -->
 
 <!-- block-begin: INNER_OUTER_LOOP -->
