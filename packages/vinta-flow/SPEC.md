@@ -698,6 +698,17 @@ A caching optimisation nobody measures is a claim rather than a result, and ther
 
 **`input` is normalized to mean the fresh remainder, in every adapter.** This is the one place the harness layer does not pass a vendor's number through. Codex reports the OpenAI shape, where `input_tokens` is the *whole* prompt and `cached_input_tokens` names the cached subset of it; claude-code and opencode report the fresh remainder with the cache counts beside it. Carried through verbatim, one field would mean two different things inside a single aggregate and every cross-harness cache figure would be wrong by exactly the cached prefix. So codex subtracts, floored at zero, and the invariant `input + cacheRead + cacheWrite = the whole prompt` holds everywhere. The cost is that codex's reported `input` no longer matches what the codex CLI prints, which is the trade a cross-harness number requires.
 
-### 15.7 Interaction with takeover
+### 15.7 What the operator sees
+
+Reuse fails *quietly*. A run whose sessions stopped being continued looks exactly like one that never continued any — same statuses, same transcripts, same result, just more tokens and a slower fix loop. So the node view carries a **Agent sessions** panel: one row per agent turn, saying which slot it ran on, whether it continued that slot's session, and — when it did not — why, in words rather than in journal tokens.
+
+Two rules the panel follows, both about not crying wolf:
+
+- **Cold is not failure.** Most cold turns are correct: the first turn on a slot has nothing to continue, and the last fix round is escalated on purpose (§15.5). They are rendered in the idle tone. Only `stale_session` gets the waiting tone, because it is the one that cost a spawn nobody asked for. Nothing in the panel is ever an error tone — a lost session costs a turn, not a run.
+- **An unrecognised reason is shown, not swallowed.** A browser served by a newer daemon renders the raw token rather than hiding it behind the vocabulary this build happens to know. Ugly and true beats tidy and blank, because the token is the only clue there is.
+
+The rows come from the journal, not from a projection, over the existing node-detail endpoint (`sessions`) with a narrow per-node query. Folding a whole run's log in the browser to keep four rows would make the panel's cost grow with the length of the run it describes, and a table keyed by node would answer "is reuse working" with whichever turn happened to be last.
+
+### 15.8 Interaction with takeover
 
 §9's PTY round trip stages a resumed id for the node's next spawn. With a ledger that id belongs to **the slot the taken-over turn was running under** — an operator who takes over a fixer turn must not have their session handed to whatever spawns next.

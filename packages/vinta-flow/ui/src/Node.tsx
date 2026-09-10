@@ -34,7 +34,7 @@ import type { NodeDetail, RunSnapshot } from '../../src/daemon/schemas.ts'
 import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
 import type { NodeStatus } from './projection.ts'
-import { nodeLabel, nodeTone } from './status.ts'
+import { nodeLabel, nodeTone, type Tone } from './status.ts'
 import { TerminalView } from './Terminal.tsx'
 import { Transcript } from './Transcript.tsx'
 import { useNow } from './time.ts'
@@ -187,6 +187,7 @@ export function NodeView({
       <div className="panels">
         <Diff diff={detail.diff} />
         <Gates gates={detail.gates} failing={failingGate} />
+        <Sessions sessions={detail.sessions} />
       </div>
 
       <Transcript entries={detail.transcript.entries} />
@@ -488,6 +489,112 @@ function Gates({
       )}
     </section>
   )
+}
+
+/**
+ * §15's session reuse, as the operator sees it: one row per agent turn, saying
+ * which slot it ran on and whether it continued that slot's session.
+ *
+ * The panel exists because reuse fails *quietly*. A run whose sessions stopped
+ * being reused looks exactly like one that never reused — same statuses, same
+ * transcripts, same result, just more tokens and a slower fix loop. The reason
+ * token is the whole point of the row: without it "fresh" is an observation
+ * nobody can act on.
+ *
+ * **Fresh is not a failure, and the colours say so.** Most cold turns are
+ * correct — the first turn on a slot has nothing to continue, and the last fix
+ * round is deliberately handed to an agent that has not seen the work (§15.5).
+ * Only `stale_session` gets the waiting tone, because it is the one that cost
+ * something nobody asked for: a spawn spent being told the session was gone.
+ */
+function Sessions({ sessions }: { readonly sessions: NodeDetail['sessions'] }) {
+  const reused = sessions.filter((turn) => turn.disposition === 'reused').length
+
+  return (
+    <section className="panel" data-sessions>
+      <h3>Agent sessions</h3>
+      {sessions.length === 0 ? (
+        <p className="empty">No agent turn has run yet.</p>
+      ) : (
+        <>
+          <p className="muted" data-session-summary>
+            {reused} of {sessions.length} {sessions.length === 1 ? 'turn' : 'turns'} continued a
+            session.
+          </p>
+          <ul className="sessions">
+            {sessions.map((turn, index) => (
+              // The index is the key because a slot legitimately repeats: `main`
+              // is every implementer and fixer turn on this node, and the rows
+              // are an append-only sequence that nothing reorders or removes.
+              <li key={index} data-session-slot={turn.slot}>
+                <p className="entry-head">
+                  <Chip tone={sessionTone(turn)}>{turn.disposition}</Chip>
+                  <span className="entry-author">{turn.slot}</span>
+                  {turn.sessionId !== undefined && (
+                    <span className="muted" title={turn.sessionId}>
+                      {shortId(turn.sessionId)}
+                    </span>
+                  )}
+                </p>
+                {turn.reason !== undefined && (
+                  <p className="muted entry-body">{sessionReason(turn.reason)}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
+/** Reused is good news, cold is usually correct, and one case cost a spawn. */
+function sessionTone(turn: NodeDetail['sessions'][number]): Tone {
+  if (turn.disposition === 'reused') return 'ok'
+  return turn.reason === 'stale_session' ? 'wait' : 'idle'
+}
+
+/**
+ * The daemon's closed reason vocabulary, in words.
+ *
+ * An unrecognised token falls through to itself rather than to "unknown": a
+ * browser served by a newer daemon should show the operator the thing it was
+ * told, which is ugly and true, instead of hiding it behind wording this build
+ * happens to know.
+ */
+function sessionReason(reason: string): string {
+  switch (reason) {
+    case 'no_prior_session':
+      return 'First turn on this slot — there was nothing to continue.'
+    case 'harness_changed':
+      return 'The slot’s session belongs to a different harness.'
+    case 'lane_changed':
+      return 'The node is in a different lane than the session ran in.'
+    case 'no_resume_capability':
+      return 'This harness cannot continue a session.'
+    case 'turn_ceiling':
+      return 'The slot reached its turn limit, so the context starts over.'
+    case 'final_fix_round':
+      return 'Last fix round — deliberately an agent that has not seen the work.'
+    case 'stale_session':
+      return 'The harness had forgotten the session. The turn was retried cold.'
+    case 'no_slot':
+      return 'This step asked for a fresh session.'
+    default:
+      return reason
+  }
+}
+
+/**
+ * Enough of an id to tell two sessions apart; the full one is on hover.
+ *
+ * The **tail**, not the head. A session id is a vendor prefix followed by the
+ * unique part — `claude-code-01J8ZQ4M7X2K` — so truncating from the left shows
+ * the twelve characters every session on this harness shares and hides the only
+ * ones that differ. An id is on this row to be compared, not read.
+ */
+function shortId(sessionId: string): string {
+  return sessionId.length <= 14 ? sessionId : `…${sessionId.slice(-12)}`
 }
 
 /** Errors from `client.ts` name an endpoint and a status; nothing else is relayed. */

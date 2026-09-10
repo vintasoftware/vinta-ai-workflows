@@ -234,6 +234,29 @@ export class Journal {
   }
 
   /**
+   * §15's per-turn session decisions for one node, oldest first.
+   *
+   * A narrow read rather than a filter over `events`, because the node view
+   * asks for this on every refresh and on every event that arrives: folding a
+   * whole run's log in JavaScript to keep four rows would make the cost of the
+   * panel grow with the length of the run it is describing. The `WHERE` runs in
+   * SQLite, and only the matching rows are ever turned into objects.
+   *
+   * Deliberately not a projection. These rows only mean anything as a
+   * sequence — "is reuse working" is a question about a run, and a table keyed
+   * by node would answer it with whichever turn happened to be last.
+   */
+  sessionHistory(runId: string, nodeId: string): StoredEvent[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM events WHERE run_id = ? AND node_id = ? AND type = 'node_session'" +
+          ' ORDER BY id',
+      )
+      .all(runId, nodeId) as EventRow[]
+    return rows.map(toStoredEvent)
+  }
+
+  /**
    * Drops every projection and replays the log. This is the boot path, and it
    * is also the repair path: a projection can never be so wrong that deleting
    * it is not the fix.

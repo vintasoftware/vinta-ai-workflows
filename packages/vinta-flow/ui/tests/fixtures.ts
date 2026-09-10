@@ -110,6 +110,7 @@ export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {
     diff: { branch: 'feature/impl', baseBranch: 'main', lane: 'lane-1' },
     transcript: { stream: 'transcript', entries: [] },
     gates: [],
+    sessions: [],
     question: null,
     ...parts,
   }

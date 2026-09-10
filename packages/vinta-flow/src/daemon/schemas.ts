@@ -239,6 +239,33 @@ export const DiffRefSchema = z.strictObject({
   lane: z.string().nullable(),
 })
 
+/**
+ * One agent turn's session decision (§15), on the wire.
+ *
+ * A closed `reason` vocabulary rather than a sentence, for the same reason the
+ * journal's is closed: the browser renders the wording, so a daemon that sent
+ * prose would be deciding how a UI reads, and a vendor's own words about a
+ * session are exactly what §11 keeps off this wire. `sessionId` is an
+ * identifier, like the one `NodeSummary` already carries.
+ *
+ * The schema is deliberately permissive about `reason` — a string, not an
+ * enum. A daemon newer than the browser serving it must not have its node view
+ * fail to parse over a reason token that was added since; an unknown token
+ * renders as itself, which is worse than a sentence and much better than a
+ * blank page.
+ */
+export const SessionTurnSchema = z.strictObject({
+  /** The slot named by `spawn_agent`, or `takeover` for §9's handoff. */
+  slot: z.string(),
+  disposition: z.enum(['reused', 'fresh']),
+  /** The id being continued. Present on `reused`. */
+  sessionId: z.string().optional(),
+  /** Why this turn was cold. Present on `fresh`. */
+  reason: z.string().optional(),
+  /** Epoch ms, so the panel can order and age its rows. */
+  at: z.number().int(),
+})
+
 export const NodeDetailSchema = z.strictObject({
   runId: z.string(),
   node: NodeSummarySchema,
@@ -250,6 +277,8 @@ export const NodeDetailSchema = z.strictObject({
   }),
   /** One entry per declared gate that has produced a log, tail-truncated. */
   gates: z.array(z.strictObject({ gateId: z.string(), log: z.string() })),
+  /** Every agent turn's session decision, oldest first (§15). */
+  sessions: z.array(SessionTurnSchema),
   question: HumanQuestionSchema.nullable(),
 })
 
@@ -379,6 +408,7 @@ export type HumanQuestion = z.infer<typeof HumanQuestionSchema>
 export type RunSummary = z.infer<typeof RunSummarySchema>
 export type RunSnapshot = z.infer<typeof RunSnapshotSchema>
 export type NodeDetail = z.infer<typeof NodeDetailSchema>
+export type SessionTurn = z.infer<typeof SessionTurnSchema>
 export type EventFrame = z.infer<typeof EventFrameSchema>
 export type EventPage = z.infer<typeof EventPageSchema>
 export type JournalEvent = z.infer<typeof JournalEventSchema>

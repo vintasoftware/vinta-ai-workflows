@@ -199,7 +199,7 @@ interface NodeState {
    * token, set when an operator detaches from a takeover.
    *
    * This is the **slot-less** path only. A takeover of a turn that named a slot
-   * writes back into the ledger instead (§15.7), because the id belongs to the
+   * writes back into the ledger instead (§15.8), because the id belongs to the
    * slot that turn was running under: staging it here would hand an operator's
    * fixer session to whichever role happened to spawn next. What is left here
    * serves pipelines that opted out of slots entirely, where there is no slot
@@ -1059,7 +1059,7 @@ export class Scheduler {
         await this.#interruptLive(state)
       },
       resume: async (sessionId: string) => {
-        // §15.7: the id belongs to the slot this turn was running under.
+        // §15.8: the id belongs to the slot this turn was running under.
         // Staging it on the node instead would hand an operator's fixer
         // session to whichever role spawned next — a reviewer continuing the
         // session it is supposed to be reviewing.

@@ -190,9 +190,17 @@ ul {
 
 .pools li,
 .harnesses li,
-.holders li {
+.holders li,
+.sessions li {
   padding: 6px 0;
   border-bottom: 1px solid var(--line);
+}
+
+/* §15's rows. The reason sits under its own turn rather than beside it: it is
+   a sentence, and a sentence in a flex row either wraps badly or truncates the
+   half that says why. */
+.sessions .entry-body {
+  margin-left: 0;
 }
 
 .pool-head,

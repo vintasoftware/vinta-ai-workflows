@@ -463,3 +463,119 @@ test('the UI has no capability table of its own left to drift', () => {
   const modules = Object.keys(import.meta.glob('../src/*.ts'))
   expect(modules.some((path) => path.endsWith('/capabilities.ts'))).toBe(false)
 })
+
+// ---------------------------------------------------------------------------
+// §15: agent sessions
+// ---------------------------------------------------------------------------
+
+const TURNS = [
+  { slot: 'main', disposition: 'fresh' as const, reason: 'no_prior_session', at: 1_000 },
+  { slot: 'review', disposition: 'fresh' as const, reason: 'no_prior_session', at: 2_000 },
+  { slot: 'main', disposition: 'reused' as const, sessionId: 'claude-code-session-0001', at: 3_000 },
+  { slot: 'main', disposition: 'fresh' as const, reason: 'final_fix_round', at: 4_000 },
+]
+
+test('the session panel says which turns continued a session, and why the rest did not', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail({ sessions: TURNS }) },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelectorAll('.sessions li')).toHaveLength(4))
+
+  // The headline number: reuse that quietly stopped happening is the whole
+  // failure mode this panel exists to make visible.
+  expect(textOf(container, '[data-session-summary]')).toContain('1 of 4 turns')
+
+  const rows = [...container.querySelectorAll('.sessions li')]
+  expect(rows.map((row) => row.getAttribute('data-session-slot'))).toEqual([
+    'main',
+    'review',
+    'main',
+    'main',
+  ])
+
+  // A cold turn states its reason in words, not as a journal token.
+  expect(rows[0]?.textContent).toContain('First turn on this slot')
+  expect(rows[0]?.textContent).not.toContain('no_prior_session')
+
+  // The deliberate escalation reads as deliberate rather than as a fault.
+  expect(rows[3]?.textContent).toContain('Last fix round')
+
+  // The continued turn names the session it continued, truncated, with the
+  // whole id on hover — an id is for telling two sessions apart, not reading.
+  const reusedId = rows[2]?.querySelector('[title]')
+  expect(reusedId?.getAttribute('title')).toBe('claude-code-session-0001')
+  expect(reusedId?.textContent).not.toBe('claude-code-session-0001')
+  // The *distinguishing* end. Truncating from the left would show the vendor
+  // prefix every session on this harness shares and drop the unique part,
+  // which is the only reason the id is on the row at all.
+  expect(reusedId?.textContent).toContain('session-0001')
+  expect(reusedId?.textContent).not.toContain('claude-code')
+})
+
+test('a cold turn is not dressed as a failure, and only a lost session is amber', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({
+        sessions: [
+          ...TURNS,
+          { slot: 'review', disposition: 'fresh', reason: 'stale_session', at: 5_000 },
+        ],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelectorAll('.sessions li')).toHaveLength(5))
+  const tones = [...container.querySelectorAll('.sessions .chip')].map((chip) =>
+    chip.getAttribute('data-tone'),
+  )
+
+  // Most cold turns are correct — a first turn has nothing to continue and the
+  // last fix round is escalated on purpose. Painting them red would train an
+  // operator to ignore the panel.
+  expect(tones).toEqual(['idle', 'idle', 'ok', 'idle', 'wait'])
+  // Nothing here is ever an error: a lost session cost a spawn, not the run.
+  expect(tones).not.toContain('error')
+})
+
+test('an unfamiliar reason is shown rather than swallowed', async () => {
+  // A browser served by a newer daemon. Showing the raw token is ugly and
+  // true; hiding it behind this build's vocabulary loses the only clue there
+  // is about why reuse stopped.
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({
+        sessions: [{ slot: 'main', disposition: 'fresh', reason: 'invented_later', at: 1_000 }],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelectorAll('.sessions li')).toHaveLength(1))
+  expect(textOf(container, '.sessions .entry-body')).toContain('invented_later')
+})
+
+test('a node whose agents have not run says so, rather than showing an empty list', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'pending')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail({ sessions: [] }) },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-sessions]')).not.toBe(null))
+  expect(textOf(container, '[data-sessions] .empty')).toContain('No agent turn has run yet')
+  expect(container.querySelector('[data-session-summary]')).toBe(null)
+})

@@ -53,7 +53,7 @@ import { CodexAdapter } from '../src/harness/codex.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
 import { EventPageSchema } from '../src/daemon/schemas.ts'
-import type { StoredEvent } from '../src/journal/events.ts'
+import type { NewEvent, StoredEvent } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
@@ -446,6 +446,49 @@ describe('snapshots', () => {
       kind: 'confirm',
       context: { diffRef: 'phase/a' },
     })
+  })
+
+  it('serves §15’s session decisions for the node, and only for that node', async () => {
+    const r = await rig()
+    // Typed as the journal's own payload, so a schema change breaks this test
+    // rather than letting it keep asserting about a shape nothing writes.
+    const decide = (
+      nodeId: string,
+      payload: Extract<NewEvent, { type: 'node_session' }>['payload'],
+    ) => r.journal.append({ runId: RUN_ID, nodeId, type: 'node_session', payload })
+
+    decide('a', { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' })
+    decide('a', { slot: 'review', disposition: 'fresh', reason: 'no_prior_session' })
+    // Another node's turn, to prove the query is scoped rather than filtered
+    // after the fact — every node has a `main` slot and they are unrelated.
+    decide('b', { slot: 'main', disposition: 'reused', session_id: 'other-node-session' })
+    decide('a', { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' })
+
+    const detail = NodeDetailSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body,
+    )
+
+    // Oldest first: these rows only mean anything as a sequence.
+    expect(detail.sessions.map((turn) => [turn.slot, turn.disposition])).toEqual([
+      ['main', 'fresh'],
+      ['review', 'fresh'],
+      ['main', 'reused'],
+    ])
+    expect(detail.sessions[0]?.reason).toBe('no_prior_session')
+    expect(detail.sessions[2]?.sessionId).toBe('claude-code-session-1')
+    // A reused row carries no reason, and a cold one carries no id.
+    expect(detail.sessions[2]?.reason).toBeUndefined()
+    expect(detail.sessions[0]?.sessionId).toBeUndefined()
+    expect(detail.sessions.some((turn) => turn.sessionId === 'other-node-session')).toBe(false)
+  })
+
+  it('serves an empty session list for a node whose agents have not run', async () => {
+    const r = await rig()
+    const detail = NodeDetailSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body,
+    )
+
+    expect(detail.sessions).toEqual([])
   })
 
   it('404s an unknown run and an unknown node', async () => {

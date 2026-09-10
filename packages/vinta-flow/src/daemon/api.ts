@@ -47,6 +47,7 @@ import {
   type NodeDetail,
   type RunSnapshot,
   type RunSummary,
+  type SessionTurn,
   type WorkflowListResponse,
   type WorkflowResponse,
 } from './schemas.ts'
@@ -204,6 +205,7 @@ export function createApi(options: ApiOptions): Hono {
         entries: journal.tailTranscript(runId, node.node_id, limit, stream),
       },
       gates,
+      sessions: sessionTurns(journal, runId, node.node_id),
       question: question(runId, found.run, node),
     }
     return c.json(detail)
@@ -529,6 +531,40 @@ function nodeSummary(row: NodeRow, name: string): RunSnapshot['nodes'][number] {
     sessionId: row.session_id,
   }
 }
+
+/**
+ * §15's session decisions for one node, oldest first.
+ *
+ * The journal stores each row as the scheduler wrote it, and this narrows that
+ * to the wire shape: a slot, a disposition, and the identifier or the reason
+ * token that goes with it. A row whose payload does not parse is dropped rather
+ * than served half-read — the panel is a diagnostic, and a diagnostic that
+ * invents a value is worse than one with a gap.
+ */
+function sessionTurns(journal: Journal, runId: string, nodeId: string): SessionTurn[] {
+  const turns: SessionTurn[] = []
+  for (const event of journal.sessionHistory(runId, nodeId)) {
+    const payload = SessionPayloadSchema.safeParse(event.payload)
+    if (!payload.success) continue
+    const { slot, disposition, session_id, reason } = payload.data
+    turns.push({
+      slot,
+      disposition,
+      at: event.ts,
+      ...(session_id === undefined ? {} : { sessionId: session_id }),
+      ...(reason === undefined ? {} : { reason }),
+    })
+  }
+  return turns
+}
+
+/** The journal payload, read back off disk — hence parsed rather than cast. */
+const SessionPayloadSchema = z.object({
+  slot: z.string(),
+  disposition: z.enum(['reused', 'fresh']),
+  session_id: z.string().optional(),
+  reason: z.string().optional(),
+})
 
 /** An absent body reads as `{}` so a no-argument POST needs no payload. */
 async function readBody<T>(
