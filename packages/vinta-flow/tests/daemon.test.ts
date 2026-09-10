@@ -12,7 +12,7 @@
  * reason that has nothing to do with the code under test.
  */
 import Database from 'better-sqlite3'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +21,7 @@ import { WebSocket } from 'ws'
 
 import { AdmissionControl } from '../src/admission/admission.ts'
 import {
+  AmendResponseSchema,
   ErrorResponseSchema,
   EventFrameSchema,
   FrameSchema,
@@ -29,6 +30,8 @@ import {
   RunListResponseSchema,
   RunSnapshotSchema,
   HumanQuestionSchema,
+  WorkflowListResponseSchema,
+  WorkflowResponseSchema,
   EventStream,
   harnessCapabilities,
   startDaemon,
@@ -1281,5 +1284,270 @@ describe('notification delivery across a restart', () => {
       'kind',
       'question',
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Workflow editing — §10's Editor row
+// ---------------------------------------------------------------------------
+
+/** A document the editor can open: a different id from the rig's running run. */
+const EDITABLE = {
+  schema_version: 1,
+  id: 'editable',
+  base_branch: 'main',
+  defaults: { harness: HARNESS, model: 'opus', pipeline: 'standard-phase' },
+  resources: { lane: { capacity: 2, kind: 'worktree' } },
+  gates: {},
+  nodes: [
+    { id: 'p1', name: 'Model', prompt_ref: 'plan.md#p1' },
+    {
+      id: 'p2',
+      name: 'API',
+      prompt_ref: 'plan.md#p2',
+      depends_on: [{ node: 'p1', artifact: 'the model' }],
+    },
+  ],
+} as const
+
+function workflowsDir(repo: string): string {
+  return join(repo, '.vinta-flow', 'workflows')
+}
+
+function seedWorkflow(repo: string, id: string, body: unknown): string {
+  const dir = workflowsDir(repo)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `${id}.json`)
+  writeFileSync(path, typeof body === 'string' ? body : JSON.stringify(body), 'utf8')
+  return path
+}
+
+describe('workflow editing', () => {
+  it('serves the editable documents, and one of them in full', async () => {
+    const r = await rig()
+    seedWorkflow(r.dir, 'editable', EDITABLE)
+
+    const list = await call(r.daemon, '/api/workflows')
+    expect(list.status).toBe(200)
+    expect(WorkflowListResponseSchema.parse(list.body).workflows).toEqual([{ id: 'editable' }])
+
+    const one = await call(r.daemon, '/api/workflows/editable')
+    expect(one.status).toBe(200)
+    const served = WorkflowResponseSchema.parse(one.body)
+    expect(served.id).toBe('editable')
+    // The dependency artifact is the edge label the editor renders (§5.1).
+    expect(served.workflow.nodes[1]?.depends_on).toEqual([{ node: 'p1', artifact: 'the model' }])
+    // `pipelines` omitted means the shipped one runs, and stays omitted.
+    expect(served.workflow.pipelines).toEqual({})
+  })
+
+  it('answers with an empty list when nothing has been edited yet', async () => {
+    const r = await rig()
+    const list = await call(r.daemon, '/api/workflows')
+    expect(list.status).toBe(200)
+    expect(WorkflowListResponseSchema.parse(list.body).workflows).toEqual([])
+    expect((await call(r.daemon, '/api/workflows/editable')).status).toBe(404)
+  })
+
+  it('refuses to serve a document it cannot vouch for, naming the path', async () => {
+    const r = await rig()
+    seedWorkflow(r.dir, 'editable', {
+      ...EDITABLE,
+      nodes: [{ id: 'p1', name: 'Model', prompt_ref: 'plan.md#p1', depends_on: [{ node: 'p9', artifact: 'x' }] }],
+    })
+
+    const result = await call(r.daemon, '/api/workflows/editable')
+    expect(result.status).toBe(409)
+    const body = ErrorResponseSchema.parse(result.body)
+    expect(body.error).toBe('invalid_workflow')
+    expect(body.issues?.map((issue) => issue.path)).toContain('nodes[0].depends_on[0].node')
+
+    seedWorkflow(r.dir, 'editable', 'not json at all')
+    expect((await call(r.daemon, '/api/workflows/editable')).status).toBe(409)
+  })
+
+  it('saves a valid workflow to disk, and serves back what it stored', async () => {
+    const r = await rig()
+    const edited = {
+      ...EDITABLE,
+      nodes: [
+        EDITABLE.nodes[0],
+        { ...EDITABLE.nodes[1], depends_on: [{ node: 'p1', artifact: 'the folder model' }] },
+      ],
+    }
+
+    const result = await call(r.daemon, '/api/workflows/editable', { method: 'PUT', body: edited })
+    expect(result.status).toBe(200)
+    expect(OkResponseSchema.parse(result.body)).toEqual({ ok: true })
+
+    const onDisk = JSON.parse(readFileSync(join(workflowsDir(r.dir), 'editable.json'), 'utf8'))
+    expect(onDisk.nodes[1].depends_on).toEqual([{ node: 'p1', artifact: 'the folder model' }])
+
+    const served = await call(r.daemon, '/api/workflows/editable')
+    expect(WorkflowResponseSchema.parse(served.body).workflow.nodes[1]?.depends_on).toEqual([
+      { node: 'p1', artifact: 'the folder model' },
+    ])
+  })
+
+  it('refuses an invalid workflow and names the offending path', async () => {
+    const r = await rig()
+    const broken = {
+      ...EDITABLE,
+      nodes: [EDITABLE.nodes[0], { ...EDITABLE.nodes[1], depends_on: [{ node: 'p1', artifact: '' }] }],
+    }
+
+    const result = await call(r.daemon, '/api/workflows/editable', { method: 'PUT', body: broken })
+    expect(result.status).toBe(400)
+    const body = ErrorResponseSchema.parse(result.body)
+    expect(body.error).toBe('invalid_workflow')
+    expect(body.issues?.map((issue) => issue.path)).toContain('nodes[1].depends_on[0].artifact')
+    // Refused means nothing was written.
+    expect(existsSync(join(workflowsDir(r.dir), 'editable.json'))).toBe(false)
+  })
+
+  it('refuses a cycle, a body that is not JSON, and an id that is not the path', async () => {
+    const r = await rig()
+    const cyclic = {
+      ...EDITABLE,
+      nodes: [
+        { ...EDITABLE.nodes[0], depends_on: [{ node: 'p2', artifact: 'the endpoints' }] },
+        EDITABLE.nodes[1],
+      ],
+    }
+    const cycle = await call(r.daemon, '/api/workflows/editable', { method: 'PUT', body: cyclic })
+    expect(cycle.status).toBe(400)
+    expect(ErrorResponseSchema.parse(cycle.body).issues?.map((issue) => issue.path)).toContain('nodes')
+
+    const junk = await call(r.daemon, '/api/workflows/editable', { method: 'PUT', raw: '{' })
+    expect(junk.status).toBe(400)
+
+    const mismatch = await call(r.daemon, '/api/workflows/other', { method: 'PUT', body: EDITABLE })
+    expect(mismatch.status).toBe(400)
+    expect(ErrorResponseSchema.parse(mismatch.body).issues?.map((issue) => issue.path)).toEqual(['id'])
+  })
+
+  it('routes a save that reaches a live run through §9’s amend, and refuses while a node is in flight', async () => {
+    const r = await rig()
+    // The rig's own run is `daemon-flow`, registered and still running, with
+    // node `a` running and node `b` pending. Replacing its nodes wholesale
+    // removes `a`, which is in flight.
+    const running = { ...EDITABLE, id: 'daemon-flow' }
+    const result = await call(r.daemon, '/api/workflows/daemon-flow', { method: 'PUT', body: running })
+
+    expect(result.status).toBe(409)
+    const body = ErrorResponseSchema.parse(result.body)
+    expect(body.error).toBe('nodes_in_flight')
+    // Named, and located — the operator is told which node and why.
+    expect(body.issues?.map((issue) => issue.path)).toEqual(['nodes[0]'])
+    expect(body.issues?.[0]?.message).toContain('node "a" is running')
+    // A refused amendment writes nothing, to the store or to the run.
+    expect(existsSync(join(workflowsDir(r.dir), 'daemon-flow.json'))).toBe(false)
+    expect(r.journal.readWorkflow(RUN_ID).nodes.map((node) => node.id)).toEqual(['a', 'b'])
+  })
+
+  it('amends a node the live run has not started, and reports what moved', async () => {
+    const r = await rig()
+    const base = r.journal.readWorkflow(RUN_ID)
+    // `b` is pending and depends on `a`; renaming it touches nothing in flight.
+    const amended = {
+      ...base,
+      nodes: [base.nodes[0], { ...base.nodes[1], name: 'B, amended', prompt_ref: 'plan.md#b2' }],
+    }
+
+    const result = await call(r.daemon, '/api/workflows/daemon-flow', {
+      method: 'PUT',
+      body: amended,
+    })
+    expect(result.status).toBe(200)
+    const amendment = AmendResponseSchema.parse(result.body)
+    expect(amendment).toMatchObject({
+      ok: true,
+      amendment: 1,
+      runId: RUN_ID,
+      changes: [{ node: 'b', kind: 'body_changed' }],
+      affected: ['b'],
+      applied: ['b'],
+      rebased: [],
+    })
+
+    // The run's frozen snapshot moved, and so did the source document.
+    expect(r.journal.readWorkflow(RUN_ID).nodes[1]?.prompt_ref).toBe('plan.md#b2')
+    expect(
+      JSON.parse(readFileSync(join(workflowsDir(r.dir), 'daemon-flow.json'), 'utf8')).nodes[1]
+        .prompt_ref,
+    ).toBe('plan.md#b2')
+    // The snapshot the API caches per run was invalidated with it, so the run
+    // view stops showing a name the run no longer has.
+    const snapshot = await call(r.daemon, `/api/runs/${RUN_ID}`)
+    expect(
+      RunSnapshotSchema.parse(snapshot.body).nodes.find((node) => node.nodeId === 'b')?.name,
+    ).toBe('B, amended')
+  })
+
+  it('refuses an amendment that is not a valid workflow, with paths, before touching the run', async () => {
+    const r = await rig()
+    const base = r.journal.readWorkflow(RUN_ID)
+    const broken = {
+      ...base,
+      nodes: [base.nodes[0], { ...base.nodes[1], depends_on: [{ node: 'p9', artifact: 'nothing' }] }],
+    }
+
+    const result = await call(r.daemon, '/api/workflows/daemon-flow', { method: 'PUT', body: broken })
+    expect(result.status).toBe(400)
+    const body = ErrorResponseSchema.parse(result.body)
+    expect(body.error).toBe('invalid_workflow')
+    expect(body.issues?.map((issue) => issue.path)).toContain('nodes[1].depends_on[0].node')
+    expect(r.journal.readWorkflow(RUN_ID).nodes[1]?.depends_on).toEqual([
+      { node: 'a', artifact: "a's model" },
+    ])
+  })
+
+  it('requires the token to amend a live run, and an unauthenticated attempt changes nothing', async () => {
+    const r = await rig()
+    const base = r.journal.readWorkflow(RUN_ID)
+    const amended = { ...base, nodes: [base.nodes[0], { ...base.nodes[1], prompt_ref: 'plan.md#x' }] }
+
+    const result = await call(r.daemon, '/api/workflows/daemon-flow', {
+      method: 'PUT',
+      token: null,
+      body: amended,
+    })
+    expect(result.status).toBe(401)
+    expect(ErrorResponseSchema.parse(result.body).error).toBe('unauthorized')
+    expect(r.journal.readWorkflow(RUN_ID).nodes[1]?.prompt_ref).toBe('plan.md#b')
+    expect(
+      r.journal.events(RUN_ID).filter((event) => event.type === 'workflow_amended'),
+    ).toEqual([])
+  })
+
+  it('refuses an id that is not an id, so no request can name a path', async () => {
+    const r = await rig()
+    const escape = await call(r.daemon, '/api/workflows/..%2F..%2Fpwned', {
+      method: 'PUT',
+      body: { ...EDITABLE, id: 'pwned' },
+    })
+    expect(escape.status).toBe(400)
+    expect(ErrorResponseSchema.parse(escape.body).error).toBe('invalid_workflow_id')
+    expect(existsSync(join(r.dir, '..', 'pwned.json'))).toBe(false)
+    expect((await call(r.daemon, '/api/workflows/..%2Fescape')).status).toBe(404)
+  })
+
+  it('requires the token on both workflow endpoints', async () => {
+    const r = await rig()
+    seedWorkflow(r.dir, 'editable', EDITABLE)
+
+    expect((await call(r.daemon, '/api/workflows', { token: null })).status).toBe(401)
+    expect((await call(r.daemon, '/api/workflows/editable', { token: null })).status).toBe(401)
+    const put = await call(r.daemon, '/api/workflows/editable', {
+      method: 'PUT',
+      token: null,
+      body: EDITABLE,
+    })
+    expect(put.status).toBe(401)
+    expect(ErrorResponseSchema.parse(put.body).error).toBe('unauthorized')
+    // The unauthenticated save changed nothing.
+    expect(JSON.parse(readFileSync(join(workflowsDir(r.dir), 'editable.json'), 'utf8'))).toEqual(
+      EDITABLE,
+    )
   })
 })

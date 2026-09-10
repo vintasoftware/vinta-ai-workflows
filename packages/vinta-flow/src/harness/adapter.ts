@@ -127,6 +127,56 @@ export interface AgentSession {
 }
 
 /**
+ * Where an interactive takeover opens (§9). The session id is passed
+ * separately because it is the *handoff token*, not an option.
+ */
+export interface PtyAttach {
+  /** Absolute path to the lane worktree — the same one the headless turn ran in. */
+  readonly cwd: string
+  /** The operator's terminal size at attach. Defaults are a plain 80×24. */
+  readonly cols?: number
+  readonly rows?: number
+}
+
+/**
+ * A live interactive terminal, handed back by `attachPty`. §7 declares the
+ * return type and deliberately leaves its shape to this step.
+ *
+ * **Everything crossing this interface is terminal bytes**, decoded as UTF-8
+ * because that is what a pty emits and what a terminal emulator consumes.
+ * They are the contents of a repository, the output of whatever the operator
+ * ran, and whatever the operator typed — which can include a credential they
+ * pasted. §11 therefore applies at its strongest: no implementation and no
+ * consumer of this interface may put `data` into a log line, an error message,
+ * the journal or a transcript. The only legitimate destination is the socket
+ * the operator's terminal is on.
+ *
+ * `sessionId` is what makes the round trip of §9 closeable: it is the id this
+ * handle was attached with, carried back so the caller resumes headless from
+ * the same session rather than starting a new one. `pid` is here for the same
+ * reason a caller can be held to it — "the PTY left no orphan" is a claim
+ * about a pid, and a handle that hides it cannot be checked.
+ */
+export interface PtyHandle {
+  /** The session id this terminal was attached to. §9's handoff token. */
+  readonly sessionId: string
+  /** The pty leader's pid. Its process group is what `detach` tears down. */
+  readonly pid: number
+  /** Terminal bytes out. Never logged (§11). */
+  onData(listener: (data: string) => void): void
+  /** Terminal bytes in. A write after exit is dropped, not an error. */
+  write(data: string): void
+  resize(cols: number, rows: number): void
+  /** The child's exit code, once it has been reaped. */
+  readonly exited: Promise<number>
+  /**
+   * Ends the terminal and its process group, resolving only once the child is
+   * reaped — so a caller that awaits it can assert the pid is gone. Idempotent.
+   */
+  detach(): Promise<void>
+}
+
+/**
  * Why a spawn was refused. Every kind but `fatal` is a wait, not a failure:
  * the node releases its resources and returns to pending (§6.1).
  */
@@ -157,8 +207,24 @@ export interface HarnessAdapter {
   preflight(): Promise<PreflightResult>
   /** Never throws on capacity — see §6.1. */
   spawn(task: AgentTask): Promise<SpawnOutcome>
-  // `attachPty` (§7) arrives with step 17, which is what defines PtyHandle.
-  // `capabilities.pty` is declared now so the UI can grey the button today.
+  /**
+   * Open an interactive terminal on an existing session (§9's take over).
+   *
+   * The flow around it is interrupt → attach → detach → resume headless, and
+   * `sessionId` is the token that survives all four: the headless turn is
+   * stopped, an interactive CLI is handed the *same* id, and on detach the
+   * caller resumes headless from it. §7 is explicit that trying to make one
+   * session both machine-parseable and human-drivable is the trap — so this
+   * is a second, separate process over the same session, never a mode switch
+   * on the first.
+   *
+   * Rejects with `HarnessCapabilityError` where `capabilities.pty` is false,
+   * exactly like `send` and `interrupt` do. Optional on the interface only so
+   * that an out-of-tree adapter or a test double is not forced to carry a
+   * method it will never be asked for; every adapter this package ships
+   * implements it, including the one whose answer is a refusal.
+   */
+  attachPty?(sessionId: string, attach: PtyAttach): Promise<PtyHandle>
 }
 
 /** Thrown when a caller invokes an operation the adapter declared it lacks. */

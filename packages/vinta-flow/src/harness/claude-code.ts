@@ -38,9 +38,12 @@ import {
   type HarnessAdapter,
   type HarnessCapabilities,
   type PreflightResult,
+  type PtyAttach,
+  type PtyHandle,
   type SpawnOutcome,
   type SpawnRefusalKind,
 } from './adapter.ts'
+import { openPty } from './pty.ts'
 import {
   EventQueue,
   JsonLines,
@@ -470,6 +473,24 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     }
 
     return await this.#awaitStart(child, task)
+  }
+
+  /**
+   * §9's take over. The *same* session the headless turn was running is
+   * reopened interactively — no `-p`, no `--output-format`, because those are
+   * exactly what makes it machine-parseable and unusable by a human. The
+   * caller interrupted the headless turn before calling this and resumes from
+   * `handle.sessionId` after the operator detaches; this adapter's only job is
+   * that the id it is handed is the id the CLI is given.
+   */
+  async attachPty(sessionId: string, attach: PtyAttach): Promise<PtyHandle> {
+    return openPty({
+      sessionId,
+      file: this.bin,
+      args: ['--resume', sessionId],
+      env: childEnv(STRIPPED_ENV),
+      attach,
+    })
   }
 
   #awaitStart(child: ChildProcess, task: AgentTask): Promise<SpawnOutcome> {

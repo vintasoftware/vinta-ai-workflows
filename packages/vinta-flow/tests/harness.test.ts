@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent, AgentTask } from '../src/harness/adapter.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
@@ -5,7 +6,9 @@ import { ERRORING_SCRIPT, MockAdapter, type MockAdapterOptions } from '../src/ha
 
 const TASK: AgentTask = {
   nodeId: 'phase-1',
-  cwd: '/tmp/lane-1',
+  // A directory that exists, because the contract's takeover assertions open a
+  // real pty in it — a pty cannot be chdir'd into a path that is not there.
+  cwd: tmpdir(),
   prompt: 'implement the widget model',
   model: 'sonnet',
 }
@@ -20,8 +23,10 @@ const fixture = (options: MockAdapterOptions = {}) => {
 // either. Running the suite twice is what proves the contract itself is right,
 // not just that one adapter passes it.
 runAdapterContract('mock adapter', { describe, it, expect }, () => fixture())
-runAdapterContract('mock adapter without inject or interrupt', { describe, it, expect }, () =>
-  fixture({ capabilities: { inject: false, interrupt: false } }),
+runAdapterContract(
+  'mock adapter without inject, interrupt or pty',
+  { describe, it, expect },
+  () => fixture({ capabilities: { inject: false, interrupt: false, pty: false } }),
 )
 
 const collect = async (adapter: MockAdapter): Promise<AgentEvent[]> => {

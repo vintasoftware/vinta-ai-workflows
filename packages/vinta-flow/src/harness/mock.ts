@@ -26,9 +26,12 @@ import {
   type HarnessAdapter,
   type HarnessCapabilities,
   type PreflightResult,
+  type PtyAttach,
+  type PtyHandle,
   type SpawnOutcome,
   type SpawnRefusalKind,
 } from './adapter.ts'
+import { openPty } from './pty.ts'
 
 /** The body of a run. `session_started` and `session_ended` are framed by the adapter. */
 export type ScriptedEvent = Exclude<AgentEvent, { type: 'session_started' | 'session_ended' }>
@@ -199,5 +202,23 @@ export class MockAdapter implements HarnessAdapter {
     )
     if (task.operatorText !== undefined) session.deliverOperatorText(task.operatorText)
     return { ok: true, session }
+  }
+
+  /**
+   * A real terminal running `cat`, which is the one interactive program whose
+   * behavior needs no model and no vendor: everything typed comes straight
+   * back. A *scripted* pty would be a fake of the one thing about takeover
+   * that is worth testing — that a process is spawned, driven and reaped — so
+   * this one is real and the program is trivial instead.
+   */
+  async attachPty(sessionId: string, attach: PtyAttach): Promise<PtyHandle> {
+    if (!this.capabilities.pty) throw new HarnessCapabilityError(this.id, 'pty')
+    return openPty({
+      sessionId,
+      file: '/bin/cat',
+      args: [],
+      env: process.env,
+      attach,
+    })
   }
 }

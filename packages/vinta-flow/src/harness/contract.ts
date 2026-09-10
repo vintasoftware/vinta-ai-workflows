@@ -115,6 +115,24 @@ const drain = async (iterator: AsyncIterator<AgentEvent>): Promise<AgentEvent[]>
 const iterate = (session: AgentSession): AsyncIterator<AgentEvent> =>
   session.events[Symbol.asyncIterator]()
 
+/**
+ * The session id a takeover is handed. It is a *literal* here on purpose: §9
+ * makes the id the handoff token, so the assertion worth making is that the
+ * exact string given to `attachPty` comes back on the handle — an adapter that
+ * minted its own would silently start a second session and lose the run.
+ */
+const PTY_SESSION = 'contract-pty-session'
+
+/** `kill(pid, 0)` signals nothing and answers one question: is that pid still there. */
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function runAdapterContract(
   name: string,
   runner: ContractRunner,
@@ -254,6 +272,52 @@ export function runAdapterContract(
 
       const events = await within('event stream', drain(iterate(outcome.session)))
       expect(events.some((e) => e.type === 'user_message' && e.text === text)).toBe(true)
+    })
+
+    test('declared pty capability matches what attachPty does', async (fixture, within) => {
+      // §9's fifth operation, held to the same rule as the other four: a
+      // capability is a promise, and the operation behind a false one refuses
+      // loudly rather than resolving with nothing.
+      const { adapter } = fixture
+      const attachPty = adapter.attachPty?.bind(adapter)
+      expect(typeof attachPty).toBe('function')
+      if (attachPty === undefined) return
+
+      const attach = { cwd: fixture.task.cwd, cols: 80, rows: 24 }
+
+      if (!adapter.capabilities.pty) {
+        let rejected: unknown
+        await within(
+          'attachPty rejection',
+          attachPty(PTY_SESSION, attach).then(
+            () => {},
+            (error: unknown) => {
+              rejected = error
+            },
+          ),
+        )
+        expect(rejected instanceof HarnessCapabilityError).toBe(true)
+        return
+      }
+
+      const handle = await within('attachPty', attachPty(PTY_SESSION, attach))
+      try {
+        // The handoff token, unchanged. Everything else about takeover is
+        // recoverable; a session id the adapter invented is not.
+        expect(handle.sessionId).toBe(PTY_SESSION)
+        expect(handle.pid > 0).toBe(true)
+        // Neither may throw, and neither is asserted on: what a terminal does
+        // with a resize or a keystroke belongs to the program inside it.
+        // Deliberately *not* asserted: nothing here reads the bytes (§11).
+        handle.resize(100, 30)
+        handle.write('\n')
+      } finally {
+        await within('detach', handle.detach())
+      }
+      // `detach` resolves only once the child is reaped, so this is a fact and
+      // not a race — and "takeover leaves no orphan" is checkable rather than
+      // hoped for.
+      expect(alive(handle.pid)).toBe(false)
     })
 
     for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'fatal'] as const) {

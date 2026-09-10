@@ -23,9 +23,12 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { closeSync, openSync, readSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { z } from 'zod'
+import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
+import { parseWorkflow } from '../validate.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import type { DaemonRun } from './control.ts'
 import { harnessCapabilities } from './harnesses.ts'
@@ -37,11 +40,16 @@ import {
   NoArgsRequestSchema,
   RedirectRequestSchema,
   toIssues,
+  toWireIssues,
+  type AmendResponse,
   type Issue,
   type NodeDetail,
   type RunSnapshot,
   type RunSummary,
+  type WorkflowListResponse,
+  type WorkflowResponse,
 } from './schemas.ts'
+import { createWorkflowStore, isWorkflowId, WORKFLOWS_DIRNAME } from './workflows.ts'
 
 /** The last 64 KiB of a gate log. Enough for a failure tail, bounded by design. */
 const GATE_LOG_TAIL_BYTES = 64 * 1024
@@ -58,11 +66,18 @@ export interface ApiOptions {
   readonly runs: ReadonlyMap<string, DaemonRun>
   /** Where the built UI lives. Defaults to this package's `dist/ui`. */
   readonly uiDir?: string
+  /**
+   * The editable workflow documents (§10's Editor row). Defaults to
+   * `<store>/workflows`; supplying one is for tests and for a project that
+   * keeps its plans elsewhere.
+   */
+  readonly workflowsDir?: string
 }
 
 export function createApi(options: ApiOptions): Hono {
   const { journal, runs } = options
   const workflows = new Map<string, Workflow>()
+  const store = createWorkflowStore(options.workflowsDir ?? join(journal.root, WORKFLOWS_DIRNAME))
   const ui = createStaticHandler(options.uiDir ?? DEFAULT_UI_DIR)
   const app = new Hono()
 
@@ -167,6 +182,114 @@ export function createApi(options: ApiOptions): Hono {
     ),
   )
 
+  // -------------------------------------------------------------------------
+  // Workflows — the documents §10's Editor row edits.
+  //
+  // These are the only *writing* endpoints in this API, and the three rules
+  // below are what keeps that from being a hole:
+  //
+  // - **The same validator the executor uses.** A save runs `parseWorkflow`,
+  //   so the editor cannot persist a document the daemon would later refuse to
+  //   run. Client-side validation is a courtesy; this is the boundary.
+  // - **An id is a filename, and the schema's id rule is the sanitiser.** No
+  //   path from a request ever reaches `join` un-checked.
+  // - **A save that reaches a live run is an amendment, not an edit.** §9's
+  //   amend path owns that: it refuses while any affected node is in flight,
+  //   rebases the `done` nodes whose base moved, and journals what it did. The
+  //   refusal comes back located, like every other refusal here.
+  // -------------------------------------------------------------------------
+
+  app.get('/api/workflows', (c) => {
+    return c.json({
+      workflows: store.list().map((id) => ({ id })),
+    } satisfies WorkflowListResponse)
+  })
+
+  app.get('/api/workflows/:id', (c) => {
+    const id = c.req.param('id') ?? ''
+    if (!isWorkflowId(id)) return fail(c, 404, 'unknown_workflow')
+
+    const read = store.read(id)
+    if (!read.ok) {
+      return read.reason === 'missing'
+        ? fail(c, 404, 'unknown_workflow')
+        : fail(c, 409, 'invalid_workflow', [
+            { path: '', code: 'invalid_json', message: 'Workflow file is not valid JSON' },
+          ])
+    }
+
+    const parsed = parseWorkflow(read.value)
+    if (!parsed.ok) return fail(c, 409, 'invalid_workflow', toWireIssues(parsed.issues))
+    return c.json({ id, workflow: parsed.workflow } satisfies WorkflowResponse)
+  })
+
+  app.put('/api/workflows/:id', async (c) => {
+    const id = c.req.param('id') ?? ''
+    if (!isWorkflowId(id)) return fail(c, 400, 'invalid_workflow_id')
+
+    const text = await c.req.text()
+    let raw: unknown
+    try {
+      raw = JSON.parse(text)
+    } catch {
+      return fail(c, 400, 'invalid_workflow', [
+        { path: '', code: 'invalid_json', message: 'Body is not valid JSON' },
+      ])
+    }
+
+    const parsed = parseWorkflow(raw)
+    if (!parsed.ok) return fail(c, 400, 'invalid_workflow', toWireIssues(parsed.issues))
+    if (parsed.workflow.id !== id) {
+      return fail(c, 400, 'invalid_workflow', [
+        { path: 'id', code: 'id_mismatch', message: 'Workflow id does not match the path' },
+      ])
+    }
+    // §9's amend. A run in flight has its own frozen snapshot and its own
+    // rules about which nodes may still change, so a save that reaches one is
+    // routed through `src/amend/` rather than refused: it classifies what
+    // moved, refuses while any affected node is in flight, rebases the `done`
+    // nodes whose base moved, and journals what it did. The source document is
+    // written only after the run took the change — a saved document the run
+    // refused would be a plan the editor shows and the daemon is not running.
+    const live = journal.runs().find((row) => row.workflow_id === id && row.status === 'running')
+    if (live !== undefined) {
+      const runner = amendRunner(runs.get(live.id))
+      const result = await amendRun({
+        journal,
+        runId: live.id,
+        proposed: parsed.workflow,
+        ...(runner === undefined ? {} : { runner }),
+      })
+      if (!result.ok) {
+        return fail(c, 409, result.code, toWireIssues(result.issues, result.code))
+      }
+      // The run's definition moved, so the cached snapshot has to.
+      workflows.set(live.id, result.workflow)
+      try {
+        store.write(id, result.workflow)
+      } catch {
+        return fail(c, 409, 'write_failed')
+      }
+      return c.json({
+        ok: true,
+        amendment: result.amendment,
+        runId: live.id,
+        changes: result.changes.map((change) => ({ node: change.node, kind: change.kind })),
+        affected: [...result.affected],
+        applied: [...result.applied],
+        rebased: [...result.rebased],
+      } satisfies AmendResponse)
+    }
+
+    try {
+      store.write(id, parsed.workflow)
+    } catch {
+      // A code, never the path or the bytes (§11).
+      return fail(c, 409, 'write_failed')
+    }
+    return c.json({ ok: true })
+  })
+
   return app
 
   // -------------------------------------------------------------------------
@@ -185,6 +308,20 @@ export function createApi(options: ApiOptions): Hono {
     if (raw === undefined) return null
     const parsed = HumanQuestionSchema.safeParse(raw)
     return parsed.success ? parsed.data : null
+  }
+
+  /**
+   * §9's amend, as the run can drive it.
+   *
+   * `RunControl.statuses` is the live view every registered run already
+   * publishes, so the gate reads it whether or not the host wired an
+   * integration worktree — a host that cannot rebase can still refuse
+   * correctly, which is the half that matters for safety. Anything the host
+   * *did* supply wins over it.
+   */
+  function amendRunner(run: DaemonRun | undefined): AmendRunner | undefined {
+    if (run === undefined) return undefined
+    return { statuses: () => run.control.statuses, ...run.amend }
   }
 
   function workflow(runId: string): Workflow {

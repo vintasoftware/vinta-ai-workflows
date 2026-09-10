@@ -50,9 +50,12 @@ import {
   type HarnessAdapter,
   type HarnessCapabilities,
   type PreflightResult,
+  type PtyAttach,
+  type PtyHandle,
   type SpawnOutcome,
   type SpawnRefusalKind,
 } from './adapter.ts'
+import { openPty } from './pty.ts'
 import {
   EventQueue,
   JsonLines,
@@ -481,6 +484,22 @@ export class CodexAdapter implements HarnessAdapter {
     )
 
     return await this.#awaitStart(child, task)
+  }
+
+  /**
+   * §9's take over. `codex resume <id>` without `--json` is the interactive
+   * reading of the same session `exec --json` was driving headlessly — which
+   * is the point: one session, two front ends, never at the same time. The
+   * caller interrupts before this and resumes from `handle.sessionId` after.
+   */
+  async attachPty(sessionId: string, attach: PtyAttach): Promise<PtyHandle> {
+    return openPty({
+      sessionId,
+      file: this.bin,
+      args: ['resume', sessionId],
+      env: childEnv(STRIPPED_ENV),
+      attach,
+    })
   }
 
   #argsFor(task: AgentTask): string[] {

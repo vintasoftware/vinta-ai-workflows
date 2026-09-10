@@ -132,8 +132,9 @@ class SpawnFatal extends Error {}
 class Aborted extends Error {}
 
 interface NodeState {
-  readonly node: Node
-  readonly pipeline: Pipeline
+  /** Replaced by `adopt` while the node is unstarted — §9's amend path. */
+  node: Node
+  pipeline: Pipeline
   status: NodeStatus
   /**
    * The live agent turn, for the four §9 operations that need one. Set the
@@ -180,6 +181,12 @@ export class Scheduler {
   readonly #options: SchedulerOptions
   readonly #states = new Map<string, NodeState>()
   readonly #order: string[]
+  /**
+   * The run's workflow. Starts as the frozen snapshot and is replaced only by
+   * `adopt` (§9's amend path), which is why it is a field rather than a read
+   * through `#options`.
+   */
+  #workflow: Workflow
   readonly #freeLanes: string[]
   #waves = new Map<string, number>()
   #waiters: (() => void)[] = []
@@ -188,32 +195,9 @@ export class Scheduler {
   constructor(options: SchedulerOptions) {
     this.#options = options
     const { workflow } = options
+    this.#workflow = workflow
 
-    for (const node of workflow.nodes) {
-      const pipelineId = node.pipeline ?? workflow.defaults.pipeline
-      const pipeline = pipelineFor(workflow, pipelineId)
-      if (pipeline === undefined) {
-        throw new Error(`node "${node.id}": unknown pipeline "${pipelineId}"`)
-      }
-      this.#states.set(node.id, {
-        node,
-        pipeline,
-        status: 'pending',
-        live: null,
-        pending: [],
-        undelivered: [],
-        pauseRequested: false,
-        aborted: false,
-        parkedEffectId: null,
-        fixRounds: 0,
-        lane: null,
-        laneLease: null,
-        gateLease: null,
-        gateHeld: [],
-        resume: null,
-        failure: null,
-      })
-    }
+    for (const node of workflow.nodes) this.#states.set(node.id, this.#fresh(node))
     this.#order = workflow.nodes.map((node) => node.id)
 
     // One name per lane slot, matching `LanePool`'s own naming so a real pool
@@ -225,6 +209,80 @@ export class Scheduler {
     )
   }
 
+  /** A node's state as it starts: pending, holding nothing, steering nothing. */
+  #fresh(node: Node): NodeState {
+    const pipelineId = node.pipeline ?? this.#workflow.defaults.pipeline
+    const pipeline = pipelineFor(this.#workflow, pipelineId)
+    if (pipeline === undefined) {
+      throw new Error(`node "${node.id}": unknown pipeline "${pipelineId}"`)
+    }
+    return {
+      node,
+      pipeline,
+      status: 'pending',
+      live: null,
+      pending: [],
+      undelivered: [],
+      pauseRequested: false,
+      aborted: false,
+      parkedEffectId: null,
+      fixRounds: 0,
+      lane: null,
+      laneLease: null,
+      gateLease: null,
+      gateHeld: [],
+      resume: null,
+      failure: null,
+    }
+  }
+
+  /**
+   * §9's amend, reaching the live run: the nodes that have **not started** take
+   * the new definitions, and nothing else is touched.
+   *
+   * The gate that decides *whether* an amendment is allowed lives in
+   * `src/amend/`, which refuses while any affected node is in flight and
+   * rebases the `done` ones before calling this. All that is left here is the
+   * one thing only the scheduler can do — swap the definitions it is holding
+   * for nodes it has not dispatched, and register the nodes the run gained.
+   *
+   * A node at any other status keeps the definition it started with, on
+   * purpose: its pipeline run already captured it, and a node that has settled
+   * has a branch that is the record of that definition.
+   */
+  adopt(workflow: Workflow): void {
+    this.#workflow = workflow
+    const declared = new Set(workflow.nodes.map((node) => node.id))
+
+    for (const node of workflow.nodes) {
+      const state = this.#states.get(node.id)
+      if (state === undefined) {
+        this.#states.set(node.id, this.#fresh(node))
+        this.#order.push(node.id)
+        continue
+      }
+      if (state.status !== 'pending' && state.status !== 'blocked') continue
+      const replacement = this.#fresh(node)
+      state.node = replacement.node
+      state.pipeline = replacement.pipeline
+    }
+
+    // A node the amendment removed is dropped only when it never started; the
+    // amend path refuses to remove one that did, so this can only ever drop an
+    // unstarted node. Leaving it would dispatch a node the workflow no longer
+    // declares.
+    for (const [id, state] of [...this.#states]) {
+      if (declared.has(id)) continue
+      if (state.status !== 'pending' && state.status !== 'blocked') continue
+      this.#states.delete(id)
+      this.#order.splice(this.#order.indexOf(id), 1)
+    }
+
+    this.#waves = computeWaves(workflow.nodes)
+    // The loop is asleep on `#changed()`; a new node may be dispatchable now.
+    this.#wake()
+  }
+
   /**
    * Runs the DAG to completion. Resolves when every node has settled, or when
    * the run stopped on something no amount of waiting can fix.
@@ -233,7 +291,7 @@ export class Scheduler {
     const unrunnable = this.#precheck()
     if (unrunnable) return this.#report(unrunnable)
 
-    this.#waves = computeWaves(this.#options.workflow.nodes)
+    this.#waves = computeWaves(this.#workflow.nodes)
 
     let stop: RunStop | null = null
     while (true) {
@@ -734,7 +792,7 @@ export class Scheduler {
     const ids = typeof named === 'string' ? [named] : node.gates
     const needs = new Set<string>()
     for (const id of ids) {
-      for (const resource of this.#options.workflow.gates[id]?.requires ?? []) needs.add(resource)
+      for (const resource of this.#workflow.gates[id]?.requires ?? []) needs.add(resource)
     }
     return [...needs]
   }
@@ -779,7 +837,7 @@ export class Scheduler {
   #fail(state: NodeState, reason: string): void {
     state.failure = reason
     this.#setStatus(state, 'failed')
-    for (const id of transitiveDependents(this.#options.workflow.nodes, state.node.id)) {
+    for (const id of transitiveDependents(this.#workflow.nodes, state.node.id)) {
       const dependent = this.#states.get(id)
       // Only nodes that have not started: one already in flight finishes.
       if (dependent?.status === 'pending') this.#setStatus(dependent, 'blocked')
@@ -828,7 +886,7 @@ export class Scheduler {
 
   #harnessOf(node: Node, override?: unknown): string {
     if (typeof override === 'string') return override
-    return node.harness ?? this.#options.workflow.defaults.harness
+    return node.harness ?? this.#workflow.defaults.harness
   }
 
   #adapter(id: string): HarnessAdapter {

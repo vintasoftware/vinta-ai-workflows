@@ -1097,6 +1097,9 @@ if (!live.installed || !live.authenticated) {
         if (outcome.ok) started.push(outcome.session)
         return outcome
       },
+      // `pty` is false here, so the contract asserts this rejects rather than
+      // that it opens anything.
+      attachPty: (sessionId) => liveAdapter.attachPty(sessionId),
     }
     return {
       adapter,

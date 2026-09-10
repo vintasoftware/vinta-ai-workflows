@@ -554,6 +554,9 @@ if (!live.installed || !live.authenticated) {
         if (outcome.ok) started.push(outcome.session)
         return outcome
       },
+      // The contract detaches every handle it opens, so unlike sessions these
+      // need no recording — `detach` is what proves there is no orphan.
+      attachPty: (sessionId, attach) => real.attachPty(sessionId, attach),
     }
     return {
       adapter,

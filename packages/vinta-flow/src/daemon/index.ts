@@ -12,9 +12,17 @@ export { createApi, type ApiOptions } from './api.ts'
 export { harnessCapabilities } from './harnesses.ts'
 export { createStaticHandler, DEFAULT_UI_DIR, type StaticHandler } from './static.ts'
 export { EventStream, DEFAULT_POLL_MS } from './stream.ts'
+export {
+  createWorkflowStore,
+  isWorkflowId,
+  WORKFLOWS_DIRNAME,
+  type WorkflowRead,
+  type WorkflowStore,
+} from './workflows.ts'
 export { startDaemon, type Daemon, type DaemonOptions } from './server.ts'
 export {
   AddContextRequestSchema,
+  AmendResponseSchema,
   AnswerRequestSchema,
   ErrorResponseSchema,
   EventFrameSchema,
@@ -34,6 +42,12 @@ export {
   RunListResponseSchema,
   RunSnapshotSchema,
   RunSummarySchema,
+  SaveWorkflowRequestSchema,
+  WorkflowListResponseSchema,
+  WorkflowResponseSchema,
+  formatPath,
+  toWireIssues,
+  type AmendResponse,
   type EventFrame,
   type Frame,
   type HumanQuestion,
@@ -41,4 +55,6 @@ export {
   type NodeDetail,
   type RunSnapshot,
   type RunSummary,
+  type WorkflowListResponse,
+  type WorkflowResponse,
 } from './schemas.ts'

@@ -21,6 +21,7 @@
  * objects satisfy them with no adapter and a stub satisfies them with three
  * methods.
  */
+import type { AmendRunner } from '../amend/amend.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion } from './schemas.ts'
@@ -70,6 +71,14 @@ export interface DaemonRun {
   readonly control: RunControl
   readonly pools: PoolView
   readonly admission: CapacityView
+  /**
+   * §9's amend path, when this host can drive it: the live statuses the gate
+   * reads, the integration worktree a `done` node is rebased in, and the hand
+   * -off that lets unstarted nodes take a new definition. Optional, because a
+   * host with no integration worktree can still serve a run — `src/amend/`
+   * refuses an amendment that would need one rather than half-applying it.
+   */
+  readonly amend?: AmendRunner
 }
 
 /** Raised by `runControl` for a §9 verb the host did not supply. */

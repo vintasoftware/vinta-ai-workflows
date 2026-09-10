@@ -27,6 +27,7 @@
 import { z } from 'zod'
 import type { HarnessCapabilities } from '../harness/adapter.ts'
 import type { NodeStatus, RunStatus } from '../journal/events.ts'
+import { WorkflowSchema } from '../types.ts'
 
 /** Compile-time exhaustiveness: a new status must be added to the enum below. */
 type Covers<Union extends string, Listed extends string> = [Exclude<Union, Listed>] extends [never]
@@ -252,6 +253,62 @@ export const NodeDetailSchema = z.strictObject({
 })
 
 // ---------------------------------------------------------------------------
+// Workflows — §10's Editor row
+// ---------------------------------------------------------------------------
+
+/**
+ * The documents a run can be started from, by id. Deliberately thin: the list
+ * exists so the editor can offer something to open, and anything richer would
+ * mean parsing every file on disk to answer a menu.
+ */
+export const WorkflowListResponseSchema = z.strictObject({
+  workflows: z.array(z.strictObject({ id: z.string() })),
+})
+
+/**
+ * One workflow, validated on the way out with the same schema the executor
+ * parses it with. A document the daemon cannot vouch for is refused rather
+ * than served: the editor's whole claim is that it cannot bless a workflow the
+ * executor would reject, and that claim has to hold in both directions.
+ */
+export const WorkflowResponseSchema = z.strictObject({
+  id: z.string(),
+  workflow: WorkflowSchema,
+})
+
+/**
+ * A save. The body is the workflow itself rather than a wrapper — there is no
+ * second field to carry, and `parseWorkflow` is the validation either way.
+ */
+export const SaveWorkflowRequestSchema = WorkflowSchema
+
+/**
+ * What a save did to a run that was still in flight (§9's amend path).
+ *
+ * A save against a workflow with no live run answers `{ok: true}` as before;
+ * one that amended a run answers with this instead, because "the document was
+ * written" and "three branches were rebased under a running plan" are not the
+ * same event and an editor that could not tell them apart would say nothing
+ * about the second.
+ *
+ * Every field is a node id or a classification from the journal's own
+ * vocabulary. There is no field a phase body could reach.
+ */
+export const AmendResponseSchema = z.strictObject({
+  ok: z.literal(true),
+  /** 1 for the run's first amendment. Matches the journalled ordinal. */
+  amendment: z.number().int(),
+  runId: z.string(),
+  changes: z.array(z.strictObject({ node: z.string(), kind: z.string() })),
+  /** Changed nodes plus their transitive dependents, topologically ordered. */
+  affected: z.array(z.string()),
+  /** Not-yet-started nodes that took the change immediately. */
+  applied: z.array(z.string()),
+  /** Already-`done` nodes rebased, in the order they were rebased. */
+  rebased: z.array(z.string()),
+})
+
+// ---------------------------------------------------------------------------
 // The WebSocket envelope
 // ---------------------------------------------------------------------------
 
@@ -279,6 +336,7 @@ export const EventFrameSchema = z.strictObject({
 
 export const FrameSchema = z.discriminatedUnion('channel', [EventFrameSchema])
 
+export type AmendResponse = z.infer<typeof AmendResponseSchema>
 export type HumanQuestion = z.infer<typeof HumanQuestionSchema>
 export type RunSummary = z.infer<typeof RunSummarySchema>
 export type RunSnapshot = z.infer<typeof RunSnapshotSchema>
@@ -286,6 +344,29 @@ export type NodeDetail = z.infer<typeof NodeDetailSchema>
 export type EventFrame = z.infer<typeof EventFrameSchema>
 export type Frame = z.infer<typeof FrameSchema>
 export type Issue = z.infer<typeof IssueSchema>
+export type WorkflowResponse = z.infer<typeof WorkflowResponseSchema>
+export type WorkflowListResponse = z.infer<typeof WorkflowListResponseSchema>
+
+/**
+ * `validate.ts`'s issues on the wire. Its path is an array of segments; the
+ * wire's is the dotted-and-bracketed rendering, so the browser shows the same
+ * location string the CLI prints and neither has to re-derive the other's.
+ */
+export function toWireIssues(
+  issues: readonly { readonly path: readonly (string | number)[]; readonly message: string }[],
+  code = 'invalid_workflow',
+): Issue[] {
+  return issues.map((issue) => ({ path: formatPath(issue.path), code, message: issue.message }))
+}
+
+/** `nodes[2].depends_on[0].artifact`. The empty path is the document itself. */
+export function formatPath(path: readonly (string | number)[]): string {
+  return path.reduce<string>(
+    (acc, segment) =>
+      typeof segment === 'number' ? `${acc}[${segment}]` : acc === '' ? segment : `${acc}.${segment}`,
+    '',
+  )
+}
 
 /**
  * zod issues, flattened and stripped. `unrecognized_keys` is the one code

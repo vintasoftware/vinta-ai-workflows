@@ -9,10 +9,19 @@
  * bound is exclusive. There is no in-memory ring buffer and no "replay window"
  * to fall out of: the journal *is* the buffer, for the life of the run.
  *
- * **One envelope, discriminated by `channel`.** Step 17 attaches a PTY to the
- * same socket, which is why the frame is a tagged union with one member today
- * rather than a bare event array. A client written now switches on `channel`
- * and keeps working when the second member arrives.
+ * **One envelope, discriminated by `channel`.** The PTY channel now rides this
+ * same socket, which is why the frame was a tagged union with one member
+ * before there was anything to discriminate. Nothing about the event frame
+ * changed to make room for it: `PtyChannel` reads the client's `pty` frames
+ * off the same socket and writes its own back, and the two channels never see
+ * each other's traffic.
+ *
+ * That placement is also the security boundary, and it is deliberate. A PTY is
+ * a shell on the operator's machine; `attach` below is called by `server.ts`
+ * only after the token check on the upgrade, and it is the *only* thing that
+ * ever constructs a `PtyChannel`. An unauthenticated peer is answered with a
+ * bare `401` and a destroyed socket before the protocol switch, so it never
+ * reaches this function and no terminal is ever spawned on its behalf.
  *
  * **Why a poll, in a package that has none.** The scheduler never polls
  * because it waits on a promise only a state change resolves. Nothing
@@ -25,6 +34,7 @@
  */
 import type { WebSocket } from 'ws'
 import type { Journal } from '../journal/journal.ts'
+import { PtyChannel, type PtyRegistry, takeovers } from './pty.ts'
 import type { EventFrame } from './schemas.ts'
 
 const OPEN = 1
@@ -40,12 +50,20 @@ interface Subscription {
 export class EventStream {
   readonly #journal: Journal
   readonly #pollMs: number
+  readonly #takeovers: PtyRegistry
   readonly #subscriptions = new Set<Subscription>()
+  readonly #terminals = new Set<PtyChannel>()
   #timer: NodeJS.Timeout | null = null
 
-  constructor(journal: Journal, pollMs: number = DEFAULT_POLL_MS) {
+  constructor(
+    journal: Journal,
+    pollMs: number = DEFAULT_POLL_MS,
+    /** Which nodes may be taken over. The process-wide registry by default. */
+    takeoverRegistry: PtyRegistry = takeovers,
+  ) {
     this.#journal = journal
     this.#pollMs = pollMs
+    this.#takeovers = takeoverRegistry
   }
 
   /**
@@ -56,8 +74,17 @@ export class EventStream {
   attach(socket: WebSocket, runId: string, since: number): void {
     const subscription: Subscription = { socket, runId, cursor: since }
     this.#subscriptions.add(subscription)
+    // The PTY half of the same socket. This is the one place a `PtyChannel` is
+    // ever built, and it is downstream of the upgrade's token check — which is
+    // what makes "no shell without the token" a property of the code path
+    // rather than a policy someone has to remember.
+    const terminal = new PtyChannel(socket, runId, this.#takeovers)
+    this.#terminals.add(terminal)
     socket.on('close', () => {
       this.#subscriptions.delete(subscription)
+      this.#terminals.delete(terminal)
+      // A dropped socket must not leave a shell running with nothing reading it.
+      void terminal.close()
       if (this.#subscriptions.size === 0) this.#stop()
     })
     this.#flush(subscription)
@@ -66,10 +93,21 @@ export class EventStream {
     }
   }
 
-  /** Drops every subscription and the timer. Sockets are closed by the server. */
+  /**
+   * Drops every subscription and the timer, and tears down every terminal.
+   *
+   * Sockets are closed by the server; a pty is not a socket and would outlive
+   * one, so it is signalled here. The signature stays synchronous because the
+   * caller's is: a `detach` signals the group immediately and then waits for
+   * the reap, so the process is dying before this returns whether or not
+   * anybody awaited the wait.
+   */
   close(): void {
     this.#subscriptions.clear()
     this.#stop()
+    const terminals = [...this.#terminals]
+    this.#terminals.clear()
+    for (const terminal of terminals) void terminal.close()
   }
 
   #tick(): void {

@@ -196,7 +196,18 @@ Expressing parallel phase execution inside a single state machine would require 
 
 ### 5.2 Pipeline state machines
 
-Authored in `vinta-state-machine-editor`'s own JSON shape (`states` / `transitions` / `initialStateIds` / `finalStateIds`, with `trigger`, `guard`, `effects` per transition and a host-owned `data` blob on every entity), so the editor loads and saves them with no translation layer.
+Authored in a shape close to `vinta-state-machine-editor`'s own (`states` / `transitions` / `initialStateIds` / `finalStateIds`, with `trigger`, `guard`, `effects` per transition and a host-owned `data` blob on every entity).
+
+**Correction: there is a translation layer.** This section originally claimed there was none. Against the editor at 0.11.0 there are four real divergences, and pretending otherwise would have made the mapping somebody's surprise rather than a designed seam:
+
+| Editor | Pipeline schema | Consequence |
+|---|---|---|
+| effects as ordered `{before, after}` hooks | one flat array | mapped to `before` and concatenated back — content and order survive, the phase distinction does not |
+| `trigger` is `{id, name}` | opaque string | flattened |
+| `name` / `description` / `color` / `data` required | optional | filled on the way in |
+| `from` nullable (creation transitions) | required | becomes `''`, so validation names the transition instead of the edge silently vanishing |
+
+Two further frictions belong to the components rather than the schema, and are worth fixing at the source: the editor mints ids like `state_<uuid>`, which the workflow `Id` pattern forbids (the host normalises deterministically and remaps every reference, so a legal round trip is still the identity); and `labelOffset` / `requiredPermission` have no workflow counterpart and do not survive a save.
 
 The editor's design says hosts inject the side-effect catalog and treat guards as opaque strings the host validates. The daemon's catalog:
 

@@ -69,10 +69,68 @@ export type GateStatus = 'passed' | 'failed' | 'timed_out'
  */
 export type OperatorDelivery = 'sent' | 'queued' | 'delivered' | 'ignored'
 
+/**
+ * How one node's definition moved between the run's frozen snapshot and the
+ * amendment proposed against it (§9's amend path).
+ *
+ * These are *classifications*, not content: an amendment is recorded as which
+ * nodes changed and in what way, never as the prose that changed. The split
+ * between the topology kinds (`dependency_*`, `base_branch_changed`,
+ * `node_added`, `node_removed`) and the content kinds (everything else) is the
+ * one that matters at apply time — topology moves a node's *base*, content
+ * moves what its branch *contains*.
+ */
+export type AmendmentKind =
+  | 'node_added'
+  | 'node_removed'
+  | 'dependency_added'
+  | 'dependency_removed'
+  /** Same dependency set, different order — §8 merges `integ-` in that order. */
+  | 'dependency_reordered'
+  | 'base_branch_changed'
+  | 'gates_changed'
+  | 'harness_changed'
+  | 'model_changed'
+  | 'pipeline_changed'
+  /** Name, `prompt_ref`, `touches` or `max_fix_rounds` — the phase body. */
+  | 'body_changed'
+
+/** One node and one way it moved. Both fields are identifiers. */
+export interface AmendmentChange {
+  readonly node: string
+  readonly kind: AmendmentKind
+}
+
 /** Events about a run as a whole. */
 interface RunPayloads {
   run_started: { readonly workflow_id: string; readonly base_branch: string }
   run_ended: { readonly status: Exclude<RunStatus, 'running'> }
+  /**
+   * §9's amend, as the run's own history: the reason a node's base moved.
+   *
+   * Deliberately *not* projected. The frozen snapshot on disk is the run's
+   * definition and the `nodes` projection is folded out of `node_registered`,
+   * `node_status` and `node_assigned` — all three of which an amendment emits
+   * for the nodes it actually moves. This row is the audit trail beside them:
+   * dropping every projection and replaying the log still reproduces the same
+   * `runs` and `nodes` rows, which is the invariant §5.3 states.
+   *
+   * Every field is an identifier or a classification. `superseded` is the
+   * run-relative path the previous snapshot was kept at, so the history points
+   * at the old definition rather than carrying a copy of it.
+   */
+  workflow_amended: {
+    /** 1 for the first amendment of a run, and one more for each after it. */
+    readonly amendment: number
+    readonly changes: readonly AmendmentChange[]
+    /** The changed nodes plus their transitive dependents, topologically ordered. */
+    readonly affected: readonly string[]
+    /** Not-yet-started nodes that took the change immediately. */
+    readonly applied: readonly string[]
+    /** Already-`done` nodes rebased, in the order they were rebased. */
+    readonly rebased: readonly string[]
+    readonly superseded: string
+  }
 }
 
 /**

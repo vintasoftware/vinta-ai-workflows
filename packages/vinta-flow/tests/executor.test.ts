@@ -338,7 +338,9 @@ describe('the shipped standard-phase, end to end', () => {
       expect([name, rig.pools.held(name)]).toEqual([name, 0])
     }
     expect(rig.pools.waiting).toBe(0)
-  })
+    // Real git worktrees, real gate processes: ~1.5s alone, but it sits close
+    // to vitest's 5s default and times out when the machine is loaded.
+  }, 60_000)
 })
 
 // ---------------------------------------------------------------------------

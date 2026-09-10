@@ -48,9 +48,11 @@ import {
   type AgentEvent,
   type AgentSession,
   type AgentTask,
+  HarnessCapabilityError,
   type HarnessAdapter,
   type HarnessCapabilities,
   type PreflightResult,
+  type PtyHandle,
   type SpawnOutcome,
   type SpawnRefusal,
   type SpawnRefusalKind,
@@ -72,8 +74,12 @@ import {
  * `inject` and `resume` are true because the session API gives both directly:
  * steering is a second prompt on a live session, and resuming is naming its id.
  *
- * `pty` is false — §7 marks it ➖, and `attachPty` does not exist on the
- * interface yet (step 17).
+ * `pty` is false — §7 marks it ➖. This adapter manages an HTTP server rather
+ * than one supervised process per agent, so there is no pipe to hand a
+ * terminal: an interactive `opencode` is a *different* client against the same
+ * server, not a takeover of this session. `attachPty` is implemented anyway,
+ * and rejects, because a false capability must be loud in the same way `send`
+ * and `interrupt` are.
  *
  * `permissionControl` is false, and deliberately so. opencode's permission
  * policy lives in its config and agent definitions, not in anything this
@@ -795,6 +801,15 @@ export class OpencodeAdapter implements HarnessAdapter {
    */
   refuseNext(kind: SpawnRefusalKind): void {
     this.#forced = kind
+  }
+
+  /**
+   * §9's take over, refused. `capabilities.pty` is false and this is the
+   * mechanism that makes that a promise rather than a note: a caller must
+   * never be able to mistake "this harness cannot do that" for "delivered".
+   */
+  async attachPty(_sessionId: string): Promise<PtyHandle> {
+    throw new HarnessCapabilityError(this.id, 'pty')
   }
 
   /**

@@ -29,12 +29,16 @@ import {
   RedirectRequestSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
+  WorkflowListResponseSchema,
+  WorkflowResponseSchema,
   toIssues,
+  toWireIssues,
   type EventFrame,
   type NodeDetail,
   type RunSnapshot,
   type RunSummary,
 } from '../../src/daemon/schemas.ts'
+import { parseWorkflow } from '../../src/validate.ts'
 
 type StoredEvent = EventFrame['events'][number]
 
@@ -61,6 +65,13 @@ export interface Post {
   readonly body: unknown
 }
 
+/** One accepted workflow save, as the stub received it off the wire. */
+export interface WorkflowPut {
+  readonly id: string
+  /** The body, parsed by the same validator the daemon uses. */
+  readonly workflow: unknown
+}
+
 /** An event as a test writes it: the log assigns `id` and `ts`. */
 export interface NewEvent {
   readonly nodeId: string | null
@@ -81,6 +92,12 @@ export interface StubOptions {
   readonly events?: readonly NewEvent[]
   /** Serve a body that does not match the schema, to prove the client parses. */
   readonly corrupt?: 'snapshot' | 'frame'
+  /**
+   * The editable workflow documents, by id. Served and saved with the daemon's
+   * own schemas and its own validator, so a workflow this stub accepts is one
+   * the daemon would accept too.
+   */
+  readonly workflows?: Readonly<Record<string, unknown>>
 }
 
 export interface StubDaemon {
@@ -90,6 +107,10 @@ export interface StubDaemon {
   readonly connections: readonly Connection[]
   /** Every §9 operation the stub accepted, in order. */
   readonly posts: readonly Post[]
+  /** Every workflow save the stub accepted, in order. */
+  readonly puts: readonly WorkflowPut[]
+  /** What the stub holds for a workflow id right now. */
+  readonly workflow: (id: string) => unknown
   readonly emit: (...events: NewEvent[]) => void
   readonly setSnapshot: (runId: string, snapshot: RunSnapshot) => void
   readonly setNodeDetail: (runId: string, nodeId: string, detail: NodeDetail) => void
@@ -104,6 +125,8 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
   const snapshots = new Map(Object.entries(options.snapshots))
   const details = new Map(Object.entries(options.details ?? {}))
   const posts: Post[] = []
+  const puts: WorkflowPut[] = []
+  const workflows = new Map(Object.entries(options.workflows ?? {}))
   const log: StoredEvent[] = []
   const connections: Connection[] = []
   const attached = new Map<WebSocket, { runId: string; cursor: number; record: Connection }>()
@@ -116,6 +139,51 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     if (!authorized(request.headers.authorization, url)) {
       return json(response, 401, { error: 'unauthorized', issues: null })
+    }
+
+    // The Editor row's three endpoints. The save runs `parseWorkflow` exactly
+    // as the daemon does, so "the client posted a body the daemon accepts" is
+    // an assertion about the contract rather than about this file.
+    if (url.pathname === '/api/workflows') {
+      return json(
+        response,
+        200,
+        WorkflowListResponseSchema.parse({
+          workflows: [...workflows.keys()].sort().map((id) => ({ id })),
+        }),
+      )
+    }
+    const workflow = /^\/api\/workflows\/([^/]+)$/.exec(url.pathname)
+    if (workflow !== null) {
+      const id = decodeURIComponent(workflow[1] ?? '')
+      if (request.method === 'PUT') {
+        let raw: unknown
+        try {
+          raw = JSON.parse(await readBody(request))
+        } catch {
+          return json(response, 400, { error: 'invalid_workflow', issues: null })
+        }
+        const parsed = parseWorkflow(raw)
+        if (!parsed.ok) {
+          return json(response, 400, {
+            error: 'invalid_workflow',
+            issues: toWireIssues(parsed.issues),
+          })
+        }
+        workflows.set(id, parsed.workflow)
+        puts.push({ id, workflow: parsed.workflow })
+        return json(response, 200, OkResponseSchema.parse({ ok: true }))
+      }
+      const held = workflows.get(id)
+      if (held === undefined) return json(response, 404, { error: 'unknown_workflow', issues: null })
+      const parsed = parseWorkflow(held)
+      if (!parsed.ok) {
+        return json(response, 409, {
+          error: 'invalid_workflow',
+          issues: toWireIssues(parsed.issues),
+        })
+      }
+      return json(response, 200, WorkflowResponseSchema.parse({ id, workflow: parsed.workflow }))
     }
 
     // The five §9 operations. Validated with the daemon's request schemas, so
@@ -199,6 +267,10 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     token: TOKEN,
     connections,
     posts,
+    puts,
+    workflow(id) {
+      return workflows.get(id)
+    },
     emit(...events) {
       for (const event of events) append(event)
       for (const ws of attached.keys()) flush(ws)

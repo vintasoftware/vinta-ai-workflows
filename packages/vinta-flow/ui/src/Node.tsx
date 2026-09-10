@@ -22,9 +22,12 @@
  *   means something moved, and a slow tick covers transcript growth, which
  *   journals no event of its own.
  *
- * PTY takeover — §9's fifth verb — has no endpoint yet (§7, step 17), so it is
- * a stated limitation and not a button. `Runs.tsx` set that precedent: an
- * action the API cannot perform does not belong on a control.
+ * PTY takeover — §9's fifth verb — is now a button where `capabilities.pty` is
+ * true and a stated limitation where it is false. That is the same rule as the
+ * other four and the same rule `Runs.tsx` set: an action the harness cannot
+ * perform does not belong on a control. The capability is read off the wire,
+ * never assumed, so a harness that declares nothing gets the sentence rather
+ * than the button.
  */
 import { useEffect, useState } from 'react'
 import type { NodeDetail, RunSnapshot } from '../../src/daemon/schemas.ts'
@@ -32,6 +35,7 @@ import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
 import type { NodeStatus } from './projection.ts'
 import { nodeLabel, nodeTone } from './status.ts'
+import { TerminalView } from './Terminal.tsx'
 import { Transcript } from './Transcript.tsx'
 import { useNow } from './time.ts'
 import { useRun } from './useRun.ts'
@@ -82,6 +86,7 @@ export function NodeView({
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [takingOver, setTakingOver] = useState(false)
   const cursor = projection.cursor
 
   useEffect(() => {
@@ -172,8 +177,12 @@ export function NodeView({
         capabilities={capabilitiesOf(snapshot, detail.node.harness)}
         status={status}
         busy={busy}
+        takingOver={takingOver}
+        onTakeOver={() => setTakingOver((open) => !open)}
         onOperate={(operation, body, done) => void operate(operation, body, done)}
       />
+
+      {takingOver && <TerminalView runId={runId} nodeId={nodeId} since={cursor} />}
 
       <div className="panels">
         <Diff diff={detail.diff} />
@@ -302,6 +311,8 @@ function Steering({
   capabilities,
   status,
   busy,
+  takingOver,
+  onTakeOver,
   onOperate,
 }: {
   readonly harness: string
@@ -309,6 +320,8 @@ function Steering({
   readonly capabilities: Capabilities | null
   readonly status: NodeStatus
   readonly busy: boolean
+  readonly takingOver: boolean
+  readonly onTakeOver: () => void
   readonly onOperate: <K extends NodeOperation>(
     operation: K,
     body: OperationBody<K>,
@@ -377,14 +390,26 @@ function Steering({
           Abort node
         </button>
       </p>
-      <p className="muted" data-takeover>
-        {declared.pty
-          ? 'Take over: the daemon does not serve a PTY channel yet.'
-          : `Take over: ${harness} has no interactive takeover.`}
-        {capabilities === null
-          ? ' Capabilities for this harness are unknown and assumed absent.'
-          : ''}
-      </p>
+      {declared.pty ? (
+        <>
+          <p className="controls">
+            <button type="button" data-op="takeover" disabled={settled} onClick={onTakeOver}>
+              {takingOver ? 'Detach' : 'Take over'}
+            </button>
+          </p>
+          <p className="muted" data-takeover>
+            Take over interrupts the headless session, opens {harness} in a terminal on the same
+            session, and resumes it headless when you detach.
+          </p>
+        </>
+      ) : (
+        <p className="muted" data-takeover>
+          Take over: {harness} has no interactive takeover.
+          {capabilities === null
+            ? ' Capabilities for this harness are unknown and assumed absent.'
+            : ''}
+        </p>
+      )}
     </section>
   )
 }
