@@ -69,6 +69,8 @@ For each project skill, decide its bucket:
 
 For `templated` and `stack-derived`, in-place diffing is misleading because the project version contains interpolated values (commands, branch names, etc.) that won't appear in the template. The right refresh path for those is to re-run [vinta-derive-skills](../vinta-derive-skills/SKILL.md) so the user can re-supply the inputs.
 
+**`qa-review` needs re-rendering on a config change, not just a template change.** Unlike every other templated skill, its value depends on facts baked into the body — environment addresses, which account role to use, the design source, who to ask when blocked — because its holder has no repo to look them up in. When `skills.qa-frontend` in `.vinta-ai-workflows.yaml` has changed since the file was rendered, the project's copy is stale even though the upstream template has not moved. The rendered body carries a generation date and source commit in its closing section; compare those against the config's last change and surface `qa-review` as **regenerate needed** when the config is newer. Same for `qa-frontend`, though a stale copy there is less costly — its reader can check the config themselves.
+
 ### 4. Diff verbatim skills
 
 For each `verbatim` skill:

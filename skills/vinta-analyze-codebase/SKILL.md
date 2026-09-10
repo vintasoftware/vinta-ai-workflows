@@ -163,7 +163,7 @@ This is a load-bearing input for the rest of the bootstrap flow — surface ever
 For each skill, also classify:
 
 - `vinta-managed` — directory name starts with `vinta-` (installed by `vinta-ai-workflows`; can be left alone or refreshed via that CLI).
-- `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `write-unit-test`). `implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`.
+- `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `write-unit-test`, `qa-frontend`, `qa-review`). `implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`.
 - `project-custom` — anything else; written by the team.
 
 **Sub-agents** — list every agent file with its name + description:
