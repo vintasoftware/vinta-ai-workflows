@@ -1,0 +1,597 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
+  "title": "vinta-flow workflow",
+  "description": "An executable plan: the phase DAG, the pipelines phases run through, the capacity pools they contend for, and the gates they must pass. Lives at `ai-plans/<feature-kebab>.workflow.json` in a target project, emitted by `plan-feature` alongside the human-readable plan and executed by `vinta-flow`. GENERATED from packages/vinta-flow/src/types.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional URL of this schema, for editor validation. Ignored at runtime.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "number",
+      "const": 1,
+      "description": "Schema major version. Bumped only on breaking changes."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Stable identifier for this workflow. Used in branch names."
+    },
+    "plan_ref": {
+      "description": "The human-readable plan this was emitted alongside.",
+      "type": "string"
+    },
+    "base_branch": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What dependency-free nodes branch from."
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "harness": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex",
+            "opencode"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pipeline": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        }
+      },
+      "required": [
+        "harness",
+        "model",
+        "pipeline"
+      ],
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Maximum concurrent holders. A starting hint for `lane` — see admission control."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "worktree",
+              "semaphore"
+            ],
+            "description": "`worktree` pools are provisioned lanes; `semaphore` pools are pure counters."
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capacity",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "description": "Named capacity pools. `lane` is required."
+    },
+    "gates": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Shell command run in the node’s lane. Not an agent."
+          },
+          "requires": {
+            "default": [],
+            "description": "Resource pool ids acquired before the gate runs, in canonical order.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "timeout_s": {
+            "default": 1800,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cmd"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "depends_on": {
+            "default": [],
+            "description": "Empty means the node branches from base_branch and may start immediately.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "The upstream node id."
+                },
+                "artifact": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "What this node needs from the upstream one — a model, a symbol, a migration, an endpoint. Required: it is what the implementer prompt uses to explain what the phase builds on, and a bare id with no reason is usually a plan smell."
+                }
+              },
+              "required": [
+                "node",
+                "artifact"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "prompt_ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Where the phase brief lives, e.g. `plan.md#phase-1`."
+          },
+          "touches": {
+            "default": [],
+            "description": "Touch List. Same-wave overlap is warned about, never refused.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pipeline": {
+            "description": "Overrides defaults.pipeline.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "gates": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "harness": {
+            "description": "Overrides defaults.harness.",
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "model": {
+            "description": "Overrides defaults.model.",
+            "type": "string"
+          },
+          "max_fix_rounds": {
+            "default": 2,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prompt_ref"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pipelines": {
+      "default": {},
+      "description": "Pipelines this workflow authors. Optional: `defaults.pipeline` may name one the package ships (see BUILT_IN_PIPELINES), and a declared id shadows a built-in of the same name. A pipeline is machinery, not plan data — requiring every emitted workflow to carry a verbatim copy would duplicate it into every plan, and a fix to the shipped one would never reach a plan already written.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "states": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "position": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Canvas position."
+                },
+                "onEnter": {
+                  "default": [],
+                  "description": "Effects run on entering the state.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "onLeave": {
+                  "default": [],
+                  "description": "Effects run on leaving the state.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "color": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "position"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "transitions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "Source state id."
+                },
+                "to": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "Target state id."
+                },
+                "trigger": {
+                  "description": "Event name that fires this transition.",
+                  "type": "string"
+                },
+                "guard": {
+                  "description": "Opaque boolean expression over the documented guard context (review.verdict, gate.exit_code, human.answer, fix_rounds, node.*, run.*). Evaluated by a restricted evaluator with no host access.",
+                  "type": "string"
+                },
+                "effects": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "data": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                }
+              },
+              "required": [
+                "id",
+                "from",
+                "to"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "initialStateIds": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "finalStateIds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "data": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {},
+            "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+          }
+        },
+        "required": [
+          "states",
+          "initialStateIds"
+        ],
+        "additionalProperties": false,
+        "description": "A per-phase pipeline, authored in vinta-state-machine-editor."
+      }
+    },
+    "data": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {},
+      "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "base_branch",
+    "defaults",
+    "resources",
+    "nodes"
+  ],
+  "additionalProperties": false
+}

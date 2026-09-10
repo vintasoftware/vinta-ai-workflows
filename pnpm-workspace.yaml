@@ -1,0 +1,7 @@
+packages:
+  - 'packages/*'
+
+# pnpm 10 blocks dependency build scripts by default. better-sqlite3 is a native
+# module and is unusable unless its build runs.
+onlyBuiltDependencies:
+  - better-sqlite3

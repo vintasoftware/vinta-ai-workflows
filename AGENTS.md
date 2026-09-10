@@ -16,6 +16,11 @@ Conventions for any AI agent (Claude Code, Codex, Cursor, Copilot, …) editing 
 - `scripts/*.mjs` — **source-side maintenance scripts** run by CI, never shipped (excluded from the `files` whitelist). `check-ai-models.mjs` is the nightly freshness check for the `plan-feature` AI model tier table (`resources/ai-models.yaml`): it checks the cited ids against a **free, no-key model aggregator** (models.dev, with LiteLLM's JSON as fallback) — detection needs network access but no API keys — and on drift (a cited id disappeared, or a newer same-family model shipped) has an LLM propose an updated table that `.github/workflows/check-ai-models.yml` opens as a PR. The LLM proposal is the only step that wants a key (`ANTHROPIC_API_KEY`), and it's optional. May use devDependencies (e.g. `yaml`) — this does **not** weaken the CLI's zero-runtime-deps property, which only concerns `dependencies` + `vinta-ai-workflows.mjs`.
 - `CHANGELOG.md` — Keep a Changelog format, SemVer.
 
+The repo is also a **pnpm workspace** (`pnpm-workspace.yaml`, `packages/*`). The root `package.json` is still the published `vinta-ai-workflows` package and is *also* the workspace root — nothing moved, and the root's `files` whitelist excludes `packages/` so workspace members are never published as part of it. **The CLI's zero-runtime-deps property covers the root `dependencies` only**; workspace packages carry their own dependencies freely and do not weaken it.
+
+- `packages/vinta-flow/` — code-orchestrated parallel execution of `plan-feature` plans (the daemon `implement-plan` describes in prose). TypeScript, strict, tested with Vitest. See [SPEC.md](packages/vinta-flow/SPEC.md) — that spec is the authority; read it before changing anything here. Source of truth for `schemas/workflow.v1.schema.json`, which is **generated** from `src/types.ts`.
+- `packages/vinta-dag-editor/` — framework-agnostic Web Component rendering and editing plan DAGs. Private (unpublished); mirrors [`vinta-state-machine-editor`](https://github.com/vintasoftware/vinta-state-machine-editor)'s architecture and conventions deliberately, so extraction to npm later is a publish rather than a refactor.
+
 The repo is **self-recursive**: it authors skills it itself does not run. Don't try to "test" a skill by invoking it inside this repo — invoke it inside a target project after `npx vinta-ai-workflows install`.
 
 ### `dev-skills/` — maintenance skills for this repo
@@ -44,7 +49,7 @@ Vendor auto-discovery is wired via committed symlinks at the repo root — no pe
 
 ## How to verify changes
 
-There is no build or lint config in this repo. Verification is a short fixed list:
+The **skills side** of this repo (`skills/`, `dev-skills/`, `schemas/`, `vinta-ai-workflows.mjs`) has no build or lint config; verification there is the short fixed list below. The **workspace packages under `packages/`** do have real tooling — see the last rows of the table.
 
 | Change touches | Verification |
 |---|---|
@@ -56,7 +61,16 @@ There is no build or lint config in this repo. Verification is a short fixed lis
 | any `SKILL.md` body | Frontmatter must include `name:` (kebab-case, matches dir name) + `description:` (dense one-liner). Body is rendered markdown — no `{{PLACEHOLDER}}` strings should survive in foundation-skill copies (they survive only in `*-template.md` files under `resources/`). |
 | `scripts/check-ai-models.mjs` or `resources/ai-models.yaml` | `npm install --no-save yaml && node scripts/check-ai-models.mjs --no-llm` (no API keys needed; detection queries the free models.dev aggregator over the network and prints a per-vendor report. **Exit 1 just means drift was found, not a failure** — exit 2 is a real error). Validate the YAML against `schemas/ai-models.v1.schema.json` if `ajv-cli` is available. |
 
-`run-in-background` long verifications when convenient. There is nothing else to run — no Vitest, Jest, pytest, ruff, eslint, biome wired up in this repo.
+`run-in-background` long verifications when convenient.
+
+| Change touches | Verification |
+|---|---|
+| anything under `packages/vinta-flow/` | From that directory: `pnpm run typecheck` and `pnpm test`. Both must pass. |
+| `packages/vinta-flow/src/types.ts` | Additionally `pnpm --filter vinta-flow schema:gen` and commit the regenerated `schemas/workflow.v1.schema.json` — a test fails when the committed file drifts from the zod source. Never hand-edit that JSON. |
+| anything under `packages/vinta-dag-editor/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (Biome, configured in `biome.jsonc` to the repo's style rather than Biome's defaults). |
+| `pnpm-workspace.yaml`, root `package.json`, or anything that could reach the published package | `npm pack --dry-run` at the root must list **exactly** the same files as before the change, and root `dependencies` must stay absent. |
+
+Beyond the above there is nothing else to run — no Jest, pytest, ruff, or eslint anywhere in this repo, and no lint or build on the skills side.
 
 ## Layout rules
 

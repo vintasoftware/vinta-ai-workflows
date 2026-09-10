@@ -7,6 +7,8 @@ description: Author a phased implementation plan for a new feature following the
 
 Plans live in `ai-plans/` as `YYYY-MM-DD-FEATURE_NAME_IMPLEMENTATION_PLAN.md` (uppercase + underscores). `..._SPEC.md` sibling exists → **read first**. Plan translates spec into phased delivery, doesn't re-derive requirements. No spec? Point at [create-spec](../create-spec/SKILL.md) first; plan without spec = plausible-sounding but unverified. Spec/plan pair share `YYYY-MM-DD-FEATURE_NAME` prefix.
 
+Every plan ships **two** files: the markdown above, and its executable sibling `ai-plans/<feature-kebab>.workflow.json` — the same phase graph in the form an orchestrator runs. See "Emit the executable workflow". Written every time; never gated on a question.
+
 ## Step 0 — Interrogate before drafting (NON-NEGOTIABLE)
 
 **Never assume requester want.** *"Plan bookmarks feature"* hide ≥dozen decisions cheaper to surface now than unwind in Phase 4.
@@ -233,6 +235,8 @@ Phase 1 and Phase 2 both export from `@app/bookmarks/__init__.py`. Trivial merge
 ```
 
 The table is **derived from the `**Depends on**:` lines, not authored independently.** Compute it: a phase with no dependencies is wave 1; otherwise its wave is one past the deepest phase it depends on. The executor recomputes this and will flag a table that disagrees.
+
+The `depends_on` edges in the workflow JSON come off the **same** lines — table and JSON are two renderings of one graph, never two graphs kept in sync by hand. See "Emit the executable workflow".
 
 ### Same-wave phases must not fight over the same files
 
@@ -475,6 +479,247 @@ See `upsert_records` in [records.py:92-96](../<app>/<module>/models/records.py#L
 
 Don't mix styles within one sentence. In **Touch List**, use `@path` for new files + `[name](relative-path)` for edited files when want line numbers.
 
+## Emit the executable workflow
+
+Alongside the markdown plan, write `ai-plans/<feature-kebab>.workflow.json` — same directory, feature name lowercased with hyphens (`BOOKMARK_FOLDERS` → `ai-plans/bookmark-folders.workflow.json`), no date prefix. The markdown is what humans review; the JSON is the same phase graph in the form an orchestrator runs — one worktree lane per phase, branches cut from each phase's dependencies, gates queued behind capacity limits instead of stampeding.
+
+**Unconditional.** Write it on every plan. Don't ask, don't gate it on a config field, don't skip it because the project has no orchestrator installed — a project without one carries a few KB it never reads, and a project that installs one later finds its plans already executable. The one thing that is *not* free is emitting it inconsistently: a half-populated `ai-plans/` teaches the team the file is optional.
+
+**It is not a second source of truth.** Every value in it is read off the plan you just wrote. Write the plan first, then transcribe. If a field has no answer in the plan, the plan is missing something — go fix the plan, not the JSON.
+
+First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json`. Editors validate against it as you type, which is when a typo is cheap; without it the first thing that reads the file is the executor, an hour into a run.
+
+### Mapping the plan onto the document
+
+| Field | Comes from |
+|---|---|
+| `$schema` | The URL above, literally. |
+| `schema_version` | `1`. |
+| `id` | The feature kebab — same slug as the filename. It lands in branch names (`plan/{id}/wave-2`), so kebab-case only, no dates, no underscores. |
+| `plan_ref` | Repo-relative path of the markdown plan, e.g. `ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md`. |
+| `base_branch` | What `**Depends on**: nothing — starts from the base branch` means concretely: the repo's default branch, unless **Guiding Decisions** names a long-lived feature branch. |
+| `defaults.harness` | The agent CLI the team runs — `claude-code`, `codex`, or `opencode`. `claude-code` unless the project says otherwise. |
+| `defaults.model` | The concrete model id for the tier **most** phases carry, pulled from [resources/ai-models.yaml](resources/ai-models.yaml). |
+| `defaults.pipeline` | `standard-phase` — see "The pipeline block". |
+| `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the project's parallel-lane budget (3 when unstated); it is a hint, not a cap the plan enforces. |
+| `resources.<pool>` | One `{"kind": "semaphore"}` pool per expensive shared thing a gate contends for — the test database, the e2e browser grid, a staging deploy slot. `capacity: 1` when only one can run at a time. |
+| `gates.<id>` | The checks a phase must pass, as **shell commands run in the phase's lane** — the project's real typecheck / test / lint invocations, not an agent and not prose. Give the slow ones `requires` naming the pool they contend for, and a `timeout_s` that is generous rather than tight. |
+| `nodes[]` | One per phase, in plan order. |
+| `nodes[].id` | `p` + the phase number, lowercased: `Phase 1` → `p1`, `Phase 4a` → `p4a`, `Phase 1b` → `p1b`. |
+| `nodes[].name` | The phase title without its `Phase N —` prefix. |
+| `nodes[].prompt_ref` | `<plan_ref>#phase-<number>` — the anchor of that phase's heading. Anchor on the number, not the slugified full title: the number is the part that survives a title edit, and the phase brief the implementer reads is located by its `### Phase N` prefix. |
+| `nodes[].depends_on[]` | **One entry per clause** of the phase's `**Depends on**:` line, each carrying both `node` (the upstream node id) and `artifact` (that clause's prose, minus the phase reference). |
+| `nodes[].touches` | That phase's **Touch List** entries as plain repo-relative paths — strip the `@` prefix and any markdown link syntax, keep the trailing `/` on a directory. |
+| `nodes[].gates` | The gate ids this phase must pass, in the order they should run. |
+| `nodes[].model` / `nodes[].harness` | **Only** when this phase differs from `defaults` — the id for its `**Suggested AI model**:` tier when that tier isn't the default one. Every phase repeating the default is noise that goes stale on the next model bump. |
+| `nodes[].max_fix_rounds` | Omit (defaults to 2). Set it higher only on a phase whose review you expect to iterate — a delicate migration, a concurrency protocol. |
+| `nodes[].pipeline` | Omit. A per-phase pipeline is for a phase that genuinely runs a different lifecycle, which is rare enough that needing it is a signal to re-read the plan. |
+| `pipelines` | **Omit.** The executor ships `standard-phase` — see "The pipeline block". |
+
+Rules the mapping depends on:
+
+- **`artifact` is required on every edge, and it is the clause's own prose.** It is what the implementer's prompt uses to explain what this phase builds on, so the value is what the clause says the phase needs — "the `BookmarkFolder` model and its migration" — never `p1`, never "depends on Phase 1". If the `**Depends on**:` line has no artifact to transcribe, the edge shouldn't exist; see "`**Depends on**:` — one line per phase, always present".
+- **`touches` is what the same-wave overlap check reads.** Executors *warn* on two same-wave nodes declaring the same path rather than refusing, so an incomplete Touch List doesn't fail loudly — it fails at merge. Transcribe every file the phase creates or edits, including tests.
+- **Never invent a model id.** Pick the tier from the rubric under "AI model selection per phase", then read the id out of [resources/ai-models.yaml](resources/ai-models.yaml). Ids drift; tiers don't.
+- **Gate commands must be commands the repo actually runs today.** Read them out of the project's task runner (`package.json` scripts, `Makefile`, `pyproject.toml`, CI config) rather than guessing a conventional one. A gate that doesn't exist fails every phase identically, and looks like a code problem.
+- **The graph must agree with the Execution graph table.** Same nodes, same edges, same waves — they are two renderings of one set of `**Depends on**:` lines, so derive both from the lines rather than transcribing one from the other. A disagreement means one was hand-edited, and the executor flags it.
+
+### The pipeline block
+
+`pipelines` describes what happens *within* one phase — implement → review → fix → gate → integrate — as opposed to `nodes`, which describes what happens *between* phases. It is fixed machinery, not a planning decision.
+
+**Omit `pipelines` entirely.** Naming `standard-phase` in `defaults.pipeline` is enough: the executor ships that pipeline and supplies it. Do not paste a copy into the plan — a pasted pipeline is a copy that cannot be fixed centrally, so an executor-side correction would never reach a plan already written, and a hand-edited one is how a plan silently stops running its reviewer.
+
+Author a `pipelines` block only when a project genuinely needs a *different* lifecycle. That is an executor-configuration decision made once per project, not a per-plan choice, and a declared id shadows the shipped pipeline of the same name.
+
+### Worked example
+
+A five-phase plan whose `**Depends on**:` lines are:
+
+```markdown
+### Phase 1 — BookmarkFolder model + migration
+**Depends on**: nothing — starts from the base branch.
+
+### Phase 2 — Folder CRUD endpoints
+**Depends on**: Phase 1 (the `BookmarkFolder` model and its migration).
+
+### Phase 3 — Folder tree serializer
+**Depends on**: Phase 1 (the `BookmarkFolder.parent` self-FK the tree is walked over).
+
+### Phase 4 — Nested folder listing endpoint
+**Depends on**: Phase 2 (the `/api/folders` viewset this list action is added to), Phase 3 (the `FolderTreeSerializer` payload shape).
+
+### Phase 5 — Remove the `bookmark-folders` feature flag
+**Depends on**: Phase 2 (the flag branches the CRUD endpoints added), Phase 3 (the flag branch in the tree serializer), Phase 4 (the flag branch in the nested listing action).
+```
+
+which give this **Execution graph** table:
+
+```markdown
+| Wave | Phases | Depends on |
+|---|---|---|
+| 1 | Phase 1 | — |
+| 2 | Phase 2, Phase 3 | Phase 1 |
+| 3 | Phase 4 | Phase 2, Phase 3 |
+| 4 | Phase 5 — remove the `bookmark-folders` flag | Phase 2, Phase 3, Phase 4 (deferred — soak-gated) |
+```
+
+and this `ai-plans/bookmark-folders.workflow.json`:
+
+```json
+{
+  "$schema": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
+  "schema_version": 1,
+  "id": "bookmark-folders",
+  "plan_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md",
+  "base_branch": "main",
+  "defaults": {
+    "harness": "claude-code",
+    "model": "claude-sonnet-5",
+    "pipeline": "standard-phase"
+  },
+  "resources": {
+    "lane": {
+      "capacity": 3,
+      "kind": "worktree",
+      "description": "Concurrent phase worktrees. Matches the project's max_parallel_lanes."
+    },
+    "test-suite": {
+      "capacity": 1,
+      "kind": "semaphore",
+      "description": "The suite runs against a forked database; two at once race on the same fixtures."
+    }
+  },
+  "gates": {
+    "types": {
+      "cmd": "uv run mypy apps/",
+      "timeout_s": 300
+    },
+    "unit": {
+      "cmd": "uv run pytest",
+      "requires": [
+        "test-suite"
+      ],
+      "timeout_s": 1800
+    }
+  },
+  "nodes": [
+    {
+      "id": "p1",
+      "name": "BookmarkFolder model + migration",
+      "depends_on": [],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-1",
+      "touches": [
+        "apps/bookmarks/models.py",
+        "apps/bookmarks/migrations/",
+        "tests/bookmarks/test_models.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ],
+      "model": "claude-haiku-4-5"
+    },
+    {
+      "id": "p2",
+      "name": "Folder CRUD endpoints",
+      "depends_on": [
+        {
+          "node": "p1",
+          "artifact": "the `BookmarkFolder` model and its migration"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-2",
+      "touches": [
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/api/urls.py",
+        "tests/bookmarks/test_api_crud.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p3",
+      "name": "Folder tree serializer",
+      "depends_on": [
+        {
+          "node": "p1",
+          "artifact": "the `BookmarkFolder.parent` self-FK the tree is walked over"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-3",
+      "touches": [
+        "apps/bookmarks/api/serializers.py",
+        "tests/bookmarks/test_serializers.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p4",
+      "name": "Nested folder listing endpoint",
+      "depends_on": [
+        {
+          "node": "p2",
+          "artifact": "the `/api/folders` viewset this list action is added to"
+        },
+        {
+          "node": "p3",
+          "artifact": "the `FolderTreeSerializer` payload shape"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-4",
+      "touches": [
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/use_cases/list_folder_tree.py",
+        "tests/bookmarks/test_api_tree.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p5",
+      "name": "Remove the bookmark-folders feature flag",
+      "depends_on": [
+        {
+          "node": "p2",
+          "artifact": "the flag branches the CRUD endpoints added"
+        },
+        {
+          "node": "p3",
+          "artifact": "the flag branch in the tree serializer"
+        },
+        {
+          "node": "p4",
+          "artifact": "the flag branch in the nested listing action"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-5",
+      "touches": [
+        "apps/core/feature_flags.py",
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/api/serializers.py",
+        "tests/bookmarks/test_api_crud.py",
+        "tests/bookmarks/test_api_tree.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ],
+      "model": "claude-haiku-4-5"
+    }
+  ]
+}
+```
+
+Read the two renderings against each other: `p2` and `p3` both name only `p1`, so they sit in wave 2 and run at once; `p4` names both, so it is wave 3; `p5` names every gated phase, so it is wave 4 and alone there. `p1` and `p5` are the Tier 1 phases (a migration, a deletion) and carry a `model` override; the other three sit on `defaults.model`. `p2` and `p4` both touch `apps/bookmarks/api/views.py` — allowed, because the edge between them puts them in different waves; had they been same-wave, that overlap is what "Same-wave phases must not fight over the same files" is about.
+
 ## What to avoid
 
 - **No `§N` shorthand for section references — anywhere in the plan body.** Use section names: `Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `API Design`, `Phased Rollout`, `Risk & Rollout Notes`, `Open Questions`, `Touch List`. Readers shouldn't have to count headings to follow a cross-reference, and section numbering shifts when the spec/plan evolves. Same rule applies to citing SPEC sections (`Use-cases`, `Acceptance scenarios`, etc.) — name them.
@@ -484,6 +729,7 @@ Don't mix styles within one sentence. In **Touch List**, use `@path` for new fil
 - **No phase that breaks build if merged alone.** Each independently mergeable AND independently reversible.
 - **No `**Depends on**:` edge you can't justify with an artifact.** "It's later in the list" is not a dependency; it's a chain that costs the team a week of wall-clock for nothing.
 - **No two same-wave phases rewriting the same file.** Either add the edge or split differently.
+- **No plan without its `.workflow.json` sibling, and no sibling that disagrees with the plan.** Different nodes, different edges, different waves, a `prompt_ref` pointing at a phase that was renumbered — all of them mean the two files were edited separately instead of derived from the same `**Depends on**:` lines.
 - **No phase requiring manual `kubectl` / SSH / "remember to run X"** without Risk & Rollout Notes checklist.
 - **No assuming user wants what they asked for.** Watch for "wait, also…" + update plan.
 
@@ -524,3 +770,9 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Open Questions lists what couldn't resolve, with recommended default.
 - [ ] Touch List groups files by phase.
 - [ ] All file references use `@path/to/file.py` or `[name](relative-path#Lline)`.
+- [ ] **`ai-plans/<feature-kebab>.workflow.json` written** — every plan, no exceptions — with `$schema` set to the canonical URL and `schema_version: 1`.
+- [ ] Workflow graph matches the **Execution graph** table: one node per phase, one `depends_on` entry per `**Depends on**:` clause carrying both the node id and the artifact, same waves.
+- [ ] Every node has `prompt_ref` (`<plan_ref>#phase-<number>`), `touches` from its **Touch List** block, and the `gates` it must pass.
+- [ ] `resources` declares a `lane` pool; every gate that contends for something shared names its pool in `requires`.
+- [ ] Model ids come from [resources/ai-models.yaml](resources/ai-models.yaml), and only phases off the default tier carry a `model` override.
+- [ ] `pipelines` is omitted — `defaults.pipeline: standard-phase` is enough, and the executor supplies it.

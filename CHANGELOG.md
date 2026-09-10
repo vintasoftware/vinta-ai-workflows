@@ -29,6 +29,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `true`) and `run_options.implement-plan.max_parallel_lanes` (default `3`), asked
     at bootstrap alongside the existing `prepare-worktree` follow-ups.
 
+- **`plan-feature` emits an executable `ai-plans/<feature-kebab>.workflow.json`
+  beside every plan.** The markdown stays the document humans review; the JSON is
+  the same phase graph in the form an orchestrator runs — one node per phase, one
+  `depends_on` entry per `**Depends on**:` clause carrying both the upstream phase
+  and the artifact it provides, plus the phase's Touch List, gates, capacity pools
+  and model tier. Validated by
+  [`schemas/workflow.v1.schema.json`](schemas/workflow.v1.schema.json), which the
+  emitted file references from its `$schema` key so editors validate it as it is
+  written. **Unconditional** — no config field, no bootstrap question, no opt-in:
+  a project with no orchestrator carries a file nothing reads, and a project that
+  adopts one later finds its plans already executable.
+
 ### Changed
 
 - **Phase branches base on their dependencies, not on the previous phase.** A phase

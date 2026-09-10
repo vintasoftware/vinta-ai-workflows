@@ -1,6 +1,6 @@
 # Schemas
 
-JSON Schema (Draft 2020-12) contracts for every YAML file the vinta-ai-workflows toolchain produces or consumes. Every YAML file carries a `schema_version` integer at its top level; that integer matches the suffix on the schema filename.
+JSON Schema (Draft 2020-12) contracts for every YAML or JSON payload the vinta-ai-workflows toolchain produces or consumes. Every payload carries a `schema_version` integer at its top level; that integer matches the suffix on the schema filename.
 
 ## Inventory
 
@@ -12,6 +12,9 @@ JSON Schema (Draft 2020-12) contracts for every YAML file the vinta-ai-workflows
 | PR-context inline comments | YAML inside the ` ```yaml ... ``` ` fence under `# Comments` of the same file | [`prs-context-comments.v1.schema.json`](prs-context-comments.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
 | MCP preflight cache | `.vinta-ai-workflows/cache.yaml` (gitignored — per-developer-machine state) | [`mcp-preflight-cache.v1.schema.json`](mcp-preflight-cache.v1.schema.json) | rendered `systematic-debugging` SKILL.md (writes during Phase 0) | rendered `systematic-debugging` SKILL.md (reads at Phase 0 start) |
 | AI model tier table | `ai-tools/skills/plan-feature/resources/ai-models.yaml` (shipped verbatim with the `plan-feature` foundation skill; source: `skills/vinta-derive-skills/resources/foundation-skills/plan-feature/resources/ai-models.yaml`) | [`ai-models.v1.schema.json`](ai-models.v1.schema.json) | nightly `check-ai-models` job ([`scripts/check-ai-models.mjs`](../scripts/check-ai-models.mjs)) → auto-PR | `plan-feature` (per-phase model suggestion) |
+| Workflow (executable plan) | `ai-plans/<feature-kebab>.workflow.json` — **JSON, not YAML** | [`workflow.v1.schema.json`](workflow.v1.schema.json) | `plan-feature` (emitted alongside the human-readable plan) | `vinta-flow` (the orchestrator daemon) |
+
+> `workflow.v1.schema.json` is the one schema here that is **generated, not hand-written**. Its source of truth is `packages/vinta-flow/src/types.ts`; regenerate with `pnpm --filter vinta-flow schema:gen` and verify with `schema:check`. Edit the zod schemas, never the JSON.
 
 ## Versioning rules
 

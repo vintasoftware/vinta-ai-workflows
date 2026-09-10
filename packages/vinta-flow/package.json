@@ -1,0 +1,31 @@
+{
+  "name": "vinta-flow",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Code-orchestrated parallel execution of plan-feature plans across agent harnesses.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "schema:gen": "node --experimental-strip-types src/schema/generate.ts",
+    "schema:check": "node --experimental-strip-types src/schema/generate.ts --check"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.7",
+    "ws": "^8.21.3",
+    "yaml": "^2.9.0",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}

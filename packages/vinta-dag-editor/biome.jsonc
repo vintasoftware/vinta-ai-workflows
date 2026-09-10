@@ -1,0 +1,25 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
+  // Biome's unconfigured defaults (tabs, double quotes) disagree with the style
+  // already established in packages/vinta-flow. A developer is meant to move
+  // between the two packages without learning a second rulebook, so this pins
+  // Biome to the style the repo actually uses rather than letting the tool decide.
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded",
+      "trailingCommas": "all",
+      "arrowParentheses": "always"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": { "recommended": true }
+  }
+}

@@ -1,0 +1,264 @@
+/**
+ * The invariants every harness adapter must satisfy, as a suite any adapter's
+ * test file runs against itself.
+ *
+ * The scheduler, the pipeline interpreter and the UI are written against
+ * `HarnessAdapter`, not against `claude-code`. That only holds if the three
+ * real adapters agree on the behavior the type cannot express: that a stream
+ * terminates exactly once, that `kill` twice is not an error, that a refusal
+ * is returned rather than thrown, that a declared capability is a promise the
+ * adapter keeps. Left to each adapter's own test file, those would be three
+ * different readings of §7 — which is the bug this suite exists to prevent.
+ *
+ * **It lives in `src/` rather than `tests/helpers/`** because adapters live in
+ * `src/harness/` and this is part of the contract they implement, not part of
+ * this package's test suite: an out-of-tree adapter should be able to import
+ * it. It takes vitest's `describe`/`it`/`expect` as arguments so that shipping
+ * it does not drag a devDependency into the runtime graph, and so the three
+ * functions are the only coupling to a test framework at all.
+ */
+import {
+  type AgentEvent,
+  type AgentSession,
+  type AgentTask,
+  HarnessCapabilityError,
+  type HarnessAdapter,
+  type SpawnRefusalKind,
+} from './adapter.ts'
+
+/** The slice of vitest this suite uses. Narrow on purpose — it is the whole coupling. */
+export interface ContractRunner {
+  readonly describe: (name: string, fn: () => void) => void
+  /**
+   * `timeoutMs` is the outer per-test budget, and is optional so a runner that
+   * has no such notion still satisfies this type. vitest's `it` takes it as its
+   * third argument, which is why passing vitest's `it` directly is enough: the
+   * suite's own deadlines then fire before the framework's default does, and a
+   * hang is reported as the await that hung rather than as a generic timeout.
+   */
+  readonly it: (name: string, fn: () => Promise<void>, timeoutMs?: number) => void
+  readonly expect: (actual: unknown) => {
+    toBe(expected: unknown): void
+    toEqual(expected: unknown): void
+  }
+}
+
+/**
+ * What an adapter must provide to be tested. A fresh one is built per test, so
+ * no assertion can be contaminated by a session another one left running.
+ */
+export interface AdapterContractFixture {
+  readonly adapter: HarnessAdapter
+  /**
+   * A task the adapter can actually run, long enough to emit at least two
+   * events before it ends — the interrupt assertion needs a stream that is
+   * still going when the interrupt lands.
+   */
+  readonly task: AgentTask
+  /**
+   * Make the next `spawn` refuse with this kind. Real adapters implement it
+   * with a fault-injection seam: a vendor cannot be asked for a rate limit on
+   * demand, and an untested refusal path is one that first runs in production
+   * at hour three of a run.
+   */
+  forceRefusal(kind: SpawnRefusalKind): void
+  dispose?(): Promise<void>
+  /**
+   * How long any single await in this suite may take before it is called a
+   * hang. Optional: the default suits a mock and a fast local CLI, and an
+   * adapter whose live turn is a network round trip raises it for itself rather
+   * than making every other adapter pay for the slowest one.
+   */
+  readonly hangMs?: number
+}
+
+/** Per-await deadline when a fixture does not raise it. */
+const DEFAULT_HANG_MS = 5_000
+
+/**
+ * The outer per-test budget. Every await in this suite is already bounded by
+ * `within`, so this is only a backstop — but it has to sit above any fixture's
+ * own deadline, because a framework default firing first (vitest's is five
+ * seconds) replaces "the event stream did not settle" with a generic timeout
+ * that names nothing.
+ */
+const TEST_TIMEOUT_MS = 120_000
+
+/** One await, deadlined. Fails loudly instead of hanging the suite. */
+type Within = <T>(what: string, work: Promise<T>) => Promise<T>
+
+const deadlined =
+  (hangMs: number): Within =>
+  async <T>(what: string, work: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`contract: ${what} did not settle`)), hangMs)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+const drain = async (iterator: AsyncIterator<AgentEvent>): Promise<AgentEvent[]> => {
+  const seen: AgentEvent[] = []
+  for (;;) {
+    const step = await iterator.next()
+    if (step.done === true) return seen
+    seen.push(step.value)
+  }
+}
+
+const iterate = (session: AgentSession): AsyncIterator<AgentEvent> =>
+  session.events[Symbol.asyncIterator]()
+
+export function runAdapterContract(
+  name: string,
+  runner: ContractRunner,
+  makeFixture: () => AdapterContractFixture | Promise<AdapterContractFixture>,
+): void {
+  const { describe, expect } = runner
+
+  const test = (
+    title: string,
+    body: (fixture: AdapterContractFixture, within: Within) => Promise<void>,
+  ): void => {
+    runner.it(
+      title,
+      async () => {
+        const fixture = await makeFixture()
+        try {
+          await body(fixture, deadlined(fixture.hangMs ?? DEFAULT_HANG_MS))
+        } finally {
+          await fixture.dispose?.()
+        }
+      },
+      TEST_TIMEOUT_MS,
+    )
+  }
+
+  const start = async (fixture: AdapterContractFixture, within: Within): Promise<AgentSession> => {
+    const outcome = await within('spawn', fixture.adapter.spawn(fixture.task))
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('contract: spawn refused where it was expected to succeed')
+    return outcome.session
+  }
+
+  describe(`harness adapter contract: ${name}`, () => {
+    test('preflight reports installation and login without throwing', async (fixture, within) => {
+      const result = await within('preflight', fixture.adapter.preflight())
+      expect(typeof result.installed).toBe('boolean')
+      expect(typeof result.authenticated).toBe('boolean')
+    })
+
+    test('the stream is framed by exactly one start and one end', async (fixture, within) => {
+      const session = await start(fixture, within)
+      const events = await within('event stream', drain(iterate(session)))
+
+      const opening = events[0]
+      expect(events.length > 1).toBe(true)
+      expect(opening?.type).toBe('session_started')
+      expect(opening?.type === 'session_started' ? opening.sessionId : undefined).toBe(session.id)
+      // Terminal means terminal: the scheduler settles a node on this event,
+      // so anything after it is a fact arriving for a node already reported.
+      expect(events.filter((e) => e.type === 'session_started').length).toBe(1)
+      expect(events.filter((e) => e.type === 'session_ended').length).toBe(1)
+      expect(events[events.length - 1]?.type).toBe('session_ended')
+    })
+
+    test('interrupt ends the session promptly and says so in the terminal event', async (fixture, within) => {
+      const session = await start(fixture, within)
+      const iterator = iterate(session)
+      await within('first event', iterator.next())
+
+      if (!fixture.adapter.capabilities.interrupt) {
+        let rejected: unknown
+        await within(
+          'interrupt rejection',
+          session.interrupt().catch((error: unknown) => {
+            rejected = error
+          }),
+        )
+        expect(rejected instanceof HarnessCapabilityError).toBe(true)
+        await within('kill', session.kill())
+        await within('event stream', drain(iterator))
+        return
+      }
+
+      await within('interrupt', session.interrupt())
+      const rest = await within('event stream after interrupt', drain(iterator))
+      const last = rest[rest.length - 1]
+      expect(last?.type).toBe('session_ended')
+      expect(last?.type === 'session_ended' ? last.result : undefined).toBe('interrupted')
+    })
+
+    test('kill is idempotent', async (fixture, within) => {
+      const session = await start(fixture, within)
+      await within('first kill', session.kill())
+      await within('second kill', session.kill())
+      const events = await within('event stream', drain(iterate(session)))
+      expect(events.filter((e) => e.type === 'session_ended').length).toBe(1)
+    })
+
+    test('declared inject capability matches what send actually does', async (fixture, within) => {
+      const session = await start(fixture, within)
+      const text = 'also update the changelog'
+
+      if (!fixture.adapter.capabilities.inject) {
+        // A false capability must be loud. Silently dropping the message would
+        // leave the operator watching for an effect that can never arrive.
+        let rejected: unknown
+        await within(
+          'send rejection',
+          session.send(text).catch((error: unknown) => {
+            rejected = error
+          }),
+        )
+        expect(rejected instanceof HarnessCapabilityError).toBe(true)
+        await within('kill', session.kill())
+        await within('event stream', drain(iterate(session)))
+        return
+      }
+
+      const iterator = iterate(session)
+      await within('first event', iterator.next())
+      await within('send', session.send(text))
+      const rest = await within('event stream after send', drain(iterator))
+      // Observable in the transcript, which is this stream (§5.3, §15).
+      expect(rest.some((e) => e.type === 'user_message' && e.text === text)).toBe(true)
+    })
+
+    for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'fatal'] as const) {
+      test(`spawn returns a ${kind} refusal instead of throwing`, async (fixture, within) => {
+        fixture.forceRefusal(kind)
+        const outcome = await within('spawn', fixture.adapter.spawn(fixture.task))
+        expect(outcome.ok).toBe(false)
+        if (outcome.ok) return
+        expect(outcome.kind).toBe(kind)
+        expect(typeof outcome.message === 'string' && outcome.message.length > 0).toBe(true)
+        expect(outcome.retryAfter === undefined || outcome.retryAfter instanceof Date).toBe(true)
+      })
+    }
+
+    test('a second consumer of events terminates instead of hanging', async (fixture, within) => {
+      const session = await start(fixture, within)
+      const first = iterate(session)
+      await within('first event', first.next())
+
+      // Mid-stream a second reader gets a finished stream, not a deadlock and
+      // not a share of the events: two consumers splitting one stream is worse
+      // than a hang, because the transcript silently loses whatever the second
+      // one took.
+      const stolen = await within('concurrent second iteration', drain(iterate(session)))
+      expect(stolen.length).toBe(0)
+
+      const rest = await within('first iteration', drain(first))
+      expect(rest[rest.length - 1]?.type).toBe('session_ended')
+      // And after completion, which is the shape a late-attaching UI takes.
+      await within('iteration after completion', drain(iterate(session)))
+    })
+  })
+}
