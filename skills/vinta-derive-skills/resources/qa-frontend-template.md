@@ -98,7 +98,11 @@ Resolve everything Step 0 left open, and state the resolved set back in one line
   `run_options.qa-frontend.screenshots`, but a default is not a decision: a run that silently captured nothing
   leaves a report a reader cannot check, and a run that silently captured everything can put restricted
   records on disk. Whatever the answer, screenshot handling stays bounded by the environment's
-  `data_sensitivity`.
+  `data_sensitivity`. Captures land under `{{QA_REPORT_DIR}}`, alongside the report and the write ledger.
+  Under `data_sensitivity` of `client` or `phi` that location is **required, not conventional** — that
+  directory is gitignored, which is the whole reason it exists: a capture written anywhere else can be
+  committed, uploaded to a PR or attached to a design tool by someone who never saw this run. Never write a
+  capture to the repo root, a temp directory or a path of your own choosing.
 - **`--scope`** — the plan source chosen in Phase 1.
 - **`--browser`** — the tool actually selected above, not the configured preference.
 - **`--writes`** — may only relax **within** the environment's declared `writes` policy, never upgrade past
@@ -147,9 +151,14 @@ feature was never exercised, so there is nothing to call broken.
 
 When a required service, the backend, or a feature flag blocks the run, **stop and name who to ask —
 {{QA_ESCALATION_CONTACT}} — rather than testing around it.** A run that works around a blocker reports on
-something other than the feature: a mocked response, a second dev server, a flag flipped by hand or a
-different environment all produce a green report about a system nobody is going to ship. Record what blocked
-it, what you tried, and what you need.
+something other than the feature: a mocked response, a second dev server, a flag you flipped yourself, or a
+switch to a different environment all produce a green report about a system nobody is going to ship. Record
+what blocked it, what you tried, and what you need.
+
+Proposing the fix is not working around it. Rule 7 in Phase 3b still applies: hand the operator the
+ready-to-run command plus its reverse — the flag flip, the seed, the service start — and **wait**. What
+invalidates a run is flipping the flag yourself and walking on, not offering the command and letting the
+operator decide. Escalating without also proposing the change leaves them with a blocker and no next step.
 
 ## Phase 3b — Write authorization
 
@@ -173,7 +182,7 @@ Nothing else in the plan mutates. Confirm the environment and scope to proceed.
 3. **The ledger is written incrementally** to `{{QA_REPORT_DIR}}`, so a run that dies halfway still leaves a record.
 4. **An unlisted write stops the run** for its own confirmation. Reversals are pre-authorised — they were named in the approved block.
 5. **`forbidden` refuses and proposes.** State what would be required, record it, let the operator decide.
-6. **Writes carry synthetic values only.** Never real client or patient data as input.
+6. **Writes carry synthetic values only.** Never real client or patient data as input. Under `phi`, the ledger records opaque IDs, not field values.
 7. **Setup writes stay propose-only in every environment.** Feature flags, seeds and migrations have a blast radius unrelated to the test — flipping a flag in production turns a feature on for every user it applies to, which is a release decision, not a QA step. Hand the operator a ready-to-run command plus its reverse and wait. App-data writes relax; setup writes do not.
 
 When `run_options.qa-frontend.dry_run` is true, print this block — the full plan, the resolved flags, the
@@ -340,8 +349,10 @@ the verdict per row either way.
 - **Treating a missing probe binary as `down`.** A probe that cannot execute is **`unknown`**. A missing
   client binary is a fact about this machine, not about the service.
 - **Starting a second dev server on an occupied port.** It binds a different port, or silently loses to the
-  running one, and the whole run then tests a build nobody asked about. Probe first; only start a frontend
-  where the environment declares a start command, and never a second copy.
+  running one, and the whole run then tests a build nobody asked about. Probe first. Starting anything is
+  **local-only and asks first**: only in an environment named `local`, only where that environment declares a
+  start command, only with the operator's approval, and never a second copy. Everywhere else — and for a
+  non-local environment that happens to declare one — propose the command and wait.
 - **Letting an earlier "go ahead" carry into a production write.** Approval is per environment and per scope.
   Re-confirm, naming the environment, every time the write set changes.
 - **Filing a layout bug that is really a stale screenshot.** Reproduce every visual defect on a fresh capture
