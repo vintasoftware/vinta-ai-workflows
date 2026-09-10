@@ -17,6 +17,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { formatDoctorReport, runDoctor, type CheckResult, type DoctorOptions } from '../src/doctor/index.ts'
 import { writeSummary, type WorktreeSummary } from '../src/lanes/summary.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 const temps: string[] = []
 
@@ -143,7 +144,7 @@ const find = (checks: readonly CheckResult[], id: string): CheckResult => {
   return check
 }
 
-describe('vinta-flow doctor', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('vinta-flow doctor', () => {
   it('reports an all-green environment as all-pass and exits zero', async () => {
     const report = await runDoctor(greenOptions())
 

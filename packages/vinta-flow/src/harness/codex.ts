@@ -60,6 +60,7 @@ import {
   EventQueue,
   JsonLines,
   type RefusalSignature,
+  agentSpawn,
   asNumber,
   asRecord,
   asString,
@@ -236,7 +237,13 @@ export function mapCliEvent(raw: unknown): AgentEvent[] {
  * machinery is shared (`classifier`).
  */
 const SIGNATURES: readonly RefusalSignature[] = [
-  { kind: 'fatal', reason: 'binary-not-found', pattern: /enoent|command not found|no such file/ },
+  {
+    kind: 'fatal',
+    reason: 'binary-not-found',
+    // `is not recognized` is cmd.exe's phrasing: on Windows every spawn goes
+    // through it, so a missing binary arrives as its output rather than ENOENT.
+    pattern: /enoent|command not found|no such file|is not recognized/,
+  },
   {
     kind: 'fatal',
     reason: 'not-authenticated',
@@ -454,12 +461,14 @@ export class CodexAdapter implements HarnessAdapter {
 
     let child: ChildProcess
     try {
-      child = spawnChild(this.bin, this.#argsFor(task), {
+      // The platform decides how the binary is reached and whether the child
+      // leads a group: on Windows `codex` is a `.cmd` shim behind `cmd.exe`.
+      const spec = agentSpawn(this.bin, this.#argsFor(task))
+      child = spawnChild(spec.file, spec.args, {
         cwd: task.cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: childEnv(STRIPPED_ENV),
-        // Its own process group, so a kill reaches the tools it started.
-        detached: true,
+        ...spec.options,
       })
     } catch (error) {
       return classifySpawnFailure(String(error), null, task.nodeId)

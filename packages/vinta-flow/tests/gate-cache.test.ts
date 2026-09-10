@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GateCache, laneTreeHash, runGateCached } from '../src/gates/cache.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import type { Gate } from '../src/types.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 /**
  * `repo` is a throwaway git repository — every git command in this file and in
@@ -81,7 +82,7 @@ const run = async (options: RunOptions = {}) =>
     ...(options.noCache === undefined ? {} : { noCache: options.noCache }),
   })
 
-describe('gate result caching', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('gate result caching', () => {
   it('serves an unchanged tree from cache without acquiring the gate’s pools', async () => {
     const first = await run()
     expect(first.cached).toBe(false)

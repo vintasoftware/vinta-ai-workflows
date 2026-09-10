@@ -17,6 +17,7 @@
  *   of the repository in the browser's console (§11). Errors here name the
  *   endpoint and the status code, and nothing else.
  */
+import type { PtyClientFrame, PtyServerFrame } from '../../src/daemon/pty-frames.ts'
 import {
   AddContextRequestSchema,
   AnswerRequestSchema,
@@ -28,6 +29,7 @@ import {
   RunListResponseSchema,
   RunSnapshotSchema,
   type EventFrame,
+  type Frame,
   type NodeDetail,
   type RunSnapshot,
   type RunSummary,
@@ -67,8 +69,17 @@ export type StreamClose = 'closed' | 'invalid_frame'
 export interface StreamHandlers {
   readonly onOpen: () => void
   readonly onFrame: (frame: EventFrame) => void
+  /** The PTY half of the same socket (§10). Bytes are passed on, never read. */
+  readonly onPty: (frame: PtyServerFrame) => void
   /** `invalid_frame` is fatal — a server this client cannot read is not one to retry. */
   readonly onClose: (reason: StreamClose) => void
+}
+
+/** An open run stream. Both channels of §10's socket, and the one close. */
+export interface Stream {
+  /** Puts a PTY frame on this socket; dropped while it is not open. */
+  readonly send: (frame: PtyClientFrame) => void
+  readonly close: () => void
 }
 
 export interface Client {
@@ -83,8 +94,8 @@ export interface Client {
     operation: K,
     body: OperationBody<K>,
   ) => Promise<void>
-  /** Tails `runId` from after `since`. The returned function detaches. */
-  readonly stream: (runId: string, since: number, handlers: StreamHandlers) => () => void
+  /** Tails `runId` from after `since`. Closing the returned stream detaches. */
+  readonly stream: (runId: string, since: number, handlers: StreamHandlers) => Stream
 }
 
 /**
@@ -135,9 +146,13 @@ export function createClient(origin: string, token: string): Client {
           socket.close()
           return
         }
-        // Step 17 adds a PTY channel to this same socket; this switch is why
-        // a client written today keeps working when it does.
-        if (frame.channel !== 'events') return
+        // Both channels ride this socket (§10), which is why the terminal
+        // does not open a second one: a `pty` frame is handed to the channel
+        // that wants it rather than being unparseable and closing the run's.
+        if (frame.channel === 'pty') {
+          handlers.onPty(frame)
+          return
+        }
         handlers.onFrame(frame)
       })
       // A socket error is always followed by a close, so `close` is the only
@@ -145,7 +160,14 @@ export function createClient(origin: string, token: string): Client {
       socket.addEventListener('error', () => {})
       socket.addEventListener('close', () => handlers.onClose(reason))
 
-      return () => socket.close()
+      return {
+        send(frame) {
+          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame))
+        },
+        close() {
+          socket.close()
+        },
+      }
     },
   }
 
@@ -164,7 +186,7 @@ function nodePath(runId: string, nodeId: string): string {
   return `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}`
 }
 
-function readFrame(data: unknown): EventFrame | null {
+function readFrame(data: unknown): Frame | null {
   if (typeof data !== 'string') return null
   let raw: unknown
   try {

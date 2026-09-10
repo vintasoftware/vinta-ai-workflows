@@ -27,6 +27,7 @@ import {
   type IntegrationPlan,
   PlanDefectError,
 } from '../src/integration/integrator.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 // ---------------------------------------------------------------------------
 // Fixture repository
@@ -443,7 +444,7 @@ async function stubGh(root: string): Promise<{ path: string; args: () => Promise
   }
 }
 
-describe('pull requests', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('pull requests', () => {
   it('opens each PR against the node’s own computed base, never base_branch', async () => {
     const repo = await makeRepo()
     const gh = await stubGh(repo.root)

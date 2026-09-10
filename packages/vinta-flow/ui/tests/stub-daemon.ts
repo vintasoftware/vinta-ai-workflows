@@ -20,6 +20,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { z } from 'zod'
 import { WebSocketServer, type WebSocket } from 'ws'
 import {
+  PtyClientFrameSchema,
+  PtyServerFrameSchema,
+  type PtyClientFrame,
+  type PtyServerFrame,
+} from '../../src/daemon/pty-frames.ts'
+import {
   AddContextRequestSchema,
   AnswerRequestSchema,
   EventFrameSchema,
@@ -115,6 +121,15 @@ export interface StubDaemon {
   readonly token: string
   /** One entry per accepted upgrade, in order, with the `since` it asked for. */
   readonly connections: readonly Connection[]
+  /**
+   * Every PTY frame a client sent, in order, parsed by the daemon's own
+   * schema. They arrive on the run's socket, which is the point: §10 carries
+   * both channels on one connection, so `connections` staying at one while
+   * these accumulate is what proves the terminal opened none of its own.
+   */
+  readonly ptyFrames: readonly PtyClientFrame[]
+  /** Sends a PTY frame to every attached socket, validated on the way out. */
+  readonly emitPty: (frame: PtyServerFrame) => void
   /** Every §9 operation the stub accepted, in order. */
   readonly posts: readonly Post[]
   /** Every workflow save the stub accepted, in order. */
@@ -142,6 +157,7 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
   const log: StoredEvent[] = []
   const eventReads: EventRead[] = []
   const connections: Connection[] = []
+  const ptyFrames: PtyClientFrame[] = []
   const attached = new Map<WebSocket, { runId: string; cursor: number; record: Connection }>()
 
   const server: Server = createServer((request, response) => {
@@ -293,6 +309,12 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       connections.push(record)
       attached.set(ws, { runId, cursor: since, record })
       ws.on('close', () => attached.delete(ws))
+      // The PTY half of the same socket. The stub does not open a terminal; it
+      // records what was said on the channel and answers when a test tells it to.
+      ws.on('message', (raw) => {
+        const parsed = PtyClientFrameSchema.safeParse(JSON.parse(String(raw)))
+        if (parsed.success) ptyFrames.push(parsed.data)
+      })
       flush(ws)
     })
   })
@@ -307,6 +329,13 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     origin: `http://127.0.0.1:${address.port}`,
     token: TOKEN,
     connections,
+    ptyFrames,
+    emitPty(frame) {
+      const text = JSON.stringify(PtyServerFrameSchema.parse(frame))
+      for (const ws of attached.keys()) {
+        if (ws.readyState === ws.OPEN) ws.send(text)
+      }
+    },
     posts,
     puts,
     eventReads,

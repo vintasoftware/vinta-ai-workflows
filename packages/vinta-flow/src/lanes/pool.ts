@@ -18,6 +18,7 @@ import { execFile } from 'node:child_process'
 import { mkdir, rm, symlink } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
+import { isWindows, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import {
   type DatabasePlan,
   type DatabaseRole,
@@ -30,12 +31,22 @@ import { readSummary, resetPlan, writeSummary, type WorktreeSummary } from './su
 
 const run = promisify(execFile)
 
+/**
+ * A project's own command line — a database setup, a clone, a reset, the
+ * project's migrate command. The shell it runs under is the platform's answer,
+ * not this module's: these are the same kind of text a gate's `cmd` is.
+ */
 const sh = async (
   command: string,
   cwd: string,
   env: Readonly<Record<string, string>>,
 ): Promise<void> => {
-  await run('/bin/sh', ['-c', command], { cwd, env: { ...process.env, ...env } })
+  const shell = shellInvocation(command)
+  await run(shell.file, [...shell.args], {
+    cwd,
+    env: { ...process.env, ...env },
+    ...spawnOptionsFor(shell),
+  })
 }
 
 /**
@@ -278,11 +289,19 @@ export class LanePool {
    * The dependency tree is symlinked rather than copied: no phase in a run adds
    * a dependency without the plan saying so, and N copies of `node_modules` is
    * the single largest thing a pool can waste.
+   *
+   * The link type is the one place this differs by platform, and it is not
+   * cosmetic. Node defaults to a *file* symlink on Windows, which for a
+   * directory produces a link nothing can traverse; and a real directory
+   * symlink needs `SeCreateSymbolicLinkPrivilege`, which means Developer Mode
+   * or an elevated shell. A junction needs neither and behaves like the
+   * directory link POSIX gives for free. It is only valid for an absolute local
+   * path, which `source` is.
    */
   async #linkDeps(lanePath: string): Promise<void> {
     const source = join(this.#options.repoPath, 'node_modules')
     try {
-      await symlink(source, join(lanePath, 'node_modules'))
+      await symlink(source, join(lanePath, 'node_modules'), isWindows() ? 'junction' : undefined)
     } catch {
       // No dependency tree in the main checkout, or one already linked in.
     }

@@ -35,6 +35,7 @@ import {
   parseModel,
 } from '../src/harness/opencode.ts'
 import { parseRetryAfter } from '../src/harness/shared.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 const temps: string[] = []
 
@@ -953,7 +954,7 @@ const portFree = (port: number): Promise<boolean> =>
     probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)))
   })
 
-describe('server lifecycle', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('server lifecycle', () => {
   it('starts a server on a free port and leaves neither socket nor process behind', async () => {
     const adapter = new OpencodeAdapter({ bin: fakeOpencode(), cwd: makeTemp() })
     let pid: number | undefined

@@ -20,6 +20,13 @@
  * codes only; vendor prose is read solely to be matched against a pattern.
  */
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process'
+import {
+  commandInvocation,
+  killTree,
+  ownProcessGroup,
+  type Platform,
+  spawnOptionsFor,
+} from '../platform/platform.ts'
 import type { AgentEvent, SpawnRefusal, SpawnRefusalKind } from './adapter.ts'
 
 // ---------------------------------------------------------------------------
@@ -293,23 +300,40 @@ export class EventQueue {
 
 /**
  * A harness runs tools, which are processes of their own and which inherit the
- * pipes this adapter is reading. Signalling the group rather than the pid is
+ * pipes this adapter is reading. Signalling the *tree* rather than the pid is
  * what keeps a killed node from leaving those children running behind it — and
  * holding the pipe open, so the stream never ends either.
  *
- * Falls back to the pid when the group signal fails, and stays silent when the
- * child is already reaped: killing a dead session is not an error.
+ * How a tree is reached is the platform's business, not this module's:
+ * `killTree` signals the process group on POSIX and runs `taskkill /T` on
+ * Windows. Falls back to the direct child when that fails, and stays silent
+ * when the child is already reaped: killing a dead session is not an error.
  */
 export const signalGroup = (child: ChildProcess, signal: NodeJS.Signals): void => {
   if (child.exitCode !== null || child.signalCode !== null) return
+  if (child.pid !== undefined && killTree(child.pid, signal)) return
   try {
-    if (child.pid !== undefined) process.kill(-child.pid, signal)
+    child.kill(signal)
   } catch {
-    try {
-      child.kill(signal)
-    } catch {
-      // Already reaped.
-    }
+    // Already reaped.
+  }
+}
+
+/**
+ * The spawn options every adapter shares for a long-lived agent process: its
+ * own process group where the platform has them, and the quoting Windows needs
+ * to reach a `.cmd` shim at all. Paired with `commandInvocation` below.
+ */
+export const agentSpawn = (
+  bin: string,
+  args: readonly string[],
+  platform?: Platform,
+): { file: string; args: string[]; options: { detached: boolean; windowsVerbatimArguments?: true } } => {
+  const invocation = commandInvocation(bin, args, platform)
+  return {
+    file: invocation.file,
+    args: [...invocation.args],
+    options: { detached: ownProcessGroup(platform), ...spawnOptionsFor(invocation) },
   }
 }
 
@@ -344,7 +368,12 @@ export const probe = (
   new Promise((resolve) => {
     let child: ChildProcess
     try {
-      child = spawnChild(bin, [...args], { stdio: ['pipe', 'pipe', 'pipe'], env })
+      const invocation = commandInvocation(bin, args)
+      child = spawnChild(invocation.file, [...invocation.args], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env,
+        ...spawnOptionsFor(invocation),
+      })
     } catch (error) {
       resolve({ spawned: false, output: String(error), code: null })
       return

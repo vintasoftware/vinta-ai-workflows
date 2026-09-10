@@ -60,6 +60,7 @@ import {
 import {
   EventQueue,
   type RefusalSignature,
+  agentSpawn,
   asNumber,
   asRecord,
   asString,
@@ -354,7 +355,13 @@ export class OpencodeEventMapper {
  * machinery is shared (`classifier`).
  */
 const SIGNATURES: readonly RefusalSignature[] = [
-  { kind: 'fatal', reason: 'binary-not-found', pattern: /enoent|command not found|no such file/ },
+  {
+    kind: 'fatal',
+    reason: 'binary-not-found',
+    // `is not recognized` is cmd.exe's phrasing: on Windows every spawn goes
+    // through it, so a missing binary arrives as its output rather than ENOENT.
+    pattern: /enoent|command not found|no such file|is not recognized/,
+  },
   {
     kind: 'fatal',
     reason: 'not-authenticated',
@@ -985,12 +992,14 @@ export class OpencodeAdapter implements HarnessAdapter {
 
     let child: ChildProcess
     try {
-      child = spawnChild(this.bin, ['serve', '--hostname', hostname, '--port', String(port)], {
+      // The platform decides how the binary is reached and whether the child
+      // leads a group: on Windows `opencode` is a `.cmd` shim behind `cmd.exe`.
+      const spec = agentSpawn(this.bin, ['serve', '--hostname', hostname, '--port', String(port)])
+      child = spawnChild(spec.file, spec.args, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: childEnv(STRIPPED_ENV),
-        // Its own process group, so stopping it reaches the tools it started.
-        detached: true,
+        ...spec.options,
       })
     } catch (error) {
       return bootFailure(String(error), null)

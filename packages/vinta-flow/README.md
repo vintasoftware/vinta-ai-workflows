@@ -6,7 +6,7 @@ The executable artifact is `ai-plans/<feature>.workflow.json` — the file `plan
 
 [SPEC.md](SPEC.md) is the authority for everything below. Where this README and the spec disagree, the spec is right and this file is stale.
 
-**Status: private workspace package.** `vinta-flow` is not published to npm and is not part of the `vinta-ai-workflows` package that `npx vinta-ai-workflows install` puts in your project — the root `files` whitelist excludes `packages/`. You get it by cloning this repository. It is also **macOS and Linux only** for now; Windows is planned and not started.
+**Status: private workspace package.** `vinta-flow` is not published to npm and is not part of the `vinta-ai-workflows` package that `npx vinta-ai-workflows install` puts in your project — the root `files` whitelist excludes `packages/`. You get it by cloning this repository. It is developed on **macOS and Linux**; Windows support exists and is described under [Platforms](#platforms).
 
 ## It does not replace the skills path
 
@@ -20,6 +20,30 @@ The zero-install path still works and is still the default. `implement-plan` —
 - **git 2.17 or newer**, with worktree support. `doctor` checks both.
 - **A harness CLI you are already logged into** — `claude`, `codex` or `opencode`. See [Harnesses](#harnesses).
 - Docker Compose, only if your workflow's `project` block declares a `compose`-delivered database.
+
+## Platforms
+
+macOS, Linux and Windows. CI runs the whole suite on all three (`.github/workflows/vinta-flow.yml`), and the four places the operating systems genuinely disagree are decided in one module — `src/platform/platform.ts` — rather than scattered through the code that depends on them. Every function there takes the platform as an argument, so both answers are asserted from either kind of machine in `tests/platform.test.ts`.
+
+What differs, and what you inherit as a consequence:
+
+| | macOS / Linux | Windows |
+| --- | --- | --- |
+| A gate's `cmd` runs under | `/bin/sh -c` | `cmd.exe /d /s /c` |
+| A harness CLI is spawned | directly | through `cmd.exe`, because npm installs it as a `.cmd` shim |
+| A timed-out or interrupted process is ended by | one signal to its process group | `taskkill /t` |
+| OS notifications | `osascript` / `notify-send` | none — a documented no-op |
+
+**`cmd.exe`, not PowerShell.** A gate is *your* command line, and on Windows your own `package.json` scripts and `.cmd` shims already run under `cmd.exe`. `pnpm test && pnpm run lint` means what you meant there; under PowerShell 5.1 `&&` will not parse, and redirection and `%VAR%` differ under both PowerShell versions. So the shell that matches the rest of your tooling wins.
+
+Four Windows caveats worth knowing before you rely on it:
+
+- **An interrupt is less gentle.** Windows has no console signal Node can send, so `taskkill` is the whole vocabulary. Where POSIX sends `SIGINT` and gives a CLI a moment to persist its session before the deadline, Windows reaches the same deadline having done nothing in between. Take-over and resume still work; the CLI simply gets less warning.
+- **A grandchild that outlives its parent survives.** A process group holds every descendant; `taskkill /t` reads parent links that a dead parent no longer has. If a gate backgrounds something that then loses its parent, it can stay running and hold the pipe open. There is no fix for this without a native dependency, which this package does not take.
+- **`core.autocrlf`.** Git for Windows enables it by default, which means your gates see CRLF where the same gate on Linux sees LF. Nothing here changes that setting for you — it is your repository's decision — but a formatter or a golden-file test that disagrees across platforms is usually this. CI pins it off so the suite tests the committed bytes.
+- **A lane's `node_modules` is a junction**, not a symlink. Real directory symlinks on Windows need Developer Mode or an elevated shell; junctions need neither and behave the same for this purpose.
+
+**The one thing CI does not cover** is the shebang. `src/cli/bin.ts` starts with `#!/usr/bin/env -S node --experimental-transform-types`, which Windows never reads: npm rewrites it into a generated `.cmd` shim at install time, and this package is private and therefore never installed. Current `cmd-shim` does parse `env -S` and forward the flags, so this is expected to work — but it is expectation, not evidence. CI starts the entry point through Node directly instead, which covers the flag and the module graph and not the shim.
 
 ## Install and run
 
@@ -51,7 +75,7 @@ Every command runs against a project checkout — your project, not this one. `-
 |---|---|
 | `doctor <workflow.json> [--repo <dir>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
-| `serve [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon and prints the URL to open. |
+| `serve [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon and prints the URL to open. Its editor edits `<repo>/ai-plans/*.workflow.json`. |
 | `run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon *and* executes the workflow. Exits when the run ends. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-flow/runs/`. |
 
@@ -63,7 +87,7 @@ Exit codes are three, so a script can tell the cases apart: `0` success, `1` the
 
 A repository with two phases that depend on nothing, so both belong to wave 1 and both run at once.
 
-**1. Have a workflow.** `plan-feature` writes one beside every plan. By hand, the smallest one that runs two phases in parallel:
+**1. Have a workflow.** `plan-feature` writes one beside every plan, as `ai-plans/<feature-kebab>.workflow.json` — committed, reviewed with the markdown plan, and the same file every command below is pointed at. By hand, save the smallest one that runs two phases in parallel as `ai-plans/widget-tags.workflow.json`:
 
 ```jsonc
 {
@@ -103,7 +127,26 @@ A repository with two phases that depend on nothing, so both belong to wave 1 an
 
   Scope it to what your phases actually need; this is the permissive end.
 
-**3. Preflight.**
+**3. Review and approve it in the editor.** `serve` opens the daemon with no run attached. Its Editor lists every `ai-plans/*.workflow.json` in the project — the file you just wrote, or the one `plan-feature` wrote — and saving writes back to that same file:
+
+```console
+$ vinta-flow serve
+vinta-flow: daemon listening on http://127.0.0.1:52218
+Open this URL. It carries the access token, so treat it as a secret:
+  http://127.0.0.1:52218/?token=<the-token-printed-here>
+```
+
+The document's `id` and its filename must agree: `widget-tags` lives in `widget-tags.workflow.json`. The id lands in every branch a run cuts (`plan/widget-tags/phase-p1`), so a file that disagrees with itself is refused rather than quietly opened. A save is a rewrite of a committed file, in place and atomically — review it the way you review the plan beside it, with `git diff`:
+
+```console
+$ git diff ai-plans/widget-tags.workflow.json
+```
+
+A save writes the *validated* document — the one the executor would run — so the first save of a hand-written file also normalizes it: two-space indentation, and the fields the schema defaults made explicit (`plan_context_refs: []`, each node's `depends_on`, `gates`, `touches`). That is a one-time diff; every save after it shows only what you changed.
+
+Nothing here is copied into `.vinta-flow/`. The store holds run state; `ai-plans/` holds the source, and the editor edits the source. Saving *during* a run is a different operation: the run has its own frozen snapshot, so the save goes through the amend path, which refuses while an affected node is in flight and rebases the finished ones whose base moved. The file is written only after the run accepts the change.
+
+**4. Preflight.**
 
 ```console
 $ vinta-flow doctor ai-plans/widget-tags.workflow.json
@@ -122,7 +165,7 @@ A run can start.
 
 Every check runs even after one fails, so one report names everything wrong at minute zero. A `FAIL` blocks the run; a `WARN` means it starts degraded — a lane whose forked database has no `reset_cmd` is the usual one, and it just means the lane is single-use.
 
-**4. Project the schedule.** `simulate` drives the real scheduler on a virtual clock against a mock harness. It is the cheapest way to see whether the graph is actually parallel, and whether the lane count or a gate pool is the constraint:
+**5. Project the schedule.** `simulate` drives the real scheduler on a virtual clock against a mock harness. It is the cheapest way to see whether the graph is actually parallel, and whether the lane count or a gate pool is the constraint:
 
 ```console
 $ vinta-flow simulate ai-plans/widget-tags.workflow.json
@@ -146,7 +189,7 @@ Pools
 
 Both phases start at `0s` — that is the parallelism the plan claimed, confirmed before a model turn is spent. `p2` finishes ten minutes later only because `test-suite` has capacity 1 and `p1` was holding it.
 
-**5. Run it.**
+**6. Run it.**
 
 ```console
 $ vinta-flow run ai-plans/widget-tags.workflow.json
@@ -170,7 +213,7 @@ $ git branch
 
 `plan/…/phase-<id>` is the phase's own branch; `wt/…` are the branches the lane and integration worktrees are checked out on. When the run ends, read [What this walkthrough does not yet reach](#what-this-walkthrough-does-not-yet-reach) before you read the last two lines it prints.
 
-**6. Read what happened, then clean up.** A finished run leaves its worktrees, branches and databases in place on purpose — they are the evidence. The post-mortem is written at the end and is what `plan-feature` reads before drawing the next feature's graph:
+**7. Read what happened, then clean up.** A finished run leaves its worktrees, branches and databases in place on purpose — they are the evidence. The post-mortem is written at the end and is what `plan-feature` reads before drawing the next feature's graph:
 
 ```console
 $ cat .vinta-flow/runs/<run-id>/postmortem.json
@@ -258,7 +301,7 @@ Point the adapter at a specific binary with an environment variable, which overr
 
 ## Limits worth knowing before you rely on it
 
-- **macOS and Linux only.** Windows is planned, and no part of it is done.
+- **Windows is supported but less proven than macOS and Linux.** See [Platforms](#platforms) for exactly which parts, and which caveats you inherit.
 - **One project, one run at a time** per daemon. The journal is keyed by run id, so this is a boundary rather than a design limit — but it is today's boundary.
 - **A node does not reach `done` yet** under the shipped pipeline. See [What this walkthrough does not yet reach](#what-this-walkthrough-does-not-yet-reach).
 - **A projection is not a prediction.** `simulate` answers "given these durations, what schedule follows", and three things it cannot know:

@@ -8,10 +8,13 @@
  * means a gate can be run against any directory, including a temp one in a
  * test, without a worktree pool existing.
  *
- * Two things it must get right. The child is spawned `detached`, so it leads
- * its own process group and a timeout can signal the whole tree — a gate is
- * usually a shell line that starts a test runner that starts workers, and
- * killing only the shell orphans all of it. And the pools it acquired are
+ * Two things it must get right. The child leads its own process group where the
+ * platform has them, so a timeout can signal the whole tree — a gate is usually
+ * a shell line that starts a test runner that starts workers, and killing only
+ * the shell orphans all of it. *Which* shell, and how a tree is reached, are
+ * `src/platform/platform.ts`'s answers rather than this module's — a gate is
+ * project text, and it must be run by the shell the project's own scripts
+ * already assume. And the pools it acquired are
  * released in a `finally`, so a timeout, a non-zero exit and a throw all leave
  * the pools exactly as wide as they were.
  *
@@ -20,6 +23,12 @@
  */
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
+import {
+  killTree as killPlatformTree,
+  ownProcessGroup,
+  shellInvocation,
+  spawnOptionsFor,
+} from '../platform/platform.ts'
 import type { ResourcePools } from '../resources/pools.ts'
 import type { Gate } from '../types.ts'
 
@@ -77,11 +86,13 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
   const startedAt = Date.now()
   const log = createWriteStream(options.logPath)
 
-  const child = spawn('/bin/sh', ['-c', options.gate.cmd], {
+  const shell = shellInvocation(options.gate.cmd)
+  const child = spawn(shell.file, [...shell.args], {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },
     stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
+    detached: ownProcessGroup(),
+    ...spawnOptionsFor(shell),
   })
   // Combined output, in arrival order. `end: false` because the log is closed
   // once, after the child is gone, rather than by whichever pipe drains first.
@@ -110,14 +121,12 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
 }
 
 /**
- * A negative pid signals the process *group*. `detached` made the gate's shell
- * its leader, so this reaches whatever the command itself spawned.
+ * Ends the gate *and* whatever it spawned. On POSIX that is one signal to the
+ * process group the shell leads; on Windows there are no groups, so the
+ * platform seam walks the process table instead. A gate that exited between the
+ * timer firing and this call is not an error either way.
  */
 function killTree(pid: number | undefined): void {
   if (pid === undefined) return
-  try {
-    process.kill(-pid, 'SIGKILL')
-  } catch {
-    // The gate exited between the timer firing and this call. Nothing to kill.
-  }
+  killPlatformTree(pid, 'SIGKILL')
 }

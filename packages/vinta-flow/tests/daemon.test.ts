@@ -12,7 +12,15 @@
  * reason that has nothing to do with the code under test.
  */
 import Database from 'better-sqlite3'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:http'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1425,19 +1433,78 @@ const EDITABLE = {
   ],
 } as const
 
+/**
+ * Where `plan-feature` writes, which is the whole point: the editor's store is
+ * the project's committed `ai-plans/`, not the gitignored run store.
+ */
 function workflowsDir(repo: string): string {
-  return join(repo, '.vinta-flow', 'workflows')
+  return join(repo, 'ai-plans')
 }
 
+/** `plan-feature`'s filename, spelled out rather than derived, on purpose. */
 function seedWorkflow(repo: string, id: string, body: unknown): string {
+  return seedFile(repo, `${id}.workflow.json`, body)
+}
+
+function seedFile(repo: string, name: string, body: unknown): string {
   const dir = workflowsDir(repo)
   mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${id}.json`)
+  const path = join(dir, name)
   writeFileSync(path, typeof body === 'string' ? body : JSON.stringify(body), 'utf8')
   return path
 }
 
 describe('workflow editing', () => {
+  it('lists a workflow written exactly where plan-feature writes it', async () => {
+    const r = await rig()
+    // Not `seedWorkflow`: the path and the name are the assertion. This is the
+    // file `plan-feature`'s "Emit the executable workflow" section describes,
+    // in the directory it describes, in a rig that was told nothing but its
+    // project directory.
+    mkdirSync(join(r.dir, 'ai-plans'), { recursive: true })
+    writeFileSync(
+      join(r.dir, 'ai-plans', 'editable.workflow.json'),
+      JSON.stringify(EDITABLE),
+      'utf8',
+    )
+
+    const list = await call(r.daemon, '/api/workflows')
+    expect(WorkflowListResponseSchema.parse(list.body).workflows).toEqual([{ id: 'editable' }])
+    expect((await call(r.daemon, '/api/workflows/editable')).status).toBe(200)
+  })
+
+  it('offers only .workflow.json, so a plan’s other JSON siblings are not workflows', async () => {
+    const r = await rig()
+    seedWorkflow(r.dir, 'editable', EDITABLE)
+    // Both of these live in `ai-plans/` beside a plan. Neither is a workflow.
+    seedFile(r.dir, 'editable.postmortem.json', { runs: [] })
+    seedFile(r.dir, 'notes.json', EDITABLE)
+
+    const list = await call(r.daemon, '/api/workflows')
+    expect(WorkflowListResponseSchema.parse(list.body).workflows).toEqual([{ id: 'editable' }])
+    expect((await call(r.daemon, '/api/workflows/notes')).status).toBe(404)
+  })
+
+  it('refuses a document whose id disagrees with its filename, either way round', async () => {
+    const r = await rig()
+    // A file named for one workflow carrying another's id: the editor could
+    // open it and never save it back, so it is refused where it is opened.
+    seedWorkflow(r.dir, 'editable', { ...EDITABLE, id: 'something-else' })
+
+    const list = await call(r.daemon, '/api/workflows')
+    expect(WorkflowListResponseSchema.parse(list.body).workflows).toEqual([{ id: 'editable' }])
+
+    const served = await call(r.daemon, '/api/workflows/editable')
+    expect(served.status).toBe(409)
+    const body = ErrorResponseSchema.parse(served.body)
+    expect(body.error).toBe('invalid_workflow')
+    expect(body.issues?.map((issue) => issue.path)).toEqual(['id'])
+    expect(body.issues?.[0]?.code).toBe('id_mismatch')
+
+    // And the file is not reachable under the id it claims, either.
+    expect((await call(r.daemon, '/api/workflows/something-else')).status).toBe(404)
+  })
+
   it('serves the editable documents, and one of them in full', async () => {
     const r = await rig()
     seedWorkflow(r.dir, 'editable', EDITABLE)
@@ -1481,6 +1548,25 @@ describe('workflow editing', () => {
     expect((await call(r.daemon, '/api/workflows/editable')).status).toBe(409)
   })
 
+  it('rewrites the committed file in place, leaving no temporary behind', async () => {
+    const r = await rig()
+    // The reviewed, committed document — the state a save actually finds.
+    const path = seedWorkflow(r.dir, 'editable', EDITABLE)
+    const before = readdirSync(workflowsDir(r.dir))
+
+    const edited = { ...EDITABLE, base_branch: 'develop' }
+    expect(
+      (await call(r.daemon, '/api/workflows/editable', { method: 'PUT', body: edited })).status,
+    ).toBe(200)
+
+    // Same file, not a new one beside it, and nothing else in the directory.
+    expect(readdirSync(workflowsDir(r.dir))).toEqual(before)
+    expect(JSON.parse(readFileSync(path, 'utf8')).base_branch).toBe('develop')
+    // A subsequent read returns the edit, over the wire.
+    const served = await call(r.daemon, '/api/workflows/editable')
+    expect(WorkflowResponseSchema.parse(served.body).workflow.base_branch).toBe('develop')
+  })
+
   it('saves a valid workflow to disk, and serves back what it stored', async () => {
     const r = await rig()
     const edited = {
@@ -1495,7 +1581,7 @@ describe('workflow editing', () => {
     expect(result.status).toBe(200)
     expect(OkResponseSchema.parse(result.body)).toEqual({ ok: true })
 
-    const onDisk = JSON.parse(readFileSync(join(workflowsDir(r.dir), 'editable.json'), 'utf8'))
+    const onDisk = JSON.parse(readFileSync(join(workflowsDir(r.dir), 'editable.workflow.json'), 'utf8'))
     expect(onDisk.nodes[1].depends_on).toEqual([{ node: 'p1', artifact: 'the folder model' }])
 
     const served = await call(r.daemon, '/api/workflows/editable')
@@ -1517,7 +1603,7 @@ describe('workflow editing', () => {
     expect(body.error).toBe('invalid_workflow')
     expect(body.issues?.map((issue) => issue.path)).toContain('nodes[1].depends_on[0].artifact')
     // Refused means nothing was written.
-    expect(existsSync(join(workflowsDir(r.dir), 'editable.json'))).toBe(false)
+    expect(existsSync(join(workflowsDir(r.dir), 'editable.workflow.json'))).toBe(false)
   })
 
   it('refuses a cycle, a body that is not JSON, and an id that is not the path', async () => {
@@ -1556,7 +1642,7 @@ describe('workflow editing', () => {
     expect(body.issues?.map((issue) => issue.path)).toEqual(['nodes[0]'])
     expect(body.issues?.[0]?.message).toContain('node "a" is running')
     // A refused amendment writes nothing, to the store or to the run.
-    expect(existsSync(join(workflowsDir(r.dir), 'daemon-flow.json'))).toBe(false)
+    expect(existsSync(join(workflowsDir(r.dir), 'daemon-flow.workflow.json'))).toBe(false)
     expect(r.journal.readWorkflow(RUN_ID).nodes.map((node) => node.id)).toEqual(['a', 'b'])
   })
 
@@ -1588,7 +1674,7 @@ describe('workflow editing', () => {
     // The run's frozen snapshot moved, and so did the source document.
     expect(r.journal.readWorkflow(RUN_ID).nodes[1]?.prompt_ref).toBe('plan.md#b2')
     expect(
-      JSON.parse(readFileSync(join(workflowsDir(r.dir), 'daemon-flow.json'), 'utf8')).nodes[1]
+      JSON.parse(readFileSync(join(workflowsDir(r.dir), 'daemon-flow.workflow.json'), 'utf8')).nodes[1]
         .prompt_ref,
     ).toBe('plan.md#b2')
     // The snapshot the API caches per run was invalidated with it, so the run
@@ -1661,7 +1747,7 @@ describe('workflow editing', () => {
     expect(put.status).toBe(401)
     expect(ErrorResponseSchema.parse(put.body).error).toBe('unauthorized')
     // The unauthenticated save changed nothing.
-    expect(JSON.parse(readFileSync(join(workflowsDir(r.dir), 'editable.json'), 'utf8'))).toEqual(
+    expect(JSON.parse(readFileSync(join(workflowsDir(r.dir), 'editable.workflow.json'), 'utf8'))).toEqual(
       EDITABLE,
     )
   })

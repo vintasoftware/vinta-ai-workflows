@@ -26,6 +26,7 @@
  *   ever runs: the daemon being killed mid-attach.
  */
 import { spawn as spawnPty, type IPty } from 'node-pty'
+import { commandInvocation, type Invocation, killTree } from '../platform/platform.ts'
 import type { PtyAttach, PtyHandle } from './adapter.ts'
 
 /** What a terminal announces itself as when the environment names nothing. */
@@ -57,23 +58,35 @@ process.once('exit', () => {
   for (const pty of open) signalGroup(pty.pid, 'SIGKILL')
 })
 
-/** The group, then the pid, then silence: signalling a reaped child is not an error. */
+/**
+ * The tree, then the pid, then silence: signalling a reaped child is not an
+ * error. `killTree` is the platform seam — a process-group signal on POSIX,
+ * `taskkill /T` on Windows, which has no groups. Both are synchronous, which
+ * the exit hook above depends on.
+ */
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
+  if (killTree(pid, signal)) return
   try {
-    process.kill(-pid, signal)
+    process.kill(pid, signal)
   } catch {
-    try {
-      process.kill(pid, signal)
-    } catch {
-      // Already reaped.
-    }
+    // Already reaped.
   }
 }
+
+/** node-pty reads a string as a verbatim command line and an array as argv. */
+const argv = (invocation: Invocation): string[] | string =>
+  invocation.windowsVerbatimArguments ? invocation.args.join(' ') : [...invocation.args]
 
 export function openPty(spec: PtySpec): PtyHandle {
   const cols = Math.max(1, spec.attach.cols ?? DEFAULT_COLS)
   const rows = Math.max(1, spec.attach.rows ?? DEFAULT_ROWS)
-  const pty = spawnPty(spec.file, [...spec.args], {
+  // ConPTY spawns through `CreateProcess`, which cannot run the `.cmd` shim npm
+  // installs a CLI as — so on Windows the terminal's process is `cmd.exe` and
+  // the CLI is the shell's child. node-pty takes a raw command line when `args`
+  // is a string, which is exactly what the Windows invocation already is; on
+  // POSIX the pair passes through unchanged.
+  const invocation = commandInvocation(spec.file, spec.args)
+  const pty = spawnPty(invocation.file, argv(invocation), {
     name: spec.env['TERM'] ?? TERM,
     cols,
     rows,

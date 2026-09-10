@@ -9,7 +9,20 @@
  * boundary. All of that is a pure function of the project spec and the lane
  * name, which is why the Postgres and compose paths can be checked here without
  * a server or a container anywhere in sight.
+ *
+ * These strings are *command lines*, recorded in the lane summary and re-run
+ * later — by this daemon or by the skill reading that file — so they have to be
+ * lines the machine's own shell understands. Which shell that is, how a value
+ * is quoted for it, and how a file is copied or deleted in it all come from
+ * `src/platform/platform.ts`; `platform` is a parameter here so both answers
+ * are decidable from either kind of machine.
  */
+import {
+  type Platform,
+  copyFileCommand,
+  removeFileCommand,
+  shellQuote,
+} from '../platform/platform.ts'
 
 export type DatabaseRole = 'dev' | 'test'
 
@@ -71,8 +84,8 @@ export interface LaneDbContext {
   readonly templatesDir: string
 }
 
-/** Single-quote for `sh -c`, the only shell these commands ever reach. */
-const sq = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`
+/** Quote for whichever shell these commands will reach on this machine. */
+const sq = (value: string, platform?: Platform): string => shellQuote(value, platform)
 
 /** Lane names are already kebab-case; database identifiers cannot hold dashes. */
 const dbSuffix = (laneName: string): string => laneName.replaceAll('-', '_')
@@ -89,23 +102,25 @@ export function planTemplate(
   role: DatabaseRole,
   spec: DatabaseSpec,
   templatesDir: string,
+  platform?: Platform,
 ): TemplatePlan | null {
   if (spec.engine === 'sqlite') {
     const name = templatePath(role, spec, templatesDir)
     return {
       role,
       name,
-      setupCmd: `rm -f ${sq(name)}`,
+      setupCmd: removeFileCommand(name, platform),
       env: { [spec.connectionUrlVar]: name },
     }
   }
   if (spec.delivery === 'compose') return null
 
   const name = `${spec.name}_wt_template`
+  // `&&` means the same thing in both shells; only the quoting differs.
   return {
     role,
     name,
-    setupCmd: `dropdb --if-exists ${sq(name)} && createdb ${sq(name)}`,
+    setupCmd: `dropdb --if-exists ${sq(name, platform)} && createdb ${sq(name, platform)}`,
     env: { [spec.connectionUrlVar]: `${spec.serverUrl}/${name}` },
   }
 }
@@ -114,11 +129,12 @@ export function planDatabase(
   role: DatabaseRole,
   spec: DatabaseSpec,
   ctx: LaneDbContext,
+  platform?: Platform,
 ): DatabasePlan {
   if (spec.engine === 'sqlite') {
     const template = templatePath(role, spec, ctx.templatesDir)
     const forkedName = `${ctx.lanePath}/${spec.path}`
-    const copy = `cp ${sq(template)} ${sq(forkedName)}`
+    const copy = copyFileCommand(template, forkedName, platform)
     return {
       role,
       engine: 'sqlite',
@@ -158,7 +174,9 @@ export function planDatabase(
     connectionUrlVar: spec.connectionUrlVar,
     // application_name makes a runaway lane greppable in pg_stat_activity.
     connectionUrl: `${spec.serverUrl}/${forkedName}?application_name=wt-${ctx.laneName}`,
-    cloneCmd: `createdb -T ${sq(template)} ${sq(forkedName)}`,
-    resetCmd: `dropdb --if-exists ${sq(forkedName)} && createdb -T ${sq(template)} ${sq(forkedName)}`,
+    cloneCmd: `createdb -T ${sq(template, platform)} ${sq(forkedName, platform)}`,
+    resetCmd:
+      `dropdb --if-exists ${sq(forkedName, platform)} && ` +
+      `createdb -T ${sq(template, platform)} ${sq(forkedName, platform)}`,
   }
 }

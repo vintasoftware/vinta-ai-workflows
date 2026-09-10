@@ -15,7 +15,9 @@ export { EventStream, DEFAULT_POLL_MS } from './stream.ts'
 export {
   createWorkflowStore,
   isWorkflowId,
-  WORKFLOWS_DIRNAME,
+  plansDirFor,
+  PLANS_DIRNAME,
+  WORKFLOW_SUFFIX,
   type WorkflowRead,
   type WorkflowStore,
 } from './workflows.ts'

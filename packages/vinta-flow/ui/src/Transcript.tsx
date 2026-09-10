@@ -17,7 +17,7 @@
  * a live transcript does not remount the rows already on screen.
  */
 import { useState } from 'react'
-import { Chip } from './Chip.tsx'
+import { ToneDot } from './Chip.tsx'
 import { present } from './transcript.ts'
 
 /** Rows per window step. Big enough to fill a screen, small enough to be cheap. */
@@ -62,7 +62,11 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
                     <span className="entry-author" data-author={view.author}>
                       {view.label}
                     </span>
-                    {view.tone !== null && <Chip tone={view.tone}>{view.kind}</Chip>}
+                    {/* The kind is `view.label`'s job and the status is the
+                        dot's; the event type stays in `data-kind`, where a
+                        test or a stylesheet can reach it and a reader is not
+                        asked to. */}
+                    {view.tone !== null && <ToneDot tone={view.tone} />}
                   </p>
                   <p className="entry-body">{view.body}</p>
                 </li>

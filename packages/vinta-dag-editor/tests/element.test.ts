@@ -3,12 +3,23 @@
  * writes to it, and everything it changes leaves as a new value on an event.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { VintaDagElement } from '../src/element'
 import type { DagChangeDetail, DagSelectionChangeDetail } from '../src/events'
 import { DAG_CHANGE_EVENT, DAG_SELECTION_CHANGE_EVENT } from '../src/events'
+import { BAND_GAP, layoutDag, NODE_WIDTH } from '../src/layout'
+import { sceneSize } from '../src/scene'
 import type { Dag } from '../src/types'
 import { control, deepFreeze, mount, nodeCards, press, SAMPLE, setField, shadow } from './helpers'
+
+/** An edge that skips a wave — the one whose label used to land on a card. */
+const SKIPPING: Dag = {
+  ...SAMPLE,
+  edges: [
+    ...SAMPLE.edges,
+    { id: 'a-d', from: 'a', to: 'd', artifact: 'the BookmarkFolder model and its migration' },
+  ],
+}
 
 beforeEach(() => {
   document.body.replaceChildren()
@@ -68,6 +79,101 @@ describe('rendering', () => {
     expect(shadow(element).querySelector('.toolbar')).toBeNull()
     expect(shadow(element).querySelector('.inspector')).toBeNull()
     expect(shadow(element).querySelector('.connect')).toBeNull()
+  })
+})
+
+describe('edge labels', () => {
+  // jsdom has no layout engine, so nothing here can prove two boxes do not
+  // overlap. What it can prove is the placement rule that makes overlap
+  // impossible: every label is inside the empty gap between two waves, which is
+  // the one strip of canvas no card is ever drawn in.
+  it('places every label in the empty gap beside its source', () => {
+    const element = mount(SKIPPING)
+    const positions = layoutDag(SKIPPING)
+    for (const edge of SKIPPING.edges) {
+      const left = Number.parseFloat(control(element, 'select-edge', edge.id).style.left)
+      const gapStart = (positions.get(edge.from)?.x ?? 0) + NODE_WIDTH
+      expect(left).toBeGreaterThanOrEqual(gapStart)
+      expect(left).toBeLessThanOrEqual(gapStart + BAND_GAP)
+    }
+  })
+
+  it('keeps the whole artifact reachable on a label the gap is too narrow for', () => {
+    const element = mount(SKIPPING)
+    const label = control(element, 'select-edge', 'a-d')
+    // The CSS truncates; the name itself is still on the element, and still in
+    // the sentence a screen reader is given.
+    expect(label.textContent).toBe('the BookmarkFolder model and its migration')
+    expect(label.title).toBe('the BookmarkFolder model and its migration')
+    expect(label.getAttribute('aria-label')).toContain('the BookmarkFolder model and its migration')
+  })
+})
+
+describe('framing', () => {
+  const measured = HTMLElement.prototype.getBoundingClientRect
+
+  /** jsdom measures everything as zero; the viewport needs a size to fit into. */
+  function measure(width: number, height: number): void {
+    HTMLElement.prototype.getBoundingClientRect = function rect(this: HTMLElement): DOMRect {
+      const size = this.classList.contains('viewport') ? { width, height } : { width: 0, height: 0 }
+      return {
+        ...size,
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: size.width,
+        bottom: size.height,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+  }
+
+  afterEach(() => {
+    HTMLElement.prototype.getBoundingClientRect = measured
+  })
+
+  it('frames the whole graph on the first render of a non-empty one', () => {
+    measure(400, 200)
+    const element = mount(SAMPLE)
+    // Wide enough that the width is what binds: three waves in 400px.
+    const fitted = 400 / sceneSize(SAMPLE, layoutDag(SAMPLE)).width
+    expect(element.viewport.scale).toBeCloseTo(fitted, 5)
+    expect(shadow(element).querySelector('.scene')).toHaveProperty(
+      'style.transform',
+      expect.stringContaining(`scale(${fitted})`),
+    )
+  })
+
+  it('never magnifies a graph that already fits', () => {
+    measure(4000, 2000)
+    expect(mount(SAMPLE).viewport.scale).toBe(1)
+  })
+
+  it('frames it once, and then leaves the viewport to whoever is reading it', () => {
+    measure(400, 200)
+    const element = mount(SAMPLE)
+    element.viewport = { x: 5, y: 6, scale: 2 }
+    // A status tick is a new value, and it must not yank the canvas back.
+    element.value = {
+      ...SAMPLE,
+      nodes: SAMPLE.nodes.map((node) => (node.id === 'b' ? { ...node, status: 'done' } : node)),
+    }
+    expect(element.viewport).toEqual({ x: 5, y: 6, scale: 2 })
+    // The way back is a control, in read mode as much as in edit mode.
+    control(element, 'fit').click()
+    expect(element.viewport.scale).toBeCloseTo(400 / sceneSize(SAMPLE, layoutDag(SAMPLE)).width, 5)
+  })
+
+  it('does not frame an empty graph, and fits when it can finally be measured', () => {
+    const element = mount({ nodes: [], edges: [] })
+    expect(element.viewport).toEqual({ x: 0, y: 0, scale: 1 })
+    // Unmeasurable (jsdom's zeros) is not fitted either — it is asked again.
+    element.value = SAMPLE
+    expect(element.viewport).toEqual({ x: 0, y: 0, scale: 1 })
+    measure(400, 200)
+    element.value = { ...SAMPLE }
+    expect(element.viewport.scale).toBeCloseTo(400 / sceneSize(SAMPLE, layoutDag(SAMPLE)).width, 5)
   })
 })
 

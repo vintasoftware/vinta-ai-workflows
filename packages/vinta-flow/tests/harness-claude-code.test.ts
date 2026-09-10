@@ -25,6 +25,7 @@ import {
 } from '../src/harness/claude-code.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 const temps: string[] = []
 
@@ -325,7 +326,7 @@ describe('binary resolution', () => {
   })
 })
 
-describe('preflight against a fake binary', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('preflight against a fake binary', () => {
   it('reports not installed, with the command that installs it', async () => {
     const missing = join(makeTemp(), 'definitely-not-here')
     const result = await new ClaudeCodeAdapter({ bin: missing }).preflight()
@@ -364,7 +365,7 @@ describe('preflight against a fake binary', () => {
   })
 })
 
-describe('spawn against a fake binary', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
   const task = (): AgentTask => ({
     nodeId: 'phase-1',
     cwd: makeTemp(),

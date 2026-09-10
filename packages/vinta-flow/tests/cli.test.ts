@@ -46,6 +46,7 @@ import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { parsePostMortem } from '../src/postmortem/postmortem.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 // ---------------------------------------------------------------------------
 // Rig
@@ -182,7 +183,7 @@ const healthyBins = (dir: string): DoctorOverrides => ({
 // 1: doctor
 // ---------------------------------------------------------------------------
 
-describe('vinta-flow doctor', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('vinta-flow doctor', () => {
   it('exits zero on a healthy environment and prints the report', async () => {
     const dir = makeTemp()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
@@ -654,7 +655,7 @@ const sqliteRepo = (): string => {
   return dir
 }
 
-describe('vinta-flow run, composed', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('vinta-flow run, composed', () => {
   it('provisions lanes, runs gates in them, and reaches done', async () => {
     const dir = gitRepo()
     const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a'), node('b', ['a'])], 2))
@@ -954,6 +955,49 @@ describe('vinta-flow run, composed', () => {
     // was cloned, and no connection variable was invented.
     expect(readdirSync(join(laneRoot(dir), '.templates'))).toEqual([])
     expect(existsSync(join(laneRoot(dir), 'plain-lane-1', 'db.sqlite3'))).toBe(false)
+  })
+
+  /**
+   * The two halves of the product, on one file.
+   *
+   * `plan-feature` writes `ai-plans/<id>.workflow.json`, a person opens the
+   * editor and approves it, and the orchestrator starts from it. That flow is
+   * only real if `serve` lists the very file `run` executes — no copy, no
+   * relocation, and no flag on either command saying where to look.
+   */
+  it('lists in the editor exactly the file run executes, unmoved', async () => {
+    const dir = makeTemp()
+    mkdirSync(join(dir, 'ai-plans'), { recursive: true })
+    const path = writeJson(
+      dir,
+      join('ai-plans', 'cli-fixture.workflow.json'),
+      workflowJson([node('a')]),
+    )
+
+    // The editor's half: `serve --repo <dir>`, told nothing else, lists it.
+    let listed: unknown
+    let opened: unknown
+    await serveCommand(['--repo', dir], recorder().io, {
+      wait: async (daemon) => {
+        const headers = { authorization: `Bearer ${daemon.token}` }
+        listed = await (await fetch(`${daemon.url}/api/workflows`, { headers })).json()
+        opened = await (
+          await fetch(`${daemon.url}/api/workflows/cli-fixture`, { headers })
+        ).json()
+      },
+    })
+    expect(listed).toEqual({ workflows: [{ id: 'cli-fixture' }] })
+    expect((opened as { id: string }).id).toBe('cli-fixture')
+
+    // `run`'s half: the same path, executed without moving anything.
+    const code = await runCommand([path, '--repo', dir], recorder().io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+      runId: 'agreed-run',
+    })
+    expect(code).toBe(OK)
+    expect(existsSync(path)).toBe(true)
+    expect(existsSync(join(dir, '.vinta-flow', 'runs', 'agreed-run', 'workflow.json'))).toBe(true)
   })
 })
 

@@ -28,13 +28,52 @@ body {
 
 .app {
   max-width: 1100px;
+  /* The page is a column with air on both sides at any width: `auto` margins
+     centre it once the viewport is wider than the column, and the padding is
+     what keeps a panel's border off the edge of the screen below that. */
   margin: 0 auto;
-  padding: 16px;
+  padding: 16px 20px 24px;
+}
+
+/*
+ * The app chrome: one quiet bar, not three browser defaults stacked in a
+ * corner. A rule and a row, the title at its own weight rather than as a blue
+ * underlined anchor, and the reminder control wearing the same border every
+ * other control on the page wears. Nothing decorative — this is a tool, and
+ * the header's whole job is to say where you are and get out of the way.
+ */
+.app-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 0 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
 }
 
 .app-head h1 {
-  font-size: 16px;
-  margin: 0 0 16px;
+  font-size: 15px;
+  margin: 0;
+}
+
+/* Only the header's own links. A banner's link inside it stays a link. */
+.app-head > h1 a,
+.app-head > a {
+  text-decoration: none;
+}
+
+.app-head > h1 a {
+  color: var(--text);
+}
+
+.app-head > a {
+  color: var(--muted);
+}
+
+.app-head > h1 a:hover,
+.app-head > a:hover {
+  text-decoration: underline;
 }
 
 a,
@@ -203,8 +242,10 @@ textarea {
   margin: 8px 0 0;
 }
 
-.controls button {
+.controls button,
+.app-head select {
   font: inherit;
+  color: inherit;
   padding: 4px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -295,6 +336,15 @@ textarea {
   background: var(--tone-idle);
 }
 
+/* A chip with no word in it (see Chip.tsx's `ToneDot`): the tone, and only the
+   tone, for a row whose text already names the kind. */
+.chip.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+}
+
 .tone-active {
   background: var(--tone-active);
 }
@@ -321,7 +371,10 @@ textarea {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin: 0 0 16px;
+  /* In the header row, and pushed to its far end: the opt-in belongs with the
+     chrome, and a banner is the one thing here allowed to be wide. */
+  margin: 0;
+  margin-left: auto;
 }
 
 .banner {

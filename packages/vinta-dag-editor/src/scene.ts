@@ -11,7 +11,7 @@
  * which are curves and are never focused, are SVG.
  */
 
-import { NODE_HEIGHT, NODE_WIDTH } from './layout'
+import { BAND_GAP, NODE_HEIGHT, NODE_WIDTH } from './layout'
 import type { DagStrings } from './strings'
 import type { Dag, DagMode, DagNode, DagPoint, DagSelection } from './types'
 import { DAG_NODE_STATUSES } from './types'
@@ -39,7 +39,7 @@ export function buildCanvas(view: SceneView): DocumentFragment {
   const viewport = create(view.doc, 'section', 'viewport')
   viewport.setAttribute('part', 'viewport')
   viewport.setAttribute('aria-label', view.strings.canvas)
-  viewport.append(buildScene(view))
+  viewport.append(buildScene(view), buildViewControls(view))
   fragment.append(viewport)
 
   const inspector = view.mode === 'edit' ? buildInspector(view) : null
@@ -50,11 +50,7 @@ export function buildCanvas(view: SceneView): DocumentFragment {
 function buildToolbar(view: SceneView): HTMLElement {
   const toolbar = create(view.doc, 'div', 'toolbar')
   toolbar.setAttribute('part', 'toolbar')
-  toolbar.append(
-    button(view.doc, 'add-node', view.strings.addNode),
-    button(view.doc, 'zoom-out', view.strings.zoomOut),
-    button(view.doc, 'zoom-in', view.strings.zoomIn),
-  )
+  toolbar.append(button(view.doc, 'add-node', view.strings.addNode))
   const source = view.pending
   if (source !== null) {
     const hint = create(view.doc, 'p', 'hint')
@@ -65,14 +61,48 @@ function buildToolbar(view: SceneView): HTMLElement {
   return toolbar
 }
 
+/**
+ * The zoom and fit controls, in **both** modes and inside the viewport.
+ *
+ * They used to be three buttons in the edit toolbar, which meant the run view
+ * — the one that shows a graph too wide for its frame — offered no visible way
+ * to reach the waves past the right edge. Panning and the wheel still work;
+ * this is the affordance that says so.
+ */
+function buildViewControls(view: SceneView): HTMLElement {
+  const controls = create(view.doc, 'div', 'view-controls')
+  controls.setAttribute('part', 'view-controls')
+  controls.append(
+    button(view.doc, 'zoom-out', view.strings.zoomOut),
+    button(view.doc, 'zoom-in', view.strings.zoomIn),
+    button(view.doc, 'fit', view.strings.fitView),
+  )
+  return controls
+}
+
+/**
+ * How much room the laid-out graph needs. Read from the layout rather than
+ * from the DOM, so the element can frame the graph without measuring it —
+ * which is also why it is a function and not two lines inside `buildScene`.
+ */
+export function sceneSize(
+  dag: Dag,
+  positions: ReadonlyMap<string, DagPoint>,
+): { readonly width: number; readonly height: number } {
+  const placed = dag.nodes.map((node) => shift(positions.get(node.id)))
+  return {
+    width: Math.max(...placed.map((at) => at.x + NODE_WIDTH), 0) + PADDING,
+    height: Math.max(...placed.map((at) => at.y + NODE_HEIGHT), 0) + PADDING,
+  }
+}
+
 function buildScene(view: SceneView): HTMLElement {
   const scene = create(view.doc, 'div', 'scene')
   const placed = view.dag.nodes.map((node) => ({
     node,
     at: shift(view.positions.get(node.id)),
   }))
-  const width = Math.max(...placed.map(({ at }) => at.x + NODE_WIDTH), 0) + PADDING
-  const height = Math.max(...placed.map(({ at }) => at.y + NODE_HEIGHT), 0) + PADDING
+  const { width, height } = sceneSize(view.dag, view.positions)
   scene.style.width = `${width}px`
   scene.style.height = `${height}px`
 
@@ -148,8 +178,12 @@ function edgeLabels(view: SceneView, placed: readonly Placed[]): readonly HTMLEl
       }),
     )
     label.setAttribute('aria-pressed', String(isSelected(view.selection, 'edge', edge.id)))
-    label.style.left = `${(ends.start.x + ends.end.x) / 2}px`
-    label.style.top = `${(ends.start.y + ends.end.y) / 2}px`
+    // The label is clipped to the width of the gap it sits in (see STYLES), so
+    // the whole artifact has to be readable some other way than by looking.
+    label.title = edge.artifact
+    const at = labelPoint(ends.start, ends.end)
+    label.style.left = `${at.x}px`
+    label.style.top = `${at.y}px`
     return [label]
   })
 }
@@ -234,8 +268,38 @@ function endpoints(
 }
 
 function curve(start: DagPoint, end: DagPoint): string {
-  const bend = Math.max(40, (end.x - start.x) / 2)
+  const bend = bendOf(start, end)
   return `M ${start.x} ${start.y} C ${start.x + bend} ${start.y} ${end.x - bend} ${end.y} ${end.x} ${end.y}`
+}
+
+function bendOf(start: DagPoint, end: DagPoint): number {
+  return Math.max(40, (end.x - start.x) / 2)
+}
+
+/**
+ * Where an edge's label sits: the middle of the empty band between the source
+ * node and the next wave, at the height the curve passes through there.
+ *
+ * The midpoint of the whole edge was the obvious choice and the wrong one. A
+ * label is as wide as its artifact name, and half of it landed on the node
+ * card to the right; an edge that skips a wave put the label squarely on top
+ * of a card in between. Both are gone if the label never leaves the one strip
+ * of canvas that is guaranteed to be empty — the gap `layout.ts` leaves
+ * between two bands — and the CSS caps the label at that strip's width.
+ */
+function labelPoint(start: DagPoint, end: DagPoint): DagPoint {
+  const span = end.x - start.x
+  // For a one-wave edge that is the curve's own midpoint; for a longer one it
+  // is the part of the curve that crosses this gap.
+  const t = span <= 0 ? 0.5 : Math.min(0.5, BAND_GAP / 2 / span)
+  return { x: start.x + BAND_GAP / 2, y: curveY(start, end, t) }
+}
+
+/** The height of the same cubic `curve` draws, at `t`. Its control points share
+ *  the endpoints' `y`, so only two terms of the polynomial survive. */
+function curveY(start: DagPoint, end: DagPoint, t: number): number {
+  const rest = 1 - t
+  return (rest ** 3 + 3 * rest ** 2 * t) * start.y + (3 * rest * t ** 2 + t ** 3) * end.y
 }
 
 function shift(point: DagPoint | undefined): DagPoint {

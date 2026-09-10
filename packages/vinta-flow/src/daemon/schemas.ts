@@ -28,6 +28,7 @@ import { z } from 'zod'
 import type { HarnessCapabilities } from '../harness/adapter.ts'
 import type { NodeStatus, RunStatus } from '../journal/events.ts'
 import { WorkflowSchema } from '../types.ts'
+import { PtyServerFrameSchema } from './pty-frames.ts'
 
 /** Compile-time exhaustiveness: a new status must be added to the enum below. */
 type Covers<Union extends string, Listed extends string> = [Exclude<Union, Listed>] extends [never]
@@ -313,9 +314,12 @@ export const AmendResponseSchema = z.strictObject({
 // ---------------------------------------------------------------------------
 
 /**
- * Every frame is discriminated by `channel`. Only `events` exists today; PTY
- * bytes are step 17 and arrive as a second member of this union, which is why
- * the discriminator is here before there is anything to discriminate.
+ * Every frame is discriminated by `channel`, and both members are now here:
+ * journalled events, and the PTY bytes `stream.ts` puts on the same socket.
+ * A client that parses with `FrameSchema` therefore sees every frame the
+ * daemon can send — which is what lets one socket carry a run *and* the
+ * terminal attached to one of its nodes, instead of the terminal opening a
+ * second connection because the first would have called its frames garbage.
  */
 /**
  * One journalled event on the wire.
@@ -342,7 +346,10 @@ export const EventFrameSchema = z.strictObject({
   events: z.array(JournalEventSchema),
 })
 
-export const FrameSchema = z.discriminatedUnion('channel', [EventFrameSchema])
+export const FrameSchema = z.discriminatedUnion('channel', [
+  EventFrameSchema,
+  PtyServerFrameSchema,
+])
 
 /**
  * §13.2's read: a bounded window of the log, for scrubbing a run's history.

@@ -77,6 +77,8 @@ import { SERVE_USAGE, announce, toBind } from './serve.ts'
 
 export const RUN_USAGE = `usage: vinta-flow run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]
 
+  <workflow.json>  Usually ai-plans/<feature>.workflow.json — the committed
+                 document plan-feature wrote and the editor edits.
 ${SERVE_USAGE.split('\n').slice(1).join('\n')}`
 
 export interface RunDeps {

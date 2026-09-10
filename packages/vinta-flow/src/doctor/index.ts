@@ -34,6 +34,7 @@ import { OpencodeAdapter } from '../harness/opencode.ts'
 import { measureBytes, probePoolDisk } from '../lanes/disk.ts'
 import type { ProjectSpec } from '../lanes/pool.ts'
 import { readSummary, resetPlan } from '../lanes/summary.ts'
+import { commandInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import type { Workflow } from '../types.ts'
 
 const run = promisify(execFile)
@@ -100,9 +101,13 @@ async function probeCommand(
   cwd?: string,
 ): Promise<ProbeOutcome> {
   try {
-    const { stdout } = await run(bin, [...args], {
+    // The same seam a run uses, so the doctor probes the path a run takes: on
+    // Windows a CLI installed by npm is a `.cmd` shim, unreachable without it.
+    const invocation = commandInvocation(bin, args)
+    const { stdout } = await run(invocation.file, [...invocation.args], {
       ...(cwd === undefined ? {} : { cwd }),
       timeout: PROBE_TIMEOUT_MS,
+      ...spawnOptionsFor(invocation),
     })
     return { ok: true, output: stdout }
   } catch {

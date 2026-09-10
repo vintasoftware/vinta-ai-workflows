@@ -7,6 +7,11 @@
  * Hit targets grow under a coarse pointer so the same markup is usable on touch.
  */
 
+import { BAND_GAP } from './layout'
+
+/** A label may be as wide as the empty gap it sits in, less a little air. */
+const EDGE_LABEL_WIDTH = BAND_GAP - 16
+
 export const STYLES = `
 :host {
   --vdag-surface: #ffffff;
@@ -40,7 +45,7 @@ export const STYLES = `
 }
 .hint { color: var(--vdag-muted); }
 button { font: inherit; color: inherit; }
-.toolbar button, .inspector button {
+.toolbar button, .inspector button, .view-controls button {
   min-height: 32px;
   padding: 4px 10px;
   border: 1px solid var(--vdag-line);
@@ -93,11 +98,33 @@ button { font: inherit; color: inherit; }
 }
 .edge-label {
   position: absolute;
+  /* Centred on the point scene.ts puts it at — the middle of the gap between
+     two waves — and never wider than that gap, so a long artifact name is
+     truncated instead of being drawn across the card next door. The whole name
+     is in the title attribute and in the label a screen reader is given. */
+  transform: translate(-50%, -50%);
+  max-width: ${EDGE_LABEL_WIDTH}px;
+  overflow: hidden;
   padding: 2px 6px;
   border: 1px solid var(--vdag-line);
   border-radius: var(--vdag-radius);
   background: var(--vdag-surface);
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
+}
+/* The zoom and fit controls, over the canvas rather than in the edit toolbar,
+   so the read-only run view has them too. */
+.view-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--vdag-line);
+  border-radius: var(--vdag-radius);
+  background: var(--vdag-surface);
 }
 .inspector {
   display: flex;

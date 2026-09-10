@@ -19,6 +19,13 @@
  *   of the URL.
  * - **The URL is a secret.** The line above it says so, because an operator who
  *   pastes it into a ticket has published the run.
+ *
+ * `--repo` is the only thing this command tells the daemon about the project,
+ * and it settles both halves of §10's Editor row: the journal it serves lives
+ * under `<repo>/.vinta-flow`, and the workflows it lists are
+ * `<repo>/ai-plans/*.workflow.json` — the committed documents `plan-feature`
+ * wrote and `vinta-flow run` is pointed at. Neither is passed separately, so
+ * they cannot come to disagree about which checkout is open.
  */
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -29,7 +36,8 @@ import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const SERVE_USAGE = `usage: vinta-flow serve [--repo <dir>] [--host <host>] [--port <n>]
 
-  --repo <dir>   The project whose .vinta-flow/ store is served.
+  --repo <dir>   The project whose .vinta-flow/ store is served, and whose
+                 ai-plans/*.workflow.json the editor opens.
                  Defaults to the current directory.
   --host <host>  Bind address. Defaults to 127.0.0.1. Any other value makes the
                  daemon reachable from other machines and prints a warning.

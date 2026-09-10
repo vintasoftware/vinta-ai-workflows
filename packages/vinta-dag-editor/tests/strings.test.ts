@@ -22,6 +22,7 @@ const MARKED: DagStrings = {
   connectHint: ({ name }) => `⟦connectHint⟧${name}`,
   zoomIn: '⟦zoomIn⟧',
   zoomOut: '⟦zoomOut⟧',
+  fitView: '⟦fitView⟧',
   nameField: '⟦nameField⟧',
   statusField: '⟦statusField⟧',
   waveField: '⟦waveField⟧',

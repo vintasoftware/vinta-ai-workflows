@@ -22,6 +22,8 @@ export interface DagStrings {
   readonly connectHint: (params: { readonly name: string }) => string
   readonly zoomIn: string
   readonly zoomOut: string
+  /** Frames the whole graph — the way out of a view that clips. */
+  readonly fitView: string
   readonly nameField: string
   readonly statusField: string
   readonly waveField: string
@@ -47,6 +49,7 @@ export const DEFAULT_STRINGS: DagStrings = {
   connectHint: ({ name }) => `Choose the node that depends on ${name}`,
   zoomIn: 'Zoom in',
   zoomOut: 'Zoom out',
+  fitView: 'Fit',
   nameField: 'Name',
   statusField: 'Status',
   waveField: 'Wave',

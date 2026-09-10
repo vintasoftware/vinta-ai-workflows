@@ -79,7 +79,7 @@ export function NodeView({
   readonly runId: string
   readonly nodeId: string
 }) {
-  const { projection, snapshot, connected } = useRun(client, runId)
+  const { projection, snapshot, connected, pty } = useRun(client, runId)
   const tick = useNow(REFRESH_MS)
   const [detail, setDetail] = useState<NodeDetail | null>(null)
   const [reloads, setReloads] = useState(0)
@@ -182,7 +182,7 @@ export function NodeView({
         onOperate={(operation, body, done) => void operate(operation, body, done)}
       />
 
-      {takingOver && <TerminalView runId={runId} nodeId={nodeId} since={cursor} />}
+      {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
 
       <div className="panels">
         <Diff diff={detail.diff} />

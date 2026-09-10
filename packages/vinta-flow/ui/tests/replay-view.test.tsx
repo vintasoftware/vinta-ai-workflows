@@ -284,8 +284,11 @@ test('a run still in progress is replayable to its current end, and says so', as
   expect(container.querySelector('[data-inprogress]')?.textContent).toContain(
     'still in progress',
   )
-  // "up to its current end" is a claim about the log, so it names the count.
-  expect(container.querySelector('[data-inprogress]')?.textContent).toContain('2 events')
+  // "up to its current end" is a claim about the log, so it names the count —
+  // which arrives with the first page, one tick after the banner itself.
+  await waitFor(() =>
+    expect(container.querySelector('[data-inprogress]')?.textContent).toContain('2 events'),
+  )
 
   await scrubTo(container, 2)
   expect(cardColorOf(container, 'impl')).toBe('var(--vdag-status-running)')

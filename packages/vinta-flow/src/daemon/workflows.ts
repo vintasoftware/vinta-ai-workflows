@@ -1,35 +1,64 @@
 /**
  * The workflow files the editor (§10's Editor row) reads and writes.
  *
- * A run's `workflow.json` is *frozen* (§5.3) and is not this. These are the
- * source documents a run is started **from** — the thing `plan-feature` emits
- * and a person edits before anything is scheduled — so they live beside the
- * store rather than inside a run directory, and nothing here ever touches a
- * run's snapshot.
+ * **These are source, not run state.** A workflow is authored by `plan-feature`
+ * beside its markdown plan, reviewed by a human, and committed — it is the
+ * document a run is started *from*, and the same file `vinta-flow run` is
+ * pointed at. `.vinta-flow/` is the opposite category: journal, transcripts,
+ * gate logs and each run's *frozen* `workflow.json` (§5.3, §11), gitignored and
+ * purgeable. So the editor edits the repository's `ai-plans/`, which is where
+ * `plan-feature` writes and where a reviewer looks, and nothing here ever
+ * touches a run's snapshot.
  *
- * Three rules, all of them enforced below rather than documented:
+ * Four rules, all of them enforced below rather than documented:
  *
- * - **The id is the filename, and the id is the schema's.** Ids match the
- *   workflow schema's own kebab-case rule, which contains no `/`, no `.` and
- *   no `..`, so a request cannot name a path outside the directory. Validating
- *   the id is the whole of the traversal defence; there is no second sanitiser
- *   to disagree with the first.
+ * - **The filename is `<id>.workflow.json`, and the id is the schema's.** That
+ *   is the name `plan-feature` emits (`BOOKMARK_FOLDERS` →
+ *   `ai-plans/bookmark-folders.workflow.json`), and the suffix is what keeps
+ *   the markdown plan's other JSON siblings — `<feature>.postmortem.json` —
+ *   from being offered as workflows. Ids match the workflow schema's own
+ *   kebab-case rule, which contains no `/`, no `.` and no `..`, so a request
+ *   cannot name a path outside the directory. Validating the id is the whole of
+ *   the traversal defence; there is no second sanitiser to disagree with it.
  * - **Writes are atomic.** A workflow is written to a temporary file in the
  *   same directory and renamed over the target, so a crash mid-write leaves the
  *   previous document intact rather than a truncated one. `rename` within a
  *   directory is atomic on both platforms this package targets.
+ * - **A failed write leaves nothing behind.** The temporary file is removed if
+ *   the rename never happens. This directory is committed and read by people; a
+ *   stray `…workflow.json.4711.tmp` in a reviewed diff is litter that
+ *   `.vinta-flow/` could absorb and `ai-plans/` cannot.
  * - **Nothing here logs.** A workflow carries plan prose and repository paths
  *   (§11); a read that fails answers with a reason code, never with the bytes
  *   it could not parse or the path it could not open.
  */
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 
 /** The workflow schema's own id rule. Kebab-case, so never a path segment. */
 const WORKFLOW_ID = /^[a-z0-9][a-z0-9-]*$/
 
-/** Where workflows live when the daemon is not told otherwise. */
-export const WORKFLOWS_DIRNAME = 'workflows'
+/**
+ * Where workflows live when the daemon is not told otherwise: the project's
+ * plan directory, committed, beside the markdown plan each one was derived
+ * from. Not under `.vinta-flow/` — see the note above.
+ */
+export const PLANS_DIRNAME = 'ai-plans'
+
+/** `plan-feature`'s filename convention, and the only one this store reads. */
+export const WORKFLOW_SUFFIX = '.workflow.json'
+
+/** The plan directory of a project checkout. */
+export function plansDirFor(projectDir: string): string {
+  return join(projectDir, PLANS_DIRNAME)
+}
 
 export type WorkflowRead =
   | { readonly ok: true; readonly value: unknown }
@@ -37,7 +66,7 @@ export type WorkflowRead =
 
 export interface WorkflowStore {
   readonly dir: string
-  /** Every `<id>.json` whose stem is a legal workflow id, sorted. */
+  /** Every `<id>.workflow.json` whose stem is a legal workflow id, sorted. */
   list(): string[]
   read(id: string): WorkflowRead
   /** Pretty-printed, atomic. Creates the directory on first write. */
@@ -62,8 +91,8 @@ export function createWorkflowStore(dir: string): WorkflowStore {
         return []
       }
       return entries
-        .filter((entry) => entry.endsWith('.json'))
-        .map((entry) => entry.slice(0, -'.json'.length))
+        .filter((entry) => entry.endsWith(WORKFLOW_SUFFIX))
+        .map((entry) => entry.slice(0, -WORKFLOW_SUFFIX.length))
         .filter(isWorkflowId)
         .sort()
     },
@@ -88,12 +117,17 @@ export function createWorkflowStore(dir: string): WorkflowStore {
       mkdirSync(dir, { recursive: true })
       const target = pathOf(id)
       const temporary = `${target}.${process.pid}.tmp`
-      writeFileSync(temporary, `${JSON.stringify(workflow, null, 2)}\n`, 'utf8')
-      renameSync(temporary, target)
+      try {
+        writeFileSync(temporary, `${JSON.stringify(workflow, null, 2)}\n`, 'utf8')
+        renameSync(temporary, target)
+      } catch (error) {
+        rmSync(temporary, { force: true })
+        throw error
+      }
     },
   }
 
   function pathOf(id: string): string {
-    return join(dir, `${id}.json`)
+    return join(dir, `${id}${WORKFLOW_SUFFIX}`)
   }
 }

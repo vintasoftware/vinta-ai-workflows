@@ -100,6 +100,20 @@ test('every normalized event kind renders, and the operator’s own message is a
   expect(container.querySelector('[data-kind="error"] .chip')?.getAttribute('data-tone')).toBe(
     'error',
   )
+
+  // …and the chip carries the tone and nothing else. It used to print the raw
+  // event type beside a row that already said what the row was, so "Operator
+  // (you)" was followed by a pill reading `user_message`. The type is still on
+  // the row as `data-kind`, where this test reads it; it is not on screen.
+  const transcript = container.querySelector('.transcript')
+  for (const chip of container.querySelectorAll('.entries .chip')) {
+    expect(chip.textContent).toBe('')
+  }
+  // The snake_case ones are the tell: `session_started` and `tool_result` can
+  // only have come from the event stream, where a human label never would.
+  for (const kind of TRANSCRIPT_KINDS.filter((candidate) => candidate.includes('_'))) {
+    expect(transcript?.textContent ?? '', kind).not.toContain(kind)
+  }
 })
 
 test('a long transcript mounts a window over its tail, not every row', async () => {

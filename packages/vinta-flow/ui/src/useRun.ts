@@ -27,16 +27,23 @@
  *   stream, from the stored cursor or from zero — a dead read endpoint is not
  *   a reason to stop watching the run.
  *
+ * - **The terminal rides this same socket.** §10 puts events and PTY bytes on
+ *   one connection, so the run stream carries both and `pty` below is the
+ *   handle a terminal panel writes to. It is owned here because the socket is:
+ *   a panel that opened its own would authenticate twice, attach a second
+ *   channel, and leave the run's stream to reconnect on its own schedule.
+ *
  * A dropped socket reconnects on a fixed delay. A frame that does not match
  * the daemon's schema does not: a server this client cannot read will not
  * become readable by trying again, and a reconnect loop against one is just a
  * quieter way of failing.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { RunSnapshot } from '../../src/daemon/schemas.ts'
-import type { Client } from './client.ts'
+import type { Client, Stream } from './client.ts'
 import { notifier } from './notifications.ts'
 import { applyFrame, EMPTY_PROJECTION, type Projection } from './projection.ts'
+import { createPtyLink, type PtyLink } from './pty-link.ts'
 
 const RECONNECT_MS = 300
 const CURSOR_KEY = 'vinta-flow:cursor:'
@@ -46,9 +53,17 @@ export interface RunView {
   readonly projection: Projection
   readonly connected: boolean
   readonly error: string | null
+  /**
+   * The PTY half of the same socket (§10). It is handed out whether or not a
+   * terminal is open, because the socket's lifetime is the run view's and not
+   * the panel's — a terminal that came and went twice used this one connection
+   * both times, and opening a second one was never necessary.
+   */
+  readonly pty: PtyLink
 }
 
 export function useRun(client: Client, runId: string): RunView {
+  const pty = useMemo(() => createPtyLink(), [client, runId])
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null)
   const [projection, setProjection] = useState<Projection>(EMPTY_PROJECTION)
   const [connected, setConnected] = useState(false)
@@ -58,7 +73,7 @@ export function useRun(client: Client, runId: string): RunView {
     let stopped = false
     let cursor = readCursor(runId)
     let opened = false
-    let detach: (() => void) | null = null
+    let socket: Stream | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
 
     const refresh = (): void => {
@@ -88,9 +103,13 @@ export function useRun(client: Client, runId: string): RunView {
     }
 
     const open = (): void => {
-      detach = client.stream(runId, cursor, {
+      socket = client.stream(runId, cursor, {
         onOpen: () => {
-          if (!stopped) setConnected(true)
+          if (stopped) return
+          setConnected(true)
+          // Whatever terminal is on screen re-attaches over this connection;
+          // the link is what survives a reconnect, and the socket is not.
+          pty.opened((frame) => socket?.send(frame))
         },
         onFrame: (frame) => {
           if (stopped) return
@@ -103,7 +122,9 @@ export function useRun(client: Client, runId: string): RunView {
           setProjection((current) => applyFrame(current, frame))
           refresh()
         },
+        onPty: (frame) => pty.deliver(frame),
         onClose: (reason) => {
+          pty.closed()
           if (stopped) return
           setConnected(false)
           if (reason === 'invalid_frame') {
@@ -120,11 +141,12 @@ export function useRun(client: Client, runId: string): RunView {
     return () => {
       stopped = true
       if (retry !== null) clearTimeout(retry)
-      detach?.()
+      socket?.close()
+      pty.closed()
     }
-  }, [client, runId])
+  }, [client, runId, pty])
 
-  return { snapshot, projection, connected, error }
+  return { snapshot, projection, connected, error, pty }
 }
 
 /** Errors from `client.ts` name an endpoint and a status; nothing else is relayed. */

@@ -17,11 +17,11 @@ import { DAG_CHANGE_EVENT, DAG_SELECTION_CHANGE_EVENT } from './events'
 import { layoutDag } from './layout'
 import type { NodePatch } from './model'
 import { addEdge, addNode, removeEdge, removeNode, updateEdge, updateNode } from './model'
-import { buildCanvas } from './scene'
+import { buildCanvas, sceneSize } from './scene'
 import type { DagStringOverrides, DagStrings } from './strings'
 import { DEFAULT_STRINGS, mergeStrings } from './strings'
 import { STYLES } from './styles'
-import type { Dag, DagMode, DagNodeStatus, DagSelection, DagViewport } from './types'
+import type { Dag, DagMode, DagNodeStatus, DagPoint, DagSelection, DagViewport } from './types'
 import { DAG_NODE_STATUSES } from './types'
 
 const EMPTY_DAG: Dag = { nodes: [], edges: [] }
@@ -38,6 +38,8 @@ export class VintaDagElement extends HTMLElement {
   #selection: DagSelection | null = null
   #viewport: DagViewport = { x: 0, y: 0, scale: 1 }
   #pending: string | null = null
+  #fitted = false
+  #resize: ResizeObserver | null = null
   #pan: { readonly x: number; readonly y: number; readonly origin: DagViewport } | null = null
 
   constructor() {
@@ -105,6 +107,12 @@ export class VintaDagElement extends HTMLElement {
 
   connectedCallback(): void {
     this.#render()
+    this.#watchSize()
+  }
+
+  disconnectedCallback(): void {
+    this.#resize?.disconnect()
+    this.#resize = null
   }
 
   attributeChangedCallback(name: string, _old: string | null, next: string | null): void {
@@ -122,15 +130,47 @@ export class VintaDagElement extends HTMLElement {
     this.#applyViewport()
   }
 
+  /**
+   * Frames the whole graph in the viewport, shrinking it if it does not fit.
+   *
+   * A plan of any size is wider than the panel it is drawn in, and what a
+   * first-time viewer used to get was the first two waves and a clean vertical
+   * cut where the rest should be — the canvas panned and zoomed, but nothing on
+   * screen said so. So the first render of a non-empty graph frames it (below),
+   * and this stays public and on a button for every render after that.
+   */
+  fitToContent(): void {
+    this.#fitTo(layoutDag(this.#value))
+  }
+
+  /**
+   * The first measurement can be a zero — the panel is still being laid out,
+   * or is hidden — and a graph that never changes again has no second render
+   * coming to try in. So the first frame is retried whenever the box changes
+   * size, and the observer is dropped the moment it lands.
+   */
+  #watchSize(): void {
+    if (this.#resize !== null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      if (!this.#fitted) this.#fitTo(layoutDag(this.#value))
+      if (!this.#fitted) return
+      observer.disconnect()
+      this.#resize = null
+    })
+    observer.observe(this)
+    this.#resize = observer
+  }
+
   #render(): void {
     if (!this.isConnected) return
     const focused = actionOf(this.#root.activeElement)
+    const positions = layoutDag(this.#value)
     for (const child of [...this.#root.children]) if (child.tagName !== 'STYLE') child.remove()
     this.#root.append(
       buildCanvas({
         doc: this.ownerDocument,
         dag: this.#value,
-        positions: layoutDag(this.#value),
+        positions,
         strings: this.#strings,
         mode: this.#mode,
         selection: this.#selection,
@@ -138,7 +178,40 @@ export class VintaDagElement extends HTMLElement {
       }),
     )
     this.#applyViewport()
+    // Once only, and never again: after the first frame the viewport is the
+    // viewer's, and a graph that re-framed itself on every status tick would
+    // yank the canvas out from under whoever was reading it.
+    if (!this.#fitted) this.#fitTo(positions)
     if (focused) this.#focus(focused.action, focused.id)
+  }
+
+  /**
+   * The measurement is of the viewport only — the content's size comes from
+   * the layout, not from the DOM — so an element that has not been laid out
+   * yet, or is hidden, simply does not fit and is asked again on the next
+   * render rather than being framed around a zero.
+   */
+  #fitTo(positions: ReadonlyMap<string, DagPoint>): void {
+    if (this.#value.nodes.length === 0) return
+    const viewport = this.#root.querySelector('.viewport')
+    if (!(viewport instanceof HTMLElement)) return
+    const box = viewport.getBoundingClientRect()
+    const content = sceneSize(this.#value, positions)
+    if (box.width <= 0 || box.height <= 0) return
+    // Never magnifies: a graph smaller than its frame is shown at its own size
+    // rather than blown up to fill one.
+    const scale = clamp(
+      Math.min(box.width / content.width, box.height / content.height),
+      ZOOM_RANGE.min,
+      1,
+    )
+    this.#viewport = {
+      scale,
+      x: (box.width - content.width * scale) / 2,
+      y: (box.height - content.height * scale) / 2,
+    }
+    this.#fitted = true
+    this.#applyViewport()
   }
 
   #applyViewport(): void {
@@ -162,6 +235,8 @@ export class VintaDagElement extends HTMLElement {
       this.zoomBy(ZOOM_STEP)
     } else if (action === 'zoom-out') {
       this.zoomBy(1 / ZOOM_STEP)
+    } else if (action === 'fit') {
+      this.fitToContent()
     } else if (action === 'add-node') {
       const added = addNode(this.#value, this.#strings.newNodeName)
       this.#selection = { kind: 'node', id: added.nodeId }

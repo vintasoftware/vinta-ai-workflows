@@ -1,0 +1,104 @@
+name: vinta-flow
+
+# The package's own suite, on every platform it claims to run on.
+#
+# The Windows leg is the point of this file. `packages/vinta-flow` was written
+# and polished on macOS and Linux; its Windows support was written by reading
+# the code, which is worth something and is not worth a claim. This job is
+# where "it works on Windows" stops being an assertion — the platform seam in
+# `src/platform/platform.ts` decides both branches from either machine, but
+# only a real `windows-latest` runner can say whether `taskkill /t` ends the
+# tree, whether `cmd.exe` parses the command lines that seam builds, and
+# whether ConPTY and the two native modules load at all.
+#
+# Three platforms, one job definition. A step that only makes sense on one of
+# them would be a step whose failure on the others nobody notices.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/vinta-flow/**'
+      - '.github/workflows/vinta-flow.yml'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+  pull_request:
+    paths:
+      - 'packages/vinta-flow/**'
+      - '.github/workflows/vinta-flow.yml'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# A push that lands while an earlier run is still going supersedes it.
+concurrency:
+  group: vinta-flow-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: packages/vinta-flow
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      # Every platform reports. A Windows failure must not hide a Linux one,
+      # and on the first runs of this job the Windows leg is the one with
+      # something to say.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      # Before checkout, so it applies to the checkout itself. Git for Windows
+      # sets `core.autocrlf=true` system-wide, which rewrites every checked-out
+      # file's line endings — and a gate, a fixture and a golden file all
+      # compare bytes. Left on, this job would test a tree that no other
+      # platform has. Operators on Windows may well have it enabled; that is a
+      # documented caveat in the README, not something to bake into CI.
+      - name: Check out with the bytes that were committed
+        run: git config --global core.autocrlf false
+        working-directory: .
+
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # `--frozen-lockfile` is the default in CI and is named anyway: a run that
+      # silently resolved a different tree would not be testing this commit.
+      # This also runs the package's postinstall (`scripts/fix-node-pty.mjs`)
+      # and builds better-sqlite3 and node-pty, both native — which is itself
+      # part of what the Windows leg is verifying.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        working-directory: .
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # The suite runs under Vitest, which transpiles. The shipped entry point
+      # does not: it asks Node itself for `--experimental-transform-types` from
+      # a shebang. That flag, and the whole module graph behind it — two native
+      # modules included — are only exercised by actually starting the binary,
+      # so it is started. `--help` costs nothing and touches everything.
+      #
+      # This does NOT cover the shebang itself on Windows, which Node never
+      # sees: npm rewrites `#!/usr/bin/env -S node …` into a generated `.cmd`
+      # shim at install time, and this package is private and so is never
+      # installed. See the README's platform section.
+      - name: The CLI entry point starts under this platform's Node
+        run: node --experimental-transform-types --disable-warning=ExperimentalWarning src/cli/bin.ts --help

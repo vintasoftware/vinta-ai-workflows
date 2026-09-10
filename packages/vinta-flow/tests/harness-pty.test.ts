@@ -52,6 +52,7 @@ import { takeOver, takeovers, type TakeoverTarget } from '../src/daemon/pty.ts'
 import { EventFrameSchema } from '../src/daemon/schemas.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 
@@ -144,7 +145,7 @@ const TASK: AgentTask = {
 // The adapters
 // ---------------------------------------------------------------------------
 
-describe('attachPty against a fake binary', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('attachPty against a fake binary', () => {
   it('hands the session id to the CLI, moves bytes both ways, and resizes the tty', async () => {
     const cwd = makeTemp()
     const adapter = new ClaudeCodeAdapter({ bin: fakeCli() })
@@ -401,7 +402,7 @@ const send = (socket: WebSocket, frame: unknown): void => {
   socket.send(JSON.stringify(PtyClientFrameSchema.parse(frame)))
 }
 
-describe('the PTY channel on the daemon socket', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('the PTY channel on the daemon socket', () => {
   it('carries terminal bytes both ways, and resizes', async () => {
     const r = await rig()
     const client = connect(r.daemon, r.daemon.token)
@@ -638,7 +639,7 @@ async function liveRig(): Promise<LiveRig> {
   }
 }
 
-describe('a node the scheduler is running', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('a node the scheduler is running', () => {
   it('is attachable over the daemon socket, and detaching leaves no process behind', async () => {
     const r = await liveRig()
     await until('node a to open a session', () => r.harness.live())
@@ -702,7 +703,7 @@ describe('a node the scheduler is running', () => {
   })
 })
 
-describe('the authorization boundary', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('the authorization boundary', () => {
   it('rejects an unauthenticated upgrade before any terminal exists', async () => {
     const r = await rig()
     for (const token of [null, 'not-the-token']) {
@@ -755,7 +756,7 @@ describe('the authorization boundary', () => {
 // The hard case: the daemon is killed rather than closed.
 // ---------------------------------------------------------------------------
 
-describe('a daemon killed mid-attach', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('a daemon killed mid-attach', () => {
   it('leaves no orphan pty', async () => {
     const dir = makeTemp()
     const script = join(dir, 'attach.ts')

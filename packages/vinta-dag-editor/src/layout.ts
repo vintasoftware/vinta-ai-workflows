@@ -20,7 +20,13 @@ import type { Dag, DagPoint } from './types'
 
 export const NODE_WIDTH = 200
 export const NODE_HEIGHT = 76
-export const BAND_GAP = 120
+/**
+ * The empty strip between two waves. It is wide enough to hold an edge's label
+ * (`scene.ts` puts it there, `styles.ts` caps it at this width) rather than
+ * only to separate two cards — the graph is framed to fit on first render, so
+ * the cost of a roomier gap is a little scale, not a clipped view.
+ */
+export const BAND_GAP = 160
 export const ROW_GAP = 36
 
 /** Enough sweeps to settle a plan-sized graph; more buys nothing measurable. */

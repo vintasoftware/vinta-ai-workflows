@@ -23,7 +23,7 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { closeSync, openSync, readSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
@@ -50,7 +50,7 @@ import {
   type WorkflowListResponse,
   type WorkflowResponse,
 } from './schemas.ts'
-import { createWorkflowStore, isWorkflowId, WORKFLOWS_DIRNAME } from './workflows.ts'
+import { createWorkflowStore, isWorkflowId, plansDirFor } from './workflows.ts'
 
 /** The last 64 KiB of a gate log. Enough for a failure tail, bounded by design. */
 const GATE_LOG_TAIL_BYTES = 64 * 1024
@@ -74,9 +74,11 @@ export interface ApiOptions {
   /** Where the built UI lives. Defaults to this package's `dist/ui`. */
   readonly uiDir?: string
   /**
-   * The editable workflow documents (§10's Editor row). Defaults to
-   * `<store>/workflows`; supplying one is for tests and for a project that
-   * keeps its plans elsewhere.
+   * The editable workflow documents (§10's Editor row). Defaults to the
+   * project's `ai-plans/` — the directory `plan-feature` writes into and the
+   * one `run` is pointed at, so the editor opens the reviewed source rather
+   * than a second copy under the gitignored store. Supplying one is for tests
+   * and for a project that keeps its plans elsewhere.
    */
   readonly workflowsDir?: string
 }
@@ -84,7 +86,11 @@ export interface ApiOptions {
 export function createApi(options: ApiOptions): Hono {
   const { journal, runs } = options
   const workflows = new Map<string, Workflow>()
-  const store = createWorkflowStore(options.workflowsDir ?? join(journal.root, WORKFLOWS_DIRNAME))
+  // `Journal.root` is `<project>/.vinta-flow`, so its parent is the checkout.
+  // Derived rather than passed because every caller already agrees on the
+  // journal, and a second `repoPath` parameter would be a second chance to
+  // disagree about which project is being served.
+  const store = createWorkflowStore(options.workflowsDir ?? plansDirFor(dirname(journal.root)))
   const ui = createStaticHandler(options.uiDir ?? DEFAULT_UI_DIR)
   const app = new Hono()
 
@@ -236,7 +242,14 @@ export function createApi(options: ApiOptions): Hono {
   // -------------------------------------------------------------------------
   // Workflows — the documents §10's Editor row edits.
   //
-  // These are the only *writing* endpoints in this API, and the three rules
+  // The documents are `ai-plans/<id>.workflow.json`: source, committed, and
+  // the same files `vinta-flow run` takes a path to. A `PUT` therefore rewrites
+  // a *reviewed* file in place — atomically, and only after `parseWorkflow`
+  // accepts it — and the review of that rewrite is the project's own diff, the
+  // same as for the plan beside it. There is no second copy under
+  // `.vinta-flow/` for the editor to drift away from.
+  //
+  // These are the only *writing* endpoints in this API, and the four rules
   // below are what keeps that from being a hole:
   //
   // - **The same validator the executor uses.** A save runs `parseWorkflow`,
@@ -244,6 +257,11 @@ export function createApi(options: ApiOptions): Hono {
   //   run. Client-side validation is a courtesy; this is the boundary.
   // - **An id is a filename, and the schema's id rule is the sanitiser.** No
   //   path from a request ever reaches `join` un-checked.
+  // - **The filename and the document's `id` must agree, in both directions.**
+  //   `plan-feature` names the file after the id and every branch a run cuts is
+  //   named from the id, so a file that disagrees with itself is a defect, not
+  //   a preference. `PUT` refuses one; `GET` refuses to serve one, because
+  //   loading a document the editor could never save back is the worse failure.
   // - **A save that reaches a live run is an amendment, not an edit.** §9's
   //   amend path owns that: it refuses while any affected node is in flight,
   //   rebases the `done` nodes whose base moved, and journals what it did. The
@@ -271,6 +289,11 @@ export function createApi(options: ApiOptions): Hono {
 
     const parsed = parseWorkflow(read.value)
     if (!parsed.ok) return fail(c, 409, 'invalid_workflow', toWireIssues(parsed.issues))
+    if (parsed.workflow.id !== id) {
+      return fail(c, 409, 'invalid_workflow', [
+        { path: 'id', code: 'id_mismatch', message: 'Workflow id does not match its filename' },
+      ])
+    }
     return c.json({ id, workflow: parsed.workflow } satisfies WorkflowResponse)
   })
 

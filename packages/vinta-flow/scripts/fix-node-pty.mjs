@@ -12,6 +12,13 @@
  * already executable is not a problem, and neither is a package layout that has
  * moved on. Reported upstream-shaped: if node-pty starts shipping the right
  * mode, this becomes a no-op rather than a conflict.
+ *
+ * **On Windows this does nothing, by construction rather than by a check.**
+ * `spawn-helper` is a POSIX artefact — ConPTY needs none — so the win32
+ * prebuild carries no such file and the loop below skips it. Nothing here
+ * reaches a `chmod`, whose mode bits Windows would ignore anyway. That is the
+ * intended behaviour of a postinstall that must not fail an install on a
+ * platform it has no work to do on.
  */
 import { chmodSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'

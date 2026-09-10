@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runGate } from '../src/gates/runner.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import type { Gate } from '../src/types.ts'
+import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 const gate = (cmd: string, overrides: Partial<Gate> = {}): Gate => ({
   cmd,
@@ -43,7 +44,7 @@ async function awaitGone(pid: number, timeoutMs: number): Promise<boolean> {
   return false
 }
 
-describe('gate runner', () => {
+describe.runIf(POSIX_SHELL_FIXTURES)('gate runner', () => {
   it('runs a command, captures combined output, and reports the exit code', async () => {
     const pools = newPools()
     const logPath = join(workspace, 'lint.log')
