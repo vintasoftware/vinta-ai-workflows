@@ -522,13 +522,24 @@ describe('a daemon killed mid-attach', () => {
     const dir = makeTemp()
     const script = join(dir, 'attach.ts')
     const ptyModule = join(import.meta.dirname, '..', 'src', 'harness', 'pty.ts')
+    // The marker is *not* the terminal's bytes: the child reports a fixed word
+    // and a pid, never what the program said (§11). It reports them only once
+    // the program has actually spoken, because "mid-attach" means a terminal
+    // that is running — killing during node-pty's own spawn handshake is a
+    // race with a helper process, not with an attached shell.
     writeFileSync(
       script,
       [
         `import { openPty } from ${JSON.stringify(ptyModule)}`,
-        `const handle = openPty({ sessionId: 's', file: '/bin/sh', args: ['-c', 'sleep 300'],`,
+        `const handle = openPty({ sessionId: 's', file: '/bin/sh',`,
+        `  args: ['-c', 'echo up; sleep 300'],`,
         `  env: process.env, attach: { cwd: ${JSON.stringify(dir)} } })`,
-        `process.stdout.write(String(handle.pid) + '\\n')`,
+        `let announced = false`,
+        `handle.onData((data) => {`,
+        `  if (announced || !data.includes('up')) return`,
+        `  announced = true`,
+        `  process.stdout.write('running ' + handle.pid + '\\n')`,
+        `})`,
         `setInterval(() => {}, 1000)`,
       ].join('\n'),
     )
@@ -545,8 +556,8 @@ describe('a daemon killed mid-attach', () => {
     child.stdout.on('data', (chunk: string) => {
       out += chunk
     })
-    await until('the child to report its pty pid', () => out.includes('\n'), 30_000)
-    const pid = Number(out.trim())
+    await until('the child to report a running terminal', () => out.includes('\n'), 30_000)
+    const pid = Number(/running (\d+)/.exec(out)?.[1] ?? 0)
     expect(alive(pid)).toBe(true)
 
     // SIGKILL, so no exit hook and no teardown code runs at all. What must
@@ -556,8 +567,14 @@ describe('a daemon killed mid-attach', () => {
     try {
       await until('the pty leader to go', () => !alive(pid), 15_000)
     } catch (error) {
+      // Naming the survivor is the difference between "flaky" and a diagnosis.
       throw new Error(
-        `${String(error)} :: ${execFileSync('ps', ['-o', 'pid=,ppid=,stat=,command=', '-p', String(pid)]).toString()}`,
+        `${String(error)} :: ${execFileSync('ps', [
+          '-o',
+          'pid=,ppid=,stat=,command=',
+          '-p',
+          String(pid),
+        ]).toString()}`,
       )
     }
   }, 60_000)
@@ -569,9 +586,6 @@ describe('a daemon killed mid-attach', () => {
 
 describe('declared pty capabilities', () => {
   it('matches §7 for every shipped adapter', () => {
-    // `execFileSync` keeps this honest about what is on the box: nothing here
-    // needs a CLI, and the table below is the adapters' own declaration.
-    expect(typeof execFileSync).toBe('function')
     expect(new ClaudeCodeAdapter().capabilities.pty).toBe(true)
     expect(new CodexAdapter().capabilities.pty).toBe(true)
     expect(new OpencodeAdapter().capabilities.pty).toBe(false)

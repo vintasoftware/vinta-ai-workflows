@@ -139,6 +139,12 @@
                 "minimum": -9007199254740991,
                 "maximum": 9007199254740991,
                 "description": "When the phase finally reached `done`."
+              },
+              "gate": {
+                "description": "The gate whose recorded result is the evidence: it failed at `failed_at_ms` and passed at `passed_at_ms`. Absent when the run recorded no gate result for the phase and the window came from its status transitions instead — a weaker signal, flagged in `gaps`.",
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
               }
             },
             "required": [
@@ -149,7 +155,7 @@
               "passed_at_ms"
             ],
             "additionalProperties": false,
-            "description": "A dependency the run discovered and the plan did not declare: the phase failed, an undeclared phase landed, and only then did it pass. The evidence is ordering — the journal records no gate result, so the causal link is not proven (see `gaps`)."
+            "description": "A dependency the run discovered and the plan did not declare: the phase failed, an undeclared phase landed, and only then did it pass. The evidence is still ordering — a recorded gate result narrows the window to one gate and rules out an unrelated failure, but it does not prove the undeclared phase is what fixed it. Confirm the edge against the plan before adding it."
           }
         },
         "wave_conflicts": {

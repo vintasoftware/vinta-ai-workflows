@@ -14,12 +14,14 @@
  * directory that is removed afterwards — including the ones the purge tests
  * try, and fail, to escape.
  */
+import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
+import { amendRun, type AmendResult } from '../src/amend/amend.ts'
 import { doctorCommand, type DoctorOverrides } from '../src/cli/doctor.ts'
 import { FAILED, OK, USAGE, type Io } from '../src/cli/io.ts'
 import { main } from '../src/cli/index.ts'
@@ -27,8 +29,11 @@ import { purgeCommand } from '../src/cli/purge.ts'
 import { runCommand } from '../src/cli/run.ts'
 import { serveCommand } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
-import type { Daemon } from '../src/daemon/index.ts'
+import type { Daemon, DaemonRun } from '../src/daemon/index.ts'
+import type { HarnessAdapter } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
+import { openJournal } from '../src/journal/journal.ts'
+import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { parsePostMortem } from '../src/postmortem/postmortem.ts'
 
 // ---------------------------------------------------------------------------
@@ -110,6 +115,9 @@ const workflowJson = (nodes: readonly Record<string, unknown>[]): Record<string,
   nodes,
   pipelines: { solo: SOLO },
 })
+
+/** `RunDeps.executor`: a host that owns its own lanes and supplies no facts. */
+const NO_EFFECTS: EffectExecutor = { execute: async () => ({}) }
 
 const node = (id: string, deps: readonly string[] = []): Record<string, unknown> => ({
   id,
@@ -328,6 +336,10 @@ describe('vinta-flow serve', () => {
 
 describe('vinta-flow run', () => {
   it('brings the daemon up before executing, and freezes the snapshot', async () => {
+    // Every test in this block injects `executor`, which is the seam a host —
+    // or a test that is not about the host composition — uses to own its own
+    // effect bodies and lanes. The composed run is exercised below, against a
+    // real git repository.
     const dir = makeTemp()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a'), node('b', ['a'])]))
     const io = recorder()
@@ -335,6 +347,7 @@ describe('vinta-flow run', () => {
 
     const code = await runCommand([path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
       runId: 'cli-run',
       onStarted: (started) => {
         daemon = started
@@ -360,6 +373,7 @@ describe('vinta-flow run', () => {
 
     await runCommand([path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
       runId: 'token-run',
       onStarted: (started) => {
         daemon = started
@@ -383,6 +397,7 @@ describe('vinta-flow run', () => {
 
     const code = await runCommand([path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
       runId: 'pm-run',
     })
 
@@ -419,6 +434,7 @@ describe('vinta-flow run', () => {
 
     await runCommand([path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
       runId: 'conflict-run',
       waveResults: () => [
         { wave: 1, conflicts: [{ nodes: ['a', 'b'], paths: ['src/models.py'], rounds: 2 }] },
@@ -444,6 +460,7 @@ describe('vinta-flow run', () => {
     const barePath = writeJson(bare, 'workflow.json', workflowJson([node('a'), node('b')]))
     await runCommand([barePath, '--repo', bare], recorder().io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
       runId: 'bare-run',
     })
     const withoutRecord = parsePostMortem(
@@ -457,6 +474,282 @@ describe('vinta-flow run', () => {
     expect(withoutRecord.report.gaps.map((gap) => gap.kind)).toContain(
       'integration_record_unavailable',
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// run, composed: the lane pool, the integrator and the production executor
+// ---------------------------------------------------------------------------
+
+/**
+ * The assembled command, against a real repository.
+ *
+ * Everything here runs in a temp git repository created per test — never the
+ * checkout the suite runs in — and the only agent is a `MockAdapter`, so no
+ * model turn is spent proving that gates ran in lanes that were provisioned.
+ */
+
+/** A repository with one commit on `main`, and an identity to commit with. */
+const gitRepo = (): string => {
+  const dir = makeTemp()
+  const git = (...args: readonly string[]): void => {
+    execFileSync('git', [...args], { cwd: dir, stdio: 'ignore' })
+  }
+  git('init', '--initial-branch=main')
+  git('config', 'user.email', 'tests@vinta-flow.invalid')
+  git('config', 'user.name', 'vinta-flow tests')
+  git('config', 'commit.gpgsign', 'false')
+  writeFileSync(join(dir, 'README.md'), 'fixture\n', 'utf8')
+  git('add', '--all')
+  git('commit', '-m', 'initial')
+  return dir
+}
+
+/** Branch, one agent turn, the node's gates, then tracking and the wave merge. */
+const PHASE = {
+  states: [
+    {
+      id: 'implement',
+      name: 'Implement',
+      position: { x: 0, y: 0 },
+      onEnter: [
+        { id: 'e-branch', definitionId: 'git_branch' },
+        { id: 'e-implement', definitionId: 'spawn_agent', params: { role: 'implementer' } },
+      ],
+    },
+    {
+      id: 'gate',
+      name: 'Gate',
+      position: { x: 200, y: 0 },
+      onEnter: [{ id: 'e-gate', definitionId: 'run_gate' }],
+    },
+    {
+      id: 'integrate',
+      name: 'Integrate',
+      position: { x: 400, y: 0 },
+      onEnter: [
+        { id: 'e-tracking', definitionId: 'write_tracking', params: { scope: 'phase' } },
+        { id: 'e-merge', definitionId: 'git_merge' },
+      ],
+    },
+    { id: 'done', name: 'Done', position: { x: 600, y: 0 }, data: { outcome: 'done' } },
+    { id: 'failed', name: 'Failed', position: { x: 400, y: 200 }, data: { outcome: 'failed' } },
+  ],
+  transitions: [
+    { id: 't-implemented', from: 'implement', to: 'gate' },
+    { id: 't-gate-pass', from: 'gate', to: 'integrate', guard: 'gate.exit_code == 0' },
+    { id: 't-gate-fail', from: 'gate', to: 'failed', guard: 'gate.exit_code != 0' },
+    { id: 't-integrated', from: 'integrate', to: 'done' },
+  ],
+  initialStateIds: ['implement'],
+  finalStateIds: ['done', 'failed'],
+}
+
+/** The gate leaves a file behind, which is how a test sees it ran, and where. */
+const GATE_MARKER = 'gate-ran.txt'
+
+const assemblyWorkflow = (
+  nodes: readonly Record<string, unknown>[],
+  laneCapacity = 1,
+): Record<string, unknown> => ({
+  schema_version: 1,
+  id: 'assembly',
+  base_branch: 'main',
+  defaults: { harness: 'claude-code', model: 'opus', pipeline: 'phase' },
+  resources: { lane: { capacity: laneCapacity, kind: 'worktree' } },
+  gates: { unit: { cmd: `touch ${GATE_MARKER}` } },
+  nodes: nodes.map((entry) => ({ ...entry, gates: ['unit'] })),
+  pipelines: { phase: PHASE },
+})
+
+/** A `MockAdapter` that records how much had been printed at the first dispatch. */
+const dispatchSpy = (io: Recorder): { adapter: HarnessAdapter; at: () => number } => {
+  const mock = new MockAdapter({ id: 'claude-code' })
+  let at = -1
+  return {
+    at: () => at,
+    adapter: {
+      id: mock.id,
+      capabilities: mock.capabilities,
+      preflight: () => mock.preflight(),
+      spawn: (task) => {
+        if (at < 0) at = io.out.length
+        return mock.spawn(task)
+      },
+    },
+  }
+}
+
+const laneRoot = (dir: string): string => join(dir, '.vinta-flow', 'lanes')
+
+describe('vinta-flow run, composed', () => {
+  it('provisions lanes, runs gates in them, and reaches done', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a'), node('b', ['a'])], 2))
+    const io = recorder()
+    const spy = dispatchSpy(io)
+    let registered: DaemonRun | null = null
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': spy.adapter },
+      runId: 'e2e',
+      doctor: healthyBins(dir),
+      perLaneBytes: 1,
+      onStarted: (_daemon, run) => {
+        registered = run
+      },
+    })
+
+    expect(io.err).toEqual([])
+    expect(code).toBe(OK)
+
+    // The pool: one worktree per lane slot, plus the integration worktree (§8).
+    expect(existsSync(join(laneRoot(dir), 'e2e-lane-1'))).toBe(true)
+    expect(existsSync(join(laneRoot(dir), 'e2e-lane-2'))).toBe(true)
+    expect(existsSync(join(laneRoot(dir), 'e2e-integ'))).toBe(true)
+
+    // The gate ran, and it ran in a lane — never in the checkout the operator
+    // is sitting in. Which lane is the scheduler's business, not this test's.
+    const marked = ['e2e-lane-1', 'e2e-lane-2'].filter((lane) =>
+      existsSync(join(laneRoot(dir), lane, GATE_MARKER)),
+    )
+    expect(marked.length).toBeGreaterThan(0)
+    expect(existsSync(join(dir, GATE_MARKER))).toBe(false)
+
+    // Every node settled `done`, which takes the whole pipeline: a branch cut
+    // in the lane, a green gate, a tracking commit and a wave merge.
+    const report = parsePostMortem(
+      JSON.parse(readFileSync(join(dir, '.vinta-flow', 'runs', 'e2e', 'postmortem.json'), 'utf8')),
+    )
+    expect(report.ok).toBe(true)
+    if (!report.ok) return
+    expect(report.report.run).toMatchObject({ status: 'done', node_count: 2 })
+
+    // §13.6: the wave results came off the integrator this command built, so
+    // an empty `wave_conflicts` means clean rather than unrecorded.
+    expect(report.report.gaps.map((gap) => gap.kind)).not.toContain(
+      'integration_record_unavailable',
+    )
+    expect(report.report.findings.wave_conflicts).toEqual([])
+
+    // §9's amend path is reachable: the rebaser is registered on the run.
+    expect(typeof (registered as unknown as DaemonRun).amend?.rebase).toBe('function')
+
+    // The URL is printed before the first node dispatches — an operator who
+    // could only reach the UI afterwards could not steer anything.
+    const url = io.out.findIndex((line) => line.includes('token='))
+    expect(url).toBeGreaterThanOrEqual(0)
+    expect(url).toBeLessThan(spy.at())
+
+    // Teardown is never automatic (§8): the lanes outlive the run they served.
+    expect(existsSync(join(laneRoot(dir), 'e2e-lane-1'))).toBe(true)
+    expect(existsSync(join(dir, '.vinta-ai-workflows', 'worktrees', 'e2e-lane-1.yaml'))).toBe(true)
+  })
+
+  it('refuses on a failing doctor check, before anything is created', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a')]))
+    const bins = healthyBins(dir)
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'sick',
+      doctor: { ...bins, bins: { ...bins.bins, harness: { 'claude-code': MISSING } } },
+      perLaneBytes: 1,
+    })
+
+    expect(code).toBe(FAILED)
+    // The whole report, so the operator fixes every minute-zero failure at once.
+    expect(io.out.some((line) => line.includes('FAIL') && line.includes('claude-code'))).toBe(true)
+    expect(io.err.some((line) => line.includes('refusing to start'))).toBe(true)
+    // Nothing was created: no lane, no store, not even a journal.
+    expect(existsSync(laneRoot(dir))).toBe(false)
+    expect(existsSync(join(dir, '.vinta-flow'))).toBe(false)
+  })
+
+  it('refuses on the pool’s disk probe, before a worktree exists', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a')]))
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'full',
+      // The doctor's probe passes and the pool's does not, which is the case
+      // that matters: §8's refusal is the pool's own, not a preflight opinion.
+      doctor: healthyBins(dir),
+      perLaneBytes: Number.MAX_SAFE_INTEGER,
+    })
+
+    expect(code).toBe(FAILED)
+    expect(io.err.some((line) => line.includes('refusing to provision'))).toBe(true)
+    expect(existsSync(laneRoot(dir))).toBe(false)
+  })
+
+  /**
+   * §9's amend, against the live run rather than after it: the lanes run one
+   * at a time, so while `c` is in flight `a` and `b` are already `done`, and
+   * giving `b` a dependency on `a` moves a `done` node's base. That is exactly
+   * the amendment `src/amend/` refuses as `rebase_unavailable` when the host
+   * registered no integration worktree to rebase in.
+   */
+  it('rebases a done node’s branch when the live run is amended', async () => {
+    const dir = gitRepo()
+    const path = writeJson(
+      dir,
+      'workflow.json',
+      assemblyWorkflow([node('a'), node('b'), node('c')]),
+    )
+    const amended = assemblyWorkflow([node('a'), node('b', ['a']), node('c')])
+    const io = recorder()
+
+    const mock = new MockAdapter({ id: 'claude-code' })
+    let registered: DaemonRun | null = null
+    let result: AmendResult | null = null
+
+    const adapter: HarnessAdapter = {
+      id: mock.id,
+      capabilities: mock.capabilities,
+      preflight: () => mock.preflight(),
+      spawn: async (task) => {
+        if (task.nodeId === 'c' && result === null) {
+          const run = registered as unknown as DaemonRun
+          const journal = openJournal(dir)
+          try {
+            result = await amendRun({
+              journal,
+              runId: 'amend',
+              proposed: amended,
+              // Exactly what the daemon builds from a registered run.
+              runner: { statuses: () => run.control.statuses, ...run.amend },
+            })
+          } finally {
+            journal.close()
+          }
+        }
+        return await mock.spawn(task)
+      },
+    }
+
+    expect(
+      await runCommand([path, '--repo', dir], io.io, {
+        adapters: { 'claude-code': adapter },
+        runId: 'amend',
+        doctor: healthyBins(dir),
+        perLaneBytes: 1,
+        onStarted: (_daemon, run) => {
+          registered = run
+        },
+      }),
+    ).toBe(OK)
+
+    expect(typeof (registered as unknown as DaemonRun).amend?.rebase).toBe('function')
+    const outcome = result as unknown as AmendResult
+    expect(outcome).not.toBeNull()
+    expect(outcome.ok ? undefined : outcome.code).not.toBe('rebase_unavailable')
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) expect(outcome.rebased).toEqual(['b'])
   })
 })
 
