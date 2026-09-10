@@ -9,10 +9,8 @@ Someone needs to know whether a feature in {{PROJECT_NAME}} actually works befor
 put in front of a client. This skill walks the app in a real browser the way a person would, one step at a
 time, and writes up what happened: what worked, what did not, and what could not be checked. It is for the
 people who judge the product by using it — product managers, designers, support leads — not for the people
-who read its code.
-
-The job is to report, never to fix. A finding that lands in a ticket with what was seen, where, and what was
-expected is worth more than a guess at the cause.
+who read its code. The job is to report, never to fix: a finding that lands in a ticket with what was seen,
+where, and what was expected is worth more than a guess at the cause.
 
 ## What this file is
 
@@ -20,10 +18,10 @@ This file is self-contained. Everything it needs is written into it: which envir
 are, which account to use, what may be changed and what may not, and what to compare against. There is
 **nothing here that needs a code checkout, a terminal, or access to the project's code**, and nothing to install.
 
-Some of what is written below is a snapshot taken on the day this file was generated. When a fact in it looks
-wrong — an address that has moved, an account that no longer exists — do not work around it. Ask
-{{QA_ESCALATION_CONTACT}}, who is also who to ask whenever a review is blocked, and see **Where this file
-came from** at the end for how to get a fresh copy. Being blocked is a normal outcome: it gets recorded.
+What is written below is a snapshot taken on the day this file was generated. When a fact in it looks wrong —
+an address that has moved, an account that no longer exists — do not work around it: ask
+{{QA_ESCALATION_CONTACT}}, who is also who to ask whenever a review is blocked, and see **Where this file came
+from** at the end for a fresh copy. Being blocked is a normal outcome; it gets recorded, not solved.
 
 ## Before you start
 
@@ -32,6 +30,18 @@ You need three things and only three:
 1. A browser.
 2. An account on the environment you are going to test. **You sign in yourself** — see Step 3.
 3. The thing you are checking: a use case, a ticket, or a description of the feature in your own words.
+
+## Before anything else — the browser itself
+
+Walking a feature means really opening a window on the app, clicking through it and reading what comes back.
+So your assistant needs some way to do that itself: open a page, click, type, and look at what appears.
+
+Settle that before anything below. **If it has no way to open and click through a real browser window, this
+review cannot happen.** It should say so plainly and stop — not describe what a screen probably looks like,
+not read the product's insides and report on those, and not ask you to click everything and narrate it back.
+None of those is a review, and a review nobody walked is worse than no review. Tell
+{{QA_ESCALATION_CONTACT}}: someone has to set your assistant up so it can use a browser. A browser it *can*
+open that then misbehaves partway through is a different problem — Step 5 covers that.
 
 ## Step 0 — What are you checking, and where
 
@@ -43,8 +53,8 @@ person already named the environment or handed over a ticket, take it and do not
 - **What to check** — `A use case`, `A ticket`, `A description of the feature`.
 - **Screenshots** — `On` / `Off`. **Always asked**, even when the answer seems obvious. A review that
   silently captured nothing leaves a report nobody else can check, and one that silently captured everything
-  can put real records into a picture that then gets shared. Whichever it is, the rules in Step 4 about what
-  may appear in a report still apply to every capture.
+  can put real records into a picture that then gets shared. Either way, Step 4's rules about what may appear
+  in a report apply to every capture.
 
 Anything genuinely open — which ticket, which account, which part of the flow matters most — ask as plain
 prose rather than squeezing it into fixed options.
@@ -59,8 +69,8 @@ Then, whatever the source: **state the steps and the expected outcome back befor
 one line per step, each with what should happen if the feature works. Wait for a yes before opening anything.
 
 When the steps came from a description rather than a written use case, that restatement is the only place
-"expected" ever gets pinned down, so say plainly which parts you worked out yourself. A review that decides
-what "expected" meant after seeing the screen confirms whatever it happens to find.
+"expected" ever gets pinned down, so say which parts you worked out yourself. A review that decides what
+"expected" meant after seeing the screen confirms whatever it happens to find.
 
 ## Step 2 — Check the app is up
 
@@ -70,9 +80,12 @@ Open the chosen environment's address from the table above. Before walking anyth
 loaded: an error page, a holding page from whatever sits in front of the app, and a blank white page all
 arrive quickly and all look like "the page loaded".
 
-If the page does not load, **that is the result.** Write down the address you opened, the time, and what
-appeared instead, then stop and tell {{QA_ESCALATION_CONTACT}}. Do not move to a different environment to get
-something on screen — that makes it a different review, and it goes back to Step 0.
+If the page does not load, **reload it once** — one slow or half-finished first attempt is not an app that is
+down, and reloading is the only recovery there is, since nothing here gets restarted.
+
+If it fails the second time too, **that is the result.** Write down the address you opened, the time and what
+both attempts showed, then stop and tell {{QA_ESCALATION_CONTACT}}. Do not move to a different environment to
+get something on screen — that makes it a different review, and it goes back to Step 0.
 
 ## Step 3 — Sign in
 
@@ -99,7 +112,9 @@ never the name of the system behind it. -->
 
 Before anything is saved, created, sent or deleted, list every such action the walk needs. Each entry says
 what it changes, how you will find it again afterwards, and exactly how it gets undone. Then get a yes that
-**names the environment** — an approval given earlier, or for a different environment, does not carry.
+**names the environment** — an approval given earlier, or for a different environment, does not carry. If the
+walk turns out to need a change nobody listed, stop and ask before making it: a yes for one change is not a
+yes for another.
 
 - **Only make a change you can undo yourself, through the app.** The full write policy above still applies, but a reviewer cannot run a revert script. Anything you cannot undo through the screen in front of you is not yours to authorise — write it down as "this needs an engineer" and move on.
 - **Blocked is a result, not a failure.** You cannot turn a feature on. "Blocked by the <name> setting — ask an engineer to enable it" is the correct outcome, recorded under *Not tested*, not reported as broken.
@@ -155,8 +170,8 @@ When you compared against exported images rather than the live design file, **sa
 exports can be older than the design, so a difference may mean the export is out of date rather than the app
 being wrong.
 
-If there was no comparison — no design, no access, no time — that goes under *Not tested* with the reason. A
-missing design comparison is never silently dropped.
+If there was no comparison — no design, no access, no time — it goes under *Not tested* with that reason,
+never silently dropped.
 
 ## Step 7 — What you found
 
@@ -177,15 +192,17 @@ Every finding also carries **matches design: yes | no | n/a**.
 - **n/a** — there was nothing to compare against, or you did not compare. Honest and useful; a guessed
   **no** sends someone to change a screen nobody asked about, a guessed **yes** lets a real difference through.
 
-Uncertainty goes inside the finding, not in a hedge wrapped around it: what you saw, what you checked, and
-what you could not check.
+Uncertainty goes inside the finding, not in a hedge around it: what you saw, what you checked, what you did not.
 
 ## Step 8 — Share it
 
 {{QA_ARTIFACT_DELIVERABLE_BLOCK}}
 
 **This never touches a pull request. The report goes wherever the team reads it — a ticket, a channel, a
-shared link.**
+shared link.** Those destinations are bounded by the choice above and never widen it: where a shareable page
+is not on offer for this environment, "a shared link" is not on offer either — the report stays text you hand
+over directly, however much easier something circulable would be, because of the records this environment
+holds.
 
 ## Step 9 — The report
 
@@ -230,7 +247,17 @@ One bullet each: **<one-line title>** — what you saw and where. Matches design
 section is never omitted.** Keep the empty severity headings too: "no Blockers found" and "Blockers were
 never looked for" must not read the same way.
 
-When a report is kept as a file rather than shared as a link, it belongs at `{{QA_REPORT_DIR}}`.
+<!-- rendering note: for qa-review, {{QA_REPORT_DIR}} is the right location **only if the reader happens to
+have a copy of the project on the machine they are working on**. It renders to a project-relative, deliberately
+hidden folder, so the normal holder of this file would be told a file was saved somewhere they can never
+reach, and their assistant would create that folder wherever it happened to be running. The sentence below is
+conditional on purpose: keep both halves. -->
+
+When a report is kept as a file rather than shared as a link, where it belongs depends on where you are
+working. Inside a copy of the project, it goes in `{{QA_REPORT_DIR}}` — the folder set aside for exactly this,
+and deliberately kept out of what the project shares. Without a copy of the project, which is the normal case
+for whoever holds this file, **do not create that folder.** Keep the report wherever you can hand it straight
+to whoever asked for the review, and say in your message where you put it.
 
 ## Pitfalls
 
@@ -242,9 +269,9 @@ When a report is kept as a file rather than shared as a link, it belongs at `{{Q
 - **Copying record contents into the report.** Describe the shape of what you saw — "a client record with
   no billing address" — rather than pasting field values into a report, a ticket or a message.
 - **Calling something broken because you could not switch it on.** That is *Not tested*, with who to ask.
-- **Working around a blocker to keep the review moving.** A different environment, a different account, or a
-  setting somebody switched on for you produces a clean report about something nobody will ship. Record what
-  blocked it, what you tried, and what you need.
+- **Working around a blocker to keep the review moving.** A different environment, a different account or a
+  setting somebody switched on for you gives a clean report about something nobody will ship. Record what
+  blocked it, what you tried, what you need.
 
 ## Verification
 
@@ -253,7 +280,9 @@ The review is finished when:
 - **Every step is either in *Walked* or in *Not tested* with a reason** — including the design comparison.
 - **Every finding carries a severity and a matches-design verdict**, visual ones re-checked on a fresh capture.
 - **Every change you made is listed** with how to find it and whether it was undone.
-- **The report follows the skeleton** and names the environment and window size actually used.
+- **The report follows the skeleton** exactly, and names the environment actually opened. The window size
+  goes wherever it matters — in the step or the finding it affected, as Step 5 asks — never as an extra
+  header line the skeleton does not have.
 - **Nothing in the report is a real person's details** or the contents of a real record.
 
 ## Where this file came from
