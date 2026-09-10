@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { AdmissionControl } from '../src/admission/admission.ts'
 import { analyzeRun } from '../src/analytics/analytics.ts'
 import type { Clock } from '../src/admission/clock.ts'
+import { PtyRegistry } from '../src/daemon/pty.ts'
 import type {
   AgentSession,
   HarnessAdapter,
@@ -98,6 +99,7 @@ function stalling(inner: HarnessAdapter): {
   const gate = new Promise<void>((resolve) => {
     open = resolve
   })
+  const attachPty = inner.attachPty
 
   const adapter: HarnessAdapter = {
     id: inner.id,
@@ -129,6 +131,10 @@ function stalling(inner: HarnessAdapter): {
       }
       return { ok: true, session: stalled }
     },
+    // Transparent about what the harness can do, terminal included: a wrapper
+    // that dropped `attachPty` would make a takeover-capable harness look
+    // unattachable, which is the thing these tests are checking.
+    ...(attachPty === undefined ? {} : { attachPty: attachPty.bind(inner) }),
   }
   return { adapter, live: () => parked > 0, release: () => open() }
 }
@@ -196,6 +202,11 @@ interface Rig {
   readonly laneRoot: string
   /** Present when `stall` was asked for: holds every session open mid-stream. */
   readonly stall: { live(): boolean; release(): void }
+  /**
+   * This run's takeover registry — its own, never the process-wide one, so
+   * what a test sees offered was offered by the scheduler it built.
+   */
+  readonly takeovers: PtyRegistry
 }
 
 const cleanups: (() => void)[] = []
@@ -244,6 +255,7 @@ function rig(
     baseBackoffMs: 1_000,
   })
   const executor = recorder(options.outcomes ?? {}, options.tap)
+  const takeovers = new PtyRegistry()
 
   const scheduler = createScheduler({
     workflow,
@@ -254,6 +266,7 @@ function rig(
     adapters: { [HARNESS]: options.stall === true ? stall.adapter : adapter },
     executor,
     laneRoot: join(dir, 'lanes'),
+    takeovers,
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
   })
 
@@ -273,6 +286,7 @@ function rig(
     poolNames: Object.keys(workflow.resources),
     laneRoot: join(dir, 'lanes'),
     stall,
+    takeovers,
   }
 }
 
@@ -1229,6 +1243,136 @@ describe('§9 operations', () => {
         { op: 'abort', delivery: 'ignored' },
       ])
     }
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8.1: §9's fifth operation — the offer the PTY channel resolves against
+//
+// The registry is the daemon's third security boundary: nothing is reachable
+// by default, and a node becomes reachable only while it has a live session in
+// its own lane. So the assertions here are as much about what is *not* offered
+// — a settled node, a finished turn, a harness with no terminal — as about
+// what is.
+// ---------------------------------------------------------------------------
+
+/** The id the live session actually announced, read back off the transcript. */
+const sessionIdOf = (rig_: Rig, nodeId: string): string | undefined =>
+  (
+    rig_.journal
+      .tailTranscript('run-1', nodeId, 100)
+      .find((event) => (event as { type: string }).type === 'session_started') as
+      | { sessionId: string }
+      | undefined
+  )?.sessionId
+
+describe('§9 take over', () => {
+  it('offers a live turn, with the session id of that turn and the lane it runs in', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    const target = r.takeovers.find('run-1', 'a')
+    expect(target).toBeDefined()
+    // The handoff token is this session's, not an id the registry invented.
+    expect(target?.sessionId).toBe(sessionIdOf(r, 'a'))
+    // And the terminal opens in the lane worktree this node was assigned,
+    // never in the repository.
+    const lane = r.journal.nodes('run-1').find((row) => row.node_id === 'a')?.lane
+    expect(lane).toBeTruthy()
+    expect(target?.cwd).toBe(join(r.laneRoot, lane as string))
+    expect(target?.adapter.id).toBe(HARNESS)
+    expect(target?.adapter.capabilities.pty).toBe(true)
+
+    r.stall.release()
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+
+  it('withdraws the offer as each turn ends, and leaves none behind when the run does', async () => {
+    let registry: PtyRegistry | null = null
+    const offeredAtEndOfTurn: (string | undefined)[] = []
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), {
+      // A spawn effect reaches the host executor only once its session's
+      // stream has ended, so this samples the registry at exactly the moment
+      // the turn it pointed at is over.
+      tap: (call) => {
+        if (call.verb === 'spawn_agent') {
+          offeredAtEndOfTurn.push(registry?.find('run-1', 'a')?.sessionId)
+        }
+      },
+    })
+    registry = r.takeovers
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // Three turns, and after each one there is nothing pointing at a stream
+    // that has already ended.
+    expect(offeredAtEndOfTurn).toEqual([undefined, undefined, undefined])
+    expect(r.takeovers.find('run-1', 'a')).toBeUndefined()
+    expectDrained(r)
+  })
+
+  it('withdraws the offer when the operator aborts the node', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    expect(r.takeovers.find('run-1', 'a')).toBeDefined()
+
+    await r.scheduler.abortNode('a')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    await until(() => r.takeovers.find('run-1', 'a') === undefined, 'the offer to be withdrawn')
+    expectDrained(r)
+  })
+
+  it('never offers a harness that has no terminal', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true, capabilities: { pty: false } })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    // The channel refuses `pty: false` too, but a target whose only possible
+    // answer is a refusal has no business being reachable at all.
+    expect(r.takeovers.find('run-1', 'a')).toBeUndefined()
+
+    r.stall.release()
+    await running
+    expectDrained(r)
+  })
+
+  it('interrupts and parks on the takeover, then resumes headless from the same session id', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    const target = r.takeovers.find('run-1', 'a')
+    const sessionId = target?.sessionId as string
+    expect(sessionId).toBe(sessionIdOf(r, 'a'))
+
+    // §9's first step. The headless turn is stopped before a terminal exists,
+    // and the node parks rather than stepping on into the lane the operator is
+    // about to be typing in.
+    await target?.interrupt()
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+    expect(transcriptOf(r, 'a')).toContainEqual({ type: 'session_ended', result: 'interrupted' })
+    expect(r.pools.held('lane')).toBe(1)
+
+    // §9's last step, which the channel hangs off the terminal's exit.
+    await target?.resume(sessionId)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // A resume, not a new session: the id the terminal held reached the task.
+    expect(r.adapter.spawned[1]?.resumeSessionId).toBe(sessionId)
+    // And it is spent once, not carried into every later turn.
+    expect(r.adapter.spawned[2]?.resumeSessionId).toBeUndefined()
+    expect(r.takeovers.find('run-1', 'a')).toBeUndefined()
     expectDrained(r)
   })
 })

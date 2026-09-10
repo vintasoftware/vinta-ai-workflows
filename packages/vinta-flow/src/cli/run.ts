@@ -47,6 +47,7 @@ import { AdmissionControl } from '../admission/admission.ts'
 import type { AmendRunner } from '../amend/amend.ts'
 import { createRebaser } from '../amend/rebase.ts'
 import { runControl, startDaemon, type Daemon, type DaemonRun } from '../daemon/index.ts'
+import { takeovers } from '../daemon/pty.ts'
 import { formatDoctorReport, referencedHarnesses, runDoctor } from '../doctor/index.ts'
 import { createRunExecutor } from '../executor/index.ts'
 import { GateCache } from '../gates/cache.ts'
@@ -234,6 +235,11 @@ export async function runCommand(
     adapters,
     executor: host.executor,
     laneRoot,
+    // §9's take over, wired: the scheduler offers each live turn here and the
+    // daemon's PTY channel resolves an `attach` against the same registry.
+    // Both sides default to this instance; naming it once is what makes the
+    // button on a running node reach a session rather than an empty map.
+    takeovers,
     // §8: a lane slot outlives the phase that used it, and the next phase must
     // not start in the last one's worktree or against its rows.
     ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),

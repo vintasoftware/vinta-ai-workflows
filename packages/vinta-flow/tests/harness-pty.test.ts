@@ -26,21 +26,27 @@
  * markers the fake script itself prints.
  */
 import { execFileSync, spawn as spawnChild } from 'node:child_process'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import {
   HarnessCapabilityError,
+  type AgentSession,
   type AgentTask,
+  type HarnessAdapter,
   type PtyHandle,
 } from '../src/harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { CodexAdapter } from '../src/harness/codex.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
+import { AdmissionControl } from '../src/admission/admission.ts'
+import { runControl } from '../src/daemon/control.ts'
 import { startDaemon, type Daemon } from '../src/daemon/server.ts'
+import { ResourcePools } from '../src/resources/pools.ts'
+import { createScheduler } from '../src/scheduler/index.ts'
 import { PtyClientFrameSchema, PtyServerFrameSchema } from '../src/daemon/pty-frames.ts'
 import { takeOver, takeovers, type TakeoverTarget } from '../src/daemon/pty.ts'
 import { EventFrameSchema } from '../src/daemon/schemas.ts'
@@ -335,6 +341,7 @@ async function rig(options: { readonly offer?: boolean } = {}): Promise<Rig> {
 function connect(
   daemon: Daemon,
   token: string | null,
+  runId: string = RUN_ID,
 ): {
   readonly socket: WebSocket
   readonly opened: Promise<void>
@@ -344,7 +351,7 @@ function connect(
   frames: () => unknown[]
 } {
   const url = new URL('/ws', daemon.url.replace('http', 'ws'))
-  url.searchParams.set('run', RUN_ID)
+  url.searchParams.set('run', runId)
   url.searchParams.set('since', '0')
   if (token !== null) url.searchParams.set('token', token)
 
@@ -461,6 +468,237 @@ describe('the PTY channel on the daemon socket', () => {
       }),
     )
     expect(r.attaches()).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The producer: a scheduler running a node is what makes the button work.
+//
+// Everything above offers its own target by hand. This one does not: it runs a
+// real `Scheduler` against the process-wide registry the daemon's `EventStream`
+// already defaults to, which is the whole production wiring of §9's take over —
+// and the assertion is that an authenticated `attach` for a node the scheduler
+// is running opens a terminal rather than answering `unknown_node`.
+// ---------------------------------------------------------------------------
+
+const LIVE_RUN_ID = 'run-live'
+const HARNESS_ID = 'claude-code'
+
+/** One agent turn per node, and `b` behind `a` so one node is never in flight. */
+const LIVE_WORKFLOW: Workflow = WorkflowSchema.parse({
+  schema_version: 1,
+  id: 'wf-live',
+  base_branch: 'main',
+  defaults: { harness: HARNESS_ID, model: 'opus', pipeline: 'solo' },
+  resources: { lane: { capacity: 1, kind: 'worktree' } },
+  pipelines: {
+    solo: {
+      states: [
+        {
+          id: 'work',
+          name: 'Work',
+          position: { x: 0, y: 0 },
+          onEnter: [{ id: 'e-work', definitionId: 'spawn_agent', params: { role: 'implementer' } }],
+        },
+        { id: 'done', name: 'Done', position: { x: 200, y: 0 }, data: { outcome: 'done' } },
+      ],
+      transitions: [{ id: 't', from: 'work', to: 'done' }],
+      initialStateIds: ['work'],
+      finalStateIds: ['done'],
+    },
+  },
+  nodes: [
+    { id: 'a', name: 'A', prompt_ref: 'plan.md#a' },
+    { id: 'b', name: 'B', prompt_ref: 'plan.md#b', depends_on: [{ node: 'a', artifact: "a's" }] },
+  ],
+})
+
+/**
+ * A harness whose turn stays live until the test ends it. `MockAdapter`'s
+ * script drains in microtasks, and a turn that is over is a turn with no
+ * offer — so the stream here is `session_started`, then silence, which is the
+ * shape an operator actually clicks the button on. `attachPty` is the mock's
+ * own: a real pty running `cat`, so the terminal is a process with a pid.
+ */
+function liveHarness(): {
+  readonly adapter: HarnessAdapter
+  readonly handles: PtyHandle[]
+  live(): boolean
+  end(): void
+} {
+  const mock = new MockAdapter({ id: HARNESS_ID })
+  const handles: PtyHandle[] = []
+  let parked = 0
+  let open!: () => void
+  const gate = new Promise<void>((resolve) => {
+    open = resolve
+  })
+
+  const adapter: HarnessAdapter = {
+    id: mock.id,
+    capabilities: mock.capabilities,
+    preflight: () => mock.preflight(),
+    async spawn(task) {
+      const outcome = await mock.spawn(task)
+      if (!outcome.ok) return outcome
+      const inner = outcome.session
+      const session: AgentSession = {
+        id: inner.id,
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'session_started', sessionId: inner.id }
+            parked += 1
+            await gate
+            parked -= 1
+            yield { type: 'session_ended', result: 'ok' }
+          },
+        },
+        send: (text) => inner.send(text),
+        interrupt: () => inner.interrupt(),
+        kill: () => inner.kill(),
+      }
+      return { ok: true, session }
+    },
+    attachPty: async (sessionId, attach) => {
+      const handle = await mock.attachPty(sessionId, attach)
+      handles.push(handle)
+      return handle
+    },
+  }
+  return { adapter, handles, live: () => parked > 0, end: () => open() }
+}
+
+interface LiveRig {
+  readonly daemon: Daemon
+  readonly journal: ReturnType<typeof openJournal>
+  readonly harness: ReturnType<typeof liveHarness>
+  readonly finished: Promise<{ statuses: Readonly<Record<string, string>> }>
+  /** The id the live session announced — what an `attached` frame must carry. */
+  sessionId(): string | null
+  end(): void
+}
+
+async function liveRig(): Promise<LiveRig> {
+  const dir = makeTemp()
+  const journal = openJournal(dir)
+  journal.createRun(LIVE_RUN_ID, LIVE_WORKFLOW)
+
+  const laneRoot = join(dir, 'lanes')
+  // The lane worktree the terminal opens in has to exist: `cwd` is the lane's,
+  // and a pty is a real process in a real directory.
+  mkdirSync(join(laneRoot, `${LIVE_RUN_ID}-lane-1`), { recursive: true })
+
+  const harness = liveHarness()
+  const pools = new ResourcePools(LIVE_WORKFLOW.resources)
+  const admission = new AdmissionControl({
+    journal,
+    runId: LIVE_RUN_ID,
+    ceilings: { [HARNESS_ID]: 2 },
+  })
+  // No `takeovers` here on purpose: both the scheduler and `EventStream`
+  // default to the process-wide registry, and this test is about that default
+  // being the one wire the button needed.
+  const scheduler = createScheduler({
+    workflow: LIVE_WORKFLOW,
+    runId: LIVE_RUN_ID,
+    journal,
+    pools,
+    admission,
+    adapters: { [HARNESS_ID]: harness.adapter },
+    executor: { execute: async () => ({}) },
+    laneRoot,
+  })
+
+  const daemon = await startDaemon({ journal, pollMs: 5 })
+  daemon.register({
+    runId: LIVE_RUN_ID,
+    control: runControl(scheduler),
+    pools,
+    admission,
+  })
+
+  const finished = scheduler.run()
+  cleanups.push(async () => {
+    harness.end()
+    await finished.catch(() => undefined)
+    for (const handle of harness.handles) await handle.detach()
+    await daemon.close().catch(() => {})
+    admission.close()
+    journal.close()
+  })
+
+  return {
+    daemon,
+    journal,
+    harness,
+    finished,
+    sessionId: () =>
+      journal.nodes(LIVE_RUN_ID).find((row) => row.node_id === 'a')?.session_id ?? null,
+    end: () => harness.end(),
+  }
+}
+
+describe('a node the scheduler is running', () => {
+  it('is attachable over the daemon socket, and detaching leaves no process behind', async () => {
+    const r = await liveRig()
+    await until('node a to open a session', () => r.harness.live())
+    const sessionId = r.sessionId()
+    expect(sessionId).toBeTruthy()
+
+    const client = connect(r.daemon, r.daemon.token, LIVE_RUN_ID)
+    await client.opened
+    send(client.socket, { channel: 'pty', type: 'attach', nodeId: 'a', cols: 80, rows: 24 })
+
+    // The assertion the button was missing: `attached`, carrying the id the
+    // headless turn is running under — not `unknown_node`.
+    await until('the attach', () =>
+      client.frames().some((frame) => {
+        const parsed = PtyServerFrameSchema.safeParse(frame)
+        return parsed.success && parsed.data.type === 'attached'
+      }),
+    )
+    const attached = client
+      .frames()
+      .map((frame) => PtyServerFrameSchema.safeParse(frame).data)
+      .find((frame) => frame?.type === 'attached')
+    expect(attached).toMatchObject({ nodeId: 'a', sessionId })
+    expect(
+      client.frames().some((frame) => PtyServerFrameSchema.safeParse(frame).data?.type === 'error'),
+    ).toBe(false)
+
+    // A real terminal in the node's lane: bytes go both ways through `cat`.
+    const pid = r.harness.handles[0]?.pid ?? 0
+    expect(pid > 0).toBe(true)
+    send(client.socket, { channel: 'pty', type: 'input', data: 'ping\n' })
+    await until('an echo from the terminal', () => client.text().includes('ping'))
+
+    send(client.socket, { channel: 'pty', type: 'detach' })
+    await until('the terminal to go', () => !alive(pid))
+
+    // And the run finishes with nothing left pointing at it.
+    r.end()
+    const report = await r.finished
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(takeovers.find(LIVE_RUN_ID, 'a')).toBeUndefined()
+    expect(takeovers.find(LIVE_RUN_ID, 'b')).toBeUndefined()
+  })
+
+  it('still refuses a node that is not running', async () => {
+    const r = await liveRig()
+    await until('node a to open a session', () => r.harness.live())
+
+    // `b` is behind `a` and has never started. Nothing offered it, so nothing
+    // is reachable — the registry's default, unchanged by a run being live.
+    const client = connect(r.daemon, r.daemon.token, LIVE_RUN_ID)
+    await client.opened
+    send(client.socket, { channel: 'pty', type: 'attach', nodeId: 'b', cols: 80, rows: 24 })
+    await until('the refusal', () =>
+      client.frames().some((frame) => {
+        const parsed = PtyServerFrameSchema.safeParse(frame)
+        return parsed.success && parsed.data.type === 'error' && parsed.data.reason === 'unknown_node'
+      }),
+    )
+    expect(r.harness.handles.length).toBe(0)
   })
 })
 

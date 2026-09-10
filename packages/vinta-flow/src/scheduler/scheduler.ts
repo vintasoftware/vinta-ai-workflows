@@ -47,6 +47,11 @@
  * its stream ends. What each operation did is journalled — the operator's own
  * steering text included, as event payload and never as a log field.
  *
+ * §9's fifth operation, take over, is that same slot seen from outside: while
+ * it is open the node is offered to the daemon's PTY registry, and the offer is
+ * withdrawn with it. That is the whole reason an operator's terminal can never
+ * reach a session that has already ended or a lane the node has handed on.
+ *
  * **Never spinning is structural, not a timer.** The loop waits on a promise
  * that only a state change resolves; a capacity wait is one harness timer owned
  * by admission control. There is no poll interval anywhere in this file.
@@ -64,6 +69,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl } from '../admission/admission.ts'
+import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
@@ -106,6 +112,13 @@ export interface SchedulerOptions {
    * reset.
    */
   readonly recycleLane?: (name: string) => Promise<void>
+  /**
+   * Where §9's takeover targets are offered — the same registry the daemon's
+   * PTY channel consults. Injectable so a test owns its own; the process-wide
+   * one by default, which is the instance `EventStream` also defaults to, so
+   * production wiring is a composition rather than a flag.
+   */
+  readonly takeovers?: PtyRegistry
 }
 
 /** Why a run stopped short. Node, pool and harness ids only. */
@@ -171,6 +184,13 @@ interface NodeState {
    * steering inert.
    */
   undelivered: string[]
+  /**
+   * The session id the node's **next** spawn continues from — §9's handoff
+   * token, set when an operator detaches from a takeover. It lives on the node
+   * rather than in the registry because the resume happens at the next spawn,
+   * which is the one moment `AgentTask.resumeSessionId` can be filled in.
+   */
+  resumeSessionId: string | null
   /** Set by `pause`; honoured after the current turn, never inside it. */
   pauseRequested: boolean
   /** Set by `abortNode`. Every step checks it, so a killed node stops stepping. */
@@ -199,6 +219,7 @@ export class Scheduler {
    * through `#options`.
    */
   #workflow: Workflow
+  readonly #takeovers: PtyRegistry
   readonly #freeLanes: string[]
   /** Lane slots a node has already run in, and which therefore need recycling. */
   readonly #usedLanes = new Set<string>()
@@ -210,6 +231,7 @@ export class Scheduler {
     this.#options = options
     const { workflow } = options
     this.#workflow = workflow
+    this.#takeovers = options.takeovers ?? takeovers
 
     for (const node of workflow.nodes) this.#states.set(node.id, this.#fresh(node))
     this.#order = workflow.nodes.map((node) => node.id)
@@ -237,6 +259,7 @@ export class Scheduler {
       live: null,
       pending: [],
       undelivered: [],
+      resumeSessionId: null,
       pauseRequested: false,
       aborted: false,
       parkedEffectId: null,
@@ -395,10 +418,20 @@ export class Scheduler {
       return this.#operation(state, 'redirect', instruction, 'ignored')
     }
 
-    const live = state.live
-    if (live !== null && live.adapter.capabilities.interrupt) await live.session.interrupt()
+    await this.#interruptLive(state)
     state.pending.push({ op: 'redirect', text: instruction })
     this.#operation(state, 'redirect', instruction, 'queued')
+  }
+
+  /**
+   * Stops the turn a node has live, where its harness can be stopped. Shared
+   * by `redirect` and by the takeover's interrupt so there is one answer to
+   * "what does stopping this turn mean", and one place a harness that cannot
+   * be interrupted is tolerated rather than refused.
+   */
+  async #interruptLive(state: NodeState): Promise<void> {
+    const live = state.live
+    if (live !== null && live.adapter.capabilities.interrupt) await live.session.interrupt()
   }
 
   /**
@@ -795,6 +828,14 @@ export class Scheduler {
       }),
       model: String(params['model'] ?? state.node.model ?? workflow.defaults.model),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
+      // §9's handoff token, coming back the other way: an operator who took
+      // this node over and detached left the id their terminal held, and this
+      // turn continues that session rather than starting a new one. Kept
+      // across a capacity retry, exactly like the operator's queue is, and
+      // spent only once a session is actually granted.
+      ...(state.resumeSessionId === null || !adapter.capabilities.resume
+        ? {}
+        : { resumeSessionId: state.resumeSessionId }),
     }
 
     const outcome = await admission.admit(adapter, task)
@@ -808,10 +849,12 @@ export class Scheduler {
       this.#operation(state, entry.op, entry.text, 'delivered')
     }
     state.undelivered = []
+    state.resumeSessionId = null
 
     // The registry: exactly as long-lived as the turn it points at, so a §9
     // operation can never reach a session whose stream has already ended.
     state.live = { session: outcome.session, adapter }
+    const withdraw = this.#offer(state, outcome.session, adapter, cwd)
     try {
       for await (const event of outcome.session.events) {
         journal.appendTranscript(runId, state.node.id, event)
@@ -820,6 +863,7 @@ export class Scheduler {
         }
       }
     } finally {
+      withdraw()
       state.live = null
       // Frees the harness in-flight slot: the ceiling counts running agents.
       outcome.release()
@@ -830,6 +874,59 @@ export class Scheduler {
     if (params['role'] === 'fixer') state.fixRounds += 1
 
     return await this.#options.executor.execute(invocation)
+  }
+
+  /**
+   * §9's fifth operation, given something to point at: this node, for exactly
+   * as long as this turn.
+   *
+   * **The lifetime is the `live` slot's, and deliberately so.** A takeover
+   * target is a session id, a lane and a way to stop and restart the node; an
+   * offer that outlived its session would name an id nothing is running and a
+   * lane the node may have handed on, which is precisely what the registry
+   * exists to make impossible ("nothing is reachable by default"). So it is
+   * made where `live` opens and withdrawn in the same `finally` that closes
+   * it — however the turn ended, including an abort or a thrown drain.
+   *
+   * A harness that cannot open a terminal is never offered. The channel checks
+   * `pty` too, but offering what cannot be honoured would put a target in the
+   * registry whose only possible answer is a refusal.
+   *
+   * Neither half of the round trip is implemented here: the interrupt is the
+   * scheduler's own `pause` — §9's "finish the turn, then park", which is what
+   * keeps the lane the operator is about to be dropped into — plus the same
+   * session interrupt `redirect` uses, and the resume is the id staged for the
+   * node's next spawn.
+   */
+  #offer(
+    state: NodeState,
+    session: AgentSession,
+    adapter: HarnessAdapter,
+    cwd: string,
+  ): () => void {
+    if (!adapter.capabilities.pty || adapter.attachPty === undefined) return () => {}
+    return this.#takeovers.offer(this.#options.runId, state.node.id, {
+      adapter,
+      sessionId: session.id,
+      // The lane worktree this turn is running in — never the repository.
+      cwd,
+      interrupt: async () => {
+        // The node parks after this turn instead of stepping on: the operator
+        // is about to be typing in that lane, and §6's "a paused node keeps
+        // its lane" is what makes the terminal's cwd still theirs.
+        await this.pause(state.node.id)
+        await this.#interruptLive(state)
+      },
+      resume: async (sessionId: string) => {
+        state.resumeSessionId = sessionId
+        // The pause the interrupt asked for is over. Either the turn has not
+        // ended yet and the request is simply dropped, or the node is parked
+        // on it and this is the answer that lets it go. Nothing between those
+        // two: `#drive` clears the flag and parks without an await in between.
+        state.pauseRequested = false
+        if (state.resume !== null) this.answer(state.node.id, {})
+      },
+    })
   }
 
   /**

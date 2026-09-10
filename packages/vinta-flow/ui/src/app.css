@@ -94,7 +94,14 @@ h3 {
 }
 
 .dag {
-  display: block;
+  /* No `display` here, deliberately. A rule in this document beats the
+     component's own `:host` rule whatever the specificity, so `display: block`
+     silently flattened its flex column — and `.viewport { flex: 1 }` then had
+     no flex container to grow in, collapsed to zero height, and clipped every
+     node. The canvas rendered nothing at all, in the run view and the editor
+     alike, while every UI test passed: jsdom has no layout engine, so a
+     collapsed flex child measures the same as a correct one there. Give the
+     host a height and let it lay itself out. */
   height: 360px;
   background: var(--surface);
   border: 1px solid var(--line);
