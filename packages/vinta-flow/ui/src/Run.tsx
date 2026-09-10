@@ -85,6 +85,10 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
           <span className={connected ? 'live' : 'live off'}>
             {connected ? 'Live' : 'Reconnecting…'}
           </span>
+          {/* Offered on a live run too: §13.2's value is answering "which minute
+              did it go wrong", which is a question you ask while it is still
+              going. Replay covers the events journalled so far and says so. */}
+          <a href={`#/runs/${encodeURIComponent(runId)}/replay`}>Replay</a>
         </div>
       </header>
 

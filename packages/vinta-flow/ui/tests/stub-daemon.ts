@@ -23,6 +23,7 @@ import {
   AddContextRequestSchema,
   AnswerRequestSchema,
   EventFrameSchema,
+  EventPageSchema,
   NoArgsRequestSchema,
   NodeDetailSchema,
   OkResponseSchema,
@@ -84,6 +85,15 @@ export interface Connection {
   readonly sent: number[]
 }
 
+/** One accepted read of §13.2's event page, as the stub received it. */
+export interface EventRead {
+  readonly runId: string
+  readonly since: number
+  readonly limit: number
+  /** How many events the stub answered with. */
+  readonly served: number
+}
+
 export interface StubOptions {
   readonly runs: readonly RunSummary[]
   readonly snapshots: Readonly<Record<string, RunSnapshot>>
@@ -109,6 +119,8 @@ export interface StubDaemon {
   readonly posts: readonly Post[]
   /** Every workflow save the stub accepted, in order. */
   readonly puts: readonly WorkflowPut[]
+  /** Every §13.2 event-page read the stub served, in order. */
+  readonly eventReads: readonly EventRead[]
   /** What the stub holds for a workflow id right now. */
   readonly workflow: (id: string) => unknown
   readonly emit: (...events: NewEvent[]) => void
@@ -128,6 +140,7 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
   const puts: WorkflowPut[] = []
   const workflows = new Map(Object.entries(options.workflows ?? {}))
   const log: StoredEvent[] = []
+  const eventReads: EventRead[] = []
   const connections: Connection[] = []
   const attached = new Map<WebSocket, { runId: string; cursor: number; record: Connection }>()
 
@@ -217,6 +230,34 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       return json(response, 200, RunListResponseSchema.parse({ runs: options.runs }))
     }
 
+    // §13.2's bounded page, with the daemon's own `since`/`limit` semantics:
+    // exclusive lower bound, at most `limit` events, and a count of what is
+    // left. The reads are recorded because "scrubbing does not refetch" is a
+    // claim about requests, and only the server can settle it.
+    const events = /^\/api\/runs\/([^/]+)\/events$/.exec(url.pathname)
+    if (events !== null) {
+      const runId = decodeURIComponent(events[1] ?? '')
+      if (!snapshots.has(runId)) return json(response, 404, { error: 'unknown_run', issues: null })
+      const since = Number(url.searchParams.get('since') ?? '0')
+      const limit = Number(url.searchParams.get('limit') ?? '500')
+      if (!Number.isSafeInteger(since) || since < 0 || !Number.isSafeInteger(limit) || limit < 1) {
+        return json(response, 400, { error: 'invalid_request', issues: null })
+      }
+      const after = log.filter((event) => event.id > since && event.runId === runId)
+      const page = after.slice(0, limit)
+      eventReads.push({ runId, since, limit, served: page.length })
+      return json(
+        response,
+        200,
+        EventPageSchema.parse({
+          runId,
+          cursor: page.at(-1)?.id ?? since,
+          remaining: after.length - page.length,
+          events: page,
+        }),
+      )
+    }
+
     const node = /^\/api\/runs\/([^/]+)\/nodes\/([^/]+)$/.exec(url.pathname)
     if (node !== null) {
       const key = `${decodeURIComponent(node[1] ?? '')}/${decodeURIComponent(node[2] ?? '')}`
@@ -268,6 +309,7 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     connections,
     posts,
     puts,
+    eventReads,
     workflow(id) {
       return workflows.get(id)
     },

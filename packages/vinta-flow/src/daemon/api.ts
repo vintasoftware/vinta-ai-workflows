@@ -42,6 +42,7 @@ import {
   toIssues,
   toWireIssues,
   type AmendResponse,
+  type EventPage,
   type Issue,
   type NodeDetail,
   type RunSnapshot,
@@ -57,6 +58,12 @@ const GATE_LOG_TAIL_BYTES = 64 * 1024
 const TranscriptQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(1000).default(100),
   stream: z.enum(['transcript', 'raw']).default('transcript'),
+})
+
+/** §13.2's page. Same exclusive `since` as the journal and the socket. */
+const EventPageQuerySchema = z.object({
+  since: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(1000).default(500),
 })
 
 export interface ApiOptions {
@@ -120,6 +127,50 @@ export function createApi(options: ApiOptions): Hono {
     const found = resolveRun(c)
     if ('response' in found) return found.response
     return c.json(snapshot(found.run, found.row, workflow(found.run.runId)))
+  })
+
+  /**
+   * §13.2's replay read: a bounded page of this run's log.
+   *
+   * Three decisions worth stating.
+   *
+   * - **The journal alone answers it.** Unlike the snapshot beside it, this
+   *   route resolves the run out of `journal.run` rather than the in-memory
+   *   registry, because nothing here is live state. A finished run from before
+   *   the last daemon restart is exactly the run a reviewer wants to scrub,
+   *   and requiring it to still be registered would refuse the main case.
+   * - **Bounded here, not in the query.** `Journal.events` has no `LIMIT`; a
+   *   bounded read belongs to the journal's owner, and this layer must not
+   *   reach past its public API to add one. So the rows are read and the
+   *   *response* is sliced: the browser never receives more than `limit`
+   *   events, which is the property replay depends on.
+   * - **`remaining` instead of a total.** The client needs to know how much
+   *   log lies beyond the page, not how long the run was; one subtraction here
+   *   saves it a second round trip to find the end.
+   */
+  app.get('/api/runs/:runId/events', (c) => {
+    const runId = c.req.param('runId') ?? ''
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+
+    const query = EventPageQuerySchema.safeParse(c.req.query())
+    if (!query.success) return fail(c, 400, 'invalid_request', toIssues(query.error))
+
+    const { since, limit } = query.data
+    const after = journal.events(runId, since)
+    const page = after.slice(0, limit)
+    return c.json({
+      runId,
+      cursor: page.at(-1)?.id ?? since,
+      remaining: after.length - page.length,
+      events: page.map((event) => ({
+        id: event.id,
+        ts: event.ts,
+        runId: event.runId,
+        nodeId: 'nodeId' in event ? event.nodeId : null,
+        type: event.type,
+        payload: event.payload,
+      })),
+    } satisfies EventPage)
   })
 
   app.get('/api/runs/:runId/nodes/:nodeId', (c) => {

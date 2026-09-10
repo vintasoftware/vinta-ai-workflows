@@ -44,6 +44,7 @@ import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { CodexAdapter } from '../src/harness/codex.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
+import { EventPageSchema } from '../src/daemon/schemas.ts'
 import type { StoredEvent } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
@@ -648,6 +649,120 @@ describe('event stream', () => {
   it('refuses an upgrade for a run it does not serve', async () => {
     const r = await rig()
     expect(await connect(r.daemon, `?run=nope&token=${r.daemon.token}`)).toEqual({ status: 404 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5b: §13.2's replay page — the log, bounded, over HTTP
+// ---------------------------------------------------------------------------
+
+describe('replay pages', () => {
+  it('serves a bounded page with the journal\'s exclusive `since`', async () => {
+    const r = await rig()
+    // The rig\'s run opens with three events: run_started and two registrations.
+    const first = EventPageSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}/events?limit=2`)).body)
+
+    expect(first.runId).toBe(RUN_ID)
+    expect(first.events.map((event) => event.type)).toEqual(['run_started', 'node_registered'])
+    expect(first.cursor).toBe(first.events.at(-1)?.id)
+    expect(first.remaining).toBe(1)
+
+    const second = EventPageSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/events?since=${first.cursor}&limit=2`)).body,
+    )
+    // Exclusive, exactly as the socket is: no gap and no duplicate.
+    expect(second.events.map((event) => event.id)).toEqual([first.cursor + 1])
+    expect(second.remaining).toBe(0)
+  })
+
+  it('pages a long log exactly once, in order, with no event seen twice', async () => {
+    const r = await rig()
+    for (let i = 0; i < 250; i += 1) {
+      r.journal.append({
+        runId: RUN_ID,
+        nodeId: 'a',
+        type: 'node_status',
+        payload: { status: i % 2 === 0 ? 'running' : 'waiting_on_capacity' },
+      })
+    }
+
+    const seen: number[] = []
+    let since = 0
+    let reads = 0
+    for (;;) {
+      const page = EventPageSchema.parse(
+        (await call(r.daemon, `/api/runs/${RUN_ID}/events?since=${since}&limit=100`)).body,
+      )
+      reads += 1
+      seen.push(...page.events.map((event) => event.id))
+      since = page.cursor
+      if (page.remaining === 0) break
+    }
+
+    // 253 events, 100 to a page: three reads, and the ids are the whole log in
+    // order with nothing repeated — which is what makes a client cache of them
+    // safe to fold forward and never re-read.
+    expect(reads).toBe(3)
+    expect(seen).toHaveLength(253)
+    expect(seen).toEqual([...seen].sort((a, b) => a - b))
+    expect(new Set(seen).size).toBe(seen.length)
+
+    // A page's events are the frame's events: one schema, so a client can fold
+    // a replayed page with the same code it folds a live frame with.
+    const page = EventPageSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/events?limit=1`)).body,
+    )
+    expect(EventFrameSchema.shape.events.safeParse(page.events).success).toBe(true)
+  })
+
+  it('reads a run the daemon is not running — the journal is the only source', async () => {
+    const r = await rig()
+    // A run from before the last restart: on disk, never registered.
+    r.journal.createRun('run-history', makeWorkflow())
+    r.journal.append({
+      runId: 'run-history',
+      nodeId: 'a',
+      type: 'node_status',
+      payload: { status: 'done' },
+    })
+
+    // The snapshot needs live scheduler state and cannot answer for it…
+    expect((await call(r.daemon, '/api/runs/run-history')).status).toBe(404)
+    // …but its history is readable, which is the case replay exists for.
+    const page = EventPageSchema.parse((await call(r.daemon, '/api/runs/run-history/events')).body)
+    expect(page.events.map((event) => event.type)).toEqual([
+      'run_started',
+      'node_registered',
+      'node_registered',
+      'node_status',
+    ])
+    // And only this run's: the other run's log is interleaved in the table.
+    expect(page.events.every((event) => event.runId === 'run-history')).toBe(true)
+    expect(page.remaining).toBe(0)
+  })
+
+  it('rejects an unauthenticated or wrongly-authenticated read', async () => {
+    const r = await rig()
+
+    const anonymous = await call(r.daemon, `/api/runs/${RUN_ID}/events`, { token: null })
+    expect(anonymous.status).toBe(401)
+    expect(ErrorResponseSchema.parse(anonymous.body).error).toBe('unauthorized')
+
+    const wrong = await call(r.daemon, `/api/runs/${RUN_ID}/events`, { token: 'not-the-token' })
+    expect(wrong.status).toBe(401)
+    // The refusal happens before the run is resolved, so an unknown run and a
+    // known one are indistinguishable without the token.
+    expect((await call(r.daemon, '/api/runs/nope/events', { token: null })).status).toBe(401)
+  })
+
+  it('refuses an unknown run, and a limit outside the bound', async () => {
+    const r = await rig()
+    expect((await call(r.daemon, '/api/runs/nope/events')).status).toBe(404)
+
+    const tooMany = await call(r.daemon, `/api/runs/${RUN_ID}/events?limit=5000`)
+    expect(tooMany.status).toBe(400)
+    expect(ErrorResponseSchema.parse(tooMany.body).error).toBe('invalid_request')
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/events?since=-1`)).status).toBe(400)
   })
 })
 

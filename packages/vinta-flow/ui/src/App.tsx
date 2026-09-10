@@ -16,6 +16,8 @@ import { EditorList, EditorView } from './Editor.tsx'
 import { pageWorkflowClient, type WorkflowClient } from './editor-client.ts'
 import { NodeView } from './Node.tsx'
 import { Notifications } from './Notifications.tsx'
+import { Replay } from './Replay.tsx'
+import { pageReplayClient, type ReplayClient } from './replay-client.ts'
 import { Run } from './Run.tsx'
 import { Runs } from './Runs.tsx'
 
@@ -23,10 +25,16 @@ import { Runs } from './Runs.tsx'
 // route cannot be swallowed by the run route.
 const RUN_ROUTE = /^#\/runs\/([^/]+)$/
 const NODE_ROUTE = /^#\/runs\/([^/]+)\/nodes\/(.+)$/
+const REPLAY_ROUTE = /^#\/runs\/([^/]+)\/replay$/
 const EDITOR_ROUTE = /^#\/editor(?:\/([^/]+))?$/
 
 type Route =
   | { readonly kind: 'run'; readonly runId: string; readonly nodeId: string | null }
+  // §13.2's replay is its own member rather than a flag on `run`: it reads a
+  // different endpoint, holds a scrub position instead of a socket, and must
+  // remount when the run changes. A boolean field would have made those three
+  // facts conditional inside one view.
+  | { readonly kind: 'replay'; readonly runId: string }
   | { readonly kind: 'editor'; readonly workflowId: string | null }
 
 /**
@@ -38,12 +46,16 @@ type Route =
 export function App({
   client,
   workflows,
+  replay,
 }: {
   readonly client: Client
   readonly workflows?: WorkflowClient
+  /** §13.2's log reader, for the same reason `workflows` is a prop. */
+  readonly replay?: ReplayClient
 }) {
   const [route, setRoute] = useState<Route | null>(() => routeOf(location.hash))
   const workflowClient = useMemo(() => workflows ?? pageWorkflowClient(), [workflows])
+  const replayClient = useMemo(() => replay ?? pageReplayClient(), [replay])
 
   useEffect(() => {
     const onHashChange = (): void => setRoute(routeOf(location.hash))
@@ -78,6 +90,11 @@ export function App({
         />
       )
     }
+    if (route.kind === 'replay') {
+      return (
+        <Replay key={route.runId} client={client} replay={replayClient} runId={route.runId} />
+      )
+    }
     if (route.nodeId === null) {
       return <Run key={route.runId} client={client} runId={route.runId} />
     }
@@ -97,6 +114,10 @@ function routeOf(hash: string): Route | null {
   if (editor !== null) {
     const id = editor[1]
     return { kind: 'editor', workflowId: id === undefined ? null : decodeURIComponent(id) }
+  }
+  const replay = REPLAY_ROUTE.exec(hash)
+  if (replay?.[1] !== undefined) {
+    return { kind: 'replay', runId: decodeURIComponent(replay[1]) }
   }
   const node = NODE_ROUTE.exec(hash)
   if (node?.[1] !== undefined && node[2] !== undefined) {

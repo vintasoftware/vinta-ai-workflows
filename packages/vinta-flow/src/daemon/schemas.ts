@@ -317,24 +317,55 @@ export const AmendResponseSchema = z.strictObject({
  * bytes are step 17 and arrive as a second member of this union, which is why
  * the discriminator is here before there is anything to discriminate.
  */
+/**
+ * One journalled event on the wire.
+ *
+ * Named rather than inlined because two endpoints now serve it — the live
+ * frame below and §13.2's bounded page — and replay is only worth having if
+ * what it folds is byte-for-byte what the live view folded. One schema is how
+ * that stays true.
+ */
+export const JournalEventSchema = z.strictObject({
+  id: z.number().int(),
+  ts: z.number().int(),
+  runId: z.string(),
+  nodeId: z.string().nullable(),
+  type: z.string(),
+  payload: z.unknown(),
+})
+
 export const EventFrameSchema = z.strictObject({
   channel: z.literal('events'),
   runId: z.string(),
   /** The id of the last event in this frame — the client's next `since`. */
   cursor: z.number().int(),
-  events: z.array(
-    z.strictObject({
-      id: z.number().int(),
-      ts: z.number().int(),
-      runId: z.string(),
-      nodeId: z.string().nullable(),
-      type: z.string(),
-      payload: z.unknown(),
-    }),
-  ),
+  events: z.array(JournalEventSchema),
 })
 
 export const FrameSchema = z.discriminatedUnion('channel', [EventFrameSchema])
+
+/**
+ * §13.2's read: a bounded window of the log, for scrubbing a run's history.
+ *
+ * The stream cannot serve this. It tails — it hands out everything after a
+ * cursor and keeps going — which is the right shape for watching a run and the
+ * wrong one for a slider, where the client wants a page at a time and wants to
+ * stop. So replay reads pages over HTTP and the socket stays what it is.
+ *
+ * `remaining` is what makes a slider possible before the whole log is loaded:
+ * the client knows how many events it has *not* fetched, so the track can span
+ * the entire run from the first page onward while the events behind it arrive
+ * on demand. Events below the run's last id are immutable, so a page fetched
+ * once is never fetched again.
+ */
+export const EventPageSchema = z.strictObject({
+  runId: z.string(),
+  /** The id of the last event in this page, or the requested `since` when empty. */
+  cursor: z.number().int(),
+  /** Events the journal holds after `cursor` — how much more there is to read. */
+  remaining: z.number().int(),
+  events: z.array(JournalEventSchema),
+})
 
 export type AmendResponse = z.infer<typeof AmendResponseSchema>
 export type HumanQuestion = z.infer<typeof HumanQuestionSchema>
@@ -342,6 +373,8 @@ export type RunSummary = z.infer<typeof RunSummarySchema>
 export type RunSnapshot = z.infer<typeof RunSnapshotSchema>
 export type NodeDetail = z.infer<typeof NodeDetailSchema>
 export type EventFrame = z.infer<typeof EventFrameSchema>
+export type EventPage = z.infer<typeof EventPageSchema>
+export type JournalEvent = z.infer<typeof JournalEventSchema>
 export type Frame = z.infer<typeof FrameSchema>
 export type Issue = z.infer<typeof IssueSchema>
 export type WorkflowResponse = z.infer<typeof WorkflowResponseSchema>
