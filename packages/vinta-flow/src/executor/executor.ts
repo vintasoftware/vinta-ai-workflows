@@ -42,9 +42,12 @@
  * verdict is read back out of the transcript the scheduler just wrote
  * (`Journal.tailTranscript`). No scheduler change is needed for this, and none
  * was made. The reviewer states its verdict in its own last words as
- * `VERDICT: pass` or `VERDICT: fail`; a turn that errored, or one that stated
- * nothing, takes `defaultVerdict` — `'fail'`, because a merge on a reviewer's
- * silence is the one failure mode a review step exists to prevent. The
+ * `VERDICT: pass` or `VERDICT: fail` — read by `readVerdict`, which
+ * `src/prompts` also uses to *ask* for it, so the protocol has one definition
+ * rather than a prompt and a parser free to drift apart. A turn that errored,
+ * or one that stated nothing, takes `defaultVerdict` — `'fail'`, because a
+ * merge on a reviewer's silence is the one failure mode a review step exists
+ * to prevent. The
  * transcript text is matched and discarded: it never reaches a fact, a log
  * field, an error message or a notification.
  *
@@ -78,6 +81,7 @@ import type { Integrator } from '../integration/integrator.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
+import { readVerdict } from '../prompts/index.ts'
 import type { Node, Workflow } from '../types.ts'
 import { createOsNotifier, notifyReason, type Notifier } from './notify.ts'
 import {
@@ -120,9 +124,6 @@ export interface RunExecutorOptions {
   /** Injected in tests, and on a platform with no notification channel. */
   readonly notifier?: Notifier
 }
-
-/** `VERDICT: pass`. Matched against the reviewer's own last words, never stored. */
-const VERDICT = /verdict\s*[:=]\s*(pass|fail)/i
 
 /**
  * The exit code a timed-out gate reports. `GateResult.exitCode` is null there —
@@ -224,9 +225,11 @@ export class RunEffectExecutor implements EffectExecutor {
       }
       if (entry.type === 'error') return fallback
       if (entry.type !== 'assistant_text' || typeof entry.text !== 'string') continue
-      const match = VERDICT.exec(entry.text)
-      // The matched group only — the transcript text itself goes no further.
-      if (match?.[1] !== undefined) return match[1].toLowerCase() === 'pass' ? 'pass' : 'fail'
+      // `src/prompts` owns the marker: the reviewer prompt asks for exactly what
+      // this reads, so the protocol cannot drift out of one of the two places.
+      // The verdict only — the transcript text itself goes no further.
+      const stated = readVerdict(entry.text)
+      if (stated !== undefined) return stated
     }
     return fallback
   }

@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { AdmissionControl } from '../src/admission/admission.ts'
@@ -36,8 +36,15 @@ import {
   type RunEffectExecutor,
 } from '../src/executor/index.ts'
 import { GateCache } from '../src/gates/cache.ts'
-import type { HarnessAdapter } from '../src/harness/adapter.ts'
-import { MockAdapter, type MockScript } from '../src/harness/mock.ts'
+import type {
+  AgentTask,
+  HarnessAdapter,
+  HarnessCapabilities,
+  PreflightResult,
+  SpawnOutcome,
+} from '../src/harness/adapter.ts'
+import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
+import { VERDICT_MARKER } from '../src/prompts/index.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import { Integrator } from '../src/integration/integrator.ts'
@@ -68,6 +75,36 @@ const PASSING: MockScript = {
   result: 'ok',
 }
 
+/**
+ * A `MockAdapter` whose script is chosen per spawn, out of the prompt the task
+ * carries.
+ *
+ * Every adapter in this suite replays the same words whatever it is told, which
+ * is how prompt composition could be missing entirely and every test still
+ * pass. This one lets a test behave like an agent that actually read what it
+ * was handed.
+ */
+class ScriptedAdapter implements HarnessAdapter {
+  readonly spawned: AgentTask[] = []
+  readonly capabilities: HarnessCapabilities
+
+  constructor(
+    readonly id: string,
+    private readonly script: (task: AgentTask) => MockScript,
+  ) {
+    this.capabilities = new MockAdapter({ id }).capabilities
+  }
+
+  async preflight(): Promise<PreflightResult> {
+    return { installed: true, authenticated: true, version: 'scripted' }
+  }
+
+  async spawn(task: AgentTask): Promise<SpawnOutcome> {
+    this.spawned.push(task)
+    return await new MockAdapter({ id: this.id, script: this.script(task) }).spawn(task)
+  }
+}
+
 interface Rig {
   readonly root: string
   readonly repo: string
@@ -78,7 +115,7 @@ interface Rig {
   readonly journal: Journal
   readonly executor: RunEffectExecutor
   readonly pools: ResourcePools
-  readonly adapters: Readonly<Record<string, MockAdapter>>
+  readonly adapters: Readonly<Record<string, ScriptedAdapter>>
   readonly notifications: Notification[]
   run(): Promise<RunReport>
   /** One effect, invoked directly — for the verbs no pipeline path exercises. */
@@ -89,9 +126,35 @@ interface Rig {
   ): Promise<EffectOutcome>
 }
 
+/**
+ * One markdown section per node, in the file its `prompt_ref` names — the
+ * minimum shape `resolveBrief` reads. The body is distinctive per node so a
+ * test can assert *which* brief reached *which* agent.
+ */
+function writePlan(repo: string, workflow: Workflow): void {
+  const files = new Map<string, string[]>()
+  for (const node of workflow.nodes) {
+    const hash = node.prompt_ref.lastIndexOf('#')
+    const file = hash === -1 ? node.prompt_ref : node.prompt_ref.slice(0, hash)
+    const anchor = hash === -1 ? 'phase' : node.prompt_ref.slice(hash + 1)
+    const body = files.get(file) ?? []
+    body.push(`## ${anchor}`, '', `Phase brief for ${node.id}: build the ${node.id} thing.`, '')
+    files.set(file, body)
+  }
+  for (const [file, body] of files) {
+    mkdirSync(dirname(join(repo, file)), { recursive: true })
+    writeFileSync(join(repo, file), `${body.join('\n')}\n`)
+  }
+}
+
 function setup(
   build: (root: string) => Workflow,
-  options: { readonly script?: MockScript; readonly cache?: boolean } = {},
+  options: {
+    readonly script?: MockScript
+    /** Answers out of the task's prompt — an agent that read what it was told. */
+    readonly reply?: (task: AgentTask) => MockScript
+    readonly cache?: boolean
+  } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-flow-executor-'))
   cleanups.push(() => rmSync(root, { recursive: true, force: true }))
@@ -104,6 +167,11 @@ function setup(
   g(repo, 'config', 'user.name', 'fixture')
   g(repo, 'config', 'commit.gpgsign', 'false')
   writeFileSync(join(repo, 'README.md'), 'fixture\n')
+  // The plan every `prompt_ref` points at, committed on the base branch so it
+  // is in every lane. Prompt composition resolves the brief out of the lane
+  // (`src/prompts`), so a repository with no plan in it is a run whose agents
+  // are handed a bare reference — which is the bug this file now covers.
+  writePlan(repo, workflow)
   g(repo, 'add', '--all')
   g(repo, 'commit', '-m', 'base')
 
@@ -167,11 +235,10 @@ function setup(
 
   const harnesses = new Set<string>([workflow.defaults.harness])
   for (const node of workflow.nodes) if (node.harness) harnesses.add(node.harness)
+  // `reply` answers out of the prompt; `script` is the same words every turn.
+  const reply = options.reply ?? ((): MockScript => options.script ?? DEFAULT_SCRIPT)
   const adapters = Object.fromEntries(
-    [...harnesses].map((id) => [
-      id,
-      new MockAdapter({ id, ...(options.script === undefined ? {} : { script: options.script }) }),
-    ]),
+    [...harnesses].map((id) => [id, new ScriptedAdapter(id, reply)]),
   )
 
   const pools = new ResourcePools(workflow.resources)
@@ -702,5 +769,73 @@ describe('notify', () => {
     await expect(
       createOsNotifier('win32').notify({ scope: 'node', id: 'p1', reason: 'phase failed' }),
     ).resolves.toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. The prompt the agent is actually handed
+//
+// Every test above scripts an adapter that says `VERDICT: pass` whatever it was
+// told, so all of them passed while `spawn_agent` handed every role the bare
+// `prompt_ref` and the reviewer was never told it was reviewing. The pair below
+// closes that: one agent answers out of its prompt, the other ignores it, and
+// only the first can reach `done`.
+// ---------------------------------------------------------------------------
+
+const CLEAN_GATES = {
+  types: { cmd: 'exit 0', timeout_s: 30 },
+  unit: { cmd: 'exit 0', requires: ['test-suite'], timeout_s: 30 },
+}
+
+/**
+ * An agent that read its prompt: it ends on the verdict line only where the
+ * prompt asked it to end on one, echoing the exact line it was given. An agent
+ * that ignored the prompt could not produce it.
+ */
+const answersThePrompt = (task: AgentTask): MockScript => {
+  const asked = task.prompt
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line === `${VERDICT_MARKER} pass`)
+  return {
+    events: [
+      { type: 'assistant_text', text: asked ?? 'Status: SUCCESS. Implemented the phase.' },
+    ],
+    result: 'ok',
+  }
+}
+
+describe('composed prompts, end to end', () => {
+  it('reaches done, because the reviewer was told the verdict protocol', async () => {
+    const rig = setup(() => goldenWorkflow(CLEAN_GATES), { reply: answersThePrompt })
+
+    const report = await within(60_000, rig.run(), 'the composed run')
+
+    expect(report.status).toBe('completed')
+    expect(report.failures).toEqual({})
+    expect(report.statuses).toEqual({ p1: 'done', p2: 'done', p3: 'done', p4: 'done' })
+
+    const spawned = rig.adapters['claude-code']?.spawned ?? []
+    // The brief itself, resolved from `prompt_ref` — not the reference.
+    expect(spawned.some((task) => task.prompt.includes('Phase brief for p1'))).toBe(true)
+    expect(spawned.every((task) => task.prompt !== rig.workflow.nodes[0]?.prompt_ref)).toBe(true)
+    // p2 and p3 are siblings off p1: neither may be told about the other.
+    const p2 = spawned.filter((task) => task.nodeId === 'p2')
+    expect(p2.length).toBeGreaterThan(0)
+    expect(p2.every((task) => task.prompt.includes('p1'))).toBe(true)
+    expect(p2.some((task) => task.prompt.includes('Phase brief for p3'))).toBe(false)
+  })
+
+  it('fails when the agent ignores its prompt — the run this bug produced', async () => {
+    const rig = setup(() => goldenWorkflow(CLEAN_GATES), {
+      reply: () => ({ events: [{ type: 'assistant_text', text: 'ok, done' }], result: 'ok' }),
+    })
+
+    const report = await within(60_000, rig.run(), 'the run nobody told what to do')
+
+    // No verdict stated, so the reviewer's silence fails closed, the fix rounds
+    // run out, and the node fails with its dependents blocked behind it.
+    expect(report.statuses['p1']).toBe('failed')
+    expect(report.statuses['p4']).toBe('blocked')
   })
 })

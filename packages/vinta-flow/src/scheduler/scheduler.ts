@@ -4,8 +4,10 @@
  * It composes units that already exist and adds exactly one thing — *when*
  * work starts and stops. Graph shape comes from `graph.ts`, capacity from
  * `ResourcePools`, vendor backpressure from `AdmissionControl`, per-node
- * control flow from `PipelineRun`, and every side effect from the injected
- * `EffectExecutor`. Nothing about git, prompts or agent semantics lives here.
+ * control flow from `PipelineRun`, every side effect from the injected
+ * `EffectExecutor`, and what an agent is told from `src/prompts` — selected by
+ * the effect's own `prompt_template`. Nothing about git, prompt wording or
+ * agent semantics lives here.
  *
  * The rules from §6 that this file exists to enforce:
  *
@@ -59,6 +61,7 @@
  * Identifiers only in every journalled field and every error message. Agent
  * output goes to the transcript file, which is where §5.3 puts it.
  */
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl } from '../admission/admission.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
@@ -75,6 +78,7 @@ import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipelin
 import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
+import { composeSpawnPrompt } from '../prompts/index.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { Node, Pipeline, Workflow } from '../types.ts'
 
@@ -769,13 +773,26 @@ export class Scheduler {
     const carried = state.pending.length
     const owed = [...state.undelivered, ...state.pending.map((entry) => entry.text)]
 
+    const cwd = join(this.#options.laneRoot, state.lane as string)
     const task: AgentTask = {
       nodeId: state.node.id,
-      cwd: join(this.#options.laneRoot, state.lane as string),
-      // A *reference* to the phase brief, never composed prompt text: prompt
-      // composition is its own unit, and this field is task input the moment
-      // one exists.
-      prompt: state.node.prompt_ref,
+      cwd,
+      // Composed by `src/prompts`, selected by the effect's `prompt_template`.
+      // This is task input: the brief and its dependency context are what the
+      // agent is *for*, and they go nowhere else — a composition that fails
+      // throws naming the node and the reference, never the brief.
+      prompt: composeSpawnPrompt({
+        template: params['prompt_template'],
+        workflow,
+        node: state.node,
+        runId,
+        journal,
+        // A lane with no worktree on disk is a projection, not a run: nothing
+        // will be spawned and there is no checkout to resolve a brief from.
+        // A dispatched node in a real run always has one.
+        workspace: existsSync(cwd) ? cwd : null,
+        facts: invocation.context,
+      }),
       model: String(params['model'] ?? state.node.model ?? workflow.defaults.model),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
     }

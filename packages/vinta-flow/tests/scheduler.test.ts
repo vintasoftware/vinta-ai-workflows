@@ -12,7 +12,7 @@
  * invisible in the run it happens in and fatal three phases later, so it is
  * checked on the happy paths and on the failure paths alike.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -192,6 +192,8 @@ interface Rig {
   readonly calls: Call[]
   readonly advance: (ms: number) => Promise<void>
   readonly poolNames: readonly string[]
+  /** Where the lane slots would live. Empty until a test plants a checkout in one. */
+  readonly laneRoot: string
   /** Present when `stall` was asked for: holds every session open mid-stream. */
   readonly stall: { live(): boolean; release(): void }
 }
@@ -269,6 +271,7 @@ function rig(
     calls: executor.calls,
     advance,
     poolNames: Object.keys(workflow.resources),
+    laneRoot: join(dir, 'lanes'),
     stall,
   }
 }
@@ -972,6 +975,62 @@ describe('standard-phase under the scheduler', () => {
     expect(r.calls.filter((call) => call.effect === 'e-fix')).toHaveLength(2)
     expect(report.statuses).toEqual({ a: 'failed', b: 'blocked' })
     expect(r.calls.some((call) => call.effect === 'e-failed')).toBe(true)
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Prompt composition, at the scheduler's seam
+//
+// `#spawn` used to hand every role `node.prompt_ref` as its whole prompt. It
+// now composes one (`src/prompts`), selected by the effect's `prompt_template`,
+// out of a brief resolved from the lane. Both halves of that are asserted here:
+// what the agent is handed, and what happens when the reference resolves to
+// nothing.
+// ---------------------------------------------------------------------------
+
+/** A plan in every lane slot — which is what makes a lane slot a checkout. */
+function plant(r: Rig, body: string): void {
+  for (const slot of ['run-1-lane-1', 'run-1-lane-2']) {
+    mkdirSync(join(r.laneRoot, slot), { recursive: true })
+    writeFileSync(join(r.laneRoot, slot, 'plan.md'), body)
+  }
+}
+
+describe('prompt composition', () => {
+  it('hands each role a composed prompt rather than the bare reference', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+    plant(r, '## a\n\nAdd the Folder model and its migration.\n')
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    const prompts = r.adapter.spawned.map((task) => task.prompt)
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0]).toContain('You are implementing a')
+    expect(prompts[0]).toContain('Add the Folder model and its migration.')
+    expect(prompts[1]).toContain('You are reviewing a')
+    expect(prompts.every((prompt) => prompt !== 'plan.md#a')).toBe(true)
+    expectDrained(r)
+  })
+
+  it('fails the node, naming it and the reference, when the brief resolves to nothing', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]))
+    plant(r, '## some other phase\n\nBRIEF BODY\n')
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(report.failures['a']).toContain('node "a"')
+    expect(report.failures['a']).toContain('plan.md#a')
+    // Identifiers only: the file it did read never reaches the failure reason.
+    expect(report.failures['a']).not.toContain('BRIEF BODY')
+    expect(r.adapter.spawned).toEqual([])
     expectDrained(r)
   })
 })

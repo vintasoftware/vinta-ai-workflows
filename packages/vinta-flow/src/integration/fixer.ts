@@ -14,6 +14,7 @@
  * in a log.
  */
 import type { AgentTask, HarnessAdapter } from '../harness/adapter.ts'
+import { composeConflictPrompt } from '../prompts/index.ts'
 
 export interface ConflictRequest {
   /** The integration worktree. The fixer runs here and nowhere else. */
@@ -57,7 +58,9 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       const task: AgentTask = {
         nodeId: request.nodeId,
         cwd: request.cwd,
-        prompt: instructions(request),
+        // The same composer every other role's prompt comes from, so a change
+        // to what an agent is told stays one edit (`src/prompts`).
+        prompt: composeConflictPrompt(request),
         model: options.model,
       }
       const outcome = await options.adapter.spawn(task)
@@ -72,19 +75,4 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       }
     },
   }
-}
-
-/**
- * Paths and plan references, plus the one rule a fixer must not break: a
- * conflict resolved by taking a side deletes half of what the plan asked for,
- * and does it invisibly.
- */
-function instructions(request: ConflictRequest): string {
-  return [
-    `Resolve the merge conflict from merging ${request.incoming} into ${request.into}.`,
-    `Conflicted paths: ${request.paths.join(' ')}`,
-    `Nodes involved: ${request.nodes.join(' ')}`,
-    `Phase briefs: ${request.promptRefs.join(' ')}`,
-    'Resolve for both phases’ intents. Never resolve with --ours or --theirs.',
-  ].join('\n')
 }
