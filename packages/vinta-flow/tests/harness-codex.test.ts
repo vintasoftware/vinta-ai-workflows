@@ -472,7 +472,9 @@ describe('spawn against a fake binary', () => {
     // And nothing that looks like the message got into the transcript.
     expect(seen.some((e) => e.type === 'user_message')).toBe(false)
     expect(seen[seen.length - 1]).toEqual({ type: 'session_ended', result: 'interrupted' })
-  })
+    // Spawns a real codex process: ~1s alone, but it sat exactly on vitest's
+    // 5s default and flaked about one run in four under parallel load.
+  }, 60_000)
 
   it('classifies a CLI that refuses before announcing a thread', async () => {
     const bin = fakeBin(

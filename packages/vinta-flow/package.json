@@ -18,7 +18,8 @@
     "schema:gen": "node --experimental-strip-types src/schema/generate.ts",
     "schema:check": "node --experimental-strip-types src/schema/generate.ts --check",
     "postmortem:schema:gen": "node --experimental-strip-types src/postmortem/generate.ts",
-    "postmortem:schema:check": "node --experimental-strip-types src/postmortem/generate.ts --check"
+    "postmortem:schema:check": "node --experimental-strip-types src/postmortem/generate.ts --check",
+    "postinstall": "node scripts/fix-node-pty.mjs"
   },
   "license": "MIT",
   "dependencies": {
