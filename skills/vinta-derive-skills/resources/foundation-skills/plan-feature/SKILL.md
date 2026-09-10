@@ -518,7 +518,9 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `schema_version` | `1`. |
 | `id` | The feature kebab — same slug as the filename. It lands in branch names (`plan/{id}/wave-2`), so kebab-case only, no dates, no underscores. |
 | `plan_ref` | Repo-relative path of the markdown plan, e.g. `ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md`. |
+| `plan_context_refs` | The two plan sections that bound **every** phase, as anchors into the plan you just wrote: `<plan_ref>#1-goals` (which carries Non-goals with it) and `<plan_ref>#2-guiding-decisions`, in that order. Same file-and-anchor form as `prompt_ref`. See "Plan-level context". |
 | `base_branch` | What `**Depends on**: nothing — starts from the base branch` means concretely: the repo's default branch, unless **Guiding Decisions** names a long-lived feature branch. |
+| `project` | The databases a lane must **fork** to be a working checkout, plus the command that migrates the template they are forked from. Omit entirely when lanes can share the main checkout's database — see "The `project` block". This is the one part of the document you *ask* about rather than transcribe. |
 | `defaults.harness` | The agent CLI the team runs — `claude-code`, `codex`, or `opencode`. `claude-code` unless the project says otherwise. |
 | `defaults.model` | The concrete model id for the tier **most** phases carry, pulled from [resources/ai-models.yaml](resources/ai-models.yaml). |
 | `defaults.pipeline` | `standard-phase` — see "The pipeline block". |
@@ -544,6 +546,66 @@ Rules the mapping depends on:
 - **Never invent a model id.** Pick the tier from the rubric under "AI model selection per phase", then read the id out of [resources/ai-models.yaml](resources/ai-models.yaml). Ids drift; tiers don't.
 - **Gate commands must be commands the repo actually runs today.** Read them out of the project's task runner (`package.json` scripts, `Makefile`, `pyproject.toml`, CI config) rather than guessing a conventional one. A gate that doesn't exist fails every phase identically, and looks like a code problem.
 - **The graph must agree with the Execution graph table.** Same nodes, same edges, same waves — they are two renderings of one set of `**Depends on**:` lines, so derive both from the lines rather than transcribing one from the other. A disagreement means one was hand-edited, and the executor flags it.
+- **`plan_context_refs` is anchors, never prose.** It names sections of the plan; it never restates them. A summary written into the JSON is a second copy that drifts the first time someone edits the plan, and the whole point of the field is that the implementer reads what the plan actually says.
+
+### Plan-level context
+
+`prompt_ref` gives a phase its own body. It gives it nothing else — and a phase body alone is how an implementer ends up building something the plan explicitly ruled out, or re-deciding a question **Guiding Decisions** already closed. `plan_context_refs` is where the plan hands every phase the two sections that bound all of them:
+
+```json
+"plan_context_refs": [
+  "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#1-goals",
+  "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#2-guiding-decisions"
+]
+```
+
+The executor resolves each reference the same way it resolves a `prompt_ref` — file, then the named heading's section down to the next heading of the same depth — and hands the text to the implementer and the reviewer **verbatim**, under a heading that says it is the plan's and not the phase's.
+
+Rules:
+
+- **Anchor on the heading as you wrote it.** The **Plan structure** section numbers those headings — `## 1. Goals`, `## 2. Guiding Decisions` — so their anchors are `#1-goals` and `#2-guiding-decisions`. Write the anchor of the heading that is actually in your plan: an anchor that resolves to nothing fails the phase loudly at spawn time, before any code is written.
+- **Goals carries Non-goals.** Non-goals is a bulleted list *inside* the **Goals** section, so one anchor delivers both. That is why `#1-goals` is not optional here — the non-goals are the half that stops scope creep.
+- **Two entries, both of them.** Not **Data Model Changes** (large, and the phase body names the models it touches), not **Risk & Rollout Notes**, not the whole plan file. Every extra section is paid for in every phase's prompt, twice — once for the implementer, once for the reviewer.
+- **Emit it on every plan**, exactly like the file itself. A workflow without it still runs; its phases just each rediscover the boundaries the plan already drew.
+
+### The `project` block
+
+Every other field in the document is transcribed from the plan. This one is not: nothing in a feature plan says how the project's databases are delivered, and without the block an executor gives each phase a git worktree and nothing else. Every phase's gate then runs against the same database — so a phase that adds a migration changes the schema every other lane is tested against, and a suite that leaves rows behind changes what the next lane sees. A `test-suite` pool does not fix that: a semaphore orders the suites, it does not give them separate data.
+
+`project` says what a lane must **fork** to be a working checkout of this repo. It is optional, and omitting it is a real answer: a repo whose tests need no database at all, or whose suite builds an in-memory one per process, has nothing to declare.
+
+**Sharing is the absence of a declaration.** There is no `"share"` value and no `"none"` value, for either role. A lane that reads the main checkout's database has no database of its own to describe, so it says nothing — and a declared database is always forked.
+
+Two roles, each optional and each declared separately:
+
+- **`dev`** — the database the app runs against inside the lane.
+- **`test`** — the database the gate commands run against. This is the one that matters most: declare it whenever a gate touches a database.
+
+`migrate_cmd` is the project's own migrate command. It runs **once per template database**, never per lane — that is what makes the Nth lane cost a copy instead of a provision. Read it out of the project's task runner, the same way gate commands are read, rather than guessing a conventional one.
+
+Fields per database, by engine:
+
+| `engine` | Fields | What they mean |
+|---|---|---|
+| `postgres` | `delivery`, `name`, `server_url`, `connection_url_var` | `delivery: "external"` forks a new database on a server that is already running — the cheap mode, and the one to prefer, because N lanes cost N cheap clones against one server. `delivery: "compose"` boots the lane its own server on its own forked volume: there is no template to clone from, so such a lane is single-use and gets re-provisioned rather than reset. `name` is the **main checkout's** database name; lane names are derived from it. `server_url` is the server *without* the database path segment — `postgres://localhost:5432`. |
+| `sqlite` | `path`, `connection_url_var` | `path` is the repo-relative path of the database file, e.g. `db.sqlite3`. The lane gets its own copy of it. |
+
+**Each role names its own database.** A lane's copy is named from `name` (or `path`) and the lane — the role is not part of it — so declaring `dev` and `test` with the same `name` makes both roles resolve to one forked database and one template. Give them the names the project already uses for them: `bookmarks` and `bookmarks_test`, `db.sqlite3` and `db.test.sqlite3`.
+
+`connection_url_var` is the **name** of the env var the project already reads its connection string from — `DATABASE_URL`, `TEST_DATABASE_URL`, whatever the settings module names. The executor sets it per lane. Never write a connection string with credentials in it here: this file is committed beside the plan, and `server_url` is a host and port, not a login.
+
+**What does not belong in this block.** Everything a worktree's own provisioning discovers and records per worktree: dependency install-or-link strategy, env file copying, `COMPOSE_PROJECT_NAME` and network naming, volume forks, sandbox tier, redis database indices, S3 prefixes, seed commands, and the `reset_cmd` for each forked database. Those are the `prepare-worktree` skill's, are decided when a lane is created, and are read back off the summary it writes per worktree. `project` records only what has to be known *before* any worktree exists.
+
+#### Asking for it
+
+Read the project first so the questions carry real defaults — the settings module, `.env.example`, `compose.yaml` / `docker-compose.yml`, the migrations directory, and the task runner. If none of that exists, the repo has no database: omit `project` and ask nothing.
+
+Otherwise issue **one `AskUserQuestion` call** carrying both questions:
+
+1. *"What does a phase lane need its own copy of?"* — options: `Nothing — lanes share the main database`, `Test database only`, `Dev and test databases`, `Dev database only`. Put the default you found in the question header ("this repo's suite reads `TEST_DATABASE_URL` — default: test only").
+2. *"How is that database delivered?"* — options: `Postgres on a server that is already running`, `Postgres started by Docker Compose`, `SQLite file in the repo`. Both questions ride the same call; if the answer to the first is `Nothing`, this answer is discarded rather than asked again.
+
+The remaining values — `migrate_cmd`, the database names, the server URL, the env var names — are **read out of the project, not asked**. They already exist in its settings, its compose file and its task runner, and a question whose answer is on disk wastes a turn. Echo what you found in the read-back summary so a wrong guess gets corrected before the file is written, and fall back to a plain-prose question only where the repo genuinely does not say.
 
 ### The pipeline block
 
@@ -593,7 +655,30 @@ and this `ai-plans/bookmark-folders.workflow.json`:
   "schema_version": 1,
   "id": "bookmark-folders",
   "plan_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md",
+  "plan_context_refs": [
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#1-goals",
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#2-guiding-decisions"
+  ],
   "base_branch": "main",
+  "project": {
+    "migrate_cmd": "uv run python manage.py migrate",
+    "databases": {
+      "dev": {
+        "engine": "postgres",
+        "delivery": "external",
+        "name": "bookmarks",
+        "server_url": "postgres://localhost:5432",
+        "connection_url_var": "DATABASE_URL"
+      },
+      "test": {
+        "engine": "postgres",
+        "delivery": "external",
+        "name": "bookmarks_test",
+        "server_url": "postgres://localhost:5432",
+        "connection_url_var": "TEST_DATABASE_URL"
+      }
+    }
+  },
   "defaults": {
     "harness": "claude-code",
     "model": "claude-sonnet-5",
@@ -741,6 +826,10 @@ and this `ai-plans/bookmark-folders.workflow.json`:
 
 Read the two renderings against each other: `p2` and `p3` both name only `p1`, so they sit in wave 2 and run at once; `p4` names both, so it is wave 3; `p5` names every gated phase, so it is wave 4 and alone there. `p1` and `p5` are the Tier 1 phases (a migration, a deletion) and carry a `model` override; the other three sit on `defaults.model`. `p2` and `p4` both touch `apps/bookmarks/api/views.py` — allowed, because the edge between them puts them in different waves; had they been same-wave, that overlap is what "Same-wave phases must not fight over the same files" is about.
 
+`plan_context_refs` points at the same plan file the `prompt_ref`s do, at its **Goals** and **Guiding Decisions** headings. Each of the five phases is handed those two sections whole, so the implementer of `p3` knows that the tree serializer is deliberately not paginated if the plan's Non-goals said so, and the reviewer of `p3` can call a paginated one scope creep instead of a bonus.
+
+The `project` block is what lets those three lanes exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
+
 ## What to avoid
 
 - **No `§N` shorthand for section references — anywhere in the plan body.** Use section names: `Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `API Design`, `Phased Rollout`, `Risk & Rollout Notes`, `Open Questions`, `Touch List`. Readers shouldn't have to count headings to follow a cross-reference, and section numbering shifts when the spec/plan evolves. Same rule applies to citing SPEC sections (`Use-cases`, `Acceptance scenarios`, etc.) — name them.
@@ -796,6 +885,9 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] **`ai-plans/<feature-kebab>.workflow.json` written** — every plan, no exceptions — with `$schema` set to the canonical URL and `schema_version: 1`.
 - [ ] Workflow graph matches the **Execution graph** table: one node per phase, one `depends_on` entry per `**Depends on**:` clause carrying both the node id and the artifact, same waves.
 - [ ] Every node has `prompt_ref` (`<plan_ref>#phase-<number>`), `touches` from its **Touch List** block, and the `gates` it must pass.
+- [ ] **`plan_context_refs` names the Goals and Guiding Decisions anchors** (`<plan_ref>#1-goals`, `<plan_ref>#2-guiding-decisions`), matching the headings as written — references, never a summary of them. Every phase's implementer and reviewer read them; a phase that doesn't know the non-goals is a phase that scope-creeps.
 - [ ] `resources` declares a `lane` pool; every gate that contends for something shared names its pool in `requires`.
+- [ ] **`project` decided, not defaulted** — asked via `AskUserQuestion`, then either written (roles `dev` / `test`, each naming its own database, engine fields filled from the project, `migrate_cmd` read out of its task runner) or deliberately omitted because lanes share the main checkout's database. No `reset_cmd`, no compose project name, no seed command, no env-file strategy — those are the worktree's, not the plan's.
+- [ ] No credential anywhere in the workflow file: `connection_url_var` is a variable name, and `server_url` is a host and port.
 - [ ] Model ids come from [resources/ai-models.yaml](resources/ai-models.yaml), and only phases off the default tier carry a `model` override.
 - [ ] `pipelines` is omitted — `defaults.pipeline: standard-phase` is enough, and the executor supplies it.

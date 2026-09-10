@@ -23,6 +23,15 @@
  * once. `dependencyClosure` is therefore an *ancestor* walk, and a sibling can
  * never appear in it.
  *
+ * **Plan-level context is carried, never summarised, and never unlabelled.**
+ * `plan_context_refs` names the plan sections that bound every phase — Goals +
+ * Non-goals, Guiding Decisions. An implementer who has not read the non-goals
+ * scope-creeps and one who has not read the decisions re-litigates them, so
+ * both they and the reviewer get those sections whole. They are also the two
+ * roles that can act on them: the reviewer measures scope creep against the
+ * non-goals, while the fixer is told to change exactly what a finding names and
+ * nothing else, and handing it the plan's goals would only widen that.
+ *
  * **The reviewer's protocol and the executor's parser are one definition.**
  * `readVerdict` is exported from here and imported by `executor.ts`, and the
  * reviewer prompt asks for `VERDICT_MARKER`. A prompt that asked for a form the
@@ -174,6 +183,12 @@ interface Materials {
   readonly branch: string
   readonly baseBranch: string
   readonly brief: string
+  /**
+   * The plan's own bounding sections — Goals + Non-goals, Guiding Decisions —
+   * resolved verbatim from `workflow.plan_context_refs`. Empty where the
+   * workflow names none, and then nothing about the prompt changes.
+   */
+  readonly planContext: readonly string[]
   readonly dependencies: readonly DependencyContext[]
   /** The reviewer's findings, when this node's last turn was a review. */
   readonly findings: string | null
@@ -193,6 +208,9 @@ function gather(request: SpawnPromptRequest, workspace: string): Materials {
     branch: row?.branch ?? 'HEAD',
     baseBranch: row?.base_branch ?? workflow.base_branch,
     brief: resolveBrief(workspace, node.id, node.prompt_ref),
+    planContext: workflow.plan_context_refs.map((ref) =>
+      resolveBrief(workspace, node.id, ref, 'plan_context_refs'),
+    ),
     dependencies: dependencyClosure(workflow.nodes, node.id).map((id) => ({
       id,
       name: workflow.nodes.find((candidate) => candidate.id === id)?.name ?? id,
@@ -230,14 +248,23 @@ export function dependencyClosure(nodes: readonly Node[], id: string): string[] 
 }
 
 /**
- * The phase brief `prompt_ref` points at: a repo-relative file, optionally with
- * a `#anchor` naming one heading's section.
+ * What a file-and-anchor reference points at: a repo-relative file, optionally
+ * with a `#anchor` naming one heading's section. `prompt_ref` names the phase
+ * brief this way and `plan_context_refs` names the plan's bounding sections the
+ * same way, so one resolver serves both — `field` only decides which of them a
+ * failure is reported against.
  *
  * Read out of the lane worktree, which is a checkout of the repository the plan
  * lives in. A reference that resolves to nothing throws rather than letting the
- * bare reference reach an agent as its whole prompt.
+ * bare reference reach an agent as its whole prompt. The error names the node
+ * and the reference; the document's own text never appears in it.
  */
-export function resolveBrief(workspace: string, nodeId: string, promptRef: string): string {
+export function resolveBrief(
+  workspace: string,
+  nodeId: string,
+  promptRef: string,
+  field = 'prompt_ref',
+): string {
   const hash = promptRef.lastIndexOf('#')
   const path = hash === -1 ? promptRef : promptRef.slice(0, hash)
   const anchor = hash === -1 ? '' : promptRef.slice(hash + 1)
@@ -246,12 +273,12 @@ export function resolveBrief(workspace: string, nodeId: string, promptRef: strin
   try {
     text = readFileSync(join(workspace, path), 'utf8')
   } catch {
-    throw new PromptError(`node "${nodeId}": prompt_ref "${promptRef}" names no readable file`)
+    throw new PromptError(`node "${nodeId}": ${field} "${promptRef}" names no readable file`)
   }
 
   const brief = anchor === '' ? text.trim() : (sectionOf(text, anchor) ?? '')
   if (brief === '') {
-    throw new PromptError(`node "${nodeId}": prompt_ref "${promptRef}" resolved to nothing`)
+    throw new PromptError(`node "${nodeId}": ${field} "${promptRef}" resolved to nothing`)
   }
   return brief
 }
@@ -335,6 +362,14 @@ function renderImplementer(materials: Materials): string {
     'so in your report rather than reaching for it.',
     `Your branch is \`${materials.branch}\`, cut from \`${materials.baseBranch}\` — derived from`,
     "this phase's dependencies, not from plan order. Commit straight to it.",
+    ...planLevel(materials, [
+      'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim,',
+      'and they bound your phase rather than describe it. A non-goal is out of scope',
+      'for the plan and therefore for you — do not build it, and do not treat it as a',
+      'task. A decision here is already settled; implement it rather than re-opening',
+      'it, and say so in your report if it cannot hold. What you were asked to build',
+      'is the phase brief further down, and only that.',
+    ]),
     '',
     '## What your phase builds on',
     ...buildsOn(materials),
@@ -359,6 +394,31 @@ function renderImplementer(materials: Materials): string {
     '- Deviations from the phase body above, and your reasoning.',
     "- Anything you could not do, with an explanation.",
   ])
+}
+
+/**
+ * The plan's Goals + Non-goals and Guiding Decisions, verbatim, under a heading
+ * that says whose they are.
+ *
+ * Verbatim because a summary of a non-goal is a paraphrase of a boundary, and a
+ * paraphrased boundary is one an agent argues with. Marked plan-level because
+ * the failure mode of pasting them next to a phase brief is an implementer that
+ * reads "we are not building X" as "build X", or a reviewer that fails a phase
+ * for not delivering the whole plan — so `framing` says, per role, what these
+ * sections are for and what they are not.
+ *
+ * A workflow naming no `plan_context_refs` gets no lines at all from here, which
+ * is what makes the field's absence compose exactly as before.
+ */
+function planLevel(materials: Materials, framing: readonly string[]): string[] {
+  if (materials.planContext.length === 0) return []
+  return [
+    '',
+    '## Plan-level decisions — the whole plan’s, not this phase’s',
+    ...framing,
+    '',
+    ...materials.planContext.flatMap((entry) => [entry, '']),
+  ]
 }
 
 /** The dependency closure, in wave order — and an explicit note about siblings. */
@@ -409,6 +469,14 @@ function renderReviewer(materials: Materials): string {
     '',
     '## What that diff was supposed to implement',
     materials.brief,
+    ...planLevel(materials, [
+      'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim.',
+      'They are what "scope creep" and "plan compliance" below are measured against:',
+      'a change serving a non-goal is scope creep, and one that contradicts a guiding',
+      'decision is a finding even where the phase body says nothing about it. Do not',
+      'ask this diff to satisfy the whole plan — it implements one phase, and the',
+      'phase body above is the only thing it was asked for.',
+    ]),
     '',
     '## The three layers, all of them, in order',
     '1. Mechanical. The changed-file list matches the report; the whole diff read;',

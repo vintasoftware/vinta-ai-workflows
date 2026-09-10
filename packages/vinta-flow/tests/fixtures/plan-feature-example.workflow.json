@@ -3,6 +3,10 @@
   "schema_version": 1,
   "id": "bookmark-folders",
   "plan_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md",
+  "plan_context_refs": [
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#1-goals",
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#2-guiding-decisions"
+  ],
   "base_branch": "main",
   "project": {
     "migrate_cmd": "uv run python manage.py migrate",

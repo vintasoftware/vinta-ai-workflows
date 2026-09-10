@@ -104,6 +104,17 @@ describe('plan-feature worked example', () => {
     }
   })
 
+  it('anchors plan-level context at the plan’s own Goals and Guiding Decisions', () => {
+    // Both anchors point into the same plan the phase briefs come from, and both
+    // are references rather than a second copy of the prose — the whole reason
+    // the field is anchors is that a copy drifts from the plan it summarises.
+    const workflow = parsed()
+    expect(workflow.plan_context_refs).toEqual([
+      `${workflow.plan_ref}#1-goals`,
+      `${workflow.plan_ref}#2-guiding-decisions`,
+    ])
+  })
+
   it('declares a lane pool and queues the suite gate behind a semaphore', () => {
     const workflow = parsed()
     expect(workflow.resources.lane?.kind).toBe('worktree')

@@ -92,6 +92,37 @@ function diamond(): Workflow {
   })
 }
 
+/**
+ * The two plan-level sections `plan_context_refs` points at, written into the
+ * same plan file the phase briefs come from. Headings as `plan-feature`'s "Plan
+ * structure" numbers them, which is what makes their anchors knowable.
+ */
+const PLAN_SECTIONS = {
+  '1. Goals': [
+    '1. Let a user group bookmarks into folders.',
+    '',
+    'Non-goals:',
+    '- Sharing a folder with another user.',
+    '- Paginating the folder tree.',
+  ].join('\n'),
+  '2. Guiding Decisions': [
+    '| Decision | Resolution |',
+    '|---|---|',
+    '| **Storage shape** | Adjacency list on `parent_id` — writes dominate reads. |',
+  ].join('\n'),
+} as const
+
+const GOALS_REF = 'plan.md#1-goals'
+const DECISIONS_REF = 'plan.md#2-guiding-decisions'
+
+/** The diamond, plus the plan-level anchors every phase is bounded by. */
+function diamondWithPlanContext(): Workflow {
+  return WorkflowSchema.parse({
+    ...diamond(),
+    plan_context_refs: [GOALS_REF, DECISIONS_REF],
+  })
+}
+
 /** A checkout holding the plan every `prompt_ref` above points at. */
 function workspace(sections: Readonly<Record<string, string>> = {}): string {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-prompts-'))
@@ -204,6 +235,181 @@ describe('the implementer prompt', () => {
     expect(compose('api-layer', 'implementer')).toContain('unit: `pnpm test`')
   })
 })
+
+// ---------------------------------------------------------------------------
+// 1b. Plan-level context: the plan's own bounds, verbatim and labelled
+// ---------------------------------------------------------------------------
+
+/**
+ * `prompt_ref` gives a phase its body and nothing else, so an implementer that
+ * never read the plan's **Non-goals** scope-creeps and one that never read its
+ * **Guiding Decisions** re-litigates them. `plan_context_refs` names those
+ * sections as file-and-anchor references — the same form `prompt_ref` uses, so
+ * one resolver serves both — and they reach the prompt whole.
+ *
+ * Two properties matter more than the wording:
+ *
+ * - **Verbatim.** A paraphrased non-goal is a boundary an agent argues with.
+ *   The assertions compare against what the resolver itself returns.
+ * - **Labelled as the plan's.** Pasted next to a phase brief, "we are not
+ *   building X" reads as "build X". So the block is under its own heading,
+ *   ahead of the phase's tasks, and says which of the two it is.
+ */
+describe('plan-level context', () => {
+  /** A checkout whose plan carries the phase bodies and the plan-level sections. */
+  const planned = (): string => workspace(PLAN_SECTIONS)
+
+  it('carries the plan’s Goals, Non-goals and Guiding Decisions verbatim', () => {
+    const dir = planned()
+    const prompt = compose('api-layer', 'implementer', {
+      dir,
+      workflow: diamondWithPlanContext(),
+    })
+
+    // Verbatim means exactly what the resolver read, not a rendering of it.
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', GOALS_REF))
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', DECISIONS_REF))
+    expect(prompt).toContain('- Sharing a folder with another user.')
+    expect(prompt).toContain('| **Storage shape** | Adjacency list on `parent_id` — writes dominate reads. |')
+  })
+
+  it('marks it as the plan’s, not the phase’s, and puts it before the tasks', () => {
+    const prompt = compose('api-layer', 'implementer', {
+      dir: planned(),
+      workflow: diamondWithPlanContext(),
+    })
+
+    // The framing is the load-bearing part: a non-goal read as a task is the
+    // exact failure this section would otherwise introduce.
+    expect(prompt).toContain('## Plan-level decisions — the whole plan’s, not this phase’s')
+    expect(prompt).toContain('they bound your phase rather than describe it')
+    expect(prompt).toContain('do not build it, and do not treat it as a')
+    expect(prompt).toContain('is the phase brief further down, and only that.')
+
+    const planLevel = prompt.indexOf('## Plan-level decisions')
+    const tasks = prompt.indexOf('## Your tasks (api-layer only)')
+    expect(planLevel).toBeGreaterThan(-1)
+    expect(tasks).toBeGreaterThan(planLevel)
+    // The phase brief still stands on its own, under its own heading.
+    expect(prompt.slice(tasks)).toContain('Add REST endpoints for folders.')
+  })
+
+  it('gives the reviewer the same sections, framed as what scope creep is measured against', () => {
+    const dir = planned()
+    const prompt = compose('api-layer', 'reviewer', {
+      dir,
+      workflow: diamondWithPlanContext(),
+    })
+
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', GOALS_REF))
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', DECISIONS_REF))
+    expect(prompt).toContain('## Plan-level decisions — the whole plan’s, not this phase’s')
+    expect(prompt).toContain('a change serving a non-goal is scope creep')
+    // A reviewer that failed the phase for not delivering the whole plan would
+    // be worse than one with no non-goals at all.
+    expect(prompt).toContain('ask this diff to satisfy the whole plan')
+    expect(prompt.indexOf('## Plan-level decisions')).toBeLessThan(
+      prompt.indexOf('## The three layers'),
+    )
+  })
+
+  it('does not give it to the fixer, whose brief is exactly one list of findings', () => {
+    const prompt = compose('api-layer', 'fixer', {
+      dir: planned(),
+      workflow: diamondWithPlanContext(),
+      reports: { 'api-layer': 'BLOCKER: POST /folders does not validate parent_id.' },
+      facts: { review: { verdict: 'fail' } },
+    })
+
+    expect(prompt).not.toContain('Plan-level decisions')
+    expect(prompt).not.toContain('Sharing a folder with another user.')
+    expect(prompt).toContain('and nothing else')
+  })
+
+  it('composes exactly as before when the workflow names no plan-level context', () => {
+    // The whole output, byte for byte: the field's absence may not move a
+    // single character of what an implementer was already handed.
+    const dir = workspace()
+    const prompt = compose('db-schema', 'implementer', { dir })
+
+    expect(prompt).toBe(IMPLEMENTER_WITHOUT_PLAN_CONTEXT(dir))
+    expect(prompt).not.toContain('Plan-level')
+  })
+
+  it('fails loudly on an anchor that does not resolve, naming the node and the ref', () => {
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      plan_context_refs: ['plan.md#no-such-section'],
+    })
+    const dir = planned()
+    const attempt = (): string => compose('api-layer', 'implementer', { dir, workflow })
+
+    expect(attempt).toThrow(PromptError)
+    expect(attempt).toThrow(/node "api-layer".*plan_context_refs.*plan\.md#no-such-section/)
+  })
+
+  it('never puts the plan’s text into that error', () => {
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      plan_context_refs: ['plan.md#no-such-section'],
+    })
+    const dir = planned()
+
+    try {
+      compose('api-layer', 'implementer', { dir, workflow })
+      expect.unreachable('an unresolvable plan-context anchor must throw')
+    } catch (error) {
+      const message = (error as Error).message
+      expect(message).not.toContain('Sharing a folder with another user.')
+      expect(message).not.toContain('Adjacency list')
+      expect(message).not.toContain('Add REST endpoints for folders.')
+    }
+  })
+})
+
+/**
+ * The implementer prompt as it stood before `plan_context_refs` existed, with
+ * the lane path left as a parameter. Pinned here rather than described, because
+ * "composes exactly as before" is a claim about every character.
+ */
+const IMPLEMENTER_WITHOUT_PLAN_CONTEXT = (dir: string): string =>
+  `You are implementing db-schema: Schema of plan bookmarks.
+
+## Working location
+Work entirely inside \`${dir}\`. cd into it before any command:
+every git, lint, test and build call runs there. Other phases of this plan may
+be running right now in sibling worktrees next to yours — never read or write
+any path outside your own. Anything you need from another phase is either
+already in your base branch or is a dependency the plan failed to declare; say
+so in your report rather than reaching for it.
+Your branch is \`HEAD\`, cut from \`main\` — derived from
+this phase's dependencies, not from plan order. Commit straight to it.
+
+## What your phase builds on
+Nothing yet — this phase starts from \`main\`.
+
+## Your tasks (db-schema only)
+## db-schema
+
+Add the Folder model and its migration.
+
+## Working instructions
+1. Read the code paths your changes touch before you write anything.
+2. Implement, matching the patterns already in the repository.
+3. Inner loop, scoped to what you touched: lint clean, then each new test on
+   its own, then the scoped suite. Do not go on while any of them is red.
+4. Outer gate, only once the inner loop is green. These run against your lane
+   and must all pass before you commit:
+   - the repository’s own type/build check and its test suite.
+5. A red outer gate sends you back to step 2. Never commit while one is red.
+
+## Required output (a single final report)
+- Status: SUCCESS or FAILURE, and why.
+- Files created or modified, paths only.
+- A 5–15 line summary of what you implemented and the decisions you took.
+- Deviations from the phase body above, and your reasoning.
+- Anything you could not do, with an explanation.
+`
 
 // ---------------------------------------------------------------------------
 // 2. The correctness rule: the dependency closure, never a sibling

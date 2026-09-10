@@ -246,6 +246,16 @@ export const WorkflowSchema = z
       .string()
       .optional()
       .describe('The human-readable plan this was emitted alongside.'),
+    plan_context_refs: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Sections of the plan that bound every phase rather than any one of them — its ' +
+          'Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference ' +
+          'in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the ' +
+          'same resolver and handed to the implementer and the reviewer verbatim, marked as ' +
+          'plan-level. Empty — the default — means the prompts carry the phase brief alone.',
+      ),
     base_branch: z.string().min(1).describe('What dependency-free nodes branch from.'),
     project: ProjectSchema.optional(),
     defaults: DefaultsSchema,

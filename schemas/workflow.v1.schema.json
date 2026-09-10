@@ -24,6 +24,15 @@
       "description": "The human-readable plan this was emitted alongside.",
       "type": "string"
     },
+    "plan_context_refs": {
+      "default": [],
+      "description": "Sections of the plan that bound every phase rather than any one of them — its Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the same resolver and handed to the implementer and the reviewer verbatim, marked as plan-level. Empty — the default — means the prompts carry the phase brief alone.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "base_branch": {
       "type": "string",
       "minLength": 1,
