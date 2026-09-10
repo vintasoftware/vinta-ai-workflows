@@ -26,7 +26,7 @@ import {
   planTemplate,
 } from './database.ts'
 import { DiskProbeError, measureBytes, probePoolDisk } from './disk.ts'
-import { readSummary, resetPlan, writeSummary } from './summary.ts'
+import { readSummary, resetPlan, writeSummary, type WorktreeSummary } from './summary.ts'
 
 const run = promisify(execFile)
 
@@ -36,6 +36,22 @@ const sh = async (
   env: Readonly<Record<string, string>>,
 ): Promise<void> => {
   await run('/bin/sh', ['-c', command], { cwd, env: { ...process.env, ...env } })
+}
+
+/**
+ * A lane that could not be handed on. Carries the lane name and which half of
+ * the recycle failed, and nothing else: a reset command's own output is the
+ * project's data — rows, paths, migration names — and §11 keeps it out of
+ * error messages the same way it keeps it out of log fields.
+ */
+export class LaneRecycleError extends Error {
+  constructor(
+    readonly lane: string,
+    readonly stage: 'worktree' | 'database' | 'reprovision',
+  ) {
+    super(`lane "${lane}" could not be recycled (${stage})`)
+    this.name = 'LaneRecycleError'
+  }
 }
 
 export interface ProjectSpec {
@@ -129,22 +145,60 @@ export class LanePool {
    * Hands a lane back fresh for the next phase, re-provisioning it when it is
    * single-use. The decision comes from the summary on disk, not from this
    * object: that file is the contract, and it outlives the process.
+   *
+   * A lane is its worktree *and* its databases, so both go back: the previous
+   * phase's branch, staged edits and untracked leftovers are as much of it as
+   * its rows are, and the re-provisioning branch already returns both. The
+   * worktree goes first — a `git clean` run after the reset would delete the
+   * database file the reset had just restored.
    */
   async recycle(name: string): Promise<Lane> {
     const lane = this.lane(name)
-    const plan = resetPlan(await readSummary(this.#summaryDir, name))
+    const summary = await readSummary(this.#summaryDir, name)
+    const plan = resetPlan(summary)
     if (plan.reusable) {
-      for (const command of plan.commands) await sh(command, lane.path, lane.env)
+      await this.#restoreWorktree(lane, summary)
+      try {
+        for (const command of plan.commands) await sh(command, lane.path, lane.env)
+      } catch {
+        throw new LaneRecycleError(name, 'database')
+      }
       return lane
     }
 
-    await this.#git(['worktree', 'remove', '--force', lane.path])
-    await this.#git(['branch', '-D', lane.branch])
-    await rm(join(this.#summaryDir, `${name}.yaml`), { force: true })
+    try {
+      await this.#git(['worktree', 'remove', '--force', lane.path])
+      await this.#git(['branch', '-D', lane.branch])
+      await rm(join(this.#summaryDir, `${name}.yaml`), { force: true })
+    } catch {
+      throw new LaneRecycleError(name, 'reprovision')
+    }
 
     const fresh = await this.#provisionWorktree(lane.name, lane.kind)
     this.#all = this.#all.map((candidate) => (candidate.name === name ? fresh : candidate))
     return fresh
+  }
+
+  /**
+   * The worktree back on its own branch at its own base, with nothing of the
+   * previous phase left in it. The phase branch itself survives — it is a ref,
+   * and integration still has to merge it.
+   *
+   * Read from the summary rather than from `lane`, for the same reason the
+   * reset decision is: the file is the contract, so a lane the skill
+   * provisioned and a lane the pool provisioned recycle identically. The linked
+   * dependency tree is excluded from the clean because it is state a lane
+   * cannot run a gate without and never a leftover of the phase.
+   */
+  async #restoreWorktree(lane: Lane, summary: WorktreeSummary): Promise<void> {
+    try {
+      const git = (args: readonly string[]) => run('git', [...args], { cwd: lane.path })
+      await git(['checkout', '--force', summary.branch])
+      await git(['reset', '--hard', summary.base_ref])
+      await git(['clean', '-fd', '-e', 'node_modules'])
+    } catch {
+      throw new LaneRecycleError(lane.name, 'worktree')
+    }
   }
 
   #git(args: readonly string[]): Promise<unknown> {

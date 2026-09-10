@@ -57,8 +57,9 @@ import { OpencodeAdapter } from '../harness/opencode.ts'
 import { createAgentConflictFixer, type ConflictFixer } from '../integration/fixer.ts'
 import { Integrator, type WaveResult } from '../integration/integrator.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
+import type { DatabaseSpec } from '../lanes/database.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
-import { LanePool } from '../lanes/pool.ts'
+import { LanePool, type ProjectSpec } from '../lanes/pool.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import {
   postMortem,
@@ -67,7 +68,7 @@ import {
 } from '../postmortem/postmortem.ts'
 import { ResourcePools } from '../resources/pools.ts'
 import { createScheduler, type RunStop } from '../scheduler/index.ts'
-import type { Workflow } from '../types.ts'
+import type { Project, ProjectDatabase, Workflow } from '../types.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 import { laneRootFor } from './paths.ts'
@@ -233,6 +234,9 @@ export async function runCommand(
     adapters,
     executor: host.executor,
     laneRoot,
+    // §8: a lane slot outlives the phase that used it, and the next phase must
+    // not start in the last one's worktree or against its rows.
+    ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),
   })
 
   // §9's amend needs two things this file owns: the integration worktree a
@@ -325,6 +329,8 @@ interface HostWiring {
   readonly waveResults?: () => readonly IntegrationWaveRecord[]
   /** `DaemonRun.amend`'s rebase. Absent means an amendment that needs one is refused. */
   readonly rebase?: NonNullable<AmendRunner['rebase']>
+  /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
+  readonly recycleLane?: (name: string) => Promise<void>
   /** Handles this process opened. Never the lanes — see the `finally` above. */
   close(): void
 }
@@ -376,10 +382,9 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     // lane is one of these worktrees rather than a directory nobody made.
     laneCount: workflow.resources['lane']?.capacity ?? 1,
     baseRef: workflow.base_branch,
-    // A workflow describes a plan, not a project's databases. With none
-    // declared a lane is a worktree and nothing else, and `migrateCmd` is
-    // never reached — templates are built per declared database role.
-    project: { databases: {}, migrateCmd: 'true' },
+    // With no `project` block a lane is a worktree and nothing else, and
+    // `migrateCmd` is never reached — templates are built per declared role.
+    project: projectSpec(workflow.project),
     ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
   })
 
@@ -419,7 +424,54 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     },
   })
 
-  return { executor, waveResults: () => integrator.records, rebase, close: () => cache.close() }
+  return {
+    executor,
+    waveResults: () => integrator.records,
+    rebase,
+    recycleLane: async (name: string) => {
+      await pool.recycle(name)
+    },
+    close: () => cache.close(),
+  }
+}
+
+/**
+ * The workflow's `project` block in `LanePool`'s terms.
+ *
+ * The two shapes differ only in casing, which is deliberate: the document is
+ * snake_case like every other field a skill writes, and the pool's is the
+ * package's own. `delivery: 'file'` is not a field a workflow may state — it
+ * is what a SQLite database *is*, and offering the choice would only let a
+ * document say something untrue.
+ */
+function projectSpec(project: Project | undefined): ProjectSpec {
+  if (project === undefined) return { databases: {}, migrateCmd: 'true' }
+  const { dev, test } = project.databases
+  return {
+    migrateCmd: project.migrate_cmd,
+    databases: {
+      ...(dev === undefined ? {} : { dev: databaseSpec(dev) }),
+      ...(test === undefined ? {} : { test: databaseSpec(test) }),
+    },
+  }
+}
+
+function databaseSpec(database: ProjectDatabase): DatabaseSpec {
+  if (database.engine === 'sqlite') {
+    return {
+      engine: 'sqlite',
+      delivery: 'file',
+      path: database.path,
+      connectionUrlVar: database.connection_url_var,
+    }
+  }
+  return {
+    engine: 'postgres',
+    delivery: database.delivery,
+    name: database.name,
+    serverUrl: database.server_url,
+    connectionUrlVar: database.connection_url_var,
+  }
 }
 
 /**

@@ -29,6 +29,167 @@
       "minLength": 1,
       "description": "What dependency-free nodes branch from."
     },
+    "project": {
+      "type": "object",
+      "properties": {
+        "migrate_cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The project’s own migrate command. Run once per template database — never per lane, which is what makes the Nth lane cost a copy rather than a provision."
+        },
+        "databases": {
+          "default": {},
+          "description": "Roles a lane forks. An undeclared role means the lane has no database of its own.",
+          "type": "object",
+          "properties": {
+            "dev": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "sqlite"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Env var the project reads its connection string from, set per lane."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "path",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "postgres"
+                    },
+                    "delivery": {
+                      "type": "string",
+                      "enum": [
+                        "external",
+                        "compose"
+                      ],
+                      "description": "`external` forks a database on an already-running server — the cheap mode, and the one to prefer for pooling. `compose` boots the lane its own server on its own forked volume, which has no template to clone from and therefore no reset: such a lane is single-use and is re-provisioned rather than reset."
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The main checkout’s database name. Lane names derive from it."
+                    },
+                    "server_url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The server, without the database path segment, e.g. `postgres://localhost:5432`."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "delivery",
+                    "name",
+                    "server_url",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "One forked database a lane gets its own copy of."
+            },
+            "test": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "sqlite"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Env var the project reads its connection string from, set per lane."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "path",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "postgres"
+                    },
+                    "delivery": {
+                      "type": "string",
+                      "enum": [
+                        "external",
+                        "compose"
+                      ],
+                      "description": "`external` forks a database on an already-running server — the cheap mode, and the one to prefer for pooling. `compose` boots the lane its own server on its own forked volume, which has no template to clone from and therefore no reset: such a lane is single-use and is re-provisioned rather than reset."
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The main checkout’s database name. Lane names derive from it."
+                    },
+                    "server_url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The server, without the database path segment, e.g. `postgres://localhost:5432`."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "delivery",
+                    "name",
+                    "server_url",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "One forked database a lane gets its own copy of."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "migrate_cmd"
+      ],
+      "additionalProperties": false,
+      "description": "What a lane needs to be a working checkout of this project. Optional: with no project block a lane is a worktree and nothing else."
+    },
     "defaults": {
       "type": "object",
       "properties": {

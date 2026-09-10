@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { planDatabase, planTemplate, type PostgresSpec } from '../src/lanes/database.ts'
 import { DiskProbeError } from '../src/lanes/disk.ts'
-import { type Lane, LanePool, type ProjectSpec } from '../src/lanes/pool.ts'
+import { type Lane, LanePool, LaneRecycleError, type ProjectSpec } from '../src/lanes/pool.ts'
 import { readSummary } from '../src/lanes/summary.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -193,6 +193,62 @@ describe('lane pool', () => {
     expect(recycled.path).toBe(lane.path)
     expect(new Database(testDb, { readonly: true }).prepare('SELECT count(*) FROM widgets').pluck().get()).toBe(0)
     runSuite()
+  })
+
+  it('puts a reused worktree back on its own base, with nothing of the last phase in it', async () => {
+    const pool = await provision(sqliteProject())
+    const lane = pool.lanes[0] as Lane
+    const git = (...args: string[]) =>
+      execFileSync('git', args, {
+        cwd: lane.path,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+
+    // A phase, as the executor runs one: its own branch cut in the lane, a
+    // commit on it, and a scratch file nobody tracked.
+    git('checkout', '-B', 'phase/a', 'main')
+    await writeFile(join(lane.path, 'implemented.txt'), 'phase a', 'utf8')
+    git('add', '-A')
+    git('commit', '-m', 'phase a')
+    await writeFile(join(lane.path, 'scratch.txt'), 'x', 'utf8')
+
+    await pool.recycle(lane.name)
+
+    // Back on the lane's own branch at its own base — not on the previous
+    // phase's, which is where the next phase would otherwise start.
+    expect(git('rev-parse', '--abbrev-ref', 'HEAD')).toBe(lane.branch)
+    expect(git('rev-parse', 'HEAD')).toBe(git('rev-parse', 'main'))
+    expect(existsSync(join(lane.path, 'implemented.txt'))).toBe(false)
+    expect(existsSync(join(lane.path, 'scratch.txt'))).toBe(false)
+    expect(git('status', '--porcelain')).toBe('')
+
+    // The phase branch itself survives: integration still has to merge it.
+    expect(git('rev-parse', '--verify', 'phase/a')).toMatch(/^[0-9a-f]{40}$/)
+    // And the lane can still run: its linked dependency tree was not cleaned
+    // away with the phase's leftovers.
+    expect(existsSync(join(lane.path, 'node_modules'))).toBe(true)
+    execFileSync('node', ['tests/widgets.mjs'], {
+      cwd: lane.path,
+      env: { ...process.env, ...lane.env },
+    })
+  })
+
+  it('refuses loudly, naming only the lane, when a lane will not recycle', async () => {
+    const pool = await provision(sqliteProject())
+    const lane = pool.lanes[0] as Lane
+
+    // The template the reset copies back is gone, so the reset cannot run.
+    await rm(join(poolRoot, '.templates'), { recursive: true, force: true })
+
+    const failure = await pool.recycle(lane.name).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(LaneRecycleError)
+    expect((failure as LaneRecycleError).lane).toBe(lane.name)
+    expect((failure as LaneRecycleError).stage).toBe('database')
+    // §11: the reset command and whatever it printed never reach the message.
+    expect((failure as Error).message).not.toContain('cp ')
+    expect((failure as Error).message).not.toContain('.templates')
   })
 
   it('re-provisions a single-use lane instead of reusing it', async () => {

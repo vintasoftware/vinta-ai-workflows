@@ -212,6 +212,8 @@ function rig(
     /** Holds every session open after `session_started`, for the §9 operations. */
     readonly stall?: boolean
     readonly capabilities?: Partial<HarnessCapabilities>
+    /** `LanePool.recycle`'s seam: called as a used lane is handed on (§8). */
+    readonly recycleLane?: (name: string) => Promise<void>
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-flow-scheduler-'))
@@ -250,6 +252,7 @@ function rig(
     adapters: { [HARNESS]: options.stall === true ? stall.adapter : adapter },
     executor,
     laneRoot: join(dir, 'lanes'),
+    ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
   })
 
   cleanups.push(() => {
@@ -644,6 +647,82 @@ describe('capacity', () => {
     const pool = analyzeRun(r.journal, 'run-1').pools.find((p) => p.resource === 'test-suite')
     expect(pool).toMatchObject({ attribution: 'exact', capacity: 1, peakHeld: 1 })
     expect(analyzeRun(r.journal, 'run-1').gaps).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2b: lane reuse (§8)
+//
+// A plan with more phases than lanes is the normal case, so a lane slot serves
+// several phases in turn. What these assert is *when* the pool is asked to
+// recycle one — between the phases that share it, never at the end of a run,
+// where §8 keeps the last phase's lane as evidence.
+// ---------------------------------------------------------------------------
+
+describe('lane reuse', () => {
+  it('recycles a lane between the phases that share it, and never after the last', async () => {
+    // Three nodes, one lane: the slot is handed on twice.
+    const recycled: string[] = []
+    const timeline: string[] = []
+    const r = rig(makeWorkflow([node('a'), node('b'), node('c')], { lanes: 1 }), {
+      tap: (call) => timeline.push(`run:${call.nodeId}`),
+      recycleLane: async (name) => {
+        recycled.push(name)
+        timeline.push(`recycle:${name}`)
+      },
+    })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    // Twice, not three times: the first node gets the lane the pool
+    // provisioned, and the run ends without touching the third node's.
+    expect(recycled).toEqual(['run-1-lane-1', 'run-1-lane-1'])
+    expect(timeline).toEqual([
+      'run:a',
+      'recycle:run-1-lane-1',
+      'run:b',
+      'recycle:run-1-lane-1',
+      'run:c',
+    ])
+    expectDrained(r)
+  })
+
+  it('leaves a lane alone when every node had one of its own', async () => {
+    const recycled: string[] = []
+    const r = rig(makeWorkflow([node('a'), node('b')], { lanes: 2 }), {
+      recycleLane: async (name) => {
+        recycled.push(name)
+      },
+    })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(recycled).toEqual([])
+    expectDrained(r)
+  })
+
+  it('fails the node rather than running it in a lane that would not recycle', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b')], { lanes: 1 }), {
+      recycleLane: async () => {
+        throw new Error('dropdb: connection refused to db "app_wt_run_1_lane_1"')
+      },
+    })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'failed' })
+    // The second node never started: no effect of its ever ran, so it cannot
+    // have implemented anything in the first node's worktree.
+    expect(nodeIdsOf(r.calls)).toEqual(['a'])
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['a'])
+    // Loud, and by lane name: §11 keeps the recycle command's own output —
+    // database names, paths, whatever it printed — out of the failure.
+    expect(report.failures['b']).toBe('lane "run-1-lane-1" could not be recycled')
+    expect(report.failures['b']).not.toContain('dropdb')
+    // And the lane went back on the free list rather than stranding capacity.
+    expectDrained(r)
   })
 })
 

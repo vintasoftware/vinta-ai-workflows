@@ -94,6 +94,14 @@ export interface SchedulerOptions {
   readonly executor: EffectExecutor
   /** Where lane worktrees live — `LanePool`'s `poolRoot`. */
   readonly laneRoot: string
+  /**
+   * Returns a lane slot to a clean state before another node is given it —
+   * `LanePool.recycle`, which resets what it can and re-provisions what it
+   * cannot (§8). Absent for a host that injected its own executor: such a host
+   * owns its lanes, and a slot it never provisioned is not the scheduler's to
+   * reset.
+   */
+  readonly recycleLane?: (name: string) => Promise<void>
 }
 
 /** Why a run stopped short. Node, pool and harness ids only. */
@@ -188,6 +196,8 @@ export class Scheduler {
    */
   #workflow: Workflow
   readonly #freeLanes: string[]
+  /** Lane slots a node has already run in, and which therefore need recycling. */
+  readonly #usedLanes = new Set<string>()
   #waves = new Map<string, number>()
   #waiters: (() => void)[] = []
   #iterations = 0
@@ -515,6 +525,7 @@ export class Scheduler {
       this.#assign(state, { lane: state.lane })
 
       try {
+        await this.#prepareLane(state)
         const settled = await this.#drive(state)
         this.#release(state)
         if (settled.outcome === 'done') this.#setStatus(state, 'done')
@@ -538,6 +549,42 @@ export class Scheduler {
         this.#fail(state, error instanceof Error ? error.message : 'node failed')
         return
       }
+    }
+  }
+
+  /**
+   * Hands this node a clean lane (§8).
+   *
+   * A plan almost always has more phases than lanes, so a slot serves several
+   * of them in turn, and the phase that had it last left its branch, its
+   * working tree and its databases behind. `recycleLane` resets what can be
+   * reset and re-provisions what cannot — the decision is the pool's, taken
+   * from the summary on disk.
+   *
+   * **Here, and not at the release.** A lane is recycled as it is handed to the
+   * next node, because the lane the *last* phase to use it released is never
+   * handed on again — and §8 keeps that worktree, that branch and those
+   * databases exactly as the phase left them, as the evidence a human reads.
+   * Recycling at the release would erase the last phase's lane in every run.
+   *
+   * A recycle that fails fails *this* node rather than letting it run in the
+   * previous phase's worktree. The lane goes back on the free list still dirty,
+   * so the next node to take it fails the same way: a dirty lane is never
+   * silently reused.
+   */
+  async #prepareLane(state: NodeState): Promise<void> {
+    const lane = state.lane as string
+    if (!this.#usedLanes.has(lane)) {
+      this.#usedLanes.add(lane)
+      return
+    }
+    const recycle = this.#options.recycleLane
+    if (recycle === undefined) return
+    try {
+      await recycle(lane)
+    } catch {
+      // The lane name, and nothing the recycle commands printed (§11).
+      throw new Error(`lane "${lane}" could not be recycled`)
     }
   }
 

@@ -15,10 +15,21 @@
  * try, and fail, to escape.
  */
 import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { amendRun, type AmendResult } from '../src/amend/amend.ts'
@@ -39,6 +50,8 @@ import { parsePostMortem } from '../src/postmortem/postmortem.ts'
 // ---------------------------------------------------------------------------
 // Rig
 // ---------------------------------------------------------------------------
+
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 const temps: string[] = []
 
@@ -582,6 +595,65 @@ const dispatchSpy = (io: Recorder): { adapter: HarnessAdapter; at: () => number 
 
 const laneRoot = (dir: string): string => join(dir, '.vinta-flow', 'lanes')
 
+/**
+ * `tests/fixtures/repo/` — the fixture project with a SQLite database and a
+ * migrate command — as a real git repo, plus the two gate scripts this file's
+ * database test needs.
+ *
+ * The dependency tree is symlinked rather than installed, which is what lets
+ * the fixture's scripts resolve `better-sqlite3`, and what `LanePool` then
+ * links on into every lane.
+ */
+const sqliteRepo = (): string => {
+  const dir = makeTemp()
+  cpSync(join(HERE, 'fixtures', 'repo'), dir, { recursive: true })
+  symlinkSync(join(HERE, '..', 'node_modules'), join(dir, 'node_modules'))
+
+  const script = (name: string, body: string): void =>
+    writeFileSync(join(dir, 'scripts', name), `${body}\n`, 'utf8')
+
+  // The phase that dirties the lane. It fails if its own insert did not take,
+  // so the check below cannot pass vacuously.
+  script(
+    'seed.mjs',
+    [
+      `import Database from 'better-sqlite3'`,
+      `import { writeFileSync } from 'node:fs'`,
+      `const db = new Database(process.env.DATABASE_URL)`,
+      `db.prepare('INSERT INTO widgets (label) VALUES (?)').run('phase-a')`,
+      `const rows = db.prepare('SELECT count(*) FROM widgets').pluck().get()`,
+      `db.close()`,
+      // Untracked, so only a clean of the worktree removes it.
+      `writeFileSync('left-behind.txt', 'phase a')`,
+      `if (rows !== 1) process.exit(1)`,
+    ].join('\n'),
+  )
+  // The phase that inherits the lane. The table must exist — the template was
+  // migrated — and be empty — the lane was recycled between the two.
+  script(
+    'check.mjs',
+    [
+      `import Database from 'better-sqlite3'`,
+      `import { existsSync } from 'node:fs'`,
+      `const db = new Database(process.env.DATABASE_URL, { readonly: true })`,
+      `const rows = db.prepare('SELECT count(*) FROM widgets').pluck().get()`,
+      `db.close()`,
+      `if (rows !== 0 || existsSync('left-behind.txt')) process.exit(1)`,
+    ].join('\n'),
+  )
+
+  const git = (...args: readonly string[]): void => {
+    execFileSync('git', [...args], { cwd: dir, stdio: 'ignore' })
+  }
+  git('init', '--initial-branch=main')
+  git('config', 'user.email', 'tests@vinta-flow.invalid')
+  git('config', 'user.name', 'vinta-flow tests')
+  git('config', 'commit.gpgsign', 'false')
+  git('add', '--all')
+  git('commit', '-m', 'initial')
+  return dir
+}
+
 describe('vinta-flow run, composed', () => {
   it('provisions lanes, runs gates in them, and reaches done', async () => {
     const dir = gitRepo()
@@ -750,6 +822,138 @@ describe('vinta-flow run, composed', () => {
     expect(outcome.ok ? undefined : outcome.code).not.toBe('rebase_unavailable')
     expect(outcome.ok).toBe(true)
     if (outcome.ok) expect(outcome.rebased).toEqual(['b'])
+  })
+
+  /**
+   * §8 end to end, through the one path that can switch it on: a workflow's
+   * `project` block.
+   *
+   * Two phases, one lane, one forked SQLite database. `a` writes a row; `b`'s
+   * gate refuses unless it finds a table (so the template was migrated) with
+   * nothing in it (so the lane was recycled between the phases rather than
+   * handed on with the previous phase's data).
+   */
+  it('forks a database per lane and hands the next phase a clean one', async () => {
+    const dir = sqliteRepo()
+    const path = writeJson(dir, 'workflow.json', {
+      ...assemblyWorkflow([node('a'), node('b', ['a'])]),
+      project: {
+        migrate_cmd: 'node scripts/migrate.mjs',
+        databases: {
+          dev: { engine: 'sqlite', path: 'db.sqlite3', connection_url_var: 'DATABASE_URL' },
+        },
+      },
+      gates: {
+        seed: { cmd: 'node scripts/seed.mjs' },
+        check: { cmd: 'node scripts/check.mjs' },
+      },
+      nodes: [
+        { ...node('a'), gates: ['seed'] },
+        { ...node('b', ['a']), gates: ['check'] },
+      ],
+    })
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'db',
+      doctor: healthyBins(dir),
+      perLaneBytes: 1,
+    })
+
+    expect(io.err).toEqual([])
+    expect(code).toBe(OK)
+
+    // One lane, so `b` ran where `a` had: the gate that passed is the
+    // assertion that it arrived migrated and empty.
+    const lane = join(laneRoot(dir), 'db-lane-1')
+    expect(existsSync(join(lane, 'db.sqlite3'))).toBe(true)
+    // The fork is the lane's own file, never the main checkout's.
+    expect(existsSync(join(dir, 'db.sqlite3'))).toBe(false)
+
+    // Both gates passed, which is the whole assertion: `seed` refuses unless
+    // its insert took, and `check` refuses unless the row is gone again.
+    const gates = openJournal(dir)
+    try {
+      const results = gates
+        .events('db')
+        .filter((event) => event.type === 'gate_result')
+        .map((event) => event.payload)
+      expect(results).toEqual([
+        { gate: 'seed', exit_code: 0, status: 'passed' },
+        { gate: 'check', exit_code: 0, status: 'passed' },
+      ])
+    } finally {
+      gates.close()
+    }
+  })
+
+  /**
+   * §8's other half: a compose-delivered database has no template to clone
+   * from and therefore no reset, so its lane is single-use. The run must still
+   * finish — the pool re-provisions the slot rather than resetting it.
+   */
+  it('re-provisions a lane whose databases cannot be reset, and still completes', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', {
+      ...assemblyWorkflow([node('a'), node('b', ['a'])]),
+      project: {
+        migrate_cmd: 'true',
+        databases: {
+          dev: {
+            engine: 'postgres',
+            delivery: 'compose',
+            name: 'app',
+            server_url: 'postgres://localhost:5432',
+            connection_url_var: 'DATABASE_URL',
+          },
+        },
+      },
+    })
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'single',
+      doctor: healthyBins(dir),
+      perLaneBytes: 1,
+    })
+
+    expect(io.err).toEqual([])
+    expect(code).toBe(OK)
+
+    // The slot was torn down and rebuilt between the phases, and what it left
+    // is a lane like any other: one worktree, its summary rewritten.
+    const worktrees = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: dir,
+      encoding: 'utf8',
+    })
+      .split('\n')
+      .filter((line) => line.startsWith('worktree '))
+    expect(worktrees).toHaveLength(3)
+    expect(existsSync(join(laneRoot(dir), 'single-lane-1'))).toBe(true)
+    expect(existsSync(join(dir, '.vinta-ai-workflows', 'worktrees', 'single-lane-1.yaml'))).toBe(
+      true,
+    )
+  })
+
+  it('provisions no database at all for a workflow with no project block', async () => {
+    const dir = sqliteRepo()
+    const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a')]))
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      runId: 'plain',
+      doctor: healthyBins(dir),
+      perLaneBytes: 1,
+    })
+
+    expect(code).toBe(OK)
+    // A lane is a worktree and nothing else: no template was built, no fork
+    // was cloned, and no connection variable was invented.
+    expect(readdirSync(join(laneRoot(dir), '.templates'))).toEqual([])
+    expect(existsSync(join(laneRoot(dir), 'plain-lane-1', 'db.sqlite3'))).toBe(false)
   })
 })
 

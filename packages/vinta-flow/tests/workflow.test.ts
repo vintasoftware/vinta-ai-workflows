@@ -184,6 +184,91 @@ describe('shape validation', () => {
   })
 })
 
+describe('the project block', () => {
+  const withProject = (project: unknown): Record<string, any> => {
+    const doc = golden()
+    doc.project = project
+    return doc
+  }
+
+  it('is optional — a workflow that omits it is unchanged', () => {
+    const result = parseWorkflow(golden())
+    if (!result.ok) throw new Error('expected valid')
+    expect(result.workflow.project).toBeUndefined()
+    // And it is not required of the document either.
+    expect((buildSchema() as { required: string[] }).required).not.toContain('project')
+  })
+
+  it('accepts the two forked databases a lane can carry', () => {
+    const result = parseWorkflow(
+      withProject({
+        migrate_cmd: 'pnpm migrate',
+        databases: {
+          dev: {
+            engine: 'postgres',
+            delivery: 'external',
+            name: 'app',
+            server_url: 'postgres://localhost:5432',
+            connection_url_var: 'DATABASE_URL',
+          },
+          test: { engine: 'sqlite', path: 'db.test.sqlite3', connection_url_var: 'TEST_DATABASE_URL' },
+        },
+      }),
+    )
+    if (!result.ok) throw new Error(`expected valid, got:\n${formatIssues(result.issues)}`)
+    expect(result.workflow.project?.databases.dev?.engine).toBe('postgres')
+    expect(result.workflow.project?.databases.test?.engine).toBe('sqlite')
+  })
+
+  it('takes a project that declares no database at all', () => {
+    const result = parseWorkflow(withProject({ migrate_cmd: 'pnpm migrate' }))
+    if (!result.ok) throw new Error('expected valid')
+    expect(result.workflow.project?.databases).toEqual({})
+  })
+
+  it('rejects a database whose delivery the pool has no strategy for', () => {
+    const issues = expectInvalid(
+      withProject({
+        migrate_cmd: 'pnpm migrate',
+        databases: {
+          dev: {
+            engine: 'postgres',
+            delivery: 'kubernetes',
+            name: 'app',
+            server_url: 'postgres://localhost:5432',
+            connection_url_var: 'DATABASE_URL',
+          },
+        },
+      }),
+    )
+    expect(issues).toContain('project.databases.dev')
+  })
+
+  it('rejects an engine nothing in `src/lanes/` knows how to fork', () => {
+    expect(
+      expectInvalid(
+        withProject({
+          migrate_cmd: 'pnpm migrate',
+          databases: { dev: { engine: 'mysql', name: 'app', connection_url_var: 'DATABASE_URL' } },
+        }),
+      ),
+    ).toContain('project.databases.dev')
+  })
+
+  it('rejects a lane role nobody provisions', () => {
+    expect(
+      expectInvalid(
+        withProject({
+          migrate_cmd: 'pnpm migrate',
+          databases: {
+            staging: { engine: 'sqlite', path: 'db.sqlite3', connection_url_var: 'DATABASE_URL' },
+          },
+        }),
+      ),
+    ).toMatch(/staging|Unrecognized/)
+  })
+})
+
 describe('generated schema', () => {
   it('matches the committed schemas/workflow.v1.schema.json', () => {
     const committed = readFileSync(join(REPO_ROOT, 'schemas', 'workflow.v1.schema.json'), 'utf8')

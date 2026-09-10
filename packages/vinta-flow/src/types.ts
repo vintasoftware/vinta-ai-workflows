@@ -38,8 +38,13 @@ const Passthrough = z
   .describe('Host-owned passthrough. Preserved verbatim and never interpreted.')
 
 // ---------------------------------------------------------------------------
-// Pipeline state machines — vinta-state-machine-editor's own shape, so the
-// editor loads and saves these with no translation layer.
+// Pipeline state machines — close to vinta-state-machine-editor's own shape,
+// but NOT identical: effects are one flat array here and ordered
+// {before, after} hooks there, `trigger` is a string here and an object there,
+// four of its fields are required and optional here, and its `from` is
+// nullable. `ui/src/editor-model.ts` owns that mapping. SPEC §5.2 originally
+// claimed there was no translation layer; there is one, and pretending
+// otherwise made it somebody's surprise instead of a designed seam.
 // ---------------------------------------------------------------------------
 
 export const SideEffectSchema = z.strictObject({
@@ -148,6 +153,78 @@ export const NodeSchema = z.strictObject({
   max_fix_rounds: z.number().int().min(0).default(2),
 })
 
+// ---------------------------------------------------------------------------
+// The project — what a lane has to become a working checkout of it (§8)
+//
+// Deliberately not the whole of `prepare-worktree`'s summary. That file records
+// what a worktree *is*; this block records only what the daemon must know
+// *before* one exists, which is the set of databases to fork and the command
+// that migrates the template they are forked from. Everything else the skill
+// decides and records — dependency and env strategy, compose networks and
+// volume forks, sandbox tier, redis indices, S3 prefixes, seed commands — is
+// the skill's, is discovered per worktree, and is read back off the summary.
+//
+// A database declared here is always *forked*: `share` and `stub` are the
+// absence of a declaration, not a value, because a lane that shares the main
+// checkout's database is a lane with no database of its own to describe.
+// ---------------------------------------------------------------------------
+
+const SqliteDatabaseSchema = z.strictObject({
+  engine: z.literal('sqlite'),
+  path: z
+    .string()
+    .min(1)
+    .describe('Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane.'),
+  connection_url_var: z
+    .string()
+    .min(1)
+    .describe('Env var the project reads its connection string from, set per lane.'),
+})
+
+const PostgresDatabaseSchema = z.strictObject({
+  engine: z.literal('postgres'),
+  delivery: z
+    .enum(['external', 'compose'])
+    .describe(
+      '`external` forks a database on an already-running server — the cheap mode, and the ' +
+        'one to prefer for pooling. `compose` boots the lane its own server on its own forked ' +
+        'volume, which has no template to clone from and therefore no reset: such a lane is ' +
+        'single-use and is re-provisioned rather than reset.',
+    ),
+  name: z.string().min(1).describe('The main checkout’s database name. Lane names derive from it.'),
+  server_url: z
+    .string()
+    .min(1)
+    .describe('The server, without the database path segment, e.g. `postgres://localhost:5432`.'),
+  connection_url_var: z.string().min(1),
+})
+
+export const DatabaseSchema = z
+  .discriminatedUnion('engine', [SqliteDatabaseSchema, PostgresDatabaseSchema])
+  .describe('One forked database a lane gets its own copy of.')
+
+export const ProjectSchema = z
+  .strictObject({
+    migrate_cmd: z
+      .string()
+      .min(1)
+      .describe(
+        'The project’s own migrate command. Run once per template database — never per lane, ' +
+          'which is what makes the Nth lane cost a copy rather than a provision.',
+      ),
+    databases: z
+      .strictObject({
+        dev: DatabaseSchema.optional(),
+        test: DatabaseSchema.optional(),
+      })
+      .default({})
+      .describe('Roles a lane forks. An undeclared role means the lane has no database of its own.'),
+  })
+  .describe(
+    'What a lane needs to be a working checkout of this project. Optional: with no project ' +
+      'block a lane is a worktree and nothing else.',
+  )
+
 export const DefaultsSchema = z.strictObject({
   harness: z.enum(HARNESS_IDS),
   model: z.string().min(1),
@@ -170,6 +247,7 @@ export const WorkflowSchema = z
       .optional()
       .describe('The human-readable plan this was emitted alongside.'),
     base_branch: z.string().min(1).describe('What dependency-free nodes branch from.'),
+    project: ProjectSchema.optional(),
     defaults: DefaultsSchema,
     resources: z.record(Id, ResourceSchema).describe('Named capacity pools. `lane` is required.'),
     gates: z.record(Id, GateSchema).default({}),
@@ -196,6 +274,8 @@ export type WorkflowInput = z.input<typeof WorkflowSchema>
 export type Node = z.infer<typeof NodeSchema>
 export type Dependency = z.infer<typeof DependencySchema>
 export type Gate = z.infer<typeof GateSchema>
+export type Project = z.infer<typeof ProjectSchema>
+export type ProjectDatabase = z.infer<typeof DatabaseSchema>
 export type Resource = z.infer<typeof ResourceSchema>
 export type Pipeline = z.infer<typeof PipelineSchema>
 export type SideEffect = z.infer<typeof SideEffectSchema>
