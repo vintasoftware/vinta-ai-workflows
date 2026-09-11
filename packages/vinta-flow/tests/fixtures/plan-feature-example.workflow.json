@@ -29,19 +29,28 @@
   },
   "crew": {
     "junior": {
+      "role": "implementer",
       "tier": 1,
       "model": "claude-haiku-4-5",
       "description": "A model plus its migration, and a flag deletion."
     },
     "mid-1": {
+      "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
       "description": "A DRF viewset mirroring the tags viewset."
     },
     "mid-2": {
+      "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
       "description": "Tree serializer and the list action that returns it."
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "tier": 2,
+      "model": "claude-sonnet-5",
+      "description": "Reads every phase; Tier 2 is the hardest work here."
     }
   },
   "defaults": {
@@ -51,9 +60,9 @@
   },
   "resources": {
     "lane": {
-      "capacity": 2,
+      "capacity": 4,
       "kind": "worktree",
-      "description": "The widest wave. Three crew, but never three phases at once."
+      "description": "One desk per crew member, kept for the whole run."
     },
     "test-suite": {
       "capacity": 1,

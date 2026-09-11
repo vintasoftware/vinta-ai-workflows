@@ -7,29 +7,31 @@
 
 1. Determine the **effective tier** for the role. For the mechanical steps it is simply `agent_models.<role>`. For `reviewer` / `fixer` there are now three sources, in this order:
    1. a per-phase `**Review models**:` override the conductor passed;
-   2. **the tier above the phase's own author on the plan's Crew table** — the most junior member *strictly above* the assigned member's tier (see [Who reviews](#who-reviews-one-tier-above-the-author) below);
+   2. **the cheapest reviewer on the plan's Crew table at or above the phase's tier** (see [Who reviews](#who-reviews-a-member-not-a-tier) below);
    3. `agent_models.<role>`.
 2. **No effective tier (override absent AND key unset, or the whole `agent_models` section absent) → do not force a model.** Spawn with the runtime's default model (today's behavior). Skip the rest.
 3. Open [`ai-tools/skills/plan-feature/resources/ai-models.yaml`](../plan-feature/resources/ai-models.yaml), take that tier's `models`, **filter to the vendors the runtime actually exposes**, pick the cheapest/fastest survivor, and translate it to the runner's spawn form — the same resolution [implement-phase](../implement-phase/SKILL.md) runs for the implementer, only keyed by a config tier instead of a plan line.
 4. `ai-models.yaml` missing, or the tier has no runtime-available vendor → fall back to the runtime default and surface the fallback once. Never hard-fail a phase over a model-selection miss.
 
-### Who reviews: one tier above the author
+### Who reviews: a member, not a tier
 
-**A review runs at the tier above the agent that wrote the code.** A team has seniors read juniors' work, and a project-wide `agent_models.reviewer` cannot express that — it puts every phase's review on one model, so the cheapest agent on the plan is checked by the same tier that wrote it.
+**Reviewers are their own members on the plan's Crew table**, with `role: reviewer`, and they never take phases. That is what makes an agent reviewing its own work impossible rather than merely unlikely — and it replaces an earlier rule that resolved a reviewer *model* one tier above the author, which was a proxy for independence and failed in both directions: a phase covered by the top-tier implementer had nobody above it and fell back to being read at its own tier, and a tier says nothing about *who* once a member is a durable agent rather than a model id.
 
-Resolve it from the plan's **Crew** table: take the phase's assigned member's tier, and use the **most junior member strictly above it**. Not the top of the roster — stepping a Tier 1 phase straight to Tier 4 makes every cheap phase on the plan carry the priciest review it has.
+Resolve it from the roster: the **cheapest reviewer at or above the phase's tier**. A reviewer's tier is a floor in the same way an implementer's is — it reads work at or below its own capability, never above it.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
-- **The reviewer borrows a tier, not a person.** It does not occupy that member's place in the schedule and never waits for them to be free. Otherwise the one senior on a plan could not review the phase they are busy implementing.
-- **Nobody above the author → fall through to `agent_models.reviewer`.** A single-tier roster, or a Tier 4 phase, has no senior to borrow from, and the project default is the right answer there.
+- **A reviewer is claimed, not borrowed.** It owns one worktree and one session and cannot read two diffs at once, so a phase whose reviewer is busy waits. That cannot deadlock: reviewers never take phases, so the wait is always on a review already running.
+- **A reviewer keeps its session across phases**, like every other member. By phase three it knows this codebase, which is most of what a cold reviewer spends its first turn on.
+- **No reviewer on the roster → fall through to `agent_models.reviewer`**, cold, one session per phase. That is what every plan did before, and the one thing a roster-less plan leaves on the table.
 
 A plan with no **Crew** table skips this step entirely and resolves `agent_models.<role>` as it always did.
 
 ### What `fixer` still governs
 
 `fixer` governs fewer rounds than it used to. A finding goes back to the phase's
-own implementer, which fixes at the tier of the crew member that took the phase
+own implementer — the same agent, in the same session — which fixes at the tier
+of the crew member that took the phase
 because it *is* that member; `agent_models.fixer` applies to the cold cases
 only — a runtime that cannot continue a sub-agent, and the last round before
 giving up, which is deliberately handed to an agent that has not seen the work.

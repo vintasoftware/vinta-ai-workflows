@@ -171,16 +171,24 @@ describe('plan-feature worked example', () => {
    * members wide on a graph that is two — so asserting them equal would enforce
    * a rule the skill does not state and this example disproves.
    */
-  it('sizes the lane pool to the widest wave, not to the roster', () => {
+  /**
+   * The roster is not capped at the widest wave: a member can earn their place
+   * by being cheaper rather than by adding a lane. This example is three
+   * implementers on a graph that is two phases wide, which is exactly that
+   * case — so the assertion is a lower bound, not an equality.
+   */
+  it('staffs at least as many implementers as the widest wave needs', () => {
     const workflow = parsed()
     const perWave = new Map<number, number>()
     for (const wave of computeWaves(workflow.nodes).values()) {
       perWave.set(wave, (perWave.get(wave) ?? 0) + 1)
     }
     const widest = Math.max(...perWave.values())
+    const built = Object.values(workflow.crew).filter(
+      (member) => member.role === 'implementer',
+    ).length
 
-    expect(workflow.resources['lane']?.capacity).toBe(widest)
-    expect(Object.keys(workflow.crew).length).toBeGreaterThanOrEqual(widest)
+    expect(built).toBeGreaterThanOrEqual(widest)
   })
 
   /**
@@ -216,11 +224,42 @@ describe('plan-feature worked example', () => {
     }
   })
 
-  it('assigns work to every member it declares', () => {
+  it('assigns a phase to every implementer, and staffs a reviewer for all of them', () => {
     const workflow = parsed()
     const assigned = new Set(workflow.nodes.map((node) => node.crew))
+    const entries = Object.entries(workflow.crew)
 
-    for (const member of Object.keys(workflow.crew)) expect(assigned.has(member)).toBe(true)
+    for (const [id, member] of entries) {
+      if (member.role === 'implementer') expect(assigned.has(id)).toBe(true)
+    }
+
+    // The roles are disjoint, which is what makes an agent reading its own diff
+    // unrepresentable rather than merely unlikely.
+    const reviewersOnRoster = entries.filter(([, member]) => member.role === 'reviewer')
+    expect(reviewersOnRoster.length).toBeGreaterThan(0)
+    for (const [id] of reviewersOnRoster) expect(assigned.has(id)).toBe(false)
+
+    // A reviewer's tier is a floor too: one below the hardest phase could never
+    // be picked for it, and the plan would silently fall back to the project
+    // default for that phase.
+    const hardest = Math.max(
+      ...workflow.nodes.map((node) => workflow.crew[node.crew ?? '']?.tier ?? 0),
+    )
+    expect(Math.max(...reviewersOnRoster.map(([, member]) => member.tier))).toBeGreaterThanOrEqual(
+      hardest,
+    )
+  })
+
+  /**
+   * A member keeps one worktree — and therefore one session — for the whole
+   * run, so the pool is sized by the roster rather than by how many phases can
+   * run at once. The idle desks are the price of the sessions the busy ones
+   * carry, and the example is deliberately a case where they differ.
+   */
+  it('gives every member a desk, including the reviewer', () => {
+    const workflow = parsed()
+
+    expect(workflow.resources['lane']?.capacity).toBe(Object.keys(workflow.crew).length)
   })
 
   /**

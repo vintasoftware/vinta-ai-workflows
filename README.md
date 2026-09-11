@@ -80,7 +80,7 @@ The bootstrap skills are **one-shot**. They scaffold the project once and are re
 - **Goals + Non-goals** — what's in / out of scope.
 - **Guiding Decisions** — feature flag (key, scope, default, flip-on criterion if any), storage shape, tenant scoping, API contract, schema rules. Load-bearing — every phase reaches back here.
 - **Data Model Changes** — migrations + rollout order.
-- **Phased Rollout** — opens with a **Crew** table (the agents this plan is staffed with, and the tier each is staffed at), then each phase declares: `id`, `title`, `goal`, `Assigned to` (which crew member takes it — implement-plan resolves their tier to the cheapest available model), `reusable_skills` (other project skills the implementer should invoke), `Changes`, `Tests`, `Acceptance`, plus flags for `is_cross_repo` and `is_flag_removal` (both deferred).
+- **Phased Rollout** — opens with a **Crew** table (the agents this plan is staffed with, each with a role — `implementer` or `reviewer` — and a tier; every member keeps one worktree and one session for the whole run), then each phase declares: `id`, `title`, `goal`, `Assigned to` (which crew member takes it — implement-plan resolves their tier to the cheapest available model), `reusable_skills` (other project skills the implementer should invoke), `Changes`, `Tests`, `Acceptance`, plus flags for `is_cross_repo` and `is_flag_removal` (both deferred).
 - **Risk & Rollout Notes**, **Open Questions**, **Touch List**.
 
 Phases are sized so the slowest path (e.g. cross-repo producer wiring, external integration approval) starts in Phase 1 and fast in-repo work fills in behind. Large mutation phases get split (`4a / 4b / 4c`) rather than monolithic.

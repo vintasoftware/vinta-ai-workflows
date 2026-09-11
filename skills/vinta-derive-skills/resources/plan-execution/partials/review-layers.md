@@ -30,7 +30,7 @@ Open the phase body alongside the diff and walk:
 
 ## Layer 3 — Independent reviewer subagent
 
-After Layers 1–2 pass, spawn a **separate** subagent (different session, no implementation context) using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) at the model resolved from the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step — **one tier above the crew member that wrote the phase**, or `agent_models.reviewer` where the roster has nobody above them. Read-only by design.
+After Layers 1–2 pass, hand the diff to a **reviewer from the plan's Crew table** — a member whose role is `reviewer`, which is never a member that writes code — using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) at the model resolved by the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step. Where the roster staffs no reviewer, spawn a **separate** subagent at `agent_models.reviewer` with no implementation context, as before. Read-only by design, either way.
 
 Reviewer prompt template — see the reviewer agent's body for the standard form. Triage findings:
 - **BLOCKER**: must fix before the phase is pushed (the conductor's integrate step).
@@ -76,10 +76,12 @@ the brief again.
 5. Loop until Layers 1, 2, 3 are all clean.
 
 **The reviewer is never the implementer.** Continuing the *reviewer* across
-rounds is fine and remembers what it flagged, but the review itself must come
-from an agent that did not write the code. An implementer asked to review its
-own phase grades its own work from inside its own reasoning, which is the one
-thing the layers exist to prevent.
+rounds — and across phases — is fine and remembers what it flagged, but the
+review itself must come from an agent that did not write the code. An
+implementer asked to review its own phase grades its own work from inside its
+own reasoning, which is the one thing the layers exist to prevent. On a plan
+with a **Crew** table this is structural rather than a rule to follow: reviewers
+and implementers are disjoint sets, and no phase can be assigned to a reviewer.
 
 **Which model fixes.** A continued implementer fixes at its own crew member's
 tier, because it *is* that member. `agent_models.fixer` therefore governs the

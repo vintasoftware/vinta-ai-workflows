@@ -439,22 +439,29 @@ First thing under **Phased Rollout**, before the **Execution graph**:
 ```markdown
 ### Crew
 
-| Agent | Tier | Takes | Why this tier |
-|---|---|---|---|
-| `junior` | 1 | Phase 0, Phase 4 | An empty module and a flag deletion — exact precedent, both of them. |
-| `mid-1` | 2 | Phase 1 | A DRF viewset mirroring `@app/tags/api/views.py` almost line for line. |
-| `mid-2` | 2 | Phase 1b, Phase 2 | Serializer with cross-field validation; the producer stub is the same shape. |
-| `senior` | 4 | Phase 3 | Cycle detection over a user-mutable tree — no precedent in this repo. |
+| Agent | Role | Tier | Takes | Why this tier |
+|---|---|---|---|---|
+| `junior` | implementer | 1 | Phase 0, Phase 4 | An empty module and a flag deletion — exact precedent, both of them. |
+| `mid-1` | implementer | 2 | Phase 1 | A DRF viewset mirroring `@app/tags/api/views.py` almost line for line. |
+| `mid-2` | implementer | 2 | Phase 1b, Phase 2 | Serializer with cross-field validation; the producer stub is the same shape. |
+| `senior` | implementer | 4 | Phase 3 | Cycle detection over a user-mutable tree — no precedent in this repo. |
+| `reviewer` | reviewer | 4 | — reviews every phase | Reads the tree phase too; a reviewer below the hardest phase can never take it. |
 ```
 
-**Every member has to earn their place, and there are exactly two ways to do it:**
+**Implementers write; reviewers read; nobody does both.** That is not a convention, it is the shape of the document — an implementer cannot be assigned a review and a reviewer cannot be assigned a phase, so an agent grading its own work is not something a plan can express. It replaces the older "review one tier above the author" rule, which was a proxy for independence and broke in both directions: a phase covered by the top-tier implementer had nobody above it, and a tier says nothing about *who* now that a member is a durable agent rather than a model id.
+
+Staff **at least one reviewer** on every plan. A roster of implementers only still runs — reviews fall back to the project's `agent_models.reviewer`, cold, one session per phase — but the reviewer then never accumulates anything about the codebase, which is most of what makes review cheap by phase three.
+
+**A reviewer's tier is a floor too.** It reads phases at or below its own tier, so a Tier 2 reviewer cannot take the Tier 4 phase. One reviewer at the plan's hardest tier is the simple answer; two (a cheap one and a capable one) is worth it on a plan with a wide tier spread, because then the Tier 1 phases are not read by the priciest model you have.
+
+**Every implementer has to earn their place, and there are exactly two ways to do it:**
 
 - **Concurrency.** A wave of three phases needs three pairs of hands, and they must be hands *at or above* each of those phases' tiers — two mids and a junior cannot run three Tier 2 phases two-wide, because the junior is not allowed to take one. So go wave by wave: sort the wave's phase tiers, sort the roster's tiers, and check the roster covers them one for one.
 - **Cheapness.** A member below the roster's other tiers earns their place by taking work the dearer members would otherwise do. A junior who runs the migration and the flag deletion is worth having even in a graph that is never two phases wide, because those two phases run at Tier 1 instead of Tier 2.
 
 **A member who does neither should not be on the roster** — a second mid in a graph that is never two wide adds no concurrency and saves nothing, and the executor refuses a member assigned no phase at all.
 
-Note what this does *not* say: the roster is not capped at the widest wave. Concurrency is capped there — that is what sizes the lane pool — but a cheaper member is bought with money, not with parallelism, and adding one to a narrow graph is a perfectly good trade.
+Note what this does *not* say: the roster is not capped at the widest wave. Concurrency is capped there, but a cheaper member is bought with money, not with parallelism, and adding one to a narrow graph is a perfectly good trade — it now costs a worktree, which is the honest price (see "Every member gets a desk").
 
 Two more rules:
 
@@ -489,22 +496,31 @@ When those two genuinely cannot both hold, **the floor wins and the plan says so
 
 ### Who reviews
 
-**The review runs one tier above the author, by default, and the plan does not say so.** A team has seniors read juniors' work; the executor derives that from the roster — the most junior member *strictly above* the phase's tier. A Tier 1 phase is read by a Tier 2 agent, not by another Tier 1 agent and not by the top of the roster.
+**The cheapest reviewer on the roster whose tier is at or above the phase's.** Not one tier above the author — the independence comes from the role, so a peer-tier review is a genuine second pair of eyes rather than the same agent grading itself.
 
-Two things follow that are worth knowing before you staff:
+Three things follow that are worth knowing before you staff:
 
-- **The reviewer borrows a tier, not a person.** It does not occupy a roster slot and does not wait for anyone, so the one senior on a plan can still review the phase they are busy implementing.
-- **A single-tier roster reviews itself.** Nobody above the author means the review runs at the author's own model. That is the old behaviour, and it is a reason to put at least two tiers on a roster even when one would do the work.
+- **A reviewer is claimed, not borrowed.** It owns one worktree and one session, so it cannot read two diffs at once; a phase whose reviewer is busy waits its turn. One reviewer on a three-lane plan is a queue at the review step — usually fine, occasionally the thing to widen.
+- **A reviewer below every phase is refused.** Its tier is a floor, so a Tier 1 reviewer on a plan whose cheapest phase is Tier 2 would never be picked. The executor will not accept it.
+- **No reviewer on the roster falls back to `agent_models.reviewer`**, cold, one session per phase. That is exactly what every plan did before, and it is the one case where a roster leaves something on the table.
 
-Add `**Review models**:` **only** when a phase needs a review above what its tier already implies — high blast-radius, subtle concurrency or transaction logic, a security-sensitive surface, a migration that is hard to undo:
+Add `**Review models**:` **only** when a phase needs a review above what the roster would pick — high blast-radius, subtle concurrency or transaction logic, a security-sensitive surface, a migration that is hard to undo:
 
-> **Review models**: reviewer Tier 4 — this phase rewrites the transactional batch-apply protocol with deferred constraints; a subtle ordering bug here corrupts data, so the independent review runs on the most capable model regardless of the author's tier. Fixer left on the derived default.
+> **Review models**: reviewer Tier 4 — this phase rewrites the transactional batch-apply protocol with deferred constraints; a subtle ordering bug here corrupts data, so the independent review runs on the most capable model regardless of the author's tier. Fixer left on the roster default.
 
-**Precedence** (resolved by `implement-plan` / `review-phase`): a phase's `**Review models**:` override wins → else the tier above the phase's author on the roster → else the project-wide `agent_models.reviewer` / `agent_models.fixer` in `.vinta-ai-workflows.yaml` → else the runtime default.
+**Precedence** (resolved by `implement-plan` / `review-phase`): a phase's `**Review models**:` override wins → else the cheapest roster reviewer at or above the phase's tier → else the project-wide `agent_models.reviewer` / `agent_models.fixer` in `.vinta-ai-workflows.yaml` → else the runtime default.
 
-### What a roster does not buy
+### Every member gets a desk
 
-**A crew member is not a live session.** Lanes are recycled between phases — new base branch, reset databases — so an agent cannot carry context from one phase into the next; resuming into a reset worktree is exactly what the executor refuses. What a member carries between phases is the *staffing decision*, not a warm cache. Prompt-cache reuse happens **within** a phase, between its implement and fix turns, and staffing changes nothing about it.
+**A member keeps one worktree, and one session, for the whole run.** This is why the roster is worth writing down rather than being a way to pick models: the agent that takes Phase 4 is the agent that took Phase 1, and it still knows where things live, how the suite is run and what this codebase's conventions are. That rediscovery is most of what a cold agent's first turn of a phase is spent on.
+
+It works because the *directory* stops moving. An agent whose worktree changed between phases would be reasoning about paths it is not standing in — that, not the reset, was what made cross-phase reuse unsafe. With the directory pinned, the only open question is which files changed while the member was away, and git answers that exactly: the executor hands the continued agent the list, plus whether the previous phase's own work is in this tree at all.
+
+What this costs, and what to weigh when sizing the roster:
+
+- **A worktree and a set of forked databases per member.** Adding a cheaper implementer to save a tier on two phases is a real trade now — disk against money — rather than free.
+- **Lane capacity is the roster size**, implementers and reviewers both. Not the widest wave: a member idle in wave 1 still has a desk waiting.
+- **A member whose phase failed starts their next one cold.** Their context is the context that failed, and a wrong conclusion costs more to inherit than a repository costs to re-read. Nothing to declare; the executor does it.
 
 **The mechanical-step models are still not plan-owned.** Worktree prep and opening the PR stay under `agent_models` in `.vinta-ai-workflows.yaml`. Don't put them on the roster; they'd be ignored.
 
@@ -567,7 +583,7 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `defaults.model` | The concrete model id for the tier **most** phases carry, pulled from [resources/ai-models.yaml](resources/ai-models.yaml). A staffed workflow never reads it for a phase — every node's model comes off its member — but it is still required, and it is what an amendment adding an unstaffed node would fall back to. |
 | `defaults.pipeline` | `standard-phase` — see "The pipeline block". |
 | `defaults.max_session_turns` | Omit (defaults to 12). It caps how many turns one reused agent session may take before the executor starts a fresh one; the executor reuses sessions across a phase's implement and fix turns, so this is a context-window guard rather than something a plan tunes. |
-| `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the **widest wave**, capped by the project's parallel-lane budget (3 when unstated). Not the roster size: a roster may be larger than the widest wave when it carries a cheaper member, and lanes past the widest wave are disk nothing can ever fill. |
+| `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the **roster size**, implementers and reviewers both, because every member keeps one worktree for the whole run. How many run *at once* is still capped by the graph and by the project's parallel-lane budget (3 when unstated); a member idle in wave 1 still has a desk. |
 | `resources.<pool>` | One `{"kind": "semaphore"}` pool per expensive shared thing a gate contends for — the test database, the e2e browser grid, a staging deploy slot. `capacity: 1` when only one can run at a time. |
 | `gates.<id>` | The checks a phase must pass, as **shell commands run in the phase's lane** — the project's real typecheck / test / lint invocations, not an agent and not prose. Give the slow ones `requires` naming the pool they contend for, and a `timeout_s` that is generous rather than tight. |
 | `nodes[]` | One per phase, in plan order. |
@@ -684,21 +700,27 @@ A five-phase plan whose `**Depends on**:` lines are:
 staffed by this **Crew** table:
 
 ```markdown
-| Agent | Tier | Takes | Why this tier |
-|---|---|---|---|
-| `junior` | 1 | Phase 1, Phase 5 | A model plus its migration, and a flag deletion. Exact precedent, both. |
-| `mid-1` | 2 | Phase 2 | A DRF viewset mirroring the tags viewset almost line for line. |
-| `mid-2` | 2 | Phase 3, Phase 4 | Tree serializer and the list action that returns it — same shape twice. |
+| Agent | Role | Tier | Takes | Why this tier |
+|---|---|---|---|---|
+| `junior` | implementer | 1 | Phase 1, Phase 5 | A model plus its migration, and a flag deletion. Exact precedent, both. |
+| `mid-1` | implementer | 2 | Phase 2 | A DRF viewset mirroring the tags viewset almost line for line. |
+| `mid-2` | implementer | 2 | Phase 3, Phase 4 | Tree serializer and the list action that returns it — same shape twice. |
+| `reviewer` | reviewer | 2 | — reviews every phase | Tier 2 is the hardest phase here, so one reviewer covers the plan. |
 ```
 
-Three members for a graph that is never more than **two** phases wide, which is
-the case worth reading closely. The two mids are there for concurrency: wave 2
-is two Tier 2 phases, and two hands at Tier 2 is the only way to run it two-wide
-— a junior cannot take one of them. `junior` is there for cheapness: without
-them, Phase 1 and Phase 5 would run on a mid's model for work that has exact
-precedent. `junior` is idle in waves 2 and 3 and that is not a defect; a fourth
-member would be, because there would be nothing left for them to make cheaper
-and no third phase for them to run alongside.
+Three implementers for a graph that is never more than **two** phases wide,
+which is the case worth reading closely. The two mids are there for concurrency:
+wave 2 is two Tier 2 phases, and two hands at Tier 2 is the only way to run it
+two-wide — a junior cannot take one of them. `junior` is there for cheapness:
+without them, Phase 1 and Phase 5 would run on a mid's model for work that has
+exact precedent. `junior` is idle in waves 2 and 3 and that is not a defect; a
+fourth implementer would be, because there would be nothing left for them to
+make cheaper and no third phase for them to run alongside.
+
+One reviewer at Tier 2 covers every phase, since Tier 2 is the hardest work on
+this plan. A Tier 1 reviewer would be refused — it could never take Phase 2,
+Phase 3 or Phase 4 — and a Tier 4 one would be paying top rate to read a
+migration.
 
 and this **Execution graph** table:
 
@@ -748,19 +770,28 @@ and this `ai-plans/bookmark-folders.workflow.json`:
   },
   "crew": {
     "junior": {
+      "role": "implementer",
       "tier": 1,
       "model": "claude-haiku-4-5",
       "description": "A model plus its migration, and a flag deletion."
     },
     "mid-1": {
+      "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
       "description": "A DRF viewset mirroring the tags viewset."
     },
     "mid-2": {
+      "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
       "description": "Tree serializer and the list action that returns it."
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "tier": 2,
+      "model": "claude-sonnet-5",
+      "description": "Reads every phase; Tier 2 is the hardest work here."
     }
   },
   "defaults": {
@@ -770,9 +801,9 @@ and this `ai-plans/bookmark-folders.workflow.json`:
   },
   "resources": {
     "lane": {
-      "capacity": 2,
+      "capacity": 4,
       "kind": "worktree",
-      "description": "The widest wave. Three crew, but never three phases at once."
+      "description": "One desk per crew member, kept for the whole run."
     },
     "test-suite": {
       "capacity": 1,
@@ -913,13 +944,15 @@ and this `ai-plans/bookmark-folders.workflow.json`:
 
 Read the three renderings against each other: `p2` and `p3` both name only `p1`, so they sit in wave 2 and run at once; `p4` names both, so it is wave 3; `p5` names every gated phase, so it is wave 4 and alone there. `p2` and `p4` both touch `apps/bookmarks/api/views.py` — allowed, because the edge between them puts them in different waves; had they been same-wave, that overlap is what "Same-wave phases must not fight over the same files" is about.
 
-No node carries a `model`. `p1` and `p5` are the Tier 1 phases and run on `junior`'s model because that is who took them — the roster says it once instead of two nodes repeating an id that goes stale on the next model bump. `mid-2` takes `p3` and then `p4`, which is deliberate rather than incidental: the same agent writes the serializer and the action that returns it, and the pairing is visible in the Crew table before anything runs. It buys no warm context, though — `p3` and `p4` are different waves, so `mid-2` starts `p4` in a recycled lane and a cold session.
+No node carries a `model`. `p1` and `p5` are the Tier 1 phases and run on `junior`'s model because that is who took them — the roster says it once instead of two nodes repeating an id that goes stale on the next model bump.
 
-`junior`'s two phases are reviewed on a Tier 2 model, because `mid-1` is the most junior member above Tier 1. Nothing in the document says so: it falls out of the roster.
+`mid-2` takes `p3` and then `p4`, which is the pairing worth seeing: the same agent writes the tree serializer and the action that returns it, in the same worktree, **continuing the same session**. Its second phase does not pay to work out where the serializers live or how the suite is run — it did that in `p3`. What it *is* told, because the tree moved underneath it, is that it is now on `p4`'s branch, that `p3`'s work is in this tree (`p4` depends on it), and exactly which files differ from what it last saw.
+
+No node names a reviewer. Every phase is read by `reviewer`, the only member on the roster whose role is to read them — so no agent ever reads its own diff, and `reviewer` builds up its own picture of the codebase across all five.
 
 `plan_context_refs` points at the same plan file the `prompt_ref`s do, at its **Goals** and **Guiding Decisions** headings. Each of the five phases is handed those two sections whole, so the implementer of `p3` knows that the tree serializer is deliberately not paginated if the plan's Non-goals said so, and the reviewer of `p3` can call a paginated one scope creep instead of a bonus.
 
-The lane pool is **two**, not three: lanes are bought with concurrency and the graph is never more than two phases wide, so a third worktree is disk nothing could fill. `junior` waits for a lane like anyone else. The `project` block is what lets those three lanes exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
+The lane pool is **four**: one desk per member, including the reviewer, because a member keeps its worktree and therefore its session for the whole run. Only two are ever busy at once — the graph is never wider than that — and the two idle ones are the price of the sessions the other two are carrying. The `project` block is what lets those worktrees exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
 
 ## What to avoid
 
@@ -931,7 +964,8 @@ The lane pool is **two**, not three: lanes are bought with concurrency and the g
 - **No `**Depends on**:` edge you can't justify with an artifact.** "It's later in the list" is not a dependency; it's a chain that costs the team a week of wall-clock for nothing.
 - **No two same-wave phases rewriting the same file.** Either add the edge or split differently.
 - **No phase assigned below the tier its work implies.** A cheap model on work above its tier does not fail cleanly; it fails review two rounds later, and by then nothing points at the staffing.
-- **No roster member who takes no phase**, and no roster wider than the widest wave. Both are agents budgeted for and never used, and the executor refuses the first.
+- **No implementer who takes no phase**, and no reviewer below every phase on the plan. Both are agents budgeted for that can never be picked, and the executor refuses both.
+- **No phase assigned to a reviewer, and no reviewer that also implements.** The roles are disjoint so that an agent reading its own diff is not something the document can say.
 - **No `model` on a node of a staffed workflow.** The member carries it; a node with both is refused rather than one quietly outranking the other.
 - **No repeating a defect a post-mortem already recorded.** A `wave_conflicts` entry on those paths, or a `missing_dependencies` entry between those layers, means the last run already paid for the lesson; drawing the same graph again wastes it.
 - **No plan without its `.workflow.json` sibling, and no sibling that disagrees with the plan.** Different nodes, different edges, different waves, a `prompt_ref` pointing at a phase that was renumbered — all of them mean the two files were edited separately instead of derived from the same `**Depends on**:` lines.
@@ -963,7 +997,8 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Same-wave phases checked against the **Touch List** for file overlap; real overlaps either serialized with an edge or called out explicitly under the graph table.
 - [ ] Post-mortems from previous runs (`.vinta-flow/runs/*/postmortem.json`, plus any committed beside a plan) read **before** the graph was drawn; every finding either changed an edge, a wave or a split, or was consciously dismissed as not applying to this feature.
 - [ ] Slow-moving / cross-repo work sits in wave 1, and no in-repo phase depends on a cross-repo phase when it only needs the contract.
-- [ ] **Crew** table is the first thing under **Phased Rollout**: one row per agent, every member taking at least one phase, every `Takes` cell agreeing with that phase's `**Assigned to**:` line.
+- [ ] **Crew** table is the first thing under **Phased Rollout**: one row per agent with its **Role**, every implementer taking at least one phase, every `Takes` cell agreeing with that phase's `**Assigned to**:` line.
+- [ ] **At least one reviewer on the roster**, at or above the plan's hardest phase tier. Implementers and reviewers are disjoint — no phase is assigned to a reviewer.
 - [ ] **Every member earns their place** — by concurrency (a wave genuinely needs that many hands *at or above* those phases' tiers) or by cheapness (they take work a dearer member would otherwise do). Check it wave by wave: sort the wave's phase tiers against the roster's and confirm the roster covers them one for one.
 - [ ] Every phase is assigned to a member whose tier is **at or above** the rubric tier its work implies — no phase handed down a tier to save money.
 - [ ] **Execution graph** carries the Agent column, and an **Idle** note naming who has nothing to do in which wave. A wave that serializes because the roster is smaller than it is called out rather than left to be discovered at run time.
@@ -984,7 +1019,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Workflow graph matches the **Execution graph** table: one node per phase, one `depends_on` entry per `**Depends on**:` clause carrying both the node id and the artifact, same waves.
 - [ ] Every node has `prompt_ref` (`<plan_ref>#phase-<number>`), `touches` from its **Touch List** block, and the `gates` it must pass.
 - [ ] **`plan_context_refs` names the Goals and Guiding Decisions anchors** (`<plan_ref>#1-goals`, `<plan_ref>#2-guiding-decisions`), matching the headings as written — references, never a summary of them. Every phase's implementer and reviewer read them; a phase that doesn't know the non-goals is a phase that scope-creeps.
-- [ ] `resources` declares a `lane` pool at the **widest wave** (not the roster size — a roster carrying a cheaper member is legitimately larger); every gate that contends for something shared names its pool in `requires`.
+- [ ] `resources` declares a `lane` pool at the **roster size** — one worktree per member, implementers and reviewers both, because a member keeps its desk and its session for the whole run; every gate that contends for something shared names its pool in `requires`.
 - [ ] **`project` decided, not defaulted** — asked via `AskUserQuestion`, then either written (roles `dev` / `test`, each naming its own database, engine fields filled from the project, `migrate_cmd` read out of its task runner) or deliberately omitted because lanes share the main checkout's database. No `reset_cmd`, no compose project name, no seed command, no env-file strategy — those are the worktree's, not the plan's.
 - [ ] No credential anywhere in the workflow file: `connection_url_var` is a variable name, and `server_url` is a host and port.
 - [ ] Model ids come from [resources/ai-models.yaml](resources/ai-models.yaml) and appear **only** in the `crew` block — no node carries a `model`, and `crew` transcribes the Crew table row for row.

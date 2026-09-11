@@ -17,9 +17,17 @@ Pick:
 
 ### Reuse the agent the plan staffed
 
-A crew member is a **staffing decision**, not a live session. The phase before this one that the same member took ran in a lane that has since been reset to a different base, so there is no context to continue and nothing to warm: this phase's implementer starts cold whatever the roster says. Session reuse happens **within** a phase, between its implement and fix turns — see the fix loop in [review-phase](../review-phase/SKILL.md).
+**A crew member is an agent, and it is still alive.** If this member has already taken a phase on this run, continue that sub-agent rather than spawning a new one: it is standing in the same worktree — a member keeps one for the whole run — and it already knows where this codebase keeps things, how its suite is run and what its conventions are. Rediscovering that is most of what a cold agent's first turn costs.
 
-What the assignment *does* carry between phases is the tier, and therefore the bill.
+Because it is new work, the continuation gets the phase's **full brief**, not a delta. Precede it with the re-orientation described in [Re-orienting a member after the reset](../implement-plan/SKILL.md#re-orienting-a-member-after-the-reset): same agent and same directory, whether the previous phase's work is in this tree, and which files differ from what it last saw.
+
+Start cold instead when any of these hold:
+
+- the member has taken no phase yet on this run;
+- **their previous phase failed** — that session is the context that failed with it;
+- the runtime cannot continue a finished sub-agent at all.
+
+Record which of those applied, so a phase that was unexpectedly slow can be read later without guessing.
 
 **Retry escalation (no user prompt):** the picked model fails on a clear capability gap → step **one tier up** and retry once. After Tier 4 fails, STOP. Update tracking with `❌`, post the agent's report to the user, ask how to proceed.
 

@@ -28,29 +28,51 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     at the widest wave — a junior who runs the migration and the flag deletion is
     worth having in a graph that never runs two phases at once — but the lane pool
     still is, because lanes are bought with concurrency and crew are not.
-  - **Reviews run one tier above the author.** A team has seniors read juniors'
-    work; a flat `agent_models.reviewer` cannot say that, and today it puts the
-    cheapest agent on the plan under review by its own tier. The reviewer steps to
-    the *next* tier up, never to the top of the roster, and **borrows a tier rather
-    than a person** — so the one senior on a plan can still review the phase they are
-    busy implementing. Nobody above the author falls through to the project default.
+  - **Reviewers are a role on the crew, and implementers and reviewers are
+    disjoint.** A member has `role: implementer` or `role: reviewer`; a phase cannot
+    be assigned to a reviewer and a reviewer never writes code, so an agent reading
+    its own diff is not something a plan can express. A phase is read by the
+    cheapest reviewer at or above its tier. A roster with no reviewer still runs and
+    falls back to `agent_models.reviewer`, cold, one session per phase.
+  - **A crew member is an agent that lives for the whole run.** Each one keeps its
+    own worktree and its own session across every phase it takes, so the agent that
+    takes Phase 4 still knows what it learned about the codebase in Phase 1 —
+    which is most of what a cold agent's first turn of a phase is spent
+    rediscovering.
+    - This works because the *directory* stops moving. Lanes used to be anonymous
+      slots handed out by a free list, so a member landed somewhere different each
+      phase and its context described paths it was not standing in. Pinning each
+      member to one worktree leaves a far smaller question — which files changed —
+      and `git diff --name-only` answers it exactly.
+    - A cross-phase continuation therefore gets the new phase's **full brief** (it
+      is new work, not a delta) behind a re-orientation: same agent, same directory,
+      everything you learned still holds; the tree is on a different branch; these
+      files differ; and — the sentence that matters most — whether the previous
+      phase's own work is in this tree at all.
+    - A delta that cannot be computed is reported as **unknown**, never as empty.
+      "Nothing changed" is the one wording that would stop an agent re-reading.
+    - Two things still start cold: a member whose previous phase **failed**, because
+      its session is the context that failed with it, and the final fix round.
+    - The cost, stated plainly: **one worktree and one set of forked databases per
+      member**, so `resources.lane.capacity` is now the roster size rather than the
+      widest wave, and adding a cheaper implementer is a trade of disk against
+      money rather than free.
   - The workflow document gained a top-level **`crew`** block and **`nodes[].crew`**.
     A staffed node carries no `model` — the member has one — and a document that is
-    half-staffed, names a member nobody declared, or declares a member nobody is
-    assigned to is refused before the run starts.
+    half-staffed, names a member nobody declared, assigns a phase to a reviewer,
+    declares an implementer nobody is assigned to, or staffs a reviewer below every
+    phase on the plan is refused before the run starts.
   - `vinta-flow` claims an agent **before** the lane, prefers the member the plan
     named, covers with the **cheapest** qualified free peer when they are busy, and
     **waits rather than handing a phase below its tier** — even with a lane free. A
     lane is disk; a phase run by too junior an agent does not fail cleanly, it fails
-    review two rounds later with nothing pointing back at the staffing.
+    review two rounds later with nothing pointing back at the staffing. A reviewer is
+    claimed per review turn rather than per phase, so one reviewer on a three-lane
+    plan is a queue at the review step and not a serialised run.
   - The run view reports who actually worked against who the plan said would.
     `substituted` is the figure to read beside a cost that overran: every
     substitution ran at or above the budgeted tier, so a run can be entirely green
     and still have been staffed dearer than planned.
-
-  What it does not buy: a crew member is **not a live session**. Lanes are recycled
-  between phases, so an agent cannot carry context from one phase to the next —
-  prompt-cache reuse stays *within* a phase, between its implement and fix turns.
 
 - **`implement-plan` runs independent phases in parallel.** The plan now carries a
   dependency graph and the conductor schedules against it: a phase starts as soon as

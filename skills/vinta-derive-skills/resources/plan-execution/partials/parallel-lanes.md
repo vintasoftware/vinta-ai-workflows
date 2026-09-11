@@ -17,6 +17,9 @@ The plan's **Phased Rollout** section opens with an **Execution graph** table an
    - **An `**Assigned to**:` naming an agent the table does not list** → stop and ask. Don't invent a member: the roster is the plan's answer to "how many agents does this feature need", and adding one changes it.
    - **A phase with no `**Assigned to**:` line in a plan that has a Crew table** → stop and ask, for the same reason. Half a roster means two staffing rules running at once.
    - **A declared member assigned no phase** → stop and ask. That is an agent the plan budgeted for and never uses.
+   - **A phase assigned to a reviewer, or a reviewer that also takes phases** → stop and ask. The two roles are disjoint precisely so that an agent reviewing its own work is unrepresentable.
+   - **A reviewer below every phase on the plan** → stop and ask. A reviewer's tier is a floor too, so one below the cheapest phase would never be picked.
+   - **No reviewer at all** → not an error. Reviews fall back to `agent_models.reviewer`, cold, one session per phase. Say so once in the pool report so nobody reads the roster and assumes otherwise.
    - **A wave the roster cannot staff** → warn. Sort the wave's assigned tiers and the roster's tiers, compare one for one: a wave of two Tier 3 phases needs two members at Tier 3 or above, and a junior on the roster does not help because the floor forbids handing them one. Such a wave still runs — it serializes — so say so now rather than letting it look like a slow machine later.
    - **A plan with no Crew table at all** is a legacy plan. Read each phase's `**Suggested AI model**:` tier instead and skip every check above.
 6. **Record the resolved graph and the roster** in `run.md` (see [Update tracking](#1d-update-tracking)) so a resume rebuilds the identical schedule and the identical staffing without re-asking anything.
@@ -33,17 +36,33 @@ Parallel execution **requires** [prepare-worktree](../prepare-worktree/SKILL.md)
 
 **Pool, don't provision per phase.** Provisioning a runnable worktree costs a dep install plus a DB fork. A plan with 14 phases must not pay that 14 times. Provision **`max_parallel_lanes` worktrees once** and reuse each one across the phases assigned to it:
 
-1. **Size the pool.** `lanes = min(run_options.max_parallel_lanes, widest_wave)` where `widest_wave` is the largest number of phases at any one wave. Never provision more lanes than the graph can ever keep busy.
+1. **Size the pool by the roster: one worktree per crew member**, implementers and reviewers alike, named for the member rather than numbered. A plan with no **Crew** table falls back to `lanes = min(run_options.max_parallel_lanes, widest_wave)`.
 
-   **Not the roster size.** A plan's **Crew** table may legitimately be larger than its widest wave, because a member can earn their place by being *cheaper* rather than by adding a lane — a junior who takes the migration and the flag deletion is worth having in a graph that never runs two phases at once. Lanes are bought with concurrency; crew are not. Provisioning one worktree per member would leave disk nothing can fill.
-2. **Provision each lane.** Run [prepare-worktree](../prepare-worktree/SKILL.md) once per lane, plan-driven, with worktree name `plan-{plan-id-kebab}-lane-{i}` (`i` = 1..lanes). This is the mechanical `worktree_prep` step — delegate all of them per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern when `agent_models.worktree_prep` is set, and **dispatch the provisioning calls concurrently** — they are independent.
+   **A member keeps their worktree for the whole run**, and that is the point rather than a detail. A sub-agent can only be continued into a directory it is already standing in, so a member that moved between phases would have to start cold every time — which is most of a phase's first turn spent rediscovering a codebase the same agent read an hour ago. Pinning the directory is what makes "reuse the agent" possible at all.
+
+   It costs a checkout and a set of forked databases per member, including for members idle in most waves. That is the trade, and it is worth stating to the user in the pool report rather than discovering on a full disk.
+2. **Provision each lane.** Run [prepare-worktree](../prepare-worktree/SKILL.md) once per lane, plan-driven, with worktree name `plan-{plan-id-kebab}-crew-{member-id}` (or `plan-{plan-id-kebab}-lane-{i}` on a plan with no roster). This is the mechanical `worktree_prep` step — delegate all of them per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern when `agent_models.worktree_prep` is set, and **dispatch the provisioning calls concurrently** — they are independent.
 3. **Provision the integration worktree.** One more, named `plan-{plan-id-kebab}-integ`. The conductor merges lane branches into wave integration branches here (see [Lane branch topology](#lane-branch-topology)) so a merge never disturbs a lane that is still working.
 4. **Record the pool** in `run.md`: for each lane, `workroot`, `branch`, `worktree_summary`, `sandbox_tier`, plus `current_phase` (null when idle). `SANDBOX_TIER` is probed **per lane** — a mixed result is possible in principle and each lane's spawn wrapping follows its own tier.
 5. **Report once, then hold.** Show the user the pool (paths, DB names, compose project names, teardown commands) and the computed wave schedule together. `AskUserQuestion`: `Looks good — start`, `Fewer lanes`, `Stop — let me adjust`.
 
-### Resetting a lane worktree between phases
+### Re-orienting a member after the reset
 
 A lane worktree carries state from the phase it just ran — most dangerously **applied migrations** in its forked dev / test DB. The next phase assigned to that lane branches from a different base, which may not contain those migrations, and a leftover schema silently invalidates its test run.
+
+**And the agent standing in it has a memory of the old tree.** Continuing a member across phases is only safe if it is told what moved, so the message that starts its next phase is the phase's **full brief** — it is new work, not a delta — preceded by three facts:
+
+1. **It is the same agent in the same directory**, and everything it knows about the repository's layout, conventions and tooling still holds. Say so: an agent told only that things changed will re-read work it does not need to.
+2. **Whether the previous phase's own work is in this tree** — true exactly when this phase depends on it. This is the sentence that matters most. An agent that remembers writing a model and does not know it is absent will code against something that is not there.
+3. **Which files differ from what it last saw**, as a list:
+
+   ```bash
+   git -C <lane.workroot> diff --name-only plan/{plan-id-kebab}/phase-{prior.id} HEAD
+   ```
+
+   A list is checkable; "things may have changed" invites the agent to decide for itself what to trust. If the diff cannot be computed, say the set is **unknown** and to re-read before editing — never that nothing changed, which is the one wording that would stop it re-reading.
+
+**Start a member cold when their previous phase failed.** Their session is the context that failed with it, and whatever wrong turn it took is exactly what a continuation preserves. Re-reading a repository is cheaper than inheriting a wrong conclusion about it.
 
 Before handing a lane to its next phase:
 
@@ -149,7 +168,11 @@ while PENDING or RUNNING:
 2. **Otherwise the cheapest free member at or above that member's tier.** A wave should not serialize behind one agent when a qualified peer is idle. Reach for the *cheapest* qualified one, not the best available — covering for a peer must not quietly promote the phase to the top tier, or a busy wave silently runs every mid-tier phase on the senior's model.
 3. **Otherwise nobody, and the phase waits** — even with a lane free. This is the one place staffing costs throughput, and it is deliberate: a phase run below its tier does not fail cleanly. It produces plausible code that fails review two rounds later, by which point nothing points back at the staffing decision.
 
-An agent is held for the **whole phase**, not one turn of it: the fixer answering a review finding is the implementer continuing its own session, so handing the phase to someone else mid-flight would hand it to an agent with no session to continue. Release the agent when the phase settles, at the same moment the lane goes back.
+An implementer is held for the **whole phase**, not one turn of it: the fixer answering a review finding is the implementer continuing its own session, so handing the phase to someone else mid-flight would hand it to an agent with no session to continue. Release it when the phase settles.
+
+**A reviewer is claimed per review turn, not per phase.** It owns one worktree and one session, so it cannot read two diffs at once — but holding it for a whole phase would make a plan with one reviewer and three implementers run three phases strictly in series. Claim it when the review starts, release it when the verdict is in. A phase whose reviewer is busy waits, and that wait cannot deadlock: reviewers never take phases, so it is always waiting on a review already in flight.
+
+Pick the reviewer the same way: the **cheapest reviewer on the roster at or above the phase's tier**. Never the phase's own implementer — the roles are disjoint, so that is not a rule to remember but a state the plan cannot describe.
 
 **The wait cannot deadlock.** The floor is the assigned member's own tier, so a waiting phase is always waiting on somebody who is *holding another phase* — never on a qualification nobody on the roster has. If you find yourself with every agent idle and a phase that cannot be staffed, the plan assigned it to a member the **Crew** table does not list; stop and ask.
 
@@ -186,9 +209,9 @@ Tracking lives in a **directory**, not a single file: `{{PLAN_DIR}}/TRACKING_{pl
 
 **No lane ever writes, edits, or deletes another lane's file.** A lane that needs a sibling's summary *reads* it — the conductor passes prior-phase summaries into the prompt as data (see [Implement](#1a-implement)); the lane does not go looking in the tracking dir itself.
 
-**`run.md`** carries: feature name, plan path, started / last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `full_test_suite`{{E2E_RUN_OPTION_TRACKING}}, `use_worktree`, `parallel_phases`, `max_parallel_lanes`), the **resolved dependency graph** (phase id → `depends_on` + computed wave), the **lane pool** (per lane: `workroot`, `branch`, `worktree_summary`, `sandbox_tier`, `current_phase`), the **crew roster** (per member: id, tier, resolved model, the phases the plan assigned them, and the phases they actually took), the integration worktree, {{TRACKING_BRANCH_FIELD}}, and per-phase status (`done` / `running` / `blocked` / `failed` / `deferred`) with the lane each ran on.
+**`run.md`** carries: feature name, plan path, started / last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `full_test_suite`{{E2E_RUN_OPTION_TRACKING}}, `use_worktree`, `parallel_phases`, `max_parallel_lanes`), the **resolved dependency graph** (phase id → `depends_on` + computed wave), the **lane pool** (per lane: `workroot`, `branch`, `worktree_summary`, `sandbox_tier`, `current_phase`), the **crew roster** (per member: id, role, tier, resolved model, its worktree, the phases the plan assigned them, and the phases they actually took), the integration worktree, {{TRACKING_BRANCH_FIELD}}, and per-phase status (`done` / `running` / `blocked` / `failed` / `deferred`) with the lane each ran on.
 
-**`phase-{id}.md`** carries: status, the crew member that took it + the model actually used + whether that member is the one the plan assigned{{TRACKING_PHASE_BRANCH_FIELD}}, base branch, wave, `depends_on`, e2e + screenshots if any, and the 5–15 line summary the conductor writes **from the git diff plus the agent's report** — not from the agent's narration.
+**`phase-{id}.md`** carries: status, the crew member that took it + the model actually used + whether that member is the one the plan assigned + whether its session was continued from an earlier phase or started cold (and why, when cold) + the reviewer that read it{{TRACKING_PHASE_BRANCH_FIELD}}, base branch, wave, `depends_on`, e2e + screenshots if any, and the 5–15 line summary the conductor writes **from the git diff plus the agent's report** — not from the agent's narration.
 
 **`waves/wave-{N}.md`** carries: which lane branches were merged, in what order, any conflicts and how they were resolved, and the outer-gate result on the merged tree.
 

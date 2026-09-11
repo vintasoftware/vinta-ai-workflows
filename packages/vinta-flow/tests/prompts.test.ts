@@ -37,6 +37,7 @@ import {
   resolveBrief,
   VERDICT_MARKER,
   type PromptJournal,
+  type Reorientation,
 } from '../src/prompts/index.ts'
 import { SideEffectSchema, WorkflowSchema, type Workflow } from '../src/types.ts'
 
