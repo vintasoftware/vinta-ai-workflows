@@ -13,13 +13,20 @@
  * These strings are *command lines*, recorded in the lane summary and re-run
  * later — by this daemon or by the skill reading that file — so they have to be
  * lines the machine's own shell understands. Which shell that is, how a value
- * is quoted for it, and how a file is copied or deleted in it all come from
- * `src/platform/platform.ts`; `platform` is a parameter here so both answers
- * are decidable from either kind of machine.
+ * is quoted for it, how a file is copied or deleted in it, and which separator
+ * the paths inside it are built with all come from `src/platform/platform.ts`;
+ * `platform` is a parameter here so both answers are decidable from either kind
+ * of machine.
+ *
+ * Every path this module builds is a *filesystem* path, destined for `cp`,
+ * `rm`, `copy` or `del`, so every one of them is joined through `joinPath`.
+ * None of them is a git path — those are posix on every platform and are built
+ * elsewhere.
  */
 import {
   type Platform,
   copyFileCommand,
+  joinPath,
   removeFileCommand,
   shellQuote,
 } from '../platform/platform.ts'
@@ -90,8 +97,23 @@ const sq = (value: string, platform?: Platform): string => shellQuote(value, pla
 /** Lane names are already kebab-case; database identifiers cannot hold dashes. */
 const dbSuffix = (laneName: string): string => laneName.replaceAll('-', '_')
 
-const templatePath = (role: DatabaseRole, spec: SqliteSpec, templatesDir: string): string =>
-  `${templatesDir}/${role}-${spec.path.replaceAll('/', '-')}`
+/**
+ * Where one role's template file lives.
+ *
+ * The repo-relative `spec.path` is flattened into a single filename rather than
+ * recreated as a tree, so one flat directory holds every template and a spec
+ * naming `data/db.sqlite3` needs no `mkdir -p` before the setup line runs.
+ * That flattening is the only `/` here that is *not* a separator, which is why
+ * the join around it goes through `joinPath`: `templatesDir` is native, and an
+ * interpolated `/` would mix separators on Windows and hand `copy` an argument
+ * beginning with a switch character.
+ */
+const templatePath = (
+  role: DatabaseRole,
+  spec: SqliteSpec,
+  templatesDir: string,
+  platform?: Platform,
+): string => joinPath([templatesDir, `${role}-${spec.path.replaceAll('/', '-')}`], platform)
 
 /**
  * Returns null for compose-delivered databases: those are not cloned from a
@@ -105,7 +127,7 @@ export function planTemplate(
   platform?: Platform,
 ): TemplatePlan | null {
   if (spec.engine === 'sqlite') {
-    const name = templatePath(role, spec, templatesDir)
+    const name = templatePath(role, spec, templatesDir, platform)
     return {
       role,
       name,
@@ -132,8 +154,12 @@ export function planDatabase(
   platform?: Platform,
 ): DatabasePlan {
   if (spec.engine === 'sqlite') {
-    const template = templatePath(role, spec, ctx.templatesDir)
-    const forkedName = `${ctx.lanePath}/${spec.path}`
+    const template = templatePath(role, spec, ctx.templatesDir, platform)
+    // `spec.path` is repo-relative and written posix-style whatever the machine,
+    // so it carries its own separators into the lane's absolute path; joining
+    // through the seam is what turns `data/db.sqlite3` into `data\db.sqlite3`
+    // under a native `lanePath` instead of leaving the two mixed.
+    const forkedName = joinPath([ctx.lanePath, spec.path], platform)
     const copy = copyFileCommand(template, forkedName, platform)
     return {
       role,

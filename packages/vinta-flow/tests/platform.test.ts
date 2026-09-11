@@ -26,6 +26,7 @@ import {
   commandInvocation,
   copyFileCommand,
   isWindows,
+  joinPath,
   killTree,
   killTreePlan,
   ownProcessGroup,
@@ -150,6 +151,34 @@ describe('reaching a harness binary', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Building a filesystem path
+// ---------------------------------------------------------------------------
+
+describe('joining a filesystem path', () => {
+  it('uses the separator the platform actually has', () => {
+    expect(joinPath(['/pool/.templates', 'dev-db.sqlite3'], 'linux')).toBe(
+      '/pool/.templates/dev-db.sqlite3',
+    )
+    expect(joinPath(['C:\\pool\\.templates', 'dev-db.sqlite3'], 'win32')).toBe(
+      'C:\\pool\\.templates\\dev-db.sqlite3',
+    )
+  })
+
+  it('leaves no forward slash in a Windows path, wherever it came from', () => {
+    // The bug this exists for: a native `C:\…` base interpolated with a `/`,
+    // or a posix-style repo-relative tail joined onto one. Either leaves a
+    // mixed path that `fs` tolerates and `cmd.exe`'s `copy` cannot parse.
+    const mixed = joinPath(['C:\\pool\\run-1-lane-2', 'data/db.sqlite3'], 'win32')
+    expect(mixed).toBe('C:\\pool\\run-1-lane-2\\data\\db.sqlite3')
+    expect(mixed).not.toContain('/')
+
+    // And the posix branch is not "the other one": a `\` there is an ordinary
+    // filename character, so it is left exactly where it was put.
+    expect(joinPath(['/pool', 'a\\b'], 'linux')).toBe('/pool/a\\b')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Command lines recorded as data: the lane's database plan
 // ---------------------------------------------------------------------------
 
@@ -185,12 +214,22 @@ describe('the command lines a lane summary records', () => {
       path: 'db.sqlite3',
       connectionUrlVar: 'DATABASE_URL',
     } as const
+    // A lane path and a templates dir are whatever `node:path` produced on the
+    // machine that made them, so each branch is given the native form it would
+    // really see rather than one posix pair used for both.
     const ctx = { laneName: 'r1-lane-1', lanePath: '/pool/r1-lane-1', templatesDir: '/pool/.t' }
+    const winCtx = {
+      laneName: 'r1-lane-1',
+      lanePath: 'C:\\pool\\r1-lane-1',
+      templatesDir: 'C:\\pool\\.t',
+    }
 
     expect(planTemplate('dev', spec, '/pool/.t', 'linux')?.setupCmd).toBe(
       "rm -f '/pool/.t/dev-db.sqlite3'",
     )
-    expect(planTemplate('dev', spec, 'C:\\pool\\.t', 'win32')?.setupCmd).toContain('del /f /q')
+    expect(planTemplate('dev', spec, 'C:\\pool\\.t', 'win32')?.setupCmd).toBe(
+      'if exist "C:\\pool\\.t\\dev-db.sqlite3" del /f /q "C:\\pool\\.t\\dev-db.sqlite3"',
+    )
 
     // The clone and the reset are the same copy — a lane returns to the
     // template by being overwritten with it — on both platforms.
@@ -198,12 +237,50 @@ describe('the command lines a lane summary records', () => {
     expect(posixPlan.cloneCmd).toBe(posixPlan.resetCmd)
     expect(posixPlan.cloneCmd).toBe("cp '/pool/.t/dev-db.sqlite3' '/pool/r1-lane-1/db.sqlite3'")
 
-    const windowsPlan = planDatabase('dev', spec, ctx, 'win32')
+    const windowsPlan = planDatabase('dev', spec, winCtx, 'win32')
     expect(windowsPlan.cloneCmd).toBe(windowsPlan.resetCmd)
-    expect(windowsPlan.cloneCmd?.startsWith('copy /y ')).toBe(true)
+    // Spelled out rather than matched on the verb, because the argument is the
+    // part that was wrong: a `/` anywhere in it is a switch as far as `copy`
+    // is concerned, so `copy /y "C:\pool\.t/dev-db.sqlite3" …` fails to find a
+    // file that is sitting right there.
+    expect(windowsPlan.cloneCmd).toBe(
+      'copy /y "C:\\pool\\.t\\dev-db.sqlite3" "C:\\pool\\r1-lane-1\\db.sqlite3"',
+    )
     // A single-use lane is single-use on both: `resetCmd` null is the pool's
     // signal to re-provision, and nothing about the platform changes it.
     expect(windowsPlan.resetCmd).not.toBeNull()
+  })
+
+  it('keeps a database in a subdirectory native on both sides of the copy', () => {
+    // `spec.path` is repo-relative and posix-spelled wherever it was written,
+    // so it is the second way a `/` reaches a `cmd.exe` argument — the lane's
+    // own copy has to be joined, and the flat template filename has to stay
+    // flat.
+    const spec = {
+      engine: 'sqlite',
+      delivery: 'file',
+      path: 'data/db.sqlite3',
+      connectionUrlVar: 'DATABASE_URL',
+    } as const
+    const winCtx = {
+      laneName: 'r1-lane-1',
+      lanePath: 'C:\\pool\\r1-lane-1',
+      templatesDir: 'C:\\pool\\.t',
+    }
+
+    expect(planTemplate('dev', spec, 'C:\\pool\\.t', 'win32')?.name).toBe(
+      'C:\\pool\\.t\\dev-data-db.sqlite3',
+    )
+    expect(planDatabase('dev', spec, winCtx, 'win32').cloneCmd).toBe(
+      'copy /y "C:\\pool\\.t\\dev-data-db.sqlite3" "C:\\pool\\r1-lane-1\\data\\db.sqlite3"',
+    )
+
+    // Unchanged on POSIX: the template name is flattened the same way, and the
+    // lane's copy keeps the subdirectory it asked for.
+    const ctx = { laneName: 'r1-lane-1', lanePath: '/pool/r1-lane-1', templatesDir: '/pool/.t' }
+    expect(planDatabase('dev', spec, ctx, 'linux').cloneCmd).toBe(
+      "cp '/pool/.t/dev-data-db.sqlite3' '/pool/r1-lane-1/data/db.sqlite3'",
+    )
   })
 
   it('plans a postgres lane with the same verbs and different quotes', () => {

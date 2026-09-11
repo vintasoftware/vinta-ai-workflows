@@ -3,7 +3,7 @@
  *
  * Everything else in the package spawns processes, kills trees and runs
  * project command lines without a `process.platform` check in sight, because
- * the four questions where POSIX and Windows genuinely disagree are answered
+ * the five questions where POSIX and Windows genuinely disagree are answered
  * here and nowhere else:
  *
  * 1. **How a project command line is run.** `/bin/sh -c` against
@@ -14,6 +14,8 @@
  *    Windows equivalent.
  * 4. **How the whole tree under a pid is ended.** `kill(-pid)` against
  *    `taskkill /T`.
+ * 5. **Which separator a filesystem path is built with**, for the paths that
+ *    end up inside one of those command lines.
  *
  * Every function takes `platform` as a parameter defaulting to
  * `process.platform`, so both branches are decidable — and therefore
@@ -26,6 +28,7 @@
  * argument that violated it.
  */
 import { spawnSync } from 'node:child_process'
+import { posix, win32 } from 'node:path'
 
 export type Platform = NodeJS.Platform
 
@@ -165,6 +168,36 @@ export function commandInvocation(
   // The outer pair is what `/s` strips, leaving the per-token quotes intact.
   return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${line}"`], windowsVerbatimArguments: true }
 }
+
+// ---------------------------------------------------------------------------
+// Building a filesystem path
+// ---------------------------------------------------------------------------
+
+/**
+ * Join path segments with the separator the *filesystem* uses on `platform`.
+ *
+ * Not a wrapper for convenience over `node:path`'s `join`: that one reads the
+ * ambient `process.platform`, so a caller using it has a Windows branch no Mac
+ * can decide — which is the whole reason every function in this module takes
+ * the platform as a value. `win32.join` and `posix.join` are the very
+ * implementations Node picks between; this picks by the parameter instead.
+ *
+ * What makes it worth a function rather than a `` `${dir}/${name}` `` is that
+ * Windows *mostly* accepts `/`, so a mixed path like
+ * `C:\pool\.templates/dev-db.sqlite3` passes through `fs` and looks harmless —
+ * right up until it reaches `copyFileCommand` below, where `cmd.exe`'s `copy`
+ * reads the leading `/` of an argument as the start of a switch and cannot
+ * parse the path at all. `win32.join` collapses every segment onto `\`, so no
+ * such argument is ever built.
+ *
+ * Paths handed to *git* are the exception and must not come through here: git
+ * speaks posix paths on every platform, so those stay `/`-joined on Windows
+ * too.
+ */
+export const joinPath = (
+  segments: readonly string[],
+  platform: Platform = process.platform,
+): string => (isWindows(platform) ? win32.join(...segments) : posix.join(...segments))
 
 // ---------------------------------------------------------------------------
 // Building a command line for that shell

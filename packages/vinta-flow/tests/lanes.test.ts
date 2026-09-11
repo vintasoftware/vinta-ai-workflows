@@ -68,6 +68,26 @@ const composeProject = (): ProjectSpec => ({
   },
 })
 
+/**
+ * Rows in a lane's test database, with the connection closed before the count
+ * is returned.
+ *
+ * The close is the point. On Windows a directory cannot be removed while any
+ * handle into it is open, so a `Database` left open by an assertion is not a
+ * leak that the garbage collector eventually tidies — it is an `EBUSY` in this
+ * suite's own teardown, blaming a temp directory that nothing in the product
+ * is holding. `finally` rather than a close after the read, so a failing query
+ * fails the test instead of poisoning the cleanup too.
+ */
+const widgetCount = (databasePath: string): number => {
+  const db = new Database(databasePath, { readonly: true })
+  try {
+    return db.prepare('SELECT count(*) FROM widgets').pluck().get() as number
+  } finally {
+    db.close()
+  }
+}
+
 const envVar = (lane: Lane, key: string): string => {
   const value = lane.env[key]
   if (!value) throw new Error(`lane "${lane.name}" has no ${key}`)
@@ -103,7 +123,18 @@ describe('lane pool', () => {
   afterEach(async () => {
     if (previousLog === undefined) delete process.env.VINTA_FIXTURE_MIGRATE_LOG
     else process.env.VINTA_FIXTURE_MIGRATE_LOG = previousLog
-    await rm(root, { recursive: true, force: true })
+    // Retried rather than attempted once, because of what this tree is: a git
+    // repo the suite has spawned `git` against and a pool of sqlite files it
+    // has opened. On Windows a directory cannot be removed while any handle
+    // into it is open, and a child that has already exited can still be holding
+    // one for a moment afterwards — `EBUSY` on `rmdir …\source`, from nothing
+    // that is still running. Every handle this suite owns is closed by the time
+    // it gets here; `maxRetries` covers the ones the OS has not let go of yet,
+    // backing off linearly between attempts.
+    //
+    // Still awaited and still allowed to throw. A teardown that swallowed this
+    // would leave a temp directory per run behind forever and say nothing.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   })
 
   const provision = (project: ProjectSpec, laneCount = 3): Promise<LanePool> =>
@@ -187,12 +218,12 @@ describe('lane pool', () => {
     const write = new Database(testDb)
     write.prepare('INSERT INTO widgets (label) VALUES (?)').run('dirty')
     write.close()
-    expect(new Database(testDb, { readonly: true }).prepare('SELECT count(*) FROM widgets').pluck().get()).toBe(1)
+    expect(widgetCount(testDb)).toBe(1)
 
     const recycled = await pool.recycle(lane.name)
 
     expect(recycled.path).toBe(lane.path)
-    expect(new Database(testDb, { readonly: true }).prepare('SELECT count(*) FROM widgets').pluck().get()).toBe(0)
+    expect(widgetCount(testDb)).toBe(0)
     runSuite()
   })
 
