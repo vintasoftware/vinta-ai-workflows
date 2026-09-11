@@ -221,7 +221,7 @@ After the scheduler loop exits — every executable phase is `done`, `failed`, o
 - [ ] This phase dispatched only after every id in its `depends_on` was green; its `base_branch` computed from that set (not from plan order).
 - [ ] Lane reset before reuse: base checked out, phase branch created, DB reset via `db_reset_cmd`.
 - [ ] [implement-phase](../implement-phase/SKILL.md) run: prompt composed with **Goals + Non-goals** + **Guiding Decisions** + relevant **Data Model Changes** subsection + **dependency-closure** tracking summaries + this phase's body; model picked from `**Suggested AI model**:` (cheapest available); implementer report received.
-- [ ] [review-phase](../review-phase/SKILL.md) run: Layers 1–3 clean; BLOCKERs fixed; SHOULD-FIX fixed or noted; outer gate re-run after any fix; when worktrees are in use, `git -C <tree> status --short` clean after the implementer and after every fixer, for the main checkout **and every sibling lane**.
+- [ ] [review-phase](../review-phase/SKILL.md) run: Layers 1–3 clean; BLOCKERs fixed; SHOULD-FIX fixed or noted; outer gate re-run after any fix; when worktrees are in use, `git -C <tree> status --short` clean after the implementer and after every fixing round, whoever ran it, for the main checkout **and every sibling lane**.
 - [ ] {{INTEGRATE_PHASE_DISPATCH}} run: {{BRANCH_CHECKLIST_LINE}}{{PR_CHECKLIST_NOTE}}
 {{COMMIT_STRATEGY_CHECKLIST_BLOCK}}
   - [ ] **Open PR via context file** decision applied per matrix (PR policy + `generate_inline_comments`): file written when at least one of policy=create / comments=true holds; `open-pr.sh` run when policy=create AND deps available (PR URL captured); per-comment failures (exit 1) and hard failures (exit 2) surfaced.

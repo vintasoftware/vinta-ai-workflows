@@ -43,8 +43,47 @@ The reviewer finds nothing on a >300-LoC multi-file phase → suspicious. Read o
 
 ## Fix loop
 
-1. Spawn a **new** subagent — the project's `fixer` agent type ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md)) at the model resolved from `agent_models.fixer` (see the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step; unset → runtime default). The fix prompt quotes the finding verbatim. For comment-hygiene findings (Layer 2 item 8), the fix prompt tells the fixer to run the `deslop-comments` skill ([ai-tools/skills/deslop-comments/SKILL.md](ai-tools/skills/deslop-comments/SKILL.md)) scoped to the phase's touched files — comment-only edits, no behavior change.
-2. The `fixer`'s system prompt mandates re-running the inner loop + outer gate (in `<WORKROOT>`).
-3. After the fixer returns, redo Layer 1 in full + the affected portion of Layer 2.
-4. Loop until Layers 1, 2, 3 are all clean.
+**The implementer fixes its own findings.** The agent that wrote the code still
+holds the phase brief, the plan's bounds, the dependency context and its own
+reasoning; a fresh fixer holds a quoted finding and has to rediscover the rest —
+slower, dearer, and more likely to "fix" the symptom by changing something the
+phase deliberately chose. Continuing the implementer is the default, and the
+message it gets is a **delta**: the findings and what to do about them, never
+the brief again.
+
+1. **Continue the phase's implementer sub-agent** with the findings. Quote each
+   one verbatim, say nothing else about the phase — it was told all of that when
+   it started, and repeating it invites a re-implementation rather than a fix.
+   Do not re-send the plan sections, the dependency summaries, or the phase body.
+   For comment-hygiene findings (Layer 2 item 8), tell it to run the
+   `deslop-comments` skill ([ai-tools/skills/deslop-comments/SKILL.md](ai-tools/skills/deslop-comments/SKILL.md))
+   scoped to the phase's touched files — comment-only edits, no behavior change.
+   Whether continued or fresh, the fixing agent re-runs the inner loop + outer
+   gate in `<WORKROOT>` before reporting.
+2. **Where the runtime cannot continue a finished sub-agent**, spawn a fresh one
+   — the project's `fixer` agent type ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md))
+   at the model resolved from `agent_models.fixer` — and give it the phase
+   context the implementer would have had, because it has none. Note in the
+   phase's tracking record that the fix was a cold hand-off, so a slow phase can
+   be read later without guessing.
+3. **The last round before you would give up goes to a fresh fixer, always.**
+   Reusing the implementer means the agent that wrote the bug is fixing it,
+   which is usually the point — it knows why the code is that way — and
+   occasionally exactly wrong, because that assumption *was* the bug. When a
+   finding has survived the implementer's own attempts, hand it to an agent that
+   has not seen the work before escalating a tier or stopping.
+4. After the fixer returns, redo Layer 1 in full + the affected portion of Layer 2.
+5. Loop until Layers 1, 2, 3 are all clean.
+
+**The reviewer is never the implementer.** Continuing the *reviewer* across
+rounds is fine and remembers what it flagged, but the review itself must come
+from an agent that did not write the code. An implementer asked to review its
+own phase grades its own work from inside its own reasoning, which is the one
+thing the layers exist to prevent.
+
+**Which model fixes.** A continued implementer fixes at the phase's own
+`**Suggested AI model**:` tier, because it *is* the implementer. `agent_models.fixer`
+therefore governs the cold cases only — the runtime fallback in step 2 and the
+escalation in step 3. A project that set `fixer` to a cheaper tier to save money
+should know it now applies to fewer rounds than before.
 <!-- block-end: LAYERS -->
