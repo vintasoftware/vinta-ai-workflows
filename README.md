@@ -578,7 +578,7 @@ vinta-ai-workflows/
 
 `vinta-bootstrap-ai-tools` is the entry point — walks a fresh repo, runs the others in order. The rest can also be invoked individually to refresh a single artifact.
 
-The repository is also a pnpm workspace. `packages/` holds **private, unpublished** packages that are not part of what `install` puts in your project — the `files` whitelist excludes the directory. The one worth knowing about is [`packages/vinta-flow`](packages/vinta-flow/README.md): an opt-in daemon that executes the `ai-plans/<feature>.workflow.json` files `plan-feature` emits, scheduling independent phases across worktree lanes. Nothing requires it; the skills path runs the same plans with no daemon installed.
+The repository is also a pnpm workspace. `packages/` holds **private, unpublished** packages that are not part of what `install` puts in your project — the `files` whitelist excludes the directory. The one worth knowing about is [`packages/vinta-ai-maestro`](packages/vinta-ai-maestro/README.md): an opt-in daemon that executes the `ai-plans/<feature>.workflow.json` files `plan-feature` emits, scheduling independent phases across worktree lanes. Nothing requires it; the skills path runs the same plans with no daemon installed.
 
 ### Why the `vinta-` prefix?
 

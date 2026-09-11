@@ -18,7 +18,7 @@ Conventions for any AI agent (Claude Code, Codex, Cursor, Copilot, …) editing 
 
 The repo is also a **pnpm workspace** (`pnpm-workspace.yaml`, `packages/*`). The root `package.json` is still the published `vinta-ai-workflows` package and is *also* the workspace root — nothing moved, and the root's `files` whitelist excludes `packages/` so workspace members are never published as part of it. **The CLI's zero-runtime-deps property covers the root `dependencies` only**; workspace packages carry their own dependencies freely and do not weaken it.
 
-- `packages/vinta-flow/` — code-orchestrated parallel execution of `plan-feature` plans (the daemon `implement-plan` describes in prose). TypeScript, strict, tested with Vitest. See [SPEC.md](packages/vinta-flow/SPEC.md) — that spec is the authority; read it before changing anything here. Source of truth for `schemas/workflow.v1.schema.json`, which is **generated** from `src/types.ts`.
+- `packages/vinta-ai-maestro/` — code-orchestrated parallel execution of `plan-feature` plans (the daemon `implement-plan` describes in prose). TypeScript, strict, tested with Vitest. See [SPEC.md](packages/vinta-ai-maestro/SPEC.md) — that spec is the authority; read it before changing anything here. Source of truth for `schemas/workflow.v1.schema.json`, which is **generated** from `src/types.ts`.
 - `packages/vinta-dag-editor/` — framework-agnostic Web Component rendering and editing plan DAGs. Private (unpublished); mirrors [`vinta-state-machine-editor`](https://github.com/vintasoftware/vinta-state-machine-editor)'s architecture and conventions deliberately, so extraction to npm later is a publish rather than a refactor.
 
 The repo is **self-recursive**: it authors skills it itself does not run. Don't try to "test" a skill by invoking it inside this repo — invoke it inside a target project after `npx vinta-ai-workflows install`.
@@ -65,10 +65,10 @@ The **skills side** of this repo (`skills/`, `dev-skills/`, `schemas/`, `vinta-a
 
 | Change touches | Verification |
 |---|---|
-| anything under `packages/vinta-flow/` | From that directory: `pnpm run typecheck` and `pnpm test`. Both must pass. |
-| `packages/vinta-flow/src/types.ts` | Additionally `pnpm --filter vinta-flow schema:gen` and commit the regenerated `schemas/workflow.v1.schema.json` — a test fails when the committed file drifts from the zod source. Never hand-edit that JSON. |
+| anything under `packages/vinta-ai-maestro/` | From that directory: `pnpm run typecheck` and `pnpm test`. Both must pass. |
+| `packages/vinta-ai-maestro/src/types.ts` | Additionally `pnpm --filter vinta-ai-maestro schema:gen` and commit the regenerated `schemas/workflow.v1.schema.json` — a test fails when the committed file drifts from the zod source. Never hand-edit that JSON. |
 | anything under `packages/vinta-dag-editor/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (Biome, configured in `biome.jsonc` to the repo's style rather than Biome's defaults). |
-| anything under `packages/design-system/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (same Biome setup). Then from `packages/vinta-flow/`: `pnpm run typecheck`, `pnpm test` and `pnpm run ui:build` — the app is the only consumer, and Tailwind only emits classes it can scan, so the build is the check that a new component's classes reach the bundle. |
+| anything under `packages/design-system/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (same Biome setup). Then from `packages/vinta-ai-maestro/`: `pnpm run typecheck`, `pnpm test` and `pnpm run ui:build` — the app is the only consumer, and Tailwind only emits classes it can scan, so the build is the check that a new component's classes reach the bundle. |
 | `pnpm-workspace.yaml`, root `package.json`, or anything that could reach the published package | `npm pack --dry-run` at the root must list **exactly** the same files as before the change, and root `dependencies` must stay absent. |
 
 Beyond the above there is nothing else to run — no Jest, pytest, ruff, or eslint anywhere in this repo, and no lint or build on the skills side.

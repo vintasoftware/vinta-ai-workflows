@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/postmortem.v1.schema.json",
-  "title": "vinta-flow plan post-mortem",
-  "description": "What one finished `vinta-flow` run learned about the plan that produced it: dependencies that were never used, dependencies discovered missing, same-wave phases that conflicted, and phases whose duration diverged from their wave. Ids, waves, paths, durations and counts only. Lives at `.vinta-flow/runs/<run-id>/postmortem.json` in a target project, emitted by `vinta-flow` after a run ends and read by `plan-feature` when planning the next feature in the same repo. GENERATED from packages/vinta-flow/src/postmortem/postmortem.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "title": "vinta-ai-maestro plan post-mortem",
+  "description": "What one finished `vinta-ai-maestro` run learned about the plan that produced it: dependencies that were never used, dependencies discovered missing, same-wave phases that conflicted, and phases whose duration diverged from their wave. Ids, waves, paths, durations and counts only. Lives at `.vinta-ai-maestro/runs/<run-id>/postmortem.json` in a target project, emitted by `vinta-ai-maestro` after a run ends and read by `plan-feature` when planning the next feature in the same repo. GENERATED from packages/vinta-ai-maestro/src/postmortem/postmortem.ts — edit there, not here. See schemas/README.md for versioning rules.",
   "type": "object",
   "properties": {
     "$schema": {

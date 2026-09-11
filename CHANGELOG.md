@@ -70,7 +70,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     half-staffed, names a member nobody declared, assigns a phase to a reviewer,
     declares an implementer nobody is assigned to, or staffs a reviewer below every
     phase on the plan is refused before the run starts.
-  - `vinta-flow` claims an agent **before** the lane, prefers the member the plan
+  - `vinta-ai-maestro` claims an agent **before** the lane, prefers the member the plan
     named, covers with the **cheapest** qualified free peer when they are busy, and
     **waits rather than handing a phase below its tier** — even with a lane free. A
     lane is disk; a phase run by too junior an agent does not fail cleanly, it fails
@@ -166,7 +166,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **New schema
   [`postmortem.v1.schema.json`](schemas/postmortem.v1.schema.json)** — the
   structured plan post-mortem an orchestrator writes at
-  `.vinta-flow/runs/<run-id>/postmortem.json` once a run has ended: dependencies
+  `.vinta-ai-maestro/runs/<run-id>/postmortem.json` once a run has ended: dependencies
   that were declared but never used, dependencies discovered at gate time,
   same-wave phases that actually conflicted, and phases whose real duration
   diverged from their wave placement. `plan-feature` reads it before drawing the
@@ -238,7 +238,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing produces a merge commit full of markers that passes into the wave
   branch unnoticed.
 
-> The repository also gained `packages/vinta-flow/`, a **private workspace
+> The repository also gained `packages/vinta-ai-maestro/`, a **private workspace
 > package** that executes these workflows. It is not published and is not part of
 > the `vinta-ai-workflows` package — the root `files` whitelist excludes
 > `packages/`, so nothing in it is installed by `npx vinta-ai-workflows install`.

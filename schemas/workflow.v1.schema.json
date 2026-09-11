@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
-  "title": "vinta-flow workflow",
-  "description": "An executable plan: the phase DAG, the pipelines phases run through, the capacity pools they contend for, and the gates they must pass. Lives at `ai-plans/<feature-kebab>.workflow.json` in a target project, emitted by `plan-feature` alongside the human-readable plan and executed by `vinta-flow`. GENERATED from packages/vinta-flow/src/types.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "title": "vinta-ai-maestro workflow",
+  "description": "An executable plan: the phase DAG, the pipelines phases run through, the capacity pools they contend for, and the gates they must pass. Lives at `ai-plans/<feature-kebab>.workflow.json` in a target project, emitted by `plan-feature` alongside the human-readable plan and executed by `vinta-ai-maestro`. GENERATED from packages/vinta-ai-maestro/src/types.ts — edit there, not here. See schemas/README.md for versioning rules.",
   "type": "object",
   "properties": {
     "$schema": {

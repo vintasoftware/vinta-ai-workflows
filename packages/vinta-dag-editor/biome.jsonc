@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
   // Biome's unconfigured defaults (tabs, double quotes) disagree with the style
-  // already established in packages/vinta-flow. A developer is meant to move
+  // already established in packages/vinta-ai-maestro. A developer is meant to move
   // between the two packages without learning a second rulebook, so this pins
   // Biome to the style the repo actually uses rather than letting the tool decide.
   "formatter": {

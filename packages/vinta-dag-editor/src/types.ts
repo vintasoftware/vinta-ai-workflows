@@ -2,7 +2,7 @@
  * Public data contract for the plan-DAG canvas.
  *
  * These types are the boundary two other things are built against —
- * `vinta-flow`'s run view renders this shape, and the workflow editor edits it —
+ * `vinta-ai-maestro`'s run view renders this shape, and the workflow editor edits it —
  * and the shape is decided by the workflow schema rather than by the canvas.
  *
  * Conventions mirror `vinta-state-machine-editor`, deliberately: data is deeply

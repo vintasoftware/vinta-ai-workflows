@@ -262,10 +262,10 @@ Don't contort the plan for concurrency, though. A genuinely sequential feature i
 
 ### Read the previous runs' post-mortems before drawing the graph
 
-Every plan you write is a guess about coupling. Every plan the orchestrator *ran* turned that guess into evidence, and it wrote the evidence down: one `postmortem.json` per finished run under `.vinta-flow/runs/<run-id>/`, plus any copy the team committed beside its plan as `ai-plans/<feature-kebab>.postmortem.json`. **Read them before the `**Depends on**:` lines, not after.** Newest first, and all of them — one run is an anecdote, three runs saying the same thing about the same layer is a rule about this codebase.
+Every plan you write is a guess about coupling. Every plan the orchestrator *ran* turned that guess into evidence, and it wrote the evidence down: one `postmortem.json` per finished run under `.vinta-ai-maestro/runs/<run-id>/`, plus any copy the team committed beside its plan as `ai-plans/<feature-kebab>.postmortem.json`. **Read them before the `**Depends on**:` lines, not after.** Newest first, and all of them — one run is an anecdote, three runs saying the same thing about the same layer is a rule about this codebase.
 
 ```bash
-ls -t .vinta-flow/runs/*/postmortem.json ai-plans/*.postmortem.json 2>/dev/null | head -5
+ls -t .vinta-ai-maestro/runs/*/postmortem.json ai-plans/*.postmortem.json 2>/dev/null | head -5
 ```
 
 Each file carries `findings` and `gaps`. Use them like this:
@@ -999,7 +999,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] **Execution graph** table is the first thing under **Phased Rollout**, and its waves match what the `**Depends on**:` lines imply.
 - [ ] Graph is acyclic; the flag-removal phase depends on every gated phase.
 - [ ] Same-wave phases checked against the **Touch List** for file overlap; real overlaps either serialized with an edge or called out explicitly under the graph table.
-- [ ] Post-mortems from previous runs (`.vinta-flow/runs/*/postmortem.json`, plus any committed beside a plan) read **before** the graph was drawn; every finding either changed an edge, a wave or a split, or was consciously dismissed as not applying to this feature.
+- [ ] Post-mortems from previous runs (`.vinta-ai-maestro/runs/*/postmortem.json`, plus any committed beside a plan) read **before** the graph was drawn; every finding either changed an edge, a wave or a split, or was consciously dismissed as not applying to this feature.
 - [ ] Slow-moving / cross-repo work sits in wave 1, and no in-repo phase depends on a cross-repo phase when it only needs the contract.
 - [ ] **Crew** table is the first thing under **Phased Rollout**: one row per agent with its **Role**, every implementer taking at least one phase, every `Takes` cell agreeing with that phase's `**Assigned to**:` line.
 - [ ] **At least one reviewer on the roster**, at or above the plan's hardest phase tier. Implementers and reviewers are disjoint — no phase is assigned to a reviewer.

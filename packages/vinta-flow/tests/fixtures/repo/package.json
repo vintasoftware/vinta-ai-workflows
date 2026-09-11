@@ -1,9 +1,0 @@
-{
-  "name": "vinta-flow-fixture-repo",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "migrate": "node scripts/migrate.mjs",
-    "test": "node tests/widgets.mjs"
-  }
-}

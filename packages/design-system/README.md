@@ -1,6 +1,6 @@
 # vinta-design-system
 
-Vinta's design system for the browser UIs in this workspace — today, `vinta-flow`'s run monitor and workflow editor. Tokens in oklch, [shadcn/ui](https://ui.shadcn.com) components (new-york style) on Tailwind CSS v4, and a small layout kit. It mirrors the architecture of `vinta-schedule-design-system`, so a developer moving between Vinta products meets one vocabulary: the same three token layers, the same `.dark` class, the same DM Sans + Geist Mono pairing, the same component files.
+Vinta's design system for the browser UIs in this workspace — today, `vinta-ai-maestro`'s run monitor and workflow editor. Tokens in oklch, [shadcn/ui](https://ui.shadcn.com) components (new-york style) on Tailwind CSS v4, and a small layout kit. It mirrors the architecture of `vinta-schedule-design-system`, so a developer moving between Vinta products meets one vocabulary: the same three token layers, the same `.dark` class, the same DM Sans + Geist Mono pairing, the same component files.
 
 Private, TypeScript source only — consumers transpile it with their own bundler; there is no `dist/`.
 
@@ -96,4 +96,4 @@ To add one: `pnpm dlx shadcn@latest add <name>` from this directory, then replac
 
 ## Verifying changes
 
-From this directory: `pnpm run typecheck`, `pnpm test`, `pnpm run lint` (Biome, the same `biome.jsonc` as `vinta-dag-editor`). A change to `tokens.css` also wants a look at `vinta-flow`'s `ui/src/app.css`, which binds the canvas components to the tones.
+From this directory: `pnpm run typecheck`, `pnpm test`, `pnpm run lint` (Biome, the same `biome.jsonc` as `vinta-dag-editor`). A change to `tokens.css` also wants a look at `vinta-ai-maestro`'s `ui/src/app.css`, which binds the canvas components to the tones.

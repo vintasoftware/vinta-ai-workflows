@@ -1,5 +1,5 @@
 {
-  "$comment": "Bundler-resolved DOM code, like vinta-flow's ui/tsconfig.json. The `@/*` path exists for the shadcn CLI (components.json aliases); committed sources import relatively so a consumer's bundler needs no alias.",
+  "$comment": "Bundler-resolved DOM code, like vinta-ai-maestro's ui/tsconfig.json. The `@/*` path exists for the shadcn CLI (components.json aliases); committed sources import relatively so a consumer's bundler needs no alias.",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "target": "ES2023",

@@ -3,7 +3,7 @@
  * the enter/exit animations shadcn's overlays use, the fonts and the tokens,
  * scanning this package's sources for the utilities its components need.
  *
- * An app with its own Tailwind entry (vinta-flow's `ui/src/app.css`) imports
+ * An app with its own Tailwind entry (vinta-ai-maestro's `ui/src/app.css`) imports
  * the pieces instead — `tokens.css`, `fonts.css` — and adds its own `@source`
  * for this package, because `@source` paths resolve relative to the file that
  * states them.

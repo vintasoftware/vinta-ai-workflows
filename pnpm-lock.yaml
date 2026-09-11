@@ -103,7 +103,7 @@ importers:
         specifier: ^5.0.0
         version: 5.0.0(@types/node@22.20.2)(jsdom@30.0.1)(vite@8.2.2(@types/node@22.20.2)(jiti@2.7.0)(yaml@2.9.0))
 
-  packages/vinta-flow:
+  packages/vinta-ai-maestro:
     dependencies:
       '@xterm/addon-fit':
         specifier: ^0.11.0

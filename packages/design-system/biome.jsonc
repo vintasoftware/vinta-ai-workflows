@@ -2,7 +2,7 @@
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
   // The same rulebook as packages/vinta-dag-editor, for the same reason: a
   // developer moving between the workspace packages should meet one style —
-  // the one packages/vinta-flow established by hand.
+  // the one packages/vinta-ai-maestro established by hand.
   "formatter": {
     "enabled": true,
     "indentStyle": "space",
