@@ -17,7 +17,7 @@ The single review implementation shared by every plan-execution conductor: [impl
 - `run_options.full_test_suite` — resolves which outer gate Layer 1 item 3 verifies ran (false = scoped suite; true = full repo suite).
 - The project's `reviewer` + `fixer` agent types, plus their `agent_models.reviewer` / `agent_models.fixer` tiers (when set in `.vinta-ai-workflows.yaml`).
 - Optional per-phase `reviewer_model_tier` / `fixer_model_tier` overrides — the tiers parsed from this phase's `**Review models**:` line in the plan (null when the phase didn't set one, which is the common case).
-- `author_tier` and `crew_reviewers` — the tier of the crew member that implemented this phase, and the plan's **Crew** table rows whose role is `reviewer` (id + tier). Both null for a legacy plan with no roster.
+- `author_tier` and `crew_reviewers` — the tier of the crew member that implemented this phase, and the plan's **Crew** table rows whose role is `reviewer` (id + tier). Both null for a legacy plan with no roster. Reviewers carry no `WORKROOT` of their own: they use the one above.
 
 ## Resolve the reviewer + fixer model
 
@@ -30,7 +30,9 @@ Each of `reviewer` and `fixer` spawns at an **effective tier**, resolved per rol
 
 Step 2 is skipped when the roster staffs no qualified reviewer — no reviewers at all, or none at or above this phase's tier, or a legacy plan with no **Crew** table — and the resolution falls through to the project default, which is the behaviour every plan had before rosters existed.
 
-**A claimed reviewer is a running agent, not just a model.** It owns one worktree and one session, so it cannot read two phases at once: if the reviewer this phase needs is mid-review elsewhere, wait for it rather than picking another. The wait is safe — reviewers never take phases, so it is always waiting on a review already in flight. And continue its session rather than spawning a fresh one: a reviewer that has read four phases of this plan knows the codebase, which is most of what a cold reviewer's first turn is spent on.
+**A claimed reviewer is a running agent, not just a model.** It has one session ledger, so two reviews as the same reviewer would collide over it: if the reviewer this phase needs is mid-review elsewhere, wait for it rather than picking another. The wait is safe — reviewers never take phases, so it is always waiting on a review already in flight.
+
+**It reviews in this phase's `WORKROOT`.** A reviewer has no worktree of its own; it reads the implementer's, with the phase's changes still uncommitted in it. Every Layer 1 command below is therefore a `git -C <WORKROOT>` against a **dirty tree**, and that is the intent — the fix loop corrects the working tree before anything is committed, so a finding never becomes a mistake recorded on the branch plus a correction after it. Continue the reviewer's session when its previous review was in this same lane; otherwise it starts cold, because a session cannot follow an agent into a different directory.
 
 **It does not apply to `fixer`.** The fix goes back to the agent that wrote the code, at its own tier; see the fix loop. A review is a judgement about the code and a fix is a change to it, and the tier that earned the first does not follow the second.
 

@@ -56,7 +56,7 @@ import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import { createAgentConflictFixer, type ConflictFixer } from '../integration/fixer.ts'
-import { gitLines, git } from '../integration/git.ts'
+import { gitLines } from '../integration/git.ts'
 import { Integrator, type WaveResult } from '../integration/integrator.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
 import type { DatabaseSpec } from '../lanes/database.ts'
@@ -247,9 +247,8 @@ export async function runCommand(
     // §8: a lane slot outlives the phase that used it, and the next phase must
     // not start in the last one's worktree or against its rows.
     ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),
-    // §15.2: a member keeps one worktree, so continuing across a phase is safe
-    // as long as the agent is told which files moved under it.
-    ...(host.reviewLane === undefined ? {} : { reviewLane: host.reviewLane }),
+    // §15.2: an implementer keeps one worktree, so continuing across a phase is
+    // safe as long as the agent is told which files moved under it.
     ...(host.laneDelta === undefined ? {} : { laneDelta: host.laneDelta }),
   })
 
@@ -359,7 +358,6 @@ interface HostWiring {
   readonly rebase?: NonNullable<AmendRunner['rebase']>
   /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
   readonly recycleLane?: (name: string) => Promise<void>
-  readonly reviewLane?: (lane: string, nodeId: string) => Promise<void>
   readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
   /** Handles this process opened. Never the lanes — see the `finally` above. */
   close(): void
@@ -404,10 +402,12 @@ interface ProvisionOptions {
 async function provision(options: ProvisionOptions): Promise<HostWiring> {
   const { workflow, runId, journal, repoPath, laneRoot, adapters } = options
 
-  // A staffed run gives every crew member their own worktree for the whole run
-  // — the thing that lets a member's session outlive a phase, because a session
-  // is about a directory. The names are derived from the roster here and in the
-  // scheduler, from the same function, so neither can drift from the other.
+  // A staffed run gives every *implementer* its own worktree for the whole run —
+  // the thing that lets a member's session outlive a phase, because a session is
+  // about a directory. Reviewers get none: a review runs in the lane it is
+  // reviewing, so that it reads the working tree before anything is committed.
+  // The names are derived from the roster here and in the scheduler, from the
+  // same function, so neither can drift from the other.
   const crewLanes = laneHolders(workflow.crew).map(
     (member, i) => `${runId}-crew-${i + 1}-${member.id}`,
   )
@@ -469,15 +469,6 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     rebase,
     recycleLane: async (name: string) => {
       await pool.recycle(name)
-    },
-    // The reviewer reads in its own worktree. Detached on purpose: the lanes
-    // are worktrees of one repository, so the phase branch is reachable from
-    // all of them without a push — but git refuses to check out a branch
-    // another worktree already has, and the implementer's lane is holding it.
-    reviewLane: async (name: string, nodeId: string) => {
-      const lane = pool.lane(name)
-      await git(lane.path, ['checkout', '--force', '--detach', integrator.nodeBranch(nodeId)])
-      await git(lane.path, ['clean', '-fd', '-e', 'node_modules'])
     },
     // What changed under a member while it was away: the files that differ
     // between the phase it last worked on and what is checked out now. It is

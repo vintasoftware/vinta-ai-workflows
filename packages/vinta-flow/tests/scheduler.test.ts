@@ -1934,6 +1934,39 @@ describe('crew', () => {
     expectDrained(r)
   })
 
+  /**
+   * The reviewer reads where the work is, uncommitted changes and all. Giving it
+   * a checkout of its own would mean reviewing a committed snapshot — strictly
+   * less than what is in the tree, and too late to fix anything before the
+   * commit that recorded it.
+   */
+  it('reviews in the implementer’s own lane, not a tree of its own', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'mid-a', pipeline: 'slots' })], {
+        crew: { 'mid-a': CREW['mid-a'], checker: CHECKER },
+      }),
+    )
+    await r.scheduler.run()
+
+    const cwds = new Set(r.adapter.spawned.map((task) => task.cwd))
+    expect(cwds.size).toBe(1)
+    // And it is the member's desk, named for them rather than numbered.
+    expect([...cwds][0]).toContain('mid-a')
+    expectDrained(r)
+  })
+
+  it('gives desks to implementers only — a reviewer has no worktree', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'mid-a', pipeline: 'slots' })], {
+        crew: { 'mid-a': CREW['mid-a'], checker: CHECKER },
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned.every((task) => !task.cwd.includes('checker'))).toBe(true)
+    expectDrained(r)
+  })
+
   it('never lets the phase’s own author review it', async () => {
     const r = rig(
       makeWorkflow([node('a', [], { crew: 'senior', pipeline: 'slots' })], {

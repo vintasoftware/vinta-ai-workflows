@@ -500,7 +500,7 @@ When those two genuinely cannot both hold, **the floor wins and the plan says so
 
 Three things follow that are worth knowing before you staff:
 
-- **A reviewer is claimed, not borrowed.** It owns one worktree and one session, so it cannot read two diffs at once; a phase whose reviewer is busy waits its turn. One reviewer on a three-lane plan is a queue at the review step — usually fine, occasionally the thing to widen.
+- **A reviewer is claimed, not borrowed.** It has one session, so two reviews as the same reviewer would collide over it; a phase whose reviewer is busy waits its turn. One reviewer on a three-lane plan is a queue at the review step — usually fine, occasionally the reason to staff a second.
 - **A reviewer below every phase is refused.** Its tier is a floor, so a Tier 1 reviewer on a plan whose cheapest phase is Tier 2 would never be picked. The executor will not accept it.
 - **No reviewer on the roster falls back to `agent_models.reviewer`**, cold, one session per phase. That is exactly what every plan did before, and it is the one case where a roster leaves something on the table.
 
@@ -510,16 +510,19 @@ Add `**Review models**:` **only** when a phase needs a review above what the ros
 
 **Precedence** (resolved by `implement-plan` / `review-phase`): a phase's `**Review models**:` override wins → else the cheapest roster reviewer at or above the phase's tier → else the project-wide `agent_models.reviewer` / `agent_models.fixer` in `.vinta-ai-workflows.yaml` → else the runtime default.
 
-### Every member gets a desk
+### Every implementer gets a desk
 
-**A member keeps one worktree, and one session, for the whole run.** This is why the roster is worth writing down rather than being a way to pick models: the agent that takes Phase 4 is the agent that took Phase 1, and it still knows where things live, how the suite is run and what this codebase's conventions are. That rediscovery is most of what a cold agent's first turn of a phase is spent on.
+**An implementer keeps one worktree, and one session, for the whole run.** This is why the roster is worth writing down rather than being a way to pick models: the agent that takes Phase 4 is the agent that took Phase 1, and it still knows where things live, how the suite is run and what this codebase's conventions are. That rediscovery is most of what a cold agent's first turn of a phase is spent on.
 
 It works because the *directory* stops moving. An agent whose worktree changed between phases would be reasoning about paths it is not standing in — that, not the reset, was what made cross-phase reuse unsafe. With the directory pinned, the only open question is which files changed while the member was away, and git answers that exactly: the executor hands the continued agent the list, plus whether the previous phase's own work is in this tree at all.
 
+**Reviewers have no desk, and that is the point.** A reviewer reads the lane it is reviewing — the implementer's worktree, with the phase's changes still **uncommitted** in it. Review sits before the commit so that findings are fixed in the working tree, rather than recorded as a mistake on the branch plus a correction after it. A reviewer with a checkout of its own would be reading a committed snapshot: strictly less than what is there, and too late to act on.
+
 What this costs, and what to weigh when sizing the roster:
 
-- **A worktree and a set of forked databases per member.** Adding a cheaper implementer to save a tier on two phases is a real trade now — disk against money — rather than free.
-- **Lane capacity is the roster size**, implementers and reviewers both. Not the widest wave: a member idle in wave 1 still has a desk waiting.
+- **A worktree and a set of forked databases per implementer.** Adding a cheaper implementer to save a tier on two phases is a real trade now — disk against money — rather than free.
+- **Lane capacity is the number of implementers.** Not the widest wave: an implementer idle in wave 1 still has a desk waiting. Reviewers add nothing to it.
+- **A reviewer's session carries only sometimes.** Its directory moves with the phase it reads, so it continues when two consecutive reviews land in the same lane and starts cold otherwise. Nothing to declare — and a good reason to prefer fewer, busier implementers over many idle ones.
 - **A member whose phase failed starts their next one cold.** Their context is the context that failed, and a wrong conclusion costs more to inherit than a repository costs to re-read. Nothing to declare; the executor does it.
 
 **The mechanical-step models are still not plan-owned.** Worktree prep and opening the PR stay under `agent_models` in `.vinta-ai-workflows.yaml`. Don't put them on the roster; they'd be ignored.
@@ -583,7 +586,7 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `defaults.model` | The concrete model id for the tier **most** phases carry, pulled from [resources/ai-models.yaml](resources/ai-models.yaml). A staffed workflow never reads it for a phase — every node's model comes off its member — but it is still required, and it is what an amendment adding an unstaffed node would fall back to. |
 | `defaults.pipeline` | `standard-phase` — see "The pipeline block". |
 | `defaults.max_session_turns` | Omit (defaults to 12). It caps how many turns one reused agent session may take before the executor starts a fresh one; the executor reuses sessions across a phase's implement and fix turns, so this is a context-window guard rather than something a plan tunes. |
-| `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the **roster size**, implementers and reviewers both, because every member keeps one worktree for the whole run. How many run *at once* is still capped by the graph and by the project's parallel-lane budget (3 when unstated); a member idle in wave 1 still has a desk. |
+| `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the number of **implementers** on the roster, because each keeps one worktree for the whole run. Reviewers add nothing: they read the lane under review. How many run *at once* is still capped by the graph and by the project's parallel-lane budget (3 when unstated); an implementer idle in wave 1 still has a desk. |
 | `resources.<pool>` | One `{"kind": "semaphore"}` pool per expensive shared thing a gate contends for — the test database, the e2e browser grid, a staging deploy slot. `capacity: 1` when only one can run at a time. |
 | `gates.<id>` | The checks a phase must pass, as **shell commands run in the phase's lane** — the project's real typecheck / test / lint invocations, not an agent and not prose. Give the slow ones `requires` naming the pool they contend for, and a `timeout_s` that is generous rather than tight. |
 | `nodes[]` | One per phase, in plan order. |
@@ -720,7 +723,8 @@ make cheaper and no third phase for them to run alongside.
 One reviewer at Tier 2 covers every phase, since Tier 2 is the hardest work on
 this plan. A Tier 1 reviewer would be refused — it could never take Phase 2,
 Phase 3 or Phase 4 — and a Tier 4 one would be paying top rate to read a
-migration.
+migration. It gets no worktree: it reads whichever lane it is reviewing, with
+that phase's changes still uncommitted.
 
 and this **Execution graph** table:
 
@@ -801,9 +805,9 @@ and this `ai-plans/bookmark-folders.workflow.json`:
   },
   "resources": {
     "lane": {
-      "capacity": 4,
+      "capacity": 3,
       "kind": "worktree",
-      "description": "One desk per crew member, kept for the whole run."
+      "description": "One desk per implementer, kept for the whole run."
     },
     "test-suite": {
       "capacity": 1,
@@ -948,11 +952,11 @@ No node carries a `model`. `p1` and `p5` are the Tier 1 phases and run on `junio
 
 `mid-2` takes `p3` and then `p4`, which is the pairing worth seeing: the same agent writes the tree serializer and the action that returns it, in the same worktree, **continuing the same session**. Its second phase does not pay to work out where the serializers live or how the suite is run — it did that in `p3`. What it *is* told, because the tree moved underneath it, is that it is now on `p4`'s branch, that `p3`'s work is in this tree (`p4` depends on it), and exactly which files differ from what it last saw.
 
-No node names a reviewer. Every phase is read by `reviewer`, the only member on the roster whose role is to read them — so no agent ever reads its own diff, and `reviewer` builds up its own picture of the codebase across all five.
+No node names a reviewer. Every phase is read by `reviewer`, the only member on the roster whose role is to read them — so no agent ever reads its own diff. Its session carries only between reviews that land in the same lane, because it goes where the work is rather than keeping a tree of its own.
 
 `plan_context_refs` points at the same plan file the `prompt_ref`s do, at its **Goals** and **Guiding Decisions** headings. Each of the five phases is handed those two sections whole, so the implementer of `p3` knows that the tree serializer is deliberately not paginated if the plan's Non-goals said so, and the reviewer of `p3` can call a paginated one scope creep instead of a bonus.
 
-The lane pool is **four**: one desk per member, including the reviewer, because a member keeps its worktree and therefore its session for the whole run. Only two are ever busy at once — the graph is never wider than that — and the two idle ones are the price of the sessions the other two are carrying. The `project` block is what lets those worktrees exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
+The lane pool is **three**: one desk per implementer, kept for the whole run so each one's session has a directory to come back to. Only two are ever busy at once — the graph is never wider than that — and the third idle desk is the price of `junior`'s session. `reviewer` has no desk at all; it reads whichever lane it is reviewing, changes still uncommitted, which is what lets a finding be fixed before the commit rather than after it. The `project` block is what lets those worktrees exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
 
 ## What to avoid
 
@@ -1019,7 +1023,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Workflow graph matches the **Execution graph** table: one node per phase, one `depends_on` entry per `**Depends on**:` clause carrying both the node id and the artifact, same waves.
 - [ ] Every node has `prompt_ref` (`<plan_ref>#phase-<number>`), `touches` from its **Touch List** block, and the `gates` it must pass.
 - [ ] **`plan_context_refs` names the Goals and Guiding Decisions anchors** (`<plan_ref>#1-goals`, `<plan_ref>#2-guiding-decisions`), matching the headings as written — references, never a summary of them. Every phase's implementer and reviewer read them; a phase that doesn't know the non-goals is a phase that scope-creeps.
-- [ ] `resources` declares a `lane` pool at the **roster size** — one worktree per member, implementers and reviewers both, because a member keeps its desk and its session for the whole run; every gate that contends for something shared names its pool in `requires`.
+- [ ] `resources` declares a `lane` pool at the **number of implementers** — one worktree each, kept for the whole run; reviewers have none and read the lane under review. Every gate that contends for something shared names its pool in `requires`.
 - [ ] **`project` decided, not defaulted** — asked via `AskUserQuestion`, then either written (roles `dev` / `test`, each naming its own database, engine fields filled from the project, `migrate_cmd` read out of its task runner) or deliberately omitted because lanes share the main checkout's database. No `reset_cmd`, no compose project name, no seed command, no env-file strategy — those are the worktree's, not the plan's.
 - [ ] No credential anywhere in the workflow file: `connection_url_var` is a variable name, and `server_url` is a host and port.
 - [ ] Model ids come from [resources/ai-models.yaml](resources/ai-models.yaml) and appear **only** in the `crew` block — no node carries a `model`, and `crew` transcribes the Crew table row for row.

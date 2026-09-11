@@ -34,6 +34,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     its own diff is not something a plan can express. A phase is read by the
     cheapest reviewer at or above its tier. A roster with no reviewer still runs and
     falls back to `agent_models.reviewer`, cold, one session per phase.
+    - **A reviewer reads the lane it is reviewing**, with the phase's changes still
+      uncommitted in it, and has no worktree of its own. That is what puts review
+      before the commit: a finding is fixed in the working tree rather than
+      recorded as a mistake on the branch plus a correction after it. The cost is
+      that a reviewer's directory follows the work, so its session carries only
+      between reviews that land in the same lane.
   - **A crew member is an agent that lives for the whole run.** Each one keeps its
     own worktree and its own session across every phase it takes, so the agent that
     takes Phase 4 still knows what it learned about the codebase in Phase 1 —
@@ -54,9 +60,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - Two things still start cold: a member whose previous phase **failed**, because
       its session is the context that failed with it, and the final fix round.
     - The cost, stated plainly: **one worktree and one set of forked databases per
-      member**, so `resources.lane.capacity` is now the roster size rather than the
-      widest wave, and adding a cheaper implementer is a trade of disk against
-      money rather than free.
+      implementer**, so `resources.lane.capacity` is now the implementer count
+      rather than the widest wave, and adding a cheaper implementer is a trade of
+      disk against money rather than free.
   - The workflow document gained a top-level **`crew`** block and **`nodes[].crew`**.
     A staffed node carries no `model` — the member has one — and a document that is
     half-staffed, names a member nobody declared, assigns a phase to a reviewer,
@@ -67,7 +73,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     **waits rather than handing a phase below its tier** — even with a lane free. A
     lane is disk; a phase run by too junior an agent does not fail cleanly, it fails
     review two rounds later with nothing pointing back at the staffing. A reviewer is
-    claimed per review turn rather than per phase, so one reviewer on a three-lane
+    claimed per review turn rather than per phase — it has one session ledger and
+    two concurrent reviews would collide over it — so one reviewer on a three-lane
     plan is a queue at the review step and not a serialised run.
   - The run view reports who actually worked against who the plan said would.
     `substituted` is the figure to read beside a cost that overran: every

@@ -5,6 +5,8 @@ Three layers, all required, in order. The reviewing orchestrator never edits —
 
 ## Layer 1 — Mechanical checks
 
+**Against the working tree, before the commit.** The phase's changes are still uncommitted in `<WORKROOT>`, and that is what every command here reads. It is why review sits before integrate rather than after: a finding is fixed in the tree, so the branch never records the mistake and a correction on top of it.
+
 1. `git -C <WORKROOT> status` + `git -C <WORKROOT> diff --stat`: confirm the file list matches the agent's report.
 2. **Read the full diff** for every changed file using `git -C <WORKROOT> diff`. Spot-checking is not enough.
 3. **Verify the outer gate** ran + green. By default that is `{{BUILD_CMD}}` (repo-wide) AND the scoped suite `{{SCOPED_TEST_PATTERN}}` covering the touched apps. {If run_options.full_test_suite = true:} the outer gate runs `{{BUILD_CMD}}` AND the full `{{TEST_CMD}}` instead — verify that. Look in the report for explicit confirmation the applicable gate was executed + passed{{E2E_LAYER1_NOTE}}. Vague confirmation → **re-run yourself** (in `<WORKROOT>`).

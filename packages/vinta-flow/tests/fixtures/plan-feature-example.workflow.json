@@ -60,9 +60,9 @@
   },
   "resources": {
     "lane": {
-      "capacity": 4,
+      "capacity": 3,
       "kind": "worktree",
-      "description": "One desk per crew member, kept for the whole run."
+      "description": "One desk per implementer, kept for the whole run."
     },
     "test-suite": {
       "capacity": 1,

@@ -122,22 +122,17 @@ export interface SchedulerOptions {
    */
   readonly recycleLane?: (name: string) => Promise<void>
   /**
-   * Points a reviewer's own worktree at the phase it is about to read, and
-   * answers what changed under a member's worktree since it last looked.
+   * What changed under a member's worktree since its session last looked.
    *
-   * Both exist because a member keeps one directory for the whole run. A
-   * reviewer needs the phase's code in *its* tree rather than the
-   * implementer's, or its directory would move every phase and its session
-   * could not carry. And a member returning to a reset worktree needs the list
-   * of files that changed while it was away — the thing that makes continuing
-   * safe rather than merely cheap.
+   * An implementer keeps one directory for the whole run, so continuing its
+   * session across a phase is safe exactly as far as the agent knows which
+   * files moved while it was away. This is the seam that answers that.
    *
    * Absent for a host that injected its own executor: such a host owns its
-   * lanes. Without them a staffed run still works, and a continuation simply
-   * carries no file list — which is why `#reorientation` says so explicitly
-   * rather than implying the tree is untouched.
+   * lanes and may have no git to ask. Without it a staffed run still works, and
+   * a continuation carries no file list — which `#reorientation` reports as
+   * unknown rather than as an untouched tree.
    */
-  readonly reviewLane?: (lane: string, nodeId: string) => Promise<void>
   readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
   /**
    * Where §9's takeover targets are offered — the same registry the daemon's
@@ -269,7 +264,6 @@ interface NodeState {
     readonly member: string
     readonly model: string
     readonly harness: string | null
-    readonly lane: string
   } | null
   /**
    * The implementer that held this node, kept after `crew` is cleared.
@@ -914,7 +908,6 @@ export class Scheduler {
           member: decision.member,
           model: decision.model,
           harness: decision.harness,
-          lane: this.#laneFor(decision.member),
         }
         this.#options.journal.append({
           runId: this.#options.runId,
@@ -1192,16 +1185,11 @@ export class Scheduler {
     const carried = state.pending.length
     const owed = [...state.undelivered, ...state.pending.map((entry) => entry.text)]
 
-    // A reviewer reads in its own worktree, pointed at this phase's branch. The
-    // lanes are worktrees of one repository, so the branch is reachable from
-    // every one of them without a push — and the checkout is detached, because
-    // git will not check out a branch another worktree already holds.
-    const turnLane = this.#laneForTurn(state, params['role']) as string
-    const cwd = join(this.#options.laneRoot, turnLane)
-    if (params['role'] === 'reviewer' && state.reviewer !== null) {
-      const point = this.#options.reviewLane
-      if (point !== undefined) await point(turnLane, state.node.id)
-    }
+    // Every role runs in the node's own lane, the reviewer included. A review
+    // reads the **working tree**, uncommitted changes and all, because the
+    // point of reviewing here is to fix before the commit rather than to record
+    // the mistake and then a correction on top of it.
+    const cwd = join(this.#options.laneRoot, state.lane as string)
 
     // §15's decision, taken before the task is built because the prompt
     // depends on it: a continued session is handed a delta, and a cold one the
@@ -1388,7 +1376,7 @@ export class Scheduler {
       role: params['role'],
       canResume: adapter.capabilities.resume,
       harnessId: adapter.id,
-      lane: this.#laneForTurn(state, params['role']),
+      lane: state.lane,
       ledger: this.#ledgerOf(state, params['role']),
       nodeId: state.node.id,
       maxTurns: this.#workflow.defaults.max_session_turns,
@@ -1407,7 +1395,7 @@ export class Scheduler {
     sessionId: string,
     role: unknown,
   ): void {
-    const lane = this.#laneForTurn(state, role)
+    const lane = state.lane
     if (plan.slot === null || lane === null) return
     this.#ledgerOf(state, role).set(plan.slot, {
       harnessId: adapter.id,
@@ -1416,17 +1404,6 @@ export class Scheduler {
       nodeId: state.node.id,
       turns: plan.turns,
     })
-  }
-
-  /**
-   * The worktree this turn runs in: the reviewer's own on a review, the node's
-   * lane otherwise. It is what `sessions.ts` compares a resumed session
-   * against, so a review filed under the node's lane would look lane-changed on
-   * the reviewer's very next phase.
-   */
-  #laneForTurn(state: NodeState, role: unknown): string | null {
-    if (role === 'reviewer' && state.reviewer !== null) return state.reviewer.lane
-    return state.lane
   }
 
   /** §15's per-turn row. A slot name, a disposition and a closed-set reason. */

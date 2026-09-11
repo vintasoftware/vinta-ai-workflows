@@ -251,15 +251,23 @@ describe('plan-feature worked example', () => {
   })
 
   /**
-   * A member keeps one worktree — and therefore one session — for the whole
-   * run, so the pool is sized by the roster rather than by how many phases can
-   * run at once. The idle desks are the price of the sessions the busy ones
-   * carry, and the example is deliberately a case where they differ.
+   * An implementer keeps one worktree — and therefore one session — for the
+   * whole run, so the pool is sized by how many implementers there are rather
+   * than by how many phases can run at once. The idle desks are the price of
+   * the sessions the busy ones carry, and this example is deliberately a case
+   * where the two numbers differ.
+   *
+   * Reviewers add nothing to it: a review runs in the lane it is reviewing, so
+   * that it reads the working tree before anything is committed.
    */
-  it('gives every member a desk, including the reviewer', () => {
+  it('gives a desk to every implementer and none to the reviewer', () => {
     const workflow = parsed()
+    const built = Object.values(workflow.crew).filter(
+      (member) => member.role === 'implementer',
+    ).length
 
-    expect(workflow.resources['lane']?.capacity).toBe(Object.keys(workflow.crew).length)
+    expect(workflow.resources['lane']?.capacity).toBe(built)
+    expect(built).toBeLessThan(Object.keys(workflow.crew).length)
   })
 
   /**

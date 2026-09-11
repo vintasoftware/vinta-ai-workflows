@@ -21,8 +21,8 @@ Resolve it from the roster: the **cheapest reviewer at or above the phase's tier
 
 Three consequences worth knowing:
 
-- **A reviewer is claimed, not borrowed.** It owns one worktree and one session and cannot read two diffs at once, so a phase whose reviewer is busy waits. That cannot deadlock: reviewers never take phases, so the wait is always on a review already running.
-- **A reviewer keeps its session across phases**, like every other member. By phase three it knows this codebase, which is most of what a cold reviewer spends its first turn on.
+- **A reviewer is claimed, not borrowed.** It has one session ledger, so two reviews running as the same reviewer would collide over it; a phase whose reviewer is busy waits. That cannot deadlock — reviewers never take phases, so the wait is always on a review already running.
+- **A reviewer reads the lane it is reviewing**, uncommitted changes and all, so findings are fixed before the commit. It has no worktree of its own, and therefore keeps a session only when consecutive reviews land in the same lane.
 - **No reviewer on the roster → fall through to `agent_models.reviewer`**, cold, one session per phase. That is what every plan did before, and the one thing a roster-less plan leaves on the table.
 
 A plan with no **Crew** table skips this step entirely and resolves `agent_models.<role>` as it always did.

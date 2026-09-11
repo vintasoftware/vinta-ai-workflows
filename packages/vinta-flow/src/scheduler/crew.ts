@@ -95,13 +95,22 @@ export function reviewers(crew: Readonly<Record<string, CrewMember>>): RosterMem
 }
 
 /**
- * Every member who owns a worktree for the run — which is all of them. A
- * reviewer needs a tree of its own as much as an implementer does: it is the
- * only way its directory stays the same from one phase to the next, and a
- * reviewer whose directory moves cannot keep a session either.
+ * The members who own a worktree for the run: implementers, and only them.
+ *
+ * A reviewer works **in the tree it is reviewing** — the implementer's own lane,
+ * with that phase's uncommitted changes still in it. That is the point rather
+ * than a convenience: review happens before the commit, so findings are fixed
+ * in the working tree instead of landing as a follow-up commit on a branch that
+ * already recorded the mistake. Giving a reviewer its own checkout would mean
+ * reading a committed snapshot, which is strictly less than what is there.
+ *
+ * The cost is that a reviewer's directory moves between phases, so its session
+ * carries only when consecutive reviews happen to land in the same lane —
+ * §15.2's `lane_changed` decides that per turn, and there is nothing to
+ * configure.
  */
 export function laneHolders(crew: Readonly<Record<string, CrewMember>>): RosterMember[] {
-  return roster(crew)
+  return implementers(crew)
 }
 
 export function assignCrew(input: CrewAssignInput): CrewDecision {
@@ -167,10 +176,13 @@ export interface ReviewAssignInput {
  * **Claimed, not borrowed.** The previous design resolved a reviewer *model* a
  * tier above the author and spawned it without holding anything, on the
  * grounds that a review is short and a senior mid-phase should still be able to
- * read a junior's diff. That works for a model and not for an agent: a reviewer
- * with one worktree and one session cannot read two phases at once, so it is
- * held for the turn like any other member, and a node whose reviewer is busy
- * waits for them.
+ * read a junior's diff. That works for a model and not for an agent: a member
+ * has one session ledger, and two reviews running as the same member would
+ * either resume one session twice or overwrite each other's entry — so a
+ * reviewer is held for its turn and a node whose reviewer is busy waits.
+ *
+ * Not for a worktree: a reviewer has none, and reads the lane it is reviewing.
+ * A plan that finds one reviewer too serialising staffs a second.
  *
  * That wait cannot deadlock. Reviewers never take phases, so a node waiting for
  * one is always waiting on another node's *review* — a turn that is already
