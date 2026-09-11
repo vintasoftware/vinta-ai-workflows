@@ -15,6 +15,7 @@
  * went wrong, and the skill's teardown steps reverse them from the summary.
  */
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, rm, symlink } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -196,16 +197,39 @@ export class LanePool {
     }
 
     try {
-      // Retried, because removal can lose a race it will win a moment later.
-      // Windows refuses to delete a file anything still holds open, and a
-      // process that has just exited — an agent, a gate, a database — can keep
-      // a handle for a beat after it is gone, as can a virus scanner reading
-      // what was written. `--force` does not help: it is about git's own
-      // reluctance, not the filesystem's. Failing here costs the node, so it is
-      // worth a few attempts before concluding the lane is stuck.
-      await retrying(() => this.#git(['worktree', 'remove', '--force', lane.path]))
-      await this.#git(['branch', '-D', lane.branch])
-      await rm(join(this.#summaryDir, `${name}.yaml`), { force: true, maxRetries: 10, retryDelay: 100 })
+      // The whole teardown is retried, not just its first step. Windows refuses
+      // to delete a file anything still holds open, and a process that has just
+      // exited — an agent, a gate, a database — can keep a handle for a beat
+      // after it is gone, as can a scanner reading what was written. `--force`
+      // does not help: it is about git's own reluctance, not the filesystem's.
+      //
+      // `prune` between the two git calls is what makes the retry converge. A
+      // removal that only partly succeeded leaves the worktree still registered,
+      // and git then refuses to delete a branch it believes is checked out —
+      // so the second step fails for a reason the first one caused, and
+      // retrying the second alone would never clear it.
+      await retrying(async () => {
+        // **Each step skips work it has already done**, or the retry could not
+        // converge: a second `worktree remove` of a path that is gone fails,
+        // and the attempt that was meant to finish the job would fail on its
+        // first line every time.
+        if (existsSync(lane.path)) {
+          await this.#git(['worktree', 'remove', '--force', lane.path])
+        }
+        // Between the two, and load-bearing. A removal that only partly
+        // succeeded leaves the worktree registered, and git then refuses to
+        // delete a branch it believes is checked out — the second step failing
+        // for a reason the first one caused.
+        await this.#git(['worktree', 'prune'])
+        if (await this.#hasBranch(lane.branch)) {
+          await this.#git(['branch', '-D', lane.branch])
+        }
+      })
+      await rm(join(this.#summaryDir, `${name}.yaml`), {
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100,
+      })
     } catch {
       throw new LaneRecycleError(name, 'reprovision')
     }
@@ -234,6 +258,16 @@ export class LanePool {
       await git(['clean', '-fd', '-e', 'node_modules'])
     } catch {
       throw new LaneRecycleError(lane.name, 'worktree')
+    }
+  }
+
+  /** Whether the ref is there. A missing branch is an answer, not a failure. */
+  async #hasBranch(branch: string): Promise<boolean> {
+    try {
+      await this.#git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+      return true
+    } catch {
+      return false
     }
   }
 
