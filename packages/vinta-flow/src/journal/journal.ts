@@ -266,6 +266,14 @@ export class Journal {
    * get a whole run's rows where it asked for one node's — a bug that reads as
    * a plausible number rather than as an error.
    */
+  /** §15.6's sibling: who took each node, for the staffing rollup. */
+  crewAssignments(runId: string): StoredEvent[] {
+    const rows = this.db
+      .prepare("SELECT * FROM events WHERE run_id = ? AND type = 'node_crew' ORDER BY id")
+      .all(runId) as EventRow[]
+    return rows.map(toStoredEvent)
+  }
+
   sessionDecisions(runId: string): StoredEvent[] {
     const rows = this.db
       .prepare("SELECT * FROM events WHERE run_id = ? AND type = 'node_session' ORDER BY id")

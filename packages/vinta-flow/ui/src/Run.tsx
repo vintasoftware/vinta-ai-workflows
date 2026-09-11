@@ -410,8 +410,9 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
     )
   }
 
-  const { reuse } = usage
+  const { reuse, crew } = usage
   const share = cacheShare(usage.cache)
+  const staffed = crew.members.length > 0 || crew.idle.length > 0
 
   return (
     <Panel
@@ -449,6 +450,50 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
           {cost(usage.cost)}
         </DescriptionDetails>
       </DescriptionList>
+
+      {staffed && (
+        <div className="flex flex-col gap-1.5 border-t pt-3">
+          {/* The roster against what it actually did. `covered` is the number
+              worth reading next to the cost above: a substitution always runs
+              at or above the tier the plan budgeted for, so a run can be
+              entirely green and still have been staffed dearer than planned. */}
+          <Hint className="crew-head text-xs">
+            Crew
+            {crew.substituted > 0 &&
+              ` — ${crew.substituted} of ${crew.asPlanned + crew.substituted} phases covered by a peer`}
+          </Hint>
+          <ul className="crew-members flex flex-col gap-1 text-xs">
+            {crew.members.map((member) => (
+              <li
+                key={member.member}
+                data-crew-member={member.member}
+                className="flex items-center justify-between gap-2"
+              >
+                <span className="text-muted-foreground">
+                  {member.member} · tier {member.tier}
+                </span>
+                <span className="font-mono">
+                  {member.nodes}
+                  {member.coveredFor > 0 && ` (${member.coveredFor} covering)`}
+                </span>
+              </li>
+            ))}
+            {/* Only reachable on a run that stopped early — a validated
+                workflow cannot declare a member nobody is assigned to — so
+                this says "not reached yet", not "the plan overstaffed". */}
+            {crew.idle.map((member) => (
+              <li
+                key={member}
+                data-crew-idle={member}
+                className="flex items-center justify-between gap-2"
+              >
+                <span className="text-muted-foreground">{member}</span>
+                <span className="font-mono">not reached</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {reuse.fresh.length > 0 && (
         <div className="flex flex-col gap-1.5 border-t pt-3">

@@ -243,6 +243,51 @@ test('a run that asked for no reuse says so, rather than reporting 0%', async ()
   expect(container.querySelector('[data-fresh-reason]')).toBe(null)
 })
 
+test('the rollup names who worked, and flags the phases a peer covered', async () => {
+  const stub = await startStubDaemon({
+    ...oneNode(),
+    usage: {
+      [RUN_ID]: runUsage({
+        crew: {
+          members: [
+            { member: 'junior', tier: 1, nodes: 2, coveredFor: 0 },
+            { member: 'senior', tier: 4, nodes: 3, coveredFor: 1 },
+          ],
+          asPlanned: 4,
+          substituted: 1,
+          idle: ['mid-a'],
+        },
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-crew-member]')).not.toBe(null))
+
+  expect(textOf(container, '[data-crew-member="junior"]')).toContain('tier 1')
+  // The number that matters next to the cost: a covered phase ran at or above
+  // the tier the plan budgeted for.
+  expect(textOf(container, '[data-crew-member="senior"]')).toContain('1 covering')
+  expect(textOf(container, '.crew-head')).toContain('1 of 5 phases covered')
+  // A declared member with nothing yet is "not reached", not "overstaffed" —
+  // a validated workflow cannot declare one nobody is assigned to.
+  expect(textOf(container, '[data-crew-idle="mid-a"]')).toContain('not reached')
+})
+
+test('an unstaffed run shows no crew panel at all', async () => {
+  // Every workflow written before rosters existed. An empty list would read as
+  // a roster that lost its members.
+  const stub = await startStubDaemon({ ...oneNode(), usage: { [RUN_ID]: runUsage() } })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-reuse]')).not.toBe(null))
+
+  expect(container.querySelector('.crew-head')).toBe(null)
+  expect(container.querySelector('[data-crew-member]')).toBe(null)
+})
+
 test('a daemon that cannot serve the rollup does not stop the run view drawing', async () => {
   // An older daemon 404s this route. The graph and the capacity panels are why
   // an operator opened this page; a missing total must not cost them either.

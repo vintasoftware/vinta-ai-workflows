@@ -28,6 +28,7 @@ import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
+import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
 import { parseWorkflow } from '../validate.ts'
@@ -202,11 +203,21 @@ export function createApi(options: ApiOptions): Hono {
 
     const usage = collectRunUsage(journal, runId)
     const reuse = collectRunReuse(journal, runId)
+    // The roster the run was started against, so a member who has not worked
+    // yet is reported as idle rather than simply absent.
+    const declared = Object.keys(workflow(runId).crew)
+    const crew = collectRunCrew(journal, runId, declared)
     return c.json({
       runId,
       // Copied rather than passed through: the fold's arrays are `readonly`,
       // and the wire type is the mutable shape `c.json` serializes.
       reuse: { ...reuse.totals, fresh: [...reuse.totals.fresh] },
+      crew: {
+        members: crew.members.map((member) => ({ ...member })),
+        asPlanned: crew.asPlanned,
+        substituted: crew.substituted,
+        idle: [...crew.idle],
+      },
       inputTokens: usage.totals.inputTokens,
       outputTokens: usage.totals.outputTokens,
       sessions: usage.totals.sessions,
