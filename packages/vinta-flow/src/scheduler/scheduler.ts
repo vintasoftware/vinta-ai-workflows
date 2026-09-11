@@ -83,6 +83,7 @@ import type { Journal } from '../journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
+import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import { composeSpawnPrompt } from '../prompts/index.ts'
@@ -646,9 +647,15 @@ export class Scheduler {
     if (recycle === undefined) return
     try {
       await recycle(lane)
-    } catch {
-      // The lane name, and nothing the recycle commands printed (§11).
-      throw new Error(`lane "${lane}" could not be recycled`)
+    } catch (error) {
+      // The lane name and the stage — and nothing the recycle commands printed
+      // (§11). The stage is one of three fixed words, and it is the difference
+      // between a database that would not reset, a worktree that would not come
+      // back to its base, and a slot that could not be torn down and rebuilt.
+      // Without it "could not be recycled" sends an operator to read three
+      // different pieces of machinery.
+      const stage = error instanceof LaneRecycleError ? ` (${error.stage})` : ''
+      throw new Error(`lane "${lane}" could not be recycled${stage}`)
     }
   }
 
