@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { agentSpawn, signalGroup } from '../src/harness/shared.ts'
-import { commandInvocation } from '../src/platform/platform.ts'
+import { commandInvocation, politeKillFirst } from '../src/platform/platform.ts'
 import {
   fakeCli,
   fakeCliFromSource,
@@ -261,9 +261,17 @@ srv.listen(port, '127.0.0.1', () => process.stdout.write('listening\\n'))
       setTimeout(() => resolve(false), 15_000).unref()
     })
 
-    // `stop`'s own sequence: polite first, then force after a moment.
-    signalGroup(child, 'SIGTERM')
-    setTimeout(() => signalGroup(child, 'SIGKILL'), 2_000).unref()
+    // The product's own sequence, through the same seam it uses. Written out
+    // as SIGTERM-then-SIGKILL this test failed on Windows for the reason the
+    // seam exists: the polite call closes `cmd.exe`, orphaning what ran inside
+    // it, and the forceful one is then skipped because the child it was handed
+    // has already exited. It is a regression test for that rule now.
+    if (politeKillFirst()) {
+      signalGroup(child, 'SIGTERM')
+      setTimeout(() => signalGroup(child, 'SIGKILL'), 2_000).unref()
+    } else {
+      signalGroup(child, 'SIGKILL')
+    }
 
     expect(await closed, 'close never arrived — a stop that waits on it hangs').toBe(true)
   }, 25_000)

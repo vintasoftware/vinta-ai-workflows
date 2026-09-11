@@ -99,6 +99,24 @@ export interface Lane {
 
 const ROLES: readonly DatabaseRole[] = ['dev', 'test']
 
+/**
+ * Runs an operation until it stops losing to a handle somebody else still
+ * holds. Linear backoff, a handful of attempts, and the last failure is
+ * rethrown so a genuinely stuck path still reports as one.
+ */
+async function retrying<T>(operation: () => Promise<T>, attempts = 8, delayMs = 150): Promise<T> {
+  let last: unknown
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      last = error
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+  throw last
+}
+
 export class LanePool {
   readonly #options: PoolOptions
   readonly #templatesDir: string
@@ -178,9 +196,16 @@ export class LanePool {
     }
 
     try {
-      await this.#git(['worktree', 'remove', '--force', lane.path])
+      // Retried, because removal can lose a race it will win a moment later.
+      // Windows refuses to delete a file anything still holds open, and a
+      // process that has just exited — an agent, a gate, a database — can keep
+      // a handle for a beat after it is gone, as can a virus scanner reading
+      // what was written. `--force` does not help: it is about git's own
+      // reluctance, not the filesystem's. Failing here costs the node, so it is
+      // worth a few attempts before concluding the lane is stuck.
+      await retrying(() => this.#git(['worktree', 'remove', '--force', lane.path]))
       await this.#git(['branch', '-D', lane.branch])
-      await rm(join(this.#summaryDir, `${name}.yaml`), { force: true })
+      await rm(join(this.#summaryDir, `${name}.yaml`), { force: true, maxRetries: 10, retryDelay: 100 })
     } catch {
       throw new LaneRecycleError(name, 'reprovision')
     }
