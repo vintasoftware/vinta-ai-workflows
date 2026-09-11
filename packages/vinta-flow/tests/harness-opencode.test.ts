@@ -19,7 +19,7 @@
  * must never fail a suite on a machine without one — which includes CI, and
  * includes the machine this was written on.
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createServer as createSocketServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -1062,29 +1062,14 @@ describe('spawn against a stub server', () => {
  * it with is the shape npm actually installs, so the `.cmd` routing in
  * `commandInvocation` is exercised here too.
  */
-/**
- * Where the fake records what it was given and what binding did.
- *
- * A server that never becomes healthy and one that never started look the same
- * from the adapter: the boot loop polls until its deadline either way, and a
- * `transient` refusal carries no diagnostics on purpose (§11 — the server's
- * output is vendor output). On Windows that made a 30s wall the only symptom.
- * The fake writes its own side of the story here instead.
- */
-const FAKE_LOG = join(makeTemp(), 'opencode-fake.log')
-
 const fakeOpencode = (): string =>
   fakeCliFromSource(
     makeTemp(),
     'opencode-fake',
     `import http from 'node:http'
-import { appendFileSync } from 'node:fs'
-const log = (line) => { try { appendFileSync(${JSON.stringify(FAKE_LOG)}, line + '\\n') } catch {} }
 const args = process.argv.slice(2)
-log('argv:' + JSON.stringify(args))
 if (args[0] === '--version') { process.stdout.write('0.9.9\\n'); process.exit(0) }
 const port = Number(args[args.indexOf('--port') + 1])
-log('port:' + String(port))
 let sessions = 0
 const json = (res, code, body) => {
   res.writeHead(code, { 'content-type': 'application/json' })
@@ -1105,13 +1090,10 @@ const srv = http.createServer((req, res) => {
   return json(res, 404, {})
 })
 srv.on('error', (error) => {
-  log('error:' + String(error && error.message))
   process.stderr.write('fake listen failed: ' + String(error && error.message) + '\\n')
   process.exit(1)
 })
-srv.listen(port, '127.0.0.1', () => {
-  log('listening:' + JSON.stringify(srv.address()))
-})
+srv.listen(port, '127.0.0.1')
 `,
   )
 
@@ -1133,15 +1115,6 @@ const portFree = (port: number): Promise<boolean> =>
   })
 
 describe('server lifecycle', () => {
-  /** The fake's own account of what it was given and whether it bound. */
-  const fakeLog = (): string => {
-    try {
-      return `fake log:\n${readFileSync(FAKE_LOG, 'utf8')}`
-    } catch {
-      return 'fake log: nothing — the fake never ran'
-    }
-  }
-
   /**
    * Short on purpose. The adapter's default boot budget is 30s, which is also
    * vitest's default timeout, so a server that never becomes healthy killed the
@@ -1160,7 +1133,7 @@ describe('server lifecycle', () => {
       expect(result.installed).toBe(true)
 
       const servers = adapter.listServers()
-      expect(servers.length, fakeLog()).toBe(1)
+      expect(servers.length).toBe(1)
       const server = servers[0]
       if (server === undefined) throw new Error('no server was started')
       pid = server.pid
@@ -1186,7 +1159,7 @@ describe('server lifecycle', () => {
     try {
       const first = await adapter.spawn(task({ nodeId: 'phase-1', cwd: laneA }))
       const second = await adapter.spawn(task({ nodeId: 'phase-2', cwd: laneA }))
-      expect(first.ok && second.ok, fakeLog()).toBe(true)
+      expect(first.ok && second.ok).toBe(true)
       // Two nodes, one server: the process outlives the node that started it.
       expect(adapter.listServers().length).toBe(1)
 

@@ -23,7 +23,7 @@ The zero-install path still works and is still the default. `implement-plan` —
 
 ## Platforms
 
-macOS, Linux and Windows. CI runs the whole suite on all three (`.github/workflows/vinta-flow.yml`) — the *whole* suite, with one test skipped on Windows for a stated reason rather than eighty. Fixtures are declared as data and rendered for whichever platform is running, so a stand-in CLI is a shebang script on POSIX and a `.cmd` shim on Windows, exactly as npm installs a real one. The four places the operating systems genuinely disagree are decided in one module — `src/platform/platform.ts` — rather than scattered through the code that depends on them. Every function there takes the platform as an argument, so both answers are asserted from either kind of machine in `tests/platform.test.ts`.
+macOS, Linux and Windows. CI runs the whole suite on all three (`.github/workflows/vinta-flow.yml`) — the *whole* suite, and it passes: **847 tests on Windows**, where eighty of them used to be skipped for being written in `sh`. What still does not run there is one test, for a stated reason, plus whatever needs a real agent CLI that is not installed on a runner. Fixtures are declared as data and rendered for whichever platform is running, so a stand-in CLI is a shebang script on POSIX and a `.cmd` shim on Windows, exactly as npm installs a real one. The four places the operating systems genuinely disagree are decided in one module — `src/platform/platform.ts` — rather than scattered through the code that depends on them. Every function there takes the platform as an argument, so both answers are asserted from either kind of machine in `tests/platform.test.ts`.
 
 What differs, and what you inherit as a consequence:
 
