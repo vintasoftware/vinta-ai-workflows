@@ -10,12 +10,13 @@
  * running-it-for-real half is covered by every migrated suite: those spawn the
  * fake and read what comes back, on whichever platform they are running.
  */
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
+import { commandInvocation } from '../src/platform/platform.ts'
 import {
   fakeCli,
   fakeCliFromSource,
@@ -23,6 +24,38 @@ import {
   renderWindowsLauncher,
 } from './support/fake-cli.ts'
 import { renderGate } from './support/gate-script.ts'
+
+/**
+ * Runs a fake the way the adapters do — through `commandInvocation`.
+ *
+ * Not a detail. On Windows the launcher is a `.cmd`, and since
+ * CVE-2024-27980 Node refuses to spawn one without a shell: calling
+ * `execFileSync(bin, …)` here answered `EINVAL` and took four of these tests
+ * and everything downstream of them with it. That is exactly the restriction
+ * `commandInvocation` exists to handle, and every spawn in `src/` already goes
+ * through it — so a test that reached past it was testing something no caller
+ * does. Going through the seam also means these tests exercise the same
+ * `cmd.exe` routing a real npm-installed CLI needs.
+ */
+function runFake(
+  bin: string,
+  args: readonly string[],
+  options: { readonly input?: string } = {},
+): { status: number; stdout: string; stderr: string } {
+  const invocation = commandInvocation(bin, args)
+  // `spawnSync` rather than `execFileSync`: it reports a non-zero exit as a
+  // value instead of a throw — several of these fixtures exit non-zero on
+  // purpose — and its options are the ones `windowsVerbatimArguments` belongs
+  // to, which is what carries `commandInvocation`'s pre-quoted command line
+  // through unmangled.
+  const result = spawnSync(invocation.file, [...invocation.args], {
+    encoding: 'utf8',
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    ...(options.input === undefined ? {} : { input: options.input }),
+  })
+  if (result.error !== undefined) throw result.error
+  return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr }
+}
 
 const temps: string[] = []
 const makeTemp = (): string => {
@@ -66,10 +99,10 @@ describe('the fake CLI, actually running', () => {
       exit: 4,
     })
 
-    const out = execFileSync(bin, ['--version'], { encoding: 'utf8' })
+    const { stdout } = runFake(bin, ['--version'])
 
-    expect(out.trim()).toBe('1.2.3 (Fake)')
-    expect(out).not.toContain('must not be reached')
+    expect(stdout.trim()).toBe('1.2.3 (Fake)')
+    expect(stdout).not.toContain('must not be reached')
   })
 
   it('writes its scripted streams and exit code', () => {
@@ -79,17 +112,7 @@ describe('the fake CLI, actually running', () => {
       exit: 3,
     })
 
-    let status = 0
-    let stdout = ''
-    let stderr = ''
-    try {
-      stdout = execFileSync(bin, [], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-    } catch (error) {
-      const failure = error as { status: number; stdout: string; stderr: string }
-      status = failure.status
-      stdout = failure.stdout
-      stderr = failure.stderr
-    }
+    const { status, stdout, stderr } = runFake(bin, [])
 
     expect(status).toBe(3)
     expect(stdout).toContain('{"type":"system"}')
@@ -102,9 +125,9 @@ describe('the fake CLI, actually running', () => {
     // fake that answered first would let a broken handover pass.
     const bin = fakeCli(makeTemp(), 'reader', { readsLine: true, stdout: ['after-the-prompt'] })
 
-    const out = execFileSync(bin, [], { encoding: 'utf8', input: 'the prompt\n' })
+    const { stdout } = runFake(bin, [], { input: 'the prompt\n' })
 
-    expect(out).toContain('after-the-prompt')
+    expect(stdout).toContain('after-the-prompt')
   })
 
   it('runs arbitrary source, and is handed its arguments', () => {
@@ -114,7 +137,7 @@ describe('the fake CLI, actually running', () => {
       `process.stdout.write('args:' + process.argv.slice(2).join(',') + '\\n')`,
     )
 
-    expect(execFileSync(bin, ['one', 'two'], { encoding: 'utf8' }).trim()).toBe('args:one,two')
+    expect(runFake(bin, ['one', 'two']).stdout.trim()).toBe('args:one,two')
   })
 })
 
