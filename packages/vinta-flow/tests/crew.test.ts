@@ -9,14 +9,30 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { assignCrew, type CrewAssignInput, reviewerModel, roster } from '../src/scheduler/crew.ts'
+import {
+  assignCrew,
+  assignReviewer,
+  type CrewAssignInput,
+  type ReviewAssignInput,
+  type ReviewDecision,
+  roster,
+} from '../src/scheduler/crew.ts'
 import type { CrewMember } from '../src/types.ts'
 
+const impl = (tier: number, model: string, extra: Partial<CrewMember> = {}): CrewMember => ({
+  role: 'implementer',
+  tier,
+  model,
+  ...extra,
+})
+
+const reviewer = (tier: number, model: string): CrewMember => ({ role: 'reviewer', tier, model })
+
 const CREW: Record<string, CrewMember> = {
-  junior: { tier: 1, model: 'cheap-1' },
-  'mid-a': { tier: 2, model: 'mid-1' },
-  'mid-b': { tier: 2, model: 'mid-1' },
-  senior: { tier: 4, model: 'dear-1' },
+  junior: impl(1, 'cheap-1'),
+  'mid-a': impl(2, 'mid-1'),
+  'mid-b': impl(2, 'mid-1'),
+  senior: impl(4, 'dear-1'),
 }
 
 function input(overrides: Partial<CrewAssignInput> = {}): CrewAssignInput {
@@ -37,10 +53,19 @@ describe('assignCrew — the plan’s own staffing', () => {
   })
 
   it('carries a member’s harness override, so a roster can be mixed-vendor', () => {
-    const crew = { ...CREW, senior: { tier: 4, model: 'dear-1', harness: 'codex' as const } }
+    const crew = { ...CREW, senior: impl(4, 'dear-1', { harness: 'codex' }) }
     const decision = assignCrew(input({ assigned: 'senior', crew }))
 
     expect(decision).toMatchObject({ member: 'senior', harness: 'codex' })
+  })
+
+  it('refuses to staff a phase to a reviewer, whatever the document said', () => {
+    // `validate.ts` catches this before a run starts. Asserted here too, because
+    // a scheduler that silently accepted it is how a reviewer ends up holding a
+    // phase and then reading its own diff.
+    const crew = { ...CREW, checker: reviewer(4, 'dear-1') }
+
+    expect(assignCrew(input({ assigned: 'checker', crew }))).toEqual({ kind: 'unstaffed' })
   })
 
   it('is unstaffed when there is no roster — every workflow written before one', () => {
@@ -109,20 +134,76 @@ describe('roster order', () => {
   })
 })
 
-describe('reviewerModel — a tier above the author', () => {
-  it('reviews a junior’s work on the next tier up, not on the top of the roster', () => {
-    expect(reviewerModel(CREW, 1)).toEqual({ member: 'mid-a', model: 'mid-1', tier: 2 })
+describe('assignReviewer — a person, not a tier', () => {
+  const STAFFED: Record<string, CrewMember> = {
+    ...CREW,
+    'check-mid': reviewer(2, 'mid-1'),
+    'check-senior': reviewer(4, 'dear-1'),
+  }
+
+  const review = (overrides: Partial<ReviewAssignInput> = {}): ReviewDecision =>
+    assignReviewer({
+      crew: STAFFED,
+      authorTier: 1,
+      author: 'junior',
+      busy: new Set(),
+      ...overrides,
+    })
+
+  it('picks the cheapest reviewer qualified for the phase', () => {
+    expect(review()).toEqual({
+      kind: 'assigned',
+      member: 'check-mid',
+      tier: 2,
+      model: 'mid-1',
+      harness: null,
+    })
   })
 
-  it('skips peers at the author’s own tier — a review is not a second opinion', () => {
-    expect(reviewerModel(CREW, 2)).toEqual({ member: 'senior', model: 'dear-1', tier: 4 })
+  /**
+   * The floor is the author's tier, not one above it. A peer-tier review is a
+   * review by someone the plan judged equally capable, which is what an
+   * independent second pair of eyes is — the independence comes from the role.
+   */
+  it('lets a reviewer at the author’s own tier take it', () => {
+    expect(review({ authorTier: 2, author: 'mid-a' })).toMatchObject({ member: 'check-mid' })
   })
 
-  it('has nobody above the top tier, and says so instead of inventing one', () => {
-    expect(reviewerModel(CREW, 4)).toBeNull()
+  it('reaches up when the phase is above the cheaper reviewer', () => {
+    expect(review({ authorTier: 4, author: 'senior' })).toMatchObject({ member: 'check-senior' })
   })
 
-  it('has nobody above a single-tier team either', () => {
-    expect(reviewerModel({ solo: { tier: 3, model: 'mid-1' } }, 3)).toBeNull()
+  it('waits for a busy reviewer rather than dropping below the author’s tier', () => {
+    const decision = review({
+      authorTier: 4,
+      author: 'senior',
+      busy: new Set(['check-senior']),
+    })
+
+    expect(decision).toEqual({ kind: 'wait', requiredTier: 4 })
+  })
+
+  it('covers with the next qualified reviewer when the cheapest is busy', () => {
+    expect(review({ busy: new Set(['check-mid']) })).toMatchObject({ member: 'check-senior' })
+  })
+
+  it('is unstaffed when the roster has no reviewer, so the project default applies', () => {
+    expect(review({ crew: CREW })).toEqual({ kind: 'unstaffed' })
+  })
+
+  /**
+   * The invariant the two roles exist to guarantee. Unreachable through the
+   * parser — a reviewer cannot be assigned a phase — so this builds the state
+   * by hand and checks the assertion fires rather than the review proceeding.
+   */
+  it('throws rather than let a member review its own phase', () => {
+    expect(() =>
+      assignReviewer({
+        crew: { solo: reviewer(3, 'mid-1') },
+        authorTier: 3,
+        author: 'solo',
+        busy: new Set(),
+      }),
+    ).toThrow(/review its own phase/)
   })
 })

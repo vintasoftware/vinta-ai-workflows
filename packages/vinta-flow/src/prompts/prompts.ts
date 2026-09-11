@@ -141,6 +141,39 @@ export interface SpawnPromptRequest {
    * back to a fresh session *and* a non-continuation prompt.
    */
   readonly continuation?: boolean
+  /**
+   * Set where this turn continues a session that last ran on a **different
+   * node** — the same agent, in the same directory, starting a new phase.
+   *
+   * Such a turn is not a delta: the session's brief is for work that is
+   * finished, so it gets the new phase's brief in full. What it also needs, and
+   * what nothing else can tell it, is that the worktree moved while it was
+   * away. Its memory of the tree is a memory of the *last* phase's branch, and
+   * silently letting it act on that is how an agent edits a file it believes it
+   * already changed, or codes against a model it believes it already wrote.
+   */
+  readonly reorientation?: Reorientation
+}
+
+export interface Reorientation {
+  /** The phase this session last worked on. */
+  readonly priorNodeId: string
+  /**
+   * Whether the prior phase's work is in this tree — true exactly when this
+   * node depends on it. The single most important line in the preamble: a
+   * session that remembers writing a model and does not know it is absent will
+   * code against something that is not there.
+   */
+  readonly priorWorkPresent: boolean
+  /**
+   * Files that differ between what the session last saw and what is checked out
+   * now, or null when the host could not compute it.
+   *
+   * Null is not "nothing changed" and must never read as it. A host with no
+   * `laneDelta` says so plainly and tells the agent to treat its whole memory
+   * of the tree as stale, which is slower and correct.
+   */
+  readonly changedFiles: readonly string[] | null
 }
 
 /**
@@ -169,17 +202,23 @@ export function composeSpawnPrompt(request: SpawnPromptRequest): string {
   // resolving a document this prompt will not carry could only fail a turn over
   // a reference it does not use — and the cold prompt that opened this session
   // already read them.
-  if (request.continuation === true) {
+  if (request.continuation === true && request.reorientation === undefined) {
     const resumed = resume(request, request.workspace)
     if (role === 'implementer') return renderImplementerContinuation(resumed)
     if (role === 'reviewer') return renderReviewerContinuation(resumed)
     return renderFixerContinuation(resumed)
   }
 
+  // A cross-phase continuation takes the cold prompt — it is a new phase, and
+  // the brief is what a new phase is — with the re-orientation in front of it.
+  // Ordered that way deliberately: what changed under the agent has to be read
+  // before the instructions it would otherwise act on from memory.
   const materials = gather(request, request.workspace)
-  if (role === 'implementer') return renderImplementer(materials)
-  if (role === 'reviewer') return renderReviewer(materials)
-  return renderFixer(materials)
+  const preamble =
+    request.reorientation === undefined ? '' : renderReorientation(request.reorientation, materials)
+  if (role === 'implementer') return preamble + renderImplementer(materials)
+  if (role === 'reviewer') return preamble + renderReviewer(materials)
+  return preamble + renderFixer(materials)
 }
 
 /** The conflict fixer's prompt. Shared with `integration/fixer.ts`, not forked. */
@@ -400,6 +439,61 @@ function lastReport(journal: PromptJournal, runId: string, nodeId: string): stri
 // ---------------------------------------------------------------------------
 // Renderers
 // ---------------------------------------------------------------------------
+
+/**
+ * What the agent has to know before it reads anything else.
+ *
+ * Three facts, in the order they matter. It is the same session and the same
+ * directory — so nothing it knows about *this repository's* conventions,
+ * layout or tooling is wasted, which is the whole reason the session was kept.
+ * The tree is on a different branch — so its memory of the branch it last
+ * worked on describes something that is not here. And, specifically, the last
+ * phase's own work either is or is not underneath it.
+ *
+ * The file list is the part that makes this safe rather than merely hopeful. A
+ * general "things may have changed" invites an agent to decide for itself what
+ * to trust; a list of paths is checkable.
+ */
+function renderReorientation(reorientation: Reorientation, materials: Materials): string {
+  const { changedFiles, priorNodeId, priorWorkPresent } = reorientation
+  const lines = [
+    '## Before you start: the worktree moved',
+    '',
+    `You are the same agent, in the same directory (\`${materials.workspace}\`), and`,
+    'everything you learned about this repository still holds — where things live, how',
+    'it is tested, what its conventions are. Keep all of it.',
+    '',
+    `What changed is the checkout. You last worked on ${priorNodeId}; this tree is now`,
+    `\`${materials.branch}\`, cut from \`${materials.baseBranch}\`. Your own commits from`,
+    priorWorkPresent
+      ? `${priorNodeId} ARE in this tree — it is a dependency of this phase, so what you`
+      : `${priorNodeId} are NOT in this tree — this phase does not depend on it, so anything`,
+    priorWorkPresent
+      ? 'built there is underneath you and you may rely on it.'
+      : 'you wrote there is absent here. Do not rely on it, import it, or assume it exists.',
+    '',
+  ]
+
+  if (changedFiles === null) {
+    lines.push(
+      'The set of files that changed could not be computed, so treat your memory of every',
+      'file’s *contents* as stale and re-read before editing. Your memory of the',
+      'repository’s shape is still good.',
+    )
+  } else if (changedFiles.length === 0) {
+    lines.push('No file differs from what you last saw. Only the branch is different.')
+  } else {
+    lines.push(
+      'These files differ from what you last saw. Re-read any you intend to touch; your',
+      'memory of their contents is out of date:',
+      ...changedFiles.map((file) => `- ${file}`),
+      '',
+      'Every other file is as you left it.',
+    )
+  }
+
+  return section(lines) + '\n\n'
+}
 
 function renderImplementer(materials: Materials): string {
   const { node, workflow } = materials

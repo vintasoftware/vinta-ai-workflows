@@ -100,6 +100,12 @@ export type SessionFreshReason =
   | 'final_fix_round'
   /** The vendor no longer has the session; the spawn was retried cold (§15.4). */
   | 'stale_session'
+  /**
+   * The member's previous phase failed. Its session is the context that failed
+   * with it, and carrying that into the next phase propagates whatever wrong
+   * turn it took — a cold start is cheaper than a poisoned one.
+   */
+  | 'prior_phase_failed'
 
 /**
  * Where the operation went. `sent` reached the live session; `queued` is
@@ -247,6 +253,11 @@ interface NodePayloads {
     readonly substitute: boolean
     /** Who the plan named. Present only on a substitution. */
     readonly instead_of?: string
+    /**
+     * Which seat this claim filled. Absent means `implementer`, so rows written
+     * before reviewers were members read as what they were.
+     */
+    readonly role?: 'implementer' | 'reviewer'
   }
   /**
    * One edge of a gate-pool acquisition, for the whole set the gate needs —

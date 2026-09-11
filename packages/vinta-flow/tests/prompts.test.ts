@@ -177,6 +177,8 @@ function compose(
     readonly facts?: EffectInvocation['context']
     /** §15.3: this turn continues a session that already ran. */
     readonly continuation?: boolean
+    /** §15.2: that session last ran on a different node. */
+    readonly reorientation?: Reorientation
   } = {},
 ): string {
   const workflow = options.workflow ?? diamond()
@@ -194,6 +196,7 @@ function compose(
     workspace: options.dir === undefined ? workspace() : options.dir,
     facts: options.facts ?? {},
     ...(options.continuation === undefined ? {} : { continuation: options.continuation }),
+    ...(options.reorientation === undefined ? {} : { reorientation: options.reorientation }),
   })
 }
 
@@ -1018,4 +1021,89 @@ it('resolves every node of the diamond against the plan the fixture writes', () 
   for (const node of diamond().nodes) {
     expect(resolveBrief(dir, node.id, node.prompt_ref)).not.toBe('')
   }
+})
+
+// ---------------------------------------------------------------------------
+// A session that outlived its phase
+// ---------------------------------------------------------------------------
+
+describe('a cross-phase continuation', () => {
+  const DOCS_BRIEF = 'Document the folders feature.'
+
+  const carried = (reorientation: Partial<Reorientation> = {}): string =>
+    compose('docs', 'implementer', {
+      continuation: true,
+      reorientation: {
+        priorNodeId: 'api-layer',
+        priorWorkPresent: true,
+        changedFiles: ['apps/api/views.py'],
+        ...reorientation,
+      },
+    })
+
+  /**
+   * The distinction the whole shape turns on. A same-phase continuation is a
+   * delta — the session already holds the brief. This session holds a brief for
+   * work that is *finished*, so withholding the new one would ask an agent to
+   * implement a phase it has never been told about.
+   */
+  it('carries the new phase’s brief in full, unlike a same-phase delta', () => {
+    const prompt = carried()
+    const delta = compose('docs', 'implementer', { continuation: true })
+
+    expect(prompt).toContain(DOCS_BRIEF)
+    expect(delta).not.toContain(DOCS_BRIEF)
+  })
+
+  it('puts the re-orientation before the brief, not after it', () => {
+    const prompt = carried()
+
+    expect(prompt.indexOf('the worktree moved')).toBeLessThan(prompt.indexOf(DOCS_BRIEF))
+  })
+
+  it('names the files that changed, so staleness is checkable rather than vague', () => {
+    expect(carried({ changedFiles: ['a.py', 'b.py'] })).toContain('- a.py')
+    expect(carried({ changedFiles: ['a.py', 'b.py'] })).toContain('- b.py')
+  })
+
+  /**
+   * The single most important sentence in the preamble. An agent that remembers
+   * writing a model and does not know it is absent will code against something
+   * that is not there.
+   */
+  it('says plainly when the previous phase’s work is NOT in this tree', () => {
+    const prompt = carried({ priorWorkPresent: false })
+
+    expect(prompt).toContain('are NOT in this tree')
+    expect(prompt).toContain('Do not rely on it')
+  })
+
+  it('says the opposite when the phase does depend on it', () => {
+    const prompt = carried({ priorWorkPresent: true })
+
+    expect(prompt).toContain('ARE in this tree')
+    expect(prompt).not.toContain('are NOT in this tree')
+  })
+
+  /**
+   * A missing answer is not an empty one. A host with no way to compute the
+   * delta must not produce a prompt that reads as "nothing changed" — that is
+   * the one wording that would make an agent skip re-reading.
+   */
+  it('treats an uncomputable delta as everything stale, never as nothing changed', () => {
+    const prompt = carried({ changedFiles: null })
+
+    expect(prompt).toContain('could not be computed')
+    expect(prompt).toContain('stale')
+    expect(prompt).not.toContain('No file differs')
+  })
+
+  it('says so when genuinely nothing changed', () => {
+    expect(carried({ changedFiles: [] })).toContain('No file differs')
+  })
+
+  /** The reason the session was kept at all — say it, so the agent trusts it. */
+  it('tells the agent its knowledge of the repository still holds', () => {
+    expect(carried()).toContain('everything you learned about this repository still holds')
+  })
 })

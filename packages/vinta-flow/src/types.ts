@@ -135,22 +135,41 @@ export const DependencySchema = z.strictObject({
 })
 
 // ---------------------------------------------------------------------------
-// The crew — who is on this plan, and at what tier
+// The crew — who is on this plan, in what role, and at what tier
 //
 // The alternative this replaces is a per-node `model`, picked phase by phase
 // with nothing anywhere adding it up. That reads fine one node at a time and
 // hides the two questions a plan is actually being asked: how many agents does
 // this feature need at once, and is any of them too junior for what it was
-// handed. A roster answers both before the run starts, and it is the same
-// number twice — the widest wave is how many members can ever be busy.
+// handed. A roster answers both before the run starts.
 //
-// A member is a tier and the model that tier resolves to, not a session. Lanes
-// are recycled between phases, so an agent cannot carry a live context from one
-// phase to the next (§15.2's `lane_changed`); what carries is the staffing
-// decision.
+// **A member is an agent, not a model.** Each one owns a worktree for the whole
+// run and keeps its session across the phases it takes, so what it learned
+// about the repository in phase 1 is still in its context in phase 4 — which is
+// most of what an agent spends its first turn of a phase rediscovering. The
+// worktree is reset between phases and the session is told exactly which files
+// that changed; see `sessions.ts`. What made this impossible before was not the
+// reset but the *anonymity* of lanes: a member that lands in a different
+// directory each phase has a context describing paths it is no longer standing
+// in, which is what §15.2's `lane_changed` refuses.
 // ---------------------------------------------------------------------------
 
+/**
+ * What a member is on the team for. Disjoint on purpose: an agent that both
+ * writes and reviews can be handed its own diff, and "the reviewer is never the
+ * implementer" then depends on arithmetic going right every time rather than on
+ * there being no way to express the mistake.
+ */
+export const CREW_ROLES = ['implementer', 'reviewer'] as const
+
 export const CrewMemberSchema = z.strictObject({
+  role: z
+    .enum(CREW_ROLES)
+    .default('implementer')
+    .describe(
+      'Implementers take phases; reviewers read them. No member does both, which is ' +
+        'what makes self-review unrepresentable rather than merely unlikely.',
+    ),
   tier: z
     .number()
     .int()
@@ -185,8 +204,10 @@ export const NodeSchema = z.strictObject({
     .optional()
     .describe('Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.'),
   crew: Id.optional().describe(
-    'The crew member this phase is assigned to. Their tier is the floor for it: a busier ' +
-      'roster may hand the phase to a free member at that tier or above, never below.',
+    'The implementer this phase is assigned to. Their tier is the floor for it: a busier ' +
+      'roster may hand the phase to a free implementer at that tier or above, never below. ' +
+      'Its reviewer is not named here — it is the cheapest reviewer on the roster who is ' +
+      'qualified for this phase, and it is never this member.',
   ),
   max_fix_rounds: z.number().int().min(0).default(2),
 })

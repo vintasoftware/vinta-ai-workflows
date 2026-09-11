@@ -246,6 +246,15 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
+          "role": {
+            "default": "implementer",
+            "description": "Implementers take phases; reviewers read them. No member does both, which is what makes self-review unrepresentable rather than merely unlikely.",
+            "type": "string",
+            "enum": [
+              "implementer",
+              "reviewer"
+            ]
+          },
           "tier": {
             "type": "integer",
             "minimum": 1,
@@ -439,7 +448,7 @@
             "type": "string"
           },
           "crew": {
-            "description": "The crew member this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free member at that tier or above, never below.",
+            "description": "The implementer this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free implementer at that tier or above, never below. Its reviewer is not named here — it is the cheapest reviewer on the roster who is qualified for this phase, and it is never this member.",
             "type": "string",
             "minLength": 1,
             "pattern": "^[a-z0-9][a-z0-9-]*$"

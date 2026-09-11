@@ -21,6 +21,7 @@ const ENTRY: SessionEntry = {
   harnessId: 'claude-code',
   sessionId: 'session-abc',
   lane: 'run-1-lane-1',
+  nodeId: 'p1',
   turns: 1,
 }
 
@@ -33,7 +34,9 @@ function input(overrides: Partial<SessionPlanInput> = {}): SessionPlanInput {
     harnessId: 'claude-code',
     lane: 'run-1-lane-1',
     ledger: new Map([['main', ENTRY]]),
+    nodeId: 'p1',
     maxTurns: 12,
+    poisoned: false,
     fixRounds: 0,
     maxFixRounds: 2,
     takeoverSessionId: null,
@@ -49,6 +52,7 @@ describe('planSession — reuse', () => {
       slot: 'main',
       resumeSessionId: 'session-abc',
       continuation: true,
+      crossPhase: false,
       reason: null,
       turns: 2,
     })
@@ -173,6 +177,7 @@ describe('planSession — pipelines that named no slot', () => {
       slot: null,
       resumeSessionId: null,
       continuation: false,
+      crossPhase: false,
       reason: 'no_slot',
       turns: 1,
     })

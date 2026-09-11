@@ -23,6 +23,14 @@
  * throughput, and it is deliberate: a lane is a worktree, not a licence to run
  * a Tier 4 phase on a Tier 1 model.
  *
+ * **Implementers and reviewers are disjoint sets.** Not "the tier above the
+ * author", which was a proxy for independence and leaked in both directions: a
+ * phase substituted up to the top tier had nobody above it and fell back to
+ * being reviewed at its own, and once members became durable agents rather than
+ * borrowed models, "a tier above" stopped saying anything about *who*. Two
+ * roles that cannot overlap make an agent reviewing its own diff unrepresentable
+ * instead of merely unlikely.
+ *
  * Nothing here reads a prompt, a transcript or a vendor's words. Its inputs are
  * identifiers, integers and a busy set (§11).
  */
@@ -61,7 +69,7 @@ export interface CrewAssignInput {
   readonly assigned: string | undefined
   /** The workflow's roster, by id. */
   readonly crew: Readonly<Record<string, CrewMember>>
-  /** Members currently holding a node. */
+  /** Members currently holding a node, in either role. */
   readonly busy: ReadonlySet<string>
 }
 
@@ -76,16 +84,37 @@ export function roster(crew: Readonly<Record<string, CrewMember>>): RosterMember
     .sort((a, b) => a.tier - b.tier || a.id.localeCompare(b.id))
 }
 
+/** The members who take phases. */
+export function implementers(crew: Readonly<Record<string, CrewMember>>): RosterMember[] {
+  return roster(crew).filter((member) => member.role === 'implementer')
+}
+
+/** The members who read them. Disjoint from the above, by construction. */
+export function reviewers(crew: Readonly<Record<string, CrewMember>>): RosterMember[] {
+  return roster(crew).filter((member) => member.role === 'reviewer')
+}
+
+/**
+ * Every member who owns a worktree for the run — which is all of them. A
+ * reviewer needs a tree of its own as much as an implementer does: it is the
+ * only way its directory stays the same from one phase to the next, and a
+ * reviewer whose directory moves cannot keep a session either.
+ */
+export function laneHolders(crew: Readonly<Record<string, CrewMember>>): RosterMember[] {
+  return roster(crew)
+}
+
 export function assignCrew(input: CrewAssignInput): CrewDecision {
-  const members = roster(input.crew)
-  if (members.length === 0) return { kind: 'unstaffed' }
+  const members = implementers(input.crew)
+  if (roster(input.crew).length === 0) return { kind: 'unstaffed' }
 
   // A node with no `crew` line in a staffed workflow is a document defect that
-  // `validate.ts` refuses before a run starts. Reaching it here means the
-  // scheduler was handed a workflow that never went through the parser, so
-  // treat it as unstaffed rather than inventing a member for it.
+  // `validate.ts` refuses before a run starts, as is one naming a reviewer.
+  // Reaching either here means the scheduler was handed a workflow that never
+  // went through the parser, so treat it as unstaffed rather than inventing a
+  // member for it.
   const named = input.assigned === undefined ? undefined : input.crew[input.assigned]
-  if (named === undefined) return { kind: 'unstaffed' }
+  if (named === undefined || named.role !== 'implementer') return { kind: 'unstaffed' }
 
   const take = (member: RosterMember, substitute: boolean): CrewDecision => ({
     kind: 'assigned',
@@ -102,35 +131,74 @@ export function assignCrew(input: CrewAssignInput): CrewDecision {
     if (self !== undefined) return take(self, false)
   }
 
-  // Cheapest free member at or above the floor. `members` is already sorted, so
-  // the first match is the cheapest one.
+  // Cheapest free implementer at or above the floor. `members` is already
+  // sorted, so the first match is the cheapest one.
   const cover = members.find((member) => member.tier >= named.tier && !input.busy.has(member.id))
   if (cover !== undefined) return take(cover, true)
 
   return { kind: 'wait', requiredTier: named.tier }
 }
 
+export type ReviewDecision =
+  /** No reviewer on the roster. The caller falls back to the project default. */
+  | { readonly kind: 'unstaffed' }
+  | {
+      readonly kind: 'assigned'
+      readonly member: string
+      readonly tier: number
+      readonly model: string
+      readonly harness: string | null
+    }
+  /** Every qualified reviewer is mid-review. The node waits its turn. */
+  | { readonly kind: 'wait'; readonly requiredTier: number }
+
+export interface ReviewAssignInput {
+  readonly crew: Readonly<Record<string, CrewMember>>
+  /** The tier of the agent that actually wrote this phase — not the plan's. */
+  readonly authorTier: number
+  /** Who wrote it. A reviewer is never this member; roles make that automatic. */
+  readonly author: string
+  readonly busy: ReadonlySet<string>
+}
+
 /**
- * The model a review of `authorTier` work runs on.
+ * Which reviewer reads this phase.
  *
- * A team has seniors read juniors' work, and that is the half of "staff the
- * plan" that a per-node model could never express: today every role on a node
- * runs on the node's one model, so a Tier 1 phase is reviewed by a Tier 1
- * agent — the cheapest model on the plan checking the cheapest model's work.
+ * **Claimed, not borrowed.** The previous design resolved a reviewer *model* a
+ * tier above the author and spawned it without holding anything, on the
+ * grounds that a review is short and a senior mid-phase should still be able to
+ * read a junior's diff. That works for a model and not for an agent: a reviewer
+ * with one worktree and one session cannot read two phases at once, so it is
+ * held for the turn like any other member, and a node whose reviewer is busy
+ * waits for them.
  *
- * The reviewer **borrows a tier, not a person**. It does not claim the member
- * and does not wait for them: a senior who is mid-phase can still have their
- * model read a junior's diff, and making review consume a roster slot would
- * deadlock a plan whose only senior is busy on the phase being reviewed.
+ * That wait cannot deadlock. Reviewers never take phases, so a node waiting for
+ * one is always waiting on another node's *review* — a turn that is already
+ * running and will end — never on a phase that might itself be blocked.
  *
- * Null means nobody on this roster is above the author — a single-tier team, or
- * a Tier 4 phase — and the caller keeps today's behaviour of reviewing at the
- * node's own model.
+ * The floor is the author's tier: work is not reviewed by someone the plan
+ * judged less capable than whoever wrote it. Above that, cheapest first, for
+ * the same reason substitution reaches for the cheapest qualified peer.
  */
-export function reviewerModel(
-  crew: Readonly<Record<string, CrewMember>>,
-  authorTier: number,
-): { readonly member: string; readonly model: string; readonly tier: number } | null {
-  const senior = roster(crew).find((member) => member.tier > authorTier)
-  return senior === undefined ? null : { member: senior.id, model: senior.model, tier: senior.tier }
+export function assignReviewer(input: ReviewAssignInput): ReviewDecision {
+  const qualified = reviewers(input.crew).filter((member) => member.tier >= input.authorTier)
+  if (qualified.length === 0) return { kind: 'unstaffed' }
+
+  const free = qualified.find((member) => !input.busy.has(member.id))
+  if (free === undefined) return { kind: 'wait', requiredTier: input.authorTier }
+
+  // Roles are disjoint and validated, so this can only fire on a hand-built
+  // workflow. It is checked anyway: it is the one invariant this module exists
+  // to guarantee, and an assertion is cheaper than the bug it prevents.
+  if (free.id === input.author) {
+    throw new Error(`crew member "${free.id}" would review its own phase`)
+  }
+
+  return {
+    kind: 'assigned',
+    member: free.id,
+    tier: free.tier,
+    model: free.model,
+    harness: free.harness ?? null,
+  }
 }
