@@ -119,7 +119,23 @@ export function openPty(spec: PtySpec): PtyHandle {
       if (alive) pty.write(data)
     },
     resize: (nextCols, nextRows) => {
-      if (alive) pty.resize(Math.max(1, nextCols), Math.max(1, nextRows))
+      if (!alive) return
+      try {
+        pty.resize(Math.max(1, nextCols), Math.max(1, nextRows))
+      } catch {
+        // The `alive` check above is not enough on Windows. ConPTY cannot be
+        // resized before it is ready, so node-pty *defers* the call onto its
+        // own queue and runs it later — by which time the terminal may have
+        // exited, and it throws `Cannot resize a pty that has already exited`
+        // from a callback no caller is on. That surfaced as an unhandled
+        // exception in CI, which is how a dead terminal got to destabilise a
+        // whole test run.
+        //
+        // Dropped rather than reported, for `write`'s reason directly above:
+        // the socket and the child close independently, so a resize landing
+        // after the exit is a race and not a fault. There is nothing an
+        // operator could do about it and nothing a caller should branch on.
+      }
     },
     detach: async () => {
       if (!alive) {

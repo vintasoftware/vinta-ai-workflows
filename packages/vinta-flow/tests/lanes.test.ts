@@ -94,11 +94,22 @@ const envVar = (lane: Lane, key: string): string => {
   return value
 }
 
+/**
+ * The worktrees git knows about, as **git** spells them.
+ *
+ * `git worktree list` prints forward slashes on Windows too — git speaks posix
+ * paths everywhere — while `mkdtemp` hands the test a native `C:\…` path, so
+ * comparing the two directly failed on a separator rather than on anything the
+ * test is about. Both sides are normalised to git's spelling, which is the one
+ * that is the same on every platform.
+ */
+const gitPath = (path: string): string => path.replaceAll('\\', '/')
+
 const worktreePaths = (repo: string): string[] =>
   execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo, encoding: 'utf8' })
     .split('\n')
     .filter((line) => line.startsWith('worktree '))
-    .map((line) => line.slice('worktree '.length))
+    .map((line) => gitPath(line.slice('worktree '.length)))
 
 describe('lane pool', () => {
   let root: string
@@ -322,7 +333,7 @@ describe('lane pool', () => {
     ).rejects.toThrow(DiskProbeError)
 
     expect(existsSync(poolRoot)).toBe(false)
-    expect(worktreePaths(repo)).toEqual([repo])
+    expect(worktreePaths(repo)).toEqual([gitPath(repo)])
     expect(existsSync(migrateLog)).toBe(false)
   })
 })
