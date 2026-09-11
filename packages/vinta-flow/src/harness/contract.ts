@@ -320,8 +320,24 @@ export function runAdapterContract(
         // Neither may throw, and neither is asserted on: what a terminal does
         // with a resize or a keystroke belongs to the program inside it.
         // Deliberately *not* asserted: nothing here reads the bytes (§11).
-        handle.resize(100, 30)
+        //
+        // **Written to first, and resized only once it has answered.** ConPTY
+        // cannot be resized before it is ready, so node-pty queues the call
+        // and runs it later — and if the terminal has been detached by then it
+        // throws from a callback no caller is on, which Vitest reports as an
+        // unhandled error and which fails a run in which every test passed.
+        // Resizing a terminal that has not started is meaningless anyway; this
+        // waits for proof that it has. The bytes are counted, never read (§11),
+        // and both programs answer: `cat` echoes, `cmd.exe` greets.
+        let spoke = false
+        handle.onData(() => {
+          spoke = true
+        })
         handle.write('\n')
+        for (let i = 0; i < 200 && !spoke; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        handle.resize(100, 30)
       } finally {
         await within('detach', handle.detach())
       }

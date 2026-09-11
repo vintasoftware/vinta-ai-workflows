@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GateCache, laneTreeHash, runGateCached } from '../src/gates/cache.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import type { Gate } from '../src/types.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { renderGate, type GateScript } from './support/gate-script.ts'
 
 /**
  * `repo` is a throwaway git repository — every git command in this file and in
@@ -47,9 +47,17 @@ const newPools = (): ResourcePools =>
 
 const counter = (): string => join(store, 'runs.txt')
 
-/** Records one line per actual execution, outside the repo so it is invisible to the hash. */
-const gate = (cmd = 'true', overrides: Partial<Gate> = {}): Gate => ({
-  cmd: `echo ran >> "${counter()}"; ${cmd}`,
+/**
+ * Records one line per actual execution, outside the repo so it is invisible to
+ * the hash.
+ *
+ * The counting step is `renderGate`'s `append` rather than a hand-written
+ * `echo ran >> "..."`: on `cmd.exe` that line writes "ran " *with* the trailing
+ * space, and every count here is a line-exact filter, so the same text spelled
+ * for one shell would have quietly counted nothing on the other.
+ */
+const gate = (script: GateScript = {}, overrides: Partial<Gate> = {}): Gate => ({
+  cmd: renderGate({ append: { path: counter(), line: 'ran' }, ...script }),
   requires: ['test-suite'],
   timeout_s: 30,
   ...overrides,
@@ -82,7 +90,7 @@ const run = async (options: RunOptions = {}) =>
     ...(options.noCache === undefined ? {} : { noCache: options.noCache }),
   })
 
-describe.runIf(POSIX_SHELL_FIXTURES)('gate result caching', () => {
+describe('gate result caching', () => {
   it('serves an unchanged tree from cache without acquiring the gate’s pools', async () => {
     const first = await run()
     expect(first.cached).toBe(false)
@@ -155,7 +163,14 @@ describe.runIf(POSIX_SHELL_FIXTURES)('gate result caching', () => {
   })
 
   it('never caches a timed_out result', async () => {
-    const slow = gate('sleep 30', { timeout_s: 1 })
+    // `background` is the spec's only step that outlives its own shell, so it
+    // is what stands in for `sleep 30` — the wait is the part this test needs,
+    // and the grandchild's pid file goes to `store` rather than the repo so the
+    // gate that never finished still cannot change the tree hash.
+    const slow = gate(
+      { background: { seconds: 30, pidFile: join(store, 'slow.pid') } },
+      { timeout_s: 1 },
+    )
 
     const first = await run({ gate: slow })
     expect(first.status).toBe('timed_out')
@@ -170,7 +185,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('gate result caching', () => {
   }, 20_000)
 
   it('caches a failing result and returns it as a hit', async () => {
-    const failing = gate('exit 3')
+    const failing = gate({ exit: 3 })
 
     const first = await run({ gate: failing })
     expect(first.status).toBe('failed')
@@ -195,12 +210,12 @@ describe.runIf(POSIX_SHELL_FIXTURES)('gate result caching', () => {
 
   it('does not collide across gate ids on the same tree', async () => {
     const passing = await run({ gateId: 'lint' })
-    const failing = await run({ gateId: 'suite', gate: gate('exit 1') })
+    const failing = await run({ gateId: 'suite', gate: gate({ exit: 1 }) })
     expect(passing.status).toBe('passed')
     expect(failing.status).toBe('failed')
 
     const lint = await run({ gateId: 'lint' })
-    const suite = await run({ gateId: 'suite', gate: gate('exit 1') })
+    const suite = await run({ gateId: 'suite', gate: gate({ exit: 1 }) })
     expect(lint.cached).toBe(true)
     expect(lint.gateId).toBe('lint')
     expect(lint.status).toBe('passed')

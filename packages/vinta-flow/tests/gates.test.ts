@@ -5,10 +5,17 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runGate } from '../src/gates/runner.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import type { Gate } from '../src/types.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { renderGate, type GateScript } from './support/gate-script.ts'
 
-const gate = (cmd: string, overrides: Partial<Gate> = {}): Gate => ({
-  cmd,
+/**
+ * A gate whose command is declared rather than written in one shell's syntax.
+ *
+ * These lines are run through `shellInvocation`, so they must stay shell — but
+ * they must not stay `sh`, which is what kept this whole suite skipped on
+ * Windows. `renderGate` spells each step for the platform actually running it.
+ */
+const gate = (script: GateScript, overrides: Partial<Gate> = {}): Gate => ({
+  cmd: renderGate(script),
   requires: ['test-suite'],
   timeout_s: 30,
   ...overrides,
@@ -44,14 +51,19 @@ async function awaitGone(pid: number, timeoutMs: number): Promise<boolean> {
   return false
 }
 
-describe.runIf(POSIX_SHELL_FIXTURES)('gate runner', () => {
+describe('gate runner', () => {
   it('runs a command, captures combined output, and reports the exit code', async () => {
     const pools = newPools()
     const logPath = join(workspace, 'lint.log')
 
     const result = await runGate({
       gateId: 'lint',
-      gate: gate('echo out-line; echo err-line >&2; echo "$GATE_MARKER"; pwd'),
+      gate: gate({
+        stdout: ['out-line'],
+        stderr: ['err-line'],
+        echoEnv: ['GATE_MARKER'],
+        printCwd: true,
+      }),
       cwd: workspace,
       env: { GATE_MARKER: 'from-env' },
       logPath,
@@ -80,8 +92,10 @@ describe.runIf(POSIX_SHELL_FIXTURES)('gate runner', () => {
     const result = await runGate({
       gateId: 'slow-suite',
       // The shell backgrounds a grandchild, so killing only the shell would
-      // leave `sleep` orphaned. Killing the group must reach it.
-      gate: gate(`sleep 60 & echo $! > "${pidFile}"; wait`, { timeout_s: 1 }),
+      // leave it orphaned. Killing the tree must reach it. The grandchild is
+      // `node` on both platforms — `$!` has no `cmd.exe` counterpart, and what
+      // this asserts is about the process tree rather than the syntax.
+      gate: gate({ background: { seconds: 60, pidFile } }, { timeout_s: 1 }),
       cwd: workspace,
       env: {},
       logPath: join(workspace, 'slow-suite.log'),
@@ -103,7 +117,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('gate runner', () => {
 
     const result = await runGate({
       gateId: 'failing',
-      gate: gate('echo nope >&2; exit 3'),
+      gate: gate({ stderr: ['nope'], exit: 3 }),
       cwd: workspace,
       env: {},
       logPath: join(workspace, 'failing.log'),
@@ -117,7 +131,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('gate runner', () => {
     // The slot is genuinely back: a second gate can take it.
     const next = await runGate({
       gateId: 'after',
-      gate: gate('true'),
+      gate: gate({}),
       cwd: workspace,
       env: {},
       logPath: join(workspace, 'after.log'),
@@ -134,7 +148,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('gate runner', () => {
     let settled = false
     const queued = runGate({
       gateId: 'queued',
-      gate: gate('true'),
+      gate: gate({}),
       cwd: workspace,
       env: {},
       logPath: join(workspace, 'queued.log'),

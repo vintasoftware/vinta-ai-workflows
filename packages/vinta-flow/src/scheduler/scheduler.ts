@@ -83,6 +83,7 @@ import type { Journal } from '../journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
+import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import { composeSpawnPrompt } from '../prompts/index.ts'
@@ -222,6 +223,26 @@ interface NodeState {
   /** Resolves when the operator answers. Set only while `awaiting_human`. */
   resume: ((facts: GuardContext) => void) | null
   failure: string | null
+}
+
+/**
+ * What went wrong recycling a lane, in words safe to print.
+ *
+ * `LaneRecycleError` already classifies itself into one of three stages, and
+ * that is the useful answer. Anything else reaching here came from the pool's
+ * own machinery rather than from a project's reset commands — a summary that
+ * would not read, a git call that refused — and is reported by its *kind*:
+ * an error name and, where the runtime supplies one, a `code` like `ENOENT`.
+ *
+ * Not its message (§11). A thrown message can carry a git diagnostic or the
+ * output of something a project chose to run, and neither belongs on a stream
+ * that is otherwise identifiers.
+ */
+function recycleStage(error: unknown): string {
+  if (error instanceof LaneRecycleError) return error.stage
+  const named = error as { name?: unknown; code?: unknown }
+  const name = typeof named.name === 'string' ? named.name : 'Error'
+  return typeof named.code === 'string' ? `${name}: ${named.code}` : name
 }
 
 export class Scheduler {
@@ -646,9 +667,14 @@ export class Scheduler {
     if (recycle === undefined) return
     try {
       await recycle(lane)
-    } catch {
-      // The lane name, and nothing the recycle commands printed (§11).
-      throw new Error(`lane "${lane}" could not be recycled`)
+    } catch (error) {
+      // The lane name and the stage — and nothing the recycle commands printed
+      // (§11). The stage is one of three fixed words, and it is the difference
+      // between a database that would not reset, a worktree that would not come
+      // back to its base, and a slot that could not be torn down and rebuilt.
+      // Without it "could not be recycled" sends an operator to read three
+      // different pieces of machinery.
+      throw new Error(`lane "${lane}" could not be recycled (${recycleStage(error)})`)
     }
   }
 

@@ -26,7 +26,12 @@
  *   ever runs: the daemon being killed mid-attach.
  */
 import { spawn as spawnPty, type IPty } from 'node-pty'
-import { commandInvocation, type Invocation, killTree } from '../platform/platform.ts'
+import {
+  commandInvocation,
+  type Invocation,
+  killTree,
+  politeKillFirst,
+} from '../platform/platform.ts'
 import type { PtyAttach, PtyHandle } from './adapter.ts'
 
 /** What a terminal announces itself as when the environment names nothing. */
@@ -145,12 +150,21 @@ export function openPty(spec: PtySpec): PtyHandle {
       // SIGHUP first, so a CLI that persists its session on the way out gets
       // to. SIGKILL is the deadline, because a terminal that ignores a hangup
       // would otherwise be the orphan this whole module exists to prevent.
-      signalGroup(pty.pid, 'SIGHUP')
-      const deadline = setTimeout(() => signalGroup(pty.pid, 'SIGKILL'), HANGUP_GRACE_MS)
+      //
+      // **Only where asking politely does not itself create that orphan.** On
+      // Windows the polite call is `taskkill /t` without `/f`: the root closes,
+      // the parent links `/t` walks die with it, and what was running inside
+      // the terminal is left behind — the exact outcome the hangup was meant to
+      // avoid. There, the deadline is the only blow (`politeKillFirst`).
+      const polite = politeKillFirst()
+      signalGroup(pty.pid, polite ? 'SIGHUP' : 'SIGKILL')
+      const deadline = polite
+        ? setTimeout(() => signalGroup(pty.pid, 'SIGKILL'), HANGUP_GRACE_MS)
+        : undefined
       try {
         await exited
       } finally {
-        clearTimeout(deadline)
+        if (deadline !== undefined) clearTimeout(deadline)
       }
     },
   }

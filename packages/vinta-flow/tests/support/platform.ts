@@ -1,24 +1,39 @@
 /**
- * One flag, one reason, one thing to grep for.
+ * One flag, one reason, one thing to grep for — and it now guards exactly one
+ * test.
  *
- * A large part of this suite is written in POSIX shell. It stands a CLI up by
- * writing a `#!/bin/sh` script and handing its path to an adapter as `bin`, and
- * it drives the gate runner with lines like `sleep 60 & echo $!`. Both are the
- * right fixture on POSIX — they are what the real thing is — and neither can
- * run on Windows: `CreateProcess` does not read shebangs, and `cmd.exe` shares
- * no syntax worth the name with `sh`. The tests that use one are therefore
- * skipped there rather than failed, through this constant rather than through
- * a scattering of `process.platform` checks, so `POSIX_SHELL_FIXTURES` is the
- * exact list of what the Windows CI job does not yet cover.
+ * This constant used to be called `POSIX_SHELL_FIXTURES` and stood in front of
+ * sixteen `describe` blocks, because most of this suite's fixtures were written
+ * in `sh`: a CLI stood up as a `#!/bin/sh` script, a gate driven with
+ * `sleep 60 & echo $!`. Eighty tests were skipped on Windows, which is to say
+ * the adapters, the gate runner, `doctor`, the composed `run` and the whole of
+ * takeover were unverified on a platform this package claims to support.
  *
- * This is a gap in the fixtures, **not** a statement that the code under them
- * is POSIX-only. Closing it means making the fixtures declarative — a spec the
- * helper renders as an `sh` script or a `.cmd` batch file — at which point this
- * constant and every `runIf` that reads it come out.
+ * That is gone. Fixtures are declared as data and rendered for whichever
+ * platform is running — `support/fake-cli.ts` for a stand-in executable,
+ * `support/gate-script.ts` for a gate command line — so every one of those
+ * blocks is unconditional.
+ *
+ * What is left is not a fixture problem, which is why the name changed. A fake
+ * CLI on Windows can only be a `.cmd` shim: that is the executable form a Node
+ * program takes, and it is what npm itself generates for a package `bin`.
+ * Every spawn in this package routes through `commandInvocation`
+ * (`src/platform/platform.ts`) so a `.cmd` works — **except**
+ * `openPullRequest`, which hands `ghPath` to `execFile` directly. Since
+ * CVE-2024-27980 Node refuses to spawn a `.bat` or `.cmd` without `shell`, so
+ * on Windows there is no way to point that function at a fixture.
+ *
+ * It is not a bug in the product as shipped: a real `gh` is `gh.exe` there and
+ * resolves without a shell. And the obvious repair — route it through the seam
+ * like everything else — is worse than the gap, for the reason spelled out
+ * above the test itself in `integration.test.ts`: one of `gh`'s arguments is
+ * the pull request body, `shellQuote` refuses `"` and `%` because `cmd.exe`
+ * cannot escape either, and a spawn that cannot be broken by its own payload
+ * would become one that can.
  *
  * Nothing else in the suite may skip by platform. Behaviour that genuinely
  * differs is decided by `src/platform/platform.ts`, which takes the platform as
  * a parameter, and is asserted on both branches from either kind of machine in
  * `tests/platform.test.ts`.
  */
-export const POSIX_SHELL_FIXTURES = process.platform !== 'win32'
+export const FAKE_BIN_VIA_EXECFILE = process.platform !== 'win32'

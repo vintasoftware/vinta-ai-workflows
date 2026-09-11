@@ -4,7 +4,7 @@
  *
  * The unit suite is the one that actually protects this adapter: it drives the
  * JSONL mapping, the stream framing, the refusal table and `preflight` over
- * synthetic CLI output and shell scripts written into a temp dir, and it runs
+ * synthetic CLI output and fake binaries written into a temp dir, and it runs
  * everywhere — no CLI, no login, no tokens spent.
  *
  * The live suite runs `runAdapterContract` against the real CLI and skips
@@ -16,7 +16,7 @@
  * run (codex-cli 0.147.0), including the failure frames — guessing at a vendor
  * schema is how an adapter passes its own tests and none of the vendor's.
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,7 +31,7 @@ import {
 import { CodexAdapter, classifySpawnFailure, mapCliEvent } from '../src/harness/codex.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { type FakeCliSpec, fakeCli } from './support/fake-cli.ts'
 
 const temps: string[] = []
 
@@ -47,15 +47,17 @@ afterAll(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true })
 })
 
-const fakeBin = (body: string): string => {
-  const path = join(makeTemp(), 'codex-fake')
-  writeFileSync(path, `#!/bin/sh\n${body}\n`)
-  chmodSync(path, 0o755)
-  return path
-}
+/**
+ * A fake `codex`, one per temp dir so no two fixtures can shadow each other.
+ *
+ * `preflight` runs the binary twice — `--version`, then `login status` — as
+ * separate processes, so a spec's `version` answers the first invocation and
+ * everything else it declares answers the second.
+ */
+const fakeBin = (spec: FakeCliSpec): string => fakeCli(makeTemp(), 'codex-fake', spec)
 
-const VERSION_CASE = `case "$1" in --version) echo "codex-cli 0.147.0"; exit 0;; esac`
-const LOGGED_IN = `case "$1$2" in loginstatus) echo "Logged in using ChatGPT"; exit 0;; esac`
+/** What this CLI answers `--version` with, which `preflight` reports verbatim. */
+const VERSION = 'codex-cli 0.147.0'
 
 /** Well-formed and never issued: the shape of a thread id the vendor has forgotten. */
 const UNISSUED_SESSION = '00000000-0000-4000-8000-000000000000'
@@ -444,7 +446,7 @@ describe('binary resolution', () => {
   })
 })
 
-describe.runIf(POSIX_SHELL_FIXTURES)('preflight against a fake binary', () => {
+describe('preflight against a fake binary', () => {
   it('reports not installed, with the command that installs it', async () => {
     const missing = join(makeTemp(), 'definitely-not-here')
     const result = await new CodexAdapter({ bin: missing }).preflight()
@@ -454,35 +456,39 @@ describe.runIf(POSIX_SHELL_FIXTURES)('preflight against a fake binary', () => {
   })
 
   it('reports not installed when the binary exists but cannot answer --version', async () => {
-    const result = await new CodexAdapter({ bin: fakeBin('exit 1') }).preflight()
+    // No `version` in the spec at all: this fake refuses `--version` the way a
+    // half-installed CLI does, which is a different state from having no file.
+    const result = await new CodexAdapter({ bin: fakeBin({ exit: 1 }) }).preflight()
     expect(result.installed).toBe(false)
   })
 
   it('distinguishes a logged-out CLI from a missing one, with the login command', async () => {
-    const bin = fakeBin(`${VERSION_CASE}\necho 'Not logged in'\nexit 1`)
+    // The vendor puts this on stdout, not stderr, and the classifier reads
+    // both — writing it to the wrong stream would pass for the wrong reason.
+    const bin = fakeBin({ version: VERSION, stdout: ['Not logged in'], exit: 1 })
     const result = await new CodexAdapter({ bin }).preflight()
     expect(result.installed).toBe(true)
     expect(result.authenticated).toBe(false)
-    expect(result.version).toBe('codex-cli 0.147.0')
+    expect(result.version).toBe(VERSION)
     expect(result.hint).toBe(`${bin} login`)
   })
 
   it('reports ready when the CLI says it is logged in', async () => {
-    const bin = fakeBin(`${VERSION_CASE}\n${LOGGED_IN}\nexit 0`)
+    const bin = fakeBin({ version: VERSION, stdout: ['Logged in using ChatGPT'] })
     expect(await new CodexAdapter({ bin }).preflight()).toEqual({
       installed: true,
       authenticated: true,
-      version: 'codex-cli 0.147.0',
+      version: VERSION,
     })
   })
 
   it('does not call an unfamiliar diagnostic a login failure', async () => {
-    const bin = fakeBin(`${VERSION_CASE}\necho 'error: unrecognized subcommand' >&2\nexit 2`)
+    const bin = fakeBin({ version: VERSION, stderr: ['error: unrecognized subcommand'], exit: 2 })
     expect((await new CodexAdapter({ bin }).preflight()).authenticated).toBe(true)
   })
 })
 
-describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
+describe('spawn against a fake binary', () => {
   const task = (): AgentTask => ({
     nodeId: 'phase-1',
     cwd: makeTemp(),
@@ -490,25 +496,29 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
     model: 'gpt-5.2-codex',
   })
 
-  const scripted = (...lines: string[]): string =>
-    fakeBin(
-      [
-        `${VERSION_CASE}`,
-        // Drain the prompt off stdin the way the real CLI does, then play a run.
-        'cat > /dev/null',
-        ...lines,
-      ].join('\n'),
-    )
+  /**
+   * A fake that takes the prompt off stdin the way the real CLI does, then
+   * plays the given run.
+   *
+   * `readsLine` stands in for the old `cat > /dev/null`: `spawn` writes the
+   * brief and immediately ends the pipe (`inject` is false precisely because
+   * codex reads to EOF), so the brief arrives as one line either way — and a
+   * fake that read one line would still be correct if the adapter ever kept
+   * the pipe open, which a fake waiting on EOF would not.
+   */
+  const scripted = (spec: Omit<FakeCliSpec, 'version' | 'readsLine'>): string =>
+    fakeBin({ version: VERSION, readsLine: true, ...spec })
 
   it('drives a whole scripted run into the normalized stream', async () => {
-    const bin = scripted(
-      `echo '{"type":"thread.started","thread_id":"thread-fake"}'`,
-      `echo '{"type":"turn.started"}'`,
-      `echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"working"}}'`,
-      `echo '{"type":"unknown_future_frame"}'`,
-      `echo '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":4}}'`,
-      'exit 0',
-    )
+    const bin = scripted({
+      stdout: [
+        '{"type":"thread.started","thread_id":"thread-fake"}',
+        '{"type":"turn.started"}',
+        '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"working"}}',
+        '{"type":"unknown_future_frame"}',
+        '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":4}}',
+      ],
+    })
     const outcome = await new CodexAdapter({ bin }).spawn(task())
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
@@ -525,11 +535,11 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
   })
 
   it('rejects send with a capability error instead of silently dropping the message', async () => {
-    const bin = scripted(
-      `echo '{"type":"thread.started","thread_id":"thread-quiet"}'`,
+    const bin = scripted({
+      stdout: ['{"type":"thread.started","thread_id":"thread-quiet"}'],
       // Still running when the send lands, which is the case that matters.
-      'sleep 5',
-    )
+      lingerMs: 5_000,
+    })
     const outcome = await new CodexAdapter({ bin }).spawn(task())
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
@@ -552,9 +562,12 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
   }, 60_000)
 
   it('classifies a CLI that refuses before announcing a thread', async () => {
-    const bin = fakeBin(
-      `${VERSION_CASE}\ncat > /dev/null\necho "You've hit your usage limit. Try again in 2 hours." >&2\nexit 1`,
-    )
+    const bin = scripted({
+      // The vendor's own wording, byte for byte: the two-hour wait below is
+      // parsed back out of this line, so paraphrasing it would test nothing.
+      stderr: ["You've hit your usage limit. Try again in 2 hours."],
+      exit: 1,
+    })
     const now = Date.now()
     const outcome = await new CodexAdapter({ bin }).spawn(task())
     expect(outcome.ok).toBe(false)
@@ -568,9 +581,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
     // The wiring §15.4 turns on, through a real process: the identical CLI
     // failure is a stale token only for the spawn that offered one. Without
     // it there was nothing to expire, so it keeps its ordinary reading.
-    const bin = fakeBin(
-      `${VERSION_CASE}\ncat > /dev/null\necho 'Error: thread not found: 5f2c1b90' >&2\nexit 1`,
-    )
+    const bin = scripted({ stderr: ['Error: thread not found: 5f2c1b90'], exit: 1 })
     const adapter = new CodexAdapter({ bin })
 
     const resumed = await adapter.spawn({ ...task(), resumeSessionId: '5f2c1b90' })
@@ -588,7 +599,10 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
   })
 
   it('ends the stream once when the CLI dies mid-turn', async () => {
-    const bin = scripted(`echo '{"type":"thread.started","thread_id":"thread-dies"}'`, 'exit 3')
+    const bin = scripted({
+      stdout: ['{"type":"thread.started","thread_id":"thread-dies"}'],
+      exit: 3,
+    })
     const outcome = await new CodexAdapter({ bin }).spawn(task())
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return

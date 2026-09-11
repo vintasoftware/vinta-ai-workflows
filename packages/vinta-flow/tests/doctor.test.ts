@@ -1,15 +1,21 @@
 /**
  * The doctor is only worth having if it is right about a *broken* machine, so
  * every case here is a deliberately broken environment built from scratch: temp
- * directories, fake binaries written as shell scripts, synthetic worktree
- * summaries.
+ * directories, fake binaries, synthetic worktree summaries.
  *
  * Nothing in this file consults the machine's PATH. Every binary the doctor
  * probes is injected, which is what makes "a harness is missing" and "git
  * cannot do worktrees" assertable on a laptop where both are installed and
  * working — and what keeps the suite passing in CI, where neither may be.
+ *
+ * The fakes are `tests/support/fake-cli.ts`'s: a Node program behind the
+ * launcher the platform actually installs. That matters more here than
+ * anywhere else in the suite, because the doctor probes through
+ * `commandInvocation` — so on Windows these fixtures are `.cmd` shims reached
+ * via `cmd.exe`, which is exactly the shape an npm-installed `claude` has and
+ * the exact thing a shebang fixture could never test.
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +23,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { formatDoctorReport, runDoctor, type CheckResult, type DoctorOptions } from '../src/doctor/index.ts'
 import { writeSummary, type WorktreeSummary } from '../src/lanes/summary.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
 const temps: string[] = []
 
@@ -31,56 +37,99 @@ afterAll(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true })
 })
 
-/** Writes an executable `sh` script and returns its absolute path. */
-const fakeBin = (dir: string, name: string, body: string): string => {
-  const path = join(dir, name)
-  writeFileSync(path, `#!/bin/sh\n${body}\n`, 'utf8')
-  chmodSync(path, 0o755)
-  return path
-}
+/**
+ * A `.mjs` line that writes `text` verbatim.
+ *
+ * `JSON.stringify` rather than an inlined `\n`, because these strings are the
+ * subject: a fixture whose newline was eaten by one level of escaping would
+ * change what the adapter's version parser and the refusal patterns see, and
+ * would do it silently.
+ */
+const write = (stream: 'stdout' | 'stderr', text: string): string =>
+  `process.${stream}.write(${JSON.stringify(`${text}\n`)})`
+
+/**
+ * `process.exitCode` rather than `process.exit(code)`.
+ *
+ * Every one of these fakes writes a line and then reports a code, and on POSIX
+ * stdout to a pipe is asynchronous: `process.exit` can truncate a write that
+ * has not drained, which would turn "not authenticated" into a blank probe and
+ * a passing check. Setting the code and falling off the end of the program
+ * flushes first.
+ */
+const exitWith = (code: number): string => `process.exitCode = ${code}`
 
 const MISSING = '/nonexistent/vinta-flow-doctor/not-a-binary'
 
-/** `--version` answers, then the adapter's auth probe says whatever it is told. */
+/**
+ * `--version` answers, then the adapter's auth probe says whatever it is told.
+ *
+ * No argv branch is needed for the second half: claude-code's auth probe *is*
+ * the real invocation with stdin closed (`src/harness/claude-code.ts`), so
+ * "anything that is not `--version`" is precisely that probe.
+ */
 const fakeClaude = (dir: string, authOutput: string | null): string =>
-  fakeBin(
-    dir,
-    'claude',
-    [
-      'if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi',
-      authOutput === null ? 'exit 0' : `echo "${authOutput}"; exit 1`,
-    ].join('\n'),
-  )
+  fakeCli(dir, 'claude', {
+    version: '9.9.9 (Claude Code)',
+    ...(authOutput === null ? {} : { stdout: [authOutput], exit: 1 }),
+  })
 
-/** `codex login status` is what the adapter asks; nothing here holds a credential. */
+/**
+ * `codex login status` is what the adapter asks; nothing here holds a credential.
+ *
+ * Written as source rather than as a spec because the fixture's subject is the
+ * *subcommand*: `--version` must succeed while `login` fails, and a spec that
+ * answered every invocation the same way would pass this test for the wrong
+ * reason. `process.argv` reads identically under a shebang script and under a
+ * `.cmd` shim, which is why it can be said once.
+ */
 const fakeCodex = (dir: string, loggedIn: boolean): string =>
-  fakeBin(
+  fakeCliFromSource(
     dir,
     'codex',
     [
-      'if [ "$1" = "--version" ]; then echo "codex-cli 0.20.0"; exit 0; fi',
+      `const argv = process.argv.slice(2)`,
+      `if (argv[0] === '--version') {`,
+      `  ${write('stdout', 'codex-cli 0.20.0')}`,
+      `} else if (argv[0] === 'login') {`,
       loggedIn
-        ? 'if [ "$1" = "login" ]; then echo "account active"; exit 0; fi'
-        : 'if [ "$1" = "login" ]; then echo "Not logged in"; exit 1; fi',
-      'exit 0',
+        ? `  ${write('stdout', 'account active')}`
+        : `  ${write('stdout', 'Not logged in')}\n  ${exitWith(1)}`,
+      `}`,
     ].join('\n'),
   )
 
+/** Likewise: `git --version` answers while `git worktree` is the half that breaks. */
 const fakeGit = (dir: string, worktreesWork: boolean): string =>
-  fakeBin(
+  fakeCliFromSource(
     dir,
     'git',
     [
-      'if [ "$1" = "--version" ]; then echo "git version 2.45.2"; exit 0; fi',
+      `const argv = process.argv.slice(2)`,
+      `if (argv[0] === '--version') {`,
+      `  ${write('stdout', 'git version 2.45.2')}`,
+      `} else if (argv[0] === 'worktree') {`,
+      // stderr, not stdout: §11's assertion below is that a probe's *diagnostic*
+      // never reaches a check line, and stderr is where a real git puts it.
       worktreesWork
-        ? 'if [ "$1" = "worktree" ]; then exit 0; fi'
-        : 'if [ "$1" = "worktree" ]; then echo "fatal: not a working tree" >&2; exit 128; fi',
-      'exit 0',
+        ? `  // usable: says nothing and exits 0`
+        : `  ${write('stderr', 'fatal: not a working tree')}\n  ${exitWith(128)}`,
+      `}`,
     ].join('\n'),
   )
 
 const fakeDocker = (dir: string): string =>
-  fakeBin(dir, 'docker', 'if [ "$1" = "compose" ]; then echo "v2.29.0"; exit 0; fi\nexit 1')
+  fakeCliFromSource(
+    dir,
+    'docker',
+    [
+      `if (process.argv[2] === 'compose') {`,
+      `  ${write('stdout', 'v2.29.0')}`,
+      `} else {`,
+      `  ${exitWith(1)}`,
+      `}`,
+    ].join('\n'),
+  )
 
 const workflow = (harnessOverride?: Workflow['defaults']['harness']): Workflow =>
   WorkflowSchema.parse({
@@ -144,7 +193,7 @@ const find = (checks: readonly CheckResult[], id: string): CheckResult => {
   return check
 }
 
-describe.runIf(POSIX_SHELL_FIXTURES)('vinta-flow doctor', () => {
+describe('vinta-flow doctor', () => {
   it('reports an all-green environment as all-pass and exits zero', async () => {
     const report = await runDoctor(greenOptions())
 

@@ -260,6 +260,28 @@ export const ownProcessGroup = (platform: Platform = process.platform): boolean 
   !isWindows(platform)
 
 /**
+ * Whether asking politely before forcing is worth doing.
+ *
+ * **True on POSIX**, where it is the whole point: `SIGTERM` to the group lets a
+ * CLI persist its session, and `SIGKILL` a moment later is the deadline.
+ *
+ * **False on Windows, and not as a preference.** `taskkill /t` without `/f`
+ * asks the root to close, and `cmd.exe` obliges — which severs the parent links
+ * `/t` walks, orphaning the process that was actually doing the work. The
+ * forceful call that follows then has no tree left to find, and
+ * `signalGroup` skips it anyway because the child it was given has already
+ * exited. The orphan keeps running, and because it inherited the stdio pipes it
+ * also keeps the parent's `close` event from ever arriving — a caller waiting
+ * on that waits forever.
+ *
+ * So on Windows the first blow is the only one. That is consistent with what
+ * the README already promises there: an interrupt is less gentle, because
+ * `taskkill` is the whole vocabulary.
+ */
+export const politeKillFirst = (platform: Platform = process.platform): boolean =>
+  !isWindows(platform)
+
+/**
  * What ending the tree under `pid` amounts to on this platform. A value rather
  * than an action, so both branches can be asserted from either machine.
  */

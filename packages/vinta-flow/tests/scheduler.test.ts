@@ -844,7 +844,12 @@ describe('lane reuse', () => {
     expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['a'])
     // Loud, and by lane name: §11 keeps the recycle command's own output —
     // database names, paths, whatever it printed — out of the failure.
-    expect(report.failures['b']).toBe('lane "run-1-lane-1" could not be recycled')
+    // The kind is on the message, and the lane's own contents are not. This
+    // fixture throws a bare `Error`, so `Error` is all there is to say about
+    // it; a real `LaneRecycleError` names which of its three stages failed.
+    // Without that suffix "could not be recycled" sends a reader to three
+    // different pieces of machinery — which is exactly what it did on Windows.
+    expect(report.failures['b']).toBe('lane "run-1-lane-1" could not be recycled (Error)')
     expect(report.failures['b']).not.toContain('dropdb')
     // And the lane went back on the free list rather than stranding capacity.
     expectDrained(r)

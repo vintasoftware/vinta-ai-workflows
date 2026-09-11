@@ -30,6 +30,7 @@ import {
   killTree,
   killTreePlan,
   ownProcessGroup,
+  politeKillFirst,
   removeFileCommand,
   shellInvocation,
   shellQuote,
@@ -318,6 +319,20 @@ describe('ending a process tree', () => {
     // `detached` on Windows means DETACHED_PROCESS — a child with no console
     // at all. It buys no tree and costs whatever the CLI does with one.
     expect(ownProcessGroup('win32')).toBe(false)
+  })
+
+  it('asks politely first only where a polite ask does not orphan the tree', () => {
+    // POSIX: `SIGTERM` to the group, then `SIGKILL` as the deadline — the CLI
+    // gets a moment to persist its session.
+    expect(politeKillFirst('darwin')).toBe(true)
+    expect(politeKillFirst('linux')).toBe(true)
+    // Windows: `taskkill /t` without `/f` asks the root to close, `cmd.exe`
+    // obliges, and the links `/t` walks die with it — leaving the process that
+    // was doing the work running, holding the stdio pipes it inherited, so the
+    // parent's `close` never arrives. The forceful call that was meant to
+    // follow is skipped, because the child it was handed has already exited.
+    // One blow is the only one that lands.
+    expect(politeKillFirst('win32')).toBe(false)
   })
 
   it('signals the group on POSIX', () => {

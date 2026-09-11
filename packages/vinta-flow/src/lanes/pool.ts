@@ -15,6 +15,7 @@
  * went wrong, and the skill's teardown steps reverse them from the summary.
  */
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, rm, symlink } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -99,6 +100,24 @@ export interface Lane {
 
 const ROLES: readonly DatabaseRole[] = ['dev', 'test']
 
+/**
+ * Runs an operation until it stops losing to a handle somebody else still
+ * holds. Linear backoff, a handful of attempts, and the last failure is
+ * rethrown so a genuinely stuck path still reports as one.
+ */
+async function retrying<T>(operation: () => Promise<T>, attempts = 8, delayMs = 150): Promise<T> {
+  let last: unknown
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      last = error
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+  throw last
+}
+
 export class LanePool {
   readonly #options: PoolOptions
   readonly #templatesDir: string
@@ -178,14 +197,59 @@ export class LanePool {
     }
 
     try {
-      await this.#git(['worktree', 'remove', '--force', lane.path])
-      await this.#git(['branch', '-D', lane.branch])
-      await rm(join(this.#summaryDir, `${name}.yaml`), { force: true })
+      // The whole teardown is retried, not just its first step. Windows refuses
+      // to delete a file anything still holds open, and a process that has just
+      // exited — an agent, a gate, a database — can keep a handle for a beat
+      // after it is gone, as can a scanner reading what was written. `--force`
+      // does not help: it is about git's own reluctance, not the filesystem's.
+      //
+      // `prune` between the two git calls is what makes the retry converge. A
+      // removal that only partly succeeded leaves the worktree still registered,
+      // and git then refuses to delete a branch it believes is checked out —
+      // so the second step fails for a reason the first one caused, and
+      // retrying the second alone would never clear it.
+      await retrying(async () => {
+        // **Each step skips work it has already done**, or the retry could not
+        // converge: a second `worktree remove` of a path that is gone fails,
+        // and the attempt that was meant to finish the job would fail on its
+        // first line every time.
+        if (existsSync(lane.path)) {
+          await this.#git(['worktree', 'remove', '--force', lane.path])
+        }
+        // Between the two, and load-bearing. A removal that only partly
+        // succeeded leaves the worktree registered, and git then refuses to
+        // delete a branch it believes is checked out — the second step failing
+        // for a reason the first one caused.
+        await this.#git(['worktree', 'prune'])
+        // git can let go of a worktree and still leave the directory standing:
+        // on Windows a delete of a file something briefly holds open fails, and
+        // git does not treat that as its own failure. `worktree add` then
+        // refuses the path for already existing, which is a re-provision that
+        // cannot happen and a node that fails for a directory nobody wanted.
+        await rm(lane.path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+        if (await this.#hasBranch(lane.branch)) {
+          await this.#git(['branch', '-D', lane.branch])
+        }
+      })
+      await rm(join(this.#summaryDir, `${name}.yaml`), {
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100,
+      })
     } catch {
       throw new LaneRecycleError(name, 'reprovision')
     }
 
-    const fresh = await this.#provisionWorktree(lane.name, lane.kind)
+    // Inside its own guard, so a re-provision that fails says which half of the
+    // recycle it was. It used to sit outside every `try` here, and reached the
+    // scheduler as a bare `Error` — the reason a Windows failure could say only
+    // "could not be recycled" while naming neither a stage nor a cause.
+    let fresh: Lane
+    try {
+      fresh = await this.#provisionWorktree(lane.name, lane.kind)
+    } catch {
+      throw new LaneRecycleError(name, 'reprovision')
+    }
     this.#all = this.#all.map((candidate) => (candidate.name === name ? fresh : candidate))
     return fresh
   }
@@ -209,6 +273,16 @@ export class LanePool {
       await git(['clean', '-fd', '-e', 'node_modules'])
     } catch {
       throw new LaneRecycleError(lane.name, 'worktree')
+    }
+  }
+
+  /** Whether the ref is there. A missing branch is an answer, not a failure. */
+  async #hasBranch(branch: string): Promise<boolean> {
+    try {
+      await this.#git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+      return true
+    } catch {
+      return false
     }
   }
 

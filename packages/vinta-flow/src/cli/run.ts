@@ -282,8 +282,22 @@ export async function runCommand(
     if (report.stop !== undefined) {
       io.err(`vinta-flow: run ${runId} stopped — ${describeStop(report.stop)}`)
     }
-    // Node ids only. Why a node failed is in its transcript, which stays on disk.
-    if (failed.length > 0) io.err(`vinta-flow: failed nodes: ${failed.join(', ')}`)
+    // Ids, then the reason each one carries. `RunReport.failures` is
+    // identifiers only by contract — a lane name, a pipeline state, a harness
+    // id — so this adds nothing §11 keeps off a stream.
+    //
+    // It used to print the ids alone, on the grounds that *why* is in the
+    // node's transcript. That is true right up until the node failed before an
+    // agent ever ran: a lane that will not provision, a pipeline that ended in
+    // a failure state, a harness with no adapter. Those have no transcript, and
+    // the operator was left with a node id and nowhere to look.
+    if (failed.length > 0) {
+      io.err(`vinta-flow: failed nodes: ${failed.join(', ')}`)
+      for (const id of failed) {
+        const why = report.failures[id]
+        if (why !== undefined) io.err(`vinta-flow:   ${id}: ${why}`)
+      }
+    }
 
     io.out(`vinta-flow: run ${runId} ${report.status}.`)
     return report.status === 'completed' && failed.length === 0 ? OK : FAILED
