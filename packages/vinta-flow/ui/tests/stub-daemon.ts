@@ -33,6 +33,7 @@ import {
   NoArgsRequestSchema,
   NodeDetailSchema,
   OkResponseSchema,
+  RunUsageResponseSchema,
   RedirectRequestSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
@@ -43,6 +44,7 @@ import {
   type EventFrame,
   type NodeDetail,
   type RunSnapshot,
+  type RunUsageResponse,
   type RunSummary,
 } from '../../src/daemon/schemas.ts'
 import { parseWorkflow } from '../../src/validate.ts'
@@ -105,6 +107,12 @@ export interface StubOptions {
   readonly snapshots: Readonly<Record<string, RunSnapshot>>
   /** Node details, keyed `${runId}/${nodeId}`. Anything else is `unknown_node`. */
   readonly details?: Readonly<Record<string, NodeDetail>>
+  /**
+   * §15.6's rollup, by run id. A run with no entry answers 404 — which is what
+   * a daemon older than this browser looks like, and the run view has to keep
+   * drawing the graph through it.
+   */
+  readonly usage?: Readonly<Record<string, RunUsageResponse>>
   readonly events?: readonly NewEvent[]
   /** Serve a body that does not match the schema, to prove the client parses. */
   readonly corrupt?: 'snapshot' | 'frame'
@@ -151,6 +159,7 @@ const TOKEN = 'stub-token'
 export async function startStubDaemon(options: StubOptions): Promise<StubDaemon> {
   const snapshots = new Map(Object.entries(options.snapshots))
   const details = new Map(Object.entries(options.details ?? {}))
+  const usageByRun = new Map(Object.entries(options.usage ?? {}))
   const posts: Post[] = []
   const puts: WorkflowPut[] = []
   const workflows = new Map(Object.entries(options.workflows ?? {}))
@@ -272,6 +281,13 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
           events: page,
         }),
       )
+    }
+
+    const usage = /^\/api\/runs\/([^/]+)\/usage$/.exec(url.pathname)
+    if (usage !== null) {
+      const totals = usageByRun.get(decodeURIComponent(usage[1] ?? ''))
+      if (totals === undefined) return json(response, 404, { error: 'unknown_run', issues: null })
+      return json(response, 200, RunUsageResponseSchema.parse(totals))
     }
 
     const node = /^\/api\/runs\/([^/]+)\/nodes\/([^/]+)$/.exec(url.pathname)

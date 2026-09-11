@@ -24,6 +24,7 @@ import {
   FrameSchema,
   NoArgsRequestSchema,
   NodeDetailSchema,
+  RunUsageResponseSchema,
   OkResponseSchema,
   RedirectRequestSchema,
   RunListResponseSchema,
@@ -31,6 +32,7 @@ import {
   type EventFrame,
   type Frame,
   type NodeDetail,
+  type RunUsageResponse,
   type RunSnapshot,
   type RunSummary,
 } from '../../src/daemon/schemas.ts'
@@ -87,6 +89,14 @@ export interface Client {
   readonly snapshot: (runId: string) => Promise<RunSnapshot>
   /** The node view's read: transcript tail, gate logs, diff ref, question (§10). */
   readonly node: (runId: string, nodeId: string) => Promise<NodeDetail>
+  /**
+   * The run-level rollup: reuse counts and token/cost/cache totals (§15.6).
+   *
+   * Its own read rather than part of the snapshot, because the daemon folds
+   * every transcript in the run to answer it — see the route's own note. The
+   * run view therefore asks for it on a slow cadence, not on every frame.
+   */
+  readonly usage: (runId: string) => Promise<RunUsageResponse>
   /** One §9 operation. Resolves when the daemon accepted it, and returns nothing. */
   readonly operate: <K extends NodeOperation>(
     runId: string,
@@ -112,6 +122,9 @@ export function createClient(origin: string, token: string): Client {
     },
     async node(runId, nodeId) {
       return await get(`${nodePath(runId, nodeId)}?limit=${TRANSCRIPT_LIMIT}`, NodeDetailSchema)
+    },
+    async usage(runId) {
+      return await get(`/api/runs/${encodeURIComponent(runId)}/usage`, RunUsageResponseSchema)
     },
     async operate(runId, nodeId, operation, body) {
       const path = `${nodePath(runId, nodeId)}/${operation}`

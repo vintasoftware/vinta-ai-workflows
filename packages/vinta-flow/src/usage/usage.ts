@@ -486,7 +486,19 @@ function seal(acc: Acc): UsageTotals {
  * caller presenting it as one reads `cache.status` and says so.
  */
 export function cacheReadShare(totals: UsageTotals): number | undefined {
-  const { cache } = totals
+  return cacheShare(totals.cache)
+}
+
+/**
+ * The same share, over a `CacheTotal` on its own.
+ *
+ * Split out because the run view computes it from the total the daemon put on
+ * the wire, where there is no `UsageTotals` to hand. One definition rather than
+ * two: a browser that reimplemented this would be free to divide by the wrong
+ * denominator, and dividing by the *whole* run's prompt tokens instead of the
+ * reporting sessions' is exactly the mistake §15.6 is about.
+ */
+export function cacheShare(cache: CacheTotal): number | undefined {
   if (cache.status === 'unreported') return undefined
   const prompt = cache.status === 'complete' ? cache.promptTokens : cache.promptTokensSoFar
   if (prompt <= 0) return undefined

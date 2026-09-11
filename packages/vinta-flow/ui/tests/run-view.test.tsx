@@ -1,6 +1,15 @@
 import { cleanup, waitFor } from '@testing-library/react'
 import { afterEach, expect, test } from 'vitest'
-import { harness, node, resource, RUN_ID, runSummary, snapshot, statusEvent } from './fixtures.ts'
+import {
+  harness,
+  node,
+  resource,
+  RUN_ID,
+  runSummary,
+  runUsage,
+  snapshot,
+  statusEvent,
+} from './fixtures.ts'
 import { cardColorOf, cardLabelOf, renderApp, textOf, toneOf } from './render-app.tsx'
 import { startStubDaemon, type StubDaemon } from './stub-daemon.ts'
 
@@ -140,4 +149,111 @@ test('a run with no nodes and no events renders', async () => {
   expect(container.textContent).toContain('No gate held.')
   await waitFor(() => expect(stub.connections).toHaveLength(1))
   expect(stub.connections[0]?.sent).toEqual([])
+})
+
+// ---------------------------------------------------------------------------
+// §15.6: the run-level rollup
+// ---------------------------------------------------------------------------
+
+const oneNode = () => ({
+  runs: [runSummary()],
+  snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+})
+
+test('the rollup states what reuse engaged and what the prompts cost', async () => {
+  const stub = await startStubDaemon({ ...oneNode(), usage: { [RUN_ID]: runUsage() } })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-reuse]')).not.toBe(null))
+
+  // 5 of 8 turns continued a session.
+  expect(textOf(container, '[data-reuse]')).toContain('63% of 8 turns')
+  // 61,000 of 100,000 prompt tokens came off the cache.
+  expect(textOf(container, '[data-cache]')).toContain('61%')
+  expect(textOf(container, '[data-tokens]')).toContain('12.4k in')
+  expect(textOf(container, '[data-tokens]')).toContain('3.1k out')
+  expect(textOf(container, '[data-cost]')).toContain('$1.42')
+
+  // And why the cold turns were cold, commonest first — under a label, because
+  // a column of bare counts directly beneath the cost rows reads as more cost.
+  expect(textOf(container, '.fresh-head')).toContain('Cold turns')
+  const reasons = [...container.querySelectorAll('[data-fresh-reason]')].map((row) =>
+    row.getAttribute('data-fresh-reason'),
+  )
+  expect(reasons).toEqual(['no_prior_session', 'final_fix_round'])
+})
+
+test('a harness that reports no cost gives an unknown bill, never a free one', async () => {
+  // The §15.6 rule where it is most likely to be broken: a `?? 0` in the view
+  // would render a confident $0.00 for a run nobody has been billed for yet.
+  const stub = await startStubDaemon({
+    ...oneNode(),
+    usage: {
+      [RUN_ID]: runUsage({
+        cost: { status: 'unreported', missingSessions: 4 },
+        cache: { status: 'unreported', missingSessions: 4 },
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-cost]')).not.toBe(null))
+
+  expect(textOf(container, '[data-cost]')).toContain('Not reported')
+  expect(textOf(container, '[data-cost]')).not.toContain('$')
+  expect(textOf(container, '[data-cache]')).toContain('Not reported')
+  expect(textOf(container, '[data-cache]')).not.toContain('0%')
+})
+
+test('a partial cost says so, and names how many sessions are missing', async () => {
+  const stub = await startStubDaemon({
+    ...oneNode(),
+    usage: {
+      [RUN_ID]: runUsage({
+        cost: { status: 'partial', usdSoFar: 0.8, reportedSessions: 5, missingSessions: 3 },
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-cost]')).not.toBe(null))
+
+  // A floor, and labelled as one — the run cost at least this much.
+  expect(textOf(container, '[data-cost]')).toContain('$0.80 so far')
+  expect(textOf(container, '[data-cost]')).toContain('3 of 8')
+})
+
+test('a run that asked for no reuse says so, rather than reporting 0%', async () => {
+  // A pipeline naming no session slots records no decisions. "0%" would read
+  // as a feature that broke; it was never switched on (§15.6).
+  const stub = await startStubDaemon({
+    ...oneNode(),
+    usage: { [RUN_ID]: runUsage({ reuse: { turns: 0, reused: 0, fresh: [] } }) },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-reuse]')).not.toBe(null))
+
+  expect(textOf(container, '[data-reuse]')).toContain('No agent turn asked to continue')
+  expect(textOf(container, '[data-reuse]')).not.toContain('0%')
+  expect(container.querySelector('[data-fresh-reason]')).toBe(null)
+})
+
+test('a daemon that cannot serve the rollup does not stop the run view drawing', async () => {
+  // An older daemon 404s this route. The graph and the capacity panels are why
+  // an operator opened this page; a missing total must not cost them either.
+  const stub = await startStubDaemon(oneNode())
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(cardColorOf(container, 'impl')).toBe('var(--vdag-status-running)'))
+
+  expect(container.querySelector('[data-rollup]')).not.toBe(null)
+  expect(container.querySelector('[data-reuse]')).toBe(null)
+  // And no error banner: the rollup is not what this screen is for.
+  expect(container.querySelector('.error')).toBe(null)
 })

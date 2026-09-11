@@ -13,15 +13,26 @@
  * operator's next move depends entirely on knowing which it is.
  */
 import type { ReactElement } from 'react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Dag } from 'vinta-dag-editor/src/index.ts'
-import type { RunSnapshot } from '../../src/daemon/schemas.ts'
+import type { RunSnapshot, RunUsageResponse } from '../../src/daemon/schemas.ts'
+import { cacheShare } from '../../src/usage/usage.ts'
 import { Chip } from './Chip.tsx'
 import type { Client } from './client.ts'
 import { DagView } from './Dag.tsx'
 import { nodeLabel, nodeTone, runTone } from './status.ts'
 import { elapsed, useNow } from './time.ts'
 import { useRun } from './useRun.ts'
+
+/**
+ * How often the rollup is re-read.
+ *
+ * Far slower than everything else on this screen, and deliberately: the daemon
+ * folds every transcript in the run to answer it. These are totals that move
+ * once per agent turn — minutes apart — so polling them at the cadence of the
+ * event stream would buy nothing and cost a full scan per agent message.
+ */
+const USAGE_REFRESH_MS = 30_000
 
 export function Run({ client, runId }: { readonly client: Client; readonly runId: string }) {
   const { snapshot, projection, connected, error } = useRun(client, runId)
@@ -106,6 +117,7 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
         <Pools resources={snapshot.resources} />
         <GateQueue queue={snapshot.gateQueue} now={now} />
         <Harnesses harnesses={snapshot.harnesses} now={now} />
+        <Rollup client={client} runId={runId} />
       </div>
     </section>
   )
@@ -274,6 +286,123 @@ function Harnesses({
       )}
     </section>
   )
+}
+
+/**
+ * §15.6's rollup: what the run's agents cost, and what reuse bought.
+ *
+ * The two halves belong on one panel because neither answers the question
+ * alone. A poor cache hit rate can mean reuse is working and the prompts are
+ * simply short; it can also mean reuse silently stopped. The turn counts
+ * separate those, and the reason tally says which of §15.2's rules is doing it.
+ *
+ * **Nothing here prints a number the daemon did not report.** A harness that
+ * reports no cost gives this run an unknown bill, not a free one, and a
+ * `?? 0` anywhere below would turn that into a confident zero — the failure
+ * §15.6 exists to prevent. Every figure is behind its status.
+ */
+function Rollup({ client, runId }: { readonly client: Client; readonly runId: string }) {
+  const [usage, setUsage] = useState<RunUsageResponse | null>(null)
+  const tick = useNow(USAGE_REFRESH_MS)
+
+  useEffect(() => {
+    let stopped = false
+    client.usage(runId).then(
+      (next) => {
+        if (!stopped) setUsage(next)
+      },
+      // A rollup that cannot be read is not worth an error banner over the
+      // whole run: the panel says nothing rather than pushing a failure at an
+      // operator who came here to watch the graph.
+      () => {},
+    )
+    return () => {
+      stopped = true
+    }
+  }, [client, runId, tick])
+
+  if (usage === null) {
+    return (
+      <section className="panel" data-rollup>
+        <h3>Sessions and cost</h3>
+        <p className="empty">Reading the run’s totals…</p>
+      </section>
+    )
+  }
+
+  const { reuse } = usage
+  const share = cacheShare(usage.cache)
+
+  return (
+    <section className="panel" data-rollup>
+      <h3>Sessions and cost</h3>
+      <dl className="ref">
+        <dt>Reuse</dt>
+        <dd data-reuse>
+          {reuse.turns === 0
+            ? // Not "0%": a pipeline that names no slots asked for no reuse,
+              // and reporting that as a rate would read as a feature that broke.
+              'No agent turn asked to continue a session.'
+            : `${percent(reuse.reused / reuse.turns)} of ${reuse.turns} turns continued a session.`}
+        </dd>
+
+        <dt>Cache</dt>
+        <dd data-cache>
+          {share === undefined
+            ? 'Not reported by this run’s harnesses.'
+            : `${percent(share)} of prompt tokens served from cache${
+                usage.cache.status === 'partial' ? ', across the sessions that reported' : ''
+              }.`}
+        </dd>
+
+        <dt>Tokens</dt>
+        <dd data-tokens>
+          {compact(usage.inputTokens)} in · {compact(usage.outputTokens)} out ·{' '}
+          {usage.sessions} {usage.sessions === 1 ? 'session' : 'sessions'}
+        </dd>
+
+        <dt>Cost</dt>
+        <dd data-cost>{cost(usage.cost)}</dd>
+      </dl>
+
+      {reuse.fresh.length > 0 && (
+        <>
+          {/* Labelled, because the tally is a column of bare numbers directly
+              under a column of bare numbers. Without this it reads as more
+              cost rows, and the reader has to infer what is being counted. */}
+          <p className="muted fresh-head">Cold turns, by reason</p>
+          <ul className="fresh-reasons">
+            {reuse.fresh.map((entry) => (
+              <li key={entry.reason} data-fresh-reason={entry.reason}>
+                <span className="muted">{entry.reason.replaceAll('_', ' ')}</span>
+                <span>{entry.count}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
+/** Cost, never invented. A silent harness is unknown, not free (§15.6). */
+function cost(total: RunUsageResponse['cost']): string {
+  if (total.status === 'complete') return `$${total.usd.toFixed(2)}`
+  if (total.status === 'partial') {
+    return `$${total.usdSoFar.toFixed(2)} so far — ${total.missingSessions} of ${
+      total.reportedSessions + total.missingSessions
+    } sessions reported no cost.`
+  }
+  return 'Not reported by this run’s harnesses.'
+}
+
+const percent = (value: number): string => `${Math.round(value * 100)}%`
+
+/** Token counts are read at a glance and compared, never summed by eye. */
+function compact(tokens: number): string {
+  if (tokens < 1_000) return String(tokens)
+  if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(1)}k`
+  return `${(tokens / 1_000_000).toFixed(1)}M`
 }
 
 function fraction(resource: RunSnapshot['resources'][number]): number {

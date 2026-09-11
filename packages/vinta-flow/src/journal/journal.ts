@@ -257,6 +257,23 @@ export class Journal {
   }
 
   /**
+   * §15's session decisions for a whole run, oldest first — the run-level
+   * rollup's input (`usage/reuse.ts`).
+   *
+   * The same narrow read as `sessionHistory`, without the node. Both exist
+   * rather than one taking an optional node id because the index each wants is
+   * different, and because a caller that passes `undefined` by accident would
+   * get a whole run's rows where it asked for one node's — a bug that reads as
+   * a plausible number rather than as an error.
+   */
+  sessionDecisions(runId: string): StoredEvent[] {
+    const rows = this.db
+      .prepare("SELECT * FROM events WHERE run_id = ? AND type = 'node_session' ORDER BY id")
+      .all(runId) as EventRow[]
+    return rows.map(toStoredEvent)
+  }
+
+  /**
    * Drops every projection and replays the log. This is the boot path, and it
    * is also the repair path: a projection can never be so wrong that deleting
    * it is not the fix.

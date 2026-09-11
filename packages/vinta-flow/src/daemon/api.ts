@@ -28,6 +28,8 @@ import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
+import { collectRunReuse } from '../usage/reuse.ts'
+import { collectRunUsage } from '../usage/usage.ts'
 import { parseWorkflow } from '../validate.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import type { DaemonRun } from './control.ts'
@@ -47,6 +49,7 @@ import {
   type NodeDetail,
   type RunSnapshot,
   type RunSummary,
+  type RunUsageResponse,
   type SessionTurn,
   type WorkflowListResponse,
   type WorkflowResponse,
@@ -178,6 +181,38 @@ export function createApi(options: ApiOptions): Hono {
         payload: event.payload,
       })),
     } satisfies EventPage)
+  })
+
+  /**
+   * §15.6's rollup: what this run's agents cost, and how often reuse engaged.
+   *
+   * Resolved out of the journal rather than out of `runs`, exactly like the
+   * events route above — a finished run's numbers are the ones most worth
+   * reading, and requiring a live control port would make them unreachable the
+   * moment the run they describe ends.
+   *
+   * Not part of the snapshot, deliberately. `collectRunUsage` reads every
+   * node's transcript in full, and the snapshot is re-read whenever an event
+   * lands; folding this into it would put a whole-run file scan behind every
+   * agent message.
+   */
+  app.get('/api/runs/:runId/usage', (c) => {
+    const runId = c.req.param('runId') ?? ''
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+
+    const usage = collectRunUsage(journal, runId)
+    const reuse = collectRunReuse(journal, runId)
+    return c.json({
+      runId,
+      // Copied rather than passed through: the fold's arrays are `readonly`,
+      // and the wire type is the mutable shape `c.json` serializes.
+      reuse: { ...reuse.totals, fresh: [...reuse.totals.fresh] },
+      inputTokens: usage.totals.inputTokens,
+      outputTokens: usage.totals.outputTokens,
+      sessions: usage.totals.sessions,
+      cost: usage.totals.cost,
+      cache: usage.totals.cache,
+    } satisfies RunUsageResponse)
   })
 
   app.get('/api/runs/:runId/nodes/:nodeId', (c) => {

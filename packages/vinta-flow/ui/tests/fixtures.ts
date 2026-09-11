@@ -4,7 +4,12 @@
  * browser.
  */
 import type { AgentEvent } from '../../src/harness/adapter.ts'
-import type { NodeDetail, RunSnapshot, RunSummary } from '../../src/daemon/schemas.ts'
+import type {
+  NodeDetail,
+  RunSnapshot,
+  RunSummary,
+  RunUsageResponse,
+} from '../../src/daemon/schemas.ts'
 
 export const RUN_ID = 'run-1'
 
@@ -101,6 +106,37 @@ export function statusEvent(nodeId: string, status: NodeStatus) {
  */
 export function entry(event: AgentEvent): AgentEvent {
   return event
+}
+
+/**
+ * §15.6's rollup. Defaults to a run that reported everything, because the
+ * interesting variations are the *partial* and *unreported* ones and a test
+ * should have to ask for them by name.
+ */
+export function runUsage(parts: Partial<RunUsageResponse> = {}): RunUsageResponse {
+  return {
+    runId: RUN_ID,
+    reuse: {
+      turns: 8,
+      reused: 5,
+      fresh: [
+        { reason: 'no_prior_session', count: 2 },
+        { reason: 'final_fix_round', count: 1 },
+      ],
+    },
+    inputTokens: 12_400,
+    outputTokens: 3_100,
+    sessions: 8,
+    cost: { status: 'complete', usd: 1.42, reportedSessions: 8 },
+    cache: {
+      status: 'complete',
+      readTokens: 61_000,
+      writeTokens: 4_000,
+      promptTokens: 100_000,
+      reportedSessions: 8,
+    },
+    ...parts,
+  }
 }
 
 export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {

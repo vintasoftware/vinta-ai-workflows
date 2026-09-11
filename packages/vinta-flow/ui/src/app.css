@@ -196,6 +196,25 @@ ul {
   border-bottom: 1px solid var(--line);
 }
 
+/* §15.6's cold-turn tally: a reason and its count, the count aligned right so
+   the column can be read down without reading the words. */
+.fresh-head {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.fresh-reasons {
+  margin-top: 2px;
+}
+
+.fresh-reasons li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+}
+
 /* §15's rows. The reason sits under its own turn rather than beside it: it is
    a sentence, and a sentence in a flex row either wraps badly or truncates the
    half that says why. */

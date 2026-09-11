@@ -283,6 +283,86 @@ export const NodeDetailSchema = z.strictObject({
 })
 
 // ---------------------------------------------------------------------------
+// The run-level rollup — §15.6, §13.7
+// ---------------------------------------------------------------------------
+
+/**
+ * A reported total, or an honest statement that it is not reported.
+ *
+ * This mirrors `usage.ts`'s `CostTotal`/`CacheTotal` onto the wire *including
+ * their three statuses*, rather than flattening them to numbers. A flattened
+ * wire would put the decision "what does a silent harness count as" in the
+ * browser, where it would be made by whichever `?? 0` was written first — and
+ * the answer that falls out of that is 0%, which is precisely the claim §15.6
+ * exists to prevent. codex reports no cost at all; a run of codex nodes has an
+ * unknown bill, not a free one.
+ *
+ * `…SoFar` names survive the crossing for the same reason they exist in the
+ * module: a caller cannot reach a partial figure without saying so in the type.
+ */
+export const CostTotalSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    status: z.literal('complete'),
+    usd: z.number(),
+    reportedSessions: z.number().int(),
+  }),
+  z.strictObject({
+    status: z.literal('partial'),
+    usdSoFar: z.number(),
+    reportedSessions: z.number().int(),
+    missingSessions: z.number().int(),
+  }),
+  z.strictObject({ status: z.literal('unreported'), missingSessions: z.number().int() }),
+])
+
+export const CacheTotalSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    status: z.literal('complete'),
+    readTokens: z.number().int(),
+    writeTokens: z.number().int(),
+    promptTokens: z.number().int(),
+    reportedSessions: z.number().int(),
+  }),
+  z.strictObject({
+    status: z.literal('partial'),
+    readTokensSoFar: z.number().int(),
+    writeTokensSoFar: z.number().int(),
+    promptTokensSoFar: z.number().int(),
+    reportedSessions: z.number().int(),
+    missingSessions: z.number().int(),
+  }),
+  z.strictObject({ status: z.literal('unreported'), missingSessions: z.number().int() }),
+])
+
+/**
+ * How often reuse engaged (§15). `fresh` is an open tally rather than a field
+ * per reason, so a daemon that learns a new reason token does not need the
+ * browser to be redeployed before the number stops being wrong.
+ */
+export const ReuseTotalsSchema = z.strictObject({
+  turns: z.number().int(),
+  reused: z.number().int(),
+  fresh: z.array(z.strictObject({ reason: z.string(), count: z.number().int() })),
+})
+
+/**
+ * What one run's agents cost and what reuse bought — the two halves that only
+ * mean something together (§15.6). Its own endpoint rather than a block on the
+ * snapshot: computing it reads every node's transcript in full, and the
+ * snapshot is re-read on every event that lands.
+ */
+export const RunUsageResponseSchema = z.strictObject({
+  runId: z.string(),
+  reuse: ReuseTotalsSchema,
+  inputTokens: z.number().int(),
+  outputTokens: z.number().int(),
+  /** Sessions counted — one per session, however many turns a node took. */
+  sessions: z.number().int(),
+  cost: CostTotalSchema,
+  cache: CacheTotalSchema,
+})
+
+// ---------------------------------------------------------------------------
 // Workflows — §10's Editor row
 // ---------------------------------------------------------------------------
 
@@ -409,6 +489,7 @@ export type RunSummary = z.infer<typeof RunSummarySchema>
 export type RunSnapshot = z.infer<typeof RunSnapshotSchema>
 export type NodeDetail = z.infer<typeof NodeDetailSchema>
 export type SessionTurn = z.infer<typeof SessionTurnSchema>
+export type RunUsageResponse = z.infer<typeof RunUsageResponseSchema>
 export type EventFrame = z.infer<typeof EventFrameSchema>
 export type EventPage = z.infer<typeof EventPageSchema>
 export type JournalEvent = z.infer<typeof JournalEventSchema>

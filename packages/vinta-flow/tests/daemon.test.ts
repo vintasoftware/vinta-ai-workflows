@@ -37,6 +37,7 @@ import {
   OkResponseSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
+  RunUsageResponseSchema,
   HumanQuestionSchema,
   WorkflowListResponseSchema,
   WorkflowResponseSchema,
@@ -489,6 +490,68 @@ describe('snapshots', () => {
     )
 
     expect(detail.sessions).toEqual([])
+  })
+
+  it('rolls the run up: what reuse engaged, and what the prompts cost', async () => {
+    const r = await rig()
+    const decide = (
+      nodeId: string,
+      payload: Extract<NewEvent, { type: 'node_session' }>['payload'],
+    ) => r.journal.append({ runId: RUN_ID, nodeId, type: 'node_session', payload })
+
+    decide('a', { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' })
+    decide('a', { slot: 'main', disposition: 'reused', session_id: 's1' })
+    decide('b', { slot: 'main', disposition: 'fresh', reason: 'final_fix_round' })
+
+    // Two sessions' worth of usage, both reporting cache figures.
+    r.journal.appendTranscript(RUN_ID, 'a', { type: 'session_started', sessionId: 's1' })
+    r.journal.appendTranscript(RUN_ID, 'a', {
+      type: 'usage',
+      input: 1_000,
+      output: 200,
+      cacheRead: 9_000,
+      cacheWrite: 500,
+    })
+
+    const body = RunUsageResponseSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/usage`)).body,
+    )
+
+    expect(body.reuse.turns).toBe(3)
+    expect(body.reuse.reused).toBe(1)
+    expect(body.reuse.fresh).toEqual([
+      { reason: 'final_fix_round', count: 1 },
+      { reason: 'no_prior_session', count: 1 },
+    ])
+    expect(body.inputTokens).toBe(1_000)
+    expect(body.cache.status).toBe('complete')
+    expect(body.cache).toMatchObject({ readTokens: 9_000, writeTokens: 500 })
+  })
+
+  it('says a silent harness is unreported rather than free, and rolls it up anyway', async () => {
+    // The §15.6 rule, on the wire. A run whose harness reports no cost has an
+    // unknown bill, not a zero one, and the browser must not be the layer that
+    // decides which — so the status crosses instead of a bare number.
+    const r = await rig()
+    r.journal.appendTranscript(RUN_ID, 'a', { type: 'session_started', sessionId: 's1' })
+    r.journal.appendTranscript(RUN_ID, 'a', { type: 'usage', input: 400, output: 90 })
+
+    const body = RunUsageResponseSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/usage`)).body,
+    )
+
+    expect(body.cost.status).toBe('unreported')
+    expect(body.cache.status).toBe('unreported')
+    expect(body).not.toHaveProperty('cost.usd')
+    // The tokens it *did* report are still counted.
+    expect([body.inputTokens, body.outputTokens, body.sessions]).toEqual([400, 90, 1])
+    // And a run that asked for no reuse reports no turns — not 0 of 0 reused.
+    expect(body.reuse).toEqual({ turns: 0, reused: 0, fresh: [] })
+  })
+
+  it('404s the rollup for an unknown run', async () => {
+    const r = await rig()
+    expect((await call(r.daemon, '/api/runs/nope/usage')).status).toBe(404)
   })
 
   it('404s an unknown run and an unknown node', async () => {

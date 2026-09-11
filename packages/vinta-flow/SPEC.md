@@ -707,7 +707,13 @@ Two rules the panel follows, both about not crying wolf:
 - **Cold is not failure.** Most cold turns are correct: the first turn on a slot has nothing to continue, and the last fix round is escalated on purpose (§15.5). They are rendered in the idle tone. Only `stale_session` gets the waiting tone, because it is the one that cost a spawn nobody asked for. Nothing in the panel is ever an error tone — a lost session costs a turn, not a run.
 - **An unrecognised reason is shown, not swallowed.** A browser served by a newer daemon renders the raw token rather than hiding it behind the vocabulary this build happens to know. Ugly and true beats tidy and blank, because the token is the only clue there is.
 
-The rows come from the journal, not from a projection, over the existing node-detail endpoint (`sessions`) with a narrow per-node query. Folding a whole run's log in the browser to keep four rows would make the panel's cost grow with the length of the run it describes, and a table keyed by node would answer "is reuse working" with whichever turn happened to be last.
+At the run level the same question is asked once, over the whole run: a **Sessions and cost** panel pairing how often reuse engaged with what the prompts cost. The two halves belong together because neither answers it alone — a poor hit rate can mean reuse is working and the prompts are simply short, or that reuse silently stopped, and only the turn counts separate those. A tally of cold turns by reason says which of §15.2's rules is responsible.
+
+That rollup is **its own endpoint, not a block on the snapshot**: answering it folds every transcript in the run, and the snapshot is re-read whenever an event lands. The run view polls it on a slow cadence instead, and a daemon too old to serve it costs the page nothing — the graph and the capacity panels are why an operator opened it.
+
+The `unreported` statuses cross the wire intact rather than being flattened to numbers, which is the one decision this panel cannot be allowed to make in the browser. A `?? 0` there turns a codex run's unknown bill into a confident $0.00, and a silent harness into a 0% hit rate — the precise claims §15.6 exists to prevent. Every figure on the panel sits behind its status, and the share is computed by the same `cacheShare` the server uses, so the browser cannot divide by a different denominator.
+
+The per-node rows come from the journal, not from a projection, over the existing node-detail endpoint (`sessions`) with a narrow per-node query. Folding a whole run's log in the browser to keep four rows would make the panel's cost grow with the length of the run it describes, and a table keyed by node would answer "is reuse working" with whichever turn happened to be last.
 
 ### 15.8 Interaction with takeover
 
