@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
+import { agentSpawn, signalGroup } from '../src/harness/shared.ts'
 import { commandInvocation } from '../src/platform/platform.ts'
 import {
   fakeCli,
@@ -230,6 +231,42 @@ srv.listen(port, '127.0.0.1', () => process.stdout.write('listening\\n'))
       child.kill('SIGKILL')
     }
   }, 20_000)
+
+  /**
+   * The other half of the bisect: ending one.
+   *
+   * A long-lived fake is spawned exactly as an adapter spawns a server — through
+   * `agentSpawn`, with a cwd and a stripped environment — and then ended the way
+   * `OpencodeServer.stop` ends one. What is asserted is that `close` actually
+   * arrives, because `stop` waits on that event with no deadline: if it never
+   * comes, a daemon shutting down hangs for as long as the server lives.
+   *
+   * On Windows the pid is `cmd.exe` and the server is its child, so this is a
+   * question about `taskkill /t` reaching a grandchild *and* about the pipe
+   * handles that grandchild inherited — `close` needs the process gone and the
+   * stdio ended, and a surviving grandchild holds the second open.
+   */
+  it('can be ended and reaped, the way an adapter ends a server', async () => {
+    const bin = fakeCli(makeTemp(), 'long-lived', { lingerMs: 120_000, stdout: ['up'] })
+    const spec = agentSpawn(bin, ['serve'])
+    const child = spawn(spec.file, spec.args, {
+      cwd: makeTemp(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+      ...spec.options,
+    })
+
+    const closed = new Promise<boolean>((resolve) => {
+      child.once('close', () => resolve(true))
+      setTimeout(() => resolve(false), 15_000).unref()
+    })
+
+    // `stop`'s own sequence: polite first, then force after a moment.
+    signalGroup(child, 'SIGTERM')
+    setTimeout(() => signalGroup(child, 'SIGKILL'), 2_000).unref()
+
+    expect(await closed, 'close never arrived — a stop that waits on it hangs').toBe(true)
+  }, 25_000)
 })
 
 describe('rendering a gate', () => {
