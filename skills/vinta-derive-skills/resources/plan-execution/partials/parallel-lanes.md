@@ -87,7 +87,11 @@ The orchestrator **never edits code**, including merge conflicts. On a conflicte
 3. After the fixer returns, re-run the **outer gate** (`{{BUILD_CMD}}` plus the test scope `run_options.full_test_suite` selects) in the integration worktree. Red → loop back to step 2 with the failure.
 4. Green → commit the merge, push the branch, and record the conflict + resolution in `waves/wave-{N}.md`.
 
-A conflict that survives two fixer rounds is a **plan defect**, not a code problem: two phases in the same wave own the same code. Stop, report both phases and the paths, and ask whether to serialize them (add the edge, re-derive waves, re-run the loser) or continue by hand.
+A conflict that survives its fixer-round budget (default **two**) is a **plan defect**, not a code problem: two phases in the same wave own the same code. Stop, report both phases and the paths, and ask whether to serialize them (add the edge, re-derive waves, re-run the loser) or continue by hand.
+
+The budget is an **integration-level** setting, not either phase's `max_fix_rounds`. A conflict belongs to a *pair* of phases, so deriving it from one of them would make the answer depend on which phase happened to merge second.
+
+**Confirming a fix requires reading the files, not asking git.** `git add` clears a path's unmerged flag whether or not `<<<<<<<` is still sitting in it, so git cannot tell you whether the fixer actually resolved anything. Scan the conflicted paths for conflict markers before committing the merge. Skip this and a fixer that did nothing produces a merge commit full of markers that passes straight into the wave branch.
 
 ### One PR per phase, based on the phase's base
 

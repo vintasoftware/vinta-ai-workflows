@@ -1,0 +1,172 @@
+{
+  "$schema": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
+  "schema_version": 1,
+  "id": "bookmark-folders",
+  "plan_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md",
+  "plan_context_refs": [
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#1-goals",
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#2-guiding-decisions"
+  ],
+  "base_branch": "main",
+  "project": {
+    "migrate_cmd": "uv run python manage.py migrate",
+    "databases": {
+      "dev": {
+        "engine": "postgres",
+        "delivery": "external",
+        "name": "bookmarks",
+        "server_url": "postgres://localhost:5432",
+        "connection_url_var": "DATABASE_URL"
+      },
+      "test": {
+        "engine": "postgres",
+        "delivery": "external",
+        "name": "bookmarks_test",
+        "server_url": "postgres://localhost:5432",
+        "connection_url_var": "TEST_DATABASE_URL"
+      }
+    }
+  },
+  "defaults": {
+    "harness": "claude-code",
+    "model": "claude-sonnet-5",
+    "pipeline": "standard-phase"
+  },
+  "resources": {
+    "lane": {
+      "capacity": 3,
+      "kind": "worktree",
+      "description": "Concurrent phase worktrees. Matches the project's max_parallel_lanes."
+    },
+    "test-suite": {
+      "capacity": 1,
+      "kind": "semaphore",
+      "description": "The suite runs against a forked database; two at once race on the same fixtures."
+    }
+  },
+  "gates": {
+    "types": {
+      "cmd": "uv run mypy apps/",
+      "timeout_s": 300
+    },
+    "unit": {
+      "cmd": "uv run pytest",
+      "requires": [
+        "test-suite"
+      ],
+      "timeout_s": 1800
+    }
+  },
+  "nodes": [
+    {
+      "id": "p1",
+      "name": "BookmarkFolder model + migration",
+      "depends_on": [],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-1",
+      "touches": [
+        "apps/bookmarks/models.py",
+        "apps/bookmarks/migrations/",
+        "tests/bookmarks/test_models.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ],
+      "model": "claude-haiku-4-5"
+    },
+    {
+      "id": "p2",
+      "name": "Folder CRUD endpoints",
+      "depends_on": [
+        {
+          "node": "p1",
+          "artifact": "the `BookmarkFolder` model and its migration"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-2",
+      "touches": [
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/api/urls.py",
+        "tests/bookmarks/test_api_crud.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p3",
+      "name": "Folder tree serializer",
+      "depends_on": [
+        {
+          "node": "p1",
+          "artifact": "the `BookmarkFolder.parent` self-FK the tree is walked over"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-3",
+      "touches": [
+        "apps/bookmarks/api/serializers.py",
+        "tests/bookmarks/test_serializers.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p4",
+      "name": "Nested folder listing endpoint",
+      "depends_on": [
+        {
+          "node": "p2",
+          "artifact": "the `/api/folders` viewset this list action is added to"
+        },
+        {
+          "node": "p3",
+          "artifact": "the `FolderTreeSerializer` payload shape"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-4",
+      "touches": [
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/use_cases/list_folder_tree.py",
+        "tests/bookmarks/test_api_tree.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p5",
+      "name": "Remove the bookmark-folders feature flag",
+      "depends_on": [
+        {
+          "node": "p2",
+          "artifact": "the flag branches the CRUD endpoints added"
+        },
+        {
+          "node": "p3",
+          "artifact": "the flag branch in the tree serializer"
+        },
+        {
+          "node": "p4",
+          "artifact": "the flag branch in the nested listing action"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-5",
+      "touches": [
+        "apps/core/feature_flags.py",
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/api/serializers.py",
+        "tests/bookmarks/test_api_crud.py",
+        "tests/bookmarks/test_api_tree.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ],
+      "model": "claude-haiku-4-5"
+    }
+  ]
+}

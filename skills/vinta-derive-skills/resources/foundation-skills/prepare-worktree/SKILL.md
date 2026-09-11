@@ -35,7 +35,9 @@ A caller that needs N isolated lanes invokes this skill N times — once per lan
 
 1. **Names are the isolation key.** Every forked DB name, compose project name, redis index, and S3 prefix already derives from `<worktree-name>` — distinct names give distinct everything. Never provision two lanes with the same name.
 2. **Answer the interview once, reuse the answers.** The caller passes the same plan and the same strategy answers to every lane. Don't re-interview per lane.
-3. **Provision lanes concurrently when the caller asks for it** — they share nothing but the source repo. The one serialization point is the DB **template**: create or refresh the template DB once, then let each lane clone from it.
+3. **Provision lanes concurrently when the caller asks for it** — the expensive part of a lane (dependency install or link, DB clone, summary write) shares nothing between lanes and should overlap. But **two steps must be serialized**, and skipping either corrupts something:
+   - **`git worktree add` itself.** Git rewrites `.git/worktrees/` metadata on every add, and concurrent adds against one repository clobber each other's entries. Add the worktrees one at a time, then do the per-lane work in parallel. This is forced by git, not a choice.
+   - **The DB template.** Create or refresh the template DB once, then let each lane clone from it — that clone is what makes N lanes cost N cheap copies instead of N full provisions.
 4. **Record a `reset_cmd`** for each forked DB (see the summary schema). A pooled lane gets reused for a later phase on a different base, and the caller must be able to return its DB to a fresh state without re-provisioning. A lane whose DBs have no `reset_cmd` is single-use — say so in the report so the caller re-provisions instead of reusing it.
 
 Disk is the real constraint: N lanes means N dep trees and N DB copies. Run the **Sanity checks** disk probe against `N ×` the estimate, not `1 ×`, and warn the caller before the first lane if the pool won't fit.

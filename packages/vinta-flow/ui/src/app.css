@@ -1,0 +1,416 @@
+/*
+ * One stylesheet, no design system. The tone colours are the canvas's own
+ * status colours (`--vdag-status-*`), so the graph and the panels beside it
+ * agree — waiting is amber in both places, and nothing but a real failure is
+ * ever red.
+ */
+:root {
+  --surface: #ffffff;
+  --canvas: #f4f5f7;
+  --line: #c4c8cf;
+  --text: #1b1f24;
+  --muted: #6b7280;
+  --tone-idle: #9ca3af;
+  --tone-active: #1c7ed6;
+  --tone-wait: #f08c00;
+  --tone-attention: #ae3ec9;
+  --tone-ok: #087f5b;
+  --tone-error: #e03131;
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+
+.app {
+  max-width: 1100px;
+  /* The page is a column with air on both sides at any width: `auto` margins
+     centre it once the viewport is wider than the column, and the padding is
+     what keeps a panel's border off the edge of the screen below that. */
+  margin: 0 auto;
+  padding: 16px 20px 24px;
+}
+
+/*
+ * The app chrome: one quiet bar, not three browser defaults stacked in a
+ * corner. A rule and a row, the title at its own weight rather than as a blue
+ * underlined anchor, and the reminder control wearing the same border every
+ * other control on the page wears. Nothing decorative — this is a tool, and
+ * the header's whole job is to say where you are and get out of the way.
+ */
+.app-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 0 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.app-head h1 {
+  font-size: 15px;
+  margin: 0;
+}
+
+/* Only the header's own links. A banner's link inside it stays a link. */
+.app-head > h1 a,
+.app-head > a {
+  text-decoration: none;
+}
+
+.app-head > h1 a {
+  color: var(--text);
+}
+
+.app-head > a {
+  color: var(--muted);
+}
+
+.app-head > h1 a:hover,
+.app-head > a:hover {
+  text-decoration: underline;
+}
+
+a,
+.link {
+  color: #3b5bdb;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+h2,
+h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.empty {
+  color: var(--muted);
+  margin: 4px 0;
+}
+
+.error {
+  color: var(--tone-error);
+  margin: 8px 0;
+}
+
+.run-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.run-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.live {
+  color: var(--tone-ok);
+}
+
+.live.off {
+  color: var(--tone-wait);
+}
+
+.dag {
+  /* No `display` here, deliberately. A rule in this document beats the
+     component's own `:host` rule whatever the specificity, so `display: block`
+     silently flattened its flex column — and `.viewport { flex: 1 }` then had
+     no flex container to grow in, collapsed to zero height, and clipped every
+     node. The canvas rendered nothing at all, in the run view and the editor
+     alike, while every UI test passed: jsdom has no layout engine, so a
+     collapsed flex child measures the same as a correct one there. Give the
+     host a height and let it lay itself out. */
+  height: 360px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+th,
+td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+tr[aria-current='true'] {
+  background: var(--canvas);
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pools li,
+.harnesses li,
+.holders li,
+.sessions li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+/* §15.6's cold-turn tally: a reason and its count, the count aligned right so
+   the column can be read down without reading the words. */
+.fresh-head {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.fresh-reasons {
+  margin-top: 2px;
+}
+
+.fresh-reasons li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+/* §15's rows. The reason sits under its own turn rather than beside it: it is
+   a sentence, and a sentence in a flex row either wraps badly or truncates the
+   half that says why. */
+.sessions .entry-body {
+  margin-left: 0;
+}
+
+.pool-head,
+.harnesses li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--canvas);
+  overflow: hidden;
+  margin: 4px 0;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--tone-active);
+}
+
+/* The node view. Same plainness: one column of panels, no design system. */
+
+.node .panel {
+  margin-top: 12px;
+}
+
+.node .panels .panel {
+  margin-top: 0;
+}
+
+textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+
+.controls button,
+.app-head select {
+  font: inherit;
+  color: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.controls button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.question {
+  border-color: var(--tone-attention);
+}
+
+.question-context {
+  color: var(--muted);
+}
+
+.ref {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 8px;
+  margin: 0;
+}
+
+.ref dt {
+  color: var(--muted);
+}
+
+.ref dd {
+  margin: 0;
+}
+
+.gates pre,
+.entry-body {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gates pre {
+  max-height: 200px;
+  overflow: auto;
+  background: var(--canvas);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+/* The window (see Transcript.tsx) scrolls; only what is inside it is mounted. */
+.entries {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.entries li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.entry-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0;
+}
+
+.entry-author {
+  font-weight: 600;
+}
+
+.entry-author[data-author='operator'] {
+  color: var(--tone-attention);
+}
+
+.entry-author[data-author='tool'],
+.entry-author[data-author='system'] {
+  color: var(--muted);
+}
+
+.chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #ffffff;
+  background: var(--tone-idle);
+}
+
+/* A chip with no word in it (see Chip.tsx's `ToneDot`): the tone, and only the
+   tone, for a row whose text already names the kind. */
+.chip.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+}
+
+.tone-active {
+  background: var(--tone-active);
+}
+.tone-wait {
+  background: var(--tone-wait);
+}
+.tone-attention {
+  background: var(--tone-attention);
+}
+.tone-ok {
+  background: var(--tone-ok);
+}
+.tone-error {
+  background: var(--tone-error);
+}
+
+/*
+ * §9.1's browser channel, where it becomes visible: the reminder opt-in, and
+ * the banner a refused permission degrades to (§10). The banner carries the
+ * same body the notification would have — a node id and a fixed reason.
+ */
+.notifications {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  /* In the header row, and pushed to its far end: the opt-in belongs with the
+     chrome, and a banner is the one thing here allowed to be wide. */
+  margin: 0;
+  margin-left: auto;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--tone-attention);
+  border-radius: 4px;
+  background: var(--surface);
+}

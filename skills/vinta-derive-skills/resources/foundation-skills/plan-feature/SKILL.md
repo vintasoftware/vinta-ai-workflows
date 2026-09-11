@@ -7,6 +7,8 @@ description: Author a phased implementation plan for a new feature following the
 
 Plans live in `ai-plans/` as `YYYY-MM-DD-FEATURE_NAME_IMPLEMENTATION_PLAN.md` (uppercase + underscores). `..._SPEC.md` sibling exists → **read first**. Plan translates spec into phased delivery, doesn't re-derive requirements. No spec? Point at [create-spec](../create-spec/SKILL.md) first; plan without spec = plausible-sounding but unverified. Spec/plan pair share `YYYY-MM-DD-FEATURE_NAME` prefix.
 
+Every plan ships **two** files: the markdown above, and its executable sibling `ai-plans/<feature-kebab>.workflow.json` — the same phase graph in the form an orchestrator runs. See "Emit the executable workflow". Written every time; never gated on a question.
+
 ## Step 0 — Interrogate before drafting (NON-NEGOTIABLE)
 
 **Never assume requester want.** *"Plan bookmarks feature"* hide ≥dozen decisions cheaper to surface now than unwind in Phase 4.
@@ -234,6 +236,8 @@ Phase 1 and Phase 2 both export from `@app/bookmarks/__init__.py`. Trivial merge
 
 The table is **derived from the `**Depends on**:` lines, not authored independently.** Compute it: a phase with no dependencies is wave 1; otherwise its wave is one past the deepest phase it depends on. The executor recomputes this and will flag a table that disagrees.
 
+The `depends_on` edges in the workflow JSON come off the **same** lines — table and JSON are two renderings of one graph, never two graphs kept in sync by hand. See "Emit the executable workflow".
+
 ### Same-wave phases must not fight over the same files
 
 Before publishing the plan, cross-check the **Touch List**: for every pair of phases in the same wave, look at their file sets. Overlap means two agents editing one file on two branches at once, and a merge conflict at the wave boundary.
@@ -249,6 +253,27 @@ Two habits pay for themselves:
 - **Split by seam, not by layer, when the seams are independent.** Four use-cases on the same entity are four independent phases if they only share the model. Four layers of one use-case (repository → service → serializer → view) are a chain no matter how you number them.
 
 Don't contort the plan for concurrency, though. A genuinely sequential feature is a chain of waves of one, and that is a correct plan.
+
+### Read the previous runs' post-mortems before drawing the graph
+
+Every plan you write is a guess about coupling. Every plan the orchestrator *ran* turned that guess into evidence, and it wrote the evidence down: one `postmortem.json` per finished run under `.vinta-flow/runs/<run-id>/`, plus any copy the team committed beside its plan as `ai-plans/<feature-kebab>.postmortem.json`. **Read them before the `**Depends on**:` lines, not after.** Newest first, and all of them — one run is an anecdote, three runs saying the same thing about the same layer is a rule about this codebase.
+
+```bash
+ls -t .vinta-flow/runs/*/postmortem.json ai-plans/*.postmortem.json 2>/dev/null | head -5
+```
+
+Each file carries `findings` and `gaps`. Use them like this:
+
+- **`missing_dependencies`** — a phase failed, a phase it did *not* declare landed, and only then did it pass. The previous plan was missing that edge. If this feature couples the same two layers, **declare the edge here**, naming the artifact. Entry is ordering evidence, not proof (the file's own `gate_result_unrecorded` gap says so) — confirm the coupling exists in the code before you draw it.
+- **`wave_conflicts`** — two same-wave phases that actually fought, with the contested `paths`. Cross-check those paths against this plan's **Touch List**: two phases of yours touching one of them in the same wave is the same defect repeating. Add the edge, or split so only one phase owns the file.
+- **`duration_divergences`** — `direction: "longer"` means that phase set its wave's wall clock alone, so every peer you parallelised it with bought nothing; keep comparable-size work together and let the long pole start in wave 1. `"shorter"` means a small phase sat behind a long one and could have been folded in or moved earlier. Sizing, never time estimates in the plan body.
+- **`unused_dependencies`** — edges the run proved nobody needed. Drop the equivalent edge here. **Empty is not evidence of a tight graph**: check `gaps` first, because a `dependency_use_unrecorded` entry means dependency use was never measured on that run, not that every edge earned its place.
+
+Rules for using them:
+
+- **Match by artifact and path, never by phase id.** `p3` in an old run is not `Phase 3` here. The transferable fact is "the serializer phase needed the migration phase's column", not the id.
+- **A finding is an input, not plan content.** Don't quote post-mortems in the plan body, don't cite run ids, don't add a section about them. They change edges, waves and splits — that's all the reader should ever see.
+- **No post-mortems in the repo?** Nothing to do, and nothing to say about it. Draw the graph from the code.
 
 ### Each phase MR-sized
 
@@ -475,6 +500,337 @@ See `upsert_records` in [records.py:92-96](../<app>/<module>/models/records.py#L
 
 Don't mix styles within one sentence. In **Touch List**, use `@path` for new files + `[name](relative-path)` for edited files when want line numbers.
 
+## Emit the executable workflow
+
+Alongside the markdown plan, write `ai-plans/<feature-kebab>.workflow.json` — same directory, feature name lowercased with hyphens (`BOOKMARK_FOLDERS` → `ai-plans/bookmark-folders.workflow.json`), no date prefix. The markdown is what humans review; the JSON is the same phase graph in the form an orchestrator runs — one worktree lane per phase, branches cut from each phase's dependencies, gates queued behind capacity limits instead of stampeding.
+
+**Unconditional.** Write it on every plan. Don't ask, don't gate it on a config field, don't skip it because the project has no orchestrator installed — a project without one carries a few KB it never reads, and a project that installs one later finds its plans already executable. The one thing that is *not* free is emitting it inconsistently: a half-populated `ai-plans/` teaches the team the file is optional.
+
+**It is not a second source of truth.** Every value in it is read off the plan you just wrote. Write the plan first, then transcribe. If a field has no answer in the plan, the plan is missing something — go fix the plan, not the JSON.
+
+First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json`. Editors validate against it as you type, which is when a typo is cheap; without it the first thing that reads the file is the executor, an hour into a run.
+
+### Mapping the plan onto the document
+
+| Field | Comes from |
+|---|---|
+| `$schema` | The URL above, literally. |
+| `schema_version` | `1`. |
+| `id` | The feature kebab — same slug as the filename. It lands in branch names (`plan/{id}/wave-2`), so kebab-case only, no dates, no underscores. |
+| `plan_ref` | Repo-relative path of the markdown plan, e.g. `ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md`. |
+| `plan_context_refs` | The two plan sections that bound **every** phase, as anchors into the plan you just wrote: `<plan_ref>#1-goals` (which carries Non-goals with it) and `<plan_ref>#2-guiding-decisions`, in that order. Same file-and-anchor form as `prompt_ref`. See "Plan-level context". |
+| `base_branch` | What `**Depends on**: nothing — starts from the base branch` means concretely: the repo's default branch, unless **Guiding Decisions** names a long-lived feature branch. |
+| `project` | The databases a lane must **fork** to be a working checkout, plus the command that migrates the template they are forked from. Omit entirely when lanes can share the main checkout's database — see "The `project` block". This is the one part of the document you *ask* about rather than transcribe. |
+| `defaults.harness` | The agent CLI the team runs — `claude-code`, `codex`, or `opencode`. `claude-code` unless the project says otherwise. |
+| `defaults.model` | The concrete model id for the tier **most** phases carry, pulled from [resources/ai-models.yaml](resources/ai-models.yaml). |
+| `defaults.pipeline` | `standard-phase` — see "The pipeline block". |
+| `defaults.max_session_turns` | Omit (defaults to 12). It caps how many turns one reused agent session may take before the executor starts a fresh one; the executor reuses sessions across a phase's implement and fix turns, so this is a context-window guard rather than something a plan tunes. |
+| `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the project's parallel-lane budget (3 when unstated); it is a hint, not a cap the plan enforces. |
+| `resources.<pool>` | One `{"kind": "semaphore"}` pool per expensive shared thing a gate contends for — the test database, the e2e browser grid, a staging deploy slot. `capacity: 1` when only one can run at a time. |
+| `gates.<id>` | The checks a phase must pass, as **shell commands run in the phase's lane** — the project's real typecheck / test / lint invocations, not an agent and not prose. Give the slow ones `requires` naming the pool they contend for, and a `timeout_s` that is generous rather than tight. |
+| `nodes[]` | One per phase, in plan order. |
+| `nodes[].id` | `p` + the phase number, lowercased: `Phase 1` → `p1`, `Phase 4a` → `p4a`, `Phase 1b` → `p1b`. |
+| `nodes[].name` | The phase title without its `Phase N —` prefix. |
+| `nodes[].prompt_ref` | `<plan_ref>#phase-<number>` — the anchor of that phase's heading. Anchor on the number, not the slugified full title: the number is the part that survives a title edit, and the phase brief the implementer reads is located by its `### Phase N` prefix. |
+| `nodes[].depends_on[]` | **One entry per clause** of the phase's `**Depends on**:` line, each carrying both `node` (the upstream node id) and `artifact` (that clause's prose, minus the phase reference). |
+| `nodes[].touches` | That phase's **Touch List** entries as plain repo-relative paths — strip the `@` prefix and any markdown link syntax, keep the trailing `/` on a directory. |
+| `nodes[].gates` | The gate ids this phase must pass, in the order they should run. |
+| `nodes[].model` / `nodes[].harness` | **Only** when this phase differs from `defaults` — the id for its `**Suggested AI model**:` tier when that tier isn't the default one. Every phase repeating the default is noise that goes stale on the next model bump. |
+| `nodes[].max_fix_rounds` | Omit (defaults to 2). Set it higher only on a phase whose review you expect to iterate — a delicate migration, a concurrency protocol. |
+| `nodes[].pipeline` | Omit. A per-phase pipeline is for a phase that genuinely runs a different lifecycle, which is rare enough that needing it is a signal to re-read the plan. |
+| `pipelines` | **Omit.** The executor ships `standard-phase` — see "The pipeline block". |
+
+Rules the mapping depends on:
+
+- **`artifact` is required on every edge, and it is the clause's own prose.** It is what the implementer's prompt uses to explain what this phase builds on, so the value is what the clause says the phase needs — "the `BookmarkFolder` model and its migration" — never `p1`, never "depends on Phase 1". If the `**Depends on**:` line has no artifact to transcribe, the edge shouldn't exist; see "`**Depends on**:` — one line per phase, always present".
+- **`touches` is what the same-wave overlap check reads.** Executors *warn* on two same-wave nodes declaring the same path rather than refusing, so an incomplete Touch List doesn't fail loudly — it fails at merge. Transcribe every file the phase creates or edits, including tests.
+- **Never invent a model id.** Pick the tier from the rubric under "AI model selection per phase", then read the id out of [resources/ai-models.yaml](resources/ai-models.yaml). Ids drift; tiers don't.
+- **Gate commands must be commands the repo actually runs today.** Read them out of the project's task runner (`package.json` scripts, `Makefile`, `pyproject.toml`, CI config) rather than guessing a conventional one. A gate that doesn't exist fails every phase identically, and looks like a code problem.
+- **The graph must agree with the Execution graph table.** Same nodes, same edges, same waves — they are two renderings of one set of `**Depends on**:` lines, so derive both from the lines rather than transcribing one from the other. A disagreement means one was hand-edited, and the executor flags it.
+- **`plan_context_refs` is anchors, never prose.** It names sections of the plan; it never restates them. A summary written into the JSON is a second copy that drifts the first time someone edits the plan, and the whole point of the field is that the implementer reads what the plan actually says.
+
+### Plan-level context
+
+`prompt_ref` gives a phase its own body. It gives it nothing else — and a phase body alone is how an implementer ends up building something the plan explicitly ruled out, or re-deciding a question **Guiding Decisions** already closed. `plan_context_refs` is where the plan hands every phase the two sections that bound all of them:
+
+```json
+"plan_context_refs": [
+  "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#1-goals",
+  "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#2-guiding-decisions"
+]
+```
+
+The executor resolves each reference the same way it resolves a `prompt_ref` — file, then the named heading's section down to the next heading of the same depth — and hands the text to the implementer and the reviewer **verbatim**, under a heading that says it is the plan's and not the phase's.
+
+Rules:
+
+- **Anchor on the heading as you wrote it.** The **Plan structure** section numbers those headings — `## 1. Goals`, `## 2. Guiding Decisions` — so their anchors are `#1-goals` and `#2-guiding-decisions`. Write the anchor of the heading that is actually in your plan: an anchor that resolves to nothing fails the phase loudly at spawn time, before any code is written.
+- **Goals carries Non-goals.** Non-goals is a bulleted list *inside* the **Goals** section, so one anchor delivers both. That is why `#1-goals` is not optional here — the non-goals are the half that stops scope creep.
+- **Two entries, both of them.** Not **Data Model Changes** (large, and the phase body names the models it touches), not **Risk & Rollout Notes**, not the whole plan file. Every extra section is paid for in every phase's prompt, twice — once for the implementer, once for the reviewer.
+- **Emit it on every plan**, exactly like the file itself. A workflow without it still runs; its phases just each rediscover the boundaries the plan already drew.
+
+### The `project` block
+
+Every other field in the document is transcribed from the plan. This one is not: nothing in a feature plan says how the project's databases are delivered, and without the block an executor gives each phase a git worktree and nothing else. Every phase's gate then runs against the same database — so a phase that adds a migration changes the schema every other lane is tested against, and a suite that leaves rows behind changes what the next lane sees. A `test-suite` pool does not fix that: a semaphore orders the suites, it does not give them separate data.
+
+`project` says what a lane must **fork** to be a working checkout of this repo. It is optional, and omitting it is a real answer: a repo whose tests need no database at all, or whose suite builds an in-memory one per process, has nothing to declare.
+
+**Sharing is the absence of a declaration.** There is no `"share"` value and no `"none"` value, for either role. A lane that reads the main checkout's database has no database of its own to describe, so it says nothing — and a declared database is always forked.
+
+Two roles, each optional and each declared separately:
+
+- **`dev`** — the database the app runs against inside the lane.
+- **`test`** — the database the gate commands run against. This is the one that matters most: declare it whenever a gate touches a database.
+
+`migrate_cmd` is the project's own migrate command. It runs **once per template database**, never per lane — that is what makes the Nth lane cost a copy instead of a provision. Read it out of the project's task runner, the same way gate commands are read, rather than guessing a conventional one.
+
+Fields per database, by engine:
+
+| `engine` | Fields | What they mean |
+|---|---|---|
+| `postgres` | `delivery`, `name`, `server_url`, `connection_url_var` | `delivery: "external"` forks a new database on a server that is already running — the cheap mode, and the one to prefer, because N lanes cost N cheap clones against one server. `delivery: "compose"` boots the lane its own server on its own forked volume: there is no template to clone from, so such a lane is single-use and gets re-provisioned rather than reset. `name` is the **main checkout's** database name; lane names are derived from it. `server_url` is the server *without* the database path segment — `postgres://localhost:5432`. |
+| `sqlite` | `path`, `connection_url_var` | `path` is the repo-relative path of the database file, e.g. `db.sqlite3`. The lane gets its own copy of it. |
+
+**Each role names its own database.** A lane's copy is named from `name` (or `path`) and the lane — the role is not part of it — so declaring `dev` and `test` with the same `name` makes both roles resolve to one forked database and one template. Give them the names the project already uses for them: `bookmarks` and `bookmarks_test`, `db.sqlite3` and `db.test.sqlite3`.
+
+`connection_url_var` is the **name** of the env var the project already reads its connection string from — `DATABASE_URL`, `TEST_DATABASE_URL`, whatever the settings module names. The executor sets it per lane. Never write a connection string with credentials in it here: this file is committed beside the plan, and `server_url` is a host and port, not a login.
+
+**What does not belong in this block.** Everything a worktree's own provisioning discovers and records per worktree: dependency install-or-link strategy, env file copying, `COMPOSE_PROJECT_NAME` and network naming, volume forks, sandbox tier, redis database indices, S3 prefixes, seed commands, and the `reset_cmd` for each forked database. Those are the `prepare-worktree` skill's, are decided when a lane is created, and are read back off the summary it writes per worktree. `project` records only what has to be known *before* any worktree exists.
+
+#### Asking for it
+
+Read the project first so the questions carry real defaults — the settings module, `.env.example`, `compose.yaml` / `docker-compose.yml`, the migrations directory, and the task runner. If none of that exists, the repo has no database: omit `project` and ask nothing.
+
+Otherwise issue **one `AskUserQuestion` call** carrying both questions:
+
+1. *"What does a phase lane need its own copy of?"* — options: `Nothing — lanes share the main database`, `Test database only`, `Dev and test databases`, `Dev database only`. Put the default you found in the question header ("this repo's suite reads `TEST_DATABASE_URL` — default: test only").
+2. *"How is that database delivered?"* — options: `Postgres on a server that is already running`, `Postgres started by Docker Compose`, `SQLite file in the repo`. Both questions ride the same call; if the answer to the first is `Nothing`, this answer is discarded rather than asked again.
+
+The remaining values — `migrate_cmd`, the database names, the server URL, the env var names — are **read out of the project, not asked**. They already exist in its settings, its compose file and its task runner, and a question whose answer is on disk wastes a turn. Echo what you found in the read-back summary so a wrong guess gets corrected before the file is written, and fall back to a plain-prose question only where the repo genuinely does not say.
+
+### The pipeline block
+
+`pipelines` describes what happens *within* one phase — implement → review → fix → gate → integrate — as opposed to `nodes`, which describes what happens *between* phases. It is fixed machinery, not a planning decision.
+
+**Omit `pipelines` entirely.** Naming `standard-phase` in `defaults.pipeline` is enough: the executor ships that pipeline and supplies it. Do not paste a copy into the plan — a pasted pipeline is a copy that cannot be fixed centrally, so an executor-side correction would never reach a plan already written, and a hand-edited one is how a plan silently stops running its reviewer.
+
+Author a `pipelines` block only when a project genuinely needs a *different* lifecycle. That is an executor-configuration decision made once per project, not a per-plan choice, and a declared id shadows the shipped pipeline of the same name.
+
+### Worked example
+
+A five-phase plan whose `**Depends on**:` lines are:
+
+```markdown
+### Phase 1 — BookmarkFolder model + migration
+**Depends on**: nothing — starts from the base branch.
+
+### Phase 2 — Folder CRUD endpoints
+**Depends on**: Phase 1 (the `BookmarkFolder` model and its migration).
+
+### Phase 3 — Folder tree serializer
+**Depends on**: Phase 1 (the `BookmarkFolder.parent` self-FK the tree is walked over).
+
+### Phase 4 — Nested folder listing endpoint
+**Depends on**: Phase 2 (the `/api/folders` viewset this list action is added to), Phase 3 (the `FolderTreeSerializer` payload shape).
+
+### Phase 5 — Remove the `bookmark-folders` feature flag
+**Depends on**: Phase 2 (the flag branches the CRUD endpoints added), Phase 3 (the flag branch in the tree serializer), Phase 4 (the flag branch in the nested listing action).
+```
+
+which give this **Execution graph** table:
+
+```markdown
+| Wave | Phases | Depends on |
+|---|---|---|
+| 1 | Phase 1 | — |
+| 2 | Phase 2, Phase 3 | Phase 1 |
+| 3 | Phase 4 | Phase 2, Phase 3 |
+| 4 | Phase 5 — remove the `bookmark-folders` flag | Phase 2, Phase 3, Phase 4 (deferred — soak-gated) |
+```
+
+and this `ai-plans/bookmark-folders.workflow.json`:
+
+```json
+{
+  "$schema": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
+  "schema_version": 1,
+  "id": "bookmark-folders",
+  "plan_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md",
+  "plan_context_refs": [
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#1-goals",
+    "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#2-guiding-decisions"
+  ],
+  "base_branch": "main",
+  "project": {
+    "migrate_cmd": "uv run python manage.py migrate",
+    "databases": {
+      "dev": {
+        "engine": "postgres",
+        "delivery": "external",
+        "name": "bookmarks",
+        "server_url": "postgres://localhost:5432",
+        "connection_url_var": "DATABASE_URL"
+      },
+      "test": {
+        "engine": "postgres",
+        "delivery": "external",
+        "name": "bookmarks_test",
+        "server_url": "postgres://localhost:5432",
+        "connection_url_var": "TEST_DATABASE_URL"
+      }
+    }
+  },
+  "defaults": {
+    "harness": "claude-code",
+    "model": "claude-sonnet-5",
+    "pipeline": "standard-phase"
+  },
+  "resources": {
+    "lane": {
+      "capacity": 3,
+      "kind": "worktree",
+      "description": "Concurrent phase worktrees. Matches the project's max_parallel_lanes."
+    },
+    "test-suite": {
+      "capacity": 1,
+      "kind": "semaphore",
+      "description": "The suite runs against a forked database; two at once race on the same fixtures."
+    }
+  },
+  "gates": {
+    "types": {
+      "cmd": "uv run mypy apps/",
+      "timeout_s": 300
+    },
+    "unit": {
+      "cmd": "uv run pytest",
+      "requires": [
+        "test-suite"
+      ],
+      "timeout_s": 1800
+    }
+  },
+  "nodes": [
+    {
+      "id": "p1",
+      "name": "BookmarkFolder model + migration",
+      "depends_on": [],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-1",
+      "touches": [
+        "apps/bookmarks/models.py",
+        "apps/bookmarks/migrations/",
+        "tests/bookmarks/test_models.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ],
+      "model": "claude-haiku-4-5"
+    },
+    {
+      "id": "p2",
+      "name": "Folder CRUD endpoints",
+      "depends_on": [
+        {
+          "node": "p1",
+          "artifact": "the `BookmarkFolder` model and its migration"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-2",
+      "touches": [
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/api/urls.py",
+        "tests/bookmarks/test_api_crud.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p3",
+      "name": "Folder tree serializer",
+      "depends_on": [
+        {
+          "node": "p1",
+          "artifact": "the `BookmarkFolder.parent` self-FK the tree is walked over"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-3",
+      "touches": [
+        "apps/bookmarks/api/serializers.py",
+        "tests/bookmarks/test_serializers.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p4",
+      "name": "Nested folder listing endpoint",
+      "depends_on": [
+        {
+          "node": "p2",
+          "artifact": "the `/api/folders` viewset this list action is added to"
+        },
+        {
+          "node": "p3",
+          "artifact": "the `FolderTreeSerializer` payload shape"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-4",
+      "touches": [
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/use_cases/list_folder_tree.py",
+        "tests/bookmarks/test_api_tree.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ]
+    },
+    {
+      "id": "p5",
+      "name": "Remove the bookmark-folders feature flag",
+      "depends_on": [
+        {
+          "node": "p2",
+          "artifact": "the flag branches the CRUD endpoints added"
+        },
+        {
+          "node": "p3",
+          "artifact": "the flag branch in the tree serializer"
+        },
+        {
+          "node": "p4",
+          "artifact": "the flag branch in the nested listing action"
+        }
+      ],
+      "prompt_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#phase-5",
+      "touches": [
+        "apps/core/feature_flags.py",
+        "apps/bookmarks/api/views.py",
+        "apps/bookmarks/api/serializers.py",
+        "tests/bookmarks/test_api_crud.py",
+        "tests/bookmarks/test_api_tree.py"
+      ],
+      "gates": [
+        "types",
+        "unit"
+      ],
+      "model": "claude-haiku-4-5"
+    }
+  ]
+}
+```
+
+Read the two renderings against each other: `p2` and `p3` both name only `p1`, so they sit in wave 2 and run at once; `p4` names both, so it is wave 3; `p5` names every gated phase, so it is wave 4 and alone there. `p1` and `p5` are the Tier 1 phases (a migration, a deletion) and carry a `model` override; the other three sit on `defaults.model`. `p2` and `p4` both touch `apps/bookmarks/api/views.py` — allowed, because the edge between them puts them in different waves; had they been same-wave, that overlap is what "Same-wave phases must not fight over the same files" is about.
+
+`plan_context_refs` points at the same plan file the `prompt_ref`s do, at its **Goals** and **Guiding Decisions** headings. Each of the five phases is handed those two sections whole, so the implementer of `p3` knows that the tree serializer is deliberately not paginated if the plan's Non-goals said so, and the reviewer of `p3` can call a paginated one scope creep instead of a bonus.
+
+The `project` block is what lets those three lanes exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
+
 ## What to avoid
 
 - **No `§N` shorthand for section references — anywhere in the plan body.** Use section names: `Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `API Design`, `Phased Rollout`, `Risk & Rollout Notes`, `Open Questions`, `Touch List`. Readers shouldn't have to count headings to follow a cross-reference, and section numbering shifts when the spec/plan evolves. Same rule applies to citing SPEC sections (`Use-cases`, `Acceptance scenarios`, etc.) — name them.
@@ -484,6 +840,8 @@ Don't mix styles within one sentence. In **Touch List**, use `@path` for new fil
 - **No phase that breaks build if merged alone.** Each independently mergeable AND independently reversible.
 - **No `**Depends on**:` edge you can't justify with an artifact.** "It's later in the list" is not a dependency; it's a chain that costs the team a week of wall-clock for nothing.
 - **No two same-wave phases rewriting the same file.** Either add the edge or split differently.
+- **No repeating a defect a post-mortem already recorded.** A `wave_conflicts` entry on those paths, or a `missing_dependencies` entry between those layers, means the last run already paid for the lesson; drawing the same graph again wastes it.
+- **No plan without its `.workflow.json` sibling, and no sibling that disagrees with the plan.** Different nodes, different edges, different waves, a `prompt_ref` pointing at a phase that was renumbered — all of them mean the two files were edited separately instead of derived from the same `**Depends on**:` lines.
 - **No phase requiring manual `kubectl` / SSH / "remember to run X"** without Risk & Rollout Notes checklist.
 - **No assuming user wants what they asked for.** Watch for "wait, also…" + update plan.
 
@@ -510,6 +868,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] **Execution graph** table is the first thing under **Phased Rollout**, and its waves match what the `**Depends on**:` lines imply.
 - [ ] Graph is acyclic; the flag-removal phase depends on every gated phase.
 - [ ] Same-wave phases checked against the **Touch List** for file overlap; real overlaps either serialized with an edge or called out explicitly under the graph table.
+- [ ] Post-mortems from previous runs (`.vinta-flow/runs/*/postmortem.json`, plus any committed beside a plan) read **before** the graph was drawn; every finding either changed an edge, a wave or a split, or was consciously dismissed as not applying to this feature.
 - [ ] Slow-moving / cross-repo work sits in wave 1, and no in-repo phase depends on a cross-repo phase when it only needs the contract.
 - [ ] `**Review models**:` appears **only** on phases that justify a non-default reviewer / fixer (not on every phase); each such line names a tier + why. Phases without it inherit the project's `agent_models` defaults.
 <!-- e2e:start -->
@@ -524,3 +883,12 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Open Questions lists what couldn't resolve, with recommended default.
 - [ ] Touch List groups files by phase.
 - [ ] All file references use `@path/to/file.py` or `[name](relative-path#Lline)`.
+- [ ] **`ai-plans/<feature-kebab>.workflow.json` written** — every plan, no exceptions — with `$schema` set to the canonical URL and `schema_version: 1`.
+- [ ] Workflow graph matches the **Execution graph** table: one node per phase, one `depends_on` entry per `**Depends on**:` clause carrying both the node id and the artifact, same waves.
+- [ ] Every node has `prompt_ref` (`<plan_ref>#phase-<number>`), `touches` from its **Touch List** block, and the `gates` it must pass.
+- [ ] **`plan_context_refs` names the Goals and Guiding Decisions anchors** (`<plan_ref>#1-goals`, `<plan_ref>#2-guiding-decisions`), matching the headings as written — references, never a summary of them. Every phase's implementer and reviewer read them; a phase that doesn't know the non-goals is a phase that scope-creeps.
+- [ ] `resources` declares a `lane` pool; every gate that contends for something shared names its pool in `requires`.
+- [ ] **`project` decided, not defaulted** — asked via `AskUserQuestion`, then either written (roles `dev` / `test`, each naming its own database, engine fields filled from the project, `migrate_cmd` read out of its task runner) or deliberately omitted because lanes share the main checkout's database. No `reset_cmd`, no compose project name, no seed command, no env-file strategy — those are the worktree's, not the plan's.
+- [ ] No credential anywhere in the workflow file: `connection_url_var` is a variable name, and `server_url` is a host and port.
+- [ ] Model ids come from [resources/ai-models.yaml](resources/ai-models.yaml), and only phases off the default tier carry a `model` override.
+- [ ] `pipelines` is omitted — `defaults.pipeline: standard-phase` is enough, and the executor supplies it.

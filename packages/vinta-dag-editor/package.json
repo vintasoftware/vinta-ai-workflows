@@ -1,0 +1,21 @@
+{
+  "name": "vinta-dag-editor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Framework-agnostic Web Component for viewing and editing plan DAGs.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "biome check src tests"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.12",
+    "@types/jsdom": "^30.0.0",
+    "jsdom": "^30.0.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
+  }
+}

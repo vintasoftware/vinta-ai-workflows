@@ -29,6 +29,58 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `true`) and `run_options.implement-plan.max_parallel_lanes` (default `3`), asked
     at bootstrap alongside the existing `prepare-worktree` follow-ups.
 
+- **`plan-feature` emits an executable `ai-plans/<feature-kebab>.workflow.json`
+  beside every plan.** The markdown stays the document humans review; the JSON is
+  the same phase graph in the form an orchestrator runs — one node per phase, one
+  `depends_on` entry per `**Depends on**:` clause carrying both the upstream phase
+  and the artifact it provides, plus the phase's Touch List, gates, capacity pools
+  and model tier. Validated by
+  [`schemas/workflow.v1.schema.json`](schemas/workflow.v1.schema.json), which the
+  emitted file references from its `$schema` key so editors validate it as it is
+  written. **Unconditional** — no config field, no bootstrap question, no opt-in:
+  a project with no orchestrator carries a file nothing reads, and a project that
+  adopts one later finds its plans already executable.
+
+- **The workflow schema gained `defaults.max_session_turns`.** Optional, default
+  12. An orchestrator that reuses one agent session across a phase's implement
+  and fix turns needs a ceiling on how long that session may grow before the next
+  turn starts cold; without one a long phase eventually dies on a context-window
+  error that reads as a broken harness. `plan-feature` omits the field — it is a
+  safety limit, not something a plan tunes — and its field table says so.
+
+- **`plan-feature` asks about the project's databases and emits the workflow's
+  `project` block.** The block records what a phase lane must **fork** to be a
+  working checkout — the `dev` and `test` databases, and the project's own
+  migrate command, which runs once per template database rather than once per
+  lane. Without it every lane got a git worktree and nothing else, so two phases
+  running concurrently pointed their test gate at the same rows. Asked at
+  emission time with one `AskUserQuestion` call ("what does a phase lane need its
+  own copy of", "how is that database delivered"); the rest — the migrate
+  command, the database names, the env var names — is read out of the project's
+  settings and task runner rather than asked.
+
+  Two rules the skill is explicit about, because both are easy to get wrong:
+  **sharing is the absence of a declaration** (there is no `share` value, and a
+  lane that reads the main checkout's database has nothing to describe), and
+  **each role names its own database** (a lane's fork is named from `name` and
+  the lane, not the role, so `dev` and `test` sharing one `name` collapse to one
+  forked database). Everything `prepare-worktree` discovers per worktree —
+  `reset_cmd`, compose project names, volume forks, seed commands, env-file
+  strategy — stays out of the block by design.
+
+- **New schema
+  [`postmortem.v1.schema.json`](schemas/postmortem.v1.schema.json)** — the
+  structured plan post-mortem an orchestrator writes at
+  `.vinta-flow/runs/<run-id>/postmortem.json` once a run has ended: dependencies
+  that were declared but never used, dependencies discovered at gate time,
+  same-wave phases that actually conflicted, and phases whose real duration
+  diverged from their wave placement. `plan-feature` reads it before drawing the
+  next feature's Execution graph, which is what stops a plan from repeating a
+  defect the last run already paid for. Like
+  [`workflow.v1.schema.json`](schemas/workflow.v1.schema.json) it is
+  **generated** from a zod source rather than hand-written — see
+  [`schemas/README.md`](schemas/README.md).
+
 ### Changed
 
 - **Phase branches base on their dependencies, not on the previous phase.** A phase
@@ -66,6 +118,37 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`modular-commits` supports parallel runs**: lanes commit their atomic units on
   `plan/{plan-id}/lane-{phase-id}` branches, merged `--no-ff` into the single plan
   branch at each wave boundary, so the unit commits survive.
+
+### Fixed
+
+- **Lane provisioning serializes `git worktree add`, not only the database
+  template.** `prepare-worktree` previously named one serialization point; there
+  are two. Git rewrites `.git/worktrees/` metadata on every add, and concurrent
+  adds against one repository clobber each other's entries — a reproducible
+  corruption, not a theoretical race. Worktrees are added one at a time; the
+  expensive per-lane work (dependency linking, database cloning, summary
+  writing) still overlaps around it.
+
+- **The conflict-fixer round budget is an integration-level setting, not a
+  phase's `max_fix_rounds`.** `parallel-lanes.md` now says so, and defaults it to
+  two. A merge conflict belongs to a *pair* of phases, so deriving the budget
+  from one of them made the answer depend on which phase happened to merge
+  second.
+
+- **A resolved merge conflict is confirmed by scanning the files, never by asking
+  git.** `git add` clears a path's unmerged flag whether or not `<<<<<<<` is
+  still sitting in it, so git's index cannot answer "did the fixer actually fix
+  it". `parallel-lanes.md` now requires scanning the conflicted paths for
+  conflict markers before the merge is committed. Without it, a fixer that did
+  nothing produces a merge commit full of markers that passes into the wave
+  branch unnoticed.
+
+> The repository also gained `packages/vinta-flow/`, a **private workspace
+> package** that executes these workflows. It is not published and is not part of
+> the `vinta-ai-workflows` package — the root `files` whitelist excludes
+> `packages/`, so nothing in it is installed by `npx vinta-ai-workflows install`.
+> What ships from that work is the two generated schemas above and the skill
+> changes that produce and consume them.
 
 ## [0.6.1] — 2026-08-17
 

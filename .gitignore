@@ -60,6 +60,11 @@ logs/
 coverage/
 .nyc_output/
 
+# vinta-flow run state — journal, transcripts, gate logs. Kept inside the
+# project (never a global cache) because it contains repository contents
+# verbatim; see packages/vinta-flow/SPEC.md § Security and data handling.
+.vinta-flow/
+
 # Local-only Claude Code / vendor artifacts (not committed from the source repo)
 # — except the dev-skills symlinks committed at the repo root, which give every
 # developer auto-discovery of the maintenance skills under dev-skills/ without
