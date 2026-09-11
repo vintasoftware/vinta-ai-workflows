@@ -10,6 +10,7 @@ import { planDatabase, planTemplate, type PostgresSpec } from '../src/lanes/data
 import { DiskProbeError } from '../src/lanes/disk.ts'
 import { type Lane, LanePool, LaneRecycleError, type ProjectSpec } from '../src/lanes/pool.ts'
 import { readSummary } from '../src/lanes/summary.ts'
+import { shellQuote } from '../src/platform/platform.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = join(HERE, '..')
@@ -319,9 +320,17 @@ describe('database strategy selection', () => {
 
     expect(one.forkedName).toBe('app_wt_run_1_lane_1')
     expect(two.forkedName).toBe('app_wt_run_1_lane_2')
-    expect(one.cloneCmd).toContain(`-T 'app_wt_template'`)
-    expect(two.cloneCmd).toContain(`-T 'app_wt_template'`)
-    expect(one.resetCmd).toContain(`dropdb --if-exists 'app_wt_run_1_lane_1'`)
+    // Quoted through the platform seam rather than with POSIX quotes written
+    // out. The subject here is the *command* `planDatabase` builds — that it
+    // clones from the shared template and drops by the lane's own name — and
+    // on Windows those names are wrapped for `cmd.exe`, which has no use for
+    // single quotes. Writing the POSIX form by hand asserted this module's
+    // behaviour on one platform and `shellQuote`'s on the other; `shellQuote`
+    // has its own tests in `platform.test.ts` for the quoting itself.
+    const q = (name: string) => shellQuote(name)
+    expect(one.cloneCmd).toContain(`-T ${q('app_wt_template')}`)
+    expect(two.cloneCmd).toContain(`-T ${q('app_wt_template')}`)
+    expect(one.resetCmd).toContain(`dropdb --if-exists ${q('app_wt_run_1_lane_1')}`)
     expect(one.connectionUrl).toContain('application_name=wt-run-1-lane-1')
   })
 
