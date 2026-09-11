@@ -247,18 +247,31 @@ export class MockAdapter implements HarnessAdapter {
   }
 
   /**
-   * A real terminal running `cat`, which is the one interactive program whose
-   * behavior needs no model and no vendor: everything typed comes straight
-   * back. A *scripted* pty would be a fake of the one thing about takeover
-   * that is worth testing — that a process is spawned, driven and reaped — so
-   * this one is real and the program is trivial instead.
+   * A real terminal running the platform's most trivial interactive program.
+   * A *scripted* pty would be a fake of the one thing about takeover that is
+   * worth testing — that a process is spawned, driven and reaped — so this one
+   * is real and the program is boring instead.
+   *
+   * **It has to stay alive, and that is what made `/bin/cat` wrong on
+   * Windows.** There is no such file there, so the terminal exited the instant
+   * it was opened; node-pty then ran its *deferred* resize — ConPTY cannot be
+   * resized before it is ready, so the call is queued rather than made — and
+   * threw `Cannot resize a pty that has already exited` from a callback no
+   * caller is on. Vitest reported that as an unhandled error and failed a run
+   * in which every test had passed. The fix is a program that survives being
+   * attached to, not a catch around a throw that arrives from somewhere else.
    */
   async attachPty(sessionId: string, attach: PtyAttach): Promise<PtyHandle> {
     if (!this.capabilities.pty) throw new HarnessCapabilityError(this.id, 'pty')
     return openPty({
       sessionId,
-      file: '/bin/cat',
-      args: [],
+      // `cat` echoes stdin and waits; `cmd.exe` with no arguments is the
+      // nearest Windows equivalent that simply sits there reading. Neither
+      // test asserts on the bytes (§11), so all that is asked of either is
+      // that it stay running until it is detached.
+      ...(process.platform === 'win32'
+        ? { file: process.env['ComSpec'] ?? 'cmd.exe', args: [] }
+        : { file: '/bin/cat', args: [] }),
       env: process.env,
       attach,
     })

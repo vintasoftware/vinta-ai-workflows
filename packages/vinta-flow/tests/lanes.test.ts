@@ -31,6 +31,15 @@ async function materializeFixtureRepo(root: string): Promise<string> {
   git('init', '-b', 'main')
   git('config', 'user.email', 'fixture@example.invalid')
   git('config', 'user.name', 'fixture')
+  // No background writer in a tree this suite is about to delete. git starts
+  // detached maintenance of its own accord after ordinary operations, and it
+  // writes `.git/objects/maintenance.lock` and then removes it — so a
+  // recursive delete racing it fails on `lstat` of a file that existed a
+  // moment ago. That surfaced as `ENOENT … maintenance.lock` in teardown on
+  // macOS, from a process nothing in this file started. It is also one fewer
+  // git holding a handle on Windows, where that is what `EBUSY` is made of.
+  git('config', 'maintenance.auto', 'false')
+  git('config', 'gc.auto', '0')
   git('add', '-A')
   git('commit', '-m', 'fixture')
   return repo
