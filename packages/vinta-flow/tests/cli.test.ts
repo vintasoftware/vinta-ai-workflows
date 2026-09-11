@@ -657,6 +657,30 @@ const sqliteRepo = (): string => {
   return dir
 }
 
+/**
+ * Why each failed node failed, read back out of the run's own journal.
+ *
+ * Only ever used to *explain* an assertion that is already failing, so it
+ * swallows its own errors: a diagnostic that throws replaces the failure it was
+ * meant to describe.
+ */
+function whyNodesFailed(repo: string, runId: string): string {
+  try {
+    const journal = openJournal(repo)
+    try {
+      const reasons = journal
+        .events(runId)
+        .filter((event) => event.type === 'node_status')
+        .map((event) => `${'nodeId' in event ? event.nodeId : '?'}: ${JSON.stringify(event.payload)}`)
+      return `node statuses:\n${reasons.join('\n')}`
+    } finally {
+      journal.close()
+    }
+  } catch (error) {
+    return `could not read the journal: ${String(error)}`
+  }
+}
+
 describe('vinta-flow run, composed', () => {
   it('provisions lanes, runs gates in them, and reaches done', async () => {
     const dir = gitRepo()
@@ -922,7 +946,10 @@ describe('vinta-flow run, composed', () => {
       perLaneBytes: 1,
     })
 
-    expect(io.err).toEqual([])
+    // The reason, not just the fact. `failed nodes: b` is all stderr carries —
+    // the *why* is a `node_status` payload in the journal, and without it a
+    // failure here is a CI round spent learning nothing.
+    expect(io.err, whyNodesFailed(dir, 'single')).toEqual([])
     expect(code).toBe(OK)
 
     // The slot was torn down and rebuilt between the phases, and what it left

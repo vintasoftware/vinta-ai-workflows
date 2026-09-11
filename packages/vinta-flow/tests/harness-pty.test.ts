@@ -164,13 +164,17 @@ const BOOT_MS = 30_000
  * slowest would hide a hang; sizing a boot to the fastest is a flake.
  */
 async function until(
-  what: string,
+  what: string | (() => string),
   done: () => boolean,
   deadlineMs: number = DEADLINE_MS,
 ): Promise<void> {
   const stop = Date.now() + deadlineMs
   while (!done()) {
-    if (Date.now() > stop) throw new Error(`timed out waiting for ${what}`)
+    // Read at the moment it is needed, so a caller can report what it learned
+    // while waiting rather than only what it was waiting for.
+    if (Date.now() > stop) {
+      throw new Error(`timed out waiting for ${typeof what === 'function' ? what() : what}`)
+    }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
@@ -870,8 +874,19 @@ describe('a daemon killed mid-attach', () => {
       ].join('\n'),
     )
 
+    // stderr piped rather than ignored. This helper is a separate Node process
+    // importing the pty module, and when it fails to start there is nothing on
+    // stdout to wait for — so an ignored stderr turns every startup failure
+    // into the same silent 30s timeout, which is how this test spent a CI round
+    // saying nothing. What it says is repeated back only in a timeout message,
+    // never logged (§11): it is this suite's own child, not a terminal's bytes.
     const child = spawnChild(process.execPath, ['--experimental-strip-types', script], {
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let failed = ''
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk: string) => {
+      failed += chunk
     })
     cleanups.push(() => {
       child.kill('SIGKILL')
@@ -882,7 +897,11 @@ describe('a daemon killed mid-attach', () => {
     child.stdout.on('data', (chunk: string) => {
       out += chunk
     })
-    await until('the child to report a running terminal', () => out.includes('\n'), 30_000)
+    await until(
+      () => `the child to report a running terminal${failed === '' ? '' : `; it said: ${failed}`}`,
+      () => out.includes('\n'),
+      30_000,
+    )
     const pid = Number(/running (\d+)/.exec(out)?.[1] ?? 0)
     expect(alive(pid)).toBe(true)
 
