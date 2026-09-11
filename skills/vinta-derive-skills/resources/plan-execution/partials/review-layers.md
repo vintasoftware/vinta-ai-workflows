@@ -30,7 +30,7 @@ Open the phase body alongside the diff and walk:
 
 ## Layer 3 — Independent reviewer subagent
 
-After Layers 1–2 pass, spawn a **separate** subagent (different session, no implementation context) using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) at the model resolved from `agent_models.reviewer` (see the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step; unset → runtime default). Read-only by design.
+After Layers 1–2 pass, spawn a **separate** subagent (different session, no implementation context) using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) at the model resolved from the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step — **one tier above the crew member that wrote the phase**, or `agent_models.reviewer` where the roster has nobody above them. Read-only by design.
 
 Reviewer prompt template — see the reviewer agent's body for the standard form. Triage findings:
 - **BLOCKER**: must fix before the phase is pushed (the conductor's integrate step).
@@ -81,9 +81,17 @@ from an agent that did not write the code. An implementer asked to review its
 own phase grades its own work from inside its own reasoning, which is the one
 thing the layers exist to prevent.
 
-**Which model fixes.** A continued implementer fixes at the phase's own
-`**Suggested AI model**:` tier, because it *is* the implementer. `agent_models.fixer`
-therefore governs the cold cases only — the runtime fallback in step 2 and the
-escalation in step 3. A project that set `fixer` to a cheaper tier to save money
-should know it now applies to fewer rounds than before.
+**Which model fixes.** A continued implementer fixes at its own crew member's
+tier, because it *is* that member. `agent_models.fixer` therefore governs the
+cold cases only — the runtime fallback in step 2 and the escalation in step 3. A
+project that set `fixer` to a cheaper tier to save money should know it now
+applies to fewer rounds than before.
+
+**The fix does not take the reviewer's tier.** The review runs a tier above the
+author deliberately, and it would be easy to carry that tier into the fix on the
+grounds that the finding was hard enough to need it. Don't: the review is a
+judgement about the code and the fix is a change to it, and the agent best
+placed to make that change is still the one that knows why the code is that way.
+A finding that genuinely needs a more capable hand is what step 3's escalation is
+for.
 <!-- block-end: LAYERS -->

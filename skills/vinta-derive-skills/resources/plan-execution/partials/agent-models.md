@@ -1,23 +1,41 @@
-<!-- Partial: agent-models — resolves the `.vinta-ai-workflows.yaml` `agent_models` section (tier per role/task) to a concrete spawn model, and the mechanical-step delegation pattern. Blocks: TIER_RESOLVE (review-phase reviewer/fixer + implement-plan mechanical steps), MECHANICAL_DELEGATION (implement-plan worktree/integrate steps). The implementer model is NOT here — that stays plan-owned via model-pick. -->
+<!-- Partial: agent-models — resolves the `.vinta-ai-workflows.yaml` `agent_models` section (tier per role/task) to a concrete spawn model, the reviewer's tier-above-the-author derivation, and the mechanical-step delegation pattern. Blocks: TIER_RESOLVE (review-phase reviewer/fixer + implement-plan mechanical steps), MECHANICAL_DELEGATION (implement-plan worktree/integrate steps). The implementer model is NOT here — that stays plan-owned via model-pick. -->
 
 <!-- block-begin: TIER_RESOLVE -->
 ## Resolve an `agent_models` tier to a spawn model
 
 `.vinta-ai-workflows.yaml` may carry an `agent_models` section mapping a role/task (`reviewer`, `fixer`, `worktree_prep`, `integrate`) to a **tier** (1–4) into the same table the per-phase implementer suggestion uses — [`ai-tools/skills/plan-feature/resources/ai-models.yaml`](../plan-feature/resources/ai-models.yaml). `agent_models` is the **project default** for these roles; for `reviewer` / `fixer`, a plan phase's optional `**Review models**:` line may override the tier for that one phase (the caller resolves that precedence and hands this block the effective tier). The mechanical steps (`worktree_prep`, `integrate`) are never plan-named. To turn a tier into the model a spawn actually uses:
 
-1. Determine the **effective tier** for the role: for `reviewer` / `fixer`, a per-phase override the conductor passed wins over `agent_models.<role>`; for the mechanical steps, it's simply `agent_models.<role>`.
+1. Determine the **effective tier** for the role. For the mechanical steps it is simply `agent_models.<role>`. For `reviewer` / `fixer` there are now three sources, in this order:
+   1. a per-phase `**Review models**:` override the conductor passed;
+   2. **the tier above the phase's own author on the plan's Crew table** — the most junior member *strictly above* the assigned member's tier (see [Who reviews](#who-reviews-one-tier-above-the-author) below);
+   3. `agent_models.<role>`.
 2. **No effective tier (override absent AND key unset, or the whole `agent_models` section absent) → do not force a model.** Spawn with the runtime's default model (today's behavior). Skip the rest.
 3. Open [`ai-tools/skills/plan-feature/resources/ai-models.yaml`](../plan-feature/resources/ai-models.yaml), take that tier's `models`, **filter to the vendors the runtime actually exposes**, pick the cheapest/fastest survivor, and translate it to the runner's spawn form — the same resolution [implement-phase](../implement-phase/SKILL.md) runs for the implementer, only keyed by a config tier instead of a plan line.
 4. `ai-models.yaml` missing, or the tier has no runtime-available vendor → fall back to the runtime default and surface the fallback once. Never hard-fail a phase over a model-selection miss.
 
+### Who reviews: one tier above the author
+
+**A review runs at the tier above the agent that wrote the code.** A team has seniors read juniors' work, and a project-wide `agent_models.reviewer` cannot express that — it puts every phase's review on one model, so the cheapest agent on the plan is checked by the same tier that wrote it.
+
+Resolve it from the plan's **Crew** table: take the phase's assigned member's tier, and use the **most junior member strictly above it**. Not the top of the roster — stepping a Tier 1 phase straight to Tier 4 makes every cheap phase on the plan carry the priciest review it has.
+
+Two consequences worth knowing:
+
+- **The reviewer borrows a tier, not a person.** It does not occupy that member's place in the schedule and never waits for them to be free. Otherwise the one senior on a plan could not review the phase they are busy implementing.
+- **Nobody above the author → fall through to `agent_models.reviewer`.** A single-tier roster, or a Tier 4 phase, has no senior to borrow from, and the project default is the right answer there.
+
+A plan with no **Crew** table skips this step entirely and resolves `agent_models.<role>` as it always did.
+
+### What `fixer` still governs
+
 `fixer` governs fewer rounds than it used to. A finding goes back to the phase's
-own implementer, which fixes at the phase's `**Suggested AI model**:` tier
-because it *is* the implementer; `agent_models.fixer` applies to the cold cases
+own implementer, which fixes at the tier of the crew member that took the phase
+because it *is* that member; `agent_models.fixer` applies to the cold cases
 only — a runtime that cannot continue a sub-agent, and the last round before
 giving up, which is deliberately handed to an agent that has not seen the work.
 See the fix loop in [review-phase](../review-phase/SKILL.md).
 
-Record the **model actually used** in tracking: for `reviewer` / `fixer`, alongside the review note; for the mechanical steps, in the phase's tracking row next to the branch/PR fields.
+Record the **model actually used** in tracking, **and which of the three sources it came from** — a review that quietly fell through to the project default because the roster had nobody above the author is a fact worth being able to read later. For `reviewer` / `fixer`, alongside the review note; for the mechanical steps, in the phase's tracking row next to the branch/PR fields.
 <!-- block-end: TIER_RESOLVE -->
 
 <!-- block-begin: MECHANICAL_DELEGATION -->

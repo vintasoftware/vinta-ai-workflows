@@ -148,11 +148,94 @@ describe('plan-feature worked example', () => {
     for (const db of [dev, test]) expect(db.server_url).not.toMatch(/@/)
   })
 
-  it('overrides the model only where the phase tier differs from the default', () => {
+  it('staffs every node off the roster, with no per-node model anywhere', () => {
     const workflow = parsed()
-    const overridden = workflow.nodes.filter((node) => node.model !== undefined).map((n) => n.id)
-    // p1 (migration) and p5 (flag deletion) are Tier 1; the rest sit on the default.
-    expect(overridden).toEqual(['p1', 'p5'])
+
+    // The roster is the only place a model id appears for a phase. A node
+    // carrying its own would be an id to re-check on the next model bump, and
+    // a second answer to "what runs this phase".
+    expect(workflow.nodes.filter((node) => node.model !== undefined)).toEqual([])
+    expect(workflow.nodes.map((node) => node.crew)).toEqual([
+      'junior',
+      'mid-1',
+      'mid-2',
+      'mid-2',
+      'junior',
+    ])
     expect(workflow.defaults.pipeline).toBe('standard-phase')
+  })
+
+  /**
+   * Lanes are bought with concurrency, and concurrency is capped by the widest
+   * wave. The roster is *not* capped there — this example is deliberately three
+   * members wide on a graph that is two — so asserting them equal would enforce
+   * a rule the skill does not state and this example disproves.
+   */
+  it('sizes the lane pool to the widest wave, not to the roster', () => {
+    const workflow = parsed()
+    const perWave = new Map<number, number>()
+    for (const wave of computeWaves(workflow.nodes).values()) {
+      perWave.set(wave, (perWave.get(wave) ?? 0) + 1)
+    }
+    const widest = Math.max(...perWave.values())
+
+    expect(workflow.resources['lane']?.capacity).toBe(widest)
+    expect(Object.keys(workflow.crew).length).toBeGreaterThanOrEqual(widest)
+  })
+
+  /**
+   * The check that caught this example the first time it was written. A wave of
+   * two Tier 2 phases needs *two members at Tier 2 or above* — a junior on the
+   * roster does not help, because the floor forbids handing them one. Sorting
+   * both sides and comparing one for one is the whole rule.
+   */
+  it('can staff every wave without dropping a phase below its tier', () => {
+    const workflow = parsed()
+    const waves = computeWaves(workflow.nodes)
+    const tiers = Object.values(workflow.crew)
+      .map((member) => member.tier)
+      .sort((a, b) => a - b)
+
+    const byWave = new Map<number, number[]>()
+    for (const node of workflow.nodes) {
+      const wave = waves.get(node.id) as number
+      const tier = workflow.crew[node.crew ?? '']?.tier as number
+      byWave.set(wave, [...(byWave.get(wave) ?? []), tier])
+    }
+
+    for (const [wave, demand] of byWave) {
+      const wanted = [...demand].sort((a, b) => a - b)
+      // The N most capable members against the N phases, hardest first.
+      const available = tiers.slice(tiers.length - wanted.length)
+      wanted.forEach((tier, i) => {
+        expect(
+          available[i],
+          `wave ${wave} wants a tier ${tier} hand and the roster’s ${i + 1}th spare is lower`,
+        ).toBeGreaterThanOrEqual(tier)
+      })
+    }
+  })
+
+  it('assigns work to every member it declares', () => {
+    const workflow = parsed()
+    const assigned = new Set(workflow.nodes.map((node) => node.crew))
+
+    for (const member of Object.keys(workflow.crew)) expect(assigned.has(member)).toBe(true)
+  })
+
+  /**
+   * The Tier 1 phases are the ones with exact precedent, and they are the two
+   * the Crew table names for `junior`. A plan that staffed the migration to a
+   * mid would still parse — this asserts the example demonstrates the rubric it
+   * is printed next to.
+   */
+  it('gives the exact-precedent phases to the cheapest tier', () => {
+    const workflow = parsed()
+    const tierOf = (id: string): number | undefined =>
+      workflow.crew[workflow.nodes.find((node) => node.id === id)?.crew ?? '']?.tier
+
+    expect(tierOf('p1')).toBe(1)
+    expect(tierOf('p5')).toBe(1)
+    expect(tierOf('p2')).toBe(2)
   })
 })

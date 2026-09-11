@@ -9,6 +9,49 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A plan staffs a team, instead of picking a model per phase.** Choosing a tier
+  phase by phase answers "what runs this one" ten times and never adds it up, so the
+  two questions that decide what a feature costs go unasked: how many agents does
+  this need at once, and is any of them too junior for what it was handed.
+  - `plan-feature` opens **Phased Rollout** with a **Crew** table — one row per
+    agent, carrying its tier and the phases it takes — and every phase carries an
+    **`**Assigned to**:`** line naming one of them. It replaces
+    `**Suggested AI model**:`; a plan that still has the old line keeps working, and
+    the executor reads the tier straight off it.
+  - The **Execution graph** table gains an **Agent** column and an **Idle** note.
+    Reading across a row says who is working that wave; reading down a column says
+    who is not. A wave that will serialize because the roster cannot staff it is now
+    stated in the plan rather than discovered as a slow run.
+  - **Every member has to earn their place**, by concurrency (a wave genuinely needs
+    that many hands *at or above* those phases' tiers) or by cheapness (they take
+    work a dearer member would otherwise do). The roster is therefore **not** capped
+    at the widest wave — a junior who runs the migration and the flag deletion is
+    worth having in a graph that never runs two phases at once — but the lane pool
+    still is, because lanes are bought with concurrency and crew are not.
+  - **Reviews run one tier above the author.** A team has seniors read juniors'
+    work; a flat `agent_models.reviewer` cannot say that, and today it puts the
+    cheapest agent on the plan under review by its own tier. The reviewer steps to
+    the *next* tier up, never to the top of the roster, and **borrows a tier rather
+    than a person** — so the one senior on a plan can still review the phase they are
+    busy implementing. Nobody above the author falls through to the project default.
+  - The workflow document gained a top-level **`crew`** block and **`nodes[].crew`**.
+    A staffed node carries no `model` — the member has one — and a document that is
+    half-staffed, names a member nobody declared, or declares a member nobody is
+    assigned to is refused before the run starts.
+  - `vinta-flow` claims an agent **before** the lane, prefers the member the plan
+    named, covers with the **cheapest** qualified free peer when they are busy, and
+    **waits rather than handing a phase below its tier** — even with a lane free. A
+    lane is disk; a phase run by too junior an agent does not fail cleanly, it fails
+    review two rounds later with nothing pointing back at the staffing.
+  - The run view reports who actually worked against who the plan said would.
+    `substituted` is the figure to read beside a cost that overran: every
+    substitution ran at or above the budgeted tier, so a run can be entirely green
+    and still have been staffed dearer than planned.
+
+  What it does not buy: a crew member is **not a live session**. Lanes are recycled
+  between phases, so an agent cannot carry context from one phase to the next —
+  prompt-cache reuse stays *within* a phase, between its implement and fix turns.
+
 - **`implement-plan` runs independent phases in parallel.** The plan now carries a
   dependency graph and the conductor schedules against it: a phase starts as soon as
   every phase it depends on is green and a worktree lane is free, instead of waiting
@@ -58,9 +101,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sub-agent, the old cold hand-off still happens and is recorded as one, so a slow
   phase can be read later without guessing.
 
-  One consequence worth knowing: a continued implementer fixes at the phase's own
-  `**Suggested AI model**:` tier, so `agent_models.fixer` now governs only the cold
-  cases. A project that set `fixer` cheap to save money is saving it on fewer rounds.
+  One consequence worth knowing: a continued implementer fixes at its own crew
+  member's tier, so `agent_models.fixer` now governs only the cold cases. A project
+  that set `fixer` cheap to save money is saving it on fewer rounds.
 
 - **The workflow schema gained `defaults.max_session_turns`.** Optional, default
   12. An orchestrator that reuses one agent session across a phase's implement
