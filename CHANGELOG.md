@@ -5,6 +5,68 @@ All notable changes to `vinta-ai-workflows` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [unreleased]
+
+### Added
+
+- **`implement-plan` runs independent phases in parallel.** The plan now carries a
+  dependency graph and the conductor schedules against it: a phase starts as soon as
+  every phase it depends on is green and a worktree lane is free, instead of waiting
+  for its turn in plan order. A chain-shaped plan behaves exactly as before —
+  sequential execution is the one-lane case of the same scheduler.
+  - `plan-feature` gives every phase a **`**Depends on**:`** line naming the artifact
+    it needs from each upstream phase, and opens **Phased Rollout** with an
+    **Execution graph** table derived from those lines. It also checks same-wave
+    phases against the **Touch List** for file overlap and tells you to add an edge
+    when two phases would fight over the same file.
+  - New shared partial `plan-execution/partials/parallel-lanes.md` carries the graph
+    parse, the worktree lane pool, the dependency-derived branch topology, the
+    dispatch loop, the tracking-directory schema, and the sibling-lane write guard.
+  - `prepare-worktree` documents provisioning a **pool** of lanes for one plan and
+    records a `reset_cmd` per forked DB so a lane can be reused across phases without
+    carrying the previous phase's migrations into the next one's test run.
+  - Two new config fields: `run_options.implement-plan.parallel_phases` (default
+    `true`) and `run_options.implement-plan.max_parallel_lanes` (default `3`), asked
+    at bootstrap alongside the existing `prepare-worktree` follow-ups.
+
+### Changed
+
+- **Phase branches base on their dependencies, not on the previous phase.** A phase
+  with no dependencies cuts from the default branch; one with a single dependency
+  cuts from that phase's branch; one with several cuts from a
+  `plan/{plan-id}/integ-{phase-id}` branch that merges them. Each wave is then merged
+  into a `plan/{plan-id}/wave-{N}` integration branch, which is what a resume anchors
+  on and what the final report points at. The PR `base` follows the same value —
+  a stacked plan produces exactly the stack it did before.
+- **Tracking is a directory, not a file.** `{{PLAN_DIR}}/TRACKING_{plan-id}/` holds
+  `run.md` (conductor-owned), one `phase-{id}.md` per phase (written only by the lane
+  that ran it, committed on that phase's own branch), and `waves/wave-{N}.md`. No two
+  branches write the same path, so wave merges no longer conflict on tracking. A run
+  started under the old single-file layout is migrated on resume.
+- **An implementer is told about its dependencies only.** Prior-phase context passed
+  into a phase prompt is now that phase's transitive dependency closure rather than
+  "everything finished so far" — a sibling lane's work is not in the phase's base
+  branch, and describing it as done made the implementer code against files it could
+  not see.
+- **The stray-write guard covers sibling lanes.** The sandbox denies the whole
+  worktree pool root and allows back only the running lane; the review-phase backstop
+  checks the main checkout and every sibling workroot after each implementer and
+  fixer. A write into a lane that is mid-implementation is worse than a stray
+  main-checkout write.
+- **`amend-plan` cascades along the dependency graph.** A rewrite touches the
+  amended phase's dependent closure instead of "every phase with a higher number",
+  rebases in topological order, rebuilds `integ-` bases before rebasing a
+  multi-dependency phase onto them, and refuses to run while any phase is still in
+  flight. It gained a `dependency-change` amendment kind for edits to a
+  `**Depends on**:` line.
+- **`implement-plan` refuses rather than degrading** when parallel execution is asked
+  for but worktrees are unavailable — several agents cannot share one working tree,
+  and silently falling back to sequential would discard the schedule the user
+  approved.
+- **`modular-commits` supports parallel runs**: lanes commit their atomic units on
+  `plan/{plan-id}/lane-{phase-id}` branches, merged `--no-ff` into the single plan
+  branch at each wave boundary, so the unit commits survive.
+
 ## [0.6.1] — 2026-08-17
 
 ### Fixed

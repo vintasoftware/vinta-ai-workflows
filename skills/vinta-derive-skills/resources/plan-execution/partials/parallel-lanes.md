@@ -1,0 +1,185 @@
+<!-- Partial: parallel-lanes — the DAG scheduler seam. The plan declares `**Depends on**:` per phase; the conductor builds the graph, assigns each ready phase to a lane (one worktree per lane, pooled), and dispatches lanes concurrently. Blocks: DAG_PARSE (conductor Step 0), LANE_WORKTREE_POOL (conductor Step 0.5), LANE_TOPOLOGY (conductor + integrate-phase), LANE_SCHEDULER (conductor Step 1), TRACKING_DIR (conductor), SIBLING_LANE_ISOLATION (implement-phase prompt + review-phase). Sequential runs use the SAME code paths with `max_parallel_lanes = 1` — there is no separate sequential topology. -->
+
+<!-- block-begin: DAG_PARSE -->
+## Build the phase dependency graph
+
+The plan's **Phased Rollout** section opens with an **Execution graph** table and gives every phase a `**Depends on**:` line ([plan-feature](../plan-feature/SKILL.md) authors both). Parse them into a DAG once, alongside the rest of the plan:
+
+1. **Read each phase's `**Depends on**:` line** into `phase.depends_on` — a list of phase ids, or `[]` for `nothing`. Ignore the prose after the em dash; it explains *why* the edge exists and is passed through to the implementer prompt, not to the scheduler.
+2. **Compute `phase.wave`** — longest path from a root: `wave(P) = 1` when `depends_on` is empty, else `1 + max(wave(d) for d in P.depends_on)`. Waves are **derived, never read from the plan**; a plan whose **Execution graph** table disagrees with the computed waves is a plan bug — surface the mismatch to the user before starting and go with the computed values.
+3. **Validate the graph.** Each failure below stops the run before any phase is dispatched:
+   - **Unknown id** in a `**Depends on**:` line → name the phase and the bad id; ask the user to fix the plan.
+   - **Cycle** → print the cycle (`Phase 3 → Phase 5 → Phase 3`); ask the user to fix the plan.
+   - **Missing line** on any executable phase → do **not** guess. Ask the user whether that phase depends on everything before it (safe, serializing) or nothing (parallel) — then write the answer back into the plan file before starting, so a resume reads the same graph.
+   - **Dependency on a deferred phase** (cross-repo or flag-removal, which this skill never executes) → that dependent is also deferred, transitively. Report both.
+4. **Warn on file overlap.** For every pair of phases in the same wave, intersect their **Touch List** entries. A non-empty intersection means two lanes will edit the same file concurrently and the wave merge will conflict. Surface the pairs and the shared paths, then ask: `Serialize them (add a dependency edge and re-derive waves)`, `Run anyway — I'll take the merge conflict`, `Stop — let me fix the plan`. Default to serializing. This is a warning, not a hard stop: two phases legitimately touching one `__init__.py` merge fine, two rewriting the same use case do not.
+5. **Record the resolved graph** in `run.md` (see [Update tracking](#1d-update-tracking)) so a resume rebuilds the identical schedule without re-asking anything.
+
+**The graph decides ordering — plan order does not.** Phase numbering is a reading aid for humans. A phase with no dependencies runs in wave 1 no matter how high its number is.
+<!-- block-end: DAG_PARSE -->
+
+<!-- block-begin: LANE_WORKTREE_POOL -->
+## Provision the lane worktree pool
+
+Parallel execution **requires** [prepare-worktree](../prepare-worktree/SKILL.md). Two agents cannot write two branches in one working tree, and two concurrent test runs cannot share one dev / test database or one compose project name.
+
+**Hard gate — refuse rather than degrade.** When `run_options.parallel_phases = true` but worktrees are unavailable — `foundation_skills.prepare-worktree` is `disabled`, or the user answered `No` to the worktree question, or provisioning fails — **stop and tell the user why**. Do not silently fall back to sequential; the plan's whole schedule was built around concurrency. Offer: `Enable worktrees and continue in parallel`, `Run this plan sequentially instead (max_parallel_lanes = 1)`, `Stop`. The user picks; the conductor never picks for them.
+
+**Pool, don't provision per phase.** Provisioning a runnable worktree costs a dep install plus a DB fork. A plan with 14 phases must not pay that 14 times. Provision **`max_parallel_lanes` worktrees once** and reuse each one across the phases assigned to it:
+
+1. **Size the pool.** `lanes = min(run_options.max_parallel_lanes, widest_wave)` where `widest_wave` is the largest number of phases at any one wave. Never provision more lanes than the graph can ever keep busy.
+2. **Provision each lane.** Run [prepare-worktree](../prepare-worktree/SKILL.md) once per lane, plan-driven, with worktree name `plan-{plan-id-kebab}-lane-{i}` (`i` = 1..lanes). This is the mechanical `worktree_prep` step — delegate all of them per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern when `agent_models.worktree_prep` is set, and **dispatch the provisioning calls concurrently** — they are independent.
+3. **Provision the integration worktree.** One more, named `plan-{plan-id-kebab}-integ`. The conductor merges lane branches into wave integration branches here (see [Lane branch topology](#lane-branch-topology)) so a merge never disturbs a lane that is still working.
+4. **Record the pool** in `run.md`: for each lane, `workroot`, `branch`, `worktree_summary`, `sandbox_tier`, plus `current_phase` (null when idle). `SANDBOX_TIER` is probed **per lane** — a mixed result is possible in principle and each lane's spawn wrapping follows its own tier.
+5. **Report once, then hold.** Show the user the pool (paths, DB names, compose project names, teardown commands) and the computed wave schedule together. `AskUserQuestion`: `Looks good — start`, `Fewer lanes`, `Stop — let me adjust`.
+
+### Resetting a lane worktree between phases
+
+A lane worktree carries state from the phase it just ran — most dangerously **applied migrations** in its forked dev / test DB. The next phase assigned to that lane branches from a different base, which may not contain those migrations, and a leftover schema silently invalidates its test run.
+
+Before handing a lane to its next phase:
+
+```bash
+git -C <lane.workroot> checkout <phase.base_branch>
+git -C <lane.workroot> checkout -b plan/{plan-id-kebab}/phase-{phase.id}
+```
+
+then **reset that lane's databases to the new base** using the `db_reset_cmd` recorded in the lane's `worktree_summary` (prepare-worktree writes it — drop + recreate from the template, or re-run migrations from zero, per engine). A lane whose summary carries no `db_reset_cmd`, and whose outgoing or incoming phase touches the **Data Model Changes** section, is not safe to reuse: re-provision that lane instead. Never reuse a lane across a migration boundary without the reset.
+
+Dep churn matters less but is real: when the incoming phase's plan body installs dependencies, re-run the project's install command in that lane before dispatching.
+
+### Teardown
+
+The pool is torn down **only at the end of the run, and only by the user**. [Step 2](#step-2--final-report) prints every lane's teardown command plus the integration worktree's. Do not auto-run them — a failed lane's worktree is the only place its state survives.
+<!-- block-end: LANE_WORKTREE_POOL -->
+
+<!-- block-begin: LANE_TOPOLOGY -->
+## Lane branch topology
+
+Every phase still gets its own branch. What changes under a DAG is **what that branch is based on** — no longer "the previous phase in plan order", but the phase's own declared dependencies.
+
+**Base branch of phase `P`:**
+
+| `P.depends_on` | `P.base_branch` |
+|---|---|
+| empty | `<BASE_BRANCH>` |
+| exactly one phase `Q` | `plan/{plan-id-kebab}/phase-{Q.id}` |
+| two or more phases | `plan/{plan-id-kebab}/integ-{P.id}` — built by merging every dependency's branch (see below) |
+
+**Multi-dependency base.** Built in the **integration worktree**, before the phase is dispatched:
+
+```bash
+git -C <integ.workroot> checkout -B plan/{plan-id-kebab}/integ-{P.id} plan/{plan-id-kebab}/phase-{first-dep.id}
+git -C <integ.workroot> merge --no-ff plan/{plan-id-kebab}/phase-{next-dep.id}   # once per remaining dep, in plan order
+git -C <integ.workroot> push -u origin plan/{plan-id-kebab}/integ-{P.id}
+```
+
+**Wave integration branches** are the durable spine. `plan/{plan-id-kebab}/wave-0` is `<BASE_BRANCH>`. When every phase at wave `N` has passed review, the conductor builds `plan/{plan-id-kebab}/wave-{N}` in the integration worktree by merging each wave-`N` lane branch into `wave-{N-1}` with `--no-ff`, in plan order. Wave branches are what a resume anchors on, what the final report points at, and what a phase whose dependency set covers an entire earlier wave may use directly as its base.
+
+**A phase does not wait for its wave — it waits for its dependencies.** Wave branches are built behind the scheduler, not in front of it: a wave-3 phase whose two dependencies are both green starts immediately, even while other wave-2 phases are still running. The wave branch is bookkeeping and integration; the `depends_on` set is the gate.
+
+### Merge conflicts during integration
+
+The orchestrator **never edits code**, including merge conflicts. On a conflicted `merge`:
+
+1. Capture `git -C <integ.workroot> diff --name-only --diff-filter=U`.
+2. Spawn a **fixer** subagent (the project's `fixer` agent type, at the `agent_models.fixer` model) inside the integration worktree. Its prompt carries: the conflicted paths, both phases' bodies from the plan, both phases' `phase-{id}.md` summaries, and the instruction to resolve for **both** intents — never to `--ours` / `--theirs` a conflict away.
+3. After the fixer returns, re-run the **outer gate** (`{{BUILD_CMD}}` plus the test scope `run_options.full_test_suite` selects) in the integration worktree. Red → loop back to step 2 with the failure.
+4. Green → commit the merge, push the branch, and record the conflict + resolution in `waves/wave-{N}.md`.
+
+A conflict that survives two fixer rounds is a **plan defect**, not a code problem: two phases in the same wave own the same code. Stop, report both phases and the paths, and ask whether to serialize them (add the edge, re-derive waves, re-run the loser) or continue by hand.
+
+### One PR per phase, based on the phase's base
+
+The PR `base` written into the prs-context frontmatter is the phase's **computed `base_branch`** — `<BASE_BRANCH>`, a single dependency's branch, or the `integ-{P.id}` branch. Never `<BASE_BRANCH>` for a phase that has dependencies; a wrong base makes the PR diff include every upstream phase and the review is unusable.
+<!-- block-end: LANE_TOPOLOGY -->
+
+<!-- block-begin: LANE_SCHEDULER -->
+### Dispatch loop
+
+Continuous, dependency-driven. A phase starts the moment its dependencies are green and a lane is free — it does **not** wait for its wave to fill or drain.
+
+```
+DONE = {}            # phase ids that passed review + integrate
+RUNNING = {}         # lane -> phase currently in flight
+BLOCKED = {}         # phase ids whose upstream failed
+PENDING = every executable phase (not cross-repo, not flag-removal)
+
+while PENDING or RUNNING:
+    ready = [p for p in PENDING
+             if set(p.depends_on) <= DONE
+             and p.id not in BLOCKED]
+
+    while ready and some lane is idle:
+        p = ready.pop(0)                      # plan order breaks ties
+        lane = claim_idle_lane()
+        reset_lane(lane, p)                   # checkout base + branch + DB reset
+        dispatch(lane, p)                     # 1a → 1b → 1c, concurrently with other lanes
+        RUNNING[lane] = p ; PENDING.remove(p)
+
+    if not RUNNING:                           # nothing running, nothing ready
+        break                                 # deadlock or done — checked below
+
+    wait for ANY lane to return
+    on success: DONE.add(p.id) ; free the lane ; write phase tracking ; maybe build a wave branch
+    on failure: mark p failed ; BLOCKED |= transitive_dependents(p) ; free the lane
+```
+
+**Tie-breaking is plan order.** When more phases are ready than lanes are free, dispatch in the order they appear in **Phased Rollout**. Prefer a ready phase that unblocks the most dependents when the user has asked for throughput — but do not invent a scoring function; plan order is the default and is what the user can predict.
+
+**Deadlock check.** Loop exits with `PENDING` non-empty and nothing running → every remaining phase is blocked. Report each blocked phase with the failed upstream that blocks it.
+
+**Failure containment.** A failed phase does **not** abort the run. Let every already-dispatched lane finish (killing a lane mid-implementation leaves a half-written worktree nobody can resume). Mark the failure's transitive dependents `BLOCKED`, keep dispatching everything still reachable, and report the whole picture at the end. The exception is the [Tier-4 escalation stop](#1a-implement) — after Tier 4 fails on a phase, that phase stops, but sibling lanes still run to completion.
+
+**Per-lane pause gate.** `run_options.pause_between_phases = true` under parallel execution means: **stop dispatching new phases** once every in-flight lane has returned, then ask. It does not mean pausing lanes individually — a per-lane prompt with three lanes running is unreadable. Options stay `Continue`, `Pause`, `Stop`.
+
+**Concurrency is a cap, not a target.** A graph that is a straight chain runs one lane at a time and that is correct — do not reorder or bundle phases to fill idle lanes.
+<!-- block-end: LANE_SCHEDULER -->
+
+<!-- block-begin: TRACKING_DIR -->
+Tracking lives in a **directory**, not a single file: `{{PLAN_DIR}}/TRACKING_{plan-id}/`.
+
+```
+{{PLAN_DIR}}/TRACKING_{plan-id}/
+├─ run.md                 # conductor-owned run state
+├─ phase-{phase.id}.md    # one per executed phase
+└─ waves/wave-{N}.md      # one per completed wave integration
+```
+
+**Why a directory.** Concurrent lanes commit on different branches that later merge. A single shared tracking file would conflict on **every** wave merge, for no reason — the lanes are appending unrelated records. Splitting by owner makes the merges trivially clean, because no two branches ever touch the same path.
+
+**Ownership rules — these are what make the merges clean. Do not relax them:**
+
+| Path | Written by | Committed on |
+|---|---|---|
+| `run.md` | the conductor only | the integration worktree, on the current wave branch |
+| `phase-{id}.md` | the lane that ran phase `{id}`, once, after it passes review | that phase's own lane branch, in the phase's final commit |
+| `waves/wave-{N}.md` | the conductor only | `plan/{plan-id-kebab}/wave-{N}`, as part of the merge commit |
+
+**No lane ever writes, edits, or deletes another lane's file.** A lane that needs a sibling's summary *reads* it — the conductor passes prior-phase summaries into the prompt as data (see [Implement](#1a-implement)); the lane does not go looking in the tracking dir itself.
+
+**`run.md`** carries: feature name, plan path, started / last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `full_test_suite`{{E2E_RUN_OPTION_TRACKING}}, `use_worktree`, `parallel_phases`, `max_parallel_lanes`), the **resolved dependency graph** (phase id → `depends_on` + computed wave), the **lane pool** (per lane: `workroot`, `branch`, `worktree_summary`, `sandbox_tier`, `current_phase`), the integration worktree, {{TRACKING_BRANCH_FIELD}}, and per-phase status (`done` / `running` / `blocked` / `failed` / `deferred`) with the lane each ran on.
+
+**`phase-{id}.md`** carries: status, the model actually used + the plan's suggested tier{{TRACKING_PHASE_BRANCH_FIELD}}, base branch, wave, `depends_on`, e2e + screenshots if any, and the 5–15 line summary the conductor writes **from the git diff plus the agent's report** — not from the agent's narration.
+
+**`waves/wave-{N}.md`** carries: which lane branches were merged, in what order, any conflicts and how they were resolved, and the outer-gate result on the merged tree.
+
+**Migrating a legacy single-file tracking.** A plan started before this layout has `{{PLAN_DIR}}/TRACKING_{plan-id}.md`. On resume: create the directory, split the existing content (run options + graph → `run.md`; each completed-phase entry → its own `phase-{id}.md`), `git rm` the old file, and continue. Say so in the resume report.
+
+**Deletion.** [Step 2](#step-2--final-report) deletes the whole directory (`git rm -r`) on the final integration branch, in one commit. The plan file stays.
+<!-- block-end: TRACKING_DIR -->
+
+<!-- block-begin: SIBLING_LANE_ISOLATION -->
+**Sibling-lane writes — only when the pool has more than one lane.** The main checkout is not the only tree an agent can wander into: with a pool provisioned, `<lane-2>/app/models.py` is as reachable from lane 1 as the main checkout is, and a write there is worse than a stray main-checkout write — it lands in a tree another agent is actively editing and testing. The same guard covers both: everything outside the lane's own `WORKROOT` is off-limits.
+
+- **Sandbox** (`SANDBOX_TIER = enforced`): the `--deny` / `--allow` set for a lane denies the **worktree root that holds the pool**, not just the main checkout, and allows only that lane's `WORKROOT` (plus `<main_checkout>/.git` and `<main_checkout>/.vinta-ai-workflows`). One `--deny <pool-root>` covers every sibling.
+- **Backstop check** (`SANDBOX_TIER = none`, or as the cheap confirmation when enforced): after every implementer and fixer returns, run the stray-write check against the main checkout **and every sibling lane's workroot**:
+
+  ```bash
+  for tree in <main_checkout> <every lane workroot except this lane's>; do
+    git -C "$tree" status --short | grep -vE '^\?\?'
+  done
+  ```
+
+  Output from a sibling lane is a BLOCKER, handled exactly like a stray main-checkout write: diff it, recover the intent into the correct lane, then `git -C <tree> restore --` it away. Do this **before** the sibling's own review reads its diff — otherwise the sibling reviews foreign changes as its own.
+<!-- block-end: SIBLING_LANE_ISOLATION -->

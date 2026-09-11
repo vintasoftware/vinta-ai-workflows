@@ -1,6 +1,6 @@
 ---
 name: amend-plan
-description: Adjust an existing implementation plan in `{{PLAN_DIR}}/` after implementation has started or finished. Updates the plan file (revising existing phases or appending new ones), then for each affected phase that was already implemented adjusts its commits (`git commit --amend` or new commits) on the phase branch, force-pushes the rewritten branch, rebases every downstream stacked phase branch, force-pushes each, and refreshes the PR-context files. Use when the user says "amend the plan", "update phase N", "add a phase to plan X", "the spec changed, fix the plan", or "rewrite the implementation for phase N". NOT for one-off changes to a single file unrelated to a plan; use the regular implement skill for that. {{PR_POLICY_DESCRIPTION}}
+description: Adjust an existing implementation plan in `{{PLAN_DIR}}/` after implementation has started or finished. Updates the plan file (revising existing phases or appending new ones), then for each affected phase that was already implemented adjusts its commits (`git commit --amend` or new commits) on the phase branch, force-pushes the rewritten branch, rebases every phase branch in the rewritten phase's dependency closure, force-pushes each, and refreshes the PR-context files. Use when the user says "amend the plan", "update phase N", "add a phase to plan X", "the spec changed, fix the plan", or "rewrite the implementation for phase N". NOT for one-off changes to a single file unrelated to a plan; use the regular implement skill for that. {{PR_POLICY_DESCRIPTION}}
 ---
 
 # Amend Plan
@@ -22,7 +22,8 @@ The flow is destructive (force-push). Every modification is gated on user confir
 - {{COAUTHOR_POLICY_BLOCK}}
 - Default branch: `{{DEFAULT_BRANCH}}`.
 - Branch naming convention (set by [implement-plan](../implement-plan/SKILL.md)): `plan/{plan-id-kebab}/phase-{phase.id}`.
-- **`WORKROOT`.** Resolve once, same as the [implement-plan Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot): the main checkout by default, or the plan's worktree when `run_options.use_worktree = true` in the tracking file. Every `git` call below runs with `git -C <WORKROOT>`; when no worktree is in play, `WORKROOT` is the main checkout and the commands read exactly as in-place git.
+- **`WORKROOT`.** Resolve once, same as the [implement-plan Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot): the main checkout by default, or the plan's worktree when `run_options.use_worktree = true` in `run.md`. When the run used a **lane pool**, amend in the **integration worktree** — lanes are sized for forward implementation and may still hold state from their last phase. Every `git` call below runs with `git -C <WORKROOT>`; when no worktree is in play, `WORKROOT` is the main checkout and the commands read exactly as in-place git.
+- **Amend only when no implementation is in flight.** A rewrite force-pushes branches other lanes may be based on. If `run.md` shows any phase `running`, stop and tell the user to let the run finish (or stop it) first.
 
 ## When to use
 
@@ -49,7 +50,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
 3. **Parse the plan.** Same structured fields as [implement-plan's "Extract structured fields" step](../implement-plan/SKILL.md#step-0--locate--parse-plan): plan id, **Goals + Non-goals** / **Guiding Decisions** / **Data Model Changes** / phase records from **Phased Rollout** / **Risk & Rollout Notes** through **Touch List**.
 
-4. **Read the tracking file** `{{PLAN_DIR}}/TRACKING_{plan-id}.md` if present. Its `Completed Phases` section tells you which phase branches were pushed, which model + base were used, and the `run_options` (including worktree state → `WORKROOT`). If absent → `git -C <WORKROOT> branch -a | grep plan/{plan-id-kebab}` to enumerate pushed phase branches.
+4. **Read the tracking directory** `{{PLAN_DIR}}/TRACKING_{plan-id}/` if present: `run.md` carries the `run_options` (including worktree state → `WORKROOT`, and the resolved dependency graph), each `phase-{id}.md` carries that phase's branch, base, and model, and `waves/wave-{N}.md` records which lane branches were merged where. A plan run before the directory layout has a single `TRACKING_{plan-id}.md` — read it the same way. If neither exists → `git -C <WORKROOT> branch -a | grep plan/{plan-id-kebab}` to enumerate pushed phase, `integ-`, and `wave-` branches.
 
 5. **Build a per-phase state map.** For every phase in the plan, record:
 
@@ -58,7 +59,8 @@ The flow is destructive (force-push). Every modification is gated on user confir
    | `phase.id`, `phase.title` | plan's **Phased Rollout** section |
    | `state` | one of `not-started` / `in-progress` / `implemented-not-merged` / `merged-to-default` |
    | `branch` | tracking file or git, pattern `plan/{plan-id-kebab}/phase-{id}` |
-   | `base` | tracking file or `git -C <WORKROOT> merge-base origin/<branch> <prev-branch>`; root phase bases on `{{DEFAULT_BRANCH}}` |
+   | `base` | `phase-{id}.md`, or `git -C <WORKROOT> merge-base origin/<branch> <base-branch>`. **The base is the phase's dependency-derived branch, not the previous phase in plan order** — read `**Depends on**:` from the plan and resolve it per [Lane branch topology](../implement-plan/SKILL.md#lane-branch-topology). A phase with no dependencies bases on `{{DEFAULT_BRANCH}}`. |
+   | `dependents` | every phase whose `**Depends on**:` set contains this one, transitively. This — not "every phase with a higher number" — is the set a rewrite cascades into. |
    | `pr_status` | `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{id}.md` frontmatter (`pending` / `published`) when the file exists |
    | `merged_to_default` | `git -C <WORKROOT> branch --merged origin/{{DEFAULT_BRANCH}} | grep` against the branch |
 
@@ -66,9 +68,10 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
 6. **Classify the requested change** by phase impact, in priority order:
 
-   - **`body-rewrite`** — existing phase keeps its id; body changes. Cascades downstream because rewritten commits get new SHAs.
-   - **`insert-new`** — new phase between existing ones. Cascades downstream because every later phase rebases onto the new branch.
-   - **`append-new`** — new phase tacked on after the last one. No downstream cascade. Implementation runs forward via [implement-plan](../implement-plan/SKILL.md) — this skill hands off after editing the plan file.
+   - **`body-rewrite`** — existing phase keeps its id; body changes. Cascades into its `dependents` closure because rewritten commits get new SHAs. Phases outside that closure are untouched — under a parallel plan that is often most of them.
+   - **`insert-new`** — new phase slotted in. Cascades into whichever existing phases the user makes depend on it (and their closure). A new phase nobody depends on cascades into nothing.
+   - **`append-new`** — new phase with no existing dependents. No cascade. Implementation runs forward via [implement-plan](../implement-plan/SKILL.md) — this skill hands off after editing the plan file.
+   - **`dependency-change`** — the change is to a phase's `**Depends on**:` line rather than its body. Adding an edge to an already-implemented phase means its branch has the wrong base: it must be rebased onto the new base and its own closure re-cascaded. Removing an edge is safe to leave as-is (the branch simply carries more history than it needs) — say so and let the user decide whether a re-cut is worth it.
    - **`guiding-decisions-change`** — change inside the plan's **Guiding Decisions** section. Cascades into every phase that referenced the decision.
 
 7. **Evaluate amendment blast radius — recommend restart when too big.** Amending in place stops being a good deal once the rewrite work approaches re-implementation. Compute these signals from the per-phase state map + the requested change:
@@ -100,7 +103,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
    1. Help the user draft a new `YYYY-MM-DD-FEATURE_NAME_PLAN.md` with today's date (paired with the spec, same `FEATURE_NAME`). This skill does not write the new plan body — point at [plan-feature](../plan-feature/SKILL.md) (or [create-spec](../create-spec/SKILL.md) first if the spec also changed).
    2. Annotate the **old** plan: at the top, add `**Superseded YYYY-MM-DD by ../YYYY-MM-DD-FEATURE_NAME_PLAN.md** — reason: <one line>`. Append the same line under `## Amendments`.
    3. Leave the old phase branches alone — useful audit trail, no force-push needed.
-   4. Update `TRACKING_{plan-id}.md` to mark the plan superseded; preserve all completed-phase entries.
+   4. Update `TRACKING_{plan-id}/run.md` to mark the plan superseded; preserve every `phase-{id}.md` entry.
    5. Hand off to [plan-feature](../plan-feature/SKILL.md). This skill exits.
 
    On `Amend in place`: proceed to step 8 (the original confirmation gate, renumbered). On `Stop`: exit cleanly; nothing written.
@@ -142,7 +145,9 @@ Always the first write. Plan file is durable; commits get rewritten next.
 
 ## Step 2 — Build the rewrite queue
 
-For each phase classified as needing commit rewrites (`body-rewrite` for already-implemented phases, downstream phases for `insert-new` / `body-rewrite` / `guiding-decisions-change`), build a queue ordered by branch stack depth: parent first, children after.
+For each phase classified as needing commit rewrites (`body-rewrite` for already-implemented phases, plus each rewritten phase's `dependents` closure for `insert-new` / `body-rewrite` / `dependency-change` / `guiding-decisions-change`), build a queue in **topological order of the dependency graph**: a phase is rebased only after every phase it depends on has been. Phases outside the closure are never touched — leave their branches and PRs alone.
+
+A phase with several dependencies rebases onto a **rebuilt** `integ-{id}` branch: re-merge its dependency branches in plan order first, then rebase the phase onto that. Rebasing it onto only one dependency silently drops the others.
 
 For each entry record:
 
@@ -299,9 +304,9 @@ Always include in the publish-log block at the bottom of the file:
 - YYYY-MM-DDThh:mm:ssZ — branch force-pushed (amend-plan); old SHA <x>, new SHA <y>
 ```
 
-### 4g. Update tracking file
+### 4g. Update tracking
 
-Update `{{PLAN_DIR}}/TRACKING_{plan-id}.md` for the rewritten phase:
+Update `{{PLAN_DIR}}/TRACKING_{plan-id}/phase-{id}.md` for the rewritten phase (and `run.md` when the graph itself changed):
 - Append to its `Completed Phases` entry: `Amended YYYY-MM-DD: <summary>; new SHA <x>; force-pushed`.
 - Don't remove the original summary — keep history.
 

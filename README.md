@@ -48,9 +48,9 @@ After bootstrap, the project ships with **three foundation skills** that take a 
    └─────────────────┘      Phased Rollout, Touch List, Risks)
             │
             ▼
-   ┌─────────────────┐    one stacked branch per phase + tracking file
-   │  implement-plan │───►  plan/<feature>/phase-1, phase-2, ...
-   └─────────────────┘      pushed to GitHub / GitLab / etc.
+   ┌─────────────────┐    one branch per phase (independent phases run in
+   │  implement-plan │───►  parallel lanes) + a tracking dir
+   └─────────────────┘      plan/<feature>/phase-1, phase-2, wave-1, ...
 ```
 
 You also get: an `AGENTS.md` tuned to the codebase — a regular file at the repo root, with per-vendor aliases (`CLAUDE.md`, `.github/copilot-instructions.md`) symlinked to it — project-specific sub-agents and skills derived from the actual stack, and per-vendor wiring so Claude Code / Codex / Cursor / Copilot all see the same artifacts.
@@ -105,28 +105,34 @@ Phases are sized so the slowest path (e.g. cross-repo producer wiring, external 
    - **Layer 3 — independent reviewer**: spawn a fresh `reviewer` agent with no implementation context. Findings triaged BLOCKER / SHOULD-FIX / NIT.
 6. **Fix loop**: each finding → spawn a `fixer` agent (separate session) that re-runs inner + outer loops; orchestrator never edits directly. Repeat until all three layers are clean.
 
-**Branch model — one branch per phase, stacked:**
+**Branch model — one branch per phase, based on that phase's dependencies:**
+
+Every phase in the plan declares what it needs (`**Depends on**: Phase 1 (the `BookmarkFolder` model), …`). That line — not the phase's number — decides both when it runs and what it branches from.
 
 ```bash
-# First executed phase — branches from the default branch.
+# A phase with no dependencies — branches from the default branch.
 git checkout main && git pull --ff-only
 git checkout -b plan/<feature-kebab>/phase-1
-# implementer's commits land here
 git push -u origin plan/<feature-kebab>/phase-1
 
-# Phase 2 stacks on phase 1 — never branches back to main.
+# A phase depending on exactly one phase — branches from it.
 git checkout plan/<feature-kebab>/phase-1
 git checkout -b plan/<feature-kebab>/phase-2
 git push -u origin plan/<feature-kebab>/phase-2
 
-# Phase 3 stacks on phase 2, etc.
+# A phase depending on several — branches from a merge of them.
+git checkout -B plan/<feature-kebab>/integ-4 plan/<feature-kebab>/phase-2
+git merge --no-ff plan/<feature-kebab>/phase-3
+git checkout -b plan/<feature-kebab>/phase-4
 ```
 
-Each phase's PR (or branch, depending on the project's PR policy captured at bootstrap) targets the previous phase's branch, not `main`. This keeps the diff per PR scoped to a single phase, makes review manageable, and lets the team merge phases sequentially as approvals land — earlier phases ship to production while later ones are still in review.
+Each phase's PR (or branch, depending on the project's PR policy captured at bootstrap) targets its own base, not `main`. This keeps the diff per PR scoped to a single phase, makes review manageable, and lets the team merge as approvals land. A plan whose phases form a chain produces exactly the classic stack; a plan with independent phases produces several short stacks, reunited by per-wave integration branches (`plan/<feature-kebab>/wave-<N>`).
+
+**Parallel phases.** Because the plan carries a dependency graph, `implement-plan` implements independent phases **at the same time** — one worktree lane per phase in flight, each with its own dev + test database and compose stack, so concurrent test runs don't collide. A phase starts the moment every phase it depends on is green and a lane frees up; a failed phase blocks only its dependents while the rest of the plan keeps going. On by default (`run_options.implement-plan.parallel_phases`, capped by `max_parallel_lanes`, default 3), it requires `prepare-worktree` and refuses to run rather than silently falling back to sequential when worktrees aren't available. A chain-shaped plan runs one phase at a time — same scheduler, one lane.
 
 **Alternative: modular commits.** Teams that prefer one branch + one PR per plan can set `policies.commit_strategy: modular-commits` in `.vinta-ai-workflows.yaml`. Under that mode, every phase pushes its **atomic unit commits** (one per service, use-case wire-up, init export, serializer field, refactor, or bug fix — tests in the same commit as code) to a single `plan/<feature-kebab>` branch; the PR opens once after Phase 1 review and gets updated as later phases push. The third option, `commit_strategy: ask`, prompts `implement-plan` at Step 0 (alongside the existing `pause_between_phases` / `generate_inline_comments` opt-ins) and caches the answer in the tracking file. Default is `stacked-branches` — the model documented above. See [`schemas/vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json) for the field definition.
 
-**Tracking file** — `ai-plans/TRACKING_<feature-kebab>.md`. The orchestrator writes it from `git diff` + the agent's report (not the agent's narration). Records: completed phases (status, model used, branch, base, e2e+screenshots when applicable, 5–15 line summary), current phase, remaining phases, deferred phases. Acts as the durable context handoff between phase prompts. Deleted on plan completion.
+**Tracking directory** — `ai-plans/TRACKING_<feature-kebab>/`. The orchestrator writes it from `git diff` + the agent's report (not the agent's narration): `run.md` for run options, the resolved dependency graph, and the lane pool; one `phase-<id>.md` per phase (status, model used, branch, base, wave, e2e+screenshots when applicable, 5–15 line summary); `waves/wave-<N>.md` for each integration merge. It is a directory rather than one file so concurrent lanes never write the same path — each phase's entry is committed on that phase's own branch, which keeps wave merges clean. Acts as the durable context handoff between phase prompts, scoped per phase to its own dependencies. Deleted on plan completion.
 
 **Phases the orchestrator never auto-executes:**
 
@@ -218,7 +224,7 @@ The 0.2.0 alpha line adds five foundation skills and restructures plan execution
 
 - **`handoff` (always)** — writes a session-continuation doc to `.vinta-ai-workflows/handoffs/` so a fresh session, a different agent, or a teammate can resume in-flight work without re-deriving context. Write mode gathers the goal, what's verified vs. still assumed, decisions and the alternatives rejected, landmines, and the single concrete next step **from the repo, never from memory**. Resume mode reads a handoff and re-checks its claims against the repo before trusting them.
 - **`deslop-comments` (always)** — rewrites the comments and doc blocks a task touched into Simple English, stripping AI-slop vocabulary and negative framing. Comment-only: no renames, no behavior change. It's wired into the review flow — `review-phase` Layer 2 gained a comment-hygiene check and dispatches a `fixer` to run this skill on any comment-slop finding — and is also invokable standalone ("deslop these comments").
-- **`prepare-worktree` (opt-in)** — provisions a fully-runnable git worktree for parallel plan work so a long-running plan can build, test, migrate, and hit databases without disturbing the main checkout. It reads the plan plus `.gitignore` / manifests / env / docker config and decides per ignored path whether to symlink, copy, or fork (dev DB, env files, compose project name). It also ships an OS-level write-guard — `sandbox-run.sh` (`sandbox-exec` / `bwrap`) for subprocess runtimes and a `PreToolUse` hook for Claude Code's in-process subagents — so a stray write back to the main checkout fails at the kernel layer instead of relying on a cooperative "stay in the worktree" instruction. `implement-plan` Step 0 question (c) opts a run into it.
+- **`prepare-worktree` (opt-in)** — provisions a fully-runnable git worktree for parallel plan work so a long-running plan can build, test, migrate, and hit databases without disturbing the main checkout. It reads the plan plus `.gitignore` / manifests / env / docker config and decides per ignored path whether to symlink, copy, or fork (dev DB, env files, compose project name). It also ships an OS-level write-guard — `sandbox-run.sh` (`sandbox-exec` / `bwrap`) for subprocess runtimes and a `PreToolUse` hook for Claude Code's in-process subagents — so a stray write back to the main checkout fails at the kernel layer instead of relying on a cooperative "stay in the worktree" instruction. `implement-plan` Step 0 question (c) opts a run into it, and parallel phase execution requires it — one lane per concurrent phase.
 - **`thermo-nuclear-code-quality-review` (opt-in)** — a deliberately harsh, on-demand structural-maintainability audit of a diff (abstraction quality, giant files, spaghetti-condition growth) that hunts for "code-judo" reframes collapsing whole branches / helpers / modes / layers rather than polishing them. Read-only — it reports findings and hands each fix to a `fixer`. `review-phase` Layer 3 now applies a condensed version of this lens on every phase and escalates to the full audit only when a phase touches core architecture, crosses ~1,000 lines, or surfaces a structural smell too big to fix inline.
 - **`handoff-to-client` (opt-in, API-only repos)** — generates a self-contained markdown document for the client teams consuming the repo's API: every endpoint / operation added, changed, deprecated, or removed on the current branch vs. the default branch, with request/response shapes derived from the code, auth + error changes, breaking-change flags judged from the strictest plausible client, one realistic example per operation, and per-platform migration notes. Template-rendered from `skills.handoff-to-client.*` config (required `client_platforms`, plus `api_style` / `api_spec_path` / `output_dir`).
 
@@ -246,7 +252,7 @@ Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
 | `add-e2e-test` | **opt-in** | Add an e2e test. Body covers e2e framework, page-object pattern, auth/storage-state, seed helpers, tenant scoping, screenshot conventions. |
 | `add-env-var` | **opt-in** | Propagate a new env var through every layer (`.env.example`, build tool envPrefix, build cache hash, app config, AGENTS.md, CI, deploy injection). |
 | [`add-one-off-script`](skills/vinta-derive-skills/resources/foundation-skills/add-one-off-script/SKILL.md) | **opt-in** | Author one-off operational scripts (backfills, cleanups, ad-hoc fixes). Ships a `BaseOneOffScript` class (Python + TS) enforcing dry-run default, idempotency, batched DB ops, segmented CSV backups, signal-safe interruption, multi-sink logging. |
-| [`prepare-worktree`](skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md) | **opt-in** | Provision a fully-runnable git worktree for parallel plan work — reads the plan + `.gitignore` + manifests + env / docker config and decides per ignored path whether to **symlink / copy / fork** (dev DB, env files, compose project name). Ships an OS-level write-guard (`sandbox-run.sh` + a Claude Code `PreToolUse` hook) so stray writes to the main checkout fail at the kernel layer. `implement-plan` Step 0 question (c) opts a run into it. |
+| [`prepare-worktree`](skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md) | **opt-in** | Provision a fully-runnable git worktree for parallel plan work — reads the plan + `.gitignore` + manifests + env / docker config and decides per ignored path whether to **symlink / copy / fork** (dev DB, env files, compose project name). Ships an OS-level write-guard (`sandbox-run.sh` + a Claude Code `PreToolUse` hook) so stray writes to the main checkout fail at the kernel layer. `implement-plan` Step 0 question (c) opts a run into it, and parallel phase execution requires it — one lane per concurrent phase. |
 | [`thermo-nuclear-code-quality-review`](skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/SKILL.md) | **opt-in** | Deliberately harsh structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — hunting "code-judo" reframes that collapse whole branches / helpers / modes / layers. Read-only; hands each fix to `fixer`. `review-phase` Layer 3 runs a condensed lens every phase and escalates to this full audit on core-architecture / ~1000-line / structurally-smelly phases. |
 | `handoff-to-client` | **opt-in** | (API-only repos) Generate a self-contained API-change handoff doc for the client teams consuming the repo's API — every endpoint / operation added / changed / deprecated / removed vs the default branch, with request/response shapes, auth + error changes, breaking-change flags, one example per operation, and per-platform migration notes. Template-rendered from `skills.handoff-to-client.*` config (client platforms, API style, spec path). |
 

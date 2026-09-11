@@ -11,8 +11,9 @@ The single review implementation shared by every plan-execution conductor: [impl
 
 - The phase diff (on the current branch inside `WORKROOT`).
 - The phase body to walk against (the **new** body when invoked by amend-plan).
-- `WORKROOT`, `SANDBOX_TIER` — resolved once by the conductor.
+- `WORKROOT`, `SANDBOX_TIER` — **this lane's**, resolved by the conductor.
 - `main_checkout` — the repo root the run was invoked from (equals `WORKROOT` when no worktree).
+- `sibling_workroots` — every other lane's workroot in the pool (empty for a sequential run). The stray-write check covers these too: a write into a lane that is actively implementing another phase is worse than a stray main-checkout write.
 - `run_options.full_test_suite` — resolves which outer gate Layer 1 item 3 verifies ran (false = scoped suite; true = full repo suite).
 - The project's `reviewer` + `fixer` agent types, plus their `agent_models.reviewer` / `agent_models.fixer` tiers (when set in `.vinta-ai-workflows.yaml`).
 - Optional per-phase `reviewer_model_tier` / `fixer_model_tier` overrides — the tiers parsed from this phase's `**Review models**:` line in the plan (null when the phase didn't set one, which is the common case).

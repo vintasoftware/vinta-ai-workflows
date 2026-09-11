@@ -19,14 +19,26 @@ The output is a worktree that is the **same shape as the main checkout** from th
 
 - A plan / spec that takes hours-to-days where parallel work in the main checkout would be disruptive (a long migration, a refactor, a feature you want to experiment on while still serving customer support out of `main`).
 - Two-or-more concurrent plans where each needs its own running app + own DB state.
+- **A lane pool for one plan** — [implement-plan](../implement-plan/SKILL.md) implements independent phases concurrently and calls this skill once per lane (plus once for an integration worktree). See **Provisioning a pool** below.
 - A risky migration where the user wants the migration to run against a forked DB, then walk the diff before promoting.
-- [implement-plan](../implement-plan/SKILL.md) Step 0 (c) — when the user opts in, that orchestrator runs this skill once before phase 1, captures the resulting path, and threads it through every subagent's prompt.
+- [implement-plan](../implement-plan/SKILL.md) Step 0 (c) — when the user opts in, that orchestrator runs this skill before the first phase (once for a sequential run, once per lane plus one integration worktree for a parallel run), captures the resulting paths, and threads each lane's through its own subagent prompts.
 
 ## When NOT to use
 
 - A small branch switch with no dep churn / no DB writes — `git switch -c …` is enough.
 - The project has no ignored runnable state (rare — usually means the project is so simple a worktree adds friction with no upside).
 - The user is on a filesystem that doesn't support symlinks (Windows non-NTFS volumes, some corporate fileshares). Fall back to copy-only and warn the user up front.
+
+## Provisioning a pool (several worktrees for one plan)
+
+A caller that needs N isolated lanes invokes this skill N times — once per lane, with distinct names (`plan-<id>-lane-1`, `plan-<id>-lane-2`, …, plus `plan-<id>-integ` for merges). Nothing about the flow changes per invocation, but four things must hold across them:
+
+1. **Names are the isolation key.** Every forked DB name, compose project name, redis index, and S3 prefix already derives from `<worktree-name>` — distinct names give distinct everything. Never provision two lanes with the same name.
+2. **Answer the interview once, reuse the answers.** The caller passes the same plan and the same strategy answers to every lane. Don't re-interview per lane.
+3. **Provision lanes concurrently when the caller asks for it** — they share nothing but the source repo. The one serialization point is the DB **template**: create or refresh the template DB once, then let each lane clone from it.
+4. **Record a `reset_cmd`** for each forked DB (see the summary schema). A pooled lane gets reused for a later phase on a different base, and the caller must be able to return its DB to a fresh state without re-provisioning. A lane whose DBs have no `reset_cmd` is single-use — say so in the report so the caller re-provisions instead of reusing it.
+
+Disk is the real constraint: N lanes means N dep trees and N DB copies. Run the **Sanity checks** disk probe against `N ×` the estimate, not `1 ×`, and warn the caller before the first lane if the pool won't fit.
 
 ## Inputs (Step 0 — interview)
 
@@ -344,11 +356,17 @@ state:
     strategy: fork | share | stub
     forked_name: <forked db name>   # null when share / stub
     connection_url_var: DATABASE_URL
+    reset_cmd: <shell command that returns this DB to the state of a fresh checkout>
+    # e.g. dropdb <forked> && createdb -T <template> <forked>
+    #      rm -f <path>/db.sqlite3 && <migrate cmd>
+    # null when the engine / setup has no safe reset — callers must then re-provision
+    # instead of reusing this worktree across a migration boundary.
   test_db:
     engine: ...
     strategy: fork | share
     forked_name: ...
     connection_url_var: TEST_DATABASE_URL
+    reset_cmd: <same idea, for the test DB>   # null when not resettable
   compose:
     project_name: <repo>_<worktree-name>
     network_strategy: per-worktree | shared-external | host
@@ -371,7 +389,9 @@ state:
     # claude-hook                 → in-process (claude-code) Layer A hook only (file tools)
     # claude-native-sandbox       → in-process (claude-code) Layer A hook + Layer B OS sandbox
     # null                        → tier=none (no guard wired)
-    deny: [<main-checkout-root>]   # subtree(s) made read-only inside the cage
+    deny: [<main-checkout-root>, <worktree-root>]   # subtree(s) made read-only inside the cage
+    # <worktree-root> is the dir that holds the worktrees — denying it blocks writes into
+    # SIBLING lanes when a pool is provisioned; the allow entry below re-opens only this one.
     allow: [<worktree-path>, <main-checkout-root>/.git, <.vinta-ai-workflows-dir>]  # writable exceptions
 notes: |
   <freeform — anything the user / agent should know>

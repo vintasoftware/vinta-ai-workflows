@@ -11,7 +11,8 @@ Invoked by [implement-plan](../implement-plan/SKILL.md) after [review-phase](../
 
 ## Inputs (passed by the conductor)
 
-- `WORKROOT`, `BASE_BRANCH` — resolved once by the conductor.
+- `WORKROOT` — **this lane's**, resolved by the conductor. Under a parallel run several integrate steps may be in flight at once, each on its own lane; nothing here is shared between them.
+- `phase.base_branch` — the phase's dependency-derived base, computed by the conductor ([Lane branch topology](../implement-plan/SKILL.md#lane-branch-topology)). This is the branch the phase was cut from **and** the PR's `base`. The plan-level `BASE_BRANCH` is only the base of phases that declare no dependencies.
 - `{{PR_POLICY_BLOCK}}` policy + `run_options.generate_inline_comments`.
 - The phase record + plan-level decisions (for the PR body).
 

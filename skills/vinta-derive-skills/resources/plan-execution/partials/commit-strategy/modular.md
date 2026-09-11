@@ -1,26 +1,36 @@
-<!-- Partial: commit-strategy / modular-commits. Folds in the former implement-plan-template-modular-substitutions.md. Blocks consumed by implement-phase (PER_PHASE_COMMIT) + integrate-phase (BRANCH_NAMING, PR_OPEN_TIMING) + conductor (CHECKLIST). All git calls use `git -C <WORKROOT>`; the first executed phase branches off `<BASE_BRANCH>` — both resolved once by the conductor (see worktree-seam.md#WORKROOT_RESOLUTION). The rendering-guidance appendix at the bottom is read by derive-skills to resolve the {{MODULAR_*}} placeholders; it is NOT part of any shipped block. -->
+<!-- Partial: commit-strategy / modular-commits. Folds in the former implement-plan-template-modular-substitutions.md. Blocks consumed by implement-phase (PER_PHASE_COMMIT) + integrate-phase (BRANCH_NAMING, PR_OPEN_TIMING) + conductor (CHECKLIST). All git calls use `git -C <WORKROOT>`; each phase branches off its own dependency-derived `<phase.base_branch>` — all resolved by the conductor (see worktree-seam.md#WORKROOT_RESOLUTION + parallel-lanes.md#LANE_TOPOLOGY). The rendering-guidance appendix at the bottom is read by derive-skills to resolve the {{MODULAR_*}} placeholders; it is NOT part of any shipped block. -->
 
 <!-- block-begin: BRANCH_NAMING -->
 Branch naming: `plan/{plan-id-kebab}` (one branch for the whole plan — no per-phase suffix).
 
-**First executed phase** (branches from `<BASE_BRANCH>`, already made current by the conductor):
+**Sequential run** (`max_parallel_lanes = 1`) — every phase commits straight onto the plan branch:
 
 ```bash
-git -C <WORKROOT> checkout <BASE_BRANCH>
-git -C <WORKROOT> checkout -b plan/{plan-id-kebab}
+git -C <WORKROOT> checkout plan/{plan-id-kebab}     # created from <BASE_BRANCH> on the first phase
 # subagent's atomic unit commits land on this branch
 git -C <WORKROOT> push -u origin plan/{plan-id-kebab}
 ```
 
-**Subsequent phases** (stay on the same plan branch — no new branch):
+**Parallel run** — one branch cannot take concurrent writers, so each lane commits its atomic units on a **lane branch** and the conductor merges those into the plan branch at each wave boundary:
 
 ```bash
-git -C <WORKROOT> checkout plan/{plan-id-kebab}
-# subagent's atomic unit commits land on this branch
-git -C <WORKROOT> push origin plan/{plan-id-kebab}
+git -C <WORKROOT> checkout <phase.base_branch>
+git -C <WORKROOT> checkout -b plan/{plan-id-kebab}/lane-{phase.id}
+# subagent's atomic unit commits land on this lane branch
+git -C <WORKROOT> push -u origin plan/{plan-id-kebab}/lane-{phase.id}
 ```
 
-The branch carries every phase's commits in plan order. Reviewers read the commit log top-to-bottom as a table of contents of the implementation.
+then, once every phase at that wave is green, in the integration worktree:
+
+```bash
+git -C <integ.workroot> checkout plan/{plan-id-kebab}
+git -C <integ.workroot> merge --no-ff plan/{plan-id-kebab}/lane-{phase.id}   # once per lane, in plan order
+git -C <integ.workroot> push origin plan/{plan-id-kebab}
+```
+
+`--no-ff` is what preserves the atomic units: the plan branch keeps every individual unit commit, grouped by the merge commit that names its phase. `plan/{plan-id-kebab}` **is** the wave integration branch under this strategy — there is no separate `wave-{N}` branch. Reviewers still read the commit log top-to-bottom as a table of contents; parallel phases appear as adjacent groups rather than one flat sequence.
+
+**Never squash a lane merge.** Squashing collapses the unit commits this whole strategy exists to preserve.
 <!-- block-end: BRANCH_NAMING -->
 
 <!-- block-begin: PER_PHASE_COMMIT -->
@@ -72,24 +82,27 @@ Tests for a unit belong **in the same commit** as that unit. Never commit tests 
 <!-- block-end: PER_PHASE_COMMIT -->
 
 <!-- block-begin: PR_OPEN_TIMING -->
-**PR opens once — after Phase 1 passes review.** Subsequent phases push their atomic unit commits to the same plan branch (`plan/{plan-id-kebab}`); the orchestrator re-runs [open-pr.sh](../open-pr-from-context/scripts/open-pr.sh) against the same plan-level prs-context file at `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md`. The script is idempotent for already-open PRs — it updates the body, appends new inline comments, and posts a `Phase {N} complete — pushed M commits` PR comment.
+**PR opens once — after the first phase passes review.** Subsequent phases land their atomic unit commits on the same plan branch (`plan/{plan-id-kebab}`) — directly when sequential, through a wave merge when parallel; the orchestrator re-runs [open-pr.sh](../open-pr-from-context/scripts/open-pr.sh) against the same plan-level prs-context file at `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md`. The script is idempotent for already-open PRs — it updates the body, appends new inline comments, and posts a `Phase {N} complete — pushed M commits` PR comment.
+
+Under a parallel run, the PR comment goes up **after the wave merge**, not when the lane branch is pushed — before the merge those commits are not on the branch the PR tracks.
 <!-- block-end: PR_OPEN_TIMING -->
 
 <!-- block-begin: CHECKLIST -->
 - [ ] Commit units listed upfront before any staging.
 - [ ] Each commit covers exactly one logical unit (no "and" in commit messages).
 - [ ] Tests landed in the same commit as the code they cover (never a separate test-only commit).
-- [ ] All unit commits pushed to `plan/{plan-id-kebab}` at end of phase.
+- [ ] All unit commits pushed at end of phase — to `plan/{plan-id-kebab}` when sequential, to `plan/{plan-id-kebab}/lane-{phase.id}` when parallel.
+- [ ] Parallel runs only: lane branch merged into `plan/{plan-id-kebab}` with `--no-ff` at the wave boundary; never squashed.
 <!-- block-end: CHECKLIST -->
 
 <!-- Single-line values (derive-skills substitutes these into the shells directly):
      BRANCH_PUSH_HEADING            = Push to plan branch
-     BRANCH_NAMING_PATTERN_SUMMARY  = plan branch (one branch for whole plan: `plan/{plan-id-kebab}`)
+     BRANCH_NAMING_PATTERN_SUMMARY  = plan branch (one branch for whole plan: `plan/{plan-id-kebab}`; parallel runs add per-lane branches `plan/{plan-id-kebab}/lane-{phase-id}` merged in at each wave boundary)
      PRS_CONTEXT_FILE_PATH          = a single `.vinta-ai-workflows/prs-context/{feature-kebab}/plan.md` file (one PR per plan, not per phase)
      TRACKING_BRANCH_FIELD          = top-level `plan_branch:` field
      TRACKING_PHASE_BRANCH_FIELD    = (empty — no per-phase branch under modular)
-     FINAL_REPORT_BRANCH_SUMMARY    = single plan branch `plan/{plan-id-kebab}` with commit log organized by phase
-     BRANCH_CHECKLIST_LINE          = Plan branch updated with phase commits; pushed. -->
+     FINAL_REPORT_BRANCH_SUMMARY    = single plan branch `plan/{plan-id-kebab}` with commit log organized by phase (parallel runs: plus the lane branches merged into it, per wave)
+     BRANCH_CHECKLIST_LINE          = Plan branch updated with phase commits (directly, or via the lane branch's wave merge); pushed. -->
 
 <!-- ===================================================================== -->
 <!-- rendering-guidance (read by derive-skills; NOT shipped in any block)  -->

@@ -312,9 +312,21 @@
               "default": false
             },
             "use_worktree": {
-              "description": "Default answer to Step 0 question (c) — whether `implement-plan` should provision an isolated git worktree (via `prepare-worktree`) and run every phase's subagent inside it. False = run in the current checkout. True = create one shared worktree at the start of the plan run; all phase branches stack inside it. Per-run prompt still asks; this is the suggested default shown.",
+              "description": "Default answer to Step 0 question (c) — whether `implement-plan` should provision isolated git worktrees (via `prepare-worktree`) and run phase subagents inside them. False = run in the current checkout. True = provision at the start of the plan run: one shared worktree for a sequential run, or one lane per concurrent phase plus an integration worktree when `parallel_phases` is on. Per-run prompt still asks; this is the suggested default shown.",
               "type": "boolean",
               "default": false
+            },
+            "parallel_phases": {
+              "description": "Default answer to Step 0 question (e) — whether `implement-plan` implements independent phases concurrently, one git worktree lane per in-flight phase. The plan's per-phase `**Depends on**:` lines define the graph; a phase starts as soon as every phase it depends on is green. True (default) = run in parallel whenever the graph has a wave wider than one phase. False = one phase at a time. Requires `foundation_skills.prepare-worktree` enabled and `use_worktree` resolving true — several agents cannot share one working tree — and `implement-plan` refuses rather than silently degrading when that is not the case. Per-run prompt still asks; this is the suggested default shown.",
+              "type": "boolean",
+              "default": true
+            },
+            "max_parallel_lanes": {
+              "description": "Upper bound on how many phases `implement-plan` keeps in flight at once, and therefore how many worktree lanes it provisions. Capped at runtime by the widest wave in the plan's dependency graph — a chain-shaped plan provisions one lane regardless. Each lane costs one runnable checkout (deps + forked dev/test DBs + its own compose project), so raise this only on machines with the disk and CPU for it. Ignored when `parallel_phases` is false.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8,
+              "default": 3
             }
           }
         },

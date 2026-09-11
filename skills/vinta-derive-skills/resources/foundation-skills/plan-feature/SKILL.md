@@ -1,6 +1,6 @@
 ---
 name: plan-feature
-description: Author a phased implementation plan for a new feature following the repo's `ai-plans/` conventions. Use when the user asks to "plan", "design", "scope", or "break down" a feature, write an implementation plan / IMPLEMENTATION_PLAN.md, or turn a spec/idea into a phased roadmap. Always interrogates the requester before drafting.
+description: Author a phased implementation plan for a new feature following the repo's `ai-plans/` conventions — including the dependency graph that lets independent phases be implemented in parallel. Use when the user asks to "plan", "design", "scope", or "break down" a feature, write an implementation plan / IMPLEMENTATION_PLAN.md, or turn a spec/idea into a phased roadmap. Always interrogates the requester before drafting.
 ---
 
 # Plan Feature
@@ -56,6 +56,8 @@ Never flatten ten questions into one prose paragraph just because tool unavailab
 1. **Explicitly out of scope** for v1? Force non-goals list — where most plans drift.
 2. v1.x / v2 already implied? Name it so we don't bake assumptions into v1's data model.
 3. **Phase granularity:** one phase per spec use-case (more, smaller PRs) or allow bundling closely-related use-cases (fewer, larger phases)? **Default: one use-case per phase** — confirm or override. Drives the "One use-case per phase" rule under **Phase structure**.
+4. **Hard sequencing constraints:** anything that *must* land before something else for a reason the code doesn't show — a deploy window, a data backfill that has to finish first, an external team's review, a contract another repo is already coding against? Name them. Everything else gets its dependency edge from the code itself (see **Phase dependencies and parallel execution**), and the executor runs whatever is independent at the same time.
+5. **Parallelism appetite:** is the team fine with several phases being implemented concurrently — several open PRs at once, several branches in flight, reviewers seeing a fan of PRs instead of a chain? **Default: yes.** Say no when review capacity is the bottleneck rather than implementation, or when the repo has a merge queue that serializes anyway.
 
 ### C. Data model & storage
 1. New table, new column on existing, JSONB blob, side table, no persistence?
@@ -155,7 +157,8 @@ Pushback *"just write the plan"*: write it but **mark every assumption explicitl
    Method / path / payload / response shape / errors.
 
 ## 5. Phased Rollout
-   See "Phase structure" below.
+   Opens with the **Execution graph** table (see "Phase dependencies and
+   parallel execution"), then the phases. See "Phase structure" below.
 
 ## 6. Risk & Rollout Notes
    Feature flag (key, scope, default, flip-on criterion, removal path),
@@ -180,6 +183,72 @@ Don't invent new top-level sections. Skip non-applicable (e.g. omit "API Design"
 - **Parallel-track (different repo, different team, runs alongside)**: `Phase 1b`. Letter signals "different lane, same time", not "comes after".
 - **Foundation phase**: `Phase 0` for pure scaffolding (new app skeleton, no behavior change). Optional.
 - Consistent inside one plan: don't mix `Phase 2.1` with `Phase 3a`.
+
+**Numbering is a reading aid, not an execution order.** What actually orders the build is each phase's `**Depends on**:` line — see below. Number the phases so a human reads them top to bottom in a sensible narrative; let the dependency graph decide what runs when.
+
+## Phase dependencies and parallel execution
+
+[implement-plan](../implement-plan/SKILL.md) implements phases **concurrently** — one worktree lane per phase in flight — whenever the graph says two phases don't need each other. That only works if the plan says what needs what. So every phase carries a `**Depends on**:` line, and **Phased Rollout** opens with the graph those lines imply.
+
+### `**Depends on**:` — one line per phase, always present
+
+```markdown
+**Depends on**: Phase 1 (the `BookmarkFolder` model and its migration), Phase 2 (the `bookmark_repository.list_for_user` method this endpoint calls).
+```
+
+or, for a phase that needs nothing:
+
+```markdown
+**Depends on**: nothing — starts from the base branch.
+```
+
+Rules:
+
+- **Name a phase only when this phase's code would not compile, import, or pass its tests without it.** The dependency is a *code* fact: a model, a column, a symbol, a migration, an endpoint, a fixture. If you can't name the artifact, there is no edge.
+- **One clause per edge, naming the artifact.** The prose after the em dash is what the reviewer (and the implementer's prompt) reads to understand the coupling. `**Depends on**: Phase 1` with no reason is a smell — usually it means "Phase 1 comes first in the list", which is not a dependency.
+- **Don't chain by habit.** The most common planning mistake here is writing `Phase 4` depends on `Phase 3` depends on `Phase 2` when in truth all three only need the Phase 1 migration. That single reflex turns a 3-lane plan into a 4-week queue.
+- **Do declare the edges that exist.** The opposite failure is worse: two phases that both rewrite the same use case, declared independent, get implemented simultaneously against divergent bases and collide at merge.
+- **No cycles.** Two phases that need each other are one phase, or the boundary is drawn in the wrong place.
+- **Cross-repo phases (`Phase Nb`) can be depended on**, but everything downstream of one inherits its deploy cadence — and the executor defers the whole subtree. Prefer designing so in-repo work depends on a *contract* (accept and drop the field) rather than on the producer actually shipping.
+
+### The Execution graph table
+
+First thing under **Phased Rollout**, before the phases:
+
+```markdown
+### Execution graph
+
+Wave = how deep a phase sits in the dependency graph. Phases in the same wave have no
+dependency on each other and are implemented concurrently.
+
+| Wave | Phases | Depends on |
+|---|---|---|
+| 1 | Phase 0, Phase 1b | — |
+| 2 | Phase 1, Phase 2 | Phase 0 |
+| 3 | Phase 3 | Phase 1, Phase 2 |
+| 4 | Phase 4 — remove the `bookmarks-v2` flag | Phase 3 (deferred — soak-gated) |
+
+**File overlap:** phases in the same wave touch disjoint files, with one exception —
+Phase 1 and Phase 2 both export from `@app/bookmarks/__init__.py`. Trivial merge.
+```
+
+The table is **derived from the `**Depends on**:` lines, not authored independently.** Compute it: a phase with no dependencies is wave 1; otherwise its wave is one past the deepest phase it depends on. The executor recomputes this and will flag a table that disagrees.
+
+### Same-wave phases must not fight over the same files
+
+Before publishing the plan, cross-check the **Touch List**: for every pair of phases in the same wave, look at their file sets. Overlap means two agents editing one file on two branches at once, and a merge conflict at the wave boundary.
+
+- **Trivial overlap** (a shared `__init__.py`, a settings registry, a route table) — fine. Note it under the graph table so the reviewer isn't surprised.
+- **Real overlap** (the same use case, the same serializer, the same view) — **add the dependency edge** and let one phase build on the other. A serialized pair that merges cleanly beats a parallel pair that needs a human to untangle.
+
+### Design *for* parallelism when it's cheap
+
+Two habits pay for themselves:
+
+- **Front-load shared scaffolding into a wave-1 foundation phase.** Types, the migration, the empty module, the fixture. Every use-case phase then depends only on that one phase, and they all run at once, instead of forming a chain.
+- **Split by seam, not by layer, when the seams are independent.** Four use-cases on the same entity are four independent phases if they only share the model. Four layers of one use-case (repository → service → serializer → view) are a chain no matter how you number them.
+
+Don't contort the plan for concurrency, though. A genuinely sequential feature is a chain of waves of one, and that is a correct plan.
 
 ### Each phase MR-sized
 
@@ -225,6 +294,8 @@ Doesn't fit → split: `Phase 4a — Static validation`, `Phase 4b — Resolutio
 
 **Goal**: one sentence on user-visible (or producer-visible) outcome.
    "Ship value: none on its own" → say so explicitly + justify why scaffolding needed.
+
+**Depends on**: {phase ids, each with the artifact this phase needs from it — or `nothing — starts from the base branch`}. See "Phase dependencies and parallel execution". **Required on every phase**; the executor refuses to guess.
 
 **Feature flag**: `{flag-key}` — {gated path; what runs when off vs on}.
    Omit only if phase is purely scaffolding (no reachable behavior) or **Guiding Decisions** explicitly marks "no flag — purely additive surface".
@@ -283,6 +354,8 @@ Gated on real-world signal, not phase number — can't merge until flag on 100% 
 
 **Goal**: delete flag + dead off-branch so feature becomes unconditional. **Prerequisite**: flag has been on for 100% of tenants in production for at least {soak window — typically 2 weeks, or one full end-of-month/quarter cycle if feature touches reporting}, with no rollback or incident attributed.
 
+**Depends on**: every gated phase — {list them} — since this phase deletes the branches they added.
+
 **Feature flag**: removed in this phase.
 
 Changes:
@@ -308,9 +381,15 @@ Acceptance: `grep -r "{flag-key}" app/ tests/` returns nothing, feature behaves 
 
 Place as separate, numbered, last-in-list entry inside **Phased Rollout**. Also in **Touch List** under its own phase. **Required**.
 
-### Order phases for slowest-moving dependency first
+### Put the slowest-moving dependency in wave 1
 
-Common mistake: leave cross-repo producer wiring for last, then discover the upstream repo's deploy cadence is two weeks. Order so slowest path starts in Phase 1 (e.g. *"accept field, validate, drop on floor"*) + fast in-repo work fills in behind. Typical sequencing: `Phase 1` (API stub) → `Phase 1b` (cross-repo producer, parallel) → `Phase 2`+ (in-repo persistence).
+Common mistake: leave cross-repo producer wiring for last, then discover the upstream repo's deploy cadence is two weeks. Give the slow path **no dependencies** so it starts in wave 1 (e.g. *"accept field, validate, drop on floor"*) + let fast in-repo work fill in behind it. Typical shape: `Phase 1` (API stub) and `Phase 1b` (cross-repo producer) both depend on nothing and run in wave 1; `Phase 2`+ (in-repo persistence) depends on `Phase 1` only — so it does **not** wait on the cross-repo lane.
+
+Watch for the accidental version of this: making an in-repo phase `**Depends on**: Phase 1b` when it only needs the *contract*, not the producer's deploy. That one edge parks the whole in-repo plan behind another team's release train.
+
+### Flag-removal phase depends on everything
+
+The mandatory final flag-removal phase depends on **every** gated phase — it deletes the branches they added. Say so in its `**Depends on**:` line. It sits alone in the deepest wave and is deferred by the executor anyway (soak-gated), so this edge costs nothing and documents the real constraint.
 
 ### Never give time estimates
 
@@ -403,6 +482,8 @@ Don't mix styles within one sentence. In **Touch List**, use `@path` for new fil
 - **No vibes-based guarantees** ("should be straightforward", "trivial", "easy lift").
 - **No skipped non-goals section.**
 - **No phase that breaks build if merged alone.** Each independently mergeable AND independently reversible.
+- **No `**Depends on**:` edge you can't justify with an artifact.** "It's later in the list" is not a dependency; it's a chain that costs the team a week of wall-clock for nothing.
+- **No two same-wave phases rewriting the same file.** Either add the edge or split differently.
 - **No phase requiring manual `kubectl` / SSH / "remember to run X"** without Risk & Rollout Notes checklist.
 - **No assuming user wants what they asked for.** Watch for "wait, also…" + update plan.
 
@@ -424,7 +505,12 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Phases MR-sized (≤1500 LoC) + independently mergeable.
 - [ ] Phase numbering uses numbers + letters consistently.
 - [ ] **Phase granularity matches the Step 0 answer.** Default (one-use-case-per-phase): at least one phase per spec use-case, no phase implements two use-cases. If bundling was chosen: grouped phases stay MR-sized, one concern, independently mergeable. Cross-cutting scaffolding is its own foundation phase either way.
-- [ ] Each phase has Goal / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / Suggested AI model / Reusable skills / Acceptance.
+- [ ] Each phase has Goal / **Depends on** / Spec use-case / Feature flag (or explicit waiver) / Changes / Tests / Suggested AI model / Reusable skills / Acceptance.
+- [ ] Every `**Depends on**:` entry names the artifact it needs (model, symbol, migration, endpoint) — no bare phase ids, no "comes first" edges.
+- [ ] **Execution graph** table is the first thing under **Phased Rollout**, and its waves match what the `**Depends on**:` lines imply.
+- [ ] Graph is acyclic; the flag-removal phase depends on every gated phase.
+- [ ] Same-wave phases checked against the **Touch List** for file overlap; real overlaps either serialized with an edge or called out explicitly under the graph table.
+- [ ] Slow-moving / cross-repo work sits in wave 1, and no in-repo phase depends on a cross-repo phase when it only needs the contract.
 - [ ] `**Review models**:` appears **only** on phases that justify a non-default reviewer / fixer (not on every phase); each such line names a tier + why. Phases without it inherit the project's `agent_models` defaults.
 <!-- e2e:start -->
 - [ ] **If e2e coverage was opted into at Step 0:** every phase introducing a new UI flow has an **E2E happy-path test** in its Tests block, with screenshot output to `pr-screenshots/`. If it was not opted into (default), **no phase carries an e2e spec** and there is no `QA_USE_CASES.md` / `pr-screenshots/` reference.
