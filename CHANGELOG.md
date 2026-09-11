@@ -216,6 +216,40 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`npx vinta-ai-maestro` now runs.** The published package pointed its `bin` at
+  `src/cli/bin.ts` and relied on Node stripping the types at startup — which Node
+  refuses to do anywhere under `node_modules`, unconditionally and with no flag to
+  override. So the CLI worked from a checkout and died on first run once installed,
+  with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`.
+
+  `packages/vinta-ai-maestro` now builds: `tsc` emits `dist/` with
+  `rewriteRelativeImportExtensions` (the source imports `.ts` specifiers, which
+  emitted JS cannot keep), vite writes the daemon's UI into `dist/ui`, and the
+  shebang is rewritten from the source's `--experimental-transform-types` form to
+  a plain `#!/usr/bin/env node` — a compiled entry point has no types left to
+  transform, and should not ask Node for a flag it is free to retire. `prepack`
+  runs the build, so a tarball can never be cut from a stale `dist/`.
+
+  Three packaging faults surfaced with it, each of which broke an install on its
+  own:
+  - **The UI was never in the tarball.** `serve` resolves its static root as
+    `dist/ui` and refuses to read outside it, so it would have booted and answered
+    every page with "build the UI first". The build now asserts `dist/ui/index.html`
+    exists rather than trusting a vite config that writes outside its own root.
+  - **`tailwindcss` and `tw-animate-css` were imported but never declared.** They
+    resolved only through pnpm's `.bin` shim setting `NODE_PATH`; building by any
+    other path failed to resolve them. Both are now devDependencies.
+  - **Everything the UI imports was a runtime dependency.** React, xterm,
+    lucide-react and the three workspace packages are bundled into `dist/ui` by
+    vite and cannot be loaded at runtime — yet a consumer installed all of them,
+    and two carried `workspace:*` specifiers that no registry understands. Moved to
+    devDependencies; the published package now declares six runtime dependencies
+    instead of fourteen.
+
+  CI packs the tarball, installs it into a throwaway project and runs the binary
+  from `node_modules`. Every previous check ran from a checkout, which is the one
+  place this class of bug cannot appear.
+
 - **Lane provisioning serializes `git worktree add`, not only the database
   template.** `prepare-worktree` previously named one serialization point; there
   are two. Git rewrites `.git/worktrees/` metadata on every add, and concurrent

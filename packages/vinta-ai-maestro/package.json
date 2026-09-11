@@ -1,16 +1,17 @@
 {
   "name": "vinta-ai-maestro",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.7.0-alpha1",
   "description": "Code-orchestrated parallel execution of plan-feature plans across agent harnesses.",
   "type": "module",
   "bin": {
-    "vinta-ai-maestro": "./src/cli/bin.ts"
+    "vinta-ai-maestro": "./dist/cli/bin.js"
   },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json && tsc -p ui/tsconfig.json",
     "test": "vitest run",
     "ui:dev": "vite --config ui/vite.config.ts",
@@ -23,17 +24,9 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.0.0",
     "better-sqlite3": "^12.4.1",
     "hono": "^4.13.7",
-    "lucide-react": "^1.44.0",
     "node-pty": "^1.1.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "vinta-dag-editor": "workspace:*",
-    "vinta-design-system": "workspace:*",
-    "vinta-state-machine-editor": "^0.11.0",
     "ws": "^8.21.3",
     "yaml": "^2.9.0",
     "zod": "^4.6.1"
@@ -48,9 +41,24 @@
     "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.1.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "jsdom": "^30.0.1",
+    "lucide-react": "^1.44.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
     "typescript": "^7.0.2",
+    "vinta-dag-editor": "workspace:*",
+    "vinta-design-system": "workspace:*",
+    "vinta-state-machine-editor": "^0.11.0",
     "vite": "^8.2.2",
     "vitest": "^5.0.0"
-  }
+  },
+  "files": [
+    "dist",
+    "scripts",
+    "README.md"
+  ]
 }

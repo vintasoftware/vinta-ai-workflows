@@ -5,7 +5,9 @@ description: Cut a release of `vinta-ai-workflows` — pick patch / minor / majo
 
 # Release
 
-This repo ships as a private npm package. Stable releases are: bump version + close CHANGELOG section + tag + push. Alpha pre-releases are: bump version (with `-alphaN` suffix) + tag + push, leaving the CHANGELOG section open so bullets accumulate across the alpha series until the stable graduates. No CI auto-publish today; the user runs `npm publish` (alpha: `npm publish --tag alpha`) once the tag is up.
+This repo ships **two** npm packages from one version number: `vinta-ai-workflows` (the root — the bootstrap CLI and the skills) and `vinta-ai-maestro` (`packages/vinta-ai-maestro` — the orchestrator daemon). They are bumped, tagged and published together; a consumer reading two different numbers for one release has no way to tell which is which.
+
+Stable releases are: bump version + close CHANGELOG section + tag + push. Alpha pre-releases are: bump version (with `-alphaN` suffix) + tag + push, leaving the CHANGELOG section open so bullets accumulate across the alpha series until the stable graduates. No CI auto-publish today; the user runs `npm publish` (alpha: `npm publish --tag alpha`) once the tag is up.
 
 ## Two release lines, two branches
 
@@ -108,7 +110,9 @@ Surface the new version to user via `AskUserQuestion`: `Confirm v<X.Y.Z[-alphaN]
 
 In a single change set:
 
-1. Edit [package.json](../../package.json): `"version": "<new>"`. For alpha, `<new>` includes the `-alphaN` suffix.
+1. Edit **both** manifests to `"version": "<new>"` — [package.json](../../package.json) and [packages/vinta-ai-maestro/package.json](../../packages/vinta-ai-maestro/package.json). For alpha, `<new>` includes the `-alphaN` suffix.
+
+   Both, every time. The workspace package was `0.0.0` and `private` while it was internal; it is published now, and a manifest left behind is what makes a released tarball unreproducible from the tag that claims it.
 2. Edit [CHANGELOG.md](../../CHANGELOG.md):
    - **stable / graduate**: change the in-progress section header to `## [<new>] — <today's ISO date>`. Today = `date -u +%Y-%m-%d` UTC.
    - **alpha**: do NOT close the placeholder. Leave header as `## [<next-stable>] — YYYY-MM-DD`. Bullets stay where they are — they accumulate across alphas and ship under the eventual stable. Optionally add a one-line note under the section recording the alpha tag (`<!-- pre-release: <new> on <date> -->`) so reviewers can correlate tags ↔ bullets; omit if the team prefers a clean CHANGELOG.
@@ -119,7 +123,7 @@ In a single change set:
 Use a HEREDOC commit message. No co-author trailer on release commits unless the user opts in (releases are typically authored by humans even when an agent prepared the bump).
 
 ```bash
-git add package.json CHANGELOG.md
+git add package.json packages/vinta-ai-maestro/package.json CHANGELOG.md
 git commit -m "$(cat <<'EOF'
 chore(release): v<new>
 
@@ -144,19 +148,20 @@ If the team uses signed tags + a tag-protection rule, surface the failure and as
 
 ## Step 7 — Surface publish command
 
-Print but do **NOT** run. Stable / graduate releases publish under the default `latest` dist-tag; alpha releases MUST use `--tag alpha` so they don't override `latest` for consumers running `npm install vinta-ai-workflows`.
+Print but do **NOT** run. Stable / graduate releases publish under the default `latest` dist-tag; alpha releases MUST use `--tag alpha` so they don't override `latest` for consumers running `npm install`.
+
+**`vinta-ai-maestro` publishes with `pnpm`, not `npm`.** Its manifest carries `workspace:*` specifiers for the sibling packages, and only pnpm rewrites those to real versions on the way out — `npm publish` would ship the protocol verbatim and every install of it would fail with `EUNSUPPORTEDPROTOCOL`. Its `prepack` runs the build, so the tarball can never be cut from a stale `dist/`.
+
+Two packages, two commands, and the root one is unaffected by either caveat.
 
 **Stable / graduate:**
 
 ```
 Release v<new> committed + tagged + pushed.
 
-To publish to the registry:
-  npm publish
-
-To publish from a fresh clone (no node_modules side-effects):
-  npm pack
-  npm publish vinta-ai-workflows-<new>.tgz
+To publish both packages:
+  npm publish                                   # vinta-ai-workflows (repo root)
+  pnpm --filter vinta-ai-maestro publish         # builds via prepack, rewrites workspace:*
 
 The user owns this step. Don't auto-publish.
 ```
@@ -166,23 +171,25 @@ The user owns this step. Don't auto-publish.
 ```
 Pre-release v<new> committed + tagged + pushed.
 
-To publish under the alpha dist-tag (does NOT affect `latest`):
-  npm publish --tag alpha
-
-Fresh-clone flow:
-  npm pack
-  npm publish vinta-ai-workflows-<new>.tgz --tag alpha
+To publish both under the alpha dist-tag (does NOT affect `latest`):
+  npm publish --tag alpha                                    # vinta-ai-workflows
+  pnpm --filter vinta-ai-maestro publish --tag alpha          # vinta-ai-maestro
 
 Consumers opt in with:
   npm install vinta-ai-workflows@alpha
+  npx vinta-ai-maestro@alpha serve
   # or pin exact: npm install vinta-ai-workflows@<new>
+
+If `latest` currently resolves to a pre-release — which it does on a package
+whose only published version is an alpha — point it back once a stable exists:
+  npm dist-tag add <pkg>@<stable> latest
 
 The user owns this step. Don't auto-publish.
 ```
 
 ## Verification
 
-1. `python3 -c "import json; print(json.load(open('package.json'))['version'])"` → matches the new version (incl. `-alphaN` suffix for alpha).
+1. `python3 -c "import json; print(json.load(open('package.json'))['version'], json.load(open('packages/vinta-ai-maestro/package.json'))['version'])"` → **both** match the new version (incl. `-alphaN` suffix for alpha).
 2. `git tag --sort=-v:refname | head -1` → `<new>`.
 3. `git log -1 --oneline` → `chore(release): <new>`.
 4. `head -20 CHANGELOG.md`:
@@ -204,6 +211,8 @@ The user owns this step. Don't auto-publish.
 - **Dating the CHANGELOG with local time.** Use UTC ISO date — the team is distributed.
 - **Tagging without signing when the repo expects signed tags.** `git config tag.gpgsign` set to true → `git tag` without `-s` fails or warns. Detect via `git config --get tag.gpgsign` in pre-flight; if true, use `-s`.
 - **Releasing while another `release` skill run is in flight.** The pre-flight clean-working-tree check catches this incidentally.
+- **Publishing `vinta-ai-maestro` with `npm` instead of `pnpm`.** Its `workspace:*` dependency specifiers are a pnpm protocol, not something the registry understands; npm ships them verbatim and every consumer install dies on `EUNSUPPORTEDPROTOCOL`. `pnpm publish` rewrites them to the sibling packages' real versions.
+- **Bumping only the root manifest.** Both packages carry the release version. A stale `packages/vinta-ai-maestro/package.json` publishes a tarball no tag in the repo describes.
 - **Publishing alpha without `--tag alpha`.** Default dist-tag is `latest` — an alpha published as `latest` becomes the install-by-default version and breaks every consumer doing `npm install vinta-ai-workflows`. Always `--tag alpha` for pre-releases.
 - **Closing the CHANGELOG placeholder on an alpha.** Alpha is a pre-release; the section header stays open as `## [<next-stable>] — YYYY-MM-DD` so later alphas + the eventual stable / graduate all share the accumulating bullet list. Closing it early forces the stable release to invent a duplicate section.
 - **`alpha10` vs `alpha2` ordering.** The format `X.Y.Z-alphaN` (no dot) is one semver identifier; `alpha10 < alpha2` lexicographically. Fine for N=1..9; if a series exceeds 9, surface to user and switch to `-alpha.10` (with dot) — semver does numeric compare on dotted numeric identifiers. Do NOT silently mix formats.

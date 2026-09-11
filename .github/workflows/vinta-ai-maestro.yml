@@ -104,21 +104,45 @@ jobs:
       - name: Test
         run: pnpm test
 
-      # The bundle the daemon serves. Tailwind generates only the classes it
-      # scans, so a build is the one check that the design system's sources
-      # are actually reachable from this package's stylesheet.
-      - name: Build the UI
-        run: pnpm run ui:build
+      # The published artifact, built the way `prepack` builds it: `tsc` to
+      # `dist/`, the UI bundle into `dist/ui`, and the shebang corrected on the
+      # way out. Tailwind generates only the classes it scans, so the UI half
+      # is also the one check that the design system's sources are reachable
+      # from this package's stylesheet.
+      - name: Build
+        run: pnpm run build
 
       # The suite runs under Vitest, which transpiles. The shipped entry point
-      # does not: it asks Node itself for `--experimental-transform-types` from
-      # a shebang. That flag, and the whole module graph behind it — two native
-      # modules included — are only exercised by actually starting the binary,
-      # so it is started. `--help` costs nothing and touches everything.
-      #
-      # This does NOT cover the shebang itself on Windows, which Node never
-      # sees: npm rewrites `#!/usr/bin/env -S node …` into a generated `.cmd`
-      # shim at install time, and this package is private and so is never
-      # installed. See the README's platform section.
-      - name: The CLI entry point starts under this platform's Node
+      # does not: it is plain JS started by plain `node`, and the whole module
+      # graph behind it — two native modules included — is only exercised by
+      # actually starting the binary. So it is started. `--help` costs nothing
+      # and touches everything.
+      - name: The built CLI starts under this platform's Node
+        run: node dist/cli/bin.js --help
+
+      # The source entry point, which is how the repo runs the CLI without
+      # building. It asks Node for `--experimental-transform-types` from its own
+      # shebang; the built one must not, and the build asserts that.
+      - name: The source entry point still starts too
         run: node --experimental-transform-types --disable-warning=ExperimentalWarning src/cli/bin.ts --help
+
+      # What `npx vinta-ai-maestro` actually does, and the failure this job did
+      # not previously catch: Node refuses to strip or transform types anywhere
+      # under `node_modules`, so a package whose `bin` points at a `.ts` file
+      # installs fine and then dies on first run with
+      # ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING. Packing and installing is
+      # the only place that shows up — every check above runs from a checkout,
+      # where stripping is allowed.
+      #
+      # `pnpm pack` rather than `npm pack`: the manifest carries `workspace:*`
+      # specifiers, and only pnpm rewrites them to real versions.
+      - name: The packed tarball installs and runs from node_modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/vinta-ai-maestro-*.tgz
+          ./node_modules/.bin/vinta-ai-maestro --help
