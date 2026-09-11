@@ -9,7 +9,12 @@
  *
  * The reminder control is the whole of O7's "opt-in". Off is the default and
  * the first option, because a system that nags gets trained out of attention.
+ * It is a real `<select>` — the design system's native one — so it keeps the
+ * keyboard, the form semantics and a test's `change` event.
  */
+import { BellIcon } from 'lucide-react'
+import { Button } from 'vinta-design-system/ui/button'
+import { NativeSelect, NativeSelectOption } from 'vinta-design-system/ui/native-select'
 import { notifier, notificationBody, routeOf, useNotifications } from './notifications.ts'
 
 /** Minutes, as an operator thinks about them. `0` is off, and is the default. */
@@ -24,27 +29,47 @@ export function Notifications() {
   const { banners, reminderMs } = useNotifications()
 
   return (
-    <div className="notifications" data-notifications>
-      <select
-        aria-label="Notification reminders"
-        data-field="reminder"
-        value={String(reminderMs)}
-        onChange={(event) => notifier.setReminderMs(Number(event.target.value))}
-      >
-        {INTERVALS.map((interval) => (
-          <option key={interval.ms} value={String(interval.ms)}>
-            {interval.label}
-          </option>
-        ))}
-      </select>
+    <div className="notifications flex flex-wrap items-center gap-2" data-notifications>
+      <span className="relative">
+        <BellIcon
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+        />
+        <NativeSelect
+          size="sm"
+          aria-label="Notification reminders"
+          data-field="reminder"
+          className="pl-8 text-[13px]"
+          value={String(reminderMs)}
+          onChange={(event) => notifier.setReminderMs(Number(event.target.value))}
+        >
+          {INTERVALS.map((interval) => (
+            <NativeSelectOption key={interval.ms} value={String(interval.ms)}>
+              {interval.label}
+            </NativeSelectOption>
+          ))}
+        </NativeSelect>
+      </span>
 
       {banners.map((banner) => (
-        <p className="banner" key={banner.key} data-banner={banner.key}>
+        <p
+          className="banner flex items-center gap-2 rounded-md border border-tone-attention bg-tone-attention-soft px-2.5 py-1 text-[13px] text-tone-attention-foreground"
+          key={banner.key}
+          data-banner={banner.key}
+        >
           {/* A fragment, so the token stays where the daemon put it (§10). */}
-          <a href={routeOf(banner)}>{notificationBody(banner)}</a>
-          <button type="button" data-op="dismiss" onClick={() => notifier.dismiss(banner.key)}>
+          <a className="font-medium underline-offset-4 hover:underline" href={routeOf(banner)}>
+            {notificationBody(banner)}
+          </a>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            data-op="dismiss"
+            onClick={() => notifier.dismiss(banner.key)}
+          >
             Dismiss
-          </button>
+          </Button>
         </p>
       ))}
     </div>

@@ -25,13 +25,32 @@
  * §9's amend — changing a run already in flight — is not this screen. The
  * daemon refuses a save whose workflow has a running run, and the refusal is
  * surfaced verbatim rather than worked around.
+ *
+ * Layout: the canvas and the forms that act on the whole workflow on the
+ * left; the selected node's fields in an inspector column on the right, where
+ * they stay beside the graph they describe.
  */
+import { ChevronRightIcon, PlusIcon, SaveIcon } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Dag } from 'vinta-dag-editor/src/index.ts'
+import {
+  HStack,
+  PageHeader,
+  PageHeaderActions,
+  PageHeaderHeading,
+  PageHeaderMeta,
+  PageHeaderTitle,
+} from 'vinta-design-system/layout'
+import { Badge } from 'vinta-design-system/ui/badge'
+import { Button } from 'vinta-design-system/ui/button'
+import { Input } from 'vinta-design-system/ui/input'
+import { Label } from 'vinta-design-system/ui/label'
+import { NativeSelect, NativeSelectOption } from 'vinta-design-system/ui/native-select'
 import { formatPath, type Issue } from '../../src/daemon/schemas.ts'
 import { HARNESS_IDS, type Node, type Pipeline, type Workflow } from '../../src/types.ts'
 import { parseWorkflow, type ValidationIssue } from '../../src/validate.ts'
+import { Chip } from './Chip.tsx'
 import { WorkflowRefused, type WorkflowClient } from './editor-client.ts'
 import {
   addDependency,
@@ -46,6 +65,7 @@ import {
 } from './editor-model.ts'
 import { EditorDag } from './EditorDag.tsx'
 import { EditorPipeline } from './EditorPipeline.tsx'
+import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 
 const REFUSALS: Readonly<Record<string, string>> = {
   self: 'A node cannot depend on itself.',
@@ -80,20 +100,38 @@ export function EditorList({ workflows }: { readonly workflows: WorkflowClient }
     }
   }, [workflows])
 
-  if (error !== null) return <p className="error">{error}</p>
-  if (ids === null) return <p className="empty">Loading workflows…</p>
-  if (ids.length === 0) return <p className="empty">No workflows to edit.</p>
-
   return (
-    <section className="editor">
-      <h2>Workflows</h2>
-      <ul>
-        {ids.map((id) => (
-          <li key={id} data-workflow={id}>
-            <a href={`#/editor/${encodeURIComponent(id)}`}>{id}</a>
-          </li>
-        ))}
-      </ul>
+    <section className="editor flex flex-col gap-5">
+      <PageHeader>
+        <PageHeaderHeading>
+          <PageHeaderTitle>Workflows</PageHeaderTitle>
+          <PageHeaderMeta>
+            <span>Each is a committed workflow.json; a save rewrites it in place.</span>
+          </PageHeaderMeta>
+        </PageHeaderHeading>
+      </PageHeader>
+      {error !== null && <ErrorNote>{error}</ErrorNote>}
+      {error === null && ids === null && <EmptyNote>Loading workflows…</EmptyNote>}
+      {error === null && ids !== null && ids.length === 0 && (
+        <EmptyNote>No workflows to edit.</EmptyNote>
+      )}
+      {error === null && ids !== null && ids.length > 0 && (
+        <Panel title="Open a workflow" contentClassName="px-0">
+          <ul className="divide-y">
+            {ids.map((id) => (
+              <li key={id} data-workflow={id}>
+                <a
+                  href={`#/editor/${encodeURIComponent(id)}`}
+                  className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm font-medium text-foreground no-underline hover:bg-muted/60 hover:no-underline"
+                >
+                  <span className="font-mono">{id}</span>
+                  <ChevronRightIcon className="size-4 text-muted-foreground" aria-hidden="true" />
+                </a>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
     </section>
   )
 }
@@ -134,15 +172,12 @@ export function EditorView({
     setRefused(null)
   }, [])
 
-  const onDagChange = useCallback(
-    (dag: Dag): void => {
-      setNotice(null)
-      setDraft((current) => (current === null ? current : applyDag(current, dag)))
-      setSaved(false)
-      setRefused(null)
-    },
-    [],
-  )
+  const onDagChange = useCallback((dag: Dag): void => {
+    setNotice(null)
+    setDraft((current) => (current === null ? current : applyDag(current, dag)))
+    setSaved(false)
+    setRefused(null)
+  }, [])
 
   // The daemon's own validator, on every change. `issues` is empty exactly
   // when the executor would accept this document.
@@ -152,73 +187,97 @@ export function EditorView({
     return parsed.ok ? [] : parsed.issues
   }, [draft])
 
-  if (loadError !== null) return <p className="error">{loadError}</p>
-  if (draft === null) return <p className="empty">Loading workflow…</p>
+  if (loadError !== null) return <ErrorNote>{loadError}</ErrorNote>
+  if (draft === null) return <EmptyNote>Loading workflow…</EmptyNote>
 
   const dag = toDag(draft)
   const node = draft.nodes.find((candidate) => candidate.id === selected) ?? null
 
   return (
-    <section className="editor" data-workflow={workflowId}>
-      <header className="run-head">
-        <div>
-          <h2>{draft.id}</h2>
-          <p className="muted">base {draft.base_branch}</p>
-        </div>
-        <div className="run-meta">
-          <button
+    <section className="editor flex flex-col gap-5" data-workflow={workflowId}>
+      <PageHeader className="run-head">
+        <PageHeaderHeading>
+          <PageHeaderTitle>{draft.id}</PageHeaderTitle>
+          <PageHeaderMeta>
+            <span>{draft.id}.workflow.json</span>
+            <span>base {draft.base_branch}</span>
+            <span>
+              {draft.nodes.length} {draft.nodes.length === 1 ? 'node' : 'nodes'}
+            </span>
+          </PageHeaderMeta>
+        </PageHeaderHeading>
+        <PageHeaderActions className="run-meta">
+          {issues.length === 0 ? (
+            <Chip tone="ok">valid</Chip>
+          ) : (
+            <Chip tone="error">
+              {issues.length} {issues.length === 1 ? 'issue' : 'issues'}
+            </Chip>
+          )}
+          {saved && (
+            <span className="muted text-[13px] text-muted-foreground" data-role="saved">
+              Saved
+            </span>
+          )}
+          <Button
             type="button"
+            size="sm"
             data-action="save"
             disabled={issues.length > 0}
             onClick={() => void save(draft)}
           >
+            <SaveIcon />
             Save
-          </button>
-          {saved && <span className="muted" data-role="saved">Saved</span>}
+          </Button>
+        </PageHeaderActions>
+      </PageHeader>
+
+      {notice !== null && <ErrorNote data-role="notice">{notice}</ErrorNote>}
+
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="flex min-w-0 flex-col gap-4">
+          <EditorDag dag={dag} selected={selected} onChange={onDagChange} onSelect={setSelected} />
+
+          <DependencyForm
+            nodes={draft.nodes}
+            onAdd={(from, to, artifact) => {
+              const result = addDependency(draft, from, to, artifact)
+              if (!result.ok) {
+                setNotice(REFUSALS[result.reason] ?? 'That dependency was refused.')
+                return
+              }
+              setNotice(null)
+              edit(result.workflow)
+            }}
+            onRefuse={setNotice}
+          />
+
+          <Pipelines
+            workflow={draft}
+            open={openPipeline}
+            onOpen={setOpenPipeline}
+            onChange={(id, pipeline) => edit(setPipeline(draft, id, pipeline))}
+          />
         </div>
-      </header>
 
-      {notice !== null && (
-        <p className="error" data-role="notice">
-          {notice}
-        </p>
-      )}
-
-      <EditorDag dag={dag} selected={selected} onChange={onDagChange} onSelect={setSelected} />
-
-      <DependencyForm
-        nodes={draft.nodes}
-        onAdd={(from, to, artifact) => {
-          const result = addDependency(draft, from, to, artifact)
-          if (!result.ok) {
-            setNotice(REFUSALS[result.reason] ?? 'That dependency was refused.')
-            return
-          }
-          setNotice(null)
-          edit(result.workflow)
-        }}
-        onRefuse={setNotice}
-      />
-
-      {node !== null && (
-        <NodeFields
-          workflow={draft}
-          node={node}
-          onPatch={(patch) => edit(patchNode(draft, node.id, patch))}
-          onArtifact={(index, artifact) =>
-            edit(patchDependency(draft, node.id, index, artifact))
-          }
-        />
-      )}
-
-      <Pipelines
-        workflow={draft}
-        open={openPipeline}
-        onOpen={setOpenPipeline}
-        onChange={(id, pipeline) => edit(setPipeline(draft, id, pipeline))}
-      />
-
-      <Issues issues={issues} refused={refused} />
+        <div className="flex flex-col gap-4">
+          {node !== null ? (
+            <NodeFields
+              workflow={draft}
+              node={node}
+              onPatch={(patch) => edit(patchNode(draft, node.id, patch))}
+              onArtifact={(index, artifact) =>
+                edit(patchDependency(draft, node.id, index, artifact))
+              }
+            />
+          ) : (
+            <Panel title="Node" description="Everything the canvas has no opinion about.">
+              <EmptyNote>Select a node on the canvas to edit its fields.</EmptyNote>
+            </Panel>
+          )}
+          <Issues issues={issues} refused={refused} />
+        </div>
+      </div>
     </section>
   )
 
@@ -247,6 +306,26 @@ export function EditorView({
 
 // ---------------------------------------------------------------------------
 
+/** A labelled control: the label above, the control full width. */
+function Field({
+  label,
+  htmlFor,
+  children,
+}: {
+  readonly label: string
+  readonly htmlFor: string
+  readonly children: ReactElement
+}): ReactElement {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor={htmlFor} className="text-[13px]">
+        {label}
+      </Label>
+      {children}
+    </div>
+  )
+}
+
 /**
  * Drawing an arrow on the canvas states an order; it does not state *what* the
  * downstream phase needs. This form asks for both at once, which is why the
@@ -267,52 +346,71 @@ function DependencyForm({
   const [artifact, setArtifact] = useState('')
 
   return (
-    <form
-      className="panel"
-      data-role="dependency-form"
-      onSubmit={(event) => {
-        event.preventDefault()
-        if (artifact.trim() === '') {
-          onRefuse('A dependency needs an artifact — what the downstream phase builds on.')
-          return
-        }
-        onAdd(from, to, artifact)
-        setArtifact('')
-      }}
+    <Panel
+      title="Add dependency"
+      description="An arrow states an order; the artifact says what the downstream phase builds on."
     >
-      <h3>Add dependency</h3>
-      <label>
-        Depends on
-        <select data-field="from" value={from} onChange={(e) => setFrom(e.target.value)}>
-          {nodes.map((candidate) => (
-            <option key={candidate.id} value={candidate.id}>
-              {candidate.id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Node
-        <select data-field="to" value={to} onChange={(e) => setTo(e.target.value)}>
-          {nodes.map((candidate) => (
-            <option key={candidate.id} value={candidate.id}>
-              {candidate.id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Artifact
-        <input
-          data-field="artifact"
-          value={artifact}
-          onChange={(e) => setArtifact(e.target.value)}
-        />
-      </label>
-      <button type="submit" data-action="add-dependency">
-        Add dependency
-      </button>
-    </form>
+      <form
+        className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_2fr_auto]"
+        data-role="dependency-form"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (artifact.trim() === '') {
+            onRefuse('A dependency needs an artifact — what the downstream phase builds on.')
+            return
+          }
+          onAdd(from, to, artifact)
+          setArtifact('')
+        }}
+      >
+        <Field label="Depends on" htmlFor="dependency-from">
+          <NativeSelect
+            id="dependency-from"
+            size="sm"
+            className="w-full"
+            data-field="from"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+          >
+            {nodes.map((candidate) => (
+              <NativeSelectOption key={candidate.id} value={candidate.id}>
+                {candidate.id}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </Field>
+        <Field label="Node" htmlFor="dependency-to">
+          <NativeSelect
+            id="dependency-to"
+            size="sm"
+            className="w-full"
+            data-field="to"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+          >
+            {nodes.map((candidate) => (
+              <NativeSelectOption key={candidate.id} value={candidate.id}>
+                {candidate.id}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </Field>
+        <Field label="Artifact" htmlFor="dependency-artifact">
+          <Input
+            id="dependency-artifact"
+            className="h-8"
+            data-field="artifact"
+            placeholder="what the downstream phase builds on"
+            value={artifact}
+            onChange={(e) => setArtifact(e.target.value)}
+          />
+        </Field>
+        <Button type="submit" variant="outline" size="sm" data-action="add-dependency">
+          <PlusIcon />
+          Add dependency
+        </Button>
+      </form>
+    </Panel>
   )
 }
 
@@ -330,48 +428,71 @@ function NodeFields({
 }): ReactElement {
   const gates = Object.keys(workflow.gates)
   return (
-    <section className="panel" data-role="node-fields" data-node={node.id}>
-      <h3>{node.id}</h3>
-      <label>
-        Name
-        <input
+    <Panel
+      title={<span className="font-mono">{node.id}</span>}
+      description="Everything the canvas has no opinion about."
+      data-role="node-fields"
+      data-node={node.id}
+      contentClassName="gap-3.5"
+    >
+      <Field label="Name" htmlFor="node-name">
+        <Input
+          id="node-name"
+          className="h-8"
           data-field="name"
           value={node.name}
           onChange={(e) => onPatch({ name: e.target.value })}
         />
-      </label>
-      <label>
-        Prompt ref
-        <input
+      </Field>
+      <Field label="Prompt ref" htmlFor="node-prompt-ref">
+        <Input
+          id="node-prompt-ref"
+          className="h-8 font-mono text-xs"
           data-field="prompt_ref"
           value={node.prompt_ref}
           onChange={(e) => onPatch({ prompt_ref: e.target.value })}
         />
-      </label>
-      <label>
-        Harness
-        <select
-          data-field="harness"
-          value={node.harness ?? ''}
-          onChange={(e) =>
-            onPatch(
-              e.target.value === ''
-                ? { harness: undefined }
-                : { harness: e.target.value as Node['harness'] },
-            )
-          }
-        >
-          <option value="">inherit ({workflow.defaults.harness})</option>
-          {HARNESS_IDS.map((id) => (
-            <option key={id} value={id}>
-              {id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Model
-        <input
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Harness" htmlFor="node-harness">
+          <NativeSelect
+            id="node-harness"
+            size="sm"
+            className="w-full"
+            data-field="harness"
+            value={node.harness ?? ''}
+            onChange={(e) =>
+              onPatch(
+                e.target.value === ''
+                  ? { harness: undefined }
+                  : { harness: e.target.value as Node['harness'] },
+              )
+            }
+          >
+            <NativeSelectOption value="">inherit ({workflow.defaults.harness})</NativeSelectOption>
+            {HARNESS_IDS.map((id) => (
+              <NativeSelectOption key={id} value={id}>
+                {id}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </Field>
+        <Field label="Max fix rounds" htmlFor="node-max-fix-rounds">
+          <Input
+            id="node-max-fix-rounds"
+            className="h-8 font-mono"
+            data-field="max_fix_rounds"
+            type="number"
+            min={0}
+            value={node.max_fix_rounds}
+            onChange={(e) => onPatch({ max_fix_rounds: Number.parseInt(e.target.value, 10) })}
+          />
+        </Field>
+      </div>
+      <Field label="Model" htmlFor="node-model">
+        <Input
+          id="node-model"
+          className="h-8 font-mono text-xs"
           data-field="model"
           value={node.model ?? ''}
           placeholder={workflow.defaults.model}
@@ -379,52 +500,54 @@ function NodeFields({
             onPatch(e.target.value === '' ? { model: undefined } : { model: e.target.value })
           }
         />
-      </label>
-      <label>
-        Max fix rounds
-        <input
-          data-field="max_fix_rounds"
-          type="number"
-          min={0}
-          value={node.max_fix_rounds}
-          onChange={(e) => onPatch({ max_fix_rounds: Number.parseInt(e.target.value, 10) })}
-        />
-      </label>
+      </Field>
 
-      <fieldset data-field="gates">
-        <legend>Gates</legend>
+      <fieldset className="m-0 flex flex-col gap-1.5 border-0 p-0" data-field="gates">
+        <legend className="mb-1.5 text-[13px] font-medium">Gates</legend>
         {gates.length === 0 ? (
-          <p className="empty">This workflow declares no gates.</p>
+          <EmptyNote>This workflow declares no gates.</EmptyNote>
         ) : (
-          gates.map((gate) => (
-            <label key={gate}>
-              <input
-                type="checkbox"
-                data-gate={gate}
-                checked={node.gates.includes(gate)}
-                onChange={(e) =>
-                  onPatch({
-                    gates: e.target.checked
-                      ? [...node.gates, gate]
-                      : node.gates.filter((held) => held !== gate),
-                  })
-                }
-              />
-              {gate}
-            </label>
-          ))
+          <HStack gap={4} wrap>
+            {gates.map((gate) => (
+              <label key={gate} className="flex items-center gap-2 text-sm">
+                {/* A real checkbox: form semantics, keyboard, and a test's click. */}
+                <input
+                  type="checkbox"
+                  className="size-4 rounded-[4px] accent-primary"
+                  data-gate={gate}
+                  checked={node.gates.includes(gate)}
+                  onChange={(e) =>
+                    onPatch({
+                      gates: e.target.checked
+                        ? [...node.gates, gate]
+                        : node.gates.filter((held) => held !== gate),
+                    })
+                  }
+                />
+                <span className="font-mono text-xs">{gate}</span>
+              </label>
+            ))}
+          </HStack>
         )}
       </fieldset>
 
-      <fieldset data-field="depends_on">
-        <legend>Dependencies</legend>
+      <fieldset className="m-0 flex flex-col gap-2 border-0 p-0" data-field="depends_on">
+        <legend className="mb-1.5 text-[13px] font-medium">Dependencies</legend>
         {node.depends_on.length === 0 ? (
-          <p className="empty">No dependencies — this node branches from the base.</p>
+          <EmptyNote>No dependencies — this node branches from the base.</EmptyNote>
         ) : (
           node.depends_on.map((dependency, index) => (
-            <label key={dependency.node} data-dependency={dependency.node}>
-              {dependency.node} provides
-              <input
+            <label
+              key={dependency.node}
+              data-dependency={dependency.node}
+              className="flex items-center gap-2 text-xs"
+            >
+              <span className="shrink-0 font-mono text-muted-foreground">
+                {dependency.node} provides
+              </span>
+              <Input
+                className="h-8 text-xs"
+                aria-label={`Artifact ${dependency.node} provides`}
                 data-field="artifact"
                 value={dependency.artifact}
                 onChange={(e) => onArtifact(index, e.target.value)}
@@ -433,7 +556,7 @@ function NodeFields({
           ))
         )}
       </fieldset>
-    </section>
+    </Panel>
   )
 }
 
@@ -465,63 +588,88 @@ function Pipelines({
   const opened = open === null ? undefined : workflow.pipelines[open]
 
   return (
-    <section className="panel" data-role="pipelines">
-      <h3>Pipelines</h3>
-      {referenced.map((id) => {
-        const shipped = usesShippedPipeline(workflow, id)
-        const declared = workflow.pipelines[id] !== undefined
-        return (
-          <div key={id} data-pipeline={id}>
-            <strong>{id}</strong>
-            {shipped && (
-              <>
-                <p className="muted" data-role="shipped">
-                  Uses the pipeline the package ships. The executor supplies it at run time; this
-                  workflow authors no override.
-                </p>
-                <button
-                  type="button"
-                  data-action="author-override"
-                  onClick={() => {
-                    const base = shippedPipeline(id)
-                    if (base === undefined) return
-                    onChange(id, base)
-                    onOpen(id)
-                  }}
-                >
-                  Author an override
-                </button>
-              </>
-            )}
-            {declared && (
-              <>
-                <p className="muted" data-role="override">
-                  This workflow authors its own copy, which shadows any shipped pipeline of the
-                  same name.
-                </p>
-                <button type="button" data-action="open-pipeline" onClick={() => onOpen(id)}>
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  data-action="drop-override"
-                  onClick={() => {
-                    onChange(id, null)
-                    if (open === id) onOpen(null)
-                  }}
-                >
-                  Drop the override
-                </button>
-              </>
-            )}
-            {!shipped && !declared && (
-              <p className="error" data-role="unknown-pipeline">
-                Nothing declares or ships a pipeline with this name.
-              </p>
-            )}
-          </div>
-        )
-      })}
+    <Panel title="Pipelines" data-role="pipelines">
+      <ul className="divide-y">
+        {referenced.map((id) => {
+          const shipped = usesShippedPipeline(workflow, id)
+          const declared = workflow.pipelines[id] !== undefined
+          return (
+            <li
+              key={id}
+              data-pipeline={id}
+              className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
+            >
+              <div className="flex min-w-0 flex-col gap-1">
+                <span className="flex items-center gap-2">
+                  <strong className="font-mono text-[13px] font-semibold">{id}</strong>
+                  {shipped && <Badge variant="outline">shipped</Badge>}
+                  {declared && <Chip tone="active">override</Chip>}
+                </span>
+                {shipped && (
+                  <Hint className="muted text-xs" data-role="shipped">
+                    Uses the pipeline the package ships. The executor supplies it at run time;
+                    this workflow authors no override.
+                  </Hint>
+                )}
+                {declared && (
+                  <Hint className="muted text-xs" data-role="override">
+                    This workflow authors its own copy, which shadows any shipped pipeline of the
+                    same name.
+                  </Hint>
+                )}
+                {!shipped && !declared && (
+                  <ErrorNote data-role="unknown-pipeline">
+                    Nothing declares or ships a pipeline with this name.
+                  </ErrorNote>
+                )}
+              </div>
+              <HStack gap={2} wrap>
+                {shipped && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    data-action="author-override"
+                    onClick={() => {
+                      const base = shippedPipeline(id)
+                      if (base === undefined) return
+                      onChange(id, base)
+                      onOpen(id)
+                    }}
+                  >
+                    Author an override
+                  </Button>
+                )}
+                {declared && (
+                  <>
+                    <Button
+                      type="button"
+                      variant={open === id ? 'secondary' : 'outline'}
+                      size="sm"
+                      data-action="open-pipeline"
+                      onClick={() => onOpen(id)}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      data-action="drop-override"
+                      onClick={() => {
+                        onChange(id, null)
+                        if (open === id) onOpen(null)
+                      }}
+                    >
+                      Drop the override
+                    </Button>
+                  </>
+                )}
+              </HStack>
+            </li>
+          )
+        })}
+      </ul>
       {open !== null && opened !== undefined && (
         <EditorPipeline
           key={open}
@@ -529,7 +677,7 @@ function Pipelines({
           onChange={(pipeline) => onChange(open, pipeline)}
         />
       )}
-    </section>
+    </Panel>
   )
 }
 
@@ -542,37 +690,46 @@ function Issues({
   readonly refused: { readonly message: string; readonly issues: readonly Issue[] } | null
 }): ReactElement {
   return (
-    <section className="panel" data-role="issues">
-      <h3>Validation</h3>
+    <Panel
+      title="Validation"
+      data-role="issues"
+      action={issues.length === 0 ? <Chip tone="ok">valid</Chip> : <Chip tone="error">invalid</Chip>}
+    >
       {issues.length === 0 ? (
-        <p className="empty" data-role="valid">
-          This workflow is valid.
-        </p>
+        <EmptyNote data-role="valid">
+          This workflow is valid. The daemon runs the same validator before it accepts a save.
+        </EmptyNote>
       ) : (
-        <ul>
+        <ul className="flex flex-col gap-1.5 text-sm">
           {issues.map((issue) => {
             const path = formatPath(issue.path)
             return (
               <li key={`${path}:${issue.message}`} data-path={path}>
-                <code>{path === '' ? '(root)' : path}</code>: {issue.message}
+                <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                  {path === '' ? '(root)' : path}
+                </code>{' '}
+                {issue.message}
               </li>
             )
           })}
         </ul>
       )}
       {refused !== null && (
-        <div data-role="refused">
-          <p className="error">{refused.message}</p>
-          <ul>
+        <div className="flex flex-col gap-1.5 border-t pt-3" data-role="refused">
+          <ErrorNote>{refused.message}</ErrorNote>
+          <ul className="flex flex-col gap-1.5 text-sm">
             {refused.issues.map((issue) => (
               <li key={`${issue.path}:${issue.message}`} data-server-path={issue.path}>
-                <code>{issue.path === '' ? '(root)' : issue.path}</code>: {issue.message}
+                <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                  {issue.path === '' ? '(root)' : issue.path}
+                </code>{' '}
+                {issue.message}
               </li>
             ))}
           </ul>
         </div>
       )}
-    </section>
+    </Panel>
   )
 }
 

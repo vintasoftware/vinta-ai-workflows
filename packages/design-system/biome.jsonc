@@ -1,0 +1,54 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
+  // The same rulebook as packages/vinta-dag-editor, for the same reason: a
+  // developer moving between the workspace packages should meet one style —
+  // the one packages/vinta-flow established by hand.
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded",
+      "trailingCommas": "all",
+      "arrowParentheses": "always"
+    }
+  },
+  "css": {
+    // The stylesheets are Tailwind v4 entries: `@theme`, `@custom-variant`,
+    // `@source`, `@apply`. Biome parses those only when told to.
+    "parser": {
+      "tailwindDirectives": true
+    },
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": { "recommended": true }
+  },
+  "overrides": [
+    {
+      // src/ui holds shadcn/ui sources as the CLI generated them, so a later
+      // `shadcn add` can be diffed against upstream. Three of Biome's rules
+      // disagree with upstream's idioms in `field.tsx` and `slider.tsx`; they
+      // are relaxed for that directory only rather than the code being forked.
+      "includes": ["src/ui/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noArrayIndexKey": "off",
+            "noDoubleEquals": "off"
+          },
+          "a11y": {
+            "useSemanticElements": "off"
+          }
+        }
+      }
+    }
+  ]
+}

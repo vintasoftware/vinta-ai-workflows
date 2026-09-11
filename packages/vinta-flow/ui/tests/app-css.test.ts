@@ -1,5 +1,5 @@
 /**
- * The two things about `app.css` that a rendering test cannot catch.
+ * The things about `app.css` that a rendering test cannot catch.
  *
  * jsdom has no layout engine, so nothing here — and nothing anywhere in this
  * suite — can prove that a box is the size it looks. What a test *can* do is
@@ -12,6 +12,12 @@
  * so `.dag { display: block }` flattened the graph's flex column, collapsed its
  * viewport to nothing, and rendered an empty box in every view while every
  * test stayed green.
+ *
+ * The second is the design system's: the graph's status colours are its
+ * tones, so the canvas and the badges beside it cannot disagree — and
+ * `waiting_on_capacity` is painted with the waiting tone, never the failing
+ * one (§6.1). The chrome itself is no longer styled here — it is the design
+ * system's shell, and the design system's own suite covers it.
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -22,11 +28,19 @@ const SOURCE = readFileSync(resolve(process.cwd(), 'ui/src/app.css'), 'utf8')
 /** Comments in this file quote CSS, braces and all, so they go first. */
 const CSS = SOURCE.replace(/\/\*[\s\S]*?\*\//g, '')
 
-/** The declarations of every rule whose selector list matches `selector`. */
+/**
+ * The declarations of every rule whose selector list matches `selector`. The
+ * text before a `{` also holds any `@import` / `@source` statements since the
+ * previous rule, so only what follows the last `;` is the selector.
+ */
 function declarationsFor(selector: string): string {
   return [...CSS.matchAll(/([^{}]+)\{([^}]*)\}/g)]
     .filter(([, selectors]) =>
-      (selectors ?? '').split(',').some((one) => one.trim() === selector),
+      (selectors ?? '')
+        .split(';')
+        .at(-1)
+        ?.split(',')
+        .some((one) => one.trim() === selector),
     )
     .map(([, , body]) => body ?? '')
     .join('\n')
@@ -35,24 +49,35 @@ function declarationsFor(selector: string): string {
 test('the host of the canvas is never given a display by this document', () => {
   // `<vinta-dag>` lays itself out as a flex column in its own `:host` rule, and
   // an outer rule would win. Size it, colour it, border it — never lay it out.
-  for (const selector of ['.dag', 'vinta-dag']) {
+  for (const selector of ['.dag', 'vinta-dag', '.pipeline', 'state-machine-editor']) {
     expect(declarationsFor(selector)).not.toMatch(/(^|[;\s])display\s*:/)
   }
   expect(declarationsFor('.dag')).toContain('height:')
 })
 
-test('the page is a bounded column and the header is one row', () => {
-  const app = declarationsFor('.app')
-  expect(app).toMatch(/max-width:\s*\d/)
-  expect(app).toMatch(/padding:\s*\d/)
-  expect(app).toMatch(/margin:\s*0 auto/)
+test('the stylesheet is the design system’s, and scans it for utilities', () => {
+  expect(CSS).toContain("@import 'tailwindcss'")
+  expect(CSS).toContain("@import 'vinta-design-system/styles/tokens.css'")
+  expect(CSS).toContain("@import 'vinta-design-system/styles/fonts.css'")
+  // Tailwind only emits the classes it sees; without this the components'
+  // classes would resolve to nothing and every card would be an unstyled div.
+  expect(CSS).toMatch(/@source\s+'\.\.\/\.\.\/\.\.\/design-system\/src'/)
+})
 
-  // The chrome is styled rather than left to the browser: a row with a rule
-  // under it, a title that is not a blue underlined anchor, and a reminder
-  // control wearing the same border as every other control on the page.
-  const head = declarationsFor('.app-head')
-  expect(head).toMatch(/display:\s*flex/)
-  expect(head).toMatch(/border-bottom:/)
-  expect(declarationsFor('.app-head > h1 a')).toMatch(/color:\s*var\(--text\)/)
-  expect(CSS).toContain('.app-head select')
+test('the graph paints each status with the tone the badges use', () => {
+  const dag = declarationsFor('vinta-dag')
+  const expected: Record<string, string> = {
+    pending: 'idle',
+    running: 'active',
+    waiting_on_capacity: 'wait',
+    awaiting_human: 'attention',
+    done: 'ok',
+    failed: 'error',
+  }
+  for (const [status, tone] of Object.entries(expected)) {
+    expect(dag).toMatch(new RegExp(`--vdag-status-${status}:\\s*var\\(--tone-${tone}\\)`))
+  }
+  // Edges are drawn with the stroke token, not the hairline: a border that
+  // fades to a 10% white at night is right for a card and invisible for a line.
+  expect(dag).toMatch(/--vdag-line:\s*var\(--line\)/)
 })

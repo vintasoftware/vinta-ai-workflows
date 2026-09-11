@@ -28,16 +28,38 @@
  * perform does not belong on a control. The capability is read off the wire,
  * never assumed, so a harness that declares nothing gets the sentence rather
  * than the button.
+ *
+ * The page is two columns above a large window: what the operator *does* on
+ * the left — the question, the steering box, the terminal, the transcript it
+ * steers — and what they *check* on the right — the diff, the gates, the
+ * sessions. On a narrow window the columns stack in that order.
  */
+import { ChevronLeftIcon, TerminalIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import {
+  DescriptionDetails,
+  DescriptionList,
+  DescriptionTerm,
+  HStack,
+  PageHeader,
+  PageHeaderActions,
+  PageHeaderHeading,
+  PageHeaderMeta,
+  PageHeaderTitle,
+} from 'vinta-design-system/layout'
+import { Button } from 'vinta-design-system/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from 'vinta-design-system/ui/card'
+import { Textarea } from 'vinta-design-system/ui/textarea'
 import type { NodeDetail, RunSnapshot } from '../../src/daemon/schemas.ts'
 import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
+import { Live } from './Live.tsx'
+import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import type { NodeStatus } from './projection.ts'
 import { nodeLabel, nodeTone, type Tone } from './status.ts'
 import { TerminalView } from './Terminal.tsx'
-import { Transcript } from './Transcript.tsx'
 import { useNow } from './time.ts'
+import { Transcript } from './Transcript.tsx'
 import { useRun } from './useRun.ts'
 
 /** Covers transcript growth, which journals no event to ride in on. */
@@ -128,7 +150,7 @@ export function NodeView({
   if (detail === null) {
     return (
       <section className="node">
-        <p className="empty">{error ?? 'Loading node…'}</p>
+        <EmptyNote>{error ?? 'Loading node…'}</EmptyNote>
       </section>
     )
   }
@@ -136,32 +158,41 @@ export function NodeView({
   // The stream is authoritative where it has spoken; the detail is the rest.
   const status = projection.statuses.get(nodeId) ?? detail.node.status
   const failingGate = detail.question?.context?.gateLogRef ?? null
+  const runHref = `#/runs/${encodeURIComponent(runId)}`
 
   return (
-    <section className="node">
-      <header className="run-head">
-        <div>
-          <h2>{detail.node.name}</h2>
-          <p className="muted">
-            {detail.node.nodeId} · wave {detail.node.wave} · {detail.node.harness} ·{' '}
-            {detail.node.lane ?? 'no lane'}
-          </p>
-        </div>
-        <div className="run-meta">
-          <Chip tone={nodeTone(status)}>{nodeLabel(status)}</Chip>
-          <span className={connected ? 'live' : 'live off'}>
-            {connected ? 'Live' : 'Reconnecting…'}
-          </span>
-          {/* A fragment, so the token stays where the daemon put it (§10). */}
-          <a href={`#/runs/${encodeURIComponent(runId)}`}>Back to run</a>
-        </div>
-      </header>
+    <section className="node flex flex-col gap-5">
+      <div className="flex flex-col gap-2">
+        {/* A fragment, so the token stays where the daemon put it (§10). */}
+        <a
+          href={runHref}
+          className="inline-flex w-fit items-center gap-1 text-[13px] text-muted-foreground no-underline hover:text-foreground hover:no-underline"
+        >
+          <ChevronLeftIcon className="size-3.5" aria-hidden="true" />
+          Back to run
+        </a>
+        <PageHeader className="run-head">
+          <PageHeaderHeading>
+            <PageHeaderTitle>{detail.node.name}</PageHeaderTitle>
+            <PageHeaderMeta>
+              <span>{detail.node.nodeId}</span>
+              <span>wave {detail.node.wave}</span>
+              <span>{detail.node.harness}</span>
+              <span>{detail.node.lane ?? 'no lane'}</span>
+            </PageHeaderMeta>
+          </PageHeaderHeading>
+          <PageHeaderActions className="run-meta">
+            <Chip tone={nodeTone(status)}>{nodeLabel(status)}</Chip>
+            <Live connected={connected} />
+          </PageHeaderActions>
+        </PageHeader>
+      </div>
 
-      {error !== null && <p className="error">{error}</p>}
+      {error !== null && <ErrorNote>{error}</ErrorNote>}
       {notice !== null && (
-        <p className="muted" data-notice>
+        <Hint className="muted" data-notice>
           {notice}
-        </p>
+        </Hint>
       )}
 
       {detail.question !== null && (
@@ -172,25 +203,26 @@ export function NodeView({
         />
       )}
 
-      <Steering
-        harness={detail.node.harness}
-        capabilities={capabilitiesOf(snapshot, detail.node.harness)}
-        status={status}
-        busy={busy}
-        takingOver={takingOver}
-        onTakeOver={() => setTakingOver((open) => !open)}
-        onOperate={(operation, body, done) => void operate(operation, body, done)}
-      />
-
-      {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
-
-      <div className="panels">
-        <Diff diff={detail.diff} />
-        <Gates gates={detail.gates} failing={failingGate} />
-        <Sessions sessions={detail.sessions} />
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div className="flex flex-col gap-4">
+          <Steering
+            harness={detail.node.harness}
+            capabilities={capabilitiesOf(snapshot, detail.node.harness)}
+            status={status}
+            busy={busy}
+            takingOver={takingOver}
+            onTakeOver={() => setTakingOver((open) => !open)}
+            onOperate={(operation, body, done) => void operate(operation, body, done)}
+          />
+          {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
+          <Transcript entries={detail.transcript.entries} />
+        </div>
+        <div className="panels flex flex-col gap-4">
+          <Diff diff={detail.diff} />
+          <Gates gates={detail.gates} failing={failingGate} />
+          <Sessions sessions={detail.sessions} />
+        </div>
       </div>
-
-      <Transcript entries={detail.transcript.entries} />
     </section>
   )
 }
@@ -199,6 +231,9 @@ export function NodeView({
  * §9.1's question, inline with its context. The context is references — a
  * branch, a gate id, a transcript position — because that is what the daemon
  * serves and what the rest of this page already renders.
+ *
+ * It is the one card on the page with a ring: it is the reason the operator
+ * was called here, and it must read before anything else does.
  */
 function Pending({
   question,
@@ -213,90 +248,108 @@ function Pending({
   const context = question.context
 
   return (
-    <section className="panel question" data-question>
-      <h3>
-        <Chip tone="attention">awaiting you</Chip> {question.question}
-      </h3>
+    <Card
+      className="question gap-3 border-tone-attention py-4 ring-[3px] ring-tone-attention-soft"
+      data-question
+    >
+      <CardHeader className="px-4">
+        <CardTitle className="flex flex-wrap items-center gap-2.5 text-[15px] leading-snug">
+          <Chip tone="attention">awaiting you</Chip>
+          <span>{question.question}</span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 px-4">
+        {context !== undefined && (
+          <ul className="question-context flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            {context.diffRef !== undefined && (
+              <li data-context="diff">
+                Diff <span className="font-mono">{context.diffRef}</span>
+              </li>
+            )}
+            {context.gateLogRef !== undefined && (
+              <li data-context="gate">
+                Gate log <span className="font-mono">{context.gateLogRef}</span>
+              </li>
+            )}
+            {context.transcriptCursor !== undefined && (
+              <li data-context="cursor">Paused at transcript entry {context.transcriptCursor}</li>
+            )}
+          </ul>
+        )}
 
-      {context !== undefined && (
-        <ul className="question-context">
-          {context.diffRef !== undefined && (
-            <li data-context="diff">Diff: {context.diffRef}</li>
-          )}
-          {context.gateLogRef !== undefined && (
-            <li data-context="gate">Gate log: {context.gateLogRef}</li>
-          )}
-          {context.transcriptCursor !== undefined && (
-            <li data-context="cursor">Paused at transcript entry {context.transcriptCursor}</li>
-          )}
-        </ul>
-      )}
-
-      {question.kind === 'confirm' && (
-        <p className="controls">
-          <button
-            type="button"
-            data-op="answer"
-            data-answer="true"
-            disabled={busy}
-            onClick={() => onAnswer(true)}
-          >
-            Yes
-          </button>
-          <button
-            type="button"
-            data-op="answer"
-            data-answer="false"
-            disabled={busy}
-            onClick={() => onAnswer(false)}
-          >
-            No
-          </button>
-        </p>
-      )}
-
-      {question.kind === 'choice' && (
-        <p className="controls">
-          {(question.choices ?? []).map((choice) => (
-            <button
-              key={choice}
+        {question.kind === 'confirm' && (
+          <HStack gap={2} wrap className="controls">
+            <Button
               type="button"
+              size="sm"
               data-op="answer"
-              data-answer={choice}
+              data-answer="true"
               disabled={busy}
-              onClick={() => onAnswer(choice)}
+              onClick={() => onAnswer(true)}
             >
-              {choice}
-            </button>
-          ))}
-          {(question.choices ?? []).length === 0 && (
-            <span className="empty">This question offers no choices.</span>
-          )}
-        </p>
-      )}
-
-      {question.kind === 'text' && (
-        <>
-          <textarea
-            aria-label="Answer"
-            data-field="answer"
-            rows={2}
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-          />
-          <p className="controls">
-            <button
+              Yes
+            </Button>
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               data-op="answer"
-              disabled={busy || text.trim() === ''}
-              onClick={() => onAnswer(text)}
+              data-answer="false"
+              disabled={busy}
+              onClick={() => onAnswer(false)}
             >
-              Answer
-            </button>
-          </p>
-        </>
-      )}
-    </section>
+              No
+            </Button>
+          </HStack>
+        )}
+
+        {question.kind === 'choice' && (
+          <HStack gap={2} wrap className="controls">
+            {(question.choices ?? []).map((choice) => (
+              <Button
+                key={choice}
+                type="button"
+                variant="outline"
+                size="sm"
+                data-op="answer"
+                data-answer={choice}
+                disabled={busy}
+                onClick={() => onAnswer(choice)}
+              >
+                {choice}
+              </Button>
+            ))}
+            {(question.choices ?? []).length === 0 && (
+              <EmptyNote>This question offers no choices.</EmptyNote>
+            )}
+          </HStack>
+        )}
+
+        {question.kind === 'text' && (
+          <>
+            <Textarea
+              aria-label="Answer"
+              data-field="answer"
+              rows={2}
+              className="min-h-14"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+            />
+            <HStack gap={2} wrap className="controls">
+              <Button
+                type="button"
+                size="sm"
+                data-op="answer"
+                disabled={busy || text.trim() === ''}
+                onClick={() => onAnswer(text)}
+              >
+                Answer
+              </Button>
+            </HStack>
+          </>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -339,79 +392,97 @@ function Steering({
   }
 
   return (
-    <section className="panel steering">
-      <h3>Steering</h3>
-      <textarea
+    <Panel
+      title="Steering"
+      className="steering"
+      description={<span data-delivery>{delivery(harness, status, declared.inject)}</span>}
+    >
+      <Textarea
         aria-label="Message to the agent"
         data-field="steering"
+        placeholder="Message to the agent…"
         rows={3}
         value={text}
         onChange={(event) => setText(event.target.value)}
         disabled={settled}
       />
-      <p className="muted" data-delivery>
-        {delivery(harness, status, declared.inject)}
-      </p>
       {!declared.interrupt && !settled && (
-        <p className="muted" data-redirect-note>
+        <Hint className="muted" data-redirect-note>
           {harness} cannot interrupt a running turn, so a redirect also lands at the next resume.
-        </p>
+        </Hint>
       )}
-      <p className="controls">
-        <button
-          type="button"
-          data-op="context"
-          disabled={busy || settled || empty}
-          onClick={() => send('context', { text }, 'Context accepted.')}
-        >
-          Add context
-        </button>
-        <button
-          type="button"
-          data-op="redirect"
-          disabled={busy || settled || empty}
-          onClick={() => send('redirect', { instruction: text }, 'Redirect accepted.')}
-        >
-          Redirect
-        </button>
-        <button
-          type="button"
-          data-op="pause"
-          disabled={busy || status !== 'running'}
-          onClick={() => onOperate('pause', {}, 'Pause requested after the current turn.')}
-        >
-          Pause
-        </button>
-        <button
-          type="button"
-          data-op="abort"
-          disabled={busy || settled}
-          onClick={() => onOperate('abort', {}, 'Abort requested.')}
-        >
-          Abort node
-        </button>
-      </p>
+      <div className="controls flex flex-wrap items-center justify-between gap-2">
+        <HStack gap={2} wrap>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-op="context"
+            disabled={busy || settled || empty}
+            onClick={() => send('context', { text }, 'Context accepted.')}
+          >
+            Add context
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-op="redirect"
+            disabled={busy || settled || empty}
+            onClick={() => send('redirect', { instruction: text }, 'Redirect accepted.')}
+          >
+            Redirect
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            data-op="pause"
+            disabled={busy || status !== 'running'}
+            onClick={() => onOperate('pause', {}, 'Pause requested after the current turn.')}
+          >
+            Pause
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-tone-error-foreground hover:bg-tone-error-soft hover:text-tone-error-foreground"
+            data-op="abort"
+            disabled={busy || settled}
+            onClick={() => onOperate('abort', {}, 'Abort requested.')}
+          >
+            Abort node
+          </Button>
+        </HStack>
+        {declared.pty && (
+          <Button
+            type="button"
+            variant={takingOver ? 'secondary' : 'outline'}
+            size="sm"
+            data-op="takeover"
+            disabled={settled}
+            onClick={onTakeOver}
+          >
+            <TerminalIcon />
+            {takingOver ? 'Detach' : 'Take over'}
+          </Button>
+        )}
+      </div>
       {declared.pty ? (
-        <>
-          <p className="controls">
-            <button type="button" data-op="takeover" disabled={settled} onClick={onTakeOver}>
-              {takingOver ? 'Detach' : 'Take over'}
-            </button>
-          </p>
-          <p className="muted" data-takeover>
-            Take over interrupts the headless session, opens {harness} in a terminal on the same
-            session, and resumes it headless when you detach.
-          </p>
-        </>
+        <Hint className="muted" data-takeover>
+          Take over interrupts the headless session, opens {harness} in a terminal on the same
+          session, and resumes it headless when you detach.
+        </Hint>
       ) : (
-        <p className="muted" data-takeover>
+        <Hint className="muted" data-takeover>
           Take over: {harness} has no interactive takeover.
           {capabilities === null
             ? ' Capabilities for this harness are unknown and assumed absent.'
             : ''}
-        </p>
+        </Hint>
       )}
-    </section>
+    </Panel>
   )
 }
 
@@ -435,22 +506,29 @@ function delivery(harness: string, status: NodeStatus, inject: boolean): string 
 function Diff({ diff }: { readonly diff: NodeDetail['diff'] }) {
   const complete = diff.branch !== null && diff.baseBranch !== null
   return (
-    <section className="panel" data-diff>
-      <h3>Diff</h3>
-      <dl className="ref">
-        <dt>branch</dt>
-        <dd data-diff-branch>{diff.branch ?? '—'}</dd>
-        <dt>base</dt>
-        <dd data-diff-base>{diff.baseBranch ?? '—'}</dd>
-        <dt>lane</dt>
-        <dd data-diff-lane>{diff.lane ?? '—'}</dd>
-      </dl>
-      <p className="muted">
-        {complete
-          ? `git diff ${diff.baseBranch}...${diff.branch}`
-          : 'This node has no branch yet.'}
-      </p>
-    </section>
+    <Panel title="Diff" data-diff>
+      <DescriptionList>
+        <DescriptionTerm>branch</DescriptionTerm>
+        <DescriptionDetails className="font-mono text-xs" data-diff-branch>
+          {diff.branch ?? '—'}
+        </DescriptionDetails>
+        <DescriptionTerm>base</DescriptionTerm>
+        <DescriptionDetails className="font-mono text-xs" data-diff-base>
+          {diff.baseBranch ?? '—'}
+        </DescriptionDetails>
+        <DescriptionTerm>lane</DescriptionTerm>
+        <DescriptionDetails className="font-mono text-xs" data-diff-lane>
+          {diff.lane ?? '—'}
+        </DescriptionDetails>
+      </DescriptionList>
+      {complete ? (
+        <pre className="m-0 rounded-md bg-muted px-3 py-2 font-mono text-xs">
+          git diff {diff.baseBranch}...{diff.branch}
+        </pre>
+      ) : (
+        <Hint className="muted">This node has no branch yet.</Hint>
+      )}
+    </Panel>
   )
 }
 
@@ -470,24 +548,28 @@ function Gates({
   readonly failing: string | null
 }) {
   return (
-    <section className="panel" data-gates>
-      <h3>Gate logs</h3>
+    <Panel title="Gate logs" data-gates>
       {gates.length === 0 ? (
-        <p className="empty">No gate has run yet.</p>
+        <EmptyNote>No gate has run yet.</EmptyNote>
       ) : (
-        <ul className="gates">
+        <ul className="gates flex flex-col gap-3">
           {gates.map((gate) => (
-            <li key={gate.gateId} data-gate={gate.gateId}>
-              <p className="entry-head">
-                <span>{gate.gateId}</span>
+            <li key={gate.gateId} data-gate={gate.gateId} className="flex flex-col gap-1.5">
+              <p className="entry-head flex items-center gap-2">
+                <span className="font-mono text-[13px] font-medium">{gate.gateId}</span>
                 {gate.gateId === failing && <Chip tone="error">failing</Chip>}
               </p>
-              <pre data-gate-log={gate.gateId}>{gate.log}</pre>
+              <pre
+                className="gate-log m-0 max-h-52 overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-xs"
+                data-gate-log={gate.gateId}
+              >
+                {gate.log}
+              </pre>
             </li>
           ))}
         </ul>
       )}
-    </section>
+    </Panel>
   )
 }
 
@@ -511,40 +593,53 @@ function Sessions({ sessions }: { readonly sessions: NodeDetail['sessions'] }) {
   const reused = sessions.filter((turn) => turn.disposition === 'reused').length
 
   return (
-    <section className="panel" data-sessions>
-      <h3>Agent sessions</h3>
-      {sessions.length === 0 ? (
-        <p className="empty">No agent turn has run yet.</p>
-      ) : (
-        <>
-          <p className="muted" data-session-summary>
+    <Panel
+      title="Agent sessions"
+      data-sessions
+      description={
+        sessions.length === 0 ? undefined : (
+          <span data-session-summary>
             {reused} of {sessions.length} {sessions.length === 1 ? 'turn' : 'turns'} continued a
             session.
-          </p>
-          <ul className="sessions">
-            {sessions.map((turn, index) => (
-              // The index is the key because a slot legitimately repeats: `main`
-              // is every implementer and fixer turn on this node, and the rows
-              // are an append-only sequence that nothing reorders or removes.
-              <li key={index} data-session-slot={turn.slot}>
-                <p className="entry-head">
-                  <Chip tone={sessionTone(turn)}>{turn.disposition}</Chip>
-                  <span className="entry-author">{turn.slot}</span>
-                  {turn.sessionId !== undefined && (
-                    <span className="muted" title={turn.sessionId}>
-                      {shortId(turn.sessionId)}
-                    </span>
-                  )}
-                </p>
-                {turn.reason !== undefined && (
-                  <p className="muted entry-body">{sessionReason(turn.reason)}</p>
+          </span>
+        )
+      }
+    >
+      {sessions.length === 0 ? (
+        <EmptyNote>No agent turn has run yet.</EmptyNote>
+      ) : (
+        <ul className="sessions divide-y">
+          {sessions.map((turn, index) => (
+            // The index is the key because a slot legitimately repeats: `main`
+            // is every implementer and fixer turn on this node, and the rows
+            // are an append-only sequence that nothing reorders or removes.
+            <li
+              key={index}
+              data-session-slot={turn.slot}
+              className="flex flex-col gap-0.5 py-2 first:pt-0 last:pb-0"
+            >
+              <p className="entry-head flex items-center gap-2">
+                <Chip tone={sessionTone(turn)}>{turn.disposition}</Chip>
+                <span className="entry-author text-[13px] font-semibold">{turn.slot}</span>
+                {turn.sessionId !== undefined && (
+                  <span
+                    className="muted font-mono text-xs text-muted-foreground"
+                    title={turn.sessionId}
+                  >
+                    {shortId(turn.sessionId)}
+                  </span>
                 )}
-              </li>
-            ))}
-          </ul>
-        </>
+              </p>
+              {turn.reason !== undefined && (
+                <p className="muted entry-body text-xs text-muted-foreground">
+                  {sessionReason(turn.reason)}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
       )}
-    </section>
+    </Panel>
   )
 }
 

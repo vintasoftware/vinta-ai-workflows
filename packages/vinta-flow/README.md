@@ -317,3 +317,5 @@ pnpm run postmortem:schema:check   # postmortem.v1 vs src/postmortem/postmortem.
 ```
 
 `schemas/workflow.v1.schema.json` and `schemas/postmortem.v1.schema.json` are **generated** and drift-checked. Edit the zod source and regenerate with `schema:gen` / `postmortem:schema:gen`; never hand-edit the JSON.
+
+The browser UI lives in `ui/` and is built on the workspace's design system, [`packages/design-system`](../design-system/README.md) — its tokens, its shadcn/ui components and its layout kit; the two canvas Web Components are re-skinned through their own custom properties in `ui/src/app.css` so the graph and the badges beside it share one palette. `pnpm run ui:dev` serves it with Vite against a running daemon; `pnpm run ui:build` writes the bundle the daemon serves into `dist/ui`. The UI follows the operating system's light or dark scheme by default; the toggle in the top bar remembers a choice per browser. Fonts ship in the bundle — the page makes no request outside its own origin.

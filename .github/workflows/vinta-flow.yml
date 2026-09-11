@@ -19,12 +19,14 @@ on:
     branches: [main]
     paths:
       - 'packages/vinta-flow/**'
+      - 'packages/design-system/**'
       - '.github/workflows/vinta-flow.yml'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
   pull_request:
     paths:
       - 'packages/vinta-flow/**'
+      - 'packages/design-system/**'
       - '.github/workflows/vinta-flow.yml'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
@@ -84,11 +86,25 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: .
 
+      # The UI is built on the workspace's design system, which has its own
+      # typecheck, tests and Biome lint. They run here rather than in a job of
+      # their own because a token or component change is only ever verified by
+      # the app that renders it, and that app is this one.
+      - name: Design system — typecheck, lint, test
+        run: pnpm run typecheck && pnpm run lint && pnpm test
+        working-directory: packages/design-system
+
       - name: Typecheck
         run: pnpm run typecheck
 
       - name: Test
         run: pnpm test
+
+      # The bundle the daemon serves. Tailwind generates only the classes it
+      # scans, so a build is the one check that the design system's sources
+      # are actually reachable from this package's stylesheet.
+      - name: Build the UI
+        run: pnpm run ui:build
 
       # The suite runs under Vitest, which transpiles. The shipped entry point
       # does not: it asks Node itself for `--experimental-transform-types` from

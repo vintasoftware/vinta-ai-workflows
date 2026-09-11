@@ -1,0 +1,322 @@
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================================
+   Vinta — colour, tone and type foundations.
+
+   Three layers, the same architecture as vinta-schedule-design-system so a
+   developer moving between Vinta products meets one vocabulary:
+
+     1. Primitive scales   --vinta-*, --slate-*, --green-*, --amber-*, --red-*,
+                           --violet-*  (raw, theme-agnostic, oklch)
+     2. Semantic tokens    --background, --primary, --border …  (the shadcn/ui
+                           contract) and --tone-*  (this workspace's own
+                           contract for what a run is doing — see below)
+     3. Shape and type     --radius-*, --shadow-*, --font-*
+
+   Everything is oklch. Never write a hex or rgb value in a component; reach
+   for a Tailwind utility (`bg-card`, `text-tone-wait-foreground`) or, in a
+   stylesheet, `var(--token)`.
+   ========================================================================== */
+
+:root {
+  /* ---- Layer 1 · Primitive colour scales -------------------------------- */
+
+  /* Vinta Blue — the wordmark colour, primary brand ramp (hue ~264). */
+  --vinta-50: oklch(0.971 0.014 264);
+  --vinta-100: oklch(0.945 0.03 264);
+  --vinta-200: oklch(0.895 0.06 264);
+  --vinta-300: oklch(0.82 0.105 264);
+  --vinta-400: oklch(0.715 0.17 264);
+  --vinta-500: oklch(0.62 0.225 264);
+  --vinta-600: oklch(0.545 0.258 264);
+  --vinta-700: oklch(0.48 0.245 264);
+  --vinta-800: oklch(0.41 0.198 265);
+  --vinta-900: oklch(0.345 0.15 266);
+  --vinta-950: oklch(0.255 0.098 267);
+
+  /* Slate — cool neutral ramp for surfaces, text and borders. */
+  --slate-50: oklch(0.985 0.002 264);
+  --slate-100: oklch(0.968 0.004 264);
+  --slate-200: oklch(0.929 0.007 264);
+  --slate-300: oklch(0.872 0.011 264);
+  --slate-400: oklch(0.71 0.018 264);
+  --slate-500: oklch(0.566 0.021 264);
+  --slate-600: oklch(0.456 0.022 264);
+  --slate-700: oklch(0.376 0.022 265);
+  --slate-800: oklch(0.279 0.022 266);
+  --slate-900: oklch(0.213 0.022 267);
+  --slate-950: oklch(0.151 0.02 268);
+
+  /* Status hues. Five steps each: a tint (100), a dark-mode tint (950), a
+     dark-mode text shade (300), and the two working shades (600, 700). */
+  --green-100: oklch(0.95 0.045 150);
+  --green-300: oklch(0.83 0.13 150);
+  --green-600: oklch(0.58 0.14 152);
+  --green-700: oklch(0.5 0.12 153);
+  --green-950: oklch(0.27 0.045 152);
+
+  --amber-100: oklch(0.96 0.05 85);
+  --amber-300: oklch(0.86 0.14 80);
+  --amber-600: oklch(0.72 0.155 70);
+  --amber-700: oklch(0.6 0.14 62);
+  --amber-950: oklch(0.29 0.05 70);
+
+  --red-100: oklch(0.945 0.035 25);
+  --red-300: oklch(0.8 0.12 25);
+  --red-600: oklch(0.577 0.225 27);
+  --red-700: oklch(0.5 0.2 27);
+  --red-950: oklch(0.27 0.06 27);
+
+  --violet-100: oklch(0.95 0.04 322);
+  --violet-300: oklch(0.82 0.13 322);
+  --violet-600: oklch(0.56 0.22 322);
+  --violet-700: oklch(0.48 0.2 322);
+  --violet-950: oklch(0.27 0.07 322);
+
+  /* ---- Layer 2 · Semantic tokens (LIGHT · the shadcn/ui contract) --------- */
+  --background: var(--slate-50);
+  --foreground: var(--slate-950);
+  --card: oklch(1 0 0);
+  --card-foreground: var(--slate-950);
+  --popover: oklch(1 0 0);
+  --popover-foreground: var(--slate-950);
+  --primary: var(--vinta-600);
+  --primary-foreground: oklch(0.99 0.01 264);
+  --secondary: var(--slate-100);
+  --secondary-foreground: var(--slate-900);
+  --muted: var(--slate-100);
+  --muted-foreground: var(--slate-500);
+  --accent: var(--vinta-50);
+  --accent-foreground: var(--vinta-700);
+  --destructive: var(--red-600);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: var(--green-600);
+  --warning: var(--amber-600);
+  --border: var(--slate-200);
+  --input: var(--slate-200);
+  /* A stroke that has to be seen — a graph edge, a divider inside a canvas.
+     `--border` is a hairline around a surface and goes to a 10% white at
+     night, which is right for a card and invisible for a line. */
+  --line: var(--slate-300);
+  --ring: var(--vinta-600);
+
+  /* ---- Layer 2 · Tones — what a run, node, gate or session is doing -------
+
+     Presentation for a fixed vocabulary of meanings, not a colour palette:
+
+       idle       nothing is happening and nothing is wrong (pending, blocked)
+       active     work is in progress
+       wait       parked on capacity or a queue — patience, never failure
+       attention  a human has to act (a question, a gate)
+       ok         finished well
+       error      the work did not happen and someone has to do something
+
+     Each tone is three values: the strong colour for a solid mark (a dot, a
+     graph node's edge, a meter), a soft tint for a badge's background, and
+     the text colour that sits on that tint. `wait` is amber and `error` is
+     red on purpose, and they must never be the same hue: a run that is
+     throttled and a run that is broken ask the operator for opposite things. */
+  --tone-idle: var(--slate-400);
+  --tone-idle-soft: var(--slate-100);
+  --tone-idle-foreground: var(--slate-600);
+  --tone-active: var(--vinta-600);
+  --tone-active-soft: var(--vinta-50);
+  --tone-active-foreground: var(--vinta-700);
+  --tone-wait: var(--amber-600);
+  --tone-wait-soft: var(--amber-100);
+  --tone-wait-foreground: var(--amber-700);
+  --tone-attention: var(--violet-600);
+  --tone-attention-soft: var(--violet-100);
+  --tone-attention-foreground: var(--violet-700);
+  --tone-ok: var(--green-600);
+  --tone-ok-soft: var(--green-100);
+  --tone-ok-foreground: var(--green-700);
+  --tone-error: var(--red-600);
+  --tone-error-soft: var(--red-100);
+  --tone-error-foreground: var(--red-700);
+
+  /* Chart palette */
+  --chart-1: var(--vinta-600);
+  --chart-2: var(--green-600);
+  --chart-3: var(--amber-600);
+  --chart-4: var(--vinta-300);
+  --chart-5: var(--slate-400);
+
+  /* ---- Layer 3 · Radius -------------------------------------------------- */
+  --radius: 0.625rem; /* 10px — base control radius */
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+
+  /* ---- Layer 3 · Elevation (soft, cool-tinted) ---------------------------- */
+  --shadow-xs: 0 1px 2px 0 oklch(0.213 0.022 267 / 0.05);
+  --shadow-sm:
+    0 1px 3px 0 oklch(0.213 0.022 267 / 0.08), 0 1px 2px -1px oklch(0.213 0.022 267 / 0.06);
+  --shadow-md:
+    0 4px 12px -2px oklch(0.213 0.022 267 / 0.1), 0 2px 6px -2px oklch(0.213 0.022 267 / 0.06);
+  --shadow-lg:
+    0 12px 28px -6px oklch(0.213 0.022 267 / 0.14), 0 4px 10px -4px oklch(0.213 0.022 267 / 0.08);
+  --shadow-xl: 0 24px 48px -12px oklch(0.213 0.022 267 / 0.18);
+
+  /* ---- Layer 3 · Typography ---------------------------------------------- */
+  /* The faces ship with the package (styles/fonts.css, self-hosted from
+     @fontsource) so a tool served from 127.0.0.1 never fetches a font from a
+     third party. The fallbacks are chosen for close metrics. */
+  --font-sans:
+    'DM Sans Variable', 'DM Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:
+    'Geist Mono Variable', 'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
+}
+
+/* ---- Layer 2 · DARK theme overrides --------------------------------------- */
+.dark {
+  --background: var(--slate-950);
+  --foreground: var(--slate-50);
+  --card: var(--slate-900);
+  --card-foreground: var(--slate-50);
+  --popover: var(--slate-900);
+  --popover-foreground: var(--slate-50);
+  --primary: var(--vinta-500);
+  --primary-foreground: oklch(0.16 0.02 267);
+  --secondary: var(--slate-800);
+  --secondary-foreground: var(--slate-100);
+  --muted: var(--slate-800);
+  --muted-foreground: var(--slate-400);
+  --accent: oklch(0.3 0.08 265);
+  --accent-foreground: var(--vinta-200);
+  --destructive: oklch(0.637 0.225 25);
+  --destructive-foreground: oklch(0.16 0.02 267);
+  --success: var(--green-300);
+  --warning: var(--amber-300);
+  --border: oklch(1 0 0 / 0.1);
+  --input: oklch(1 0 0 / 0.14);
+  --line: var(--slate-600);
+  --ring: var(--vinta-500);
+
+  --tone-idle: var(--slate-500);
+  --tone-idle-soft: var(--slate-800);
+  --tone-idle-foreground: var(--slate-300);
+  --tone-active: var(--vinta-500);
+  --tone-active-soft: oklch(0.3 0.08 265);
+  --tone-active-foreground: var(--vinta-200);
+  --tone-wait: var(--amber-300);
+  --tone-wait-soft: var(--amber-950);
+  --tone-wait-foreground: var(--amber-300);
+  --tone-attention: var(--violet-300);
+  --tone-attention-soft: var(--violet-950);
+  --tone-attention-foreground: var(--violet-300);
+  --tone-ok: var(--green-300);
+  --tone-ok-soft: var(--green-950);
+  --tone-ok-foreground: var(--green-300);
+  --tone-error: var(--red-300);
+  --tone-error-soft: var(--red-950);
+  --tone-error-foreground: var(--red-300);
+
+  --chart-1: var(--vinta-500);
+  --chart-2: var(--green-300);
+  --chart-3: var(--amber-300);
+  --chart-4: var(--vinta-300);
+  --chart-5: var(--slate-400);
+
+  --shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.3);
+  --shadow-sm: 0 1px 3px 0 oklch(0 0 0 / 0.4), 0 1px 2px -1px oklch(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px -2px oklch(0 0 0 / 0.45);
+  --shadow-lg: 0 12px 28px -6px oklch(0 0 0 / 0.55);
+  --shadow-xl: 0 24px 48px -12px oklch(0 0 0 / 0.6);
+}
+
+/* ---- Tailwind theme mapping — expose tokens as utilities ------------------- */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-line: var(--line);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* Tones — bg-tone-wait-soft, text-tone-wait-foreground, bg-tone-wait … */
+  --color-tone-idle: var(--tone-idle);
+  --color-tone-idle-soft: var(--tone-idle-soft);
+  --color-tone-idle-foreground: var(--tone-idle-foreground);
+  --color-tone-active: var(--tone-active);
+  --color-tone-active-soft: var(--tone-active-soft);
+  --color-tone-active-foreground: var(--tone-active-foreground);
+  --color-tone-wait: var(--tone-wait);
+  --color-tone-wait-soft: var(--tone-wait-soft);
+  --color-tone-wait-foreground: var(--tone-wait-foreground);
+  --color-tone-attention: var(--tone-attention);
+  --color-tone-attention-soft: var(--tone-attention-soft);
+  --color-tone-attention-foreground: var(--tone-attention-foreground);
+  --color-tone-ok: var(--tone-ok);
+  --color-tone-ok-soft: var(--tone-ok-soft);
+  --color-tone-ok-foreground: var(--tone-ok-foreground);
+  --color-tone-error: var(--tone-error);
+  --color-tone-error-soft: var(--tone-error-soft);
+  --color-tone-error-foreground: var(--tone-error-foreground);
+
+  /* Brand ramp — bg-vinta-600, text-vinta-700, … */
+  --color-vinta-50: var(--vinta-50);
+  --color-vinta-100: var(--vinta-100);
+  --color-vinta-200: var(--vinta-200);
+  --color-vinta-300: var(--vinta-300);
+  --color-vinta-400: var(--vinta-400);
+  --color-vinta-500: var(--vinta-500);
+  --color-vinta-600: var(--vinta-600);
+  --color-vinta-700: var(--vinta-700);
+  --color-vinta-800: var(--vinta-800);
+  --color-vinta-900: var(--vinta-900);
+  --color-vinta-950: var(--vinta-950);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-2xl: var(--radius-2xl);
+
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}

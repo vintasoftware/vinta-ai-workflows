@@ -149,6 +149,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `packages/`, so nothing in it is installed by `npx vinta-ai-workflows install`.
 > What ships from that work is the two generated schemas above and the skill
 > changes that produce and consume them.
+>
+> Its browser UI is now built on `packages/design-system/` (`vinta-design-system`),
+> a second private workspace package: oklch tokens in three layers mirroring
+> `vinta-schedule-design-system`, six run-status **tones** (`idle`, `active`,
+> `wait`, `attention`, `ok`, `error` — waiting is amber and failure is red, never
+> the same hue), shadcn/ui components on Tailwind CSS v4, a small layout kit, and
+> a light/dark/system theme. The run graph and the pipeline editor are re-skinned
+> through their own custom properties, so the canvas and the badges beside it
+> share one palette. Equally unpublished: nothing in it reaches `npx
+> vinta-ai-workflows install`.
 
 ## [0.6.1] — 2026-08-17
 
