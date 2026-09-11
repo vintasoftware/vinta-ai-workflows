@@ -1019,6 +1019,9 @@ const storeWithRuns = (...runIds: readonly string[]): string => {
 const runDir = (repo: string, runId: string): string =>
   join(repo, '.vinta-flow', 'runs', runId)
 
+/** A run's store directory as `purge` prints it: relative, native separators. */
+const runPath = (runId: string): string => join('.vinta-flow', 'runs', runId)
+
 describe('vinta-flow purge', () => {
   it('--dry-run lists every target and deletes nothing', async () => {
     const dir = storeWithRuns('run-a', 'run-b')
@@ -1026,8 +1029,14 @@ describe('vinta-flow purge', () => {
 
     expect(await purgeCommand(['--repo', dir, '--dry-run'], io.io)).toBe(OK)
     const text = io.out.join('\n')
-    expect(text).toContain('.vinta-flow/runs/run-a')
-    expect(text).toContain('.vinta-flow/runs/run-b')
+    // Built with the platform's own separator, because the line this checks is
+    // one a human reads on their own machine before confirming a deletion.
+    // `purge` prints `relative()` output deliberately — a Windows operator
+    // shown a posix path might not recognise it, and could paste it somewhere
+    // that does not resolve. Unlike a git path (see `tracking.ts`) there is no
+    // second consumer here with an opinion about separators.
+    expect(text).toContain(runPath('run-a'))
+    expect(text).toContain(runPath('run-b'))
     expect(text).toContain('nothing was deleted')
     // Not asked, because nothing was going to happen.
     expect(io.asked).toEqual([])
@@ -1060,7 +1069,7 @@ describe('vinta-flow purge', () => {
 
     expect(await purgeCommand(['--repo', dir], refused.io)).toBe(FAILED)
     expect(refused.asked).toHaveLength(1)
-    expect(refused.out.join('\n')).toContain('.vinta-flow/runs/run-a')
+    expect(refused.out.join('\n')).toContain(runPath('run-a'))
     expect(existsSync(runDir(dir, 'run-a'))).toBe(true)
 
     const accepted = recorder(true)

@@ -25,7 +25,7 @@
  * gate ids — every one of them a name the plan already chose.
  */
 import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { git, gitOk } from '../integration/git.ts'
 import type { Workflow } from '../types.ts'
 
@@ -35,12 +35,36 @@ export type TrackingScope = 'run' | 'phase' | 'wave'
  * `ai-plans/PLAN_x.md#phase-1` → `ai-plans/TRACKING_<id>`. A workflow with no
  * `plan_ref` tracks at the repository root, which is the only location that
  * needs no guess.
+ *
+ * **Joined with `posix`, on every platform, because this is a git path and not
+ * a filesystem path.** It is handed to `git add`, to `git commit -- <path>`
+ * and — through `parallel-lanes.md`'s own reader — to `git show <rev>:<path>`,
+ * and git speaks forward slashes everywhere including Windows. Built with
+ * `node:path`'s platform `join` it came out as `ai-plans\TRACKING_x` there,
+ * and `git show` answered `fatal: path ... does not exist`: the phase's
+ * tracking file was never committed, so the node failed on a path separator.
+ * Node resolves a forward-slash path against the filesystem perfectly well on
+ * Windows, so there is nothing to trade away by fixing it in this direction.
  */
 export function trackingDir(workflow: Pick<Workflow, 'id' | 'plan_ref'>): string {
   const ref = workflow.plan_ref?.split('#')[0]
-  const dir = ref === undefined || ref === '' ? '' : dirname(ref)
+  const dir = ref === undefined || ref === '' ? '' : posix.dirname(ref)
   const name = `TRACKING_${workflow.id}`
-  return dir === '' || dir === '.' ? name : join(dir, name)
+  return dir === '' || dir === '.' ? name : posix.join(dir, name)
+}
+
+/**
+ * A file under the tracking directory, as a repo-relative git path.
+ *
+ * The callers used to compose this themselves with `join`, which put the same
+ * separator bug back one level up from `trackingDir`. One function owns the
+ * rule now, so a new tracking file cannot reintroduce it.
+ */
+export function trackingPath(
+  workflow: Pick<Workflow, 'id' | 'plan_ref'>,
+  ...segments: readonly string[]
+): string {
+  return posix.join(trackingDir(workflow), ...segments)
 }
 
 /** One node, as the run record and the phase record both see it. */

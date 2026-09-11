@@ -19,6 +19,7 @@ export {
   renderRun,
   renderWave,
   trackingDir,
+  trackingPath,
   writeTrackingFile,
   type PhaseFacts,
   type RunFacts,

@@ -30,6 +30,7 @@ import {
   createRunExecutor,
   notificationBody,
   trackingDir,
+  trackingPath,
   type ExecutorLane,
   type Notification,
   type Notifier,
@@ -446,6 +447,19 @@ describe('the shipped standard-phase, end to end', () => {
 // 2–3. The fix loop
 // ---------------------------------------------------------------------------
 
+/**
+ * Red the first time it runs, green every time after, by leaving a marker file.
+ *
+ * The two shells agree on nothing here — `test -f` against `if exist`, `touch`
+ * against `copy nul`, `exit` against `exit /b`. `copy` rather than the usual
+ * `type nul >` because the marker only has to exist; its contents are never
+ * read, and `copy` keeps the command free of a redirect.
+ */
+const flipOnceGate = (marker: string): string =>
+  process.platform === 'win32'
+    ? `if exist "${marker}" (exit /b 0) else (copy /y nul "${marker}" & exit /b 1)`
+    : `test -f '${marker}' && exit 0; touch '${marker}'; exit 1`
+
 describe('the fix loop', () => {
   /** One node, one gate whose result flips once a marker file exists. */
   const flakyGate = (root: string, maxFixRounds: number): Workflow =>
@@ -457,8 +471,11 @@ describe('the fix loop', () => {
       resources: { lane: { capacity: 1, kind: 'worktree' } },
       gates: {
         unit: {
-          // The marker lives outside every lane, so flipping it does not move a tree hash.
-          cmd: `test -f ${join(root, 'green')} && exit 0; touch ${join(root, 'green')}; exit 1`,
+          // The marker lives outside every lane, so flipping it does not move a
+          // tree hash. Rendered per platform for `noisyGate`'s reason: the
+          // POSIX form is three commands separated by `;`, which `cmd.exe`
+          // reads as one.
+          cmd: flipOnceGate(join(root, 'green')),
           timeout_s: 30,
         },
       },
@@ -631,6 +648,23 @@ describe('gate caching', () => {
 
 describe('journalled gate results', () => {
   /** A gate that fails loudly, printing something no event may ever contain. */
+  /**
+   * Prints to both streams and exits with a chosen code, in the shell the gate
+   * runner actually uses on this platform (`src/platform/platform.ts`).
+   *
+   * `cmd.exe` shares no syntax with `sh`, and `;` is not a command separator
+   * there: the POSIX form ran as a single `echo` of the whole literal line and
+   * exited 0, so the gate came back **green on Windows whatever exit code it
+   * was asked for** — a fixture that had silently stopped testing the thing it
+   * is named after. Rendered per platform rather than skipped, because what it
+   * asserts (the code is recorded, and the gate's output reaches no event
+   * payload) is not POSIX-specific.
+   */
+  const noisyGate = (exit: number): string =>
+    process.platform === 'win32'
+      ? `echo SECRET-FROM-THE-REPO& echo on-stderr 1>&2& exit /b ${exit}`
+      : `echo SECRET-FROM-THE-REPO; echo on-stderr >&2; exit ${exit}`
+
   const noisy = (exit: number): Workflow =>
     WorkflowSchema.parse({
       schema_version: 1,
@@ -639,7 +673,7 @@ describe('journalled gate results', () => {
       defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
       resources: { lane: { capacity: 1, kind: 'worktree' } },
       gates: {
-        unit: { cmd: `echo SECRET-FROM-THE-REPO; echo on-stderr >&2; exit ${exit}`, timeout_s: 30 },
+        unit: { cmd: noisyGate(exit), timeout_s: 30 },
       },
       nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['unit'] }],
     })
@@ -793,6 +827,44 @@ describe('the git verbs', () => {
     expect(run).toContain(`# Run ${RUN_ID}`)
     expect(run).toContain('| p1 |')
     expect(readFileSync(join(rig.integ, dir, 'waves', 'wave-1.md'), 'utf8')).toContain('# Wave 1')
+  })
+
+  it('builds tracking paths for git, which means forward slashes everywhere', () => {
+    // These strings are handed to `git add`, `git commit -- <path>` and
+    // `git show <rev>:<path>`, and git speaks posix paths on every platform.
+    // Built with `node:path`'s join they came out as `ai-plans\TRACKING_x` on
+    // Windows, `git show` answered `fatal: path ... does not exist`, and the
+    // phase's tracking file was silently never committed — the node failed on
+    // a path separator.
+    //
+    // **A posix machine cannot fully prove this**: `posix.join` and the
+    // platform `join` are the same function here, so this test passes on macOS
+    // and Linux either way. It is pinned as an exact string so that a revert to
+    // `join` fails on the Windows leg, which now runs the suite. That leg is
+    // the enforcement; this is the statement of the rule.
+    const workflow = { id: 'bookmark-folders', plan_ref: 'ai-plans/PLAN_x.md#phase-1' }
+
+    expect(trackingDir(workflow)).toBe('ai-plans/TRACKING_bookmark-folders')
+    expect(trackingPath(workflow, 'run.md')).toBe('ai-plans/TRACKING_bookmark-folders/run.md')
+    expect(trackingPath(workflow, 'waves', 'wave-2.md')).toBe(
+      'ai-plans/TRACKING_bookmark-folders/waves/wave-2.md',
+    )
+    for (const path of [
+      trackingDir(workflow),
+      trackingPath(workflow, 'run.md'),
+      trackingPath(workflow, 'waves', 'wave-2.md'),
+    ]) {
+      expect(path).not.toContain('\\')
+    }
+  })
+
+  it('tracks at the repository root when the workflow names no plan', () => {
+    // The one location that needs no guess, and the branch where there is no
+    // directory to join — so it must not gain a leading separator either.
+    const workflow = { id: 'adhoc', plan_ref: undefined }
+
+    expect(trackingDir(workflow)).toBe('TRACKING_adhoc')
+    expect(trackingPath(workflow, 'run.md')).toBe('TRACKING_adhoc/run.md')
   })
 })
 

@@ -88,7 +88,7 @@ import {
   renderPhase,
   renderRun,
   renderWave,
-  trackingDir,
+  trackingPath,
   writeTrackingFile,
   type PhaseFacts,
   type TrackingScope,
@@ -421,13 +421,14 @@ export class RunEffectExecutor implements EffectExecutor {
   ): Promise<EffectOutcome> {
     const raw = params['scope']
     const scope: TrackingScope = raw === 'run' || raw === 'wave' ? raw : 'phase'
-    const dir = trackingDir(this.#options.workflow)
-
     if (scope === 'phase') {
       // The lane's own file, on the phase branch — so it travels with the merge.
       await writeTrackingFile({
         cwd: this.#lane(nodeId).path,
-        relPath: join(dir, `phase-${nodeId}.md`),
+        // `trackingPath`, never `join`: every one of these is a *git* path, and
+        // `node:path`'s join puts a backslash in it on Windows (see
+        // `tracking.ts`). The file was written and then never committed.
+        relPath: trackingPath(this.#options.workflow, `phase-${nodeId}.md`),
         body: renderPhase(this.#phaseFacts(nodeId)),
         message: `tracking: phase ${nodeId}`,
       })
@@ -440,7 +441,7 @@ export class RunEffectExecutor implements EffectExecutor {
       await this.#integration(() =>
         writeTrackingFile({
           cwd: integrationPath,
-          relPath: join(dir, 'run.md'),
+          relPath: trackingPath(workflow, 'run.md'),
           body: renderRun({
             runId,
             workflowId: workflow.id,
@@ -457,7 +458,7 @@ export class RunEffectExecutor implements EffectExecutor {
     await this.#integration(() =>
       writeTrackingFile({
         cwd: integrationPath,
-        relPath: join(dir, 'waves', `wave-${wave}.md`),
+        relPath: trackingPath(workflow, 'waves', `wave-${wave}.md`),
         body: renderWave({
           wave,
           branch: integrator.waveBranch(wave),
