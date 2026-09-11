@@ -41,6 +41,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a project with no orchestrator carries a file nothing reads, and a project that
   adopts one later finds its plans already executable.
 
+- **The workflow schema gained `defaults.max_session_turns`.** Optional, default
+  12. An orchestrator that reuses one agent session across a phase's implement
+  and fix turns needs a ceiling on how long that session may grow before the next
+  turn starts cold; without one a long phase eventually dies on a context-window
+  error that reads as a broken harness. `plan-feature` omits the field — it is a
+  safety limit, not something a plan tunes — and its field table says so.
+
 - **`plan-feature` asks about the project's databases and emits the workflow's
   `project` block.** The block records what a phase lane must **fork** to be a
   working checkout — the `dev` and `test` databases, and the project's own
