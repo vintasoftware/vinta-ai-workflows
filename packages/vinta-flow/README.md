@@ -23,7 +23,7 @@ The zero-install path still works and is still the default. `implement-plan` —
 
 ## Platforms
 
-macOS, Linux and Windows. CI runs the whole suite on all three (`.github/workflows/vinta-flow.yml`), and the four places the operating systems genuinely disagree are decided in one module — `src/platform/platform.ts` — rather than scattered through the code that depends on them. Every function there takes the platform as an argument, so both answers are asserted from either kind of machine in `tests/platform.test.ts`.
+macOS, Linux and Windows. CI runs the whole suite on all three (`.github/workflows/vinta-flow.yml`) — the *whole* suite, with one test skipped on Windows for a stated reason rather than eighty. Fixtures are declared as data and rendered for whichever platform is running, so a stand-in CLI is a shebang script on POSIX and a `.cmd` shim on Windows, exactly as npm installs a real one. The four places the operating systems genuinely disagree are decided in one module — `src/platform/platform.ts` — rather than scattered through the code that depends on them. Every function there takes the platform as an argument, so both answers are asserted from either kind of machine in `tests/platform.test.ts`.
 
 What differs, and what you inherit as a consequence:
 
@@ -43,7 +43,9 @@ Four Windows caveats worth knowing before you rely on it:
 - **`core.autocrlf`.** Git for Windows enables it by default, which means your gates see CRLF where the same gate on Linux sees LF. Nothing here changes that setting for you — it is your repository's decision — but a formatter or a golden-file test that disagrees across platforms is usually this. CI pins it off so the suite tests the committed bytes.
 - **A lane's `node_modules` is a junction**, not a symlink. Real directory symlinks on Windows need Developer Mode or an elevated shell; junctions need neither and behave the same for this purpose.
 
-**The one thing CI does not cover** is the shebang. `src/cli/bin.ts` starts with `#!/usr/bin/env -S node --experimental-transform-types`, which Windows never reads: npm rewrites it into a generated `.cmd` shim at install time, and this package is private and therefore never installed. Current `cmd-shim` does parse `env -S` and forward the flags, so this is expected to work — but it is expectation, not evidence. CI starts the entry point through Node directly instead, which covers the flag and the module graph and not the shim.
+**What CI does not cover** is two things. One is the shebang. `src/cli/bin.ts` starts with `#!/usr/bin/env -S node --experimental-transform-types`, which Windows never reads: npm rewrites it into a generated `.cmd` shim at install time, and this package is private and therefore never installed. Current `cmd-shim` does parse `env -S` and forward the flags, so this is expected to work — but it is expectation, not evidence. CI starts the entry point through Node directly instead, which covers the flag and the module graph and not the shim.
+
+The other is opening a pull request. `openPullRequest` hands `gh` to `execFile` directly rather than through `commandInvocation`, which is right for the real thing — `gh` is `gh.exe` on Windows and needs no shell — but leaves no way to point it at a test fixture there, since Node refuses to spawn a `.cmd` without one. Routing it through the seam like every other spawn would be worse than the gap: one of `gh`'s arguments is the pull request body, and `cmd.exe` cannot escape a `\"` or a `%` inside a quoted region, so a spawn that cannot be broken by its own payload would become one that can. `tests/support/platform.ts` carries the whole argument.
 
 ## Install and run
 
@@ -297,7 +299,7 @@ Point the adapter at a specific binary with an environment variable, which overr
 
 ## Limits worth knowing before you rely on it
 
-- **Windows is supported but less proven than macOS and Linux.** See [Platforms](#platforms) for exactly which parts, and which caveats you inherit.
+- **Windows runs the same suite as macOS and Linux**, minus one test that cannot be given a fixture there. See [Platforms](#platforms) for that one, and for the caveats you inherit — a less gentle interrupt, `taskkill` in place of process groups, no OS notifications.
 - **One project, one run at a time** per daemon. The journal is keyed by run id, so this is a boundary rather than a design limit — but it is today's boundary.
 - **A full run with real agents has not been done since prompt composition landed.** The path is covered end to end by tests against real git worktrees, gates and merges, but the walkthrough's transcript is from an older run. See [What this walkthrough has and has not been run against](#what-this-walkthrough-has-and-has-not-been-run-against).
 - **A projection is not a prediction.** `simulate` answers "given these durations, what schedule follows", and three things it cannot know:
