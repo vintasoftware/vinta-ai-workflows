@@ -5,6 +5,8 @@ Three layers, all required, in order. The reviewing orchestrator never edits —
 
 ## Layer 1 — Mechanical checks
 
+**Against the working tree, before the commit.** The phase's changes are still uncommitted in `<WORKROOT>`, and that is what every command here reads. It is why review sits before integrate rather than after: a finding is fixed in the tree, so the branch never records the mistake and a correction on top of it.
+
 1. `git -C <WORKROOT> status` + `git -C <WORKROOT> diff --stat`: confirm the file list matches the agent's report.
 2. **Read the full diff** for every changed file using `git -C <WORKROOT> diff`. Spot-checking is not enough.
 3. **Verify the outer gate** ran + green. By default that is `{{BUILD_CMD}}` (repo-wide) AND the scoped suite `{{SCOPED_TEST_PATTERN}}` covering the touched apps. {If run_options.full_test_suite = true:} the outer gate runs `{{BUILD_CMD}}` AND the full `{{TEST_CMD}}` instead — verify that. Look in the report for explicit confirmation the applicable gate was executed + passed{{E2E_LAYER1_NOTE}}. Vague confirmation → **re-run yourself** (in `<WORKROOT>`).
@@ -30,7 +32,7 @@ Open the phase body alongside the diff and walk:
 
 ## Layer 3 — Independent reviewer subagent
 
-After Layers 1–2 pass, spawn a **separate** subagent (different session, no implementation context) using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) at the model resolved from `agent_models.reviewer` (see the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step; unset → runtime default). Read-only by design.
+After Layers 1–2 pass, hand the diff to a **reviewer from the plan's Crew table** — a member whose role is `reviewer`, which is never a member that writes code — using the project's `reviewer` agent type ([ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) at the model resolved by the [Resolve the reviewer + fixer model](#resolve-the-reviewer--fixer-model) step. Where the roster staffs no reviewer, spawn a **separate** subagent at `agent_models.reviewer` with no implementation context, as before. Read-only by design, either way.
 
 Reviewer prompt template — see the reviewer agent's body for the standard form. Triage findings:
 - **BLOCKER**: must fix before the phase is pushed (the conductor's integrate step).
@@ -76,14 +78,24 @@ the brief again.
 5. Loop until Layers 1, 2, 3 are all clean.
 
 **The reviewer is never the implementer.** Continuing the *reviewer* across
-rounds is fine and remembers what it flagged, but the review itself must come
-from an agent that did not write the code. An implementer asked to review its
-own phase grades its own work from inside its own reasoning, which is the one
-thing the layers exist to prevent.
+rounds — and across phases — is fine and remembers what it flagged, but the
+review itself must come from an agent that did not write the code. An
+implementer asked to review its own phase grades its own work from inside its
+own reasoning, which is the one thing the layers exist to prevent. On a plan
+with a **Crew** table this is structural rather than a rule to follow: reviewers
+and implementers are disjoint sets, and no phase can be assigned to a reviewer.
 
-**Which model fixes.** A continued implementer fixes at the phase's own
-`**Suggested AI model**:` tier, because it *is* the implementer. `agent_models.fixer`
-therefore governs the cold cases only — the runtime fallback in step 2 and the
-escalation in step 3. A project that set `fixer` to a cheaper tier to save money
-should know it now applies to fewer rounds than before.
+**Which model fixes.** A continued implementer fixes at its own crew member's
+tier, because it *is* that member. `agent_models.fixer` therefore governs the
+cold cases only — the runtime fallback in step 2 and the escalation in step 3. A
+project that set `fixer` to a cheaper tier to save money should know it now
+applies to fewer rounds than before.
+
+**The fix does not take the reviewer's tier.** The review runs a tier above the
+author deliberately, and it would be easy to carry that tier into the fix on the
+grounds that the finding was hard enough to need it. Don't: the review is a
+judgement about the code and the fix is a change to it, and the agent best
+placed to make that change is still the one that knows why the code is that way.
+A finding that genuinely needs a more capable hand is what step 3's escalation is
+for.
 <!-- block-end: LAYERS -->

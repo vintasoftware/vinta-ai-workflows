@@ -184,6 +184,91 @@ describe('shape validation', () => {
   })
 })
 
+describe('the crew roster', () => {
+  /** The golden workflow, staffed: four nodes, three members, nobody idle. */
+  const staffed = (): Record<string, any> => {
+    const doc = golden()
+    doc.crew = {
+      junior: { tier: 1, model: 'cheap-1' },
+      'mid-a': { tier: 2, model: 'mid-1' },
+      senior: { tier: 4, model: 'dear-1' },
+    }
+    const assignments = ['junior', 'mid-a', 'mid-a', 'senior']
+    doc.nodes.forEach((node: Record<string, unknown>, i: number) => {
+      delete node['model']
+      node['crew'] = assignments[i]
+    })
+    return doc
+  }
+
+  it('parses a staffed workflow and keeps every assignment', () => {
+    const result = parseWorkflow(staffed())
+    if (!result.ok) throw new Error(`expected valid, got:\n${formatIssues(result.issues)}`)
+
+    expect(Object.keys(result.workflow.crew)).toHaveLength(3)
+    expect(result.workflow.nodes.map((node) => node.crew)).toEqual([
+      'junior',
+      'mid-a',
+      'mid-a',
+      'senior',
+    ])
+  })
+
+  it('leaves an unstaffed workflow alone — the roster is opt-in', () => {
+    const result = parseWorkflow(golden())
+    if (!result.ok) throw new Error('expected valid')
+
+    expect(result.workflow.crew).toEqual({})
+    expect(result.workflow.nodes.every((node) => node.crew === undefined)).toBe(true)
+  })
+
+  it('locates an assignment to somebody who is not on the roster', () => {
+    const doc = staffed()
+    doc.nodes[1].crew = 'principal'
+
+    expect(expectInvalid(doc)).toContain('nodes[1].crew: unknown crew member "principal"')
+  })
+
+  /**
+   * The defect a roster exists to make visible. A member nobody was assigned to
+   * is an agent the plan budgeted for and never used, and it is also the shape
+   * of a plan whose widest wave is narrower than its author thought.
+   */
+  it('rejects a member who is assigned no node', () => {
+    const doc = staffed()
+    doc.crew['spare'] = { tier: 3, model: 'mid-1' }
+
+    expect(expectInvalid(doc)).toContain('crew.spare: crew member "spare" is assigned no node')
+  })
+
+  /**
+   * Half a roster would leave the scheduler running two staffing rules at once,
+   * and would make the plan's own idleness arithmetic wrong.
+   */
+  it('rejects a node that names no member in a staffed workflow', () => {
+    const doc = staffed()
+    delete doc.nodes[2].crew
+
+    const issues = expectInvalid(doc)
+    expect(issues).toContain('nodes[2].crew')
+    expect(issues).toContain('names no crew member')
+  })
+
+  it('rejects a node carrying both a model override and an assignment', () => {
+    const doc = staffed()
+    doc.nodes[0].model = 'something-else'
+
+    expect(expectInvalid(doc)).toContain('nodes[0].model')
+  })
+
+  it('rejects a tier outside the rubric', () => {
+    const doc = staffed()
+    doc.crew.senior.tier = 5
+
+    expect(expectInvalid(doc)).toContain('crew.senior.tier')
+  })
+})
+
 describe('the project block', () => {
   const withProject = (project: unknown): Record<string, any> => {
     const doc = golden()

@@ -27,6 +27,32 @@
       }
     }
   },
+  "crew": {
+    "junior": {
+      "role": "implementer",
+      "tier": 1,
+      "model": "claude-haiku-4-5",
+      "description": "A model plus its migration, and a flag deletion."
+    },
+    "mid-1": {
+      "role": "implementer",
+      "tier": 2,
+      "model": "claude-sonnet-5",
+      "description": "A DRF viewset mirroring the tags viewset."
+    },
+    "mid-2": {
+      "role": "implementer",
+      "tier": 2,
+      "model": "claude-sonnet-5",
+      "description": "Tree serializer and the list action that returns it."
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "tier": 2,
+      "model": "claude-sonnet-5",
+      "description": "Reads every phase; Tier 2 is the hardest work here."
+    }
+  },
   "defaults": {
     "harness": "claude-code",
     "model": "claude-sonnet-5",
@@ -36,7 +62,7 @@
     "lane": {
       "capacity": 3,
       "kind": "worktree",
-      "description": "Concurrent phase worktrees. Matches the project's max_parallel_lanes."
+      "description": "One desk per implementer, kept for the whole run."
     },
     "test-suite": {
       "capacity": 1,
@@ -72,7 +98,7 @@
         "types",
         "unit"
       ],
-      "model": "claude-haiku-4-5"
+      "crew": "junior"
     },
     {
       "id": "p2",
@@ -92,7 +118,8 @@
       "gates": [
         "types",
         "unit"
-      ]
+      ],
+      "crew": "mid-1"
     },
     {
       "id": "p3",
@@ -111,7 +138,8 @@
       "gates": [
         "types",
         "unit"
-      ]
+      ],
+      "crew": "mid-2"
     },
     {
       "id": "p4",
@@ -135,7 +163,8 @@
       "gates": [
         "types",
         "unit"
-      ]
+      ],
+      "crew": "mid-2"
     },
     {
       "id": "p5",
@@ -166,7 +195,7 @@
         "types",
         "unit"
       ],
-      "model": "claude-haiku-4-5"
+      "crew": "junior"
     }
   ]
 }

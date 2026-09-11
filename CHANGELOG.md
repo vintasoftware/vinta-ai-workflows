@@ -9,6 +9,78 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A plan staffs a team, instead of picking a model per phase.** Choosing a tier
+  phase by phase answers "what runs this one" ten times and never adds it up, so the
+  two questions that decide what a feature costs go unasked: how many agents does
+  this need at once, and is any of them too junior for what it was handed.
+  - `plan-feature` opens **Phased Rollout** with a **Crew** table — one row per
+    agent, carrying its tier and the phases it takes — and every phase carries an
+    **`**Assigned to**:`** line naming one of them. It replaces
+    `**Suggested AI model**:`; a plan that still has the old line keeps working, and
+    the executor reads the tier straight off it.
+  - The **Execution graph** table gains an **Agent** column and an **Idle** note.
+    Reading across a row says who is working that wave; reading down a column says
+    who is not. A wave that will serialize because the roster cannot staff it is now
+    stated in the plan rather than discovered as a slow run.
+  - **Every member has to earn their place**, by concurrency (a wave genuinely needs
+    that many hands *at or above* those phases' tiers) or by cheapness (they take
+    work a dearer member would otherwise do). The roster is therefore **not** capped
+    at the widest wave — a junior who runs the migration and the flag deletion is
+    worth having in a graph that never runs two phases at once — but the lane pool
+    still is, because lanes are bought with concurrency and crew are not.
+  - **Reviewers are a role on the crew, and implementers and reviewers are
+    disjoint.** A member has `role: implementer` or `role: reviewer`; a phase cannot
+    be assigned to a reviewer and a reviewer never writes code, so an agent reading
+    its own diff is not something a plan can express. A phase is read by the
+    cheapest reviewer at or above its tier. A roster with no reviewer still runs and
+    falls back to `agent_models.reviewer`, cold, one session per phase.
+    - **A reviewer reads the lane it is reviewing**, with the phase's changes still
+      uncommitted in it, and has no worktree of its own. That is what puts review
+      before the commit: a finding is fixed in the working tree rather than
+      recorded as a mistake on the branch plus a correction after it. The cost is
+      that a reviewer's directory follows the work, so its session carries only
+      between reviews that land in the same lane.
+  - **A crew member is an agent that lives for the whole run.** Each one keeps its
+    own worktree and its own session across every phase it takes, so the agent that
+    takes Phase 4 still knows what it learned about the codebase in Phase 1 —
+    which is most of what a cold agent's first turn of a phase is spent
+    rediscovering.
+    - This works because the *directory* stops moving. Lanes used to be anonymous
+      slots handed out by a free list, so a member landed somewhere different each
+      phase and its context described paths it was not standing in. Pinning each
+      member to one worktree leaves a far smaller question — which files changed —
+      and `git diff --name-only` answers it exactly.
+    - A cross-phase continuation therefore gets the new phase's **full brief** (it
+      is new work, not a delta) behind a re-orientation: same agent, same directory,
+      everything you learned still holds; the tree is on a different branch; these
+      files differ; and — the sentence that matters most — whether the previous
+      phase's own work is in this tree at all.
+    - A delta that cannot be computed is reported as **unknown**, never as empty.
+      "Nothing changed" is the one wording that would stop an agent re-reading.
+    - Two things still start cold: a member whose previous phase **failed**, because
+      its session is the context that failed with it, and the final fix round.
+    - The cost, stated plainly: **one worktree and one set of forked databases per
+      implementer**, so `resources.lane.capacity` is now the implementer count
+      rather than the widest wave, and adding a cheaper implementer is a trade of
+      disk against money rather than free.
+  - The workflow document gained a top-level **`crew`** block and **`nodes[].crew`**.
+    A staffed node carries no `model` — the member has one — and a document that is
+    half-staffed, names a member nobody declared, assigns a phase to a reviewer,
+    declares an implementer nobody is assigned to, or staffs a reviewer below every
+    phase on the plan is refused before the run starts.
+  - `vinta-flow` claims an agent **before** the lane, prefers the member the plan
+    named, covers with the **cheapest** qualified free peer when they are busy, and
+    **waits rather than handing a phase below its tier** — even with a lane free. A
+    lane is disk; a phase run by too junior an agent does not fail cleanly, it fails
+    review two rounds later with nothing pointing back at the staffing. A reviewer is
+    claimed per review turn rather than per phase — it has one session ledger and
+    two concurrent reviews would collide over it — so one reviewer on a three-lane
+    plan is a queue at the review step and not a serialised run.
+  - The run view reports who actually worked against who the plan said would.
+    `substituted` is the figure to read beside a cost that overran: every
+    substitution ran at or above the budgeted tier, so a run can be entirely green
+    and still have been staffed dearer than planned.
+
 - **`implement-plan` runs independent phases in parallel.** The plan now carries a
   dependency graph and the conductor schedules against it: a phase starts as soon as
   every phase it depends on is green and a worktree lane is free, instead of waiting
@@ -58,9 +130,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sub-agent, the old cold hand-off still happens and is recorded as one, so a slow
   phase can be read later without guessing.
 
-  One consequence worth knowing: a continued implementer fixes at the phase's own
-  `**Suggested AI model**:` tier, so `agent_models.fixer` now governs only the cold
-  cases. A project that set `fixer` cheap to save money is saving it on fewer rounds.
+  One consequence worth knowing: a continued implementer fixes at its own crew
+  member's tier, so `agent_models.fixer` now governs only the cold cases. A project
+  that set `fixer` cheap to save money is saving it on fewer rounds.
 
 - **The workflow schema gained `defaults.max_session_turns`.** Optional, default
   12. An orchestrator that reuses one agent session across a phase's implement

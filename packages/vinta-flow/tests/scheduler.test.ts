@@ -320,6 +320,10 @@ function expectDrained(rig_: Rig): void {
   for (const name of rig_.poolNames) expect([name, rig_.pools.held(name)]).toEqual([name, 0])
   expect(rig_.pools.waiting).toBe(0)
   expect(rig_.journal.leases()).toEqual([])
+  // A member held past the end of a run is not a leaked resource the pools can
+  // see: nothing counts them, so a stall would show up only as a later phase
+  // waiting forever on an agent that no longer exists.
+  expect(rig_.scheduler.busyCrew()).toEqual([])
 }
 
 // ---------------------------------------------------------------------------
@@ -533,12 +537,14 @@ function makeWorkflow(
     readonly gates?: Record<string, unknown>
     readonly pipelines?: Record<string, unknown>
     readonly pipeline?: string
+    readonly crew?: Record<string, unknown>
   } = {},
 ): Workflow {
   return WorkflowSchema.parse({
     schema_version: 1,
     id: 'test-flow',
     base_branch: 'main',
+    ...(options.crew === undefined ? {} : { crew: options.crew }),
     defaults: { harness: HARNESS, model: 'opus', pipeline: options.pipeline ?? 'solo' },
     resources: options.resources ?? { lane: { capacity: options.lanes ?? 4, kind: 'worktree' } },
     gates: options.gates ?? {},
@@ -1651,7 +1657,14 @@ describe('session slots', () => {
       spawns: ['ok', 'rate_limit', 'ok', 'ok'],
     })
     const run = r.scheduler.run()
-    await until(() => r.pools.held('lane') === 0, 'the node to release its lane')
+    // Both halves matter. `held === 0` is true before the node ever acquires,
+    // so on its own it lets the clock advance past a backoff that has not been
+    // set yet and the run then waits forever. One admitted spawn is what says
+    // the attempt happened, and the refusal is the turn after it.
+    await until(
+      () => r.adapter.spawned.length === 1 && r.pools.held('lane') === 0,
+      'the node to take a turn and then release its lane',
+    )
     await r.advance(2_000)
     const report = await run
 
@@ -1769,6 +1782,318 @@ describe('a session the vendor has forgotten (§15.4)', () => {
 
     expect(report.status).toBe('completed')
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9: staffing
+// ---------------------------------------------------------------------------
+
+describe('crew', () => {
+  const CREW = {
+    junior: { role: 'implementer', tier: 1, model: 'cheap' },
+    'mid-a': { role: 'implementer', tier: 2, model: 'mid' },
+    'mid-b': { role: 'implementer', tier: 2, model: 'mid' },
+    senior: { role: 'implementer', tier: 4, model: 'dear' },
+  } as const
+
+  const CHECKER = { role: 'reviewer', tier: 4, model: 'checker' } as const
+
+  /** Every spawn's model, in the order the harness was asked for them. */
+  const modelsOf = (r: Rig): string[] => r.adapter.spawned.map((task) => task.model)
+
+  const crewEvents = (r: Rig): Record<string, unknown>[] =>
+    r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_crew')
+      .map((event) => event.payload as Record<string, unknown>)
+
+  it('runs each node on its member’s model, not on defaults.model', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'junior' }), node('b', ['a'], { crew: 'senior' })],
+        { crew: { junior: CREW.junior, senior: CREW.senior } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.status).toBe('completed')
+    expect(modelsOf(r)).toEqual(['cheap', 'dear'])
+    expectDrained(r)
+  })
+
+  it('leaves an unstaffed workflow on the model it always used', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'], { model: 'override' })]))
+    await r.scheduler.run()
+
+    expect(modelsOf(r)).toEqual(['opus', 'override'])
+    expectDrained(r)
+  })
+
+  /**
+   * The substitution, end to end. Two same-wave phases are both assigned to
+   * `mid-a`; `mid-b` is free and equally qualified, so the wave still runs two
+   * wide instead of serialising behind one member.
+   */
+  it('covers for a busy member with a free peer at the same tier', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'mid-a' }), node('b', [], { crew: 'mid-a' })],
+        { lanes: 2, crew: { 'mid-a': CREW['mid-a'], 'mid-b': CREW['mid-b'] } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // Both ran, both on the tier the plan asked for, and exactly one of them
+    // was somebody else's work.
+    expect(modelsOf(r)).toEqual(['mid', 'mid'])
+    const members = crewEvents(r)
+    expect(members.map((event) => event['member']).sort()).toEqual(['mid-a', 'mid-b'])
+    expect(members.filter((event) => event['substitute'] === true)).toHaveLength(1)
+    expect(members.find((event) => event['substitute'] === true)?.['instead_of']).toBe('mid-a')
+    expectDrained(r)
+  })
+
+  /**
+   * The floor, end to end, and the one case where staffing costs throughput:
+   * two lanes, a free junior, a ready phase — and it waits anyway, because the
+   * phase is Tier 2 work.
+   */
+  it('leaves a lane idle rather than run a phase below its tier', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'mid-a' }), node('b', [], { crew: 'mid-a' }), node('c', [], { crew: 'junior' })],
+        { lanes: 3, crew: { junior: CREW.junior, 'mid-a': CREW['mid-a'] } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    // Three phases, two members, and nothing ran on a tier it was not entitled
+    // to: the junior's model appears exactly once.
+    expect(modelsOf(r).filter((model) => model === 'cheap')).toHaveLength(1)
+    expect(modelsOf(r).filter((model) => model === 'mid')).toHaveLength(2)
+    expect(crewEvents(r).some((event) => event['substitute'] === true)).toBe(false)
+    expectDrained(r)
+  })
+
+  /**
+   * `SLOTS` spawns implementer → reviewer → implementer, so the middle turn is
+   * the only one that should differ — and it should differ because a *different
+   * member* took it, not because a tier was borrowed.
+   */
+  it('sends the review to the reviewer and keeps the fix with the author', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'junior', pipeline: 'slots' })], {
+        crew: { junior: CREW.junior, checker: CHECKER },
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(modelsOf(r)).toEqual(['cheap', 'checker', 'cheap'])
+    const roles = crewEvents(r).map((event) => event['role'] ?? 'implementer')
+    expect(roles).toEqual(['implementer', 'reviewer'])
+    expectDrained(r)
+  })
+
+  it('reviews on the node’s own model when the roster staffs no reviewer', async () => {
+    // Every workflow written before reviewers were members. The review is still
+    // its own session; it simply has nobody of its own to run as.
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'senior', pipeline: 'slots' })], {
+        crew: { senior: CREW.senior },
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(modelsOf(r)).toEqual(['dear', 'dear', 'dear'])
+    expectDrained(r)
+  })
+
+  /**
+   * One reviewer, two phases running at once. The reviewer cannot read two
+   * diffs in one worktree, so the second review queues — and the run still
+   * completes, which is the half that would break if the wait could deadlock.
+   */
+  it('queues two phases behind a single reviewer without stalling', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'mid-a', pipeline: 'slots' }),
+          node('b', [], { crew: 'mid-b', pipeline: 'slots' }),
+        ],
+        { lanes: 2, crew: { 'mid-a': CREW['mid-a'], 'mid-b': CREW['mid-b'], checker: CHECKER } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(modelsOf(r).filter((model) => model === 'checker')).toHaveLength(2)
+    expectDrained(r)
+  })
+
+  /**
+   * The reviewer reads where the work is, uncommitted changes and all. Giving it
+   * a checkout of its own would mean reviewing a committed snapshot — strictly
+   * less than what is in the tree, and too late to fix anything before the
+   * commit that recorded it.
+   */
+  it('reviews in the implementer’s own lane, not a tree of its own', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'mid-a', pipeline: 'slots' })], {
+        crew: { 'mid-a': CREW['mid-a'], checker: CHECKER },
+      }),
+    )
+    await r.scheduler.run()
+
+    const cwds = new Set(r.adapter.spawned.map((task) => task.cwd))
+    expect(cwds.size).toBe(1)
+    // And it is the member's desk, named for them rather than numbered.
+    expect([...cwds][0]).toContain('mid-a')
+    expectDrained(r)
+  })
+
+  it('gives desks to implementers only — a reviewer has no worktree', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'mid-a', pipeline: 'slots' })], {
+        crew: { 'mid-a': CREW['mid-a'], checker: CHECKER },
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned.every((task) => !task.cwd.includes('checker'))).toBe(true)
+    expectDrained(r)
+  })
+
+  it('never lets the phase’s own author review it', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'senior', pipeline: 'slots' })], {
+        crew: { senior: CREW.senior, checker: CHECKER },
+      }),
+    )
+    await r.scheduler.run()
+
+    const reviewTurns = crewEvents(r).filter((event) => event['role'] === 'reviewer')
+    expect(reviewTurns.map((event) => event['member'])).toEqual(['checker'])
+    expect(modelsOf(r)[1]).toBe('checker')
+    expectDrained(r)
+  })
+
+  /**
+   * The point of the whole thing. Two phases, one member, one session — so the
+   * second phase does not pay to rediscover the repository the first one
+   * already read.
+   */
+  it('keeps a member’s session across the phases it takes', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'senior', pipeline: 'reuse' }),
+        ],
+        { crew: { senior: CREW.senior }, lanes: 1 },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // Four turns, one session: cold once, and continued every turn after —
+    // including across the phase boundary, which is the turn that used to be
+    // cold for no reason but the lane's name.
+    const resumed = r.adapter.spawned.map((task) => task.resumeSessionId)
+    expect(resumed[0]).toBeUndefined()
+    expect(resumed.slice(1).every((id) => id === resumed[1])).toBe(true)
+    expect(sessionsOf(r, 'b')).toEqual([
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
+    ])
+    expectDrained(r)
+  })
+
+  it('does not carry one member’s session into another member’s phase', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'mid-a', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'junior', pipeline: 'reuse' }),
+        ],
+        { crew: { junior: CREW.junior, 'mid-a': CREW['mid-a'] }, lanes: 2 },
+      ),
+    )
+    await r.scheduler.run()
+
+    // `junior` has never run: its first turn is cold, whatever `mid-a` built up.
+    expect(sessionsOf(r, 'b')[0]).toEqual({
+      slot: 'main',
+      disposition: 'fresh',
+      reason: 'no_prior_session',
+    })
+    expectDrained(r)
+  })
+
+  /**
+   * A failed phase's context is the context that failed. Carrying it forward
+   * carries whatever wrong turn it took, and a wrong conclusion costs more to
+   * inherit than a repository costs to re-read.
+   */
+  it('starts a member cold after their phase failed', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'senior', pipeline: 'explode' }),
+          node('b', [], { crew: 'senior', pipeline: 'reuse' }),
+        ],
+        { crew: { senior: CREW.senior }, lanes: 1 },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses['a']).toBe('failed')
+    expect(sessionsOf(r, 'b')[0]).toEqual({
+      slot: 'main',
+      disposition: 'fresh',
+      reason: 'prior_phase_failed',
+    })
+    expectDrained(r)
+  })
+
+  it('gives the member back when a waiting node is aborted', async () => {
+    // `b` cannot start: the roster has one senior and `a` is holding them. An
+    // abort has to reach it *while it waits*, and has to leave the roster in a
+    // state where a third phase could still be staffed.
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'senior' }), node('b', [], { crew: 'senior' })],
+        { lanes: 2, crew: { senior: CREW.senior } },
+      ),
+      { stall: true },
+    )
+
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    expect(r.scheduler.busyCrew()).toEqual(['senior'])
+
+    await r.scheduler.abortNode('b')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'failed' })
+    expectDrained(r)
+  })
+
+  it('gives the member back when the node settles, so the next one can have them', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'senior' }), node('b', ['a'], { crew: 'senior' })],
+        { lanes: 2, crew: { senior: CREW.senior } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'senior'])
     expectDrained(r)
   })
 })

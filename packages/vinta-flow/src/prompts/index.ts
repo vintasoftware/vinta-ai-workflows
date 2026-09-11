@@ -10,5 +10,6 @@ export {
   type ConflictContext,
   type DependencyContext,
   type PromptJournal,
+  type Reorientation,
   type SpawnPromptRequest,
 } from './prompts.ts'

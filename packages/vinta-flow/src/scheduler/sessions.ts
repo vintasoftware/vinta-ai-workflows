@@ -32,6 +32,12 @@ export interface SessionEntry {
   readonly sessionId: string
   /** The lane the session ran in. A session is about a worktree. */
   readonly lane: string
+  /**
+   * The node whose turn wrote this entry. What makes a continuation's *shape*
+   * decidable: continuing within one phase is a delta, and continuing into the
+   * next one is a whole brief plus an account of what changed underneath.
+   */
+  readonly nodeId: string
   /** Turns taken on this slot, against `defaults.max_session_turns`. */
   readonly turns: number
 }
@@ -47,6 +53,16 @@ export interface SessionPlan {
   /** The id to continue, or null to start cold. */
   readonly resumeSessionId: string | null
   readonly continuation: boolean
+  /**
+   * True where the session being continued last ran on a **different node**.
+   *
+   * The distinction the prompt turns on. A same-phase continuation is a delta —
+   * the session already holds the brief. A cross-phase one holds a brief for
+   * work that is finished, so it gets the new phase's brief in full *and* an
+   * account of what changed in the worktree while it was away: same session,
+   * same directory, different problem and a tree that moved under it.
+   */
+  readonly crossPhase: boolean
   /** Why this is not a continuation. Null exactly when `continuation` is true. */
   readonly reason: SessionFreshReason | null
   /** What the slot's turn count becomes if this spawn is granted. */
@@ -64,8 +80,15 @@ export interface SessionPlanInput {
   /** The lane this turn runs in. Null only in a projection with no worktrees. */
   readonly lane: string | null
   readonly ledger: ReadonlyMap<string, SessionEntry>
+  /** The node this turn belongs to, compared against the entry's. */
+  readonly nodeId: string
   /** `defaults.max_session_turns`. */
   readonly maxTurns: number
+  /**
+   * The actor's previous phase failed, so its session is the context that
+   * failed with it. Only reachable once sessions outlive a phase.
+   */
+  readonly poisoned: boolean
   /** Fixers that have already *finished* on this node. */
   readonly fixRounds: number
   readonly maxFixRounds: number
@@ -86,6 +109,7 @@ export function planSession(input: SessionPlanInput): SessionPlan {
     slot,
     resumeSessionId: null,
     continuation: false,
+    crossPhase: false,
     reason,
     turns: 1,
   })
@@ -102,6 +126,7 @@ export function planSession(input: SessionPlanInput): SessionPlan {
         resumeSessionId: input.takeoverSessionId,
         continuation: true,
         reason: null,
+        crossPhase: false,
         // A takeover spends no slot budget: the operator continued the turn
         // that was already running rather than buying a new one.
         turns: 0,
@@ -117,17 +142,29 @@ export function planSession(input: SessionPlanInput): SessionPlan {
   // is the one that will still be true on the next turn.
   if (!input.canResume) return fresh('no_resume_capability')
   if (isLastFixRound(input)) return fresh('final_fix_round')
+  // Before the ledger, for the same reason as the two above: it is true
+  // whatever the ledger holds. A member whose last phase failed carries the
+  // context that failed with it, and the wrong turn it took is exactly what a
+  // continuation would preserve. Cheaper to re-read the repository than to
+  // inherit a wrong conclusion about it.
+  if (input.poisoned) return fresh('prior_phase_failed')
 
   const entry = input.ledger.get(slot)
   if (entry === undefined) return fresh('no_prior_session')
   if (entry.harnessId !== input.harnessId) return fresh('harness_changed')
-  // The scheduler clears the whole ledger when a node re-attempts, because a
-  // recycled lane is invisible from its name — so in the shipped host this is
-  // the second line of defence rather than the first. It stays because it is
-  // the one that states the invariant: an entry is about a worktree, and a
-  // session resumed into a different one reasons about paths and file states
-  // that are not there. A host that forgets to clear is wrong; a host that
-  // cannot express the mistake is better.
+  // The invariant, and the rule that decides whether a session may outlive its
+  // phase: an entry is about a worktree, and a session resumed into a different
+  // one reasons about paths that are not there.
+  //
+  // It used to fire on nearly every cross-phase turn, because lanes were
+  // anonymous and a node took whatever the free list had on top. Now a member
+  // owns one worktree for the run, so the lane matches and the session carries
+  // — and what the reset *did* change, the files, is handed to the agent as an
+  // explicit list rather than left for it to discover (`#reorientation`).
+  //
+  // The check stays, and stays first among the ledger rules. A host that
+  // forgets to pin a member to a lane is wrong; a host that cannot express the
+  // mistake is worse.
   if (input.lane === null || entry.lane !== input.lane) return fresh('lane_changed')
   if (entry.turns >= input.maxTurns) return fresh('turn_ceiling')
 
@@ -135,6 +172,7 @@ export function planSession(input: SessionPlanInput): SessionPlan {
     slot,
     resumeSessionId: entry.sessionId,
     continuation: true,
+    crossPhase: entry.nodeId !== input.nodeId,
     reason: null,
     turns: entry.turns + 1,
   }

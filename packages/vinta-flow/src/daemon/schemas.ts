@@ -346,6 +346,28 @@ export const ReuseTotalsSchema = z.strictObject({
 })
 
 /**
+ * Who worked, against who the plan said would. `substituted` is the field to
+ * read next to a cost that overran: every substitution ran at a tier at or
+ * above the one budgeted for, so a run can be entirely green and still have
+ * been staffed dearer than planned.
+ *
+ * Empty `members` is the normal shape for an unstaffed workflow, not an error.
+ */
+export const CrewTotalsSchema = z.strictObject({
+  members: z.array(
+    z.strictObject({
+      member: z.string(),
+      tier: z.number().int(),
+      nodes: z.number().int(),
+      coveredFor: z.number().int(),
+    }),
+  ),
+  asPlanned: z.number().int(),
+  substituted: z.number().int(),
+  idle: z.array(z.string()),
+})
+
+/**
  * What one run's agents cost and what reuse bought — the two halves that only
  * mean something together (§15.6). Its own endpoint rather than a block on the
  * snapshot: computing it reads every node's transcript in full, and the
@@ -354,6 +376,7 @@ export const ReuseTotalsSchema = z.strictObject({
 export const RunUsageResponseSchema = z.strictObject({
   runId: z.string(),
   reuse: ReuseTotalsSchema,
+  crew: CrewTotalsSchema,
   inputTokens: z.number().int(),
   outputTokens: z.number().int(),
   /** Sessions counted — one per session, however many turns a node took. */

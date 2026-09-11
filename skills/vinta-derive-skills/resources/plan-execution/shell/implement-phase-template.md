@@ -9,7 +9,7 @@ Execution unit invoked by [implement-plan](../implement-plan/SKILL.md) (and by [
 
 ## Inputs (passed by the conductor as data — this skill re-derives none of them)
 
-- `phase` record: `{ id, title, goal, body, spec_use_case, depends_on, wave, base_branch, suggested_model_tier, reusable_skills, has_e2e, acceptance }`.
+- `phase` record: `{ id, title, goal, body, spec_use_case, depends_on, wave, base_branch, crew_member, crew_tier, suggested_model_tier, reusable_skills, has_e2e, acceptance }`. `crew_member` / `crew_tier` come from the phase's `**Assigned to**:` line and the plan's **Crew** table; `suggested_model_tier` is the legacy path and is set only on a plan with no roster. Exactly one of the two is populated.
 - Plan-level decisions: **Goals + Non-goals**, **Guiding Decisions**, the relevant **Data Model Changes** subsection.
 - **Dependency-closure summaries** — the `phase-{id}.md` tracking entries for this phase's transitive dependencies, and only those. Not "everything finished so far": under parallel execution a sibling lane's work is not in this phase's base branch, and describing it as done makes the implementer code against files it cannot see.
 - `WORKROOT`, `SANDBOX_TIER` — **this lane's**, resolved by the conductor ([Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot)). `phase.base_branch` — the branch the conductor already created this phase's branch from, derived from `depends_on`.
