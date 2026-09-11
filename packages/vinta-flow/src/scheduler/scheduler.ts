@@ -85,6 +85,7 @@ import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
 import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
+import { assignCrew, type CrewDecision, reviewerModel } from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import { composeSpawnPrompt } from '../prompts/index.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
@@ -217,6 +218,20 @@ interface NodeState {
   fixRounds: number
   lane: string | null
   laneLease: Lease | null
+  /**
+   * The roster member holding this node, or null when the workflow is
+   * unstaffed. Claimed before the lane and released with it, because a member
+   * owns the phase rather than a turn of it: the fixer answering a review
+   * finding is the implementer continuing its own session, so handing the node
+   * to someone else mid-pipeline would hand it to an agent that has no session
+   * to continue.
+   */
+  crew: {
+    readonly member: string
+    readonly tier: number
+    readonly model: string
+    readonly harness: string | null
+  } | null
   /** Held for one pipeline step, and released at an `await_human` suspension. */
   gateLease: Lease | null
   gateHeld: readonly string[]
@@ -259,6 +274,10 @@ export class Scheduler {
   readonly #freeLanes: string[]
   /** Lane slots a node has already run in, and which therefore need recycling. */
   readonly #usedLanes = new Set<string>()
+  /** Roster members currently holding a node. Empty in an unstaffed workflow. */
+  readonly #busyCrew = new Set<string>()
+  /** Whether this workflow declared a roster at all. Fixed for the run. */
+  readonly #staffed: boolean
   #waves = new Map<string, number>()
   #waiters: (() => void)[] = []
   #iterations = 0
@@ -268,6 +287,7 @@ export class Scheduler {
     const { workflow } = options
     this.#workflow = workflow
     this.#takeovers = options.takeovers ?? takeovers
+    this.#staffed = Object.keys(workflow.crew).length > 0
 
     for (const node of workflow.nodes) this.#states.set(node.id, this.#fresh(node))
     this.#order = workflow.nodes.map((node) => node.id)
@@ -296,6 +316,7 @@ export class Scheduler {
       pending: [],
       undelivered: [],
       sessions: new Map(),
+      crew: null,
       resumeSessionId: null,
       pauseRequested: false,
       aborted: false,
@@ -566,7 +587,7 @@ export class Scheduler {
   /** Harnesses admission control says may not be tried yet (§6.1). */
   #parkedHarnesses(): string[] {
     const harnesses = new Set(
-      [...this.#states.values()].map((state) => this.#harnessOf(state.node)),
+      [...this.#states.values()].map((state) => this.#harnessOf(state)),
     )
     return [...harnesses].filter((id) => this.#options.admission.wakeAt(id) !== undefined)
   }
@@ -590,6 +611,19 @@ export class Scheduler {
 
   async #runNode(state: NodeState): Promise<void> {
     while (true) {
+      // Staffing before capacity, deliberately. A lane is disk; who is holding
+      // it is what the phase costs and whether it is any good. A free lane with
+      // nobody qualified to take the phase is an idle lane — cheaper than the
+      // same phase run by an agent the plan judged too junior for it.
+      // Guarded rather than awaited unconditionally: an unstaffed workflow must
+      // reach `acquire` in the same turn it always did. An extra microtask here
+      // is not a behaviour change but it *is* a schedule change, and the
+      // scheduler's own tests time their assertions against that schedule.
+      if (this.#staffed) {
+        await this.#claimCrew(state)
+        if (state.aborted) return
+      }
+
       // All-or-nothing, canonical order, one call: the lane and nothing else.
       // Gate pools are acquired later, while this lane is still held, which is
       // the §6 rule that an idle lane is just disk.
@@ -635,6 +669,66 @@ export class Scheduler {
         return
       }
     }
+  }
+
+  /**
+   * Takes a roster member for this node, waiting if every qualified one is busy.
+   *
+   * The wait cannot deadlock, and the reason is worth stating because it is the
+   * whole safety argument: `assignCrew`'s floor is the *assigned* member's own
+   * tier, and `validate.ts` refuses a node naming a member who is not on the
+   * roster. So a node that waits is always waiting on somebody who is holding
+   * another node — never on a qualification nobody has. A run cannot arrive at
+   * "everyone is idle and this phase is unstaffable".
+   *
+   * An unstaffed workflow returns immediately and holds nothing, which is every
+   * workflow written before rosters existed.
+   */
+  async #claimCrew(state: NodeState): Promise<void> {
+    while (!state.aborted) {
+      const decision: CrewDecision = assignCrew({
+        assigned: state.node.crew,
+        crew: this.#workflow.crew,
+        busy: this.#busyCrew,
+      })
+
+      if (decision.kind === 'unstaffed') return
+
+      if (decision.kind === 'assigned') {
+        this.#busyCrew.add(decision.member)
+        state.crew = {
+          member: decision.member,
+          tier: decision.tier,
+          model: decision.model,
+          harness: decision.harness,
+        }
+        this.#options.journal.append({
+          runId: this.#options.runId,
+          nodeId: state.node.id,
+          type: 'node_crew',
+          payload: {
+            member: decision.member,
+            tier: decision.tier,
+            substitute: decision.substitute,
+            ...(decision.insteadOf === null ? {} : { instead_of: decision.insteadOf }),
+          },
+        })
+        return
+      }
+
+      // Every member at or above the floor is working. A member frees only when
+      // a node settles, and that is a state change — so this waits on the same
+      // signal the dispatch loop does rather than polling.
+      await this.#changed()
+    }
+  }
+
+  /** Gives the node's member back to the roster and wakes whoever is waiting. */
+  #releaseCrew(state: NodeState): void {
+    if (state.crew === null) return
+    this.#busyCrew.delete(state.crew.member)
+    state.crew = null
+    this.#wake()
   }
 
   /**
@@ -849,7 +943,7 @@ export class Scheduler {
   async #spawn(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
     const { params } = invocation.effect
     const { workflow, runId, journal, admission } = this.#options
-    const adapter = this.#adapter(this.#harnessOf(state.node, params['harness']))
+    const adapter = this.#adapter(this.#harnessOf(state, params['harness']))
 
     // §9's queue, on its way to the agent. Carried as its own field rather
     // than folded into the brief so the adapter can present it as the
@@ -887,7 +981,7 @@ export class Scheduler {
         facts: invocation.context,
         continuation: plan.continuation,
       }),
-      model: String(params['model'] ?? state.node.model ?? workflow.defaults.model),
+      model: this.#modelFor(state, params),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
       // The handoff token: either the slot's session (§15) or, for a pipeline
       // that named no slot, the id an operator's takeover left behind (§9).
@@ -1168,6 +1262,9 @@ export class Scheduler {
 
   #release(state: NodeState): void {
     this.#releaseGate(state)
+    // Before the early return below: a node can hold a member and no lane —
+    // it is claimed first, and a capacity refusal unwinds from in between.
+    this.#releaseCrew(state)
     if (state.laneLease === null) return
     state.laneLease.release()
     state.laneLease = null
@@ -1227,9 +1324,45 @@ export class Scheduler {
     return null
   }
 
-  #harnessOf(node: Node, override?: unknown): string {
+  #harnessOf(state: NodeState, override?: unknown): string {
     if (typeof override === 'string') return override
-    return node.harness ?? this.#workflow.defaults.harness
+    return state.crew?.harness ?? state.node.harness ?? this.#workflow.defaults.harness
+  }
+
+  /**
+   * Which model this turn runs on.
+   *
+   * In an unstaffed workflow this is what it always was: the effect's own
+   * override, then the node's, then the default. A roster inserts one thing
+   * between them — the member holding the node — and one rule that a per-node
+   * model could never express.
+   *
+   * **A review runs at the tier above the author's.** Every role on a node
+   * shares the node's one model today, so the cheapest model on the plan is
+   * what checks the cheapest model's work, and a Tier 1 phase gets a Tier 1
+   * review. A team does not work that way, and neither should this: the review
+   * is resolved against the most junior member *strictly above* the author's
+   * tier.
+   *
+   * That member is not claimed and not waited for — the reviewer borrows a
+   * tier, not a person. Making a review hold a roster slot would let the one
+   * senior on a plan be unable to review the phase they are busy implementing.
+   * Nobody above the author (a single-tier team, a Tier 4 phase) leaves the
+   * review on the author's own model, which is today's behaviour.
+   */
+  #modelFor(state: NodeState, params: Readonly<Record<string, unknown>>): string {
+    const override = params['model']
+    if (typeof override === 'string') return override
+
+    const crew = state.crew
+    if (crew !== null) {
+      if (params['role'] === 'reviewer') {
+        return reviewerModel(this.#workflow.crew, crew.tier)?.model ?? crew.model
+      }
+      return crew.model
+    }
+
+    return String(state.node.model ?? this.#workflow.defaults.model)
   }
 
   #adapter(id: string): HarnessAdapter {

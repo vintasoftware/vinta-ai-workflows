@@ -134,6 +134,37 @@ export const DependencySchema = z.strictObject({
     ),
 })
 
+// ---------------------------------------------------------------------------
+// The crew — who is on this plan, and at what tier
+//
+// The alternative this replaces is a per-node `model`, picked phase by phase
+// with nothing anywhere adding it up. That reads fine one node at a time and
+// hides the two questions a plan is actually being asked: how many agents does
+// this feature need at once, and is any of them too junior for what it was
+// handed. A roster answers both before the run starts, and it is the same
+// number twice — the widest wave is how many members can ever be busy.
+//
+// A member is a tier and the model that tier resolves to, not a session. Lanes
+// are recycled between phases, so an agent cannot carry a live context from one
+// phase to the next (§15.2's `lane_changed`); what carries is the staffing
+// decision.
+// ---------------------------------------------------------------------------
+
+export const CrewMemberSchema = z.strictObject({
+  tier: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .describe(
+      'Difficulty tier this member is staffed at, per the plan skill’s rubric. It is a ' +
+        'floor on what they may be handed, and the ordering the scheduler substitutes along.',
+    ),
+  model: z.string().min(1).describe('The model this tier resolves to for this run.'),
+  harness: z.enum(HARNESS_IDS).optional().describe('Overrides defaults.harness for this member.'),
+  description: z.string().optional().describe('Why the plan staffed this tier.'),
+})
+
 export const NodeSchema = z.strictObject({
   id: Id,
   name: z.string().min(1),
@@ -149,7 +180,14 @@ export const NodeSchema = z.strictObject({
   pipeline: Id.optional().describe('Overrides defaults.pipeline.'),
   gates: z.array(Id).default([]),
   harness: z.enum(HARNESS_IDS).optional().describe('Overrides defaults.harness.'),
-  model: z.string().optional().describe('Overrides defaults.model.'),
+  model: z
+    .string()
+    .optional()
+    .describe('Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.'),
+  crew: Id.optional().describe(
+    'The crew member this phase is assigned to. Their tier is the floor for it: a busier ' +
+      'roster may hand the phase to a free member at that tier or above, never below.',
+  ),
   max_fix_rounds: z.number().int().min(0).default(2),
 })
 
@@ -269,6 +307,14 @@ export const WorkflowSchema = z
     base_branch: z.string().min(1).describe('What dependency-free nodes branch from.'),
     project: ProjectSchema.optional(),
     defaults: DefaultsSchema,
+    crew: z
+      .record(Id, CrewMemberSchema)
+      .default({})
+      .describe(
+        'The agents this plan is staffed with, by id. Empty — the default — means the ' +
+          'workflow is unstaffed and every node falls back to `model` / `defaults.model`, ' +
+          'which is how workflows written before rosters existed keep running.',
+      ),
     resources: z.record(Id, ResourceSchema).describe('Named capacity pools. `lane` is required.'),
     gates: z.record(Id, GateSchema).default({}),
     nodes: z.array(NodeSchema).min(1),
@@ -297,6 +343,7 @@ export type Gate = z.infer<typeof GateSchema>
 export type Project = z.infer<typeof ProjectSchema>
 export type ProjectDatabase = z.infer<typeof DatabaseSchema>
 export type Resource = z.infer<typeof ResourceSchema>
+export type CrewMember = z.infer<typeof CrewMemberSchema>
 export type Pipeline = z.infer<typeof PipelineSchema>
 export type SideEffect = z.infer<typeof SideEffectSchema>
 export type HarnessId = (typeof HARNESS_IDS)[number]

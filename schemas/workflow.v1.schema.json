@@ -234,6 +234,50 @@
       ],
       "additionalProperties": false
     },
+    "crew": {
+      "default": {},
+      "description": "The agents this plan is staffed with, by id. Empty — the default — means the workflow is unstaffed and every node falls back to `model` / `defaults.model`, which is how workflows written before rosters existed keep running.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "tier": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4,
+            "description": "Difficulty tier this member is staffed at, per the plan skill’s rubric. It is a floor on what they may be handed, and the ordering the scheduler substitutes along."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The model this tier resolves to for this run."
+          },
+          "harness": {
+            "description": "Overrides defaults.harness for this member.",
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "description": {
+            "description": "Why the plan staffed this tier.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tier",
+          "model"
+        ],
+        "additionalProperties": false
+      }
+    },
     "resources": {
       "type": "object",
       "propertyNames": {
@@ -391,8 +435,14 @@
             ]
           },
           "model": {
-            "description": "Overrides defaults.model.",
+            "description": "Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.",
             "type": "string"
+          },
+          "crew": {
+            "description": "The crew member this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free member at that tier or above, never below.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
           },
           "max_fix_rounds": {
             "default": 2,

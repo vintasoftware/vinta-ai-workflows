@@ -31,6 +31,10 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
   ])
   const gateIds = new Set(Object.keys(workflow.gates))
   const resourceIds = new Set(Object.keys(workflow.resources))
+  const crewIds = new Set(Object.keys(workflow.crew))
+  const staffed = crewIds.size > 0
+  /** Members some node actually named. Filled by the node pass below. */
+  const employed = new Set<string>()
 
   if (!resourceIds.has('lane')) {
     issues.push({
@@ -72,7 +76,48 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
         issues.push({ path: ['nodes', i, 'gates', j], message: `unknown gate "${gate}"` })
       }
     })
+
+    if (node.crew !== undefined) {
+      if (!crewIds.has(node.crew)) {
+        issues.push({
+          path: ['nodes', i, 'crew'],
+          message: `unknown crew member "${node.crew}"`,
+        })
+      }
+      employed.add(node.crew)
+
+      // Both would answer "which model runs this phase", and nothing says which
+      // wins. The roster is the answer a staffed workflow is asking for, so the
+      // node-level override has to go rather than be quietly outranked.
+      if (node.model !== undefined) {
+        issues.push({
+          path: ['nodes', i, 'model'],
+          message:
+            `node "${node.id}" sets both \`model\` and \`crew\` — a crew member carries ` +
+            'a model, so drop the override or drop the assignment',
+        })
+      }
+    } else if (staffed) {
+      // Half a roster is worse than none: the scheduler would run two staffing
+      // rules at once, and the plan's own idleness arithmetic would be wrong.
+      issues.push({
+        path: ['nodes', i, 'crew'],
+        message: `node "${node.id}" names no crew member, but this workflow is staffed`,
+      })
+    }
   })
+
+  // A member nobody was assigned to is an agent the plan pays to watch. It is
+  // also the exact defect a roster exists to make visible, so it is refused
+  // rather than warned about.
+  for (const memberId of crewIds) {
+    if (!employed.has(memberId)) {
+      issues.push({
+        path: ['crew', memberId],
+        message: `crew member "${memberId}" is assigned no node`,
+      })
+    }
+  }
 
   // Dependencies are checked in a second pass so forward references resolve.
   workflow.nodes.forEach((node, i) => {

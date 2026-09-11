@@ -229,6 +229,26 @@ interface NodePayloads {
     readonly reason?: SessionFreshReason
   }
   /**
+   * Who took this node, and whether the plan named them.
+   *
+   * Journalled once per attempt, at the claim — before the lane is acquired, so
+   * a node that then waits on capacity is already on the record as staffed. A
+   * `substitute` row is the interesting one: it says the plan's staffing and
+   * the run's staffing diverged, which is how a feature comes in dearer than
+   * the roster predicted without anything having gone wrong.
+   *
+   * Ids and an integer tier. A member is a staffing decision, not an agent's
+   * words: nothing a model wrote reaches this payload (§11).
+   */
+  node_crew: {
+    readonly member: string
+    readonly tier: number
+    /** True when the plan named someone else and they were busy. */
+    readonly substitute: boolean
+    /** Who the plan named. Present only on a substitution. */
+    readonly instead_of?: string
+  }
+  /**
    * One edge of a gate-pool acquisition, for the whole set the gate needs —
    * acquisition is all-or-nothing and in one `pools.acquire` call (§6), so a
    * per-resource event would claim an ordering the scheduler does not have.

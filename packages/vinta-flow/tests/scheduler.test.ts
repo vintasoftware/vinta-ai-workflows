@@ -533,12 +533,14 @@ function makeWorkflow(
     readonly gates?: Record<string, unknown>
     readonly pipelines?: Record<string, unknown>
     readonly pipeline?: string
+    readonly crew?: Record<string, unknown>
   } = {},
 ): Workflow {
   return WorkflowSchema.parse({
     schema_version: 1,
     id: 'test-flow',
     base_branch: 'main',
+    ...(options.crew === undefined ? {} : { crew: options.crew }),
     defaults: { harness: HARNESS, model: 'opus', pipeline: options.pipeline ?? 'solo' },
     resources: options.resources ?? { lane: { capacity: options.lanes ?? 4, kind: 'worktree' } },
     gates: options.gates ?? {},
@@ -1651,7 +1653,14 @@ describe('session slots', () => {
       spawns: ['ok', 'rate_limit', 'ok', 'ok'],
     })
     const run = r.scheduler.run()
-    await until(() => r.pools.held('lane') === 0, 'the node to release its lane')
+    // Both halves matter. `held === 0` is true before the node ever acquires,
+    // so on its own it lets the clock advance past a backoff that has not been
+    // set yet and the run then waits forever. One admitted spawn is what says
+    // the attempt happened, and the refusal is the turn after it.
+    await until(
+      () => r.adapter.spawned.length === 1 && r.pools.held('lane') === 0,
+      'the node to take a turn and then release its lane',
+    )
     await r.advance(2_000)
     const report = await run
 
@@ -1769,6 +1778,143 @@ describe('a session the vendor has forgotten (§15.4)', () => {
 
     expect(report.status).toBe('completed')
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9: staffing
+// ---------------------------------------------------------------------------
+
+describe('crew', () => {
+  const CREW = {
+    junior: { tier: 1, model: 'cheap' },
+    'mid-a': { tier: 2, model: 'mid' },
+    'mid-b': { tier: 2, model: 'mid' },
+    senior: { tier: 4, model: 'dear' },
+  }
+
+  /** Every spawn's model, in the order the harness was asked for them. */
+  const modelsOf = (r: Rig): string[] => r.adapter.spawned.map((task) => task.model)
+
+  const crewEvents = (r: Rig): Record<string, unknown>[] =>
+    r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_crew')
+      .map((event) => event.payload as Record<string, unknown>)
+
+  it('runs each node on its member’s model, not on defaults.model', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'junior' }), node('b', ['a'], { crew: 'senior' })],
+        { crew: { junior: CREW.junior, senior: CREW.senior } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.status).toBe('completed')
+    expect(modelsOf(r)).toEqual(['cheap', 'dear'])
+    expectDrained(r)
+  })
+
+  it('leaves an unstaffed workflow on the model it always used', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'], { model: 'override' })]))
+    await r.scheduler.run()
+
+    expect(modelsOf(r)).toEqual(['opus', 'override'])
+    expectDrained(r)
+  })
+
+  /**
+   * The substitution, end to end. Two same-wave phases are both assigned to
+   * `mid-a`; `mid-b` is free and equally qualified, so the wave still runs two
+   * wide instead of serialising behind one member.
+   */
+  it('covers for a busy member with a free peer at the same tier', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'mid-a' }), node('b', [], { crew: 'mid-a' })],
+        { lanes: 2, crew: { 'mid-a': CREW['mid-a'], 'mid-b': CREW['mid-b'] } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // Both ran, both on the tier the plan asked for, and exactly one of them
+    // was somebody else's work.
+    expect(modelsOf(r)).toEqual(['mid', 'mid'])
+    const members = crewEvents(r)
+    expect(members.map((event) => event['member']).sort()).toEqual(['mid-a', 'mid-b'])
+    expect(members.filter((event) => event['substitute'] === true)).toHaveLength(1)
+    expect(members.find((event) => event['substitute'] === true)?.['instead_of']).toBe('mid-a')
+    expectDrained(r)
+  })
+
+  /**
+   * The floor, end to end, and the one case where staffing costs throughput:
+   * two lanes, a free junior, a ready phase — and it waits anyway, because the
+   * phase is Tier 2 work.
+   */
+  it('leaves a lane idle rather than run a phase below its tier', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'mid-a' }), node('b', [], { crew: 'mid-a' }), node('c', [], { crew: 'junior' })],
+        { lanes: 3, crew: { junior: CREW.junior, 'mid-a': CREW['mid-a'] } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    // Three phases, two members, and nothing ran on a tier it was not entitled
+    // to: the junior's model appears exactly once.
+    expect(modelsOf(r).filter((model) => model === 'cheap')).toHaveLength(1)
+    expect(modelsOf(r).filter((model) => model === 'mid')).toHaveLength(2)
+    expect(crewEvents(r).some((event) => event['substitute'] === true)).toBe(false)
+    expectDrained(r)
+  })
+
+  /**
+   * The reviewer borrows a tier. `SLOTS` spawns implementer → reviewer →
+   * implementer, and the middle one is the only turn that should differ.
+   */
+  it('reviews a junior’s work one tier up, and keeps the fix with the author', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'junior', pipeline: 'slots' })], {
+        crew: { junior: CREW.junior, 'mid-a': CREW['mid-a'], senior: CREW.senior },
+      }),
+    )
+    await r.scheduler.run()
+
+    // Not `dear`: the review steps up to the next tier, never to the top of
+    // the roster, or every cheap phase on the plan is reviewed by its priciest
+    // model.
+    expect(modelsOf(r)).toEqual(['cheap', 'mid', 'cheap'])
+    expectDrained(r)
+  })
+
+  it('keeps the review on the author’s own model when nobody is above them', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'senior', pipeline: 'slots' })], {
+        crew: { junior: CREW.junior, senior: CREW.senior },
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(modelsOf(r)).toEqual(['dear', 'dear', 'dear'])
+    expectDrained(r)
+  })
+
+  it('gives the member back when the node settles, so the next one can have them', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'senior' }), node('b', ['a'], { crew: 'senior' })],
+        { lanes: 2, crew: { senior: CREW.senior } },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'senior'])
     expectDrained(r)
   })
 })
