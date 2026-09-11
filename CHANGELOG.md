@@ -41,6 +41,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a project with no orchestrator carries a file nothing reads, and a project that
   adopts one later finds its plans already executable.
 
+- **Review findings go back to the phase's own implementer, not to a fresh fixer.**
+  The agent that wrote the code still holds the phase brief, the plan's bounds, the
+  dependency context and its own reasoning; a fresh fixer held a quoted finding and
+  had to rediscover the rest — slower, dearer, and likelier to "fix" a symptom by
+  undoing something the phase chose deliberately. The fix message is now a delta —
+  the findings, nothing else — because re-sending the brief invites a
+  re-implementation rather than a fix.
+
+  Three rules keep that from costing what it buys. **The reviewer is never the
+  implementer**: continuing the reviewer across rounds is fine, but the review must
+  come from an agent that did not write the code. **The last round before giving up
+  goes to a fresh fixer, always** — reuse means the agent that wrote the bug is
+  fixing it, which is usually the point and occasionally exactly wrong, because that
+  assumption *was* the bug. And where a runtime cannot continue a finished
+  sub-agent, the old cold hand-off still happens and is recorded as one, so a slow
+  phase can be read later without guessing.
+
+  One consequence worth knowing: a continued implementer fixes at the phase's own
+  `**Suggested AI model**:` tier, so `agent_models.fixer` now governs only the cold
+  cases. A project that set `fixer` cheap to save money is saving it on fewer rounds.
+
 - **The workflow schema gained `defaults.max_session_turns`.** Optional, default
   12. An orchestrator that reuses one agent session across a phase's implement
   and fix turns needs a ceiling on how long that session may grow before the next

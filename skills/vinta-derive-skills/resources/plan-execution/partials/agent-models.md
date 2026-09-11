@@ -10,6 +10,13 @@
 3. Open [`ai-tools/skills/plan-feature/resources/ai-models.yaml`](../plan-feature/resources/ai-models.yaml), take that tier's `models`, **filter to the vendors the runtime actually exposes**, pick the cheapest/fastest survivor, and translate it to the runner's spawn form — the same resolution [implement-phase](../implement-phase/SKILL.md) runs for the implementer, only keyed by a config tier instead of a plan line.
 4. `ai-models.yaml` missing, or the tier has no runtime-available vendor → fall back to the runtime default and surface the fallback once. Never hard-fail a phase over a model-selection miss.
 
+`fixer` governs fewer rounds than it used to. A finding goes back to the phase's
+own implementer, which fixes at the phase's `**Suggested AI model**:` tier
+because it *is* the implementer; `agent_models.fixer` applies to the cold cases
+only — a runtime that cannot continue a sub-agent, and the last round before
+giving up, which is deliberately handed to an agent that has not seen the work.
+See the fix loop in [review-phase](../review-phase/SKILL.md).
+
 Record the **model actually used** in tracking: for `reviewer` / `fixer`, alongside the review note; for the mechanical steps, in the phase's tracking row next to the branch/PR fields.
 <!-- block-end: TIER_RESOLVE -->
 
