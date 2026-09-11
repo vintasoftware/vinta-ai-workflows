@@ -5,12 +5,17 @@
  * and handed to the client. It is not stored, not logged, and not rendered.
  */
 import { createRoot } from 'react-dom/client'
+import { applyTheme, readThemePreference } from 'vinta-design-system/lib/theme'
 import './app.css'
 import { App } from './App.tsx'
 import { createClient } from './client.ts'
+import { THEME_STORAGE_KEY } from './theme.tsx'
 
 const root = document.getElementById('root')
 if (root === null) throw new Error('vinta-flow: #root is missing from the page')
+
+// Before the first render, so a remembered dark theme never flashes light.
+applyTheme(readThemePreference(THEME_STORAGE_KEY))
 
 const token = new URLSearchParams(location.search).get('token') ?? ''
 createRoot(root).render(<App client={createClient(location.origin, token)} />)

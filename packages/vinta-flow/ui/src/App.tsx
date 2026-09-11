@@ -9,8 +9,22 @@
  * one run's cursor into another's stream, and switching nodes must not show
  * one node's transcript under another's name; remounting is the cheapest way
  * to be sure neither can happen.
+ *
+ * The chrome is the design system's shell: one sticky bar — brand, the two
+ * sections, the reminder control, the theme — and one bounded column under it.
+ * Nothing decorative; this is a tool, and the bar's whole job is to say where
+ * you are and get out of the way.
  */
 import { useEffect, useMemo, useState } from 'react'
+import {
+  AppBrand,
+  AppMain,
+  AppNav,
+  AppNavLink,
+  AppShell,
+  AppTopbar,
+  AppTopbarActions,
+} from 'vinta-design-system/layout'
 import type { Client } from './client.ts'
 import { EditorList, EditorView } from './Editor.tsx'
 import { pageWorkflowClient, type WorkflowClient } from './editor-client.ts'
@@ -20,6 +34,7 @@ import { Replay } from './Replay.tsx'
 import { pageReplayClient, type ReplayClient } from './replay-client.ts'
 import { Run } from './Run.tsx'
 import { Runs } from './Runs.tsx'
+import { ThemeProvider, ThemeToggle } from './theme.tsx'
 
 // A run id is one segment — `encodeURIComponent` guarantees it — so the node
 // route cannot be swallowed by the run route.
@@ -63,18 +78,33 @@ export function App({
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
 
+  const section = route?.kind === 'editor' ? 'editor' : 'runs'
+
   return (
-    <main className="app">
-      <header className="app-head">
-        <h1>
-          <a href="#/">vinta-flow</a>
-        </h1>
-        <a href="#/editor">Editor</a>
-        {/* §9.1's browser channel: its opt-in, and its degrade when refused. */}
-        <Notifications />
-      </header>
-      {view()}
-    </main>
+    <ThemeProvider>
+      <AppShell className="app">
+        <AppTopbar className="app-head">
+          <AppBrand href="#/">
+            <BrandMark />
+            vinta-flow
+          </AppBrand>
+          <AppNav>
+            <AppNavLink href="#/" current={section === 'runs'}>
+              Runs
+            </AppNavLink>
+            <AppNavLink href="#/editor" current={section === 'editor'}>
+              Editor
+            </AppNavLink>
+          </AppNav>
+          <AppTopbarActions>
+            {/* §9.1's browser channel: its opt-in, and its degrade when refused. */}
+            <Notifications />
+            <ThemeToggle />
+          </AppTopbarActions>
+        </AppTopbar>
+        <AppMain>{view()}</AppMain>
+      </AppShell>
+    </ThemeProvider>
   )
 
   function view() {
@@ -107,6 +137,29 @@ export function App({
       />
     )
   }
+}
+
+/** The mark beside the name: a V, drawn rather than typed, in the brand blue. */
+function BrandMark() {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-grid size-[18px] place-items-center rounded-[5px] bg-primary text-primary-foreground"
+    >
+      <svg
+        viewBox="0 0 16 16"
+        width="12"
+        height="12"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 4l5 8 5-8" />
+      </svg>
+    </span>
+  )
 }
 
 function routeOf(hash: string): Route | null {

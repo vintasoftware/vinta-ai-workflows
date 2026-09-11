@@ -28,6 +28,7 @@ import {
 } from 'vinta-state-machine-editor'
 import type { Pipeline } from '../../src/types.ts'
 import { EFFECT_DEFINITIONS, fromMachine, toMachine } from './editor-model.ts'
+import { useResolvedTheme } from './theme.tsx'
 
 declare module 'react' {
   namespace JSX {
@@ -50,6 +51,15 @@ export interface EditorPipelineProps {
 export function EditorPipeline({ pipeline, onChange }: EditorPipelineProps): React.ReactElement {
   const host = useRef<StateMachineEditorElement | null>(null)
   const emitted = useRef<Pipeline | null>(null)
+  const theme = useResolvedTheme()
+
+  // The component ships its own light and dark schemes and never reads the
+  // OS; the app shell owns the theme and says which one (README, Theming).
+  // The attribute rather than the property: it is what the CSS keys off, and
+  // it is the same call whether the element has upgraded yet or not.
+  useLayoutEffect(() => {
+    host.current?.setAttribute('theme', theme)
+  }, [theme])
 
   useLayoutEffect(() => {
     const element = host.current

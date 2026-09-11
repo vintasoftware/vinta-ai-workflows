@@ -25,13 +25,38 @@
  * payload can hold phase prose, so the timeline shows what happened and where,
  * and the node view remains the place transcripts are read (§11).
  */
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  RadioIcon,
+  SkipBackIcon,
+  SkipForwardIcon,
+} from 'lucide-react'
 import type { ReactElement } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 import type { Dag } from 'vinta-dag-editor/src/index.ts'
+import {
+  HStack,
+  PageHeader,
+  PageHeaderActions,
+  PageHeaderHeading,
+  PageHeaderMeta,
+  PageHeaderTitle,
+} from 'vinta-design-system/layout'
+import { Button } from 'vinta-design-system/ui/button'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from 'vinta-design-system/ui/table'
 import type { RunSnapshot } from '../../src/daemon/schemas.ts'
 import { Chip } from './Chip.tsx'
 import type { Client } from './client.ts'
 import { DagView } from './Dag.tsx'
+import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import type { NodeStatus, RunStatus } from './projection.ts'
 import type { ReplayClient } from './replay-client.ts'
 import { useReplay } from './replay.ts'
@@ -116,65 +141,72 @@ export function Replay({
   const inProgress = snapshot !== null && snapshot.run.status === 'running'
 
   return (
-    <section className="run">
-      <header className="run-head">
-        <div>
-          <h2>Replay · {snapshot?.run.workflowId ?? runId}</h2>
-          <p className="muted">
-            {runId}
-            {snapshot === null ? '' : ` · base ${snapshot.run.baseBranch}`}
-          </p>
-        </div>
-        <div className="run-meta">
+    <section className="run replay flex flex-col gap-5">
+      <PageHeader className="run-head">
+        <PageHeaderHeading>
+          <PageHeaderTitle>Replay · {snapshot?.run.workflowId ?? runId}</PageHeaderTitle>
+          <PageHeaderMeta>
+            <span>{runId}</span>
+            {snapshot !== null && <span>base {snapshot.run.baseBranch}</span>}
+          </PageHeaderMeta>
+        </PageHeaderHeading>
+        <PageHeaderActions className="run-meta">
           <Chip tone={runTone(status)}>{status}</Chip>
-          <span className="muted" data-position>
+          <span className="muted font-mono text-[13px] text-muted-foreground" data-position>
             event {position} of {total}
           </span>
-        </div>
-      </header>
+          <Button asChild variant="outline" size="sm">
+            <a href={`#/runs/${encodeURIComponent(runId)}`}>
+              <RadioIcon />
+              Live view
+            </a>
+          </Button>
+        </PageHeaderActions>
+      </PageHeader>
 
       {/* A run still moving can be replayed up to whatever the log holds now —
           which is a prefix of the run, not the run. Saying so is the whole
           difference between a history and a half-read one. */}
       {inProgress && (
-        <p className="muted" data-inprogress>
+        <Hint data-inprogress>
           This run is still in progress. Replay covers the {total} event
           {total === 1 ? '' : 's'} journalled so far, not the whole run.
-        </p>
+        </Hint>
       )}
       {snapshotError !== null && (
-        <p className="muted" data-degraded>
+        <Hint data-degraded>
           The run graph is unavailable ({snapshotError}); replaying from the log alone.
-        </p>
+        </Hint>
       )}
-      {error !== null && <p className="error">{error}</p>}
+      {error !== null && <ErrorNote>{error}</ErrorNote>}
 
-      <section className="panel">
-        <h3>Position</h3>
-        <p className="run-meta">
+      <Panel title="Position">
+        <HStack gap={3} wrap className="run-meta text-[13px]">
           {at === null ? (
-            <span className="muted" data-at="">
+            <span className="muted text-muted-foreground" data-at="">
               —
             </span>
           ) : (
-            <time data-at={at} dateTime={new Date(at).toISOString()}>
+            <time className="font-mono" data-at={at} dateTime={new Date(at).toISOString()}>
               {new Date(at).toLocaleTimeString()}
             </time>
           )}
-          <span className="muted" data-elapsed>
+          <span className="muted font-mono text-muted-foreground" data-elapsed>
             {startedAt === null || at === null ? '—' : `+${elapsed(startedAt, at)}`}
           </span>
-          <span className="muted" data-event>
+          <span className="muted font-mono text-muted-foreground" data-event>
             {event === undefined
               ? 'before the first event'
               : `${event.type}${event.nodeId === null ? '' : ` · ${event.nodeId}`}`}
           </span>
-          {loading && <span className="muted">loading…</span>}
-        </p>
+          {loading && <span className="text-muted-foreground">loading…</span>}
+        </HStack>
+        {/* A native range, so a test's `change` event and a keyboard both move it. */}
         <input
           type="range"
           aria-label="Replay position"
           data-slider
+          className="w-full accent-primary"
           min={0}
           max={total}
           step={1}
@@ -182,62 +214,96 @@ export function Replay({
           disabled={total === 0}
           onChange={(change) => seek(Number(change.target.value))}
         />
-        <p className="run-meta">
-          <button type="button" onClick={() => seek(0)} disabled={position === 0}>
+        <HStack gap={2} wrap className="run-meta">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => seek(0)}
+            disabled={position === 0}
+          >
+            <SkipBackIcon />
             Start
-          </button>
-          <button type="button" onClick={() => seek(position - 1)} disabled={position === 0}>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => seek(position - 1)}
+            disabled={position === 0}
+          >
+            <ChevronLeftIcon />
             Back
-          </button>
-          <button type="button" onClick={() => seek(position + 1)} disabled={position >= total}>
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => seek(position + 1)}
+            disabled={position >= total}
+          >
             Forward
-          </button>
-          <button type="button" onClick={() => seek(total)} disabled={position >= total}>
+            <ChevronRightIcon />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => seek(total)}
+            disabled={position >= total}
+          >
             End
-          </button>
-          <a href={`#/runs/${encodeURIComponent(runId)}`}>Live view</a>
-        </p>
-        {opened && total === 0 && <p className="empty">This run has no events yet.</p>}
-        {position > loaded && <p className="muted">Reading the log up to that point…</p>}
-      </section>
+            <SkipForwardIcon />
+          </Button>
+        </HStack>
+        {opened && total === 0 && <EmptyNote>This run has no events yet.</EmptyNote>}
+        {position > loaded && <Hint>Reading the log up to that point…</Hint>}
+      </Panel>
 
       <DagView dag={dag} selected={selected} onSelect={setSelected} />
 
-      <div className="panels">
-        <section className="panel">
-          <h3>Nodes</h3>
+      <div className="panels grid gap-4">
+        <Panel title="Nodes" contentClassName="px-0">
           {nodes.length === 0 ? (
-            <p className="empty">No nodes registered yet.</p>
+            <EmptyNote className="px-4">No nodes registered yet.</EmptyNote>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Node</th>
-                  <th>Wave</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-4">Node</TableHead>
+                  <TableHead>Wave</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {nodes.map((node) => {
                   const nodeStatus = statuses.get(node.nodeId) ?? UNTOUCHED
                   return (
-                    <tr
+                    <TableRow
                       key={node.nodeId}
                       data-node={node.nodeId}
                       aria-current={node.nodeId === selected}
+                      className="aria-[current=true]:bg-muted"
                     >
-                      <td>{node.nodeId}</td>
-                      <td>{node.wave}</td>
-                      <td>
+                      <TableCell className="pl-4 font-medium">
+                        {node.nodeId}
+                        {node.name !== node.nodeId && (
+                          <span className="ml-2 font-normal text-muted-foreground">
+                            {node.name}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>{node.wave}</TableCell>
+                      <TableCell>
                         <Chip tone={nodeTone(nodeStatus)}>{nodeLabel(nodeStatus)}</Chip>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )
                 })}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           )}
-        </section>
+        </Panel>
       </div>
     </section>
   )

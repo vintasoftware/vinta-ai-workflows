@@ -1,0 +1,10 @@
+/*
+ * The two brand faces, self-hosted. `@fontsource` ships the woff2 files and
+ * the `@font-face` rules; the bundler copies the files beside the page. A UI
+ * that a daemon serves from 127.0.0.1 therefore never asks fonts.googleapis.com
+ * for anything — no third-party request, and the same type offline.
+ *
+ * Import this once from the app's stylesheet, beside tokens.css.
+ */
+@import '@fontsource-variable/dm-sans';
+@import '@fontsource-variable/geist-mono';

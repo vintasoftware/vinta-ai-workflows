@@ -12,14 +12,38 @@
  * window look, from the graph alone, like nothing happening at all; the
  * operator's next move depends entirely on knowing which it is.
  */
+import { ChevronRightIcon, HistoryIcon } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 import type { Dag } from 'vinta-dag-editor/src/index.ts'
+import {
+  DescriptionDetails,
+  DescriptionList,
+  DescriptionTerm,
+  PageHeader,
+  PageHeaderActions,
+  PageHeaderHeading,
+  PageHeaderMeta,
+  PageHeaderTitle,
+} from 'vinta-design-system/layout'
+import { Badge } from 'vinta-design-system/ui/badge'
+import { Button } from 'vinta-design-system/ui/button'
+import { Progress } from 'vinta-design-system/ui/progress'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from 'vinta-design-system/ui/table'
 import type { RunSnapshot, RunUsageResponse } from '../../src/daemon/schemas.ts'
 import { cacheShare } from '../../src/usage/usage.ts'
 import { Chip } from './Chip.tsx'
 import type { Client } from './client.ts'
 import { DagView } from './Dag.tsx'
+import { Live } from './Live.tsx'
+import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import { nodeLabel, nodeTone, runTone } from './status.ts'
 import { elapsed, useNow } from './time.ts'
 import { useRun } from './useRun.ts'
@@ -73,51 +97,62 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
   if (snapshot === null) {
     return (
       <section className="run">
-        <p className="empty">{error ?? 'Loading run…'}</p>
+        <EmptyNote>{error ?? 'Loading run…'}</EmptyNote>
       </section>
     )
   }
 
   const status = projection.runStatus ?? snapshot.run.status
   const endedAt = snapshot.run.endedAt
+  const waves = new Set(nodes.map((node) => node.wave)).size
 
   return (
-    <section className="run">
-      <header className="run-head">
-        <div>
-          <h2>{snapshot.run.workflowId}</h2>
-          <p className="muted">
-            {snapshot.run.runId} · base {snapshot.run.baseBranch}
-          </p>
-        </div>
-        <div className="run-meta">
+    <section className="run flex flex-col gap-5">
+      <PageHeader className="run-head">
+        <PageHeaderHeading>
+          <PageHeaderTitle>{snapshot.run.workflowId}</PageHeaderTitle>
+          <PageHeaderMeta>
+            <span>{snapshot.run.runId}</span>
+            <span>base {snapshot.run.baseBranch}</span>
+            <span>
+              {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'} · {waves}{' '}
+              {waves === 1 ? 'wave' : 'waves'}
+            </span>
+          </PageHeaderMeta>
+        </PageHeaderHeading>
+        <PageHeaderActions className="run-meta">
           <Chip tone={runTone(status)}>{status}</Chip>
-          <span className="muted">{elapsed(snapshot.run.startedAt, endedAt ?? now)}</span>
-          <span className={connected ? 'live' : 'live off'}>
-            {connected ? 'Live' : 'Reconnecting…'}
+          <span className="muted font-mono text-[13px] text-muted-foreground">
+            {elapsed(snapshot.run.startedAt, endedAt ?? now)}
           </span>
+          <Live connected={connected} />
           {/* Offered on a live run too: §13.2's value is answering "which minute
               did it go wrong", which is a question you ask while it is still
               going. Replay covers the events journalled so far and says so. */}
-          <a href={`#/runs/${encodeURIComponent(runId)}/replay`}>Replay</a>
-        </div>
-      </header>
+          <Button asChild variant="outline" size="sm">
+            <a href={`#/runs/${encodeURIComponent(runId)}/replay`}>
+              <HistoryIcon />
+              Replay
+            </a>
+          </Button>
+        </PageHeaderActions>
+      </PageHeader>
 
-      {error !== null && <p className="error">{error}</p>}
+      {error !== null && <ErrorNote>{error}</ErrorNote>}
 
       <DagView dag={dag} selected={selected} onSelect={setSelected} />
 
-      <div className="panels">
+      <div className="panels grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Nodes
           runId={snapshot.run.runId}
           nodes={nodes}
           selected={selected}
           onSelect={setSelected}
         />
+        <Rollup client={client} runId={runId} />
         <Pools resources={snapshot.resources} />
         <GateQueue queue={snapshot.gateQueue} now={now} />
         <Harnesses harnesses={snapshot.harnesses} now={now} />
-        <Rollup client={client} runId={runId} />
       </div>
     </section>
   )
@@ -135,51 +170,68 @@ function Nodes({
   readonly onSelect: (nodeId: string) => void
 }): ReactElement {
   return (
-    <section className="panel">
-      <h3>Nodes</h3>
+    <Panel
+      title="Nodes"
+      description="Status is the stream's where it has spoken, the snapshot's otherwise."
+      className="md:col-span-2"
+      contentClassName="px-0"
+    >
       {nodes.length === 0 ? (
-        <p className="empty">No nodes registered yet.</p>
+        <EmptyNote className="px-4">No nodes registered yet.</EmptyNote>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Node</th>
-              <th>Wave</th>
-              <th>Harness</th>
-              <th>Lane</th>
-              <th>Status</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="pl-4">Node</TableHead>
+              <TableHead>Wave</TableHead>
+              <TableHead>Harness</TableHead>
+              <TableHead>Lane</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="w-px pr-4" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {nodes.map((node) => (
-              <tr key={node.nodeId} data-node={node.nodeId} aria-current={node.nodeId === selected}>
-                <td>
-                  <button type="button" className="link" onClick={() => onSelect(node.nodeId)}>
+              <TableRow
+                key={node.nodeId}
+                data-node={node.nodeId}
+                aria-current={node.nodeId === selected}
+                className="aria-[current=true]:bg-muted"
+              >
+                <TableCell className="pl-4">
+                  <button
+                    type="button"
+                    className="link cursor-pointer font-medium text-primary underline-offset-4 hover:underline"
+                    onClick={() => onSelect(node.nodeId)}
+                  >
                     {node.nodeId}
                   </button>
-                </td>
-                <td>{node.wave}</td>
-                <td>{node.harness}</td>
-                <td>{node.lane ?? '—'}</td>
-                <td>
+                  <span className="ml-2 text-muted-foreground">{node.name}</span>
+                </TableCell>
+                <TableCell>{node.wave}</TableCell>
+                <TableCell className="font-mono text-xs">{node.harness}</TableCell>
+                <TableCell className="font-mono text-xs">{node.lane ?? '—'}</TableCell>
+                <TableCell>
                   <Chip tone={nodeTone(node.status)}>{nodeLabel(node.status)}</Chip>
-                </td>
-                <td>
+                </TableCell>
+                <TableCell className="pr-4 text-right">
                   {/* The node view (§10). A fragment, so the token in the
                       page's query string is neither copied nor dropped. */}
-                  <a
-                    href={`#/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(node.nodeId)}`}
-                  >
-                    Open
-                  </a>
-                </td>
-              </tr>
+                  <Button asChild variant="ghost" size="sm">
+                    <a
+                      href={`#/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(node.nodeId)}`}
+                    >
+                      Open
+                      <ChevronRightIcon />
+                    </a>
+                  </Button>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
-    </section>
+    </Panel>
   )
 }
 
@@ -189,32 +241,43 @@ function Pools({
   readonly resources: RunSnapshot['resources']
 }): ReactElement {
   return (
-    <section className="panel">
-      <h3>Resource pools</h3>
+    <Panel title="Resource pools">
       {resources.length === 0 ? (
-        <p className="empty">No pools declared.</p>
+        <EmptyNote>No pools declared.</EmptyNote>
       ) : (
-        <ul className="pools">
+        <ul className="pools divide-y">
           {resources.map((resource) => (
-            <li key={resource.id} data-resource={resource.id}>
-              <div className="pool-head">
-                <span>{resource.id}</span>
-                <span className="muted">{resource.kind}</span>
-                <span data-occupancy>
+            <li
+              key={resource.id}
+              data-resource={resource.id}
+              className="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0"
+            >
+              <div className="pool-head flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2">
+                  <span className="font-medium">{resource.id}</span>
+                  <Badge variant="outline" className="muted">
+                    {resource.kind}
+                  </Badge>
+                </span>
+                <span className="font-mono text-xs" data-occupancy>
                   {resource.held} / {resource.capacity}
                 </span>
               </div>
-              <div className="meter">
-                <div className="meter-fill" style={{ width: `${fraction(resource)}%` }} />
-              </div>
-              <p className="muted">
-                {resource.holders.length === 0 ? 'idle' : resource.holders.join(', ')}
-              </p>
+              <Progress
+                value={fraction(resource)}
+                aria-label={`${resource.id} occupancy`}
+                className="meter h-1.5 bg-muted *:data-[slot=progress-indicator]:bg-tone-active"
+              />
+              <Hint className="text-xs">
+                {resource.holders.length === 0
+                  ? 'idle'
+                  : `held by ${resource.holders.join(', ')}`}
+              </Hint>
             </li>
           ))}
         </ul>
       )}
-    </section>
+    </Panel>
   )
 }
 
@@ -226,23 +289,36 @@ function GateQueue({
   readonly now: number
 }): ReactElement {
   return (
-    <section className="panel">
-      <h3>Gate queue</h3>
-      <p data-waiting>
-        <Chip tone={queue.waiting > 0 ? 'wait' : 'idle'}>{queue.waiting} waiting</Chip>
-      </p>
+    <Panel
+      title="Gate queue"
+      action={
+        <span data-waiting>
+          <Chip tone={queue.waiting > 0 ? 'wait' : 'idle'}>{queue.waiting} waiting</Chip>
+        </span>
+      }
+    >
       {queue.holders.length === 0 ? (
-        <p className="empty">No gate held.</p>
+        <EmptyNote>No gate held.</EmptyNote>
       ) : (
-        <ul className="holders">
+        <ul className="holders divide-y text-sm">
           {queue.holders.map((holder) => (
-            <li key={`${holder.resource}:${holder.nodeId}`} data-holder={holder.nodeId}>
-              {holder.nodeId} holds {holder.resource} · {elapsed(holder.acquiredAt, now)}
+            <li
+              key={`${holder.resource}:${holder.nodeId}`}
+              data-holder={holder.nodeId}
+              className="flex items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
+            >
+              <span>
+                <span className="font-mono text-xs font-medium">{holder.nodeId}</span> holds{' '}
+                <span className="font-mono text-xs">{holder.resource}</span>
+              </span>
+              <span className="font-mono text-xs text-muted-foreground">
+                {elapsed(holder.acquiredAt, now)}
+              </span>
             </li>
           ))}
         </ul>
       )}
-    </section>
+    </Panel>
   )
 }
 
@@ -259,17 +335,22 @@ function Harnesses({
   readonly now: number
 }): ReactElement {
   return (
-    <section className="panel">
-      <h3>Harness capacity</h3>
+    <Panel title="Harness capacity" description="A parked harness is throttled, not broken.">
       {harnesses.length === 0 ? (
-        <p className="empty">No harness in use.</p>
+        <EmptyNote>No harness in use.</EmptyNote>
       ) : (
-        <ul className="harnesses">
+        <ul className="harnesses divide-y">
           {harnesses.map((harness) => (
-            <li key={harness.id} data-harness={harness.id}>
-              <span>{harness.id}</span>
-              <span data-inflight>
-                {harness.inFlight} / {harness.ceiling}
+            <li
+              key={harness.id}
+              data-harness={harness.id}
+              className="flex items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
+            >
+              <span className="flex items-center gap-2.5">
+                <span className="font-mono text-[13px]">{harness.id}</span>
+                <span className="font-mono text-xs text-muted-foreground" data-inflight>
+                  {harness.inFlight} / {harness.ceiling}
+                </span>
               </span>
               {harness.wakeAt === null ? (
                 <Chip tone="ok">accepting</Chip>
@@ -284,7 +365,7 @@ function Harnesses({
           ))}
         </ul>
       )}
-    </section>
+    </Panel>
   )
 }
 
@@ -323,10 +404,9 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
 
   if (usage === null) {
     return (
-      <section className="panel" data-rollup>
-        <h3>Sessions and cost</h3>
-        <p className="empty">Reading the run’s totals…</p>
-      </section>
+      <Panel title="Sessions and cost" data-rollup>
+        <EmptyNote>Reading the run’s totals…</EmptyNote>
+      </Panel>
     )
   }
 
@@ -334,54 +414,63 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
   const share = cacheShare(usage.cache)
 
   return (
-    <section className="panel" data-rollup>
-      <h3>Sessions and cost</h3>
-      <dl className="ref">
-        <dt>Reuse</dt>
-        <dd data-reuse>
+    <Panel
+      title="Sessions and cost"
+      description="Every figure sits behind its status."
+      data-rollup
+    >
+      <DescriptionList>
+        <DescriptionTerm>Reuse</DescriptionTerm>
+        <DescriptionDetails data-reuse>
           {reuse.turns === 0
             ? // Not "0%": a pipeline that names no slots asked for no reuse,
               // and reporting that as a rate would read as a feature that broke.
               'No agent turn asked to continue a session.'
             : `${percent(reuse.reused / reuse.turns)} of ${reuse.turns} turns continued a session.`}
-        </dd>
+        </DescriptionDetails>
 
-        <dt>Cache</dt>
-        <dd data-cache>
+        <DescriptionTerm>Cache</DescriptionTerm>
+        <DescriptionDetails data-cache>
           {share === undefined
             ? 'Not reported by this run’s harnesses.'
             : `${percent(share)} of prompt tokens served from cache${
                 usage.cache.status === 'partial' ? ', across the sessions that reported' : ''
               }.`}
-        </dd>
+        </DescriptionDetails>
 
-        <dt>Tokens</dt>
-        <dd data-tokens>
+        <DescriptionTerm>Tokens</DescriptionTerm>
+        <DescriptionDetails className="font-mono text-xs" data-tokens>
           {compact(usage.inputTokens)} in · {compact(usage.outputTokens)} out ·{' '}
           {usage.sessions} {usage.sessions === 1 ? 'session' : 'sessions'}
-        </dd>
+        </DescriptionDetails>
 
-        <dt>Cost</dt>
-        <dd data-cost>{cost(usage.cost)}</dd>
-      </dl>
+        <DescriptionTerm>Cost</DescriptionTerm>
+        <DescriptionDetails className="font-mono text-xs" data-cost>
+          {cost(usage.cost)}
+        </DescriptionDetails>
+      </DescriptionList>
 
       {reuse.fresh.length > 0 && (
-        <>
+        <div className="flex flex-col gap-1.5 border-t pt-3">
           {/* Labelled, because the tally is a column of bare numbers directly
               under a column of bare numbers. Without this it reads as more
               cost rows, and the reader has to infer what is being counted. */}
-          <p className="muted fresh-head">Cold turns, by reason</p>
-          <ul className="fresh-reasons">
+          <Hint className="fresh-head text-xs">Cold turns, by reason</Hint>
+          <ul className="fresh-reasons flex flex-col gap-1 text-xs">
             {reuse.fresh.map((entry) => (
-              <li key={entry.reason} data-fresh-reason={entry.reason}>
-                <span className="muted">{entry.reason.replaceAll('_', ' ')}</span>
-                <span>{entry.count}</span>
+              <li
+                key={entry.reason}
+                data-fresh-reason={entry.reason}
+                className="flex items-center justify-between gap-2"
+              >
+                <span className="text-muted-foreground">{entry.reason.replaceAll('_', ' ')}</span>
+                <span className="font-mono">{entry.count}</span>
               </li>
             ))}
           </ul>
-        </>
+        </div>
       )}
-    </section>
+    </Panel>
   )
 }
 

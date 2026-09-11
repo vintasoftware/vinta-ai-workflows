@@ -31,6 +31,7 @@ import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, useState } from 'react'
 import type { PtyError } from '../../src/daemon/pty-frames.ts'
 import type { PtyLink } from './pty-link.ts'
+import { Hint, Panel } from './Panel.tsx'
 
 /** What the operator is told, in the daemon's own vocabulary. */
 const REFUSALS: Record<PtyError, string> = {
@@ -126,19 +127,30 @@ export function TerminalView({
   }, [nodeId, link])
 
   return (
-    <section className="panel" data-terminal={nodeId}>
-      <h3>Terminal</h3>
-      <p className="muted" data-terminal-status={status}>
-        {label(status)}
-        {sessionId === null ? '' : ` Session ${sessionId}.`}
-      </p>
+    <Panel
+      title="Terminal"
+      data-terminal={nodeId}
+      description={
+        <span data-terminal-status={status}>
+          {label(status)}
+          {sessionId === null ? '' : ` Session ${sessionId}.`}
+        </span>
+      }
+    >
       {note !== null && (
-        <p className="muted" data-terminal-note>
+        <Hint className="muted" data-terminal-note>
           {note}
-        </p>
+        </Hint>
       )}
-      <div ref={host} data-terminal-host style={{ height: '24em', width: '100%' }} />
-    </section>
+      {/* xterm paints its own dark theme; the host gives it a rounded, padded
+          well so the terminal reads as one surface inside the card. */}
+      <div
+        ref={host}
+        data-terminal-host
+        className="overflow-hidden rounded-lg bg-slate-950 p-2"
+        style={{ height: '24em', width: '100%' }}
+      />
+    </Panel>
   )
 }
 

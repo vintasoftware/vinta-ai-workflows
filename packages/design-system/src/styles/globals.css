@@ -1,0 +1,16 @@
+/*
+ * A complete stylesheet for a consumer that has nothing of its own: Tailwind,
+ * the enter/exit animations shadcn's overlays use, the fonts and the tokens,
+ * scanning this package's sources for the utilities its components need.
+ *
+ * An app with its own Tailwind entry (vinta-flow's `ui/src/app.css`) imports
+ * the pieces instead — `tokens.css`, `fonts.css` — and adds its own `@source`
+ * for this package, because `@source` paths resolve relative to the file that
+ * states them.
+ */
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import './fonts.css';
+@import './tokens.css';
+
+@source '../';
