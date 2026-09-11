@@ -791,6 +791,15 @@ class OpencodeSession implements AgentSession {
   async interrupt(): Promise<void> {
     if (this.#ended) return
     this.#stopping = true
+    // **Not awaited, deliberately.** `request()` carries no timeout, so a
+    // server that has stopped answering would hold this promise — and with it
+    // the operator's interrupt, and §9's takeover, which interrupts before it
+    // attaches — open indefinitely. The thing an interrupt must never be is
+    // slower than the thing it is interrupting.
+    //
+    // The cost is that resolving says the abort was *sent*, not delivered. A
+    // test reading the server's side the instant the turn ends is therefore
+    // asserting a race it can lose; `tests/harness-opencode.test.ts` waits.
     void postJson(this.#url('/abort'), {})
     // The scheduler is waiting on a terminal event; a server that never reports
     // idle must not hold a node open forever.

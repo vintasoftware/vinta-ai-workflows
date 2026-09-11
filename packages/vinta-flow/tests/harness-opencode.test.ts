@@ -175,6 +175,30 @@ const drain = async (session: AgentSession): Promise<AgentEvent[]> => {
   return seen
 }
 
+/**
+ * Waits for something the adapter does *not* sequence against its own promises.
+ *
+ * `interrupt` fires the abort without awaiting it, on purpose (see
+ * `opencode.ts`): a server that has stopped answering must not be able to hold
+ * an operator's interrupt open, and `request()` carries no timeout. The request
+ * is therefore still in flight when the turn ends, and a test that reads
+ * `stub.aborts` the instant the drain returns is asserting about whichever of
+ * the two finished first. That ordering held on this machine and lost on every
+ * CI runner — which is the worst way round, because it made the suite look
+ * green on the machine the change was written on.
+ *
+ * The wait does not weaken the assertion: an adapter that never sent the abort
+ * still fails, one timeout later, and the caller still checks *which* path was
+ * hit and that it was hit once.
+ */
+async function until(read: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 200; i += 1) {
+    if (read()) return
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
 const task = (overrides: Partial<AgentTask> = {}): AgentTask => ({
   nodeId: 'phase-1',
   cwd: makeTemp(),
@@ -851,6 +875,8 @@ describe('spawn against a stub server', () => {
 
       const seen = await drain(outcome.session)
       expect(seen[seen.length - 1]).toEqual({ type: 'session_ended', result: 'interrupted' })
+      // In flight when the turn ended — see `until` above.
+      await until(() => stub.aborts.length > 0, 'the abort to reach the server')
       expect(stub.aborts).toEqual([`/session/${SESSION}/abort`])
     } finally {
       await adapter.close()
