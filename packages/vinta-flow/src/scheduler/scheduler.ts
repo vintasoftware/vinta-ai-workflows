@@ -85,8 +85,15 @@ import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
 import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
+import {
+  assignCrew,
+  assignReviewer,
+  type CrewDecision,
+  laneHolders,
+  type ReviewDecision,
+} from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
-import { composeSpawnPrompt } from '../prompts/index.ts'
+import { composeSpawnPrompt, type Reorientation } from '../prompts/index.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { Node, Pipeline, Workflow } from '../types.ts'
 
@@ -114,6 +121,19 @@ export interface SchedulerOptions {
    * reset.
    */
   readonly recycleLane?: (name: string) => Promise<void>
+  /**
+   * What changed under a member's worktree since its session last looked.
+   *
+   * An implementer keeps one directory for the whole run, so continuing its
+   * session across a phase is safe exactly as far as the agent knows which
+   * files moved while it was away. This is the seam that answers that.
+   *
+   * Absent for a host that injected its own executor: such a host owns its
+   * lanes and may have no git to ask. Without it a staffed run still works, and
+   * a continuation carries no file list — which `#reorientation` reports as
+   * unknown rather than as an untouched tree.
+   */
+  readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
   /**
    * Where §9's takeover targets are offered — the same registry the daemon's
    * PTY channel consults. Injectable so a test owns its own; the process-wide
@@ -217,6 +237,44 @@ interface NodeState {
   fixRounds: number
   lane: string | null
   laneLease: Lease | null
+  /**
+   * The roster member holding this node, or null when the workflow is
+   * unstaffed. Claimed before the lane and released with it, because a member
+   * owns the phase rather than a turn of it: the fixer answering a review
+   * finding is the implementer continuing its own session, so handing the node
+   * to someone else mid-pipeline would hand it to an agent that has no session
+   * to continue.
+   */
+  crew: {
+    readonly member: string
+    readonly tier: number
+    readonly model: string
+    readonly harness: string | null
+  } | null
+  /**
+   * The reviewer holding this node's review turn, or null between turns.
+   *
+   * Shorter-lived than `crew` on purpose. An implementer owns the phase from
+   * its first turn to its last, because the fixer answering a finding *is* the
+   * implementer continuing. A reviewer owns one turn: it reads a diff, returns
+   * a verdict and goes back to the roster, so a plan with one reviewer and
+   * three implementers is a queue at the review step rather than a deadlock.
+   */
+  reviewer: {
+    readonly member: string
+    readonly model: string
+    readonly harness: string | null
+  } | null
+  /**
+   * The implementer that held this node, kept after `crew` is cleared.
+   *
+   * Needed because a failure unwinds in the order resources-then-verdict:
+   * `#release` runs first — correctly, since §6.1 says a node gives everything
+   * back before it waits — and `#fail` therefore has no member left to name.
+   * Without this the poisoned set was never written and a member carried a
+   * failed phase's context into its next one.
+   */
+  lastMember: string | null
   /** Held for one pipeline step, and released at an `await_human` suspension. */
   gateLease: Lease | null
   gateHeld: readonly string[]
@@ -259,6 +317,33 @@ export class Scheduler {
   readonly #freeLanes: string[]
   /** Lane slots a node has already run in, and which therefore need recycling. */
   readonly #usedLanes = new Set<string>()
+  /** Roster members currently holding a turn. Empty in an unstaffed workflow. */
+  readonly #busyCrew = new Set<string>()
+  /** Whether this workflow declared a roster at all. Fixed for the run. */
+  readonly #staffed: boolean
+  /**
+   * Each member's own worktree, for the whole run.
+   *
+   * This is what makes a session outlive a phase. A member that lands in a
+   * different directory each time has a context describing paths it is no
+   * longer standing in — §15.2's `lane_changed`, and the reason cross-phase
+   * reuse was impossible rather than merely risky. Pinning the directory turns
+   * that into a much smaller question: which *files* changed under it, which
+   * git can answer exactly (`#reorientation`).
+   */
+  readonly #laneOf = new Map<string, string>()
+  /**
+   * Session ledgers, per member rather than per node.
+   *
+   * The node-scoped map they replace was cleared at the top of every attempt,
+   * which is correct when lanes are anonymous and wrong once they are not: it
+   * is what threw away the context a member had built up by the end of a phase.
+   * Keyed by member, a ledger survives the phase and is invalidated
+   * deliberately — by a failure, a turn ceiling, or a capacity retry.
+   */
+  readonly #memberSessions = new Map<string, Map<string, SessionEntry>>()
+  /** Members whose last phase failed: their next turn starts cold (§15.2). */
+  readonly #poisoned = new Set<string>()
   #waves = new Map<string, number>()
   #waiters: (() => void)[] = []
   #iterations = 0
@@ -268,6 +353,7 @@ export class Scheduler {
     const { workflow } = options
     this.#workflow = workflow
     this.#takeovers = options.takeovers ?? takeovers
+    this.#staffed = Object.keys(workflow.crew).length > 0
 
     for (const node of workflow.nodes) this.#states.set(node.id, this.#fresh(node))
     this.#order = workflow.nodes.map((node) => node.id)
@@ -279,6 +365,56 @@ export class Scheduler {
       { length: options.pools.capacity(LANE) },
       (_, i) => `${options.runId}-lane-${i + 1}`,
     )
+
+    // One desk per member, named off the roster rather than the free list. The
+    // names still match `LanePool`'s own scheme so a real pool hands back the
+    // same worktrees; what changes is that the mapping is fixed for the run
+    // instead of being whatever the free list had on top.
+    laneHolders(workflow.crew).forEach((member, i) => {
+      this.#laneOf.set(member.id, `${options.runId}-crew-${i + 1}-${member.id}`)
+    })
+  }
+
+  /** The member's own worktree. Only meaningful in a staffed workflow. */
+  #laneFor(member: string): string {
+    const lane = this.#laneOf.get(member)
+    if (lane === undefined) throw new Error(`crew member "${member}" has no lane`)
+    return lane
+  }
+
+  /**
+   * Who is taking this turn: the node's reviewer on a review, its implementer
+   * otherwise. Null in an unstaffed workflow.
+   *
+   * The distinction is not cosmetic. A reviewer's session belongs to the
+   * reviewer, and filing it under the implementer would hand the next phase's
+   * reviewer a session another agent opened — the precise confusion the two
+   * roles exist to prevent, reintroduced one layer down.
+   */
+  #actorOf(state: NodeState, role: unknown): string | null {
+    if (role === 'reviewer' && state.reviewer !== null) return state.reviewer.member
+    return state.crew?.member ?? null
+  }
+
+  /**
+   * The ledger a turn reads and writes.
+   *
+   * Its actor's, in a staffed workflow — which is what lets a session outlive
+   * the phase. The node's own, otherwise, which is every workflow written
+   * before rosters existed and keeps their behaviour identical.
+   */
+  #ledgerOf(state: NodeState, role?: unknown): Map<string, SessionEntry> {
+    const actor = this.#actorOf(state, role)
+    return actor === null ? state.sessions : this.#ledgerFor(actor)
+  }
+
+  /** The member's ledger, created on first use. */
+  #ledgerFor(member: string): Map<string, SessionEntry> {
+    const existing = this.#memberSessions.get(member)
+    if (existing !== undefined) return existing
+    const fresh = new Map<string, SessionEntry>()
+    this.#memberSessions.set(member, fresh)
+    return fresh
   }
 
   /** A node's state as it starts: pending, holding nothing, steering nothing. */
@@ -296,6 +432,9 @@ export class Scheduler {
       pending: [],
       undelivered: [],
       sessions: new Map(),
+      crew: null,
+      reviewer: null,
+      lastMember: null,
       resumeSessionId: null,
       pauseRequested: false,
       aborted: false,
@@ -324,6 +463,17 @@ export class Scheduler {
    * purpose: its pipeline run already captured it, and a node that has settled
    * has a branch that is the record of that definition.
    */
+  /**
+   * Roster members currently holding a node.
+   *
+   * Exposed for the same reason the pools expose `held`: a member left claimed
+   * after a run ends is not a leak any counter notices — it surfaces much later
+   * as a phase waiting forever on an agent nobody is using.
+   */
+  busyCrew(): string[] {
+    return [...this.#busyCrew].sort()
+  }
+
   adopt(workflow: Workflow): void {
     this.#workflow = workflow
     const declared = new Set(workflow.nodes.map((node) => node.id))
@@ -566,7 +716,7 @@ export class Scheduler {
   /** Harnesses admission control says may not be tried yet (§6.1). */
   #parkedHarnesses(): string[] {
     const harnesses = new Set(
-      [...this.#states.values()].map((state) => this.#harnessOf(state.node)),
+      [...this.#states.values()].map((state) => this.#harnessOf(state)),
     )
     return [...harnesses].filter((id) => this.#options.admission.wakeAt(id) !== undefined)
   }
@@ -590,30 +740,50 @@ export class Scheduler {
 
   async #runNode(state: NodeState): Promise<void> {
     while (true) {
+      // Staffing before capacity, deliberately. A lane is disk; who is holding
+      // it is what the phase costs and whether it is any good. A free lane with
+      // nobody qualified to take the phase is an idle lane — cheaper than the
+      // same phase run by an agent the plan judged too junior for it.
+      // Guarded rather than awaited unconditionally: an unstaffed workflow must
+      // reach `acquire` in the same turn it always did. An extra microtask here
+      // is not a behaviour change but it *is* a schedule change, and the
+      // scheduler's own tests time their assertions against that schedule.
+      if (this.#staffed) {
+        await this.#claimCrew(state)
+        // Belt and braces. `abortNode` releases what the node holds itself, and
+        // nothing awaits between the claim above and this check, so today the
+        // member is already back. It is written anyway because the failure it
+        // guards is silent: a member left claimed is not a lease any counter
+        // notices, and the symptom is a later phase waiting forever on an agent
+        // nobody is using. `expectDrained` holds every scheduler test to it.
+        if (state.aborted) {
+          this.#releaseCrew(state)
+          return
+        }
+      }
+
       // All-or-nothing, canonical order, one call: the lane and nothing else.
       // Gate pools are acquired later, while this lane is still held, which is
       // the §6 rule that an idle lane is just disk.
       state.laneLease = await this.#options.pools.acquire([LANE])
-      state.lane = this.#freeLanes.pop() as string
+      // A staffed node goes to its member's desk; an unstaffed one takes
+      // whatever the free list has, exactly as before.
+      state.lane =
+        state.crew === null ? (this.#freeLanes.pop() as string) : this.#laneFor(state.crew.member)
       this.#options.journal.acquireLease(LANE, state.node.id)
       this.#assign(state, { lane: state.lane })
-
-      // §15's ledger does not survive an attempt. Empty on the first pass; on
-      // every one after it, the sessions it held describe work that is no
-      // longer on disk. A capacity refusal re-drives this pipeline from its
-      // initial state, and the lane it comes back to is either a different one
-      // or — far more often, since the free list hands back what was just
-      // released — the *same* one, which `#prepareLane` then recycles. Both
-      // cases end with a worktree the sessions do not describe, and only the
-      // first is visible from a lane name. Resuming into it would hand an agent
-      // a memory of files it created and a tree without them.
-      state.sessions.clear()
 
       try {
         await this.#prepareLane(state)
         const settled = await this.#drive(state)
         this.#release(state)
-        if (settled.outcome === 'done') this.#setStatus(state, 'done')
+        if (settled.outcome === 'done') {
+          // A member that finishes cleanly is trusted again. Otherwise one bad
+          // phase would force every later phase they take to start cold, long
+          // after the context that failed was thrown away.
+          if (state.lastMember !== null) this.#poisoned.delete(state.lastMember)
+          this.#setStatus(state, 'done')
+        }
         else this.#fail(state, `pipeline ended in state "${settled.state}"`)
         return
       } catch (error) {
@@ -625,6 +795,20 @@ export class Scheduler {
         if (error instanceof Aborted) return
 
         if (error instanceof CapacityRetry) {
+          // §15's ledger does not survive a *re-attempt*. A capacity refusal
+          // re-drives this pipeline from its initial state, so the branch the
+          // last attempt built is gone and `#prepareLane` will recycle the
+          // worktree under it. Whatever the session remembers writing is no
+          // longer on disk, and resuming would hand an agent a memory of files
+          // it created and a tree without them.
+          //
+          // Here rather than at the top of the loop, which is where it used to
+          // be. That was equivalent while ledgers were per node — the first
+          // pass had nothing to clear — and became a bug the moment they were
+          // per member: it wiped everything the member had built up the instant
+          // they started their second phase, which is the one thing this was
+          // all for.
+          this.#clearLedger(state)
           this.#setStatus(state, 'waiting_on_capacity')
           await error.waitFor()
           if (state.aborted) return
@@ -635,6 +819,130 @@ export class Scheduler {
         return
       }
     }
+  }
+
+  /**
+   * Takes a roster member for this node, waiting if every qualified one is busy.
+   *
+   * The wait cannot deadlock, and the reason is worth stating because it is the
+   * whole safety argument: `assignCrew`'s floor is the *assigned* member's own
+   * tier, and `validate.ts` refuses a node naming a member who is not on the
+   * roster. So a node that waits is always waiting on somebody who is holding
+   * another node — never on a qualification nobody has. A run cannot arrive at
+   * "everyone is idle and this phase is unstaffable".
+   *
+   * An unstaffed workflow returns immediately and holds nothing, which is every
+   * workflow written before rosters existed.
+   */
+  async #claimCrew(state: NodeState): Promise<void> {
+    while (!state.aborted) {
+      const decision: CrewDecision = assignCrew({
+        assigned: state.node.crew,
+        crew: this.#workflow.crew,
+        busy: this.#busyCrew,
+      })
+
+      if (decision.kind === 'unstaffed') return
+
+      if (decision.kind === 'assigned') {
+        this.#busyCrew.add(decision.member)
+        state.crew = {
+          member: decision.member,
+          tier: decision.tier,
+          model: decision.model,
+          harness: decision.harness,
+        }
+        this.#options.journal.append({
+          runId: this.#options.runId,
+          nodeId: state.node.id,
+          type: 'node_crew',
+          payload: {
+            member: decision.member,
+            tier: decision.tier,
+            substitute: decision.substitute,
+            ...(decision.insteadOf === null ? {} : { instead_of: decision.insteadOf }),
+          },
+        })
+        return
+      }
+
+      // Every member at or above the floor is working. A member frees only when
+      // a node settles, and that is a state change — so this waits on the same
+      // signal the dispatch loop does rather than polling.
+      await this.#changed()
+    }
+  }
+
+  /**
+   * Takes a reviewer for one review turn, waiting if every qualified one is
+   * busy.
+   *
+   * Unlike the implementer claim this happens *inside* the turn, because a
+   * reviewer owns a turn rather than a phase — it reads a diff, returns a
+   * verdict and goes back. Holding one for the whole node would make a plan
+   * with one reviewer and three implementers run three phases strictly in
+   * series.
+   *
+   * The wait cannot deadlock: reviewers never take phases, so a node waiting
+   * for one is waiting on another node's review — a turn already running — and
+   * never on a phase that might itself be blocked behind this one.
+   */
+  async #claimReviewer(state: NodeState): Promise<void> {
+    if (!this.#staffed || state.crew === null) return
+
+    while (!state.aborted) {
+      const decision: ReviewDecision = assignReviewer({
+        crew: this.#workflow.crew,
+        authorTier: state.crew.tier,
+        author: state.crew.member,
+        busy: this.#busyCrew,
+      })
+
+      // No reviewer staffed. The turn runs on the node's own model, which is
+      // what every workflow did before rosters existed.
+      if (decision.kind === 'unstaffed') return
+
+      if (decision.kind === 'assigned') {
+        this.#busyCrew.add(decision.member)
+        state.reviewer = {
+          member: decision.member,
+          model: decision.model,
+          harness: decision.harness,
+        }
+        this.#options.journal.append({
+          runId: this.#options.runId,
+          nodeId: state.node.id,
+          type: 'node_crew',
+          payload: { member: decision.member, tier: decision.tier, substitute: false, role: 'reviewer' },
+        })
+        return
+      }
+
+      await this.#changed()
+    }
+  }
+
+  /** Throws away this node's actor sessions, so its next attempt starts cold. */
+  #clearLedger(state: NodeState): void {
+    if (state.crew === null) state.sessions.clear()
+    else this.#ledgerFor(state.crew.member).clear()
+  }
+
+  /** Gives the reviewer back after its turn. */
+  #releaseReviewer(state: NodeState): void {
+    if (state.reviewer === null) return
+    this.#busyCrew.delete(state.reviewer.member)
+    state.reviewer = null
+    this.#wake()
+  }
+
+  /** Gives the node's member back to the roster and wakes whoever is waiting. */
+  #releaseCrew(state: NodeState): void {
+    if (state.crew === null) return
+    this.#busyCrew.delete(state.crew.member)
+    state.lastMember = state.crew.member
+    state.crew = null
+    this.#wake()
   }
 
   /**
@@ -848,8 +1156,26 @@ export class Scheduler {
    */
   async #spawn(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
     const { params } = invocation.effect
+    if (params['role'] === 'reviewer') {
+      // Claimed here rather than with the lane: a reviewer owns a turn, not a
+      // phase, and is released the moment the verdict is in. `#release` frees
+      // it too, so an abort or a capacity refusal mid-review does not strand
+      // the one reviewer on the plan.
+      await this.#claimReviewer(state)
+      if (state.aborted) throw new Aborted()
+      try {
+        return await this.#spawnTurn(state, invocation)
+      } finally {
+        this.#releaseReviewer(state)
+      }
+    }
+    return await this.#spawnTurn(state, invocation)
+  }
+
+  async #spawnTurn(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
+    const { params } = invocation.effect
     const { workflow, runId, journal, admission } = this.#options
-    const adapter = this.#adapter(this.#harnessOf(state.node, params['harness']))
+    const adapter = this.#adapter(this.#harnessOf(state, params['harness'], params['role']))
 
     // §9's queue, on its way to the agent. Carried as its own field rather
     // than folded into the brief so the adapter can present it as the
@@ -859,6 +1185,10 @@ export class Scheduler {
     const carried = state.pending.length
     const owed = [...state.undelivered, ...state.pending.map((entry) => entry.text)]
 
+    // Every role runs in the node's own lane, the reviewer included. A review
+    // reads the **working tree**, uncommitted changes and all, because the
+    // point of reviewing here is to fix before the commit rather than to record
+    // the mistake and then a correction on top of it.
     const cwd = join(this.#options.laneRoot, state.lane as string)
 
     // §15's decision, taken before the task is built because the prompt
@@ -886,8 +1216,12 @@ export class Scheduler {
         workspace: existsSync(cwd) ? cwd : null,
         facts: invocation.context,
         continuation: plan.continuation,
+        // Only on a cross-phase continuation. A same-phase one is a delta and
+        // has nothing to be re-oriented about; a cold one has no memory to
+        // correct.
+        ...(plan.crossPhase && reorientation !== null ? { reorientation } : {}),
       }),
-      model: String(params['model'] ?? state.node.model ?? workflow.defaults.model),
+      model: this.#modelFor(state, params),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
       // The handoff token: either the slot's session (§15) or, for a pipeline
       // that named no slot, the id an operator's takeover left behind (§9).
@@ -897,6 +1231,9 @@ export class Scheduler {
     })
 
     let plan = this.#sessionPlan(state, params, adapter)
+    // Computed once, before the first `build`, because a capacity retry rebuilds
+    // the task and re-running a git command per attempt would be wasted work.
+    const reorientation = await this.#reorientation(state, plan, params['role'])
     let outcome = await admission.admit(adapter, build(plan))
 
     // §15.4: the vendor has forgotten the session this task asked to continue.
@@ -918,6 +1255,7 @@ export class Scheduler {
         slot: plan.slot,
         resumeSessionId: null,
         continuation: false,
+        crossPhase: false,
         reason: 'stale_session',
         turns: 1,
       }
@@ -948,7 +1286,7 @@ export class Scheduler {
     // that won is the one carrying `stale_session`, so one row per turn still
     // says what happened (§15).
     this.#session(state, plan)
-    this.#remember(state, plan, adapter, outcome.session.id)
+    this.#remember(state, plan, adapter, outcome.session.id, params['role'])
 
     // The registry: exactly as long-lived as the turn it points at, so a §9
     // operation can never reach a session whose stream has already ended.
@@ -963,7 +1301,7 @@ export class Scheduler {
           // before the CLI spoke; a harness that mints its own on resume
           // reports it here, and the ledger must hold the one the *next*
           // resume has to name.
-          this.#remember(state, plan, adapter, event.sessionId)
+          this.#remember(state, plan, adapter, event.sessionId, params['role'])
         }
       }
     } finally {
@@ -978,6 +1316,49 @@ export class Scheduler {
     if (params['role'] === 'fixer') state.fixRounds += 1
 
     return await this.#options.executor.execute(invocation)
+  }
+
+  /**
+   * What changed under a member's worktree since its session last looked.
+   *
+   * The answer that makes a cross-phase continuation safe. Everything else
+   * about keeping an agent alive is an optimisation; this is the correctness
+   * half, because the one thing a resumed session is reliably wrong about is
+   * the contents of files that moved while it was away.
+   *
+   * `laneDelta` is a seam and may be absent — a host that injected its own
+   * executor owns its lanes and may have no git to ask. Absent yields a null
+   * file list, which the prompt renders as "treat every file's contents as
+   * stale" rather than as "nothing changed". A missing answer is not an empty
+   * one, and the difference decides whether an agent re-reads before editing.
+   */
+  async #reorientation(
+    state: NodeState,
+    plan: SessionPlan,
+    role: unknown,
+  ): Promise<Reorientation | null> {
+    if (!plan.crossPhase) return null
+    const entry = this.#ledgerOf(state, role).get(plan.slot as string)
+    if (entry === undefined) return null
+
+    const priorNodeId = entry.nodeId
+    const priorWorkPresent = state.node.depends_on.some((dep) => dep.node === priorNodeId)
+
+    let changedFiles: readonly string[] | null = null
+    const delta = this.#options.laneDelta
+    if (delta !== undefined && state.lane !== null) {
+      try {
+        changedFiles = await delta(state.lane, priorNodeId)
+      } catch {
+        // A delta that cannot be computed is reported as unknown, never as
+        // empty. Failing the node over it would be worse: the turn is
+        // recoverable, and the prompt has a correct thing to say about not
+        // knowing.
+        changedFiles = null
+      }
+    }
+
+    return { priorNodeId, priorWorkPresent, changedFiles }
   }
 
   /**
@@ -996,8 +1377,10 @@ export class Scheduler {
       canResume: adapter.capabilities.resume,
       harnessId: adapter.id,
       lane: state.lane,
-      ledger: state.sessions,
+      ledger: this.#ledgerOf(state, params['role']),
+      nodeId: state.node.id,
       maxTurns: this.#workflow.defaults.max_session_turns,
+      poisoned: this.#poisoned.has(this.#actorOf(state, params['role']) ?? ''),
       fixRounds: state.fixRounds,
       maxFixRounds: state.node.max_fix_rounds,
       takeoverSessionId: state.resumeSessionId,
@@ -1010,12 +1393,15 @@ export class Scheduler {
     plan: SessionPlan,
     adapter: HarnessAdapter,
     sessionId: string,
+    role: unknown,
   ): void {
-    if (plan.slot === null || state.lane === null) return
-    state.sessions.set(plan.slot, {
+    const lane = state.lane
+    if (plan.slot === null || lane === null) return
+    this.#ledgerOf(state, role).set(plan.slot, {
       harnessId: adapter.id,
       sessionId,
-      lane: state.lane,
+      lane,
+      nodeId: state.node.id,
       turns: plan.turns,
     })
   }
@@ -1095,6 +1481,7 @@ export class Scheduler {
             harnessId: adapter.id,
             sessionId,
             lane,
+            nodeId: state.node.id,
             // The operator's turn is this slot's turn, not an extra one: they
             // took over the session that was already running, so the ceiling
             // must not advance for a turn nobody spent a spawn on.
@@ -1168,6 +1555,10 @@ export class Scheduler {
 
   #release(state: NodeState): void {
     this.#releaseGate(state)
+    this.#releaseReviewer(state)
+    // Before the early return below: a node can hold a member and no lane —
+    // it is claimed first, and a capacity refusal unwinds from in between.
+    this.#releaseCrew(state)
     if (state.laneLease === null) return
     state.laneLease.release()
     state.laneLease = null
@@ -1180,6 +1571,11 @@ export class Scheduler {
   #fail(state: NodeState, reason: string): void {
     state.failure = reason
     this.#setStatus(state, 'failed')
+    // The member's context is the context that just failed. Carrying it into
+    // their next phase carries whatever wrong turn it took with it, and a wrong
+    // conclusion is more expensive to inherit than a repository is to re-read.
+    const member = state.crew?.member ?? state.lastMember
+    if (member !== null) this.#poisoned.add(member)
     for (const id of transitiveDependents(this.#workflow.nodes, state.node.id)) {
       const dependent = this.#states.get(id)
       // Only nodes that have not started: one already in flight finishes.
@@ -1227,9 +1623,42 @@ export class Scheduler {
     return null
   }
 
-  #harnessOf(node: Node, override?: unknown): string {
+  #harnessOf(state: NodeState, override?: unknown, role?: unknown): string {
     if (typeof override === 'string') return override
-    return node.harness ?? this.#workflow.defaults.harness
+    // A reviewer is its own member and may be staffed on another vendor.
+    if (role === 'reviewer' && state.reviewer?.harness != null) return state.reviewer.harness
+    return state.crew?.harness ?? state.node.harness ?? this.#workflow.defaults.harness
+  }
+
+  /**
+   * Which model this turn runs on.
+   *
+   * In an unstaffed workflow this is what it always was: the effect's own
+   * override, then the node's, then the default. A roster inserts one thing
+   * between them — the member holding the node — and one rule that a per-node
+   * model could never express.
+   *
+   * **A review runs on the reviewer that claimed it**, and reviewers are their
+   * own members. An earlier version resolved a reviewer *model* one tier above
+   * the author without claiming anybody — which read well and was wrong twice
+   * over: a phase substituted up to the top tier had nobody above it and fell
+   * back to being reviewed at its own tier, and a tier says nothing about *who*
+   * once members are durable agents rather than borrowed model ids.
+   *
+   * With no reviewer on the roster there is nobody to claim, and the review
+   * runs on the node's own model — which is what every workflow did before
+   * rosters existed.
+   */
+  #modelFor(state: NodeState, params: Readonly<Record<string, unknown>>): string {
+    const override = params['model']
+    if (typeof override === 'string') return override
+
+    if (params['role'] === 'reviewer' && state.reviewer !== null) return state.reviewer.model
+
+    const crew = state.crew
+    if (crew !== null) return crew.model
+
+    return String(state.node.model ?? this.#workflow.defaults.model)
   }
 
   #adapter(id: string): HarnessAdapter {

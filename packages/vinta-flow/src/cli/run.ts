@@ -56,11 +56,13 @@ import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import { createAgentConflictFixer, type ConflictFixer } from '../integration/fixer.ts'
+import { gitLines } from '../integration/git.ts'
 import { Integrator, type WaveResult } from '../integration/integrator.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
 import type { DatabaseSpec } from '../lanes/database.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
 import { LanePool, type ProjectSpec } from '../lanes/pool.ts'
+import { laneHolders } from '../scheduler/crew.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import {
   postMortem,
@@ -245,6 +247,9 @@ export async function runCommand(
     // §8: a lane slot outlives the phase that used it, and the next phase must
     // not start in the last one's worktree or against its rows.
     ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),
+    // §15.2: an implementer keeps one worktree, so continuing across a phase is
+    // safe as long as the agent is told which files moved under it.
+    ...(host.laneDelta === undefined ? {} : { laneDelta: host.laneDelta }),
   })
 
   // §9's amend needs two things this file owns: the integration worktree a
@@ -353,6 +358,7 @@ interface HostWiring {
   readonly rebase?: NonNullable<AmendRunner['rebase']>
   /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
   readonly recycleLane?: (name: string) => Promise<void>
+  readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
   /** Handles this process opened. Never the lanes — see the `finally` above. */
   close(): void
 }
@@ -396,13 +402,24 @@ interface ProvisionOptions {
 async function provision(options: ProvisionOptions): Promise<HostWiring> {
   const { workflow, runId, journal, repoPath, laneRoot, adapters } = options
 
+  // A staffed run gives every *implementer* its own worktree for the whole run —
+  // the thing that lets a member's session outlive a phase, because a session is
+  // about a directory. Reviewers get none: a review runs in the lane it is
+  // reviewing, so that it reads the working tree before anything is committed.
+  // The names are derived from the roster here and in the scheduler, from the
+  // same function, so neither can drift from the other.
+  const crewLanes = laneHolders(workflow.crew).map(
+    (member, i) => `${runId}-crew-${i + 1}-${member.id}`,
+  )
+
   const pool = await LanePool.provision({
     repoPath,
     poolRoot: laneRoot,
     runId,
     // The scheduler names its lane slots the same way, so a node's assigned
     // lane is one of these worktrees rather than a directory nobody made.
-    laneCount: workflow.resources['lane']?.capacity ?? 1,
+    laneCount: crewLanes.length > 0 ? crewLanes.length : (workflow.resources['lane']?.capacity ?? 1),
+    ...(crewLanes.length === 0 ? {} : { laneNames: crewLanes }),
     baseRef: workflow.base_branch,
     // With no `project` block a lane is a worktree and nothing else, and
     // `migrateCmd` is never reached — templates are built per declared role.
@@ -452,6 +469,20 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     rebase,
     recycleLane: async (name: string) => {
       await pool.recycle(name)
+    },
+    // What changed under a member while it was away: the files that differ
+    // between the phase it last worked on and what is checked out now. It is
+    // the whole safety argument for continuing a session across a phase, so a
+    // failure here is reported as "unknown" by the caller rather than swallowed
+    // into "nothing changed".
+    laneDelta: async (name: string, priorNodeId: string) => {
+      const lane = pool.lane(name)
+      return await gitLines(lane.path, [
+        'diff',
+        '--name-only',
+        integrator.nodeBranch(priorNodeId),
+        'HEAD',
+      ])
     },
     close: () => cache.close(),
   }

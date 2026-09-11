@@ -148,11 +148,141 @@ describe('plan-feature worked example', () => {
     for (const db of [dev, test]) expect(db.server_url).not.toMatch(/@/)
   })
 
-  it('overrides the model only where the phase tier differs from the default', () => {
+  it('staffs every node off the roster, with no per-node model anywhere', () => {
     const workflow = parsed()
-    const overridden = workflow.nodes.filter((node) => node.model !== undefined).map((n) => n.id)
-    // p1 (migration) and p5 (flag deletion) are Tier 1; the rest sit on the default.
-    expect(overridden).toEqual(['p1', 'p5'])
+
+    // The roster is the only place a model id appears for a phase. A node
+    // carrying its own would be an id to re-check on the next model bump, and
+    // a second answer to "what runs this phase".
+    expect(workflow.nodes.filter((node) => node.model !== undefined)).toEqual([])
+    expect(workflow.nodes.map((node) => node.crew)).toEqual([
+      'junior',
+      'mid-1',
+      'mid-2',
+      'mid-2',
+      'junior',
+    ])
     expect(workflow.defaults.pipeline).toBe('standard-phase')
+  })
+
+  /**
+   * Lanes are bought with concurrency, and concurrency is capped by the widest
+   * wave. The roster is *not* capped there — this example is deliberately three
+   * members wide on a graph that is two — so asserting them equal would enforce
+   * a rule the skill does not state and this example disproves.
+   */
+  /**
+   * The roster is not capped at the widest wave: a member can earn their place
+   * by being cheaper rather than by adding a lane. This example is three
+   * implementers on a graph that is two phases wide, which is exactly that
+   * case — so the assertion is a lower bound, not an equality.
+   */
+  it('staffs at least as many implementers as the widest wave needs', () => {
+    const workflow = parsed()
+    const perWave = new Map<number, number>()
+    for (const wave of computeWaves(workflow.nodes).values()) {
+      perWave.set(wave, (perWave.get(wave) ?? 0) + 1)
+    }
+    const widest = Math.max(...perWave.values())
+    const built = Object.values(workflow.crew).filter(
+      (member) => member.role === 'implementer',
+    ).length
+
+    expect(built).toBeGreaterThanOrEqual(widest)
+  })
+
+  /**
+   * The check that caught this example the first time it was written. A wave of
+   * two Tier 2 phases needs *two members at Tier 2 or above* — a junior on the
+   * roster does not help, because the floor forbids handing them one. Sorting
+   * both sides and comparing one for one is the whole rule.
+   */
+  it('can staff every wave without dropping a phase below its tier', () => {
+    const workflow = parsed()
+    const waves = computeWaves(workflow.nodes)
+    const tiers = Object.values(workflow.crew)
+      .map((member) => member.tier)
+      .sort((a, b) => a - b)
+
+    const byWave = new Map<number, number[]>()
+    for (const node of workflow.nodes) {
+      const wave = waves.get(node.id) as number
+      const tier = workflow.crew[node.crew ?? '']?.tier as number
+      byWave.set(wave, [...(byWave.get(wave) ?? []), tier])
+    }
+
+    for (const [wave, demand] of byWave) {
+      const wanted = [...demand].sort((a, b) => a - b)
+      // The N most capable members against the N phases, hardest first.
+      const available = tiers.slice(tiers.length - wanted.length)
+      wanted.forEach((tier, i) => {
+        expect(
+          available[i],
+          `wave ${wave} wants a tier ${tier} hand and the roster’s ${i + 1}th spare is lower`,
+        ).toBeGreaterThanOrEqual(tier)
+      })
+    }
+  })
+
+  it('assigns a phase to every implementer, and staffs a reviewer for all of them', () => {
+    const workflow = parsed()
+    const assigned = new Set(workflow.nodes.map((node) => node.crew))
+    const entries = Object.entries(workflow.crew)
+
+    for (const [id, member] of entries) {
+      if (member.role === 'implementer') expect(assigned.has(id)).toBe(true)
+    }
+
+    // The roles are disjoint, which is what makes an agent reading its own diff
+    // unrepresentable rather than merely unlikely.
+    const reviewersOnRoster = entries.filter(([, member]) => member.role === 'reviewer')
+    expect(reviewersOnRoster.length).toBeGreaterThan(0)
+    for (const [id] of reviewersOnRoster) expect(assigned.has(id)).toBe(false)
+
+    // A reviewer's tier is a floor too: one below the hardest phase could never
+    // be picked for it, and the plan would silently fall back to the project
+    // default for that phase.
+    const hardest = Math.max(
+      ...workflow.nodes.map((node) => workflow.crew[node.crew ?? '']?.tier ?? 0),
+    )
+    expect(Math.max(...reviewersOnRoster.map(([, member]) => member.tier))).toBeGreaterThanOrEqual(
+      hardest,
+    )
+  })
+
+  /**
+   * An implementer keeps one worktree — and therefore one session — for the
+   * whole run, so the pool is sized by how many implementers there are rather
+   * than by how many phases can run at once. The idle desks are the price of
+   * the sessions the busy ones carry, and this example is deliberately a case
+   * where the two numbers differ.
+   *
+   * Reviewers add nothing to it: a review runs in the lane it is reviewing, so
+   * that it reads the working tree before anything is committed.
+   */
+  it('gives a desk to every implementer and none to the reviewer', () => {
+    const workflow = parsed()
+    const built = Object.values(workflow.crew).filter(
+      (member) => member.role === 'implementer',
+    ).length
+
+    expect(workflow.resources['lane']?.capacity).toBe(built)
+    expect(built).toBeLessThan(Object.keys(workflow.crew).length)
+  })
+
+  /**
+   * The Tier 1 phases are the ones with exact precedent, and they are the two
+   * the Crew table names for `junior`. A plan that staffed the migration to a
+   * mid would still parse — this asserts the example demonstrates the rubric it
+   * is printed next to.
+   */
+  it('gives the exact-precedent phases to the cheapest tier', () => {
+    const workflow = parsed()
+    const tierOf = (id: string): number | undefined =>
+      workflow.crew[workflow.nodes.find((node) => node.id === id)?.crew ?? '']?.tier
+
+    expect(tierOf('p1')).toBe(1)
+    expect(tierOf('p5')).toBe(1)
+    expect(tierOf('p2')).toBe(2)
   })
 })

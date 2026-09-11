@@ -79,6 +79,16 @@ export interface PoolOptions {
   readonly poolRoot: string
   readonly runId: string
   readonly laneCount: number
+  /**
+   * Lane slot names, when the caller wants its own.
+   *
+   * A staffed run names one worktree per crew member and pins each member to
+   * theirs for the whole run, because a member whose directory moves between
+   * phases cannot keep a session across them. `laneCount` still governs how
+   * many are provisioned; this only decides what they are called, and the
+   * scheduler derives the same names from the same roster.
+   */
+  readonly laneNames?: readonly string[]
   readonly baseRef: string
   readonly project: ProjectSpec
   /** Overrides the measured per-lane disk estimate the N× probe uses. */
@@ -142,11 +152,11 @@ export class LanePool {
     await pool.#probeDisk()
     await pool.#buildTemplates()
 
+    const laneNames =
+      options.laneNames ??
+      Array.from({ length: options.laneCount }, (_, i) => `${options.runId}-lane-${i + 1}`)
     const names: [string, Lane['kind']][] = [
-      ...Array.from({ length: options.laneCount }, (_, i): [string, Lane['kind']] => [
-        `${options.runId}-lane-${i + 1}`,
-        'lane',
-      ]),
+      ...laneNames.map((name): [string, Lane['kind']] => [name, 'lane']),
       [`${options.runId}-integ`, 'integration'],
     ]
     // Lanes share nothing but the source repo, so past the template they are

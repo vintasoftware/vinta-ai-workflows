@@ -124,6 +124,14 @@ export function runUsage(parts: Partial<RunUsageResponse> = {}): RunUsageRespons
         { reason: 'final_fix_round', count: 1 },
       ],
     },
+    // An unstaffed run, for the same reason: a roster is the variation a test
+    // should have to ask for.
+    crew: {
+      members: [],
+      asPlanned: 0,
+      substituted: 0,
+      idle: [],
+    },
     inputTokens: 12_400,
     outputTokens: 3_100,
     sessions: 8,

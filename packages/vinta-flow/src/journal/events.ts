@@ -100,6 +100,12 @@ export type SessionFreshReason =
   | 'final_fix_round'
   /** The vendor no longer has the session; the spawn was retried cold (§15.4). */
   | 'stale_session'
+  /**
+   * The member's previous phase failed. Its session is the context that failed
+   * with it, and carrying that into the next phase propagates whatever wrong
+   * turn it took — a cold start is cheaper than a poisoned one.
+   */
+  | 'prior_phase_failed'
 
 /**
  * Where the operation went. `sent` reached the live session; `queued` is
@@ -227,6 +233,31 @@ interface NodePayloads {
     readonly session_id?: string
     /** Why fresh, from a closed set. Absent on `reused`. */
     readonly reason?: SessionFreshReason
+  }
+  /**
+   * Who took this node, and whether the plan named them.
+   *
+   * Journalled once per attempt, at the claim — before the lane is acquired, so
+   * a node that then waits on capacity is already on the record as staffed. A
+   * `substitute` row is the interesting one: it says the plan's staffing and
+   * the run's staffing diverged, which is how a feature comes in dearer than
+   * the roster predicted without anything having gone wrong.
+   *
+   * Ids and an integer tier. A member is a staffing decision, not an agent's
+   * words: nothing a model wrote reaches this payload (§11).
+   */
+  node_crew: {
+    readonly member: string
+    readonly tier: number
+    /** True when the plan named someone else and they were busy. */
+    readonly substitute: boolean
+    /** Who the plan named. Present only on a substitution. */
+    readonly instead_of?: string
+    /**
+     * Which seat this claim filled. Absent means `implementer`, so rows written
+     * before reviewers were members read as what they were.
+     */
+    readonly role?: 'implementer' | 'reviewer'
   }
   /**
    * One edge of a gate-pool acquisition, for the whole set the gate needs —

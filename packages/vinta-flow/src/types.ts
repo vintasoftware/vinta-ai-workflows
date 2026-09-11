@@ -134,6 +134,56 @@ export const DependencySchema = z.strictObject({
     ),
 })
 
+// ---------------------------------------------------------------------------
+// The crew — who is on this plan, in what role, and at what tier
+//
+// The alternative this replaces is a per-node `model`, picked phase by phase
+// with nothing anywhere adding it up. That reads fine one node at a time and
+// hides the two questions a plan is actually being asked: how many agents does
+// this feature need at once, and is any of them too junior for what it was
+// handed. A roster answers both before the run starts.
+//
+// **A member is an agent, not a model.** Each one owns a worktree for the whole
+// run and keeps its session across the phases it takes, so what it learned
+// about the repository in phase 1 is still in its context in phase 4 — which is
+// most of what an agent spends its first turn of a phase rediscovering. The
+// worktree is reset between phases and the session is told exactly which files
+// that changed; see `sessions.ts`. What made this impossible before was not the
+// reset but the *anonymity* of lanes: a member that lands in a different
+// directory each phase has a context describing paths it is no longer standing
+// in, which is what §15.2's `lane_changed` refuses.
+// ---------------------------------------------------------------------------
+
+/**
+ * What a member is on the team for. Disjoint on purpose: an agent that both
+ * writes and reviews can be handed its own diff, and "the reviewer is never the
+ * implementer" then depends on arithmetic going right every time rather than on
+ * there being no way to express the mistake.
+ */
+export const CREW_ROLES = ['implementer', 'reviewer'] as const
+
+export const CrewMemberSchema = z.strictObject({
+  role: z
+    .enum(CREW_ROLES)
+    .default('implementer')
+    .describe(
+      'Implementers take phases; reviewers read them. No member does both, which is ' +
+        'what makes self-review unrepresentable rather than merely unlikely.',
+    ),
+  tier: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .describe(
+      'Difficulty tier this member is staffed at, per the plan skill’s rubric. It is a ' +
+        'floor on what they may be handed, and the ordering the scheduler substitutes along.',
+    ),
+  model: z.string().min(1).describe('The model this tier resolves to for this run.'),
+  harness: z.enum(HARNESS_IDS).optional().describe('Overrides defaults.harness for this member.'),
+  description: z.string().optional().describe('Why the plan staffed this tier.'),
+})
+
 export const NodeSchema = z.strictObject({
   id: Id,
   name: z.string().min(1),
@@ -149,7 +199,16 @@ export const NodeSchema = z.strictObject({
   pipeline: Id.optional().describe('Overrides defaults.pipeline.'),
   gates: z.array(Id).default([]),
   harness: z.enum(HARNESS_IDS).optional().describe('Overrides defaults.harness.'),
-  model: z.string().optional().describe('Overrides defaults.model.'),
+  model: z
+    .string()
+    .optional()
+    .describe('Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.'),
+  crew: Id.optional().describe(
+    'The implementer this phase is assigned to. Their tier is the floor for it: a busier ' +
+      'roster may hand the phase to a free implementer at that tier or above, never below. ' +
+      'Its reviewer is not named here — it is the cheapest reviewer on the roster who is ' +
+      'qualified for this phase, and it is never this member.',
+  ),
   max_fix_rounds: z.number().int().min(0).default(2),
 })
 
@@ -269,6 +328,14 @@ export const WorkflowSchema = z
     base_branch: z.string().min(1).describe('What dependency-free nodes branch from.'),
     project: ProjectSchema.optional(),
     defaults: DefaultsSchema,
+    crew: z
+      .record(Id, CrewMemberSchema)
+      .default({})
+      .describe(
+        'The agents this plan is staffed with, by id. Empty — the default — means the ' +
+          'workflow is unstaffed and every node falls back to `model` / `defaults.model`, ' +
+          'which is how workflows written before rosters existed keep running.',
+      ),
     resources: z.record(Id, ResourceSchema).describe('Named capacity pools. `lane` is required.'),
     gates: z.record(Id, GateSchema).default({}),
     nodes: z.array(NodeSchema).min(1),
@@ -297,6 +364,7 @@ export type Gate = z.infer<typeof GateSchema>
 export type Project = z.infer<typeof ProjectSchema>
 export type ProjectDatabase = z.infer<typeof DatabaseSchema>
 export type Resource = z.infer<typeof ResourceSchema>
+export type CrewMember = z.infer<typeof CrewMemberSchema>
 export type Pipeline = z.infer<typeof PipelineSchema>
 export type SideEffect = z.infer<typeof SideEffectSchema>
 export type HarnessId = (typeof HARNESS_IDS)[number]

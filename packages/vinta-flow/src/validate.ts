@@ -31,6 +31,17 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
   ])
   const gateIds = new Set(Object.keys(workflow.gates))
   const resourceIds = new Set(Object.keys(workflow.resources))
+  const crewIds = new Set(Object.keys(workflow.crew))
+  const staffed = crewIds.size > 0
+  const crewImplementers = new Set(
+    Object.entries(workflow.crew)
+      .filter(([, member]) => member.role === 'implementer')
+      .map(([id]) => id),
+  )
+  /** Members some node actually named. Filled by the node pass below. */
+  const employed = new Set<string>()
+  /** The tiers phases are assigned at, for the reviewer-reachability check. */
+  const assignedTiers: number[] = []
 
   if (!resourceIds.has('lane')) {
     issues.push({
@@ -72,7 +83,82 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
         issues.push({ path: ['nodes', i, 'gates', j], message: `unknown gate "${gate}"` })
       }
     })
+
+    if (node.crew !== undefined) {
+      if (!crewIds.has(node.crew)) {
+        issues.push({
+          path: ['nodes', i, 'crew'],
+          message: `unknown crew member "${node.crew}"`,
+        })
+      } else if (!crewImplementers.has(node.crew)) {
+        // The whole point of the two roles: a reviewer that can be handed a
+        // phase is a reviewer that can end up reading its own diff.
+        issues.push({
+          path: ['nodes', i, 'crew'],
+          message: `crew member "${node.crew}" is a reviewer and cannot be assigned a phase`,
+        })
+      }
+      employed.add(node.crew)
+      const tier = workflow.crew[node.crew]?.tier
+      if (tier !== undefined) assignedTiers.push(tier)
+
+      // Both would answer "which model runs this phase", and nothing says which
+      // wins. The roster is the answer a staffed workflow is asking for, so the
+      // node-level override has to go rather than be quietly outranked.
+      if (node.model !== undefined) {
+        issues.push({
+          path: ['nodes', i, 'model'],
+          message:
+            `node "${node.id}" sets both \`model\` and \`crew\` — a crew member carries ` +
+            'a model, so drop the override or drop the assignment',
+        })
+      }
+    } else if (staffed) {
+      // Half a roster is worse than none: the scheduler would run two staffing
+      // rules at once, and the plan's own idleness arithmetic would be wrong.
+      issues.push({
+        path: ['nodes', i, 'crew'],
+        message: `node "${node.id}" names no crew member, but this workflow is staffed`,
+      })
+    }
   })
+
+  if (staffed) {
+    // A roster of reviewers with nobody to write the code. Reachable by editing
+    // a role and nothing else, and the resulting run would refuse every node.
+    if (crewImplementers.size === 0) {
+      issues.push({ path: ['crew'], message: 'no crew member has role "implementer"' })
+    }
+
+    // A reviewer qualifies for a phase when its tier is at or above the
+    // phase's, so the easiest phase on the plan is the bar it has to clear.
+    const easiest = assignedTiers.length === 0 ? 0 : Math.min(...assignedTiers)
+    for (const [memberId, member] of Object.entries(workflow.crew)) {
+      if (member.role === 'implementer') {
+        // An implementer nobody was assigned to is an agent the plan pays to
+        // watch. It is the exact defect a roster exists to make visible, so it
+        // is refused rather than warned about.
+        if (!employed.has(memberId)) {
+          issues.push({
+            path: ['crew', memberId],
+            message: `crew member "${memberId}" is assigned no node`,
+          })
+        }
+        continue
+      }
+
+      // A reviewer is idle in the same way when it is below every phase: the
+      // floor is the author's tier, so it would never be picked for any of them.
+      if (member.tier < easiest) {
+        issues.push({
+          path: ['crew', memberId],
+          message:
+            `reviewer "${memberId}" is tier ${member.tier}, below every phase on this ` +
+            `plan (the easiest is tier ${easiest}) — it would never be picked`,
+        })
+      }
+    }
+  }
 
   // Dependencies are checked in a second pass so forward references resolve.
   workflow.nodes.forEach((node, i) => {
