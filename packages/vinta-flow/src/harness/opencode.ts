@@ -70,6 +70,7 @@ import {
   probe as probeBin,
   signalGroup,
 } from './shared.ts'
+import { politeKillFirst } from '../platform/platform.ts'
 
 /**
  * `inject` and `resume` are true because the session API gives both directly:
@@ -666,16 +667,33 @@ class OpencodeServer {
     if (child === null) return
     if (child.exitCode !== null || child.signalCode !== null) return
     await new Promise<void>((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      child.once('close', () => {
-        if (timer) clearTimeout(timer)
+      const timers: ReturnType<typeof setTimeout>[] = []
+      const settle = (): void => {
+        for (const timer of timers) clearTimeout(timer)
         resolve()
-      })
-      signalGroup(child, 'SIGTERM')
-      // A server mid-request may take its time; the port must be free when this
-      // resolves, so politeness has a deadline.
-      timer = setTimeout(() => signalGroup(child, 'SIGKILL'), 2_000)
-      timer.unref()
+      }
+      child.once('close', settle)
+
+      if (politeKillFirst()) {
+        signalGroup(child, 'SIGTERM')
+        // A server mid-request may take its time; the port must be free when
+        // this resolves, so politeness has a deadline.
+        timers.push(setTimeout(() => signalGroup(child, 'SIGKILL'), 2_000))
+      } else {
+        // One blow, because a polite one would orphan the server rather than
+        // end it — see `politeKillFirst`.
+        signalGroup(child, 'SIGKILL')
+      }
+
+      // **`close` may never come, so waiting on it alone is a hang.** It needs
+      // the process gone *and* its stdio ended, and anything that survives the
+      // kill still holds the pipes it inherited. That is not hypothetical: on
+      // Windows the child is `cmd.exe` and the server is beneath it, and a
+      // daemon shutting down used to wait here for as long as the server lived.
+      // Giving up is the honest outcome — the caller asked for the server to be
+      // stopped, and it has been told to stop.
+      timers.push(setTimeout(settle, 10_000))
+      for (const timer of timers) timer.unref()
     })
   }
 }
