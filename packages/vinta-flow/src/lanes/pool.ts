@@ -221,6 +221,12 @@ export class LanePool {
         // delete a branch it believes is checked out — the second step failing
         // for a reason the first one caused.
         await this.#git(['worktree', 'prune'])
+        // git can let go of a worktree and still leave the directory standing:
+        // on Windows a delete of a file something briefly holds open fails, and
+        // git does not treat that as its own failure. `worktree add` then
+        // refuses the path for already existing, which is a re-provision that
+        // cannot happen and a node that fails for a directory nobody wanted.
+        await rm(lane.path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
         if (await this.#hasBranch(lane.branch)) {
           await this.#git(['branch', '-D', lane.branch])
         }
@@ -234,7 +240,16 @@ export class LanePool {
       throw new LaneRecycleError(name, 'reprovision')
     }
 
-    const fresh = await this.#provisionWorktree(lane.name, lane.kind)
+    // Inside its own guard, so a re-provision that fails says which half of the
+    // recycle it was. It used to sit outside every `try` here, and reached the
+    // scheduler as a bare `Error` — the reason a Windows failure could say only
+    // "could not be recycled" while naming neither a stage nor a cause.
+    let fresh: Lane
+    try {
+      fresh = await this.#provisionWorktree(lane.name, lane.kind)
+    } catch {
+      throw new LaneRecycleError(name, 'reprovision')
+    }
     this.#all = this.#all.map((candidate) => (candidate.name === name ? fresh : candidate))
     return fresh
   }
