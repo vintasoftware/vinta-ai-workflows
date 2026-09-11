@@ -9,14 +9,13 @@
  * below collects.
  *
  * Nothing in this file consults the machine's PATH or its real repository. The
- * doctor's binaries are shell scripts written into a temp directory, the
- * workflows are written per test, and every `.vinta-flow/` store is a temp
- * directory that is removed afterwards — including the ones the purge tests
- * try, and fail, to escape.
+ * doctor's binaries are fakes written into a temp directory, the workflows are
+ * written per test, and every `.vinta-flow/` store is a temp directory that is
+ * removed afterwards — including the ones the purge tests try, and fail, to
+ * escape.
  */
 import { execFileSync } from 'node:child_process'
 import {
-  chmodSync,
   cpSync,
   mkdirSync,
   mkdtempSync,
@@ -45,8 +44,10 @@ import type { HarnessAdapter } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
+import { isWindows } from '../src/platform/platform.ts'
 import { parsePostMortem } from '../src/postmortem/postmortem.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { fakeCli } from './support/fake-cli.ts'
+import { renderGate } from './support/gate-script.ts'
 
 // ---------------------------------------------------------------------------
 // Rig
@@ -144,38 +145,30 @@ const node = (id: string, deps: readonly string[] = []): Record<string, unknown>
 // Rig: the doctor's environment
 // ---------------------------------------------------------------------------
 
-const fakeBin = (dir: string, name: string, body: string): string => {
-  const path = join(dir, name)
-  writeFileSync(path, `#!/bin/sh\n${body}\n`, 'utf8')
-  chmodSync(path, 0o755)
-  return path
-}
-
 const MISSING = '/nonexistent/vinta-flow-cli/not-a-binary'
 
-/** A machine where nothing is wrong. Each test breaks exactly one thing. */
+/**
+ * A machine where nothing is wrong. Each test breaks exactly one thing.
+ *
+ * These are `tests/support/fake-cli.ts`'s fakes rather than shell scripts, so
+ * the doctor reaches them through `commandInvocation` the same way it reaches
+ * a real npm-installed CLI on either platform. Every one of them is a plain
+ * spec: nothing here branches on a subcommand, because the only question with
+ * an *answer* is `--version` — `git worktree list` and `docker compose` just
+ * have to succeed, which is what the spec's default exit already does.
+ */
 const healthyBins = (dir: string): DoctorOverrides => ({
   repoPath: dir,
   poolRoot: join(dir, 'pool'),
   summaryDir: join(dir, 'summaries'),
   perLaneBytes: 1,
   bins: {
-    git: fakeBin(
-      dir,
-      'git',
-      [
-        'if [ "$1" = "--version" ]; then echo "git version 2.45.2"; exit 0; fi',
-        'exit 0',
-      ].join('\n'),
-    ),
-    docker: fakeBin(dir, 'docker', 'exit 0'),
-    harness: {
-      'claude-code': fakeBin(
-        dir,
-        'claude',
-        'if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi\nexit 0',
-      ),
-    },
+    git: fakeCli(dir, 'git', { version: 'git version 2.45.2' }),
+    // Never actually probed: no workflow here declares a compose-delivered
+    // database, so the compose check is "not required by this project" and
+    // this binary only has to exist.
+    docker: fakeCli(dir, 'docker', {}),
+    harness: { 'claude-code': fakeCli(dir, 'claude', { version: '9.9.9 (Claude Code)' }) },
   },
 })
 
@@ -183,7 +176,7 @@ const healthyBins = (dir: string): DoctorOverrides => ({
 // 1: doctor
 // ---------------------------------------------------------------------------
 
-describe.runIf(POSIX_SHELL_FIXTURES)('vinta-flow doctor', () => {
+describe('vinta-flow doctor', () => {
   it('exits zero on a healthy environment and prints the report', async () => {
     const dir = makeTemp()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
@@ -571,7 +564,9 @@ const assemblyWorkflow = (
   base_branch: 'main',
   defaults: { harness: 'claude-code', model: 'opus', pipeline: 'phase' },
   resources: { lane: { capacity: laneCapacity, kind: 'worktree' } },
-  gates: { unit: { cmd: `touch ${GATE_MARKER}` } },
+  // Declared rather than written as `touch`, which `cmd.exe` does not have.
+  // The marker's *content* is never read — only that it exists, and where.
+  gates: { unit: { cmd: renderGate({ append: { path: GATE_MARKER, line: 'ran' } }) } },
   nodes: nodes.map((entry) => ({ ...entry, gates: ['unit'] })),
   pipelines: { phase: PHASE },
 })
@@ -608,7 +603,14 @@ const laneRoot = (dir: string): string => join(dir, '.vinta-flow', 'lanes')
 const sqliteRepo = (): string => {
   const dir = makeTemp()
   cpSync(join(HERE, 'fixtures', 'repo'), dir, { recursive: true })
-  symlinkSync(join(HERE, '..', 'node_modules'), join(dir, 'node_modules'))
+  // A *junction* on Windows, exactly as `LanePool.#linkDeps` does it: a plain
+  // directory symlink there needs SeCreateSymbolicLinkPrivilege, so an
+  // unelevated run would fail to build the fixture rather than to test it.
+  symlinkSync(
+    join(HERE, '..', 'node_modules'),
+    join(dir, 'node_modules'),
+    isWindows() ? 'junction' : undefined,
+  )
 
   const script = (name: string, body: string): void =>
     writeFileSync(join(dir, 'scripts', name), `${body}\n`, 'utf8')
@@ -655,7 +657,7 @@ const sqliteRepo = (): string => {
   return dir
 }
 
-describe.runIf(POSIX_SHELL_FIXTURES)('vinta-flow run, composed', () => {
+describe('vinta-flow run, composed', () => {
   it('provisions lanes, runs gates in them, and reaches done', async () => {
     const dir = gitRepo()
     const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a'), node('b', ['a'])], 2))

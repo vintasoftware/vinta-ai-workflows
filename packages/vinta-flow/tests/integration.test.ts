@@ -6,8 +6,8 @@
  * branch name the code chose. A base computed correctly and a base *named*
  * correctly are different claims, and only the first one matters at merge time.
  *
- * `gh` is stubbed with a script that records its argv. Nothing in this file
- * ever reaches a remote.
+ * `gh` is stubbed with a fake that records its argv. Nothing in this file ever
+ * reaches a remote.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
@@ -27,6 +27,7 @@ import {
   type IntegrationPlan,
   PlanDefectError,
 } from '../src/integration/integrator.ts'
+import { fakeCliFromSource } from './support/fake-cli.ts'
 import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
 
 // ---------------------------------------------------------------------------
@@ -427,16 +428,28 @@ describe('merge conflicts', () => {
 // Pull requests
 // ---------------------------------------------------------------------------
 
-/** A `gh` that records its argv and prints a URL. Never touches a remote. */
-async function stubGh(root: string): Promise<{ path: string; args: () => Promise<string[]> }> {
+/**
+ * A `gh` that records its argv and prints a URL. Never touches a remote.
+ *
+ * Source rather than a `FakeCliSpec`: what this fixture is *for* is the argv,
+ * and no spec describes "write back what you were called with". Node says it
+ * once for both platforms — `process.argv` is the same list under a shebang
+ * script and under a `.cmd` shim, which a `for a in "$@"` loop was never going
+ * to be. The separator is written as `\n` explicitly so the reader below can
+ * split on it whatever the platform's own line ending is.
+ */
+function stubGh(root: string): { path: string; args: () => Promise<string[]> } {
   const log = join(root, 'gh.log')
-  const path = join(root, 'gh')
-  await writeFile(
-    path,
-    ['#!/bin/sh', `for a in "$@"; do echo "$a" >> ${log}; done`, 'echo https://example.invalid/pr/1', ''].join(
-      '\n',
-    ),
-    { mode: 0o755 },
+  const path = fakeCliFromSource(
+    root,
+    'gh',
+    [
+      `import { appendFileSync } from 'node:fs'`,
+      `for (const arg of process.argv.slice(2)) {`,
+      `  appendFileSync(${JSON.stringify(log)}, arg + '\\n')`,
+      `}`,
+      `process.stdout.write(${JSON.stringify('https://example.invalid/pr/1\n')})`,
+    ].join('\n'),
   )
   return {
     path,
@@ -444,46 +457,77 @@ async function stubGh(root: string): Promise<{ path: string; args: () => Promise
   }
 }
 
-describe.runIf(POSIX_SHELL_FIXTURES)('pull requests', () => {
-  it('opens each PR against the node’s own computed base, never base_branch', async () => {
-    const repo = await makeRepo()
-    const gh = await stubGh(repo.root)
-    const integrator = new Integrator({
-      plan: plan([node('a'), node('b'), node('c', ['a']), node('d', ['a', 'b'])]),
-      integrationPath: repo.integ,
-      fixer: spyFixer(),
-      ghPath: gh.path,
-    })
+describe('pull requests', () => {
+  /**
+   * Still POSIX-only, and not because of the fixture.
+   *
+   * `openPullRequest` (`src/integration/pr.ts`) hands `ghPath` straight to
+   * `execFile` rather than through `commandInvocation`, which is fine for a
+   * real `gh` — that one is `gh.exe` on Windows and resolves without a shell —
+   * but leaves no way to point it at a fixture there: since CVE-2024-27980
+   * Node refuses to spawn a `.bat`/`.cmd` without `shell`, and a `.cmd` shim is
+   * the only executable form a Node fake can take. The fixture itself is
+   * already portable.
+   *
+   * **Do not "just use the seam" here without reading this.** Every other CLI
+   * spawn in the package routes through `commandInvocation` precisely so a
+   * `.cmd` shim works, so that looks like the obvious fix — and it would trade
+   * a real problem for a worse one. `commandInvocation` builds a `cmd.exe`
+   * command line, and `shellQuote` refuses `"` and `%` outright because
+   * `cmd.exe` offers no way to escape either inside a quoted region. One of
+   * `gh`'s arguments is `--body`: the pull request body, which is derived from
+   * the plan and the run and can hold both characters. Routing it through a
+   * shell would turn a spawn that cannot be broken by its own payload into one
+   * that can — an `UnquotableArgumentError` on a legitimate PR.
+   *
+   * So the gate comes off when `pr.ts` can reach a `.cmd` *without* putting
+   * that body through a shell — `--body-file` instead of `--body` is the
+   * shape that gets there, since it leaves only paths and branch names on the
+   * command line. That is a change to the product with its own risk, and it
+   * does not belong in a commit about test fixtures.
+   */
+  it.runIf(POSIX_SHELL_FIXTURES)(
+    'opens each PR against the node’s own computed base, never base_branch',
+    async () => {
+      const repo = await makeRepo()
+      const gh = stubGh(repo.root)
+      const integrator = new Integrator({
+        plan: plan([node('a'), node('b'), node('c', ['a']), node('d', ['a', 'b'])]),
+        integrationPath: repo.integ,
+        fixer: spyFixer(),
+        ghPath: gh.path,
+      })
 
-    const one = await repo.lane('lane-1')
-    await integrator.startNode('a', one)
-    await repo.commit(one, { 'a.ts': 'a\n' }, 'phase a: unit')
-    const two = await repo.lane('lane-2')
-    await integrator.startNode('b', two)
-    await repo.commit(two, { 'b.ts': 'b\n' }, 'phase b: unit')
+      const one = await repo.lane('lane-1')
+      await integrator.startNode('a', one)
+      await repo.commit(one, { 'a.ts': 'a\n' }, 'phase a: unit')
+      const two = await repo.lane('lane-2')
+      await integrator.startNode('b', two)
+      await repo.commit(two, { 'b.ts': 'b\n' }, 'phase b: unit')
 
-    expect(await integrator.openPr('a')).toMatchObject({
-      opened: true,
-      base: 'main',
-      head: 'plan/wf/phase-a',
-      url: 'https://example.invalid/pr/1',
-    })
-    expect(await integrator.openPr('c')).toMatchObject({
-      opened: true,
-      base: 'plan/wf/phase-a',
-      head: 'plan/wf/phase-c',
-    })
-    expect(await integrator.openPr('d', { draft: true })).toMatchObject({
-      opened: true,
-      base: 'plan/wf/integ-d',
-    })
+      expect(await integrator.openPr('a')).toMatchObject({
+        opened: true,
+        base: 'main',
+        head: 'plan/wf/phase-a',
+        url: 'https://example.invalid/pr/1',
+      })
+      expect(await integrator.openPr('c')).toMatchObject({
+        opened: true,
+        base: 'plan/wf/phase-a',
+        head: 'plan/wf/phase-c',
+      })
+      expect(await integrator.openPr('d', { draft: true })).toMatchObject({
+        opened: true,
+        base: 'plan/wf/integ-d',
+      })
 
-    const args = await gh.args()
-    expect(args.filter((arg) => arg === '--draft')).toHaveLength(1)
-    // A dependent node's PR base is never the run's base branch.
-    const bases = args.map((arg, i) => (args[i - 1] === '--base' ? arg : null)).filter(Boolean)
-    expect(bases).toEqual(['main', 'plan/wf/phase-a', 'plan/wf/integ-d'])
-  })
+      const args = await gh.args()
+      expect(args.filter((arg) => arg === '--draft')).toHaveLength(1)
+      // A dependent node's PR base is never the run's base branch.
+      const bases = args.map((arg, i) => (args[i - 1] === '--base' ? arg : null)).filter(Boolean)
+      expect(bases).toEqual(['main', 'plan/wf/phase-a', 'plan/wf/integ-d'])
+    },
+  )
 
   it('degrades to a clear report when gh is unavailable', async () => {
     const repo = await makeRepo()
