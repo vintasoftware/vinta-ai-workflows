@@ -225,6 +225,26 @@ interface NodeState {
   failure: string | null
 }
 
+/**
+ * What went wrong recycling a lane, in words safe to print.
+ *
+ * `LaneRecycleError` already classifies itself into one of three stages, and
+ * that is the useful answer. Anything else reaching here came from the pool's
+ * own machinery rather than from a project's reset commands — a summary that
+ * would not read, a git call that refused — and is reported by its *kind*:
+ * an error name and, where the runtime supplies one, a `code` like `ENOENT`.
+ *
+ * Not its message (§11). A thrown message can carry a git diagnostic or the
+ * output of something a project chose to run, and neither belongs on a stream
+ * that is otherwise identifiers.
+ */
+function recycleStage(error: unknown): string {
+  if (error instanceof LaneRecycleError) return error.stage
+  const named = error as { name?: unknown; code?: unknown }
+  const name = typeof named.name === 'string' ? named.name : 'Error'
+  return typeof named.code === 'string' ? `${name}: ${named.code}` : name
+}
+
 export class Scheduler {
   readonly #options: SchedulerOptions
   readonly #states = new Map<string, NodeState>()
@@ -654,8 +674,7 @@ export class Scheduler {
       // back to its base, and a slot that could not be torn down and rebuilt.
       // Without it "could not be recycled" sends an operator to read three
       // different pieces of machinery.
-      const stage = error instanceof LaneRecycleError ? ` (${error.stage})` : ''
-      throw new Error(`lane "${lane}" could not be recycled${stage}`)
+      throw new Error(`lane "${lane}" could not be recycled (${recycleStage(error)})`)
     }
   }
 
