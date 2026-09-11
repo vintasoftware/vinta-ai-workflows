@@ -10,7 +10,8 @@
  * running-it-for-real half is covered by every migrated suite: those spawn the
  * fake and read what comes back, on whichever platform they are running.
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -139,6 +140,96 @@ describe('the fake CLI, actually running', () => {
 
     expect(runFake(bin, ['one', 'two']).stdout.trim()).toBe('args:one,two')
   })
+})
+
+describe('a fake that serves HTTP', () => {
+  /**
+   * The bisect between "the fixture cannot work here" and "the adapter cannot
+   * drive it here".
+   *
+   * Four opencode lifecycle tests hang on the Windows runner, and every layer
+   * above this one — probe deadline, boot deadline, the adapter's own kill —
+   * can hide the cause. This spawns the same shape of fake directly, binds a
+   * port, and asks it a question, with nothing of the adapter in the way. If it
+   * passes on Windows, the fixture mechanism is sound and the fault is above
+   * it; if it fails, the fixture is where to look.
+   */
+  it('binds a port and answers, through the platform seam', async () => {
+    const dir = makeTemp()
+    const bin = fakeCliFromSource(
+      dir,
+      'server-fake',
+      `import http from 'node:http'
+const port = Number(process.argv[process.argv.indexOf('--port') + 1])
+const srv = http.createServer((req, res) => {
+  req.resume()
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, url: req.url }))
+})
+srv.on('error', (error) => {
+  process.stderr.write('listen failed: ' + String(error && error.message) + '\\n')
+  process.exit(1)
+})
+srv.listen(port, '127.0.0.1', () => process.stdout.write('listening\\n'))
+`,
+    )
+
+    // A port the OS just told us is free, exactly as the adapter picks one.
+    const probe = createServer()
+    const port = await new Promise<number>((resolve, reject) => {
+      probe.once('error', reject)
+      probe.listen(0, '127.0.0.1', () => {
+        const address = probe.address()
+        const chosen = typeof address === 'object' && address !== null ? address.port : 0
+        probe.close(() => resolve(chosen))
+      })
+    })
+
+    const invocation = commandInvocation(bin, ['serve', '--port', String(port)])
+    const child = spawn(invocation.file, [...invocation.args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    })
+    let said = ''
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => {
+      said += chunk
+    })
+    child.stderr?.on('data', (chunk: string) => {
+      said += chunk
+    })
+    let exited: number | null | undefined
+    child.on('close', (code) => {
+      exited = code
+    })
+
+    try {
+      let body: unknown
+      const deadline = Date.now() + 10_000
+      for (;;) {
+        if (exited !== undefined) break
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/global/health`)
+          body = await response.json()
+          break
+        } catch {
+          // Not up yet.
+        }
+        if (Date.now() >= deadline) break
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+
+      // The message carries everything the runner knows, so a Windows failure
+      // arrives explained rather than as a bare timeout.
+      expect(body, `child said: ${JSON.stringify(said)} exited: ${String(exited)}`).toEqual({
+        ok: true,
+        url: '/global/health',
+      })
+    } finally {
+      child.kill('SIGKILL')
+    }
+  }, 20_000)
 })
 
 describe('rendering a gate', () => {
