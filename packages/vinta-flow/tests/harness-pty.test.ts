@@ -38,6 +38,7 @@ import { execFileSync, spawn as spawnChild } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import {
@@ -848,7 +849,13 @@ describe('a daemon killed mid-attach', () => {
   it('leaves no orphan pty', async () => {
     const dir = makeTemp()
     const script = join(dir, 'attach.ts')
-    const ptyModule = join(import.meta.dirname, '..', 'src', 'harness', 'pty.ts')
+    // A `file://` URL, not a path. An ESM specifier is a URL, and on Windows a
+    // native path is not one: `C:\…` reads as a scheme, and the helper died in
+    // the module loader before it could say anything — which, with its stderr
+    // ignored, looked exactly like a terminal that never started.
+    const ptyModule = pathToFileURL(
+      join(import.meta.dirname, '..', 'src', 'harness', 'pty.ts'),
+    ).href
     // Declarative, because this fixture is not interactive: it says one word
     // and stays up. The linger is what makes the kill below a kill rather than
     // a race with an exit that was coming anyway.
