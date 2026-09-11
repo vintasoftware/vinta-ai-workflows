@@ -320,6 +320,10 @@ function expectDrained(rig_: Rig): void {
   for (const name of rig_.poolNames) expect([name, rig_.pools.held(name)]).toEqual([name, 0])
   expect(rig_.pools.waiting).toBe(0)
   expect(rig_.journal.leases()).toEqual([])
+  // A member held past the end of a run is not a leaked resource the pools can
+  // see: nothing counts them, so a stall would show up only as a later phase
+  // waiting forever on an agent that no longer exists.
+  expect(rig_.scheduler.busyCrew()).toEqual([])
 }
 
 // ---------------------------------------------------------------------------
@@ -1901,6 +1905,30 @@ describe('crew', () => {
     await r.scheduler.run()
 
     expect(modelsOf(r)).toEqual(['dear', 'dear', 'dear'])
+    expectDrained(r)
+  })
+
+  it('gives the member back when a waiting node is aborted', async () => {
+    // `b` cannot start: the roster has one senior and `a` is holding them. An
+    // abort has to reach it *while it waits*, and has to leave the roster in a
+    // state where a third phase could still be staffed.
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'senior' }), node('b', [], { crew: 'senior' })],
+        { lanes: 2, crew: { senior: CREW.senior } },
+      ),
+      { stall: true },
+    )
+
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    expect(r.scheduler.busyCrew()).toEqual(['senior'])
+
+    await r.scheduler.abortNode('b')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'failed' })
     expectDrained(r)
   })
 

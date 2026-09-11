@@ -345,6 +345,17 @@ export class Scheduler {
    * purpose: its pipeline run already captured it, and a node that has settled
    * has a branch that is the record of that definition.
    */
+  /**
+   * Roster members currently holding a node.
+   *
+   * Exposed for the same reason the pools expose `held`: a member left claimed
+   * after a run ends is not a leak any counter notices — it surfaces much later
+   * as a phase waiting forever on an agent nobody is using.
+   */
+  busyCrew(): string[] {
+    return [...this.#busyCrew].sort()
+  }
+
   adopt(workflow: Workflow): void {
     this.#workflow = workflow
     const declared = new Set(workflow.nodes.map((node) => node.id))
@@ -621,7 +632,16 @@ export class Scheduler {
       // scheduler's own tests time their assertions against that schedule.
       if (this.#staffed) {
         await this.#claimCrew(state)
-        if (state.aborted) return
+        // Belt and braces. `abortNode` releases what the node holds itself, and
+        // nothing awaits between the claim above and this check, so today the
+        // member is already back. It is written anyway because the failure it
+        // guards is silent: a member left claimed is not a lease any counter
+        // notices, and the symptom is a later phase waiting forever on an agent
+        // nobody is using. `expectDrained` holds every scheduler test to it.
+        if (state.aborted) {
+          this.#releaseCrew(state)
+          return
+        }
       }
 
       // All-or-nothing, canonical order, one call: the lane and nothing else.
