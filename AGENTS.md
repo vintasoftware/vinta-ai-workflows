@@ -108,6 +108,17 @@ Beyond the above there is nothing else to run — no Jest, pytest, ruff, or esli
   5. CHANGELOG entry.
   Skipping any step leaves the field orphaned. **Standalone resource schemas** (e.g. `ai-models.v1.schema.json`, which validates a data file a single skill reads — not a per-project produced artifact) have a lighter contract: the schema file + a `schemas/README.md` inventory row + the one consuming skill + a CHANGELOG entry. No bootstrap interview, no Step 0.5 emission.
 
+## Branch model
+
+Two long-lived branches, and which one you are on decides what may be cut from it.
+
+- **`alpha`** — where work lands. Every PR targets it, and every alpha pre-release (`X.Y.Z-alphaN`) is tagged on it. This is the default branch for day-to-day work.
+- **`main`** — the stable line. `alpha` merges here when a series is ready, and stable tags (`X.Y.Z`) are cut here.
+
+So the normal path is: branch off `alpha` → PR into `alpha` → alphas ship from `alpha` → `alpha` merges to `main` → the stable graduates on `main`.
+
+The [`release`](dev-skills/release/SKILL.md) skill asserts this rather than inferring it: an alpha asked for on `main`, or a stable asked for on `alpha`, stops with the reason instead of being reinterpreted. It never switches branches or merges for you.
+
 ## CHANGELOG + version policy
 
 - Every user-facing change gets an entry under the current `[unreleased]` or in-progress `[X.Y.Z]` section. Keep a Changelog vocabulary: **Added** / **Changed** / **Deprecated** / **Removed** / **Fixed** / **Security**.
@@ -116,16 +127,17 @@ Beyond the above there is nothing else to run — no Jest, pytest, ruff, or esli
   - **Patch** — bug fixes, doc fixes, internal refactors invisible to consumers.
   - **Minor** — new skills, new opt-in fields, additive schema fields (no major bump on the schema itself), new CLI flags with backward-compatible defaults.
   - **Major** — removed skill, breaking schema change (new `v<N+1>` schema file), CLI flag rename without alias, default-behavior flip.
+  - **Alpha** — a pre-release of the next stable, tagged `X.Y.Z-alphaN` on `alpha` and published under the `alpha` dist-tag. The CHANGELOG section stays **open** across an alpha series: bullets accumulate under the `[X.Y.Z]` placeholder until the stable graduates and dates it.
 - Bump `package.json` `version` in the same commit that adds the entry. Don't bump just to bump.
 
 ## Git + PR rules
 
 - **Conventional Commits** for new commits where it fits (`feat:`, `fix:`, `docs:`, `refactor:`). Existing history is mixed — match what the change is, don't retrofit. Keep subject under 72 chars.
 - **One commit = one logical change.** Don't bundle a schema rev with a CLI flag rename with a CHANGELOG sweep. Each is its own commit.
-- **Never amend a published commit.** Always a new commit. Force-push only your own short-lived branch with `--force-with-lease`, never `--force`. Never force-push `main`.
+- **Never amend a published commit.** Always a new commit. Force-push only your own short-lived branch with `--force-with-lease`, never `--force`. Never force-push `alpha` or `main` — both are published branches other people and the release tags depend on.
 - **AI co-author trailers allowed** on commits authored by an agent (`Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` or whichever model). Skip trailers on pure human commits.
 - **Don't commit unless asked.** The user explicitly drives `git commit`; agents draft, propose, and wait for approval.
-- **PRs target `main`.** Description carries: summary (1–3 bullets), test plan (verification commands you ran), CHANGELOG entry pointer if applicable.
+- **PRs target `alpha`**, not `main` — see **Branch model**. A stacked PR targets the branch below it in the stack, and is retargeted to `alpha` when that one merges. Description carries: summary (1–3 bullets), test plan (verification commands you ran), CHANGELOG entry pointer if applicable.
 
 ## Self-recursive bootstrap
 

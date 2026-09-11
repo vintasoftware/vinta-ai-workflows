@@ -16,7 +16,11 @@ name: vinta-flow
 
 on:
   push:
-    branches: [main]
+    # Both long-lived branches. `alpha` is where PRs land, so a push to it is an
+    # integration event — the first moment several approved PRs meet — and it is
+    # exactly where a cross-PR breakage shows up. Running only on `main` meant
+    # nothing checked the merge until a stable release was already being cut.
+    branches: [main, alpha]
     paths:
       - 'packages/vinta-flow/**'
       - 'packages/design-system/**'

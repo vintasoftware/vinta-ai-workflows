@@ -1,19 +1,31 @@
 ---
 name: release
-description: Cut a release of `vinta-ai-workflows` — pick patch / minor / major / alpha bump, close the in-progress CHANGELOG section (stable only — alpha keeps it open), bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on `main`, fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Surfaces the npm publish command for the user to run manually — never auto-publishes. Alpha releases use `--tag alpha` dist-tag. Use when the user says "release", "cut a release", "tag 0.1.4", "alpha release", "0.2.0-alpha1", "publish".
+description: Cut a release of `vinta-ai-workflows` — pick patch / minor / major / alpha bump, close the in-progress CHANGELOG section (stable only — alpha keeps it open), bump `package.json.version`, commit, tag, push. Asserts pre-flight conditions (clean working tree, on the right release branch for the kind of release — `alpha` for pre-releases, `main` for stable — fetched, CHANGELOG section non-empty, schema enums match every shipped foundation skill, version bump matches the kind of change). Surfaces the npm publish command for the user to run manually — never auto-publishes. Alpha releases use `--tag alpha` dist-tag. Use when the user says "release", "cut a release", "tag 0.1.4", "alpha release", "0.2.0-alpha1", "publish".
 ---
 
 # Release
 
 This repo ships as a private npm package. Stable releases are: bump version + close CHANGELOG section + tag + push. Alpha pre-releases are: bump version (with `-alphaN` suffix) + tag + push, leaving the CHANGELOG section open so bullets accumulate across the alpha series until the stable graduates. No CI auto-publish today; the user runs `npm publish` (alpha: `npm publish --tag alpha`) once the tag is up.
 
+## Two release lines, two branches
+
+| Kind | Cut from | Why |
+|---|---|---|
+| `alpha` | **`alpha`** | Pre-release work lands on `alpha` first. Tagging it there is what makes the tag point at the code that was published. |
+| `patch` / `minor` / `major` | **`main`** | The stable line. |
+| `graduate` | **`main`** | It cuts a *stable* tag, so it belongs on the stable line — and the alpha series must already be merged into `main`, or the tag would claim work it does not contain. |
+
+**The branch is checked, never chosen for you.** This skill does not switch branches, merge, or push anything you did not ask for: it asserts you are standing on the right one for the release you asked for, and stops if you are not. Two mistakes it exists to catch: an alpha tagged on `main` (published as a pre-release from the stable line, where the code is not), and a stable tagged on `alpha` (a `latest` release from a branch nobody promised was stable).
+
+Substitute `<release-branch>` below with the branch the chosen kind requires — `alpha` for an alpha, `main` for everything else.
+
 ## Step 0 — Pre-flight checks (NON-NEGOTIABLE)
 
 Run all in parallel via `Bash`:
 
 1. `git status --porcelain` → empty (clean working tree). Non-empty → stop, ask user to commit / stash.
-2. `git rev-parse --abbrev-ref HEAD` → `main`. Otherwise → stop, ask user to switch.
-3. `git fetch origin` then `git rev-list --left-right --count origin/main...HEAD` → `0\t0`. Behind → stop, ask user to pull. Ahead → fine, those are the unreleased commits.
+2. `git rev-parse --abbrev-ref HEAD` → `main` **or** `alpha`. Anything else → stop, ask user to switch. Record it; Step 1 checks the chosen kind against it. (Do not pick the kind from the branch — an alpha cut from `main` and a stable cut from `alpha` are both mistakes worth *naming*, not silently reinterpreting.)
+3. `git fetch origin` then `git rev-list --left-right --count origin/<release-branch>...HEAD` → `0\t0`, where `<release-branch>` is the branch from check 2. Behind → stop, ask user to pull. Ahead → fine, those are the unreleased commits.
 4. `python3 -c "import json; print(json.load(open('package.json'))['version'])"` → record current version.
 5. `git tag --sort=-v:refname | head -5` → recent tags (alpha + stable). Compare top tag against `package.json` — they should match (= last release). Mismatch is a sign someone bumped without tagging; surface before continuing. Note whether the top tag is **stable** (`X.Y.Z`) or **alpha** (`X.Y.Z-alphaN`) — Step 1 branches on this.
 6. `git log <last-tag>..HEAD --oneline` → list of commits since last release. Show to user.
@@ -29,6 +41,21 @@ Read the unreleased CHANGELOG section + the commit list from Step 0.6. Use `AskU
 - **major** — removed skill, breaking schema change (new `<N+1>` schema file), CLI flag rename without alias, default-behavior flip.
 - **alpha** — pre-release for an upcoming stable. Tag format `X.Y.Z-alphaN`. Use when shipping work-in-progress to early consumers before locking the stable. Does NOT close the CHANGELOG section.
 - **graduate** — only if last tag is `X.Y.Z-alphaN`: cut the stable `X.Y.Z` that the alpha series targeted. Behaves like a normal stable release (closes CHANGELOG section).
+
+### The kind and the branch must agree
+
+Check the chosen kind against the branch recorded in Step 0.2, and **stop on a mismatch** rather than switching branches:
+
+- On **`alpha`**, only `alpha` is allowed. A stable or `graduate` request → stop: *"you are on `alpha`; stable releases are cut from `main` — switch and re-run."*
+- On **`main`**, only `patch` / `minor` / `major` / `graduate` are allowed. An `alpha` request → stop: *"alpha pre-releases are cut from `alpha`; switch and re-run."*
+
+**`graduate` has one extra pre-condition**: the alpha series it graduates must already be in this branch.
+
+```bash
+git rev-list --count HEAD..origin/alpha
+```
+
+Non-zero → stop. `origin/alpha` holds commits `main` does not, so the stable tag would claim to graduate an alpha series whose code it does not contain. Ask the user to merge `alpha` into `main` first; do not merge for them.
 
 Read the rule from `AGENTS.md` `## CHANGELOG + version policy` if uncertain — quote it back to the user.
 
@@ -107,9 +134,11 @@ Confirm with the user before pushing.
 ## Step 6 — Push
 
 ```bash
-git push origin main
+git push origin <release-branch>
 git push origin "<new>"
 ```
+
+`<release-branch>` is the branch from Step 0.2 — `alpha` for an alpha, `main` for a stable or a graduate. Pushing a release to the other one is how a pre-release ends up on the stable line.
 
 If the team uses signed tags + a tag-protection rule, surface the failure and ask the user to push manually with their key.
 
@@ -160,13 +189,17 @@ The user owns this step. Don't auto-publish.
    - **stable / graduate**: top section header dated today, version matches `<new>`.
    - **alpha**: top section header still `## [<next-stable>] — YYYY-MM-DD` (placeholder intentionally open), bullets unchanged from pre-bump.
 5. `git status --porcelain` → empty.
-6. `git rev-list --left-right --count origin/main...HEAD` → `0\t0` (pushed).
+6. `git rev-list --left-right --count origin/<release-branch>...HEAD` → `0\t0` (pushed).
+7. `git branch --contains <new> | tr -d ' *'` → includes `<release-branch>`. Cheap, and it catches the one failure the count above cannot: a tag created while standing somewhere other than where it was pushed.
 
 ## Pitfalls
 
 - **Releasing a section that wasn't actually authored.** If commits landed without CHANGELOG updates (someone forgot), you'll release a "Added: " entry that doesn't reflect the diff. Cross-check `git log <last-tag>..HEAD` against the section's bullets before bumping.
 - **Patch-bumping a minor change.** A new schema field is minor, not patch — even if it looks small. The schema is a public contract.
-- **Forgetting to push the tag.** `git push origin main` doesn't carry tags; need the explicit `git push origin <tag>` (or `git push --follow-tags`).
+- **Forgetting to push the tag.** `git push origin <release-branch>` doesn't carry tags; need the explicit `git push origin <tag>` (or `git push --follow-tags`).
+- **Cutting an alpha from `main`.** The tag would point at the stable line, where the pre-release code is not — so `npm publish --tag alpha` would ship something other than what the alpha series contains. The branch check refuses it; do not work around it by merging `alpha` into `main` just to tag.
+- **Cutting a stable from `alpha`.** Publishes `latest` off the pre-release branch. Refused for the same reason, in the other direction.
+- **Graduating before merging `alpha` into `main`.** The stable tag names an `X.Y.Z` the alpha series was building toward, so a `main` that has not taken those commits produces a tag that claims work it does not have. `git rev-list --count HEAD..origin/alpha` must be `0`.
 - **Auto-publishing.** Don't. The user's npm credentials + 2FA flow are not your business; surface the command and stop.
 - **Dating the CHANGELOG with local time.** Use UTC ISO date — the team is distributed.
 - **Tagging without signing when the repo expects signed tags.** `git config tag.gpgsign` set to true → `git tag` without `-s` fails or warns. Detect via `git config --get tag.gpgsign` in pre-flight; if true, use `-s`.
