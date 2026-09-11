@@ -28,7 +28,7 @@ import {
   PlanDefectError,
 } from '../src/integration/integrator.ts'
 import { fakeCliFromSource } from './support/fake-cli.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { FAKE_BIN_VIA_EXECFILE } from './support/platform.ts'
 
 // ---------------------------------------------------------------------------
 // Fixture repository
@@ -486,7 +486,7 @@ describe('pull requests', () => {
    * command line. That is a change to the product with its own risk, and it
    * does not belong in a commit about test fixtures.
    */
-  it.runIf(POSIX_SHELL_FIXTURES)(
+  it.runIf(FAKE_BIN_VIA_EXECFILE)(
     'opens each PR against the node’s own computed base, never base_branch',
     async () => {
       const repo = await makeRepo()

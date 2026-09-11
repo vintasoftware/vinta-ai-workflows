@@ -2,16 +2,25 @@
  * Interactive takeover (§9's fifth operation), end to end and without a CLI.
  *
  * Everything below runs against a **fake binary** written into a temp dir: a
- * shell script that reports the argv it was given, echoes lines back, and
- * prints its own terminal size on request. That last one is the whole reason a
- * script is enough — a resize is observable as the tty's `winsize`, which
- * `stty size` reads, so "the resize reached the terminal" is an assertion
- * rather than a spy on a method call.
+ * Node program behind the launcher a real npm install would put in front of it,
+ * which reports the argv it was given, echoes lines back, and prints its own
+ * terminal size on request. That last one is the whole reason a fake is enough
+ * — a resize is observable as the window size the child itself reads, so "the
+ * resize reached the terminal" is an assertion rather than a spy on a method
+ * call.
+ *
+ * The fixture was `#!/bin/sh` and `stty size` until this change, and that one
+ * choice skipped this entire file on Windows: ConPTY, the one pty this package
+ * drives that has no POSIX guarantee standing behind it, was the least tested
+ * path in the package. Node answers all four questions the shell did — a
+ * backgrounded process with a pid, argv, the terminal's size, a command loop —
+ * and answers them the same way on both platforms. `tests/support/fake-cli.ts`
+ * explains why the *executable* is still a launcher rather than the program.
  *
  * Three claims this file exists to hold to.
  *
  * - **No orphan, proved with a pid.** Every teardown path is followed by
- *   `kill(pid, 0)` on the pty leader *and* on a background process the script
+ *   `kill(pid, 0)` on the pty leader *and* on a background process the fake
  *   started inside it, because the leader dying while its children keep the
  *   worktree open is exactly the failure `signalGroup` exists to prevent.
  * - **The session id survives the round trip.** §9 makes it the handoff token,
@@ -23,10 +32,10 @@
  *
  * Nothing here logs terminal bytes. They are collected into a local string and
  * matched; they never reach a message, and the assertions quote only the fixed
- * markers the fake script itself prints.
+ * markers the fake itself prints.
  */
 import { execFileSync, spawn as spawnChild } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -51,8 +60,9 @@ import { PtyClientFrameSchema, PtyServerFrameSchema } from '../src/daemon/pty-fr
 import { takeOver, takeovers, type TakeoverTarget } from '../src/daemon/pty.ts'
 import { EventFrameSchema } from '../src/daemon/schemas.ts'
 import { openJournal } from '../src/journal/journal.ts'
+import { isWindows } from '../src/platform/platform.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 
@@ -69,28 +79,60 @@ const makeTemp = (): string => {
 /**
  * A CLI stand-in with a terminal's three observable behaviours: it says what
  * it was invoked with, it echoes, and it reports its window size. The
- * background `sleep` is the orphan detector — it shares the pty's process
+ * background child is the orphan detector — it shares the terminal's process
  * group, so it survives a teardown that signalled only the leader.
+ *
+ * Node source rather than a `FakeCliSpec`, for the reason `fakeCliFromSource`
+ * gives: a command loop is a program, and describing one as data would be
+ * inventing a shell rather than replacing it. `String.raw` so the escapes below
+ * are the fake's own and not this file's — and no backtick may appear inside,
+ * which is why the comments in there quote nothing.
  */
-const FAKE_CLI = `#!/bin/sh
-sleep 300 &
-echo "child:$!"
-echo "args:$*"
-while IFS= read -r line; do
-  case "$line" in
-    size) stty size ;;
-    quit) exit 7 ;;
-    *) echo "echo:$line" ;;
-  esac
-done
+const INTERACTIVE_CLI = String.raw`
+import { spawn } from 'node:child_process'
+import { createInterface } from 'node:readline'
+
+// The orphan detector, and deliberately *not* detached. Detached would hand
+// this child a process group of its own — on POSIX the group signal aimed at
+// the terminal's leader would then miss it, and the "no orphan" assertion
+// would pass because the thing it looks for was never in the group being
+// signalled. Inheriting the group is what "sleep 300 &" did in the shell
+// fixture this replaces. It reports its own pid rather than the shell's, which
+// is both more honest and the only one of the two that cmd.exe has any
+// equivalent for.
+const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)'], { stdio: 'ignore' })
+process.stdout.write('child:' + child.pid + '\n')
+process.stdout.write('args:' + process.argv.slice(2).join(' ') + '\n')
+
+// Raw mode, so a line is the bytes that arrived rather than whatever a line
+// discipline decided a line was. A POSIX pty in cooked mode ends a line on LF,
+// which is what the tests write; a Windows console ends one on CR, so a cooked
+// read there could sit on a complete line indefinitely. In raw mode the bytes
+// are ours and readline splits them — it already knows CR, LF, and a CRLF torn
+// across two chunks, which is exactly the part worth not rewriting.
+if (process.stdin.isTTY) process.stdin.setRawMode(true)
+
+// process.stdout.columns is a *cache*. Node reads the size once at startup and
+// refreshes it from a SIGWINCH handler; POSIX raises that signal with the
+// ioctl, so reading the property there is reading a fresh value. Windows has
+// no SIGWINCH — libuv emulates one from console activity and documents that it
+// may not arrive in time — so a size command that trusted the cache could
+// answer with the pre-resize numbers and turn the resize assertion of section
+// 9 into a coin flip. _refreshSize is the call that signal handler makes;
+// asking for it directly takes the signal out of the question on both.
+const size = () => {
+  if (typeof process.stdout._refreshSize === 'function') process.stdout._refreshSize()
+  process.stdout.write(process.stdout.rows + ' ' + process.stdout.columns + '\n')
+}
+
+createInterface({ input: process.stdin, terminal: false }).on('line', (line) => {
+  if (line === 'size') size()
+  else if (line === 'quit') process.exit(7)
+  else process.stdout.write('echo:' + line + '\n')
+})
 `
 
-const fakeCli = (): string => {
-  const path = join(makeTemp(), 'harness-fake')
-  writeFileSync(path, FAKE_CLI)
-  chmodSync(path, 0o755)
-  return path
-}
+const interactiveCli = (): string => fakeCliFromSource(makeTemp(), 'harness-fake', INTERACTIVE_CLI)
 
 /** `kill(pid, 0)` signals nothing and answers one question: is that pid there. */
 const alive = (pid: number): boolean => {
@@ -105,10 +147,21 @@ const alive = (pid: number): boolean => {
 const DEADLINE_MS = 5_000
 
 /**
- * `deadlineMs` is a parameter because one wait here is not like the others:
- * everything else is a signal or a byte on a pipe, while booting a whole Node
+ * The deadline for the *first* byte out of a freshly spawned fixture.
+ *
+ * Every other wait here is a signal or a byte on a pipe against a process that
+ * is already up. This one is a process creation — on Windows a `cmd.exe`, then
+ * a Node — on a runner where every write is scanned by Defender and process
+ * creation costs an order of magnitude more than a `fork`. Five seconds is a
+ * deadline for a hang; this is a deadline for a boot.
+ */
+const BOOT_MS = 30_000
+
+/**
+ * `deadlineMs` is a parameter because not every wait here is the same kind of
+ * wait: most are a signal or a byte on a pipe, while booting a whole Node
  * process is seconds of work on a loaded machine. Sizing every wait to the
- * slowest would hide a hang; sizing that one to the fastest is a flake.
+ * slowest would hide a hang; sizing a boot to the fastest is a flake.
  */
 async function until(
   what: string,
@@ -145,16 +198,20 @@ const TASK: AgentTask = {
 // The adapters
 // ---------------------------------------------------------------------------
 
-describe.runIf(POSIX_SHELL_FIXTURES)('attachPty against a fake binary', () => {
+describe('attachPty against a fake binary', () => {
   it('hands the session id to the CLI, moves bytes both ways, and resizes the tty', async () => {
     const cwd = makeTemp()
-    const adapter = new ClaudeCodeAdapter({ bin: fakeCli() })
+    const adapter = new ClaudeCodeAdapter({ bin: interactiveCli() })
     const handle = await adapter.attachPty('sess-42', { cwd, cols: 80, rows: 24 })
     const out = reader(handle)
 
     // The handoff token, on the wire to the CLI as `--resume <id>`.
     expect(handle.sessionId).toBe('sess-42')
-    await until('the CLI to report its argv', () => out.text().includes('args:--resume sess-42'))
+    await until(
+      'the CLI to report its argv',
+      () => out.text().includes('args:--resume sess-42'),
+      BOOT_MS,
+    )
     expect(alive(handle.pid)).toBe(true)
 
     // Bytes in, bytes out.
@@ -177,16 +234,20 @@ describe.runIf(POSIX_SHELL_FIXTURES)('attachPty against a fake binary', () => {
   })
 
   it('codex opens the same session interactively', async () => {
-    const adapter = new CodexAdapter({ bin: fakeCli() })
+    const adapter = new CodexAdapter({ bin: interactiveCli() })
     const handle = await adapter.attachPty('thread-9', { cwd: makeTemp() })
     const out = reader(handle)
-    await until('the CLI to report its argv', () => out.text().includes('args:resume thread-9'))
+    await until(
+      'the CLI to report its argv',
+      () => out.text().includes('args:resume thread-9'),
+      BOOT_MS,
+    )
     await handle.detach()
     expect(alive(handle.pid)).toBe(false)
   })
 
   it('reports the exit code when the terminal ends on its own', async () => {
-    const adapter = new ClaudeCodeAdapter({ bin: fakeCli() })
+    const adapter = new ClaudeCodeAdapter({ bin: interactiveCli() })
     const handle = await adapter.attachPty('sess-1', { cwd: makeTemp() })
     handle.write('quit\n')
     expect(await handle.exited).toBe(7)
@@ -285,7 +346,7 @@ async function rig(options: { readonly offer?: boolean } = {}): Promise<Rig> {
   const journal = openJournal(dir)
   journal.createRun(RUN_ID, WORKFLOW)
 
-  const bin = fakeCli()
+  const bin = interactiveCli()
   const real = new ClaudeCodeAdapter({ bin })
   const handles: PtyHandle[] = []
   let attaches = 0
@@ -402,7 +463,7 @@ const send = (socket: WebSocket, frame: unknown): void => {
   socket.send(JSON.stringify(PtyClientFrameSchema.parse(frame)))
 }
 
-describe.runIf(POSIX_SHELL_FIXTURES)('the PTY channel on the daemon socket', () => {
+describe('the PTY channel on the daemon socket', () => {
   it('carries terminal bytes both ways, and resizes', async () => {
     const r = await rig()
     const client = connect(r.daemon, r.daemon.token)
@@ -418,7 +479,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('the PTY channel on the daemon socket', () 
             (frame as { sessionId: string }).sessionId === 'sess-live',
         ),
     )
-    await until('the CLI argv', () => client.text().includes('args:--resume sess-live'))
+    await until('the CLI argv', () => client.text().includes('args:--resume sess-live'), BOOT_MS)
 
     send(client.socket, { channel: 'pty', type: 'input', data: 'hello\n' })
     await until('an echo', () => client.text().includes('echo:hello'))
@@ -439,7 +500,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('the PTY channel on the daemon socket', () 
     await client.opened
 
     send(client.socket, { channel: 'pty', type: 'attach', nodeId: 'a', cols: 80, rows: 24 })
-    await until('the terminal', () => client.text().includes('args:--resume sess-live'))
+    await until('the terminal', () => client.text().includes('args:--resume sess-live'), BOOT_MS)
 
     r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'running' } })
 
@@ -639,7 +700,7 @@ async function liveRig(): Promise<LiveRig> {
   }
 }
 
-describe.runIf(POSIX_SHELL_FIXTURES)('a node the scheduler is running', () => {
+describe('a node the scheduler is running', () => {
   it('is attachable over the daemon socket, and detaching leaves no process behind', async () => {
     const r = await liveRig()
     await until('node a to open a session', () => r.harness.live())
@@ -671,7 +732,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('a node the scheduler is running', () => {
     const pid = r.harness.handles[0]?.pid ?? 0
     expect(pid > 0).toBe(true)
     send(client.socket, { channel: 'pty', type: 'input', data: 'ping\n' })
-    await until('an echo from the terminal', () => client.text().includes('ping'))
+    await until('an echo from the terminal', () => client.text().includes('ping'), BOOT_MS)
 
     send(client.socket, { channel: 'pty', type: 'detach' })
     await until('the terminal to go', () => !alive(pid))
@@ -703,7 +764,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('a node the scheduler is running', () => {
   })
 })
 
-describe.runIf(POSIX_SHELL_FIXTURES)('the authorization boundary', () => {
+describe('the authorization boundary', () => {
   it('rejects an unauthenticated upgrade before any terminal exists', async () => {
     const r = await rig()
     for (const token of [null, 'not-the-token']) {
@@ -756,11 +817,38 @@ describe.runIf(POSIX_SHELL_FIXTURES)('the authorization boundary', () => {
 // The hard case: the daemon is killed rather than closed.
 // ---------------------------------------------------------------------------
 
-describe.runIf(POSIX_SHELL_FIXTURES)('a daemon killed mid-attach', () => {
+/**
+ * What is still holding a pid, for a failure message.
+ *
+ * A process table row is the operating system's, not the operator's — no
+ * terminal byte reaches this (§11), and the fixture's own command line is a
+ * path this test wrote itself. `ps` does not exist on Windows and `tasklist`
+ * is not `ps`, so the command is chosen through the one seam that decides
+ * platform questions here rather than by a check of its own.
+ */
+function survivor(pid: number): string {
+  const plan = isWindows()
+    ? { file: 'tasklist', args: ['/fi', `pid eq ${pid}`, '/nh'] }
+    : { file: 'ps', args: ['-o', 'pid=,ppid=,stat=,command=', '-p', String(pid)] }
+  try {
+    return execFileSync(plan.file, plan.args).toString().trim()
+  } catch {
+    // `ps` exits non-zero when the pid is already gone. Letting that throw
+    // would replace the timeout this exists to explain with a spawn error
+    // about the explanation.
+    return 'nothing — the pid is gone'
+  }
+}
+
+describe('a daemon killed mid-attach', () => {
   it('leaves no orphan pty', async () => {
     const dir = makeTemp()
     const script = join(dir, 'attach.ts')
     const ptyModule = join(import.meta.dirname, '..', 'src', 'harness', 'pty.ts')
+    // Declarative, because this fixture is not interactive: it says one word
+    // and stays up. The linger is what makes the kill below a kill rather than
+    // a race with an exit that was coming anyway.
+    const bin = fakeCli(dir, 'linger', { stdout: ['up'], lingerMs: 300_000 })
     // The marker is *not* the terminal's bytes: the child reports a fixed word
     // and a pid, never what the program said (§11). It reports them only once
     // the program has actually spoken, because "mid-attach" means a terminal
@@ -770,8 +858,7 @@ describe.runIf(POSIX_SHELL_FIXTURES)('a daemon killed mid-attach', () => {
       script,
       [
         `import { openPty } from ${JSON.stringify(ptyModule)}`,
-        `const handle = openPty({ sessionId: 's', file: '/bin/sh',`,
-        `  args: ['-c', 'echo up; sleep 300'],`,
+        `const handle = openPty({ sessionId: 's', file: ${JSON.stringify(bin)}, args: [],`,
         `  env: process.env, attach: { cwd: ${JSON.stringify(dir)} } })`,
         `let announced = false`,
         `handle.onData((data) => {`,
@@ -802,19 +889,20 @@ describe.runIf(POSIX_SHELL_FIXTURES)('a daemon killed mid-attach', () => {
     // SIGKILL, so no exit hook and no teardown code runs at all. What must
     // still hold is that the pty leader is gone: the master descriptor dies
     // with the process, and the kernel hangs up the session behind it.
+    //
+    // Node maps `SIGKILL` to `TerminateProcess` on Windows, where the same
+    // claim rests on a different mechanism and is the weaker of the two: the
+    // pseudoconsole's handles are closed by the kernel with everything else the
+    // process held, ConPTY's conhost sees them go, and the client attached to
+    // that console is asked to close and then terminated. That is a shutdown
+    // with a timeout in it rather than a hangup, which is why the deadline
+    // below is fifteen seconds and not one.
     child.kill('SIGKILL')
     try {
       await until('the pty leader to go', () => !alive(pid), 15_000)
     } catch (error) {
       // Naming the survivor is the difference between "flaky" and a diagnosis.
-      throw new Error(
-        `${String(error)} :: ${execFileSync('ps', [
-          '-o',
-          'pid=,ppid=,stat=,command=',
-          '-p',
-          String(pid),
-        ]).toString()}`,
-      )
+      throw new Error(`${String(error)} :: ${survivor(pid)}`)
     }
   }, 60_000)
 })
