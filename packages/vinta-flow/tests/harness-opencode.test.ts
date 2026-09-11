@@ -19,7 +19,7 @@
  * must never fail a suite on a machine without one — which includes CI, and
  * includes the machine this was written on.
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createServer as createSocketServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -35,7 +35,7 @@ import {
   parseModel,
 } from '../src/harness/opencode.ts'
 import { parseRetryAfter } from '../src/harness/shared.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
 const temps: string[] = []
 
@@ -1051,13 +1051,22 @@ describe('spawn against a stub server', () => {
 // Server lifecycle: the acceptance criterion, asserted rather than assumed.
 // ---------------------------------------------------------------------------
 
-/** A stand-in `opencode` that answers the routes the adapter uses and nothing else. */
-const fakeOpencode = (): string => {
-  const path = join(makeTemp(), 'opencode-fake')
-  writeFileSync(
-    path,
-    `#!/usr/bin/env node
-const http = require('node:http')
+/**
+ * A stand-in `opencode` that answers the routes the adapter uses and nothing
+ * else.
+ *
+ * Source rather than a spec: a spec describes a CLI that writes some lines and
+ * exits, and this one is an HTTP server that has to stay up until it is killed
+ * — which is the whole point of the block below. Written as Node it is the
+ * same program on either platform, and the launcher `fakeCliFromSource` pairs
+ * it with is the shape npm actually installs, so the `.cmd` routing in
+ * `commandInvocation` is exercised here too.
+ */
+const fakeOpencode = (): string =>
+  fakeCliFromSource(
+    makeTemp(),
+    'opencode-fake',
+    `import http from 'node:http'
 const args = process.argv.slice(2)
 if (args[0] === '--version') { process.stdout.write('0.9.9\\n'); process.exit(0) }
 const port = Number(args[args.indexOf('--port') + 1])
@@ -1082,9 +1091,6 @@ http.createServer((req, res) => {
 }).listen(port, '127.0.0.1')
 `,
   )
-  chmodSync(path, 0o755)
-  return path
-}
 
 const alive = (pid: number | undefined): boolean => {
   if (pid === undefined) return false
@@ -1103,7 +1109,7 @@ const portFree = (port: number): Promise<boolean> =>
     probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)))
   })
 
-describe.runIf(POSIX_SHELL_FIXTURES)('server lifecycle', () => {
+describe('server lifecycle', () => {
   it('starts a server on a free port and leaves neither socket nor process behind', async () => {
     const adapter = new OpencodeAdapter({ bin: fakeOpencode(), cwd: makeTemp() })
     let pid: number | undefined
@@ -1173,9 +1179,8 @@ describe.runIf(POSIX_SHELL_FIXTURES)('server lifecycle', () => {
   })
 
   it('refuses without leaking a process when the binary is not a server', async () => {
-    const path = join(makeTemp(), 'opencode-broken')
-    writeFileSync(path, '#!/bin/sh\ncase "$1" in --version) echo 0.0.1; exit 0;; esac\nexit 9\n')
-    chmodSync(path, 0o755)
+    // Answers `--version` so it counts as installed, then refuses to serve.
+    const path = fakeCli(makeTemp(), 'opencode-broken', { version: '0.0.1', exit: 9 })
 
     const adapter = new OpencodeAdapter({ bin: path })
     try {
@@ -1190,10 +1195,11 @@ describe.runIf(POSIX_SHELL_FIXTURES)('server lifecycle', () => {
   })
 
   it('classifies a server that never becomes ready as a wait, and kills it', async () => {
-    const path = join(makeTemp(), 'opencode-hangs')
     // Answers `--version`, then serves nothing at all: health never succeeds.
-    writeFileSync(path, '#!/bin/sh\ncase "$1" in --version) echo 0.0.1; exit 0;; esac\nsleep 30\n')
-    chmodSync(path, 0o755)
+    // The linger outlives the 300ms start deadline by two orders of magnitude,
+    // so if the adapter failed to kill it the test would see it still running
+    // rather than racing a fixture that happened to exit on its own.
+    const path = fakeCli(makeTemp(), 'opencode-hangs', { version: '0.0.1', lingerMs: 30_000 })
 
     const adapter = new OpencodeAdapter({ bin: path, startTimeoutMs: 300 })
     try {

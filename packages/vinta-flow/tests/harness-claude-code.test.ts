@@ -4,8 +4,9 @@
  * The unit suite is the one that actually protects this adapter: it drives the
  * JSONL mapping, the stream framing and the refusal table over synthetic CLI
  * output, and it runs everywhere — no CLI, no login, no tokens spent. It even
- * covers `preflight` end to end, against shell scripts written into a temp dir
- * that impersonate each state the real binary can be in.
+ * covers `preflight` and `spawn` end to end, against fake binaries written into
+ * a temp dir — a Node program plus the launcher npm would install beside it —
+ * that impersonate each state the real binary can be in, on either platform.
  *
  * The live suite runs `runAdapterContract` against the real CLI, and skips
  * itself when `preflight` says the binary is missing or logged out. It must
@@ -13,7 +14,7 @@
  * includes CI, and includes the machine this was written on, where `claude` is
  * a shell alias rather than anything on PATH.
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -25,7 +26,7 @@ import {
 } from '../src/harness/claude-code.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
-import { POSIX_SHELL_FIXTURES } from './support/platform.ts'
+import { type FakeCliSpec, fakeCli } from './support/fake-cli.ts'
 
 const temps: string[] = []
 
@@ -41,14 +42,17 @@ afterAll(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true })
 })
 
-const fakeBin = (body: string): string => {
-  const path = join(makeTemp(), 'claude-fake')
-  writeFileSync(path, `#!/bin/sh\n${body}\n`)
-  chmodSync(path, 0o755)
-  return path
-}
+/**
+ * A fake `claude`, one per temp dir so no two fixtures can shadow each other.
+ *
+ * Each fixture gets its own directory because `fakeCli` writes two files under
+ * a fixed name and the tests below hand several different fakes to several
+ * different adapters within one run.
+ */
+const fakeBin = (spec: FakeCliSpec): string => fakeCli(makeTemp(), 'claude-fake', spec)
 
-const VERSION_CASE = `case "$1" in --version) echo "1.2.3 (Claude Code)"; exit 0;; esac`
+/** What this CLI answers `--version` with, which `preflight` reports verbatim. */
+const VERSION = '1.2.3 (Claude Code)'
 
 /** Well-formed and never issued: the shape of a session id the vendor has forgotten. */
 const UNISSUED_SESSION = '00000000-0000-4000-8000-000000000000'
@@ -397,7 +401,7 @@ describe('binary resolution', () => {
   })
 })
 
-describe.runIf(POSIX_SHELL_FIXTURES)('preflight against a fake binary', () => {
+describe('preflight against a fake binary', () => {
   it('reports not installed, with the command that installs it', async () => {
     const missing = join(makeTemp(), 'definitely-not-here')
     const result = await new ClaudeCodeAdapter({ bin: missing }).preflight()
@@ -407,36 +411,43 @@ describe.runIf(POSIX_SHELL_FIXTURES)('preflight against a fake binary', () => {
   })
 
   it('reports not installed when the binary exists but cannot answer --version', async () => {
-    const bin = fakeBin('exit 1')
+    // No `version` in the spec at all: this fake refuses `--version` the way a
+    // half-installed CLI does, which is a different state from having no file.
+    const bin = fakeBin({ exit: 1 })
     const result = await new ClaudeCodeAdapter({ bin }).preflight()
     expect(result.installed).toBe(false)
   })
 
   it('distinguishes a logged-out CLI from a missing one, with the login command', async () => {
-    const bin = fakeBin(`${VERSION_CASE}\necho 'Invalid API key · Please run /login' >&2\nexit 1`)
+    const bin = fakeBin({
+      version: VERSION,
+      stderr: ['Invalid API key · Please run /login'],
+      exit: 1,
+    })
     const result = await new ClaudeCodeAdapter({ bin }).preflight()
     expect(result.installed).toBe(true)
     expect(result.authenticated).toBe(false)
-    expect(result.version).toBe('1.2.3 (Claude Code)')
+    expect(result.version).toBe(VERSION)
     expect(result.hint).toBe(`${bin} /login`)
   })
 
   it('reports ready when the CLI starts a session', async () => {
-    const bin = fakeBin(
-      `${VERSION_CASE}\necho '{"type":"system","subtype":"init","session_id":"probe"}'\nexit 0`,
-    )
+    const bin = fakeBin({
+      version: VERSION,
+      stdout: ['{"type":"system","subtype":"init","session_id":"probe"}'],
+    })
     const result = await new ClaudeCodeAdapter({ bin }).preflight()
-    expect(result).toEqual({ installed: true, authenticated: true, version: '1.2.3 (Claude Code)' })
+    expect(result).toEqual({ installed: true, authenticated: true, version: VERSION })
   })
 
   it('does not call an unfamiliar diagnostic a login failure', async () => {
-    const bin = fakeBin(`${VERSION_CASE}\necho 'warning: config file is new' >&2\nexit 2`)
+    const bin = fakeBin({ version: VERSION, stderr: ['warning: config file is new'], exit: 2 })
     const result = await new ClaudeCodeAdapter({ bin }).preflight()
     expect(result.authenticated).toBe(true)
   })
 })
 
-describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
+describe('spawn against a fake binary', () => {
   const task = (): AgentTask => ({
     nodeId: 'phase-1',
     cwd: makeTemp(),
@@ -445,18 +456,17 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
   })
 
   it('drives a whole scripted run into the normalized stream', async () => {
-    const bin = fakeBin(
-      [
-        `${VERSION_CASE}`,
-        // Read the prompt off stdin the way the real CLI does, then play a run.
-        'head -n 1 > /dev/null',
-        `echo '{"type":"system","subtype":"init","session_id":"sess-fake"}'`,
-        `echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'`,
-        `echo '{"type":"unknown_future_frame"}'`,
-        `echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":3,"output_tokens":4},"total_cost_usd":0.01}'`,
-        'exit 0',
-      ].join('\n'),
-    )
+    const bin = fakeBin({
+      version: VERSION,
+      // Read the prompt off stdin the way the real CLI does, then play a run.
+      readsLine: true,
+      stdout: [
+        '{"type":"system","subtype":"init","session_id":"sess-fake"}',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}',
+        '{"type":"unknown_future_frame"}',
+        '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":3,"output_tokens":4},"total_cost_usd":0.01}',
+      ],
+    })
     const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
@@ -473,9 +483,13 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
   })
 
   it('classifies a CLI that refuses before announcing a session', async () => {
-    const bin = fakeBin(
-      `${VERSION_CASE}\necho 'Claude usage limit reached. Resets at 2026-01-01T15:30:00Z' >&2\nexit 1`,
-    )
+    const bin = fakeBin({
+      version: VERSION,
+      // The vendor's own wording, byte for byte: the reset time is parsed back
+      // out of this line, so paraphrasing it would test nothing.
+      stderr: ['Claude usage limit reached. Resets at 2026-01-01T15:30:00Z'],
+      exit: 1,
+    })
     const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
@@ -487,11 +501,14 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
     // The wiring §15.4 turns on, through a real process: the identical CLI
     // failure is a stale token only for the spawn that offered one. Without
     // it there was nothing to expire, so it keeps its ordinary reading.
-    const bin = fakeBin(
-      // `head` rather than `cat`: this adapter keeps stdin open for injection,
-      // so a fake that waits for EOF waits forever.
-      `${VERSION_CASE}\nhead -n 1 > /dev/null\necho 'No conversation found with session ID: 5f2c1b90' >&2\nexit 1`,
-    )
+    const bin = fakeBin({
+      version: VERSION,
+      // `readsLine` rather than a read to EOF: this adapter keeps stdin open
+      // for injection, so a fake that waits for EOF waits forever.
+      readsLine: true,
+      stderr: ['No conversation found with session ID: 5f2c1b90'],
+      exit: 1,
+    })
     const adapter = new ClaudeCodeAdapter({ bin })
 
     const resumed = await adapter.spawn({ ...task(), resumeSessionId: '5f2c1b90' })
@@ -509,14 +526,12 @@ describe.runIf(POSIX_SHELL_FIXTURES)('spawn against a fake binary', () => {
   })
 
   it('ends the stream once when the CLI dies mid-turn', async () => {
-    const bin = fakeBin(
-      [
-        `${VERSION_CASE}`,
-        'head -n 1 > /dev/null',
-        `echo '{"type":"system","subtype":"init","session_id":"sess-dies"}'`,
-        'exit 3',
-      ].join('\n'),
-    )
+    const bin = fakeBin({
+      version: VERSION,
+      readsLine: true,
+      stdout: ['{"type":"system","subtype":"init","session_id":"sess-dies"}'],
+      exit: 3,
+    })
     const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
