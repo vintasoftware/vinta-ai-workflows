@@ -1,7 +1,7 @@
 {
   "name": "vinta-dag-editor",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
   "description": "Framework-agnostic Web Component for viewing and editing plan DAGs.",
   "type": "module",
   "scripts": {

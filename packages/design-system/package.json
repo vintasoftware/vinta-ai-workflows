@@ -1,7 +1,7 @@
 {
   "name": "vinta-design-system",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
   "description": "Vinta's design system for browser UIs in this workspace: oklch tokens, shadcn/ui components, and a small layout kit on Tailwind CSS v4.",
   "type": "module",
   "sideEffects": [
