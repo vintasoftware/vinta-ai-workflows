@@ -272,22 +272,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing produces a merge commit full of markers that passes into the wave
   branch unnoticed.
 
-> The repository also gained `packages/vinta-ai-maestro/`, a **private workspace
-> package** that executes these workflows. It is not published and is not part of
-> the `vinta-ai-workflows` package — the root `files` whitelist excludes
-> `packages/`, so nothing in it is installed by `npx vinta-ai-workflows install`.
-> What ships from that work is the two generated schemas above and the skill
-> changes that produce and consume them.
+> The repository also gained `packages/vinta-ai-maestro/`, the workspace package
+> that executes these workflows. It is published as its own npm package,
+> `vinta-ai-maestro`, carrying the same version as `vinta-ai-workflows`, and is
+> run with `npx vinta-ai-maestro`. It is not part of the `vinta-ai-workflows`
+> tarball — the root `files` whitelist excludes `packages/`, so nothing in it is
+> installed by `npx vinta-ai-workflows install`. What ships from that work into
+> the skills package is the two generated schemas above and the skill changes
+> that produce and consume them.
 >
 > Its browser UI is now built on `packages/design-system/` (`vinta-design-system`),
-> a second private workspace package: oklch tokens in three layers mirroring
+> a second workspace package: oklch tokens in three layers mirroring
 > `vinta-schedule-design-system`, six run-status **tones** (`idle`, `active`,
 > `wait`, `attention`, `ok`, `error` — waiting is amber and failure is red, never
 > the same hue), shadcn/ui components on Tailwind CSS v4, a small layout kit, and
 > a light/dark/system theme. The run graph and the pipeline editor are re-skinned
 > through their own custom properties, so the canvas and the badges beside it
-> share one palette. Equally unpublished: nothing in it reaches `npx
-> vinta-ai-workflows install`.
+> share one palette. It and `vinta-dag-editor` publish on their own cadence
+> (`0.1.0`) as dependencies of `vinta-ai-maestro`; nothing in either reaches
+> `npx vinta-ai-workflows install`.
 
 ## [0.6.1] — 2026-08-17
 
