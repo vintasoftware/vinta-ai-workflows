@@ -242,6 +242,36 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permission flags and that a committed `.claude/settings.json` was what made a
   run able to write; that is now the narrowing layer on top of a mode, not the
   only thing standing between an agent and a blocked lane.
+- **`doctor` now catches, before a lane exists, the failures that used to take a
+  run each.** Four consecutive runs of one plan failed four different ways, and
+  every one of them was knowable at minute zero from the workflow and the repo.
+  - **Every `prompt_ref` and `plan_context_ref` is resolved against
+    `base_branch`**, with `git cat-file -e`, which reads the branch's tree and
+    so cannot be satisfied by a working-tree copy — the working tree being
+    exactly what a lane will not have. It distinguishes the three cases, because
+    they have three different fixes: never committed, **staged but never
+    committed** (`git add` alone does not put a file in a branch), and committed
+    on a different branch. The last offers both routes out — merge it, or point
+    `base_branch` at the branch that has it — since only the operator knows
+    which they want.
+  - **Phase branches held by another worktree** are reported with the directory
+    to remove. Lane directories are named per run and phase branches per
+    workflow, so a failed run leaves worktrees holding the branch names the next
+    run will try to cut, and git refuses to check out a branch twice. Nothing
+    cleans those up: `purge` deletes run state under `.vinta-ai-maestro/runs/`,
+    and lane worktrees are not there. `doctor` does not delete them either — a
+    failed lane's worktree is the only place its state survives — but it now
+    names each one and the exact command.
+
+- **A failed node records why.** `node_status` carried `{"status":"failed"}` and
+  nothing else, so two runs failing for two unrelated reasons produced identical
+  journal rows and the cause survived only in the operator's terminal. The
+  reason is now persisted — **sanitized**, not raw: errors the package builds
+  itself are identifiers by construction and are kept verbatim, and anything
+  else is reduced to its kind, the rule `recycleStage` already followed. The
+  journal is durable and API-served, and an exception message from a dependency
+  is exactly how repository content gets into one. Blocked dependents record
+  which node blocked them.
 
 - **Two diagnostics that named the symptom and hid the cause.** Both came out of
   one real run, and neither was a wrong answer — just an unusable one.

@@ -382,6 +382,156 @@ async function checkLaneSummary(summaryDir: string, name: string): Promise<Check
  * concurrently and a failure never short-circuits the ones after it — reporting
  * the whole list at once is the entire point of the command.
  */
+// ---------------------------------------------------------------------------
+// held branches — a previous run's worktrees make this one impossible
+// ---------------------------------------------------------------------------
+
+/**
+ * Phase branches that another worktree already has checked out.
+ *
+ * Lane directories are named per *run* (`<run-id>-crew-2-mid`) and phase
+ * branches are named per *workflow* (`plan/<id>/phase-p0`). So a run that fails
+ * leaves worktrees holding branch names the next run of the same workflow will
+ * try to cut — and git refuses to check out a branch a second worktree already
+ * holds. Nothing cleans those up: `purge` deletes run state under
+ * `.vinta-ai-maestro/runs/`, and lane worktrees are not there.
+ *
+ * The failure without this check is `git_branch` failing per node, after lanes
+ * have been provisioned, with the lane acquired and no branch event to show for
+ * it. It is diagnosable only by running `git worktree list` and noticing an old
+ * run's directory — which is not a thing the tool should ask of anyone.
+ *
+ * A `fail`: the run cannot cut the branches it needs.
+ */
+async function checkHeldBranches(
+  bin: string,
+  repoPath: string,
+  workflow: Workflow,
+): Promise<readonly CheckResult[]> {
+  const probe = await probeCommand(bin, ['worktree', 'list', '--porcelain'], repoPath)
+  // `checkWorktrees` already reports an unusable checkout; saying it twice adds
+  // nothing, and a missing listing is not evidence of a held branch.
+  if (!probe.ok) return []
+
+  // `worktree list --porcelain` is stanzas of `key value` lines separated by
+  // blank lines, each opening with `worktree <path>`.
+  const held = new Map<string, string>()
+  let path = ''
+  for (const line of probe.output.split('\n')) {
+    if (line.startsWith('worktree ')) path = line.slice('worktree '.length).trim()
+    else if (line.startsWith('branch ')) {
+      const branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '')
+      if (branch !== '') held.set(branch, path)
+    }
+  }
+
+  const wanted = workflow.nodes.map((node) => `plan/${workflow.id}/phase-${node.id}`)
+  const clashes = wanted.filter((branch) => held.has(branch))
+  if (clashes.length === 0) {
+    return [pass('branches', `phase branches: none held by another worktree`)]
+  }
+
+  // One line per clash, each naming the directory to remove. A single summary
+  // line would make the operator run `git worktree list` themselves, which is
+  // the step this check exists to remove.
+  return clashes.map((branch) =>
+    flag(
+      `branch:${branch}`,
+      `${branch}: already checked out in ${held.get(branch) as string}`,
+      'fail',
+      `git -C ${repoPath} worktree remove --force ${held.get(branch) as string}`,
+    ),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// briefs — does the base branch actually carry what the nodes point at
+// ---------------------------------------------------------------------------
+
+/**
+ * Every `prompt_ref` and `plan_context_ref`, resolved against `base_branch`.
+ *
+ * This is the check that earns the command. A lane is a fresh worktree of the
+ * base branch, so a plan that is uncommitted, staged-but-not-committed, or
+ * committed on a different branch is present in the operator's checkout and
+ * absent from every lane — and the run finds out one node at a time, after
+ * provisioning worktrees and cutting branches, with every dependent blocked
+ * behind it.
+ *
+ * `git cat-file -e <ref>:<path>` asks the one question that matters and reads
+ * nothing: it resolves the path in the branch's *tree*, so a working-tree copy
+ * cannot make it pass. That is the whole point — the working tree is exactly
+ * what the lanes will not have.
+ *
+ * A `fail`, not a warning. There is no sense in which a run can proceed with a
+ * brief it cannot read.
+ */
+async function checkBriefs(
+  bin: string,
+  repoPath: string,
+  workflow: Workflow,
+): Promise<CheckResult[]> {
+  const base = workflow.base_branch
+  // One entry per distinct file; several nodes usually share one plan, and
+  // reporting the same missing file eight times buries the eight that differ.
+  const wanted = new Map<string, string[]>()
+  const note = (ref: string, owner: string): void => {
+    const hash = ref.lastIndexOf('#')
+    const path = hash === -1 ? ref : ref.slice(0, hash)
+    if (path === '') return
+    wanted.set(path, [...(wanted.get(path) ?? []), owner])
+  }
+
+  for (const node of workflow.nodes) note(node.prompt_ref, node.id)
+  for (const ref of workflow.plan_context_refs) note(ref, 'plan_context_refs')
+
+  if (wanted.size === 0) return []
+
+  // The branch has to exist before asking what is in it, and "no such branch"
+  // is a different fix from "no such file".
+  const branch = await probeCommand(bin, ['rev-parse', '--verify', `${base}^{commit}`], repoPath)
+  if (!branch.ok) {
+    return [
+      flag(
+        'briefs',
+        `base_branch "${base}": not a branch in this checkout`,
+        'fail',
+        `create or fetch ${base}, or point base_branch at a branch that exists`,
+      ),
+    ]
+  }
+
+  const results = await Promise.all(
+    [...wanted].map(async ([path, owners]): Promise<CheckResult> => {
+      const found = await probeCommand(bin, ['cat-file', '-e', `${base}:${path}`], repoPath)
+      if (found.ok) return pass(`brief:${path}`, `${path}: present in ${base}`)
+
+      // Distinguishing the two cases is most of the value: "commit it" and
+      // "point base_branch somewhere else" are different actions, and the
+      // operator cannot tell which they need from the failure alone.
+      const tracked = await probeCommand(bin, ['ls-files', '--error-unmatch', path], repoPath)
+      const elsewhere = await probeCommand(bin, ['log', '--all', '-1', '--format=%H', '--', path], repoPath)
+      const onSomeBranch = elsewhere.ok && elsewhere.output.trim() !== ''
+
+      const why = onSomeBranch
+        ? `committed, but not on ${base}`
+        : tracked.ok
+          ? `staged, never committed — \`git add\` alone does not put it in a branch`
+          : 'not committed anywhere'
+
+      return flag(
+        `brief:${path}`,
+        `${path}: missing from ${base} (${why}) — needed by ${owners.join(', ')}`,
+        'fail',
+        onSomeBranch
+          ? `merge it into ${base}, or set base_branch to the branch that has it`
+          : `commit ${path} to ${base}`,
+      )
+    }),
+  )
+  return results
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const { workflow, repoPath } = options
   const gitBin = options.bins?.git ?? 'git'
@@ -389,7 +539,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const summaryDir = options.summaryDir ?? `${repoPath}/.vinta-ai-workflows/worktrees`
   const laneCount = workflow.resources['lane']?.capacity ?? 1
 
-  const [harnesses, git, worktrees, compose, disk, lanes] = await Promise.all([
+  const [harnesses, git, worktrees, compose, disk, lanes, briefs, branches] = await Promise.all([
     Promise.all(
       referencedHarnesses(workflow).map((id) =>
         checkHarness(id, options.bins?.harness?.[id]),
@@ -400,9 +550,11 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     checkCompose(dockerBin, needsCompose(options.project)),
     checkDisk(options, laneCount),
     checkLaneSummaries(summaryDir),
+    checkBriefs(gitBin, repoPath, workflow),
+    checkHeldBranches(gitBin, repoPath, workflow),
   ])
 
-  const checks = [...harnesses, git, worktrees, compose, disk, ...lanes]
+  const checks = [...harnesses, git, worktrees, compose, disk, ...briefs, ...branches, ...lanes]
   const ok = !checks.some((check) => check.status === 'fail')
   return { checks, ok, exitCode: ok ? 0 : 1 }
 }

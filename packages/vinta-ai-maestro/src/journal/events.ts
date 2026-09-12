@@ -186,7 +186,22 @@ interface RunPayloads {
  */
 interface NodePayloads {
   node_registered: { readonly wave: number; readonly harness: string }
-  node_status: { readonly status: NodeStatus }
+  /**
+   * A node's status, and on `failed` why.
+   *
+   * The reason used to live only in the scheduler's memory and the run's
+   * terminal output, which meant a finished run could say *that* a node failed
+   * and never *why*. Two runs failing for two different causes produced two
+   * identical rows, and the only way back to the cause was the operator's
+   * scrollback.
+   *
+   * It is a **sanitized** reason (`failureReason`), not an arbitrary error
+   * message: the package's own errors are built from identifiers and are kept
+   * verbatim, and anything else is reduced to its kind (§11). The journal is
+   * durable and is served over the API; an exception message from a dependency
+   * is exactly the place repository content leaks into one.
+   */
+  node_status: { readonly status: NodeStatus; readonly reason?: string }
   node_assigned: {
     readonly lane?: string
     readonly branch?: string

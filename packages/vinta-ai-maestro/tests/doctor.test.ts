@@ -16,6 +16,7 @@
  * the exact thing a shebang fixture could never test.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -351,6 +352,189 @@ describe('vinta-ai-maestro doctor', () => {
 
     expect(check.label).toContain('state.dev_db.strategy')
     expect(check.label).not.toContain('secret_db_name_do_not_print')
+  })
+
+  /**
+   * The four-run sequence this check exists to collapse into one line. Each of
+   * these failed a real run *after* provisioning worktrees and cutting
+   * branches, one node at a time, with every dependent blocked behind it.
+   */
+  describe('briefs against the base branch', () => {
+    /** A real repository, because `git cat-file` is the whole mechanism. */
+    const repo = async (): Promise<string> => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-git-'))
+      temps.push(dir)
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+      return dir
+    }
+
+    const planWorkflow = (base = 'main'): Workflow =>
+      WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'p',
+        base_branch: base,
+        defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'ai-plans/plan.md#phase-0' }],
+      })
+
+    /**
+     * Real `git`, deliberately. The rig's fake answers every probe with
+     * success, and the whole mechanism here is what `git cat-file -e` says
+     * about a path in a branch's tree.
+     */
+    const realGit = (dir: string, workflow: Workflow): DoctorOptions => {
+      const base = greenOptions()
+      return { ...base, workflow, repoPath: dir, bins: { ...base.bins, git: 'git' } }
+    }
+
+    const briefCheck = async (dir: string, workflow: Workflow) =>
+      find((await runDoctor(realGit(dir, workflow))).checks, 'brief:ai-plans/plan.md')
+
+    it('passes when the plan is committed on the base branch', async () => {
+      const dir = await repo()
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+      execFileSync('git', ['add', '.'], { cwd: dir, stdio: 'ignore' })
+      execFileSync('git', ['commit', '-qm', 'plan'], { cwd: dir, stdio: 'ignore' })
+
+      expect((await briefCheck(dir, planWorkflow())).status).toBe('pass')
+    })
+
+    /** Run 1: the file only ever existed in the working tree. */
+    it('fails an uncommitted plan, and says to commit it', async () => {
+      const dir = await repo()
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+
+      const check = await briefCheck(dir, planWorkflow())
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('not committed anywhere')
+      expect(check.remedy).toContain('commit ai-plans/plan.md to main')
+    })
+
+    /**
+     * Run 2: `git add` and no commit. Worth its own case because the operator
+     * has *done something* and the file looks tracked — "not committed
+     * anywhere" would read as wrong to them.
+     */
+    it('tells a staged-but-uncommitted plan that git add is not enough', async () => {
+      const dir = await repo()
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+      execFileSync('git', ['add', 'ai-plans/plan.md'], { cwd: dir, stdio: 'ignore' })
+
+      const check = await briefCheck(dir, planWorkflow())
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('staged, never committed')
+    })
+
+    /** Run 4: committed, but on a branch `base_branch` does not name. */
+    it('distinguishes "on another branch" and offers the other fix', async () => {
+      const dir = await repo()
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('checkout', '-qb', 'feature')
+      await mkdir(join(dir, 'ai-plans'), { recursive: true })
+      await writeFile(join(dir, 'ai-plans/plan.md'), '## phase-0\n\nDo it.\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'plan')
+
+      const check = await briefCheck(dir, planWorkflow('main'))
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('not on main')
+      // Both routes out, because only the operator knows which they want.
+      expect(check.remedy).toContain('merge it into main')
+      expect(check.remedy).toContain('base_branch')
+    })
+
+    it('fails a base_branch that is not a branch at all', async () => {
+      const dir = await repo()
+      const check = find((await runDoctor(realGit(dir, planWorkflow('nope')))).checks, 'briefs')
+
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('not a branch')
+    })
+  })
+
+  /**
+   * The run that failed at `git_branch`: a previous run's worktrees still held
+   * `plan/<id>/phase-p0`, and git will not check out a branch twice.
+   */
+  describe('phase branches held by another worktree', () => {
+    it('fails and names the worktree to remove', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-held-'))
+      temps.push(dir)
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+      // Exactly what a failed run leaves behind.
+      const stale = join(dir, 'stale-lane')
+      git('worktree', 'add', '-q', '-b', 'plan/p/phase-p0', stale)
+
+      const workflow = WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'p',
+        base_branch: 'main',
+        defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'seed.txt' }],
+      })
+      const base = greenOptions()
+      const report = await runDoctor({
+        ...base,
+        workflow,
+        repoPath: dir,
+        bins: { ...base.bins, git: 'git' },
+      })
+      const check = find(report.checks, 'branch:plan/p/phase-p0')
+
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('already checked out')
+      expect(check.remedy).toContain('worktree remove --force')
+      expect(check.remedy).toContain('stale-lane')
+      expect(report.ok).toBe(false)
+    })
+
+    it('passes when nothing holds them', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-free-'))
+      temps.push(dir)
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+
+      const workflow = WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'p',
+        base_branch: 'main',
+        defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'seed.txt' }],
+      })
+
+      const base = greenOptions()
+      const report = await runDoctor({
+        ...base,
+        workflow,
+        repoPath: dir,
+        bins: { ...base.bins, git: 'git' },
+      })
+      expect(find(report.checks, 'branches').status).toBe('pass')
+    })
   })
 
   it('fails when the disk cannot hold lanes + 1 worktrees', async () => {
