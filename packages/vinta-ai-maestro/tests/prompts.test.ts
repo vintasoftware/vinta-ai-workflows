@@ -492,6 +492,28 @@ describe('an unresolvable prompt_ref', () => {
     )
   })
 
+  /**
+   * What this looked like in practice: a plan sitting untracked in the
+   * operator's checkout, and two nodes failing against a path spelled
+   * perfectly. A lane is a fresh worktree of the base branch, so an
+   * uncommitted plan is in exactly one place the run cannot look — and the old
+   * wording sent people to check a spelling that was already right.
+   */
+  it('says which directory it looked in, and why a plan is often not in it', () => {
+    const dir = workspace()
+
+    try {
+      resolveBrief(dir, 'db-schema', 'no-such-plan.md#db-schema')
+      expect.unreachable('a missing file must throw')
+    } catch (error) {
+      const message = (error as Error).message
+      // The lane it resolved against, not the checkout the operator is in.
+      expect(message).toContain(dir)
+      expect(message).toContain('fresh worktree of the base branch')
+      expect(message).toMatch(/uncommitted|another branch/)
+    }
+  })
+
   it('names the node and the reference when the anchor is not in the file', () => {
     const dir = workspace()
     expect(() => resolveBrief(dir, 'db-schema', 'plan.md#no-such-anchor')).toThrow(

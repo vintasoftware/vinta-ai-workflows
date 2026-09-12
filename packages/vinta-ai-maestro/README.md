@@ -43,9 +43,11 @@ Four Windows caveats worth knowing before you rely on it:
 - **`core.autocrlf`.** Git for Windows enables it by default, which means your gates see CRLF where the same gate on Linux sees LF. Nothing here changes that setting for you — it is your repository's decision — but a formatter or a golden-file test that disagrees across platforms is usually this. CI pins it off so the suite tests the committed bytes.
 - **A lane's `node_modules` is a junction**, not a symlink. Real directory symlinks on Windows need Developer Mode or an elevated shell; junctions need neither and behave the same for this purpose.
 
-**What CI does not cover** is two things. One is the shebang. `src/cli/bin.ts` starts with `#!/usr/bin/env -S node --experimental-transform-types`, which Windows never reads: npm rewrites it into a generated `.cmd` shim at install time, and this package is private and therefore never installed. Current `cmd-shim` does parse `env -S` and forward the flags, so this is expected to work — but it is expectation, not evidence. CI starts the entry point through Node directly instead, which covers the flag and the module graph and not the shim.
+**The shebang is now covered, and was not before.** Windows never reads a `#!` line: npm rewrites it into a generated `.cmd` shim at install time. That used to be untested here — the package was private, so nothing ever installed it, and CI started the entry point through Node directly, which covers the flag and the module graph and not the shim. CI now packs the tarball and installs it into a throwaway project on all three platforms, so the shim is exercised where it actually exists.
 
-The other is opening a pull request. `openPullRequest` hands `gh` to `execFile` directly rather than through `commandInvocation`, which is right for the real thing — `gh` is `gh.exe` on Windows and needs no shell — but leaves no way to point it at a test fixture there, since Node refuses to spawn a `.cmd` without one. Routing it through the seam like every other spawn would be worse than the gap: one of `gh`'s arguments is the pull request body, and `cmd.exe` cannot escape a `\"` or a `%` inside a quoted region, so a spawn that cannot be broken by its own payload would become one that can. `tests/support/platform.ts` carries the whole argument.
+The shipped shebang is also simpler than it was. `dist/cli/bin.js` is plain JavaScript starting with `#!/usr/bin/env node` — no `env -S`, no flags to forward — because the build rewrites it. `src/cli/bin.ts` keeps `#!/usr/bin/env -S node --experimental-transform-types` for running from a checkout, and the build asserts it found that form rather than letting the two drift apart quietly.
+
+**What CI still does not cover** is opening a pull request. `openPullRequest` hands `gh` to `execFile` directly rather than through `commandInvocation`, which is right for the real thing — `gh` is `gh.exe` on Windows and needs no shell — but leaves no way to point it at a test fixture there, since Node refuses to spawn a `.cmd` without one. Routing it through the seam like every other spawn would be worse than the gap: one of `gh`'s arguments is the pull request body, and `cmd.exe` cannot escape a `\"` or a `%` inside a quoted region, so a spawn that cannot be broken by its own payload would become one that can. `tests/support/platform.ts` carries the whole argument.
 
 ## Install and run
 
@@ -55,19 +57,26 @@ cd vinta-ai-workflows
 pnpm install
 ```
 
-There is no build step and no bin link, because the package is private. Run the CLI by its path — the file is executable and its shebang asks Node for the TypeScript flags it needs:
+That is the development setup. To *use* it, there is no clone at all — the package is published:
 
 ```bash
-/path/to/vinta-ai-workflows/packages/vinta-ai-maestro/src/cli/bin.ts --help
+npx vinta-ai-maestro@alpha serve
 ```
 
-Give it a name you will actually type:
+`@alpha` while the only published versions are pre-releases. Plain `npx vinta-ai-maestro` resolves the `latest` dist-tag, which is correct once a stable exists.
+
+### Running it from a checkout
+
+For development, run the CLI **by its path** rather than through `node`:
 
 ```bash
-alias vinta-ai-maestro=/path/to/vinta-ai-workflows/packages/vinta-ai-maestro/src/cli/bin.ts
+packages/vinta-ai-maestro/src/cli/bin.ts --help
+alias vinta-ai-maestro="$PWD/packages/vinta-ai-maestro/src/cli/bin.ts"
 ```
 
-`node packages/vinta-ai-maestro/src/cli/bin.ts` does **not** work: that bypasses the shebang, and Node's strip-only TypeScript mode rejects the parameter properties the adapters use.
+The file is executable and its shebang asks Node for the flags it needs. `node packages/vinta-ai-maestro/src/cli/bin.ts` does **not** work: that bypasses the shebang, and Node's strip-only TypeScript mode rejects the parameter properties the adapters use.
+
+The published binary is a different file — `dist/cli/bin.js`, plain JavaScript started by plain `node`, built by `pnpm --filter vinta-ai-maestro build` and rebuilt by `prepack` on every publish. It needs no flags at all, which is the point: **Node refuses to strip types anywhere under `node_modules`**, so a `bin` pointing at the `.ts` file installs cleanly and then dies on first run with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`.
 
 Every command runs against a project checkout — your project, not this one. `--repo <dir>` names it; with no flag it is the current directory.
 

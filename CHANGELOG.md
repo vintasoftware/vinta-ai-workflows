@@ -217,6 +217,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two diagnostics that named the symptom and hid the cause.** Both came out of
+  one real run, and neither was a wrong answer — just an unusable one.
+  - **A phase whose plan is not committed** failed with `prompt_ref "…" names no
+    readable file`, against a path that was spelled correctly. A lane is a fresh
+    worktree of the base branch, so a plan sitting untracked in the operator's
+    checkout is in the one place the run cannot look. The message now names the
+    directory it resolved against and says why a plan is often not in it.
+  - **A lane summary the daemon could not accept** reported `summary unreadable`
+    and advised deleting the lane — which takes its forked databases with it,
+    over what turned out to be two wrong fields. `doctor` now names the fields
+    and what was expected, and offers repair before deletion. A file that does
+    not parse at all still reports as unreadable, because there is no field to
+    name. Neither message carries the offending *value*: a summary holds
+    database names and connection variables, and the value that failed
+    validation is the likeliest thing in it to be one.
+
+  `prepare-worktree` gained the rule that would have prevented the summary in
+  the first place — its `|` alternatives are closed sets read by machine, `null`
+  is how you say "none", and a strategy outside the set should be the closest
+  one plus a `note:` rather than a fourth word.
+
 - **`npx vinta-ai-maestro` now runs.** The published package pointed its `bin` at
   `src/cli/bin.ts` and relied on Node stripping the types at startup — which Node
   refuses to do anywhere under `node_modules`, unconditionally and with no flag to
