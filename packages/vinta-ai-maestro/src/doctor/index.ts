@@ -316,17 +316,47 @@ async function checkLaneSummaries(summaryDir: string): Promise<readonly CheckRes
   return await Promise.all(names.map((name) => checkLaneSummary(summaryDir, name)))
 }
 
+/**
+ * A schema failure as `field: complaint` pairs, or null when the file did not
+ * parse at all.
+ *
+ * **Paths and messages only, never the value that failed** (§11). A field path
+ * is the schema's own vocabulary and a message is its own text — neither can
+ * carry repository content, which the received value very much can: a summary
+ * holds database names, connection variables and filesystem paths.
+ */
+function schemaComplaints(error: unknown): string | null {
+  const issues = (error as { issues?: readonly { path?: readonly PropertyKey[]; message?: string }[] })
+    .issues
+  if (!Array.isArray(issues) || issues.length === 0) return null
+
+  return issues
+    .slice(0, 5)
+    .map((issue) => `${(issue.path ?? []).map(String).join('.') || '(root)'}: ${issue.message ?? 'invalid'}`)
+    .join('; ')
+}
+
 async function checkLaneSummary(summaryDir: string, name: string): Promise<CheckResult> {
   const check = `lane:${name}`
   let summary
   try {
     summary = await readSummary(summaryDir, name)
-  } catch {
+  } catch (error) {
+    // "unreadable" was true and useless. A summary fails to read for two very
+    // different reasons — the file is gone or malformed, or it parses and one
+    // field is wrong — and only the second is repairable. Naming the fields
+    // turns a lane you would have thrown away into one you can fix, which
+    // matters because throwing it away takes its forked databases with it.
+    const detail = schemaComplaints(error)
     return flag(
       check,
-      `lane ${name}: summary unreadable`,
+      detail === null
+        ? `lane ${name}: summary unreadable`
+        : `lane ${name}: summary does not match the schema — ${detail}`,
       'warn',
-      `delete ${summaryDir}/${name}.yaml and re-provision the lane`,
+      detail === null
+        ? `delete ${summaryDir}/${name}.yaml and re-provision the lane`
+        : `fix those fields in ${summaryDir}/${name}.yaml, or delete it and re-provision the lane`,
     )
   }
 

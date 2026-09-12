@@ -365,7 +365,20 @@ export function resolveBrief(
   try {
     text = readFileSync(join(workspace, path), 'utf8')
   } catch {
-    throw new PromptError(`node "${nodeId}": ${field} "${promptRef}" names no readable file`)
+    // The resolution root is the *lane*, and saying so is most of the fix. A
+    // lane is a fresh worktree of the base branch, so a plan that is untracked,
+    // or committed on some other branch, exists in the checkout the operator is
+    // looking at and nowhere the run can see it. That is the common cause by
+    // some distance, and "names no readable file" sends people to check the
+    // spelling of a path that is spelled correctly.
+    //
+    // The path and the lane directory are identifiers, not content: no line of
+    // the document is read before this throws (§11).
+    throw new PromptError(
+      `node "${nodeId}": ${field} "${promptRef}" names no readable file under ${workspace} — ` +
+        'a lane is a fresh worktree of the base branch, so an uncommitted plan, or one ' +
+        'committed on another branch, is not in it',
+    )
   }
 
   const brief = anchor === '' ? text.trim() : (sectionOf(text, anchor) ?? '')

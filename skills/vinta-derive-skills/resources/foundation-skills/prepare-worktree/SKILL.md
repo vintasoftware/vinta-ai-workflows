@@ -355,7 +355,7 @@ state:
     files: [.env, .envrc, ...]
   dev_db:
     engine: postgres | mysql | sqlite | mongo | redis
-    strategy: fork | share | stub
+    strategy: fork | share | stub     # closed set — see "The summary is read by machine"
     forked_name: <forked db name>   # null when share / stub
     connection_url_var: DATABASE_URL
     reset_cmd: <shell command that returns this DB to the state of a fresh checkout>
@@ -365,7 +365,7 @@ state:
     # instead of reusing this worktree across a migration boundary.
   test_db:
     engine: ...
-    strategy: fork | share
+    strategy: fork | share            # closed set, as above
     forked_name: ...
     connection_url_var: TEST_DATABASE_URL
     reset_cmd: <same idea, for the test DB>   # null when not resettable
@@ -467,6 +467,14 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 
 - **Symlink for reads, copy for writes, fork for state.** This is the only mental model that scales. Default to fork when unsure — disk is cheap, corrupted main-checkout DBs are not.
 - **Never share a writable DB across worktrees by default.** The race conditions are subtle and the failure mode is silent data corruption.
+### The summary is read by machine
+
+This file is not a note to the next human. [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) parses it to decide whether a lane can be handed to another phase, so **every `|` above is a closed set and every key is required** — `null` is how you say "none", and omitting the key is not the same thing.
+
+A value outside the set makes the lane unusable by the daemon. It does not fail loudly at write time; it fails later, as `doctor` reporting the lane and the field it could not accept, long after the worktree and its forked databases exist. Seen in the wild: a `strategy: create-empty-and-migrate` invented to describe a database that had been created empty and migrated by hand, with `reset_cmd` left off entirely. Neither is in the spec, and the pair cost eleven lanes their readability.
+
+If none of the listed strategies describes what you did, **the honest record is the closest one plus a `note:`** — the schema keeps `note` free-form for exactly this. A database created empty and migrated is a `fork` whose `reset_cmd` re-runs that same creation; a database you could not provision at all is a `stub`. What it must never be is a fourth word.
+
 - **`COMPOSE_PROJECT_NAME` does not isolate `external:`/fixed-`name:` volumes or fixed host ports — always run the [4a](#4a--neutralize-compose-isolation-leaks) generator.** For a compose-delivered DB the data volumes are forked *unconditionally* (independent of `schema_change` and `test_db_strategy`): the worktree runs its own server, and two servers on one volume is corruption. "Share the DB" only ever means share a connection to a single already-running server, never a second server on shared storage. The fix is a generated, out-of-tree override + a `COMPOSE_FILE` line in the copied `.env` — never an edit to any tracked compose file. Verify the volume-differs invariant before declaring the worktree runnable.
 - **Every fork decision lands in `.vinta-ai-workflows/worktrees/<name>.yaml`.** Teardown reads it; humans grep it; agents resuming a stalled plan read it. No decision lives only in conversation memory.
 - **Worktree root governed by runtime conventions.** claude-code uses `.claude/worktrees/`; other harnesses use sibling dirs. Don't fight the harness — match it.

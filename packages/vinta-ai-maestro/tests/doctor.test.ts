@@ -16,9 +16,10 @@
  * the exact thing a shebang fixture could never test.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { stringify } from 'yaml'
 import { afterAll, describe, expect, it } from 'vitest'
 import { formatDoctorReport, runDoctor, type CheckResult, type DoctorOptions } from '../src/doctor/index.ts'
 import { writeSummary, type WorktreeSummary } from '../src/lanes/summary.ts'
@@ -285,6 +286,71 @@ describe('vinta-ai-maestro doctor', () => {
     // Degraded, not blocked: the run still starts.
     expect(report.ok).toBe(true)
     expect(report.exitCode).toBe(0)
+  })
+
+  /**
+   * The shape a real repository produced: `prepare-worktree` wrote
+   * `strategy: create-empty-and-migrate`, which is not one of the three the
+   * skill's own spec lists, and omitted `reset_cmd` entirely. Eleven lanes
+   * reported "summary unreadable" and the only advice was to delete them —
+   * which would have dropped their forked databases over two wrong fields.
+   */
+  it('names the fields a summary got wrong instead of calling it unreadable', async () => {
+    const base = greenOptions()
+    const { summaryDir } = base
+    await mkdir(summaryDir, { recursive: true })
+    const broken = summary('run-lane-1', 'dropdb x') as unknown as Record<string, any>
+    broken['state'].dev_db.strategy = 'create-empty-and-migrate'
+    delete broken['state'].dev_db.reset_cmd
+    await writeFile(join(summaryDir, 'run-lane-1.yaml'), stringify(broken), 'utf8')
+
+    const report = await runDoctor(base)
+    const check = find(report.checks, 'lane:run-lane-1')
+
+    expect(check.status).toBe('warn')
+    expect(check.label).toContain('state.dev_db.strategy')
+    expect(check.label).toContain('state.dev_db.reset_cmd')
+    // Repairable, so repair is offered first: deleting takes the databases too.
+    expect(check.remedy).toContain('fix those fields')
+    // Still a warning. A stale summary from an older run must not block a run
+    // that is not using that lane.
+    expect(report.ok).toBe(true)
+  })
+
+  /**
+   * The other half: a file that is not YAML at all has no field to name, and
+   * must not pretend otherwise.
+   */
+  it('still says "unreadable" when the file does not parse', async () => {
+    const base = greenOptions()
+    const { summaryDir } = base
+    await mkdir(summaryDir, { recursive: true })
+    await writeFile(join(summaryDir, 'run-lane-1.yaml'), ': not: valid: yaml: [', 'utf8')
+
+    const check = find((await runDoctor(base)).checks, 'lane:run-lane-1')
+
+    expect(check.status).toBe('warn')
+    expect(check.label).toContain('unreadable')
+    expect(check.remedy).toContain('re-provision')
+  })
+
+  /**
+   * §11: a summary holds database names, connection variables and filesystem
+   * paths, and the value that failed validation is exactly the thing most
+   * likely to be one. Field paths and schema messages carry none of it.
+   */
+  it('reports the field and the expectation, never the offending value', async () => {
+    const base = greenOptions()
+    const { summaryDir } = base
+    await mkdir(summaryDir, { recursive: true })
+    const broken = summary('run-lane-1', 'dropdb x') as unknown as Record<string, any>
+    broken['state'].dev_db.strategy = 'secret_db_name_do_not_print'
+    await writeFile(join(summaryDir, 'run-lane-1.yaml'), stringify(broken), 'utf8')
+
+    const check = find((await runDoctor(base)).checks, 'lane:run-lane-1')
+
+    expect(check.label).toContain('state.dev_db.strategy')
+    expect(check.label).not.toContain('secret_db_name_do_not_print')
   })
 
   it('fails when the disk cannot hold lanes + 1 worktrees', async () => {
