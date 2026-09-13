@@ -9,6 +9,10 @@
  *
  * The reminder control is the whole of O7's "opt-in". Off is the default and
  * the first option, because a system that nags gets trained out of attention.
+ * Its options name the thing being repeated and the condition that ends it —
+ * only an *unanswered pause* repeats, and answering is what stops it — because
+ * an interval alone ("every 5 min") describes the mechanism and leaves the
+ * operator to guess the subject.
  * It is a real `<select>` — the design system's native one — so it keeps the
  * keyboard, the form semantics and a test's `change` event.
  */
@@ -17,12 +21,20 @@ import { Button } from 'vinta-design-system/ui/button'
 import { NativeSelect, NativeSelectOption } from 'vinta-design-system/ui/native-select'
 import { notifier, notificationBody, routeOf, useNotifications } from './notifications.ts'
 
-/** Minutes, as an operator thinks about them. `0` is off, and is the default. */
+/**
+ * Minutes, as an operator thinks about them. `0` is off, and is the default.
+ *
+ * Each label says what the reminder is *about* and what stops it. "Remind
+ * every 5 min" said neither, so the control read as a setting for some
+ * unnamed nagging — and a control nobody can explain is one nobody turns on,
+ * which leaves the thing it exists for (a lane idle for hours because a pause
+ * went unseen) exactly as unsolved as if it were not there.
+ */
 const INTERVALS: readonly { readonly label: string; readonly ms: number }[] = [
-  { label: 'Reminders off', ms: 0 },
-  { label: 'Remind every 5 min', ms: 5 * 60_000 },
-  { label: 'Remind every 15 min', ms: 15 * 60_000 },
-  { label: 'Remind every 30 min', ms: 30 * 60_000 },
+  { label: 'No reminders', ms: 0 },
+  { label: 'Remind every 5 min until answered', ms: 5 * 60_000 },
+  { label: 'Remind every 15 min until answered', ms: 15 * 60_000 },
+  { label: 'Remind every 30 min until answered', ms: 30 * 60_000 },
 ]
 
 export function Notifications() {
@@ -37,7 +49,8 @@ export function Notifications() {
         />
         <NativeSelect
           size="sm"
-          aria-label="Notification reminders"
+          aria-label="Reminders while a phase waits for your answer"
+          title="A phase that stops to ask you something raises one notification. This repeats it until you answer."
           data-field="reminder"
           className="pl-8 text-[13px]"
           value={String(reminderMs)}

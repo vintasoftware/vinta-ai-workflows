@@ -15,8 +15,15 @@
  *
  * Keys are absolute indices from the start of the served tail, so appending to
  * a live transcript does not remount the rows already on screen.
+ *
+ * The box opens at the *newest* row and stays there while new ones arrive. A
+ * top-anchored scroller opens a live agent's transcript at the oldest of sixty
+ * rows, so the thing the operator came to read — what it is doing now — is
+ * below the fold, and every new entry pushes it further down. Sticking is
+ * conditional, though: an operator who has scrolled up is reading, and yanking
+ * them back to the bottom mid-sentence is worse than the problem it fixes.
  */
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { cn } from 'vinta-design-system/lib/utils'
 import { Button } from 'vinta-design-system/ui/button'
 import { ToneDot } from './Chip.tsx'
@@ -29,6 +36,15 @@ export const TRANSCRIPT_WINDOW = 60
 /** Grow the window when the operator scrolls within this much of the top. */
 const SCROLL_MARGIN = 40
 
+/**
+ * Treat the view as "at the bottom" within this much of it.
+ *
+ * Wider than an exact test on purpose: a row arriving mid-scroll, or a
+ * fractional device pixel, must not read as "the operator has scrolled away"
+ * and silently stop the following.
+ */
+const STICK_MARGIN = 60
+
 /** The author's colour: the operator stands out, machinery recedes. */
 const AUTHOR: Readonly<Record<string, string>> = {
   operator: 'text-tone-attention-foreground',
@@ -38,10 +54,24 @@ const AUTHOR: Readonly<Record<string, string>> = {
 
 export function Transcript({ entries }: { readonly entries: readonly unknown[] }) {
   const [visible, setVisible] = useState(TRANSCRIPT_WINDOW)
+  const list = useRef<HTMLOListElement>(null)
+  // Starts true so the first paint lands on the newest row. A ref rather than
+  // state: it is read during layout and changing it must never re-render.
+  const following = useRef(true)
 
   const hidden = Math.max(0, entries.length - visible)
   const shown = entries.slice(hidden)
   const grow = (): void => setVisible((current) => current + TRANSCRIPT_WINDOW)
+
+  // Before paint, so the newest row is never briefly visible at the wrong
+  // offset. Growing the window prepends rows and also lands here, but only
+  // ever with `following` false — the operator had to scroll to the top to
+  // ask for them.
+  useLayoutEffect(() => {
+    const element = list.current
+    if (element === null || !following.current) return
+    element.scrollTop = element.scrollHeight
+  }, [shown.length])
 
   return (
     <Panel
@@ -72,9 +102,13 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
             </Button>
           )}
           <ol
+            ref={list}
             className="entries max-h-[480px] divide-y overflow-y-auto"
             onScroll={(event) => {
-              if (hidden > 0 && event.currentTarget.scrollTop <= SCROLL_MARGIN) grow()
+              const box = event.currentTarget
+              following.current =
+                box.scrollHeight - box.scrollTop - box.clientHeight <= STICK_MARGIN
+              if (hidden > 0 && box.scrollTop <= SCROLL_MARGIN) grow()
             }}
           >
             {shown.map((raw, index) => {
