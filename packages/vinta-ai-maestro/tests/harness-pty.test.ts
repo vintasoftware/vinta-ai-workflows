@@ -71,9 +71,25 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
+/**
+ * A temp directory that goes even on Windows.
+ *
+ * These tests kill terminals, and killing a process on Windows is not
+ * synchronous with releasing what it held: the conpty and its background child
+ * are gone as far as the test is concerned while the OS still has the working
+ * directory open, so `rmdir` comes back `EBUSY`. Retries are the supported
+ * answer — `rm` retries exactly this family of errors — and they cost nothing
+ * on a platform that never raises them.
+ *
+ * This is teardown, not a subject: an orphaned process is caught by the
+ * assertions in the tests themselves, which is why waiting here is allowed to
+ * be patient rather than exact.
+ */
 const makeTemp = (): string => {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-pty-'))
-  cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+  cleanups.push(() =>
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }),
+  )
   return dir
 }
 
