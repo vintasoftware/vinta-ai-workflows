@@ -62,6 +62,19 @@ export function isAgentPermission(value: unknown): value is AgentPermission {
 /**
  * claude-code's `--permission-mode`, plus the opt-in its blunt setting needs.
  *
+ * **`auto` is not the mode named "auto".** The vendor's `auto` still routes a
+ * write to a permission prompt, and in `-p` there is nobody to answer one, so
+ * every `Write` came back denied with no reason attached — the same dead end
+ * this file was written to close, wearing the word that made it look closed.
+ * `acceptEdits` is the mode that actually lets an unattended agent write, and
+ * the pair was run against the CLI rather than read from its help text: under
+ * `auto` a write to the agent's own working directory is refused, under
+ * `acceptEdits` it succeeds.
+ *
+ * The lesson is the naming: our vocabulary and the vendor's collide on a word
+ * and mean different things by it, which is exactly why this file translates
+ * instead of passing ours through.
+ *
  * `bypassPermissions` is refused by the CLI unless the session was started with
  * `--allow-dangerously-skip-permissions`, so `full` has to pass both — asking
  * for the mode without enabling it is a spawn that fails at the vendor rather
@@ -72,7 +85,7 @@ export function claudeCodeArgs(permission: AgentPermission): readonly string[] {
     case 'ask':
       return ['--permission-mode', 'manual']
     case 'auto':
-      return ['--permission-mode', 'auto']
+      return ['--permission-mode', 'acceptEdits']
     case 'full':
       return ['--allow-dangerously-skip-permissions', '--permission-mode', 'bypassPermissions']
   }

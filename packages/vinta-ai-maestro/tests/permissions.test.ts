@@ -47,8 +47,20 @@ describe('claude-code', () => {
     }
   })
 
-  it('runs unattended on auto', () => {
-    expect(claudeCodeArgs('auto')).toEqual(['--permission-mode', 'auto'])
+  /**
+   * Our `auto` is not the vendor's mode of the same name, and the collision is
+   * the whole point of this assertion.
+   *
+   * `--permission-mode auto` still routes a write to a permission prompt, and
+   * in `-p` there is nobody to answer one: run against the CLI, a `Write` to
+   * the agent's own working directory comes back denied with no reason
+   * attached. `acceptEdits` is the mode under which the same write succeeds.
+   * The previous version of this test asserted the word rather than the
+   * behaviour, and so pinned the bug in place.
+   */
+  it('runs unattended on auto — which is the vendor mode that writes, not the one called auto', () => {
+    expect(claudeCodeArgs('auto')).toEqual(['--permission-mode', 'acceptEdits'])
+    expect(claudeCodeArgs('auto')).not.toContain('auto')
   })
 
   /**
