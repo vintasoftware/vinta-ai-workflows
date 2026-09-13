@@ -110,26 +110,66 @@ describe('CLI frame mapping', () => {
         decision_reason: 'Path is outside allowed working directories',
         message: 'Claude requested permissions to read from /repo/src/secret.ts, …',
       }),
-    ).toEqual([{ type: 'permission_denied', tool: 'Read', reason: 'workingDir' }])
+    ).toEqual([
+      {
+        type: 'permission_denied',
+        tool: 'Read',
+        reason: 'workingDir',
+        detail: 'Path is outside allowed working directories',
+      },
+    ])
   })
 
   /**
-   * §11: the prose names the file that was being read. The decision token is a
-   * fixed word, which is what an operator acts on anyway — and the `tool_use`
-   * row above it in the transcript already carries what was attempted.
+   * The reversal, and the reason for it.
+   *
+   * This test used to assert the opposite — that the sentence was dropped and
+   * only the token kept, on §11 grounds. Then a real run failed with
+   * forty-five denials whose token was `other`, and finding out what that meant
+   * cost an afternoon and a rebuilt reproduction: the sentence said "this Bash
+   * command contains multiple operations; the following parts require
+   * approval". §11 keeps repository *contents* out of the record. A refusal's
+   * own explanation is not contents, and the `tool_use` row above it already
+   * carries the path and the command verbatim — so withholding it protected
+   * nothing and hid the only fact worth having.
+   *
+   * The CLI puts the text in `decision_reason` for some refusals and in
+   * `message` for others, so both are read.
    */
-  it('carries the decision token and never the vendor’s prose', () => {
-    const [event] = mapCliEvent({
+  it('carries the sentence the refusal came with, from either field', () => {
+    const [fromReason] = mapCliEvent({
       type: 'system',
       subtype: 'permission_denied',
       tool_name: 'Read',
       decision_reason_type: 'workingDir',
       decision_reason: 'Path is outside allowed working directories',
-      message: 'Claude requested permissions to read from /repo/src/secret.ts, …',
+    })
+    expect(fromReason).toMatchObject({ detail: 'Path is outside allowed working directories' })
+
+    const [fromMessage] = mapCliEvent({
+      type: 'system',
+      subtype: 'permission_denied',
+      tool_name: 'Bash',
+      decision_reason_type: 'subcommandResults',
+      message: 'This Bash command contains multiple operations. The following parts require…',
+    })
+    expect(fromMessage).toMatchObject({
+      reason: 'subcommandResults',
+      detail: 'This Bash command contains multiple operations. The following parts require…',
+    })
+  })
+
+  /** A sentence, not a transcript: an explanation that long is not one. */
+  it('bounds the sentence it carries', () => {
+    const [event] = mapCliEvent({
+      type: 'system',
+      subtype: 'permission_denied',
+      tool_name: 'Bash',
+      decision_reason_type: 'other',
+      message: 'x'.repeat(4_000),
     })
 
-    expect(JSON.stringify(event)).not.toContain('secret.ts')
-    expect(JSON.stringify(event)).not.toContain('outside allowed')
+    expect((event as { detail: string }).detail.length).toBeLessThanOrEqual(500)
   })
 
   /** A refusal with no reason attached is still a refusal, and still said. */
@@ -627,8 +667,90 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     expect(settings.permissions.deny.some((rule) => rule.includes('mine'))).toBe(false)
   })
 
-  /** No roots, no grant — and therefore no policy that could contradict one. */
-  it('passes neither when nothing is granted', async () => {
+  /**
+   * The failure this exists to prevent, and it is not hypothetical.
+   *
+   * `--permission-mode acceptEdits` accepts file *edits* and nothing else: a
+   * shell command still goes to a permission prompt, and in `-p` nobody answers
+   * one. A real run of eight phases died of it — the agents wrote their code and
+   * were then refused `ruff`, `pytest`, `git add` and `docker compose`, 69
+   * denials across two lanes, every gate failing on work that was never allowed
+   * to be checked.
+   */
+  it('lets an unattended agent run a shell command', async () => {
+    const dir = makeTemp()
+    const lane = join(dir, 'lanes', 'mine')
+    mkdirSync(lane, { recursive: true })
+    const bin = argvRecordingCli(dir, 'claude-auto', 'auto.json')
+
+    const outcome = await new ClaudeCodeAdapter({
+      bin,
+      permission: 'auto',
+      readRoots: [dir],
+      settingsDir: join(dir, 'settings'),
+    }).spawn({ ...task(), cwd: lane })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    for await (const _event of outcome.session.events) void _event
+
+    expect(settingsOf(dir, 'auto.json').permissions.allow).toEqual(['Bash'])
+  })
+
+  /**
+   * `ask` is the mode for a human at the browser, and the prompt is its whole
+   * purpose. Allowing the shell there would answer a question nobody asked it
+   * to stop asking.
+   */
+  it('does not allow the shell when a human is meant to be approving', async () => {
+    const dir = makeTemp()
+    const lane = join(dir, 'lanes', 'mine')
+    mkdirSync(lane, { recursive: true })
+    const bin = argvRecordingCli(dir, 'claude-ask', 'ask.json')
+
+    const outcome = await new ClaudeCodeAdapter({
+      bin,
+      permission: 'ask',
+      readRoots: [dir],
+      settingsDir: join(dir, 'settings'),
+    }).spawn({ ...task(), cwd: lane })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    for await (const _event of outcome.session.events) void _event
+
+    const settings = settingsOf(dir, 'ask.json')
+    expect(settings.permissions.allow).toBeUndefined()
+    // The write guard is still there: `ask` narrows what may happen, never widens it.
+    expect((settings.permissions.deny ?? []).length).toBeGreaterThan(0)
+  })
+
+  /** `full` means no checks. A policy it is chosen to ignore would only mislead. */
+  it('writes no policy at all under full', async () => {
+    const dir = makeTemp()
+    const lane = join(dir, 'lanes', 'mine')
+    mkdirSync(lane, { recursive: true })
+    const bin = argvRecordingCli(dir, 'claude-full', 'full.json')
+
+    const outcome = await new ClaudeCodeAdapter({
+      bin,
+      permission: 'full',
+      readRoots: [dir],
+      settingsDir: join(dir, 'settings'),
+    }).spawn({ ...task(), cwd: lane })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    for await (const _event of outcome.session.events) void _event
+
+    const argv = JSON.parse(readFileSync(join(dir, 'full.json'), 'utf8')) as string[]
+    expect(argv).toContain('--add-dir')
+    expect(argv).not.toContain('--settings')
+  })
+
+  /**
+   * No roots means no grant — but `auto` still writes a policy, because the
+   * shell allowance lives in it and has nothing to do with the grant. Without
+   * it `acceptEdits` refuses every command the phase needs to run.
+   */
+  it('grants no directory when none is asked for, and still allows the shell', async () => {
     const dir = makeTemp()
     const bin = fakeCliFromSource(
       dir,
@@ -648,7 +770,12 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 
     const argv = JSON.parse(readFileSync(join(dir, 'bare.json'), 'utf8')) as string[]
     expect(argv).not.toContain('--add-dir')
-    expect(argv).not.toContain('--settings')
+
+    const settings = JSON.parse(
+      readFileSync(argv[argv.indexOf('--settings') + 1] as string, 'utf8'),
+    ) as { permissions: { allow?: string[]; deny?: string[] } }
+    expect(settings.permissions.allow).toEqual(['Bash'])
+    expect(settings.permissions.deny).toBeUndefined()
   })
 
   /**
@@ -709,6 +836,32 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 
     expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
   })
+
+  /** A fake that records the argv it was handed, then plays one clean turn. */
+  function argvRecordingCli(dir: string, name: string, out: string): string {
+    return fakeCliFromSource(
+      dir,
+      name,
+      `import { writeFileSync } from 'node:fs'
+if (process.argv.includes('--version')) { console.log(${JSON.stringify(VERSION)}); process.exit(0) }
+writeFileSync(${JSON.stringify('')} + ${JSON.stringify(join(dir, out))}, JSON.stringify(process.argv.slice(2)))
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-argv' }))
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }))
+`,
+    )
+  }
+
+  /** The policy file the adapter wrote, read back through the argv it passed. */
+  function settingsOf(
+    dir: string,
+    out: string,
+  ): { permissions: { allow?: string[]; deny?: string[] } } {
+    const argv = JSON.parse(readFileSync(join(dir, out), 'utf8')) as string[]
+    const path = argv[argv.indexOf('--settings') + 1] as string
+    return JSON.parse(readFileSync(path, 'utf8')) as {
+      permissions: { allow?: string[]; deny?: string[] }
+    }
+  }
 
   it('classifies a CLI that refuses before announcing a session', async () => {
     const bin = fakeBin({

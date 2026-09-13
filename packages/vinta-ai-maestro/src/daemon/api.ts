@@ -135,9 +135,9 @@ export function createApi(options: ApiOptions): Hono {
   })
 
   app.get('/api/runs/:runId', (c) => {
-    const found = resolveRun(c)
+    const found = resolveRead(c)
     if ('response' in found) return found.response
-    return c.json(snapshot(found.run, found.row, workflow(found.run.runId)))
+    return c.json(snapshot(found.run, found.row, workflow(found.row.id)))
   })
 
   /**
@@ -422,11 +422,14 @@ export function createApi(options: ApiOptions): Hono {
    * what makes it outlive a daemon restart and a UI reload alike. Validated on
    * the way out either way — a shape the UI cannot rely on is worse than none.
    */
-  function question(runId: string, run: DaemonRun, node: NodeRow): NodeDetail['question'] {
+  function question(runId: string, run: DaemonRun | null, node: NodeRow): NodeDetail['question'] {
     if (node.status !== 'awaiting_human') return null
+    // The journal is authoritative and survives the daemon; the live control
+    // port is the escape hatch for a host that parked a node without
+    // journalling the pause, and a finished run simply has none.
     const raw =
       journal.pendingQuestion(runId, node.node_id)?.question ??
-      run.control.question?.(node.node_id)
+      run?.control.question?.(node.node_id)
     if (raw === undefined) return null
     const parsed = HumanQuestionSchema.safeParse(raw)
     return parsed.success ? parsed.data : null
@@ -455,18 +458,30 @@ export function createApi(options: ApiOptions): Hono {
     return read
   }
 
-  function resolveRun(c: Context): { run: DaemonRun; row: RunRow } | { response: Response } {
+  /**
+   * A run to *read*. The journal is the whole answer.
+   *
+   * `runs` is an in-memory registry filled as a run starts, so it holds only
+   * what is live — and this used to require an entry in it *and* a journal row,
+   * which meant every finished run answered 404. The list endpoint reads the
+   * journal, so a daemon started with nothing running would show the operator
+   * their history and then refuse to open any of it.
+   *
+   * The store outlives the daemon by design (§5.3). A finished run is exactly
+   * as readable as a live one; what it no longer has is a scheduler to talk to,
+   * which is `resolveLive`'s problem and not a reader's.
+   */
+  function resolveRead(c: Context): { run: DaemonRun | null; row: RunRow } | { response: Response } {
     const runId = c.req.param('runId') ?? ''
-    const run = runs.get(runId)
     const row = journal.run(runId)
-    if (run === undefined || row === undefined) return { response: fail(c, 404, 'unknown_run') }
-    return { run, row }
+    if (row === undefined) return { response: fail(c, 404, 'unknown_run') }
+    return { run: runs.get(runId) ?? null, row }
   }
 
   function resolveNode(
     c: Context,
-  ): { run: DaemonRun; runId: string; node: NodeRow } | { response: Response } {
-    const found = resolveRun(c)
+  ): { run: DaemonRun | null; runId: string; node: NodeRow } | { response: Response } {
+    const found = resolveRead(c)
     if ('response' in found) return found
     const nodeId = c.req.param('nodeId') ?? ''
     const node = journal.nodes(found.row.id).find((row) => row.node_id === nodeId)
@@ -481,6 +496,12 @@ export function createApi(options: ApiOptions): Hono {
   ): Promise<Response> {
     const found = resolveNode(c)
     if ('response' in found) return found.response
+    // Reading a finished node is fine; steering one is not — there is no
+    // scheduler left to receive the instruction. It refuses with 409 rather
+    // than 404 because the run *does* exist: answering "unknown" would send the
+    // operator hunting for a typo instead of reading the status in front of
+    // them.
+    if (found.run === null) return fail(c, 409, 'run_not_live')
 
     const body = await readBody(c, schema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
@@ -495,7 +516,17 @@ export function createApi(options: ApiOptions): Hono {
     return c.json({ ok: true })
   }
 
-  function snapshot(run: DaemonRun, row: RunRow, wf: Workflow): RunSnapshot {
+  /**
+   * A run as the UI draws it. `run` is null for a finished one.
+   *
+   * Everything structural — nodes, edges, statuses, leases — comes from the
+   * journal either way. What the live handle adds is the in-flight counters,
+   * and for a finished run those are not unknown, they are *zero*: nothing is
+   * held, nothing is queued, nothing is waiting on a backoff. The capacities
+   * beside them come from the frozen workflow, which is what they were
+   * configured to be for the whole of that run.
+   */
+  function snapshot(run: DaemonRun | null, row: RunRow, wf: Workflow): RunSnapshot {
     // Read before the projections below, so the cursor can only lag what this
     // snapshot shows. A client resuming from it may replay an event it already
     // sees the effect of — the fold is idempotent — but can never miss one.
@@ -527,12 +558,12 @@ export function createApi(options: ApiOptions): Hono {
       resources: Object.entries(wf.resources).map(([id, resource]) => ({
         id,
         kind: resource.kind,
-        capacity: run.pools.capacity(id),
-        held: run.pools.held(id),
+        capacity: run === null ? resource.capacity : run.pools.capacity(id),
+        held: run === null ? 0 : run.pools.held(id),
         holders: leases.filter((lease) => lease.resource === id).map((lease) => lease.holder_node),
       })),
       gateQueue: {
-        waiting: run.pools.waiting,
+        waiting: run === null ? 0 : run.pools.waiting,
         holders: leases
           .filter((lease) => gatePools.has(lease.resource))
           .map((lease) => ({
@@ -543,9 +574,12 @@ export function createApi(options: ApiOptions): Hono {
       },
       harnesses: [...new Set(nodes.map((node) => node.harness))].sort().map((id) => ({
         id,
-        ceiling: run.admission.ceiling(id),
-        inFlight: run.admission.inFlight(id),
-        wakeAt: run.admission.wakeAt(id) ?? null,
+        // A finished run has no admission control to ask. Its ceiling was the
+        // lane capacity the plan declared — the number `run` is given at boot —
+        // and nothing is in flight under it any more.
+        ceiling: run === null ? (wf.resources['lane']?.capacity ?? 0) : run.admission.ceiling(id),
+        inFlight: run === null ? 0 : run.admission.inFlight(id),
+        wakeAt: run === null ? null : (run.admission.wakeAt(id) ?? null),
         // Read off the adapter, never restated — see `harnesses.ts`.
         capabilities: harnessCapabilities(id),
       })),

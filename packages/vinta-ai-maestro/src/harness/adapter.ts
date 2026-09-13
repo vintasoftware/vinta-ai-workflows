@@ -106,12 +106,26 @@ export type AgentEvent =
    * model a message ("you haven't granted it yet") that reads like a pending
    * prompt. An orchestrator that only knew about requests saw nothing at all.
    *
-   * `reason` is the harness's own decision token — `workingDir`, `mode` — never
-   * its prose, which carries the path it was reading (§11). The row above this
-   * one in the transcript is the `tool_use` that was refused, and it carries
-   * what was attempted; this says why it was not allowed.
+   * `reason` is the harness's own decision token — `workingDir`, `mode`,
+   * `subcommandResults`. `detail` is the sentence it printed alongside.
+   *
+   * **`detail` is carried, and an earlier version of this dropped it.** The
+   * reasoning then was §11 — the vendor's prose can name a path. The reasoning
+   * now is what that cost: a run failed with forty-five denials reading
+   * `reason: "other"`, and the investigation took an afternoon and a rebuilt
+   * reproduction to learn that the sentence said "this Bash command contains
+   * multiple operations; the following parts require approval". §11 keeps
+   * repository *contents* out of the record — diffs, file bodies, gate output.
+   * A refusal's own explanation is not that, and the `tool_use` row directly
+   * above already carries the path and the command verbatim, so withholding it
+   * here protected nothing and hid the one fact worth having.
    */
-  | { readonly type: 'permission_denied'; readonly tool: string; readonly reason: string }
+  | {
+      readonly type: 'permission_denied'
+      readonly tool: string
+      readonly reason: string
+      readonly detail?: string
+    }
   | {
       readonly type: 'usage'
       readonly input: number

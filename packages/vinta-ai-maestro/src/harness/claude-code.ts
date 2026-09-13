@@ -211,15 +211,29 @@ const mapResult = (value: Record<string, unknown>): AgentEvent[] => {
  * forbids the tool. Nothing can be replied to, so the only thing to do with it
  * is say it happened.
  *
- * `decision_reason` is prose and `message` names the path that was read; both
- * are dropped. `decision_reason_type` is a fixed token, which is what §11
- * allows in an event and what an operator can act on anyway.
+ * Both the token and the sentence are carried. The token alone was the first
+ * version, and `reason: "other"` turned out to be exactly as useful as no event
+ * at all — the sentence beside it ("the following parts require approval:
+ * command -v ruff, …") is the whole diagnosis. The CLI puts that text in
+ * `decision_reason` for some refusals and in `message` for others, so both are
+ * read and the first present one wins.
  */
 const mapPermissionDenied = (value: Record<string, unknown>): AgentEvent[] => {
   const tool = asString(value['tool_name'])
   if (tool === undefined) return []
-  return [{ type: 'permission_denied', tool, reason: asString(value['decision_reason_type']) ?? 'denied' }]
+  const detail = asString(value['decision_reason']) ?? asString(value['message'])
+  return [
+    {
+      type: 'permission_denied',
+      tool,
+      reason: asString(value['decision_reason_type']) ?? 'denied',
+      ...(detail === undefined || detail === '' ? {} : { detail: detail.slice(0, DETAIL_LIMIT) }),
+    },
+  ]
 }
+
+/** A refusal explains itself in a sentence; anything longer is not one. */
+const DETAIL_LIMIT = 500
 
 /**
  * The CLI's own verdict on the turn it just finished.
@@ -445,17 +459,36 @@ class ClaudeCodeSession implements AgentSession {
 }
 
 /**
- * `--add-dir` for each granted root, and the deny list that keeps the grant to
- * reading.
+ * The policy this spawn runs under: what it may read beyond its lane, what it
+ * may not write, and whether it may run a shell command at all.
  *
- * Computed per spawn because it is per lane: the deny list names the *other*
- * children at every level between a root and this agent's working directory,
- * which is the only shape the vendor's rules can express (`read-access.ts`).
+ * **`Bash` is allowed under `auto`, and that is the whole of what makes `auto`
+ * mean what it says.** `--permission-mode acceptEdits` accepts file *edits* and
+ * nothing else: a shell command still goes to a permission prompt, and in `-p`
+ * there is nobody to answer one. A run of eight phases died of this — the
+ * agents wrote their code and were then refused `ruff`, `pytest`, `git add` and
+ * `docker compose`, 69 denials between two lanes, every gate failing on work
+ * that was never allowed to be checked. An orchestrator that stops to ask
+ * before each command is not unattended, and a lane exists precisely so that
+ * nobody has to be asked.
  *
- * `full` gets the grant and no deny list. It means "no checks at all" and is
- * documented as being for a box that is sandboxed by something else; writing a
- * policy the mode is chosen to ignore would only make the flag look safer than
- * the operator asked for.
+ * What that costs is worth stating plainly: **`Bash` was never confined to the
+ * lane** — the deny list below covers the file-editing tools, and a shell
+ * redirection walks through it. Allowing it is allowing commands on this
+ * machine. `auto` already promised that in words ("works unattended inside its
+ * lane"); this is the first version where the words are true.
+ *
+ * `ask` deliberately does not allow it: that mode is for a human at the
+ * browser, and its whole purpose is the prompt.
+ *
+ * `full` gets the grant and no policy at all. It means "no checks" and is
+ * documented as being for a box sandboxed by something else; writing rules the
+ * mode is chosen to ignore would make the flag look safer than it is.
+ *
+ * The deny list is computed per spawn because it is per lane: it names the
+ * *other* children at every level between a root and this agent's working
+ * directory, which is the only shape the vendor's rules can express
+ * (`read-access.ts`).
  */
 function readAccessArgs(
   permission: AgentPermission,
@@ -463,31 +496,41 @@ function readAccessArgs(
   lane: string,
   settingsDir: string,
 ): readonly string[] {
-  if (roots.length === 0) return []
+  if (permission === 'full') return roots.length === 0 ? [] : addDirArgs({ roots, lane })
+
+  // `auto` needs a settings file even with nothing granted, because the shell
+  // allowance lives in it and is not about the grant at all.
+  const allow = permission === 'auto' ? ['Bash'] : []
+  if (roots.length === 0 && allow.length === 0) return []
+
   const grant: ReadGrant = { roots, lane }
-  if (permission === 'full') return addDirArgs(grant)
-  const deny = writeDenyRules(grant, (dir) => {
-    try {
-      return readdirSync(dir)
-    } catch {
-      // A directory that cannot be listed contributes no rules, which is the
-      // safe direction only because the corridor is what it would have named:
-      // an unlistable level leaves its siblings writable, never the lane
-      // unwritable.
-      return []
-    }
-  })
+  const deny =
+    roots.length === 0
+      ? []
+      : writeDenyRules(grant, (dir) => {
+          try {
+            return readdirSync(dir)
+          } catch {
+            // A directory that cannot be listed contributes no rules, which is
+            // the safe direction only because the corridor is what it would
+            // have named: an unlistable level leaves its siblings writable,
+            // never the lane unwritable.
+            return []
+          }
+        })
   // Written to a file rather than passed as JSON, and this is forced rather
   // than tidy. On Windows every spawn goes through `cmd.exe`, where a `"`
   // cannot survive a quoted region: `platform.ts` refuses an argument
   // containing one instead of escaping it, so the whole spawn fails before the
   // binary is reached. A JSON object is nothing but quotes.
-  const settings = writeSettings(settingsDir, lane, deny)
+  const settings = writeSettings(settingsDir, lane, allow, deny)
   // Fail *closed*. Without the policy the grant is a write grant, so a
   // directory that cannot be written to costs the read access rather than the
-  // guard — the one direction in which this may silently do less.
+  // guard — the one direction in which this may silently do less. It costs the
+  // shell allowance too, which fails the phase loudly rather than quietly
+  // widening what it may touch.
   if (settings === null) return []
-  return [...addDirArgs(grant), '--settings', settings]
+  return [...(roots.length === 0 ? [] : addDirArgs(grant)), '--settings', settings]
 }
 
 /**
@@ -499,12 +542,21 @@ function readAccessArgs(
  * leaves nothing to collect — the next spawn in that lane overwrites it, and
  * `purge` removes the directory with the rest of the store.
  */
-function writeSettings(dir: string, lane: string, deny: readonly string[]): string | null {
+function writeSettings(
+  dir: string,
+  lane: string,
+  allow: readonly string[],
+  deny: readonly string[],
+): string | null {
   const name = `${lane.split(/[/\\]/).filter(Boolean).pop() ?? 'lane'}.settings.json`
   const path = join(dir, name)
+  const permissions = {
+    ...(allow.length === 0 ? {} : { allow: [...allow] }),
+    ...(deny.length === 0 ? {} : { deny: [...deny] }),
+  }
   try {
     mkdirSync(dir, { recursive: true })
-    writeFileSync(path, `${JSON.stringify({ permissions: { deny } }, null, 2)}\n`, 'utf8')
+    writeFileSync(path, `${JSON.stringify({ permissions }, null, 2)}\n`, 'utf8')
     return path
   } catch {
     return null

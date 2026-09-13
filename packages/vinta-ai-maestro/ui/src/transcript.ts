@@ -52,7 +52,12 @@ const EntrySchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tool_use'), name: z.string(), id: z.string(), input: z.unknown() }),
   z.object({ type: z.literal('tool_result'), id: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ type: z.literal('permission_request'), tool: z.string(), detail: z.unknown() }),
-  z.object({ type: z.literal('permission_denied'), tool: z.string(), reason: z.string() }),
+  z.object({
+    type: z.literal('permission_denied'),
+    tool: z.string(),
+    reason: z.string(),
+    detail: z.string().optional(),
+  }),
   z.object({
     type: z.literal('usage'),
     input: z.number(),
@@ -132,8 +137,17 @@ export function present(raw: unknown): EntryView {
       return row(entry.type, 'tool', preview(entry.detail), 'attention', `Permission · ${entry.tool}`)
     // `error`, not `attention`: a request is waiting for someone and a denial
     // is already over. The row above carries what the tool was trying to do.
+    // The sentence when there is one, the token when there is not. The token
+    // alone ("other") reads as though the record is broken; the sentence is
+    // what an operator can act on.
     case 'permission_denied':
-      return row(entry.type, 'tool', entry.reason, 'error', `Refused · ${entry.tool}`)
+      return row(
+        entry.type,
+        'tool',
+        entry.detail === undefined ? entry.reason : `${entry.reason} — ${entry.detail}`,
+        'error',
+        `Refused · ${entry.tool}`,
+      )
     case 'usage':
       return row(entry.type, 'system', usage(entry), null, 'Usage')
     case 'error':

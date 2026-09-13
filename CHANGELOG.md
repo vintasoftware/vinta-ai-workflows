@@ -220,6 +220,42 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An agent can run a shell command.** `auto` mapped to the vendor's
+  `acceptEdits`, which accepts file *edits* and nothing else — a shell command
+  still goes to a permission prompt, and in `-p` there is nobody to answer one.
+  A run of eight phases died of it: the agents wrote their code and were then
+  refused `ruff`, `pytest`, `git add` and `docker compose`, **69 denials across
+  two lanes**, every gate failing on work that was never allowed to be checked.
+  `auto` now allows `Bash` in the policy file it already writes.
+
+  What that costs is worth stating plainly: **`Bash` was never confined to the
+  lane.** The deny list covers the file-editing tools and a shell redirection
+  walks through it, so allowing the shell allows commands on the machine.
+  `auto` has always promised exactly this in words — "the agent works unattended
+  inside its lane" — and this is the first version where the words are true.
+  `ask` still does not allow it: that mode exists for a human at the browser,
+  and the prompt is its purpose.
+
+- **A refusal says why, in the words the harness used.** `permission_denied`
+  carried a decision token and deliberately dropped the sentence beside it, on
+  §11 grounds. Then a run failed with forty-five denials reading
+  `reason: "other"`, and finding out what that meant cost an afternoon and a
+  rebuilt reproduction — the sentence said "this Bash command contains multiple
+  operations; the following parts require approval". §11 keeps repository
+  *contents* out of the record; a refusal's own explanation is not contents, and
+  the `tool_use` row above it already carries the path and the command verbatim.
+  Withholding it protected nothing and hid the one fact worth having.
+
+- **`serve` opens a run that has already finished.** The API resolved a run from
+  the in-memory registry *and* the journal and required both, so a daemon
+  started with nothing running listed the operator's history — the list reads
+  the journal — and then answered 404 for every run in it, under a message
+  saying the daemon was not running. Reads now need only the journal, which is
+  where a run's whole record lives and which outlives the daemon by design
+  (§5.3). Steering a finished run is still refused, with `409` rather than
+  `404`: the run exists, and saying it does not sends the operator hunting for a
+  typo instead of reading the status in front of them.
+
 - **Four places the UI asked the operator to work around it.** The transcript
   opened at the *oldest* row it held, so a live agent's newest line — the one
   the panel was opened to read — sat below the fold and every arriving entry

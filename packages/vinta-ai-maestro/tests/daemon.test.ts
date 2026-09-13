@@ -840,9 +840,37 @@ describe('replay pages', () => {
       payload: { status: 'done' },
     })
 
-    // The snapshot needs live scheduler state and cannot answer for it…
-    expect((await call(r.daemon, '/api/runs/run-history')).status).toBe(404)
-    // …but its history is readable, which is the case replay exists for.
+    // This used to answer 404, deliberately: the snapshot was held to need live
+    // scheduler state. It does not. Everything structural — nodes, statuses,
+    // edges, leases — is in the journal, and the in-flight counters a finished
+    // run cannot report are not unknown but *zero*. The old behaviour meant a
+    // daemon started with nothing running listed the operator's history from
+    // the journal and then refused to open any of it, under a message saying
+    // the daemon was not running.
+    const snapshot = await call(r.daemon, '/api/runs/run-history')
+    expect(snapshot.status).toBe(200)
+    expect((snapshot.body as { nodes: { nodeId: string; status: string }[] }).nodes).toEqual([
+      expect.objectContaining({ nodeId: 'a', status: 'done' }),
+      expect.objectContaining({ nodeId: 'b' }),
+    ])
+    // Nothing is held or in flight, because nothing is running.
+    const state = snapshot.body as {
+      resources: { held: number }[]
+      gateQueue: { waiting: number }
+    }
+    expect(state.resources.every((resource) => resource.held === 0)).toBe(true)
+    expect(state.gateQueue.waiting).toBe(0)
+
+    // Steering it is still refused — there is no scheduler to receive the
+    // instruction — but with 409, not 404: the run exists, and saying it does
+    // not sends the operator hunting for a typo.
+    const steered = await call(r.daemon, '/api/runs/run-history/nodes/a/context', {
+      method: 'POST',
+      body: { text: 'hello' },
+    })
+    expect(steered.status).toBe(409)
+
+    // Its history is readable, which is the case replay exists for.
     const page = EventPageSchema.parse((await call(r.daemon, '/api/runs/run-history/events')).body)
     expect(page.events.map((event) => event.type)).toEqual([
       'run_started',
