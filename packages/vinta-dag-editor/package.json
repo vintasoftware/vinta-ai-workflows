@@ -1,6 +1,11 @@
 {
   "name": "vinta-dag-editor",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vintasoftware/vinta-ai-workflows.git",
+    "directory": "packages/vinta-dag-editor"
+  },
   "private": false,
   "description": "Framework-agnostic Web Component for viewing and editing plan DAGs.",
   "type": "module",

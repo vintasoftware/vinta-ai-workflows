@@ -1,6 +1,11 @@
 {
   "name": "vinta-design-system",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vintasoftware/vinta-ai-workflows.git",
+    "directory": "packages/design-system"
+  },
   "private": false,
   "description": "Vinta's design system for browser UIs in this workspace: oklch tokens, shadcn/ui components, and a small layout kit on Tailwind CSS v4.",
   "type": "module",

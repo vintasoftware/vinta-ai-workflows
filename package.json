@@ -26,7 +26,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com:vintasoftware/vinta-ai-workflows.git"
+    "url": "git+https://github.com/vintasoftware/vinta-ai-workflows.git"
   },
   "publishConfig": {
     "access": "public"

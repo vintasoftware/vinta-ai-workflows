@@ -1,6 +1,11 @@
 {
   "name": "vinta-ai-maestro",
   "version": "0.7.0-alpha5",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vintasoftware/vinta-ai-workflows.git",
+    "directory": "packages/vinta-ai-maestro"
+  },
   "description": "Code-orchestrated parallel execution of plan-feature plans across agent harnesses.",
   "type": "module",
   "bin": {
