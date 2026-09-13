@@ -221,6 +221,27 @@ const mapPermissionDenied = (value: Record<string, unknown>): AgentEvent[] => {
   return [{ type: 'permission_denied', tool, reason: asString(value['decision_reason_type']) ?? 'denied' }]
 }
 
+/**
+ * The CLI's own verdict on the turn it just finished.
+ *
+ * `{"type":"system","subtype":"post_turn_summary","status_category":"blocked",
+ * "needs_action":"Please grant access…"}` — the frame that says the agent
+ * stopped without doing what it was asked and wants a person. It is emitted
+ * *before* a `result` frame that then reports `is_error: false`, which is how a
+ * phase came to succeed having written nothing.
+ *
+ * Only `blocked` is acted on. The other categories are the ordinary ones and
+ * the set is the vendor's to grow, so anything unrecognised means nothing here.
+ *
+ * `needs_action` and `status_detail` are the agent's own words and are dropped
+ * (§11); the fixed sentence below is this adapter's, and says the one thing the
+ * category actually establishes.
+ */
+const mapTurnSummary = (value: Record<string, unknown>): AgentEvent[] =>
+  value['status_category'] === 'blocked'
+    ? [{ type: 'error', message: 'claude-code: the turn ended blocked' }]
+    : []
+
 const mapControlRequest = (value: Record<string, unknown>): AgentEvent[] => {
   const request = asRecord(value['request'])
   if (!request || request['subtype'] !== 'can_use_tool') return []
@@ -239,6 +260,7 @@ export function mapCliEvent(raw: unknown): AgentEvent[] {
   switch (value['type']) {
     case 'system': {
       if (value['subtype'] === 'permission_denied') return mapPermissionDenied(value)
+      if (value['subtype'] === 'post_turn_summary') return mapTurnSummary(value)
       const sessionId = asString(value['session_id'])
       return value['subtype'] === 'init' && sessionId !== undefined
         ? [{ type: 'session_started', sessionId }]
@@ -334,6 +356,8 @@ class ClaudeCodeSession implements AgentSession {
   #taken = false
   #ended = false
   #stopping = false
+  /** An error was reported during this turn. See `ingest`. */
+  #errored = false
 
   constructor(readonly id: string, child: ChildProcess, queue: EventQueue) {
     this.#child = child
@@ -351,11 +375,29 @@ class ClaudeCodeSession implements AgentSession {
     }
   }
 
-  /** One mapped event from the CLI. Terminal events close the stream exactly once. */
+  /**
+   * One mapped event from the CLI. Terminal events close the stream exactly
+   * once.
+   *
+   * **A session that reported an error did not end ok**, whatever the final
+   * frame claims. The CLI announces a turn that ended blocked and then reports
+   * `is_error: false` on the way out, because from its side nothing went wrong
+   * — it was asked something it could not do and said so. From this side that
+   * is a turn that produced nothing, and calling it a success is what let a
+   * phase pass having written no code and fail two steps later under another
+   * name.
+   *
+   * The rule is deliberately about `error` in general rather than about the
+   * blocked summary in particular: every error here is one this adapter chose
+   * to raise, and there is no error it raises that should leave a turn looking
+   * clean.
+   */
   ingest(event: AgentEvent): void {
     if (this.#ended) return
+    if (event.type === 'error') this.#errored = true
     if (event.type === 'session_ended') {
-      this.#finish(this.#stopping ? 'interrupted' : event.result)
+      const reported = this.#errored && event.result === 'ok' ? 'error' : event.result
+      this.#finish(this.#stopping ? 'interrupted' : reported)
       return
     }
     this.#queue.push(event)

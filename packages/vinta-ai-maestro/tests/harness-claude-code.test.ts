@@ -143,6 +143,40 @@ describe('CLI frame mapping', () => {
     expect(mapCliEvent({ type: 'system', subtype: 'permission_denied' })).toEqual([])
   })
 
+  /**
+   * The frame that says the turn is over and nothing was done — emitted just
+   * before a `result` that reports `is_error: false`.
+   */
+  it('maps a turn the CLI says ended blocked', () => {
+    expect(
+      mapCliEvent({
+        type: 'system',
+        subtype: 'post_turn_summary',
+        status_category: 'blocked',
+        status_detail: 'Please grant access and I will retrieve the secret value for you.',
+        needs_action: 'Please grant access and I will retrieve the secret value for you.',
+      }),
+    ).toEqual([{ type: 'error', message: 'claude-code: the turn ended blocked' }])
+  })
+
+  /** The agent's own words about what it wanted (§11). The category is ours. */
+  it('keeps the agent’s words out of the blocked report', () => {
+    const [event] = mapCliEvent({
+      type: 'system',
+      subtype: 'post_turn_summary',
+      status_category: 'blocked',
+      needs_action: 'Please grant access to /repo/src/secret.ts',
+    })
+
+    expect(JSON.stringify(event)).not.toContain('secret.ts')
+  })
+
+  /** Every other category is an ordinary turn, and the set is the vendor's. */
+  it('says nothing about a turn that finished', () => {
+    expect(mapCliEvent({ type: 'system', subtype: 'post_turn_summary', status_category: 'completed' })).toEqual([])
+    expect(mapCliEvent({ type: 'system', subtype: 'post_turn_summary' })).toEqual([])
+  })
+
   it('maps assistant text, thinking and tool use from one message', () => {
     const events = mapCliEvent({
       type: 'assistant',
@@ -615,6 +649,65 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     const argv = JSON.parse(readFileSync(join(dir, 'bare.json'), 'utf8')) as string[]
     expect(argv).not.toContain('--add-dir')
     expect(argv).not.toContain('--settings')
+  })
+
+  /**
+   * The vendor reports `is_error: false` for a turn it has just said was
+   * blocked: from its side nothing went wrong — it was asked for something it
+   * could not do and said so. From this side the turn produced nothing, and
+   * reporting it as a clean end is what let a phase pass having written no code
+   * and then fail two steps later under another name.
+   *
+   * It matters beyond the record: a reviewer's verdict is read back out of the
+   * transcript, and a session that did not end `ok` falls back to `fail` rather
+   * than to whatever the tail happens to contain.
+   */
+  it('does not end ok when the turn reported an error', async () => {
+    const bin = fakeBin({
+      version: VERSION,
+      readsLine: true,
+      stdout: [
+        '{"type":"system","subtype":"init","session_id":"sess-blocked"}',
+        '{"type":"system","subtype":"permission_denied","tool_name":"Read","decision_reason_type":"workingDir"}',
+        '{"type":"system","subtype":"post_turn_summary","status_category":"blocked"}',
+        // The vendor's own verdict on the same turn.
+        '{"type":"result","subtype":"success","is_error":false}',
+      ],
+    })
+
+    const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const seen: AgentEvent[] = []
+    for await (const event of outcome.session.events) seen.push(event)
+
+    expect(seen).toEqual([
+      { type: 'session_started', sessionId: 'sess-blocked' },
+      { type: 'permission_denied', tool: 'Read', reason: 'workingDir' },
+      { type: 'error', message: 'claude-code: the turn ended blocked' },
+      { type: 'session_ended', result: 'error' },
+    ])
+  })
+
+  /** The ordinary path is untouched: no error, no reinterpretation. */
+  it('still ends ok when nothing went wrong', async () => {
+    const bin = fakeBin({
+      version: VERSION,
+      readsLine: true,
+      stdout: [
+        '{"type":"system","subtype":"init","session_id":"sess-fine"}',
+        '{"type":"system","subtype":"post_turn_summary","status_category":"completed"}',
+        '{"type":"result","subtype":"success","is_error":false}',
+      ],
+    })
+
+    const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const seen: AgentEvent[] = []
+    for await (const event of outcome.session.events) seen.push(event)
+
+    expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
   })
 
   it('classifies a CLI that refuses before announcing a session', async () => {
