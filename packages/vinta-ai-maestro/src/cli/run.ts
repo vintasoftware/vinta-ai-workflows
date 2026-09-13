@@ -137,6 +137,7 @@ export async function runCommand(
         host: { type: 'string' },
         port: { type: 'string' },
         permission: { type: 'string' },
+        'on-failure': { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -163,6 +164,15 @@ export async function runCommand(
     return USAGE
   }
   const permission = requested ?? DEFAULT_PERMISSION
+
+  // Rejected rather than defaulted, for the reason `--permission` is: a typo
+  // that quietly became `stop` would look like the flag worked, and the
+  // operator would find out by watching a failed run end without asking them.
+  const onFailure = parsed.values['on-failure']
+  if (onFailure !== undefined && onFailure !== 'stop' && onFailure !== 'ask') {
+    io.err('vinta-ai-maestro: --on-failure must be one of stop, ask')
+    return USAGE
+  }
 
   const workflow = await loadWorkflow(path, io)
   if (workflow === null) return FAILED
@@ -257,6 +267,7 @@ export async function runCommand(
     adapters,
     executor: host.executor,
     laneRoot,
+    ...(onFailure === undefined ? {} : { onFailure }),
     // §9's take over, wired: the scheduler offers each live turn here and the
     // daemon's PTY channel resolves an `attach` against the same registry.
     // Both sides default to this instance; naming it once is what makes the

@@ -219,6 +219,49 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failed phase can be retried instead of ending the run.** `run` takes
+  `--on-failure <stop|ask>`. `stop` is the default and is what every run has
+  always done — the phase fails, its dependents block, the run finishes. `ask`
+  parks the node on a question instead: retry, retry with another member of the
+  crew, or stop.
+
+  It exists because the failures worth retrying are overwhelmingly
+  environmental — a permission wall, a grant nobody made, a gate whose service
+  was not up — and the only recovery was to start the whole plan again, running
+  every phase that had already succeeded a second time. Only pass `ask` when
+  somebody is watching: the run waits, which is exactly why it is not the
+  default.
+
+  The alternatives offered are **members of the crew, not models**. A staffed
+  run has no free-floating models in it — a phase is taken by a member, and the
+  tier floor that decides who may take it is the assigned member's own — so a
+  model is something the plan cannot express and nobody could be found to hold.
+  A member below the phase's tier is never offered: an operator answering a
+  question is not a reason to hand a phase to somebody the plan judged too
+  junior for it.
+
+  The retry starts **cold**, and everything the node held goes back before it
+  waits (§6.1) — an operator at lunch must not be holding a lane another phase
+  could use.
+
+- **A refusal nobody was asked about is now said out loud.** The adapter knew
+  about `permission_request`, a question waiting for an answer, and nothing
+  else. The refusal an operator actually hits is not a question: a read outside
+  the working directory is decided by the CLI and announced as
+  `permission_denied`, with no request to reply to. That frame was dropped at
+  the first `switch` — no event, no journal row, no transcript line. The new
+  `permission_denied` event carries the decision token (`workingDir`, `mode`)
+  and never the vendor's prose, which names the file being read (§11).
+
+- **A turn that ended blocked is no longer a turn that succeeded.** The CLI
+  says `status_category: "blocked"` one frame before reporting
+  `is_error: false`, and both are true from its side: it was asked for
+  something it could not do and said so. Taking the second at its word is how a
+  phase passed having written no code and then failed two steps later under
+  another name. A session that reported an error no longer ends `ok` — which
+  also makes a reviewer fail closed, since its verdict is read back out of a
+  transcript whose session did not end cleanly.
+
 - **An agent still could not write in its own lane.** The entry below passed
   claude-code `--permission-mode auto`, which matched our own vocabulary for
   "works unattended" and is not what the vendor means by the word: `auto` still

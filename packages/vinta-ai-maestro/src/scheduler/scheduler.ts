@@ -100,6 +100,11 @@ import type { Node, Pipeline, Workflow } from '../types.ts'
 /** The pool a node is dispatched into. Required of every workflow (§5.1). */
 const LANE = 'lane'
 
+/** The answers `#offerRetry` understands. `retry with ` carries a member id. */
+const RETRY = 'retry'
+const STOP = 'stop'
+const RETRY_WITH = 'retry with '
+
 export interface SchedulerOptions {
   /** The frozen snapshot the run executes. Its `run_started` is already journalled. */
   readonly workflow: Workflow
@@ -113,6 +118,21 @@ export interface SchedulerOptions {
   readonly executor: EffectExecutor
   /** Where lane worktrees live — `LanePool`'s `poolRoot`. */
   readonly laneRoot: string
+  /**
+   * What a node's failure does: end it, or ask the operator first.
+   *
+   * `stop` is the default and is what a run has always done — a failed phase
+   * fails, its dependents block, the run finishes. It is the only safe default
+   * because the alternative *waits*, and a run in CI with nobody watching would
+   * wait forever.
+   *
+   * `ask` parks the node on a question instead. It exists because the failures
+   * worth retrying are overwhelmingly environmental — a permission wall, a
+   * missing grant, a flaky gate — and an operator who is watching can fix the
+   * cause in seconds. Without it their only recovery is to start the whole plan
+   * again, re-running every phase that already succeeded.
+   */
+  readonly onFailure?: 'stop' | 'ask'
   /**
    * Returns a lane slot to a clean state before another node is given it —
    * `LanePool.recycle`, which resets what it can and re-provisions what it
@@ -248,6 +268,14 @@ interface NodeState {
   /** Fixer runs taken so far. The `fix_rounds` fact the interpreter reads. */
   fixRounds: number
   lane: string | null
+  /**
+   * A member the operator picked for the next attempt, in place of the one the
+   * plan assigned. Consumed by the next claim and then kept, so a second
+   * failure offers the choice again from where the node actually is.
+   */
+  retryMember: string | null
+  /** How many times the operator has been offered this node. Keeps effect ids apart. */
+  retries: number
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -478,6 +506,8 @@ export class Scheduler {
       parkedEffectId: null,
       fixRounds: 0,
       lane: null,
+      retryMember: null,
+      retries: 0,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -821,7 +851,11 @@ export class Scheduler {
           if (state.lastMember !== null) this.#poisoned.delete(state.lastMember)
           this.#setStatus(state, 'done')
         }
-        else this.#fail(state, `pipeline ended in state "${settled.state}"`)
+        else {
+          const reason = `pipeline ended in state "${settled.state}"`
+          if (await this.#offerRetry(state)) continue
+          this.#fail(state, reason)
+        }
         return
       } catch (error) {
         // Everything the node holds goes back before it waits — §6.1's rule,
@@ -852,7 +886,9 @@ export class Scheduler {
           this.#setStatus(state, 'running')
           continue
         }
-        this.#fail(state, failureReason(error))
+        const reason = failureReason(error)
+        if (await this.#offerRetry(state)) continue
+        this.#fail(state, reason)
         return
       }
     }
@@ -874,7 +910,11 @@ export class Scheduler {
   async #claimCrew(state: NodeState): Promise<void> {
     while (!state.aborted) {
       const decision: CrewDecision = assignCrew({
-        assigned: state.node.crew,
+        // The operator's pick, when they made one, stands in for the plan's.
+        // `assignCrew` still refuses a member who is not an implementer on the
+        // roster and still substitutes when the pick is busy, so an answer
+        // cannot put a phase somewhere the plan would not.
+        assigned: state.retryMember ?? state.node.crew,
         crew: this.#workflow.crew,
         busy: this.#busyCrew,
       })
@@ -1081,6 +1121,76 @@ export class Scheduler {
         facts: this.#withPending(state, run, { fix_rounds: state.fixRounds }),
       })
     }
+  }
+
+  /**
+   * Offers the operator the node's failure, and returns whether to try again.
+   *
+   * Reached only under `onFailure: 'ask'`; otherwise a failure fails, which is
+   * what every run did before this existed.
+   *
+   * Everything the node held is already back — both call sites release before
+   * they get here — so a node waiting on this answer costs a question and
+   * nothing else. That is the §6.1 rule and it matters more here than anywhere:
+   * the wait is unbounded, and a lane held across it would be a lane no other
+   * phase can have for as long as the operator is at lunch.
+   *
+   * The retry starts **cold**. The context that failed is the thing being
+   * retried away from, and §15's ledger does not survive a re-attempt anyway:
+   * the branch the last attempt built is gone and the worktree under it will be
+   * recycled, so a resumed session would hold a memory of files it wrote and a
+   * tree without them — the same reasoning a capacity retry already follows.
+   */
+  async #offerRetry(state: NodeState): Promise<boolean> {
+    if ((this.#options.onFailure ?? 'stop') !== 'ask') return false
+    if (state.aborted) return false
+
+    state.retries += 1
+    const effectId = `retry:${state.node.id}:${state.retries}`
+    this.#ask(state, effectId, {
+      // The reason is already journalled by `#setStatus`; repeating it in the
+      // question would put a failure message in a notification body (§11).
+      question: `This phase failed. Try it again?`,
+      kind: 'choice',
+      choices: this.#retryChoices(state),
+    })
+    state.parkedEffectId = effectId
+
+    const facts = await this.#park(state)
+    if (state.aborted) return false
+
+    const answer = facts.human?.['answer']
+    const chosen = typeof answer === 'string' ? answer : answer === true ? RETRY : STOP
+    if (chosen === STOP) return false
+
+    const member = chosen.startsWith(RETRY_WITH) ? chosen.slice(RETRY_WITH.length) : null
+    if (member !== null && this.#workflow.crew[member] !== undefined) state.retryMember = member
+    this.#clearLedger(state)
+    return true
+  }
+
+  /**
+   * `retry`, `stop`, and one entry per other member who could take this phase.
+   *
+   * The alternatives are read off the roster rather than offered as a list of
+   * models, because a staffed run has no free-floating models in it: a phase is
+   * taken by a *member*, and the tier floor that decides who may take it is the
+   * assigned member's own. Offering a model would be offering something the
+   * plan cannot express and the scheduler would have to invent a holder for.
+   */
+  #retryChoices(state: NodeState): readonly string[] {
+    const assigned = state.retryMember ?? state.node.crew
+    const floor = assigned === undefined ? undefined : this.#workflow.crew[assigned]?.tier
+    const others =
+      floor === undefined
+        ? []
+        : Object.entries(this.#workflow.crew)
+            .filter(
+              ([id, member]) =>
+                member.role === 'implementer' && member.tier >= floor && id !== assigned,
+            )
+            .map(([id]) => `${RETRY_WITH}${id}`)
+    return [RETRY, ...others, STOP]
   }
 
   /**
