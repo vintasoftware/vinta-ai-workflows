@@ -1,6 +1,6 @@
 {
   "name": "vinta-ai-maestro",
-  "version": "0.7.0-alpha4",
+  "version": "0.7.0-alpha5",
   "description": "Code-orchestrated parallel execution of plan-feature plans across agent harnesses.",
   "type": "module",
   "bin": {

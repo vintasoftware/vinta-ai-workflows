@@ -7,6 +7,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.0] — YYYY-MM-DD
 
+<!-- pre-release: 0.7.0-alpha5 on 2026-09-13 -->
 <!-- pre-release: 0.7.0-alpha4 on 2026-09-13 -->
 <!-- pre-release: 0.7.0-alpha3 on 2026-09-12 -->
 <!-- pre-release: 0.7.0-alpha2 on 2026-09-12 -->
@@ -218,6 +219,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   branch at each wave boundary, so the unit commits survive.
 
 ### Fixed
+
+- **Four places the UI asked the operator to work around it.** The transcript
+  opened at the *oldest* row it held, so a live agent's newest line — the one
+  the panel was opened to read — sat below the fold and every arriving entry
+  pushed it further down; it now opens at the newest and stays there, but only
+  while the operator is already at the bottom, because scrolling up is reading.
+  The `git diff` command overflowed its panel, uncopyable without selecting
+  blind, and now wraps. The shell's bounded column went from 1280px to 1600px:
+  1280 is a reading measure, and the Nodes table's columns are ids, lane names
+  and branch names, none of which can be abbreviated without losing what
+  identifies them. And the notification interval said "Remind every 5 min"
+  without ever saying what it would remind anyone about — it repeats the
+  notification for a phase that stopped to ask the operator something, until
+  they answer, which is what the options say now.
+
+- **A killed terminal releases its directory on Windows.** Two PTY tests failed
+  teardown with `EBUSY: rmdir`: killing a process there is not synchronous with
+  releasing what it held, so the conpty and its background child are gone as far
+  as the test is concerned while the OS still has the working directory open.
 
 - **A failed phase can be retried instead of ending the run.** `run` takes
   `--on-failure <stop|ask>`. `stop` is the default and is what every run has
