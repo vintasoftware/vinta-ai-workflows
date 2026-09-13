@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
-import { findReapable, reap, worktrees } from '../src/cli/reap.ts'
+import { findReapable, reap } from '../src/cli/reap.ts'
 
 const temps: string[] = []
 afterAll(() => {
@@ -159,6 +159,37 @@ describe('finding what a run left behind', () => {
   })
 })
 
+/**
+ * Lanes are found by reading the lane root, not by matching `git worktree list`
+ * output against a path this process built. The two spellings of one directory
+ * differ on Windows — drive-letter case, separators, 8.3 short names — and when
+ * they do, every lane looks like someone else's worktree and the command
+ * quietly does nothing. Reading the directory leaves nothing to reconcile, and
+ * these two say what that costs: membership is now a fact about each child.
+ */
+describe('a lane is a child of the lane root that is really a worktree', () => {
+  it('ignores a directory under the lane root that is not a worktree', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
+    // The lane root lives inside the repository, so a stray directory here
+    // answers every `git` question — from the main checkout, which is not a
+    // lane and must never be removed as one.
+    mkdirSync(join(laneRoot, 'notes'), { recursive: true })
+    writeFileSync(join(laneRoot, 'notes', 'scratch.md'), 'mine\n', 'utf8')
+
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    expect(found.lanes.map((lane) => lane.path)).toEqual([join(laneRoot, 'runa-crew-1-junior')])
+  })
+
+  it('finds the lane at the path it was created at', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
+
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    expect(found.lanes[0]?.path).toBe(join(laneRoot, 'runa-crew-1-junior'))
+  })
+})
+
 describe('work left in the worktree', () => {
   /**
    * The asymmetry this fixes. An earlier version guarded branches carefully and
@@ -257,7 +288,7 @@ describe('reaping', () => {
     expect(failures).toEqual([])
     expect(existsSync(join(laneRoot, 'runa-crew-1-junior'))).toBe(false)
     // The point of the exercise: the next run can cut this branch again.
-    expect((await worktrees(repo)).some((lane) => lane.branch === 'plan/p/phase-runa')).toBe(false)
+    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain('plan/p/phase-runa')
     expect(git(repo, 'branch', '--list', 'plan/p/phase-runa').trim()).toBe('')
   })
 

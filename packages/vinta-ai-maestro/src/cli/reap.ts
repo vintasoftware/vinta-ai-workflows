@@ -27,8 +27,7 @@
  * list every time — is the entire point.
  */
 import { execFile } from 'node:child_process'
-import { realpathSync } from 'node:fs'
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -62,45 +61,64 @@ const git = async (repoPath: string, args: readonly string[]): Promise<string> =
 }
 
 /**
- * Every worktree git knows about, with the branch each holds.
+ * The lanes under this root, with the branch each holds.
  *
- * `--porcelain` is stanzas of `key value` lines separated by blank lines, each
- * opening with `worktree <path>`. Parsed rather than `--list`ed because the
- * human format aligns columns and truncates.
+ * Read from the directory rather than from `git worktree list`, and that is the
+ * load-bearing choice in this file. Listing git's worktrees means asking which
+ * of them are lanes, and the only available answer is "the ones whose path is
+ * under `laneRoot`" — a comparison between a path git printed and a path Node
+ * built, which are not the same string for the same directory. Windows decides
+ * that on its own: drive-letter case, `/` against `\`, and 8.3 short names like
+ * `RUNNER~1` where the long name is `runneradmin`. Resolving both sides first
+ * narrows the gap without closing it, and the failure is silent in the worst
+ * possible direction — every lane looks like someone else's worktree, so the
+ * command finds nothing, deletes nothing, and says so cheerfully.
+ *
+ * A lane's directory is one this tool created, at a path it built itself. Going
+ * that way round there is no second spelling to reconcile: the children of the
+ * lane root are the candidates, and each is asked about itself.
  */
-export async function worktrees(repoPath: string): Promise<readonly Lane[]> {
-  let output: string
-  try {
-    output = await git(repoPath, ['worktree', 'list', '--porcelain'])
-  } catch {
-    return []
-  }
-
-  const found: { path: string; branch: string | null }[] = []
-  let path: string | null = null
-  let branch: string | null = null
-  const flush = (): void => {
-    if (path !== null) found.push({ path, branch })
-    path = null
-    branch = null
-  }
-
-  for (const line of output.split('\n')) {
-    if (line.startsWith('worktree ')) {
-      flush()
-      path = line.slice('worktree '.length).trim()
-    } else if (line.startsWith('branch ')) {
-      branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '')
-    }
-  }
-  flush()
-
-  // Asked per worktree rather than inferred from the main checkout's status:
-  // each lane is its own working tree with its own index, and the main
-  // checkout's cleanliness says nothing about any of them.
-  return await Promise.all(
-    found.map(async (lane) => ({ ...lane, dirty: await isDirty(lane.path) })),
+async function lanesUnder(laneRoot: string, runId: string | undefined): Promise<readonly Lane[]> {
+  const names = (await entriesOf(laneRoot)).filter(
+    (name) => runId === undefined || name.startsWith(`${runId}-`),
   )
+
+  const found = await Promise.all(
+    names.map(async (name): Promise<Lane | null> => {
+      const path = join(laneRoot, name)
+      if (!(await isLinkedWorktree(path))) return null
+      return { path, branch: await branchOf(path), dirty: await isDirty(path) }
+    }),
+  )
+  return found.filter((lane): lane is Lane => lane !== null)
+}
+
+/**
+ * Whether a directory is a linked worktree, as opposed to anything else that
+ * happens to be sitting under the lane root.
+ *
+ * A linked worktree carries a `.git` **file** pointing at the real repository,
+ * where an ordinary checkout has a directory — a fact about the filesystem,
+ * which is what this needs, since the lane root lives inside the repository and
+ * a plain subdirectory of it would answer every `git` question perfectly well
+ * while not being a worktree at all.
+ */
+async function isLinkedWorktree(path: string): Promise<boolean> {
+  try {
+    return (await stat(join(path, '.git'))).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** The branch checked out in a worktree, or null when HEAD is detached. */
+async function branchOf(path: string): Promise<string | null> {
+  try {
+    const output = await git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+    return output.trim() === '' ? null : output.trim()
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -125,9 +143,9 @@ async function isDirty(path: string): Promise<boolean> {
 /**
  * What belongs to a run, or to every run, under this store.
  *
- * A lane is identified by its directory sitting under `laneRoot` — not by its
- * name matching a pattern. The names encode a run id, but a name is a
- * convention and a path is a fact, and this deletes things.
+ * A lane is a child of `laneRoot` that is really a worktree; the name matters
+ * only for `runId`, which selects a subset of lanes already established as
+ * lanes. Nothing is reaped for looking like it belongs to a run.
  */
 export async function findReapable(options: {
   readonly repoPath: string
@@ -140,18 +158,7 @@ export async function findReapable(options: {
 }): Promise<Reapable> {
   const { repoPath, laneRoot, summaryDir, runId } = options
 
-  // Both sides resolved before comparing. `git worktree list` reports real
-  // paths, and a store under a symlinked directory — `/var/folders/…` on macOS,
-  // which is really `/private/var/folders/…`, and any repository someone keeps
-  // behind a symlink — otherwise matches nothing. The failure mode is the worst
-  // available for this command: it finds no lanes, deletes nothing, and says so
-  // cheerfully.
-  const root = realpath(laneRoot)
-  const all = await worktrees(repoPath)
-  const mine = all.filter((lane) => {
-    if (!isUnder(realpath(lane.path), root)) return false
-    return runId === undefined || basename(lane.path).startsWith(`${runId}-`)
-  })
+  const mine = await lanesUnder(laneRoot, runId)
 
   const lanes = mine.filter((lane) => !lane.dirty)
   const dirtyLanes = mine.filter((lane) => lane.dirty)
@@ -272,24 +279,6 @@ const isPhaseBranch = (branch: string | null): branch is string =>
   branch !== null && /^plan\/[^/]+\/(phase|integ)-/.test(branch)
 
 const basename = (path: string): string => path.split(/[/\\]/).filter(Boolean).pop() ?? path
-
-/** Path containment by segment, so `lanes-old` is not "under" `lanes`. */
-function isUnder(path: string, root: string): boolean {
-  const normalize = (value: string): string[] => value.split(/[/\\]/).filter(Boolean)
-  const parts = normalize(path)
-  const rootParts = normalize(root)
-  if (parts.length <= rootParts.length) return false
-  return rootParts.every((segment, i) => parts[i] === segment)
-}
-
-/** The real path, or the path unchanged when it does not exist (yet). */
-function realpath(path: string): string {
-  try {
-    return realpathSync(path)
-  } catch {
-    return path
-  }
-}
 
 async function entriesOf(dir: string): Promise<readonly string[]> {
   try {
