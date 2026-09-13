@@ -14,7 +14,7 @@
  * includes CI, and includes the machine this was written on, where `claude` is
  * a shell alias rather than anything on PATH.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -25,8 +25,9 @@ import {
   mapCliEvent,
 } from '../src/harness/claude-code.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
+import { commandInvocation } from '../src/platform/platform.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
-import { type FakeCliSpec, fakeCli } from './support/fake-cli.ts'
+import { type FakeCliSpec, fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
 const temps: string[] = []
 
@@ -87,6 +88,59 @@ describe('CLI frame mapping', () => {
     expect(mapCliEvent({ type: 'system', subtype: 'init', session_id: 's-1' })).toEqual([
       { type: 'session_started', sessionId: 's-1' },
     ])
+  })
+
+  /**
+   * The frame that was being dropped, byte for byte as the CLI emits it.
+   *
+   * A read outside the working directory is not *asked* about — there is no
+   * `can_use_tool` request to answer — it is decided, and announced like this.
+   * Until this mapping existed the orchestrator saw nothing: no event, no
+   * journal row, no transcript line, and a session that went on to end
+   * successfully having written nothing.
+   */
+  it('maps a refusal the CLI decided on its own', () => {
+    expect(
+      mapCliEvent({
+        type: 'system',
+        subtype: 'permission_denied',
+        tool_name: 'Read',
+        tool_use_id: 'toolu_01',
+        decision_reason_type: 'workingDir',
+        decision_reason: 'Path is outside allowed working directories',
+        message: 'Claude requested permissions to read from /repo/src/secret.ts, …',
+      }),
+    ).toEqual([{ type: 'permission_denied', tool: 'Read', reason: 'workingDir' }])
+  })
+
+  /**
+   * §11: the prose names the file that was being read. The decision token is a
+   * fixed word, which is what an operator acts on anyway — and the `tool_use`
+   * row above it in the transcript already carries what was attempted.
+   */
+  it('carries the decision token and never the vendor’s prose', () => {
+    const [event] = mapCliEvent({
+      type: 'system',
+      subtype: 'permission_denied',
+      tool_name: 'Read',
+      decision_reason_type: 'workingDir',
+      decision_reason: 'Path is outside allowed working directories',
+      message: 'Claude requested permissions to read from /repo/src/secret.ts, …',
+    })
+
+    expect(JSON.stringify(event)).not.toContain('secret.ts')
+    expect(JSON.stringify(event)).not.toContain('outside allowed')
+  })
+
+  /** A refusal with no reason attached is still a refusal, and still said. */
+  it('names a refusal that came with no decision token', () => {
+    expect(
+      mapCliEvent({ type: 'system', subtype: 'permission_denied', tool_name: 'Write' }),
+    ).toEqual([{ type: 'permission_denied', tool: 'Write', reason: 'denied' }])
+  })
+
+  it('ignores a refusal that does not say which tool', () => {
+    expect(mapCliEvent({ type: 'system', subtype: 'permission_denied' })).toEqual([])
   })
 
   it('maps assistant text, thinking and tool use from one message', () => {
@@ -480,6 +534,87 @@ describe('spawn against a fake binary', () => {
       { type: 'usage', input: 3, output: 4, costUsd: 0.01 },
       { type: 'session_ended', result: 'ok' },
     ])
+  })
+
+  /**
+   * The grant and its guard reach the CLI as arguments, so the assertion is
+   * about argv and nothing else.
+   *
+   * Worth pinning because the failure is invisible: `--add-dir` lifts the
+   * working-directory boundary in both directions, so a `--settings` that went
+   * missing would not break a run — it would quietly give every agent write
+   * access to the operator's checkout and to every sibling lane.
+   */
+  it('grants the read roots and denies writing in them', async () => {
+    const dir = makeTemp()
+    const lane = join(dir, 'lanes', 'mine')
+    mkdirSync(lane, { recursive: true })
+    const bin = fakeCliFromSource(
+      dir,
+      'claude-argv',
+      `import { writeFileSync } from 'node:fs'
+if (process.argv.includes('--version')) { console.log(${JSON.stringify(VERSION)}); process.exit(0) }
+writeFileSync(${JSON.stringify(join(dir, 'argv.json'))}, JSON.stringify(process.argv.slice(2)))
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-argv' }))
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }))
+`,
+    )
+
+    const outcome = await new ClaudeCodeAdapter({
+      bin,
+      readRoots: [dir],
+      settingsDir: join(dir, 'settings'),
+    }).spawn({ ...task(), cwd: lane })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    for await (const _event of outcome.session.events) void _event
+
+    const argv = JSON.parse(readFileSync(join(dir, 'argv.json'), 'utf8')) as string[]
+    expect(argv).toContain('--add-dir')
+    expect(argv[argv.indexOf('--add-dir') + 1]).toBe(dir)
+
+    // A path, never the policy itself. On Windows every spawn goes through
+    // `cmd.exe`, where a `"` cannot survive a quoted region — `platform.ts`
+    // refuses such an argument rather than escaping it, so a JSON argument is
+    // a spawn that dies before the binary is reached.
+    const settingsPath = argv[argv.indexOf('--settings') + 1] as string
+    expect(argv.some((token) => token.includes('"'))).toBe(false)
+    // The exact check Windows applies, run from anywhere: `commandInvocation`
+    // refuses a token it cannot quote instead of escaping it, so this throwing
+    // is the spawn dying before the binary is reached. It is how the JSON
+    // version of this failed, on one platform, with 13ms and no output.
+    expect(() => commandInvocation('claude', argv, 'win32')).not.toThrow()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as {
+      permissions: { deny: string[] }
+    }
+    // The corridor: the fake's own directory is denied, the lane is not.
+    expect(settings.permissions.deny.some((rule) => rule.includes('claude-argv'))).toBe(true)
+    expect(settings.permissions.deny.some((rule) => rule.includes('mine'))).toBe(false)
+  })
+
+  /** No roots, no grant — and therefore no policy that could contradict one. */
+  it('passes neither when nothing is granted', async () => {
+    const dir = makeTemp()
+    const bin = fakeCliFromSource(
+      dir,
+      'claude-bare',
+      `import { writeFileSync } from 'node:fs'
+if (process.argv.includes('--version')) { console.log(${JSON.stringify(VERSION)}); process.exit(0) }
+writeFileSync(${JSON.stringify(join(dir, 'bare.json'))}, JSON.stringify(process.argv.slice(2)))
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-bare' }))
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }))
+`,
+    )
+
+    const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    for await (const _event of outcome.session.events) void _event
+
+    const argv = JSON.parse(readFileSync(join(dir, 'bare.json'), 'utf8')) as string[]
+    expect(argv).not.toContain('--add-dir')
+    expect(argv).not.toContain('--settings')
   })
 
   it('classifies a CLI that refuses before announcing a session', async () => {

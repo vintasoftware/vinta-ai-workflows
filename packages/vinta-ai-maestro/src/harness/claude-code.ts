@@ -31,6 +31,9 @@
  * tokens and exit codes only; the content lives in the transcript stream.
  */
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import {
   type AgentEvent,
   type AgentSession,
@@ -44,6 +47,7 @@ import {
   type SpawnRefusalKind,
 } from './adapter.ts'
 import { type AgentPermission, claudeCodeArgs, DEFAULT_PERMISSION } from './permissions.ts'
+import { addDirArgs, writeDenyRules, type ReadGrant } from './read-access.ts'
 import { openPty } from './pty.ts'
 import {
   EventQueue,
@@ -198,6 +202,25 @@ const mapResult = (value: Record<string, unknown>): AgentEvent[] => {
   return events
 }
 
+/**
+ * The refusal that never asks: `{"type":"system","subtype":"permission_denied",
+ * "tool_name":"Read","decision_reason_type":"workingDir", …}`.
+ *
+ * The CLI emits this instead of a `can_use_tool` control request whenever the
+ * answer is already decided — a path outside the working directory, a mode that
+ * forbids the tool. Nothing can be replied to, so the only thing to do with it
+ * is say it happened.
+ *
+ * `decision_reason` is prose and `message` names the path that was read; both
+ * are dropped. `decision_reason_type` is a fixed token, which is what §11
+ * allows in an event and what an operator can act on anyway.
+ */
+const mapPermissionDenied = (value: Record<string, unknown>): AgentEvent[] => {
+  const tool = asString(value['tool_name'])
+  if (tool === undefined) return []
+  return [{ type: 'permission_denied', tool, reason: asString(value['decision_reason_type']) ?? 'denied' }]
+}
+
 const mapControlRequest = (value: Record<string, unknown>): AgentEvent[] => {
   const request = asRecord(value['request'])
   if (!request || request['subtype'] !== 'can_use_tool') return []
@@ -215,6 +238,7 @@ export function mapCliEvent(raw: unknown): AgentEvent[] {
   if (!value) return []
   switch (value['type']) {
     case 'system': {
+      if (value['subtype'] === 'permission_denied') return mapPermissionDenied(value)
       const sessionId = asString(value['session_id'])
       return value['subtype'] === 'init' && sessionId !== undefined
         ? [{ type: 'session_started', sessionId }]
@@ -378,6 +402,73 @@ class ClaudeCodeSession implements AgentSession {
   }
 }
 
+/**
+ * `--add-dir` for each granted root, and the deny list that keeps the grant to
+ * reading.
+ *
+ * Computed per spawn because it is per lane: the deny list names the *other*
+ * children at every level between a root and this agent's working directory,
+ * which is the only shape the vendor's rules can express (`read-access.ts`).
+ *
+ * `full` gets the grant and no deny list. It means "no checks at all" and is
+ * documented as being for a box that is sandboxed by something else; writing a
+ * policy the mode is chosen to ignore would only make the flag look safer than
+ * the operator asked for.
+ */
+function readAccessArgs(
+  permission: AgentPermission,
+  roots: readonly string[],
+  lane: string,
+  settingsDir: string,
+): readonly string[] {
+  if (roots.length === 0) return []
+  const grant: ReadGrant = { roots, lane }
+  if (permission === 'full') return addDirArgs(grant)
+  const deny = writeDenyRules(grant, (dir) => {
+    try {
+      return readdirSync(dir)
+    } catch {
+      // A directory that cannot be listed contributes no rules, which is the
+      // safe direction only because the corridor is what it would have named:
+      // an unlistable level leaves its siblings writable, never the lane
+      // unwritable.
+      return []
+    }
+  })
+  // Written to a file rather than passed as JSON, and this is forced rather
+  // than tidy. On Windows every spawn goes through `cmd.exe`, where a `"`
+  // cannot survive a quoted region: `platform.ts` refuses an argument
+  // containing one instead of escaping it, so the whole spawn fails before the
+  // binary is reached. A JSON object is nothing but quotes.
+  const settings = writeSettings(settingsDir, lane, deny)
+  // Fail *closed*. Without the policy the grant is a write grant, so a
+  // directory that cannot be written to costs the read access rather than the
+  // guard — the one direction in which this may silently do less.
+  if (settings === null) return []
+  return [...addDirArgs(grant), '--settings', settings]
+}
+
+/**
+ * The policy file for one lane, or null when it cannot be written.
+ *
+ * Named for the lane and rewritten on each spawn: the deny list is computed
+ * from what is on disk *now*, and a stale file would describe a repository that
+ * has moved on. One file per lane rather than per spawn so a killed session
+ * leaves nothing to collect — the next spawn in that lane overwrites it, and
+ * `purge` removes the directory with the rest of the store.
+ */
+function writeSettings(dir: string, lane: string, deny: readonly string[]): string | null {
+  const name = `${lane.split(/[/\\]/).filter(Boolean).pop() ?? 'lane'}.settings.json`
+  const path = join(dir, name)
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path, `${JSON.stringify({ permissions: { deny } }, null, 2)}\n`, 'utf8')
+    return path
+  } catch {
+    return null
+  }
+}
+
 const writeMessage = (child: ChildProcess, text: string): void => {
   const line = `${JSON.stringify({
     type: 'user',
@@ -404,6 +495,33 @@ export interface ClaudeCodeAdapterOptions {
    * invocation — never read from the workflow document (`permissions.ts`).
    */
   readonly permission?: AgentPermission
+  /**
+   * Directories the agent may *read* beyond its lane, as absolute paths.
+   *
+   * Normally the repository root: a lane is a worktree cut from a branch, so
+   * anything the operator has not committed — a plan written this morning, a
+   * spec that never leaves their checkout — is present where they are and
+   * missing where the agent is, and reaching for it is refused before the
+   * model sees a byte.
+   *
+   * Granting a directory to `claude` grants writing in it too, so the grant is
+   * paired with a deny list that keeps the lane as the only writable place
+   * under it (`read-access.ts`). Empty means the working directory is the
+   * whole world, which is what it was before this existed.
+   */
+  readonly readRoots?: readonly string[]
+  /**
+   * Where the per-lane settings file is written, when `readRoots` is set.
+   *
+   * A directory rather than a flag, because the policy cannot travel as one:
+   * on Windows every spawn goes through `cmd.exe`, and a `"` cannot survive a
+   * quoted region — `platform.ts` refuses such an argument outright rather than
+   * escaping it cleverly. A JSON object is nothing but quotes. A path has none.
+   *
+   * Defaults to the OS temp directory. Hosts that have a store pass it there,
+   * where `purge` can reach it.
+   */
+  readonly settingsDir?: string
   /** How long a spawn may go without an init frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
@@ -464,6 +582,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   }
 
   async spawn(task: AgentTask): Promise<SpawnOutcome> {
+    const permission = this.options.permission ?? DEFAULT_PERMISSION
     const forced = this.#forced
     this.#forced = null
     if (forced !== null) {
@@ -481,7 +600,13 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       // `permission_request` event, the transcript renders it, and no answer is
       // ever sent — so the agent reports a blocked working directory and the
       // phase fails having written nothing.
-      ...claudeCodeArgs(this.options.permission ?? DEFAULT_PERMISSION),
+      ...claudeCodeArgs(permission),
+      ...readAccessArgs(
+        permission,
+        this.options.readRoots ?? [],
+        task.cwd,
+        this.options.settingsDir ?? tmpdir(),
+      ),
       '--model',
       task.model,
       ...(task.resumeSessionId === undefined ? [] : ['--resume', task.resumeSessionId]),

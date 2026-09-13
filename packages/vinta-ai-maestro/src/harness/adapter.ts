@@ -96,6 +96,22 @@ export type AgentEvent =
   | { readonly type: 'tool_use'; readonly name: string; readonly input: unknown; readonly id: string }
   | { readonly type: 'tool_result'; readonly id: string; readonly ok: boolean; readonly summary: string }
   | { readonly type: 'permission_request'; readonly tool: string; readonly detail: unknown }
+  /**
+   * A tool the harness refused outright, with no request to answer.
+   *
+   * Not the same event as `permission_request` and not a variant of it: a
+   * request is a question waiting for a reply, and this is a decision already
+   * taken. The distinction is the whole reason this exists — a read outside the
+   * working directory is *denied*, never asked about, and the vendor hands the
+   * model a message ("you haven't granted it yet") that reads like a pending
+   * prompt. An orchestrator that only knew about requests saw nothing at all.
+   *
+   * `reason` is the harness's own decision token — `workingDir`, `mode` — never
+   * its prose, which carries the path it was reading (§11). The row above this
+   * one in the transcript is the `tool_use` that was refused, and it carries
+   * what was attempted; this says why it was not allowed.
+   */
+  | { readonly type: 'permission_denied'; readonly tool: string; readonly reason: string }
   | {
       readonly type: 'usage'
       readonly input: number

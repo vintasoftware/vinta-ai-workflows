@@ -50,6 +50,7 @@ const ALL_KINDS = [
   entry({ type: 'tool_result', id: 't1', ok: true, summary: '120 lines' }),
   entry({ type: 'user_message', text: 'Use the existing invoice serializer.' }),
   entry({ type: 'permission_request', tool: 'Bash', detail: { cmd: 'pnpm test' } }),
+  entry({ type: 'permission_denied', tool: 'Read', reason: 'workingDir' }),
   entry({ type: 'usage', input: 1200, output: 340, costUsd: 0.12 }),
   entry({ type: 'error', message: 'the harness stream ended early' }),
   entry({ type: 'session_ended', result: 'ok' }),
@@ -71,7 +72,7 @@ test('every normalized event kind renders, and the operator’s own message is a
   daemon = stub
   const { container } = open(stub, 'impl')
 
-  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(10))
+  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(11))
 
   // Not one kind falls through to a blank row, and no two look alike.
   const labels = TRANSCRIPT_KINDS.map((kind) => {
