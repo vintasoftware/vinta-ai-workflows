@@ -57,6 +57,13 @@ concurrency:
 
 jobs:
   publish:
+    # Part of the credential, not a deployment nicety. npm's trusted publisher
+    # record names the environment alongside the repository and the workflow
+    # filename, and the OIDC token only carries an `environment` claim when the
+    # job actually runs in one. Without this the exchange answers 404 — the same
+    # 404 as "no trusted publisher at all" — and npm falls back to looking for a
+    # token, failing with `ENEEDAUTH`, which names none of this.
+    environment: npm
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
