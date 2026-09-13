@@ -43,6 +43,7 @@ import {
   type SpawnOutcome,
   type SpawnRefusalKind,
 } from './adapter.ts'
+import { type AgentPermission, claudeCodeArgs, DEFAULT_PERMISSION } from './permissions.ts'
 import { openPty } from './pty.ts'
 import {
   EventQueue,
@@ -398,6 +399,11 @@ const STRIPPED_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const
 export interface ClaudeCodeAdapterOptions {
   /** Overrides `VINTA_AI_MAESTRO_CLAUDE_BIN`, which overrides `"claude"`. */
   readonly bin?: string
+  /**
+   * How much the agent may do unasked. The operator's choice, passed at
+   * invocation — never read from the workflow document (`permissions.ts`).
+   */
+  readonly permission?: AgentPermission
   /** How long a spawn may go without an init frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
@@ -470,6 +476,12 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
 
     const args = [
       ...BASE_ARGS,
+      // Without this the CLI runs in its default mode and asks before every
+      // write. In `-p` there is nobody to ask: the request surfaces as a
+      // `permission_request` event, the transcript renders it, and no answer is
+      // ever sent — so the agent reports a blocked working directory and the
+      // phase fails having written nothing.
+      ...claudeCodeArgs(this.options.permission ?? DEFAULT_PERMISSION),
       '--model',
       task.model,
       ...(task.resumeSessionId === undefined ? [] : ['--resume', task.resumeSessionId]),

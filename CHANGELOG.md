@@ -218,6 +218,31 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An agent can write in its own lane.** Every adapter declared
+  `permissionControl: true` and passed no policy at all: claude-code was spawned
+  as `-p --output-format stream-json …` with no `--permission-mode`, and codex as
+  `exec --json` with no sandbox and no approval flag, under a comment saying it
+  took both on the command line. So a headless run asked before its first write,
+  emitted a `permission_request`, rendered it in the transcript — and nothing
+  anywhere answered. The phase failed reporting a permission system it could not
+  see, having written nothing.
+
+  `run` and `serve` now take `--permission <ask|auto|full>`, defaulting to
+  `auto`. **The operator sets it, never the workflow document**: the document is
+  committed and shared, and a file in a repository should not be able to tell
+  someone else's machine to run agents without approvals.
+
+  Both CLIs refuse combinations that looked reasonable, and both were found by
+  running them rather than reading them: codex rejects `--sandbox` alongside
+  `--approve-for-me`, and `codex exec resume` accepts neither — passing the
+  fresh-spawn policy there turned a `stale_session` refusal, which the scheduler
+  retries cold, into a `fatal` one that fails the node.
+
+  This reverses a documented decision. The README said the daemon passed no
+  permission flags and that a committed `.claude/settings.json` was what made a
+  run able to write; that is now the narrowing layer on top of a mode, not the
+  only thing standing between an agent and a blocked lane.
+
 - **Two diagnostics that named the symptom and hid the cause.** Both came out of
   one real run, and neither was a wrong answer — just an unusable one.
   - **A phase whose plan is not committed** failed with `prompt_ref "…" names no

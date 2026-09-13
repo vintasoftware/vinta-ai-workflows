@@ -55,6 +55,12 @@ import {
   type SpawnOutcome,
   type SpawnRefusalKind,
 } from './adapter.ts'
+import {
+  type AgentPermission,
+  codexArgs,
+  codexResumeArgs,
+  DEFAULT_PERMISSION,
+} from './permissions.ts'
 import { openPty } from './pty.ts'
 import {
   EventQueue,
@@ -79,7 +85,9 @@ const BASE_ARGS = ['exec', '--json'] as const
  * `inject` is false and that is structural, not a gap: `codex exec` consumes
  * stdin to EOF before the turn starts. `permissionControl` is true because
  * codex takes a non-interactive sandbox and approval policy on the command
- * line, which is exactly what the capability names.
+ * line — which this adapter now actually passes (`permissions.ts`). It did not
+ * before, and the comment claiming otherwise was the only thing standing where
+ * the flags should have been.
  */
 const CAPABILITIES: HarnessCapabilities = {
   inject: false,
@@ -423,6 +431,8 @@ const STRIPPED_ENV = ['OPENAI_API_KEY', 'CODEX_API_KEY'] as const
 export interface CodexAdapterOptions {
   /** Overrides `VINTA_AI_MAESTRO_CODEX_BIN`, which overrides `"codex"`. */
   readonly bin?: string
+  /** How much the agent may do unasked. The operator's choice (`permissions.ts`). */
+  readonly permission?: AgentPermission
   /** How long a spawn may go without a thread frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
@@ -551,9 +561,21 @@ export class CodexAdapter implements HarnessAdapter {
     // slugs are account- and plan-gated, so there is no universally valid one
     // to substitute, and inventing a wrong slug fails the turn outright.
     const model = task.model.length === 0 ? [] : ['--model', task.model]
+    // The sandbox and approval policy the capability claims this adapter
+    // passes. Both subcommands take them, and a resumed turn needs them as much
+    // as a fresh one — the policy is the operator's for the run, not the turn's.
+    const permission = this.options.permission ?? DEFAULT_PERMISSION
     return task.resumeSessionId === undefined
-      ? [...BASE_ARGS, ...model, '-']
-      : ['exec', 'resume', '--json', ...model, task.resumeSessionId, '-']
+      ? [...BASE_ARGS, ...codexArgs(permission), ...model, '-']
+      : [
+          'exec',
+          'resume',
+          '--json',
+          ...codexResumeArgs(permission),
+          ...model,
+          task.resumeSessionId,
+          '-',
+        ]
   }
 
   #awaitStart(child: ChildProcess, task: AgentTask): Promise<SpawnOutcome> {

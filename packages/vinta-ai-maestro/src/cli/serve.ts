@@ -35,13 +35,21 @@ import { openJournal } from '../journal/journal.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
+                              [--permission <ask|auto|full>]
 
   --repo <dir>   The project whose .vinta-ai-maestro/ store is served, and whose
                  ai-plans/*.workflow.json the editor opens.
                  Defaults to the current directory.
   --host <host>  Bind address. Defaults to 127.0.0.1. Any other value makes the
                  daemon reachable from other machines and prints a warning.
-  --port <n>     Defaults to 0 — an OS-assigned port, printed with the URL.`
+  --port <n>     Defaults to 0 — an OS-assigned port, printed with the URL.
+  --permission   How much an agent may do without being asked. Defaults to
+                 auto — it works in its own lane unattended, which is what a
+                 lane is for. ask makes every tool use need approval, and
+                 nothing answers those in a headless run. full removes the
+                 checks entirely; both CLIs recommend that only for a sandbox
+                 with no network, which a lane is not.
+                 The operator sets this, never the workflow document.`
 
 /** The bind and store settings `serve` and `run` share. */
 export interface Bind {
@@ -105,6 +113,7 @@ export async function serveCommand(
         repo: { type: 'string' },
         host: { type: 'string' },
         port: { type: 'string' },
+        permission: { type: 'string' },
       },
       allowPositionals: true,
     })
