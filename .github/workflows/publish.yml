@@ -128,6 +128,12 @@ jobs:
           pnpm --filter vinta-ai-maestro pack --pack-destination dist-tarballs
           ls -l dist-tarballs
 
+      # `./` is not decoration. `npm publish dist-tarballs/x.tgz` reads a bare
+      # `a/b` path as a GitHub `owner/repo` shorthand and goes looking for
+      # `ssh://git@github.com/dist-tarballs/x.tgz.git`; the leading `./` is what
+      # makes it a file. It fails as an SSH permission error, which names
+      # nothing that is actually wrong.
+      #
       # `npm`, not `pnpm`, for the publishing: pnpm has no trusted-publishing
       # support, so it would look for a token that does not exist here. The
       # tarballs are already correct, which is what makes the split safe.
@@ -141,13 +147,13 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           DIST_TAG: ${{ steps.dist.outputs.tag }}
-        run: npm publish "dist-tarballs/vinta-ai-workflows-${TAG}.tgz" --tag "$DIST_TAG"
+        run: npm publish "./dist-tarballs/vinta-ai-workflows-${TAG}.tgz" --tag "$DIST_TAG"
 
       - name: Publish vinta-ai-maestro
         env:
           TAG: ${{ github.ref_name }}
           DIST_TAG: ${{ steps.dist.outputs.tag }}
-        run: npm publish "dist-tarballs/vinta-ai-maestro-${TAG}.tgz" --tag "$DIST_TAG"
+        run: npm publish "./dist-tarballs/vinta-ai-maestro-${TAG}.tgz" --tag "$DIST_TAG"
 
       - name: Say what was published
         env:

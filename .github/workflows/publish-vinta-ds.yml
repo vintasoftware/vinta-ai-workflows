@@ -107,7 +107,7 @@ jobs:
           DIST_TAG: ${{ steps.dist.outputs.tag }}
         run: |
           version="${TAG##*@}"
-          npm publish "dist-tarballs/vinta-design-system-${version}.tgz" --tag "$DIST_TAG"
+          npm publish "./dist-tarballs/vinta-design-system-${version}.tgz" --tag "$DIST_TAG"
 
       - name: Say what was published
         env:
