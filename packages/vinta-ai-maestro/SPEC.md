@@ -380,7 +380,7 @@ Two details in that block are load-bearing and were both corrected during implem
 
 | Harness | Invocation | inject | resume | pty | Notes |
 |---|---|---|---|---|---|
-| `claude-code` | `claude -p --output-format stream-json --input-format stream-json --verbose` | ✅ native | ✅ `--resume` | ✅ | The only one with true bidirectional stdio; steering is a message on stdin. Also has `--permission-mode` and hooks. |
+| `claude-code` | `claude -p --output-format stream-json --input-format stream-json --verbose` | ✅ native | ✅ `--resume` | ✅ | The only one with true bidirectional stdio; steering is a message on stdin. `--permission-mode` is passed per the operator's `--permission` setting; hooks are not used. |
 | `codex` | `codex exec --json` | ❌ | ✅ | ✅ | JSONL out, one-way. Steering = interrupt, then resume with an amended prompt. |
 | `opencode` | `opencode serve` + official TS SDK | ✅ session API | ✅ | ➖ | An HTTP server rather than a supervised pipe; the richest control surface, and the adapter manages a server process rather than one process per agent. |
 

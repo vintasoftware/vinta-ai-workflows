@@ -304,7 +304,25 @@ Point the adapter at a specific binary with an environment variable, which overr
 | `codex` | `VINTA_AI_MAESTRO_CODEX_BIN` | `codex` |
 | `opencode` | `VINTA_AI_MAESTRO_OPENCODE_BIN` | `opencode` |
 
-**The harness's own permission configuration governs what an agent may do in a lane.** `vinta-ai-maestro` passes no permission flags and cannot answer a permission prompt: a headless session that stops to ask simply ends its turn having done nothing. A lane is a worktree of your repository, so committed settings travel into it — for `claude-code`, a `.claude/settings.json` that grants the tools your phases need is what makes a run able to write at all.
+### What an agent may do in its lane
+
+`--permission <ask|auto|full>` on `run` and `serve`, defaulting to **`auto`**: the agent works unattended inside its own lane, which is what a lane is for.
+
+**The operator sets this, never the workflow document.** It is an argument to the command rather than a field in the JSON, and deliberately so — the document is committed and shared, and a file in a repository should not be able to tell someone else's machine to run agents without approvals. A plan may say which model writes a phase; it may not say how much of a stranger's filesystem that model gets.
+
+| | claude-code | codex |
+|---|---|---|
+| `ask` | `--permission-mode manual` | `--sandbox workspace-write` |
+| `auto` | `--permission-mode auto` | `--approve-for-me` |
+| `full` | `--allow-dangerously-skip-permissions --permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
+
+`ask` is the CLIs' own default and the one to avoid headlessly: nothing answers a permission prompt in a `run`. The request surfaces as a `permission_request` event and the transcript renders it, but no reply is ever sent — so the agent reports a blocked working directory and the phase fails having written nothing. Use it with `serve` and a human watching, or not at all.
+
+`full` is available and is not the default. Both vendors describe their equivalent as being for sandboxes with no internet access, and a lane is not that — it has the network and whatever credentials the machine holds.
+
+Two argument combinations are refused by the CLIs themselves, which is why the table is not symmetric: codex rejects `--sandbox` alongside `--approve-for-me` (the latter already implies the former), and `codex exec resume` accepts neither, so a resumed thread keeps the policy it was created under.
+
+A lane is still a worktree of your repository, so committed settings travel into it: for `claude-code`, a `.claude/settings.json` narrowing tools further is honoured on top of whatever mode is passed.
 
 ## Limits worth knowing before you rely on it
 

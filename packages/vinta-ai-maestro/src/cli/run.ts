@@ -53,6 +53,12 @@ import { createRunExecutor } from '../executor/index.ts'
 import { GateCache } from '../gates/cache.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
+import {
+  AGENT_PERMISSIONS,
+  type AgentPermission,
+  DEFAULT_PERMISSION,
+  isAgentPermission,
+} from '../harness/permissions.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import { createAgentConflictFixer, type ConflictFixer } from '../integration/fixer.ts'
@@ -129,6 +135,7 @@ export async function runCommand(
         repo: { type: 'string' },
         host: { type: 'string' },
         port: { type: 'string' },
+        permission: { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -146,11 +153,21 @@ export async function runCommand(
   const bind = toBind(parsed.values, io)
   if (bind === null) return USAGE
 
+  // Rejected here rather than passed through: an unrecognised value must not
+  // quietly become the default, because the default is the permissive end of
+  // the range and the typo most worth catching is `--permission ful`.
+  const requested = parsed.values['permission']
+  if (requested !== undefined && !isAgentPermission(requested)) {
+    io.err(`vinta-ai-maestro: --permission must be one of ${AGENT_PERMISSIONS.join(', ')}`)
+    return USAGE
+  }
+  const permission = requested ?? DEFAULT_PERMISSION
+
   const workflow = await loadWorkflow(path, io)
   if (workflow === null) return FAILED
 
   const runId = deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`
-  const adapters = deps.adapters ?? defaultAdapters(workflow)
+  const adapters = deps.adapters ?? defaultAdapters(workflow, permission)
   const laneRoot = laneRootFor(bind.repoPath)
 
   // §13.5, before a port is bound, a journal is opened or a worktree exists: a
@@ -560,15 +577,26 @@ function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
   return `vinta-ai-maestro: could not provision the lane pool under ${laneRoot}.`
 }
 
-/** One real adapter per harness the workflow could dispatch to. */
-function defaultAdapters(workflow: Workflow): Record<string, HarnessAdapter> {
+/**
+ * One real adapter per harness the workflow could dispatch to, each carrying
+ * the operator's permission policy.
+ *
+ * The policy reaches the adapters here and nowhere else: it is an argument to
+ * the command, not a field in the plan. A committed document that could say
+ * "run agents without approvals" would say it on every machine that ever runs
+ * it, including ones whose owner never agreed to that.
+ */
+function defaultAdapters(
+  workflow: Workflow,
+  permission: AgentPermission,
+): Record<string, HarnessAdapter> {
   const adapters: Record<string, HarnessAdapter> = {}
   for (const id of referencedHarnesses(workflow)) {
     adapters[id] =
       id === 'claude-code'
-        ? new ClaudeCodeAdapter()
+        ? new ClaudeCodeAdapter({ permission })
         : id === 'codex'
-          ? new CodexAdapter()
+          ? new CodexAdapter({ permission })
           : new OpencodeAdapter()
   }
   return adapters
