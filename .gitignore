@@ -76,3 +76,6 @@ coverage/
 !.cursor/skills
 .agents/*
 !.agents/skills
+
+# Publish workflows pack here before handing the tarballs to `npm publish`.
+dist-tarballs/

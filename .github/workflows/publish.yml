@@ -1,0 +1,162 @@
+name: publish
+
+# `vinta-ai-workflows` and `vinta-ai-maestro`, published together from one tag.
+#
+# One workflow because they carry one version number: they are bumped, tagged
+# and published as a pair, and a consumer reading two different numbers for one
+# release has no way to tell which is which. Splitting them would make a
+# half-release expressible.
+#
+# **Triggered by the tag, and the tag is the version.** `0.7.0`, `0.7.0-alpha5`
+# — the spelling the `release` skill already produces. Nothing here decides what
+# to publish: the tag says, and the manifests are checked against it below.
+#
+# **Authentication is npm trusted publishing (OIDC).** There is no token in this
+# file and there must not be one: the `id-token: write` permission lets npm
+# exchange a short-lived GitHub identity for publish rights, scoped to *this
+# repository and this workflow file*. That binding is why the filename matters —
+# renaming this file revokes its own access until the npm side is updated.
+#
+# Provenance is generated automatically under trusted publishing, so it is not
+# asked for here.
+
+on:
+  push:
+    tags:
+      # Every release tag starts with a digit. The per-package tags
+      # (`vinta-dag-editor@…`, `vinta-design-system@…`) start with a letter, so
+      # the two families cannot collide — which is the whole reason those two
+      # are spelled that way.
+      - '[0-9]*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  # The credential. Everything else this job does is ordinary.
+  id-token: write
+
+# A publish is not cancellable in any useful sense: half of it may already have
+# reached the registry. Queue instead of superseding.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      # No `registry-url`. That option writes an `.npmrc` pointing at
+      # `${NODE_AUTH_TOKEN}`, and under trusted publishing there is no such
+      # token — npm would find an empty credential where it expected none at
+      # all. The default registry is the one being published to anyway.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # Trusted publishing landed in npm 11.5.1 and Node 22 ships npm 10.
+      # Without this the publish falls back to looking for a token and fails
+      # with an authentication error that says nothing about OIDC.
+      - name: Use an npm that can publish by OIDC
+        run: npm install -g npm@^11.5.1
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The tag is the claim; the manifests are the artifact. A tag that names a
+      # version the manifests do not carry would publish something other than
+      # what it says — the one failure that cannot be corrected afterwards,
+      # because a version number on the registry is permanent.
+      - name: The tag and both manifests must agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const { readFileSync } = require("node:fs")
+            const tag = process.env.TAG
+            const manifests = ["package.json", "packages/vinta-ai-maestro/package.json"]
+            const wrong = manifests.filter(
+              (path) => JSON.parse(readFileSync(path, "utf8")).version !== tag,
+            )
+            if (wrong.length > 0) {
+              console.error(`tag ${tag} does not match: ${wrong.join(", ")}`)
+              process.exit(1)
+            }
+            console.log(`tag ${tag} matches both manifests`)
+          '
+
+      # `latest` for a release, the prerelease identifier for a pre-release:
+      # `0.7.0-alpha5` publishes under `alpha`. An alpha published as `latest`
+      # becomes the install-by-default version for everyone running a plain
+      # `npm install`, which is the mistake this line exists to make impossible.
+      - name: Pick the dist-tag from the version
+        id: dist
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const found = /-([a-zA-Z]+)/.exec(process.env.TAG)
+            const tag = found === null ? "latest" : found[1]
+            console.log(`dist-tag: ${tag}`)
+            require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`)
+          '
+
+      # **Both tarballs before either publish.** `pnpm pack` runs
+      # `vinta-ai-maestro`'s `prepack`, which is a real build and a real chance
+      # to fail; packing first means a build failure stops the release instead
+      # of leaving one of the pair on the registry and the other not.
+      #
+      # `pnpm`, not `npm`, for the packing: the maestro manifest carries
+      # `workspace:*` specifiers, and only pnpm rewrites those to the sibling
+      # packages' real versions on the way out. It also drops `prepack` from the
+      # packed manifest, so `npm publish` below cannot re-run the build.
+      #
+      # `--pack-destination` resolves against the directory `pnpm` was *invoked*
+      # from, not the package being packed — so a `../../` that looks right from
+      # inside `packages/` writes outside the checkout, and the publish below
+      # then cannot find its own tarball. Root-relative, from the root, always.
+      - name: Pack both packages
+        run: |
+          mkdir -p dist-tarballs
+          pnpm pack --pack-destination dist-tarballs
+          pnpm --filter vinta-ai-maestro pack --pack-destination dist-tarballs
+          ls -l dist-tarballs
+
+      # `npm`, not `pnpm`, for the publishing: pnpm has no trusted-publishing
+      # support, so it would look for a token that does not exist here. The
+      # tarballs are already correct, which is what makes the split safe.
+      #
+      # The tag reaches the shell as an environment variable rather than through
+      # `${{ }}`, here and everywhere below. A ref name is chosen by whoever
+      # pushed it: expanded into a command line it is someone else's shell
+      # script, and the guard above — which would reject such a tag — runs in a
+      # different step and cannot protect this one.
+      - name: Publish vinta-ai-workflows
+        env:
+          TAG: ${{ github.ref_name }}
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
+        run: npm publish "dist-tarballs/vinta-ai-workflows-${TAG}.tgz" --tag "$DIST_TAG"
+
+      - name: Publish vinta-ai-maestro
+        env:
+          TAG: ${{ github.ref_name }}
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
+        run: npm publish "dist-tarballs/vinta-ai-maestro-${TAG}.tgz" --tag "$DIST_TAG"
+
+      - name: Say what was published
+        env:
+          TAG: ${{ github.ref_name }}
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
+        run: |
+          {
+            echo "### Published \`${TAG}\` under \`${DIST_TAG}\`"
+            echo
+            echo '- `vinta-ai-workflows`'
+            echo '- `vinta-ai-maestro`'
+          } >> "$GITHUB_STEP_SUMMARY"

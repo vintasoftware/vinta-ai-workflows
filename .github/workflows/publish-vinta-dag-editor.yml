@@ -1,0 +1,118 @@
+name: publish-vinta-dag-editor
+
+# `vinta-dag-editor`, on its own tag and its own schedule.
+#
+# It is not part of the `vinta-ai-workflows` / `vinta-ai-maestro` pair and does
+# not share their version: it is a component those packages consume, and tying
+# it to their release number would mean either publishing it when nothing in it
+# changed, or holding a release back for a component that is ready.
+#
+# **The tag is `vinta-dag-editor@<version>`.** The npm spelling, and a shape
+# that cannot be confused with a release tag — those start with a digit, these
+# with a letter, so `on.push.tags` can tell them apart with no overlap and
+# `git tag --list '[0-9]*'` still finds only releases.
+#
+# Authentication is npm trusted publishing (OIDC): no token here, and the
+# `id-token: write` permission below is the whole mechanism. It is bound to this
+# repository *and this filename*, so renaming this file revokes its access until
+# the npm side is updated to match.
+
+on:
+  push:
+    tags:
+      - 'vinta-dag-editor@*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-vinta-dag-editor
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      # No `registry-url`: it would write an `.npmrc` expecting
+      # `${NODE_AUTH_TOKEN}`, and trusted publishing has no token to put there.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # Trusted publishing needs npm 11.5.1; Node 22 ships npm 10.
+      - name: Use an npm that can publish by OIDC
+        run: npm install -g npm@^11.5.1
+
+      # The tag is the claim; the manifest is the artifact. A version number on
+      # the registry is permanent, so the disagreement has to be caught here.
+      - name: The tag and the manifest must agree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const { readFileSync } = require("node:fs")
+            const wanted = process.env.TAG.split("@").pop()
+            const found = JSON.parse(
+              readFileSync("packages/vinta-dag-editor/package.json", "utf8"),
+            ).version
+            if (found !== wanted) {
+              console.error(`tag asks for ${wanted}, manifest carries ${found}`)
+              process.exit(1)
+            }
+            console.log(`tag and manifest agree on ${found}`)
+          '
+
+      - name: Pick the dist-tag from the version
+        id: dist
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const version = process.env.TAG.split("@").pop()
+            const found = /-([a-zA-Z]+)/.exec(version)
+            const tag = found === null ? "latest" : found[1]
+            console.log(`dist-tag: ${tag}`)
+            require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`)
+          '
+
+      # `pnpm pack` even though this package has no `workspace:` specifiers
+      # today: it is the same command the other publish workflows run, and the
+      # day it gains a sibling dependency is not a day anyone will remember to
+      # come back and change it.
+      - name: Pack
+        run: |
+          mkdir -p dist-tarballs
+          pnpm --filter vinta-dag-editor pack --pack-destination dist-tarballs
+          ls -l dist-tarballs
+
+      # `npm`, not `pnpm`: pnpm has no trusted-publishing support and would look
+      # for a token that does not exist here.
+      #
+      # The tag reaches the shell as an environment variable rather than through
+      # `${{ }}`. A ref name is chosen by whoever pushed it: expanded into a
+      # command line it is someone else's shell script, and the guard above —
+      # which would reject such a tag — runs in a different step and cannot
+      # protect this one.
+      - name: Publish
+        env:
+          TAG: ${{ github.ref_name }}
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
+        run: |
+          version="${TAG##*@}"
+          npm publish "dist-tarballs/vinta-dag-editor-${version}.tgz" --tag "$DIST_TAG"
+
+      - name: Say what was published
+        env:
+          TAG: ${{ github.ref_name }}
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
+        run: |
+          echo "### Published \`vinta-dag-editor@${TAG##*@}\` under \`${DIST_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
