@@ -185,9 +185,17 @@ jobs:
       # pushed it: expanded into a command line it is someone else's shell
       # script, and the guard above — which would reject such a tag — runs in a
       # different step and cannot protect this one.
+      #
+      # `NPM_CONFIG_LOGLEVEL: verbose` is not debugging left behind. npm's OIDC
+      # helper never throws and logs only at verbose — so a *refused* token
+      # exchange and a runner with no credentials at all produce the identical
+      # `ENEEDAUTH`, and the one line saying which it was is suppressed by
+      # default. Publishing is the step that cannot be redone; it is the wrong
+      # place to be quiet.
       - name: Publish vinta-ai-workflows
         if: ${{ inputs.dry_run != true }}
         env:
+          NPM_CONFIG_LOGLEVEL: verbose
           TAG: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.dist.outputs.tag }}
         run: npm publish "./dist-tarballs/vinta-ai-workflows-${TAG}.tgz" --tag "$DIST_TAG"
@@ -195,6 +203,7 @@ jobs:
       - name: Publish vinta-ai-maestro
         if: ${{ inputs.dry_run != true }}
         env:
+          NPM_CONFIG_LOGLEVEL: verbose
           TAG: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.dist.outputs.tag }}
         run: npm publish "./dist-tarballs/vinta-ai-maestro-${TAG}.tgz" --tag "$DIST_TAG"
