@@ -36,6 +36,7 @@ import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
                               [--permission <ask|auto|full>]
+                              [--on-failure <stop|ask>]
 
   --repo <dir>   The project whose .vinta-ai-maestro/ store is served, and whose
                  ai-plans/*.workflow.json the editor opens.
@@ -43,6 +44,12 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
   --host <host>  Bind address. Defaults to 127.0.0.1. Any other value makes the
                  daemon reachable from other machines and prints a warning.
   --port <n>     Defaults to 0 — an OS-assigned port, printed with the URL.
+  --on-failure   What a failed phase does. "stop" (default) ends it and blocks
+                 whatever depended on it, as runs have always done. "ask" parks
+                 it on a question instead — retry, retry with another member of
+                 the crew, or stop — so an environmental failure can be fixed
+                 and the phase tried again without re-running the whole plan.
+                 Only pass "ask" when somebody is watching: the run waits.
   --permission   How much an agent may do without being asked. Defaults to
                  auto — it works in its own lane unattended, which is what a
                  lane is for. ask makes every tool use need approval, and

@@ -229,6 +229,8 @@ function rig(
     readonly recycleLane?: (name: string) => Promise<void>
     /** Session ids this harness has forgotten (§15.4). */
     readonly staleSessions?: readonly string[]
+    /** What a failed node does: end, or ask the operator first. */
+    readonly onFailure?: 'stop' | 'ask'
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-scheduler-'))
@@ -271,6 +273,7 @@ function rig(
     laneRoot: join(dir, 'lanes'),
     takeovers,
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
+    ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
   })
 
   cleanups.push(() => {
@@ -2095,5 +2098,157 @@ describe('crew', () => {
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
     expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'senior'])
     expectDrained(r)
+  })
+})
+
+/**
+ * Recovering from a failed phase without re-running the plan.
+ *
+ * A failure is usually environmental — a permission wall, a missing grant, a
+ * gate that needed a service that was not up — and until now the only recovery
+ * was to start the whole plan again, re-running every phase that had already
+ * succeeded. These cover the operator being asked instead.
+ *
+ * `EXPLODE` is a pipeline that always fails, which is what makes the retries
+ * observable: a node that recovered would prove the plumbing once, while one
+ * that fails every time can be asked, answered, and asked again.
+ */
+describe('a failed phase the operator can retry', () => {
+  const ROSTER = {
+    junior: { role: 'implementer', tier: 1, model: 'cheap' },
+    senior: { role: 'implementer', tier: 4, model: 'dear' },
+  } as const
+
+  /** Every spawn's model, in the order the harness was asked for them. */
+  const modelsOf = (r: Rig): string[] => r.adapter.spawned.map((task) => task.model)
+
+  /** The default is what every run did before this existed. */
+  it('fails without asking when nobody said to ask', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }))
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(r.journal.pendingQuestion('run-1', 'a')).toBeUndefined()
+    expect(r.adapter.spawned).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('parks the node on a question instead of failing it', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: 'ask' })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+
+    const question = r.journal.pendingQuestion('run-1', 'a')?.question
+    expect(question?.kind).toBe('choice')
+    expect(question?.choices).toEqual(['retry', 'stop'])
+    // §6.1: everything is back before the wait. An operator at lunch must not
+    // be holding a lane that another phase could be using.
+    expect(r.pools.held('lane')).toBe(0)
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(r.adapter.spawned).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('runs the phase again when the operator asks it to', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: 'ask' })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first offer')
+    r.scheduler.answer('a', { human: { answer: 'retry' } })
+
+    // It fails again — `EXPLODE` always does — and asks again rather than
+    // giving up on the strength of one answer.
+    await until(() => r.adapter.spawned.length === 2, 'the second attempt')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second offer')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expectDrained(r)
+  })
+
+  /**
+   * The attempt starts cold. The context that failed is what is being retried
+   * away from, and the branch it built is gone — the worktree under it gets
+   * recycled — so a resumed session would carry a memory of files it wrote and
+   * a tree without them.
+   */
+  it('starts the retry cold rather than resuming the session that failed', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: 'ask' })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first offer')
+    r.scheduler.answer('a', { human: { answer: 'retry' } })
+    await until(() => r.adapter.spawned.length === 2, 'the second attempt')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second offer')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+
+    expect(r.adapter.spawned.map((task) => task.resumeSessionId)).toEqual([undefined, undefined])
+  })
+
+  /**
+   * The alternatives are members of the crew, not models. A staffed run has no
+   * free-floating models in it — a phase is taken by a member, and the tier
+   * floor that decides who may take it is the assigned member's own — so a
+   * model is something the plan cannot express and nobody could be found to
+   * hold.
+   */
+  it('offers the members who could take the phase, and honours the pick', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'junior' })], {
+        pipeline: 'explode',
+        crew: { junior: ROSTER.junior, senior: ROSTER.senior },
+      }),
+      { onFailure: 'ask' },
+    )
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first offer')
+
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question.choices).toEqual([
+      'retry',
+      'retry with senior',
+      'stop',
+    ])
+
+    r.scheduler.answer('a', { human: { answer: 'retry with senior' } })
+    await until(() => r.adapter.spawned.length === 2, 'the second attempt')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second offer')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+
+    // The junior took the first attempt and the senior the second.
+    expect(modelsOf(r)).toEqual(['cheap', 'dear'])
+    expectDrained(r)
+  })
+
+  /**
+   * A member below the phase's tier is not offered. The floor is the whole
+   * point of staffing a plan, and an operator answering a question is not a
+   * reason to hand a phase to somebody the plan judged too junior for it.
+   */
+  it('never offers a member below the phase’s tier', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'senior' })], {
+        pipeline: 'explode',
+        crew: { junior: ROSTER.junior, senior: ROSTER.senior },
+      }),
+      { onFailure: 'ask' },
+    )
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question.choices).toEqual(['retry', 'stop'])
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
   })
 })
