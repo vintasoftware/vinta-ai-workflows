@@ -30,13 +30,15 @@
  * post-mortem down with the transcripts it was supposed to replace.
  */
 import { readdir, rm } from 'node:fs/promises'
-import { relative, resolve, sep } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { FAILED, OK, USAGE, type Io } from './io.ts'
-import { runsRootFor } from './paths.ts'
+import { laneRootFor, runsRootFor } from './paths.ts'
+import { findReapable, reap, type Reapable } from './reap.ts'
 
 export const PURGE_USAGE = `usage: vinta-ai-maestro purge [run-id] [--repo <dir>] [--yes] [--dry-run]
+                             [--lanes] [--branches]
 
   Deletes run state under .vinta-ai-maestro/runs/ — transcripts, raw streams, gate
   logs and the frozen workflow snapshot. With no run id, every run is listed.
@@ -44,7 +46,14 @@ export const PURGE_USAGE = `usage: vinta-ai-maestro purge [run-id] [--repo <dir>
   --repo <dir>   The project whose .vinta-ai-maestro/ store is purged.
                  Defaults to the current directory.
   --yes          Skip the confirmation. For scripts.
-  --dry-run      List what would be deleted and stop.`
+  --dry-run      List what would be deleted and stop.
+  --lanes        Also remove the lane worktrees a failed run left behind, and
+                 their summaries. Nothing else reaps these: a run's lanes are
+                 not under runs/, so they outlive every purge and accumulate.
+  --branches     Also delete the plan/<workflow>/phase-* branches those lanes
+                 held. Scoped to branches no longer checked out anywhere and
+                 already merged; an unmerged branch is listed and kept, because
+                 it is the only copy of whatever that phase wrote.`
 
 /** A run id is a single directory name, never a path. */
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -58,6 +67,8 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
         repo: { type: 'string' },
         yes: { type: 'boolean' },
         'dry-run': { type: 'boolean' },
+        lanes: { type: 'boolean' },
+        branches: { type: 'boolean' },
       },
       allowPositionals: true,
     })
@@ -78,20 +89,53 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
     runId === undefined ? await everyRun(runsRoot) : await within(runsRoot, runId, io)
   if (targets === null) return FAILED
 
-  if (targets.length === 0) {
+  const wantsLanes = parsed.values.lanes === true || parsed.values.branches === true
+  const reapable = wantsLanes
+    ? await findReapable({
+        repoPath,
+        laneRoot: laneRootFor(repoPath),
+        summaryDir: join(repoPath, '.vinta-ai-workflows', 'worktrees'),
+        ...(runId === undefined ? {} : { runId }),
+        includeBranches: parsed.values.branches === true,
+      })
+    : { lanes: [], summaries: [], mergedBranches: [], unmergedBranches: [] }
+
+  const nothing =
+    targets.length === 0 && reapable.lanes.length === 0 && reapable.mergedBranches.length === 0
+  if (nothing) {
+    // The wording widens only when the scope did. A plain `purge` that finds
+    // nothing is still talking about run state, and saying "nothing to purge"
+    // there would claim it had looked at lanes it was never asked about.
+    const what = wantsLanes ? 'nothing to purge' : 'no run state to purge'
     io.out(
       runId === undefined
-        ? 'vinta-ai-maestro: no run state to purge.'
-        : `vinta-ai-maestro: no run state for "${runId}".`,
+        ? `vinta-ai-maestro: ${what}.`
+        : `vinta-ai-maestro: ${wantsLanes ? 'nothing to purge' : 'no run state'} for "${runId}".`,
     )
+    // An unmerged branch is not nothing: it is the reason this ran and found
+    // no work, and saying so beats an operator wondering why the branch is
+    // still there.
+    reportKept(reapable, io)
     return OK
   }
 
-  io.out('vinta-ai-maestro purge — the following run state will be permanently deleted:')
+  io.out('vinta-ai-maestro purge — the following will be permanently deleted:')
   for (const target of targets) io.out(`  ${relative(repoPath, target)}`)
+  for (const lane of reapable.lanes) {
+    io.out(`  ${relative(repoPath, lane.path)}${lane.branch === null ? '' : ` (${lane.branch})`}`)
+  }
+  for (const summary of reapable.summaries) io.out(`  ${relative(repoPath, summary)}`)
+  for (const branch of reapable.mergedBranches) io.out(`  branch ${branch}`)
   io.out('')
-  io.out('These directories hold agent transcripts and gate logs, which contain')
-  io.out('repository contents verbatim. Deletion cannot be undone.')
+  if (targets.length > 0) {
+    io.out('Run directories hold agent transcripts and gate logs, which contain')
+    io.out('repository contents verbatim.')
+  }
+  if (reapable.lanes.length > 0) {
+    io.out('Removing a worktree discards anything uncommitted in it.')
+  }
+  io.out('Deletion cannot be undone.')
+  reportKept(reapable, io)
 
   if (parsed.values['dry-run'] === true) {
     io.out('')
@@ -99,14 +143,37 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
     return OK
   }
 
-  if (parsed.values.yes !== true && !(await io.confirm(`Delete ${targets.length} run directories?`))) {
+  const count = targets.length + reapable.lanes.length + reapable.mergedBranches.length
+  if (parsed.values.yes !== true && !(await io.confirm(`Delete ${count} items?`))) {
     io.err('vinta-ai-maestro: cancelled. Nothing was deleted.')
     return FAILED
   }
 
   for (const target of targets) await rm(target, { recursive: true, force: true })
-  io.out(`vinta-ai-maestro: deleted ${targets.length} run director${targets.length === 1 ? 'y' : 'ies'}.`)
+  for (const summary of reapable.summaries) await rm(summary, { force: true })
+  const failures = wantsLanes
+    ? await reap(repoPath, reapable, { branches: parsed.values.branches === true })
+    : []
+
+  io.out(`vinta-ai-maestro: deleted ${count - failures.length} of ${count} items.`)
+  if (failures.length > 0) {
+    // Named rather than counted: on Windows a worktree whose files something
+    // still holds open is the common case, and it is fixed by retrying once
+    // whatever holds them has exited.
+    io.err('vinta-ai-maestro: these could not be removed — retry, or remove them by hand:')
+    for (const failure of failures) io.err(`  ${failure}`)
+    return FAILED
+  }
   return OK
+}
+
+/** Says what was deliberately left alone, and why. Silence would read as a bug. */
+function reportKept(reapable: Reapable, io: Io): void {
+  if (reapable.unmergedBranches.length === 0) return
+  io.out('')
+  io.out('Kept — unmerged, so deleting them would lose commits:')
+  for (const branch of reapable.unmergedBranches) io.out(`  ${branch}`)
+  io.out('Delete one yourself with: git branch -D <branch>')
 }
 
 /**

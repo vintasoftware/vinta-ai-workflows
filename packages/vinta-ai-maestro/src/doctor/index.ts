@@ -510,7 +510,16 @@ async function checkBriefs(
       // "point base_branch somewhere else" are different actions, and the
       // operator cannot tell which they need from the failure alone.
       const tracked = await probeCommand(bin, ['ls-files', '--error-unmatch', path], repoPath)
-      const elsewhere = await probeCommand(bin, ['log', '--all', '-1', '--format=%H', '--', path], repoPath)
+      // `rev-list`, not `log --format=%H`. On Windows every probe goes through
+      // `cmd.exe`, which expands `%…%` — so a format string is a argument the
+      // shell rewrites, and the probe came back empty there while working
+      // everywhere else. The path this whole check exists to distinguish then
+      // reported as "staged, never committed", which is the wrong fix.
+      const elsewhere = await probeCommand(
+        bin,
+        ['rev-list', '--all', '--max-count=1', '--', path],
+        repoPath,
+      )
       const onSomeBranch = elsewhere.ok && elsewhere.output.trim() !== ''
 
       const why = onSomeBranch

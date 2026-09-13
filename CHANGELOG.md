@@ -242,6 +242,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permission flags and that a committed `.claude/settings.json` was what made a
   run able to write; that is now the narrowing layer on top of a mode, not the
   only thing standing between an agent and a blocked lane.
+- **`purge --lanes --branches` clears what a failed run leaves behind.** A run's
+  lane worktrees are not under `runs/`, so no purge ever reached them: three
+  failed attempts at one plan left twelve worktrees, twelve summaries, and a set
+  of `plan/<id>/phase-*` branches still checked out — which is what makes the
+  *next* run of that plan impossible, since git refuses to check out a branch a
+  second worktree holds.
+
+  Both flags are opt-in and destructive in different ways, so they are not
+  bundled: removing a worktree discards whatever was uncommitted in it, and
+  deleting a branch discards commits. **An unmerged branch is never deleted**,
+  only listed with the command to delete it by hand — on a failed run that
+  branch is the only copy of whatever the phase wrote. `--dry-run` and `--yes`
+  work as they already did, and a worktree that will not go is named rather than
+  counted.
+
 - **`doctor` now catches, before a lane exists, the failures that used to take a
   run each.** Four consecutive runs of one plan failed four different ways, and
   every one of them was knowable at minute zero from the workflow and the repo.
