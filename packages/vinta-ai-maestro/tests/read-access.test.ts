@@ -12,28 +12,41 @@
  * succeeds, a write in the lane succeeds, and writes into the checkout's source
  * and into a sibling lane are both refused.
  */
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { addDirArgs, writeDenyRules, type ListDir } from '../src/harness/read-access.ts'
 
-const REPO = '/repo'
-const LANE = '/repo/.vinta-ai-maestro/lanes/run-crew-1-junior'
+/**
+ * Paths are built the way the caller builds them — with `join`, so they carry
+ * the host's separator — and compared after the same normalization the rules
+ * get. A fixture written in posix would pass on two platforms and describe a
+ * third, which is how the first version of this shipped a guard that produced
+ * no rules at all on Windows.
+ */
+const REPO = join('/repo')
+const STORE = join(REPO, '.vinta-ai-maestro')
+const LANES = join(STORE, 'lanes')
+const LANE = join(LANES, 'run-crew-1-junior')
 
 /** A repository with source beside the store, and two lanes in it. */
 const tree: Record<string, readonly string[]> = {
-  '/repo': ['src', 'package.json', '.vinta-ai-maestro', '.git'],
-  '/repo/.vinta-ai-maestro': ['lanes', 'runs'],
-  '/repo/.vinta-ai-maestro/lanes': ['run-crew-1-junior', 'run-crew-2-senior'],
+  [REPO]: ['src', 'package.json', '.vinta-ai-maestro', '.git'],
+  [STORE]: ['lanes', 'runs'],
+  [LANES]: ['run-crew-1-junior', 'run-crew-2-senior'],
 }
 const list: ListDir = (dir) => tree[dir] ?? []
 
 const rulesFor = (roots: readonly string[], lane = LANE): readonly string[] =>
   writeDenyRules({ roots, lane }, list)
 
+/** The settings spelling of a path: separators normalized, root stripped. */
+const glob = (path: string): string => path.replace(/\\/g, '/').replace(/^\/+/, '')
+
 /** Whether the list refuses a write at this path, by either form of the rule. */
 function denies(rules: readonly string[], path: string): boolean {
   return rules.some(
-    (rule) => rule === `Write(//${path.slice(1)})` || rule === `Write(//${path.slice(1)}/**)`,
+    (rule) => rule === `Write(//${glob(path)})` || rule === `Write(//${glob(path)}/**)`,
   )
 }
 
@@ -41,18 +54,18 @@ describe('the corridor down to the lane', () => {
   it('denies the checkout’s own source', () => {
     const rules = rulesFor([REPO])
 
-    expect(denies(rules, '/repo/src')).toBe(true)
-    expect(denies(rules, '/repo/package.json')).toBe(true)
+    expect(denies(rules, join(REPO, 'src'))).toBe(true)
+    expect(denies(rules, join(REPO, 'package.json'))).toBe(true)
   })
 
   /** Two phases run at once. One writing in the other's worktree corrupts it. */
   it('denies a sibling lane', () => {
-    expect(denies(rulesFor([REPO]), '/repo/.vinta-ai-maestro/lanes/run-crew-2-senior')).toBe(true)
+    expect(denies(rulesFor([REPO]), join(LANES, 'run-crew-2-senior'))).toBe(true)
   })
 
   /** Transcripts and the journal are the run's own record of itself. */
   it('denies the rest of the store', () => {
-    expect(denies(rulesFor([REPO]), '/repo/.vinta-ai-maestro/runs')).toBe(true)
+    expect(denies(rulesFor([REPO]), join(STORE, 'runs'))).toBe(true)
   })
 
   /**
@@ -65,9 +78,9 @@ describe('the corridor down to the lane', () => {
     const rules = rulesFor([REPO])
 
     expect(denies(rules, LANE)).toBe(false)
-    expect(denies(rules, '/repo')).toBe(false)
-    expect(denies(rules, '/repo/.vinta-ai-maestro')).toBe(false)
-    expect(denies(rules, '/repo/.vinta-ai-maestro/lanes')).toBe(false)
+    expect(denies(rules, REPO)).toBe(false)
+    expect(denies(rules, STORE)).toBe(false)
+    expect(denies(rules, LANES)).toBe(false)
     expect(rules.some((rule) => rule.includes('run-crew-1-junior'))).toBe(false)
   })
 
@@ -86,9 +99,9 @@ describe('the corridor down to the lane', () => {
 
 describe('a root that is not the lane’s ancestor', () => {
   it('is denied whole, with no corridor through it', () => {
-    const rules = rulesFor(['/elsewhere'])
+    const rules = rulesFor([join('/elsewhere')])
 
-    expect(denies(rules, '/elsewhere')).toBe(true)
+    expect(denies(rules, join('/elsewhere'))).toBe(true)
   })
 })
 
@@ -106,11 +119,11 @@ describe('granting nothing', () => {
 
 describe('the arguments', () => {
   it('names each root once', () => {
-    expect(addDirArgs({ roots: [REPO, '/elsewhere'], lane: LANE })).toEqual([
+    expect(addDirArgs({ roots: [REPO, join('/elsewhere')], lane: LANE })).toEqual([
       '--add-dir',
       REPO,
       '--add-dir',
-      '/elsewhere',
+      join('/elsewhere'),
     ])
   })
 })
@@ -129,7 +142,10 @@ describe('the listing it asks for', () => {
       return tree[dir] ?? []
     })
 
-    expect(asked).toEqual([REPO, '/repo/.vinta-ai-maestro', '/repo/.vinta-ai-maestro/lanes'])
-    expect(asked.every((dir) => dir.startsWith('/'))).toBe(true)
+    expect(asked).toEqual([REPO, STORE, LANES])
+    // The bug this pins: paths rebuilt from split segments lose the leading
+    // separator on posix and the drive on Windows, every listing comes back
+    // empty, and the grant ships with no guard and nothing to see.
+    expect(asked.every((dir) => dir === join(dir))).toBe(true)
   })
 })

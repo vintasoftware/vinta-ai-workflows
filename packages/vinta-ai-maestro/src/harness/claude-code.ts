@@ -31,7 +31,9 @@
  * tokens and exit codes only; the content lives in the transcript stream.
  */
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process'
-import { readdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import {
   type AgentEvent,
   type AgentSession,
@@ -397,6 +399,7 @@ function readAccessArgs(
   permission: AgentPermission,
   roots: readonly string[],
   lane: string,
+  settingsDir: string,
 ): readonly string[] {
   if (roots.length === 0) return []
   const grant: ReadGrant = { roots, lane }
@@ -412,10 +415,38 @@ function readAccessArgs(
       return []
     }
   })
-  // Settings as a JSON string rather than a file: the policy is per spawn and
-  // a file would be one more thing to write into a lane, name uniquely and
-  // clean up after a kill.
-  return [...addDirArgs(grant), '--settings', JSON.stringify({ permissions: { deny } })]
+  // Written to a file rather than passed as JSON, and this is forced rather
+  // than tidy. On Windows every spawn goes through `cmd.exe`, where a `"`
+  // cannot survive a quoted region: `platform.ts` refuses an argument
+  // containing one instead of escaping it, so the whole spawn fails before the
+  // binary is reached. A JSON object is nothing but quotes.
+  const settings = writeSettings(settingsDir, lane, deny)
+  // Fail *closed*. Without the policy the grant is a write grant, so a
+  // directory that cannot be written to costs the read access rather than the
+  // guard — the one direction in which this may silently do less.
+  if (settings === null) return []
+  return [...addDirArgs(grant), '--settings', settings]
+}
+
+/**
+ * The policy file for one lane, or null when it cannot be written.
+ *
+ * Named for the lane and rewritten on each spawn: the deny list is computed
+ * from what is on disk *now*, and a stale file would describe a repository that
+ * has moved on. One file per lane rather than per spawn so a killed session
+ * leaves nothing to collect — the next spawn in that lane overwrites it, and
+ * `purge` removes the directory with the rest of the store.
+ */
+function writeSettings(dir: string, lane: string, deny: readonly string[]): string | null {
+  const name = `${lane.split(/[/\\]/).filter(Boolean).pop() ?? 'lane'}.settings.json`
+  const path = join(dir, name)
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path, `${JSON.stringify({ permissions: { deny } }, null, 2)}\n`, 'utf8')
+    return path
+  } catch {
+    return null
+  }
 }
 
 const writeMessage = (child: ChildProcess, text: string): void => {
@@ -459,6 +490,18 @@ export interface ClaudeCodeAdapterOptions {
    * whole world, which is what it was before this existed.
    */
   readonly readRoots?: readonly string[]
+  /**
+   * Where the per-lane settings file is written, when `readRoots` is set.
+   *
+   * A directory rather than a flag, because the policy cannot travel as one:
+   * on Windows every spawn goes through `cmd.exe`, and a `"` cannot survive a
+   * quoted region — `platform.ts` refuses such an argument outright rather than
+   * escaping it cleverly. A JSON object is nothing but quotes. A path has none.
+   *
+   * Defaults to the OS temp directory. Hosts that have a store pass it there,
+   * where `purge` can reach it.
+   */
+  readonly settingsDir?: string
   /** How long a spawn may go without an init frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
@@ -538,7 +581,12 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       // ever sent — so the agent reports a blocked working directory and the
       // phase fails having written nothing.
       ...claudeCodeArgs(permission),
-      ...readAccessArgs(permission, this.options.readRoots ?? [], task.cwd),
+      ...readAccessArgs(
+        permission,
+        this.options.readRoots ?? [],
+        task.cwd,
+        this.options.settingsDir ?? tmpdir(),
+      ),
       '--model',
       task.model,
       ...(task.resumeSessionId === undefined ? [] : ['--resume', task.resumeSessionId]),

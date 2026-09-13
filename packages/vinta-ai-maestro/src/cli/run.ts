@@ -80,7 +80,8 @@ import { createScheduler, type RunStop } from '../scheduler/index.ts'
 import type { Project, ProjectDatabase, Workflow } from '../types.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
-import { laneRootFor } from './paths.ts'
+import { join } from 'node:path'
+import { laneRootFor, storeFor } from './paths.ts'
 import { SERVE_USAGE, announce, toBind } from './serve.ts'
 
 export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]
@@ -602,7 +603,11 @@ function defaultAdapters(
   for (const id of referencedHarnesses(workflow)) {
     adapters[id] =
       id === 'claude-code'
-        ? new ClaudeCodeAdapter({ permission, readRoots: [repoPath] })
+        ? new ClaudeCodeAdapter({
+            permission,
+            readRoots: [repoPath],
+            settingsDir: join(storeFor(repoPath), 'harness'),
+          })
         : id === 'codex'
           ? new CodexAdapter({ permission })
           : new OpencodeAdapter()

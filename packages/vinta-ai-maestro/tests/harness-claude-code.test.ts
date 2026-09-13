@@ -25,6 +25,7 @@ import {
   mapCliEvent,
 } from '../src/harness/claude-code.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
+import { commandInvocation } from '../src/platform/platform.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
 import { type FakeCliSpec, fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
@@ -506,10 +507,11 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 `,
     )
 
-    const outcome = await new ClaudeCodeAdapter({ bin, readRoots: [dir] }).spawn({
-      ...task(),
-      cwd: lane,
-    })
+    const outcome = await new ClaudeCodeAdapter({
+      bin,
+      readRoots: [dir],
+      settingsDir: join(dir, 'settings'),
+    }).spawn({ ...task(), cwd: lane })
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
     for await (const _event of outcome.session.events) void _event
@@ -518,12 +520,24 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     expect(argv).toContain('--add-dir')
     expect(argv[argv.indexOf('--add-dir') + 1]).toBe(dir)
 
-    const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as {
+    // A path, never the policy itself. On Windows every spawn goes through
+    // `cmd.exe`, where a `"` cannot survive a quoted region — `platform.ts`
+    // refuses such an argument rather than escaping it, so a JSON argument is
+    // a spawn that dies before the binary is reached.
+    const settingsPath = argv[argv.indexOf('--settings') + 1] as string
+    expect(argv.some((token) => token.includes('"'))).toBe(false)
+    // The exact check Windows applies, run from anywhere: `commandInvocation`
+    // refuses a token it cannot quote instead of escaping it, so this throwing
+    // is the spawn dying before the binary is reached. It is how the JSON
+    // version of this failed, on one platform, with 13ms and no output.
+    expect(() => commandInvocation('claude', argv, 'win32')).not.toThrow()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as {
       permissions: { deny: string[] }
     }
     // The corridor: the fake's own directory is denied, the lane is not.
     expect(settings.permissions.deny.some((rule) => rule.includes('claude-argv'))).toBe(true)
-    expect(settings.permissions.deny.some((rule) => rule.includes('lanes/mine'))).toBe(false)
+    expect(settings.permissions.deny.some((rule) => rule.includes('mine'))).toBe(false)
   })
 
   /** No roots, no grant — and therefore no policy that could contradict one. */
