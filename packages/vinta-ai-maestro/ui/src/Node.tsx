@@ -522,7 +522,10 @@ function Diff({ diff }: { readonly diff: NodeDetail['diff'] }) {
         </DescriptionDetails>
       </DescriptionList>
       {complete ? (
-        <pre className="m-0 rounded-md bg-muted px-3 py-2 font-mono text-xs">
+        // Wraps rather than overflowing: two long branch names are routinely
+        // wider than this panel, and a command that runs off the edge of its
+        // box is one nobody can copy without selecting blind.
+        <pre className="m-0 whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
           git diff {diff.baseBranch}...{diff.branch}
         </pre>
       ) : (

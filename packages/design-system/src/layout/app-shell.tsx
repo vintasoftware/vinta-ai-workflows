@@ -34,7 +34,7 @@ function AppTopbar({ className, children, ...props }: React.ComponentProps<'head
       )}
       {...props}
     >
-      <div className="mx-auto flex h-12 w-full max-w-(--app-width,1280px) items-center gap-4 px-5">
+      <div className="mx-auto flex h-12 w-full max-w-(--app-width,1600px) items-center gap-4 px-5">
         {children}
       </div>
     </header>
@@ -112,13 +112,22 @@ function AppTopbarActions({ className, ...props }: React.ComponentProps<'div'>) 
   )
 }
 
-/** The content column under the bar. */
+/**
+ * The content column under the bar.
+ *
+ * 1600px rather than a reading measure, because the apps on this shell are
+ * dense tools: their main content is tables whose columns are ids, lane names
+ * and branch names — values that cannot be wrapped or abbreviated without
+ * losing what identifies them. Below this the tables scroll sideways inside
+ * their own container, which hides columns behind a gesture nobody makes.
+ * `--app-width` still overrides it, for an app whose content is prose.
+ */
 function AppMain({ className, ...props }: React.ComponentProps<'main'>) {
   return (
     <main
       data-slot="app-main"
       className={cn(
-        'mx-auto flex w-full max-w-(--app-width,1280px) flex-1 flex-col gap-5 px-5 py-6',
+        'mx-auto flex w-full max-w-(--app-width,1600px) flex-1 flex-col gap-5 px-5 py-6',
         className,
       )}
       {...props}

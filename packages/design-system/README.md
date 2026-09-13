@@ -81,7 +81,7 @@ To add one: `pnpm dlx shadcn@latest add <name>` from this directory, then replac
 `src/layout/` — the layout kit, prop-driven and `gap`-spaced:
 
 - `Stack`, `HStack`, `VStack` — flex with `gap` on the 4px scale (`gap={3}`), `align`, `justify`, `wrap`.
-- `AppShell`, `AppTopbar`, `AppBrand`, `AppNav`, `AppNavLink`, `AppTopbarActions`, `AppMain` — one sticky bar and one bounded column (`--app-width`, default 1280px).
+- `AppShell`, `AppTopbar`, `AppBrand`, `AppNav`, `AppNavLink`, `AppTopbarActions`, `AppMain` — one sticky bar and one bounded column (`--app-width`, default 1600px — these are dense tools, not prose).
 - `PageHeader`, `PageHeaderHeading`, `PageHeaderTitle`, `PageHeaderMeta`, `PageHeaderActions` — title, mono identifiers, status and actions.
 - `DescriptionList`, `DescriptionTerm`, `DescriptionDetails` — labelled facts as a two-column `<dl>`.
 
