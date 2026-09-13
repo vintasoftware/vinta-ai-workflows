@@ -38,6 +38,7 @@ const KINDS = [
   'tool_use',
   'tool_result',
   'permission_request',
+  'permission_denied',
   'usage',
   'error',
   'session_ended',
@@ -51,6 +52,7 @@ const EntrySchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tool_use'), name: z.string(), id: z.string(), input: z.unknown() }),
   z.object({ type: z.literal('tool_result'), id: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ type: z.literal('permission_request'), tool: z.string(), detail: z.unknown() }),
+  z.object({ type: z.literal('permission_denied'), tool: z.string(), reason: z.string() }),
   z.object({
     type: z.literal('usage'),
     input: z.number(),
@@ -128,6 +130,10 @@ export function present(raw: unknown): EntryView {
       )
     case 'permission_request':
       return row(entry.type, 'tool', preview(entry.detail), 'attention', `Permission · ${entry.tool}`)
+    // `error`, not `attention`: a request is waiting for someone and a denial
+    // is already over. The row above carries what the tool was trying to do.
+    case 'permission_denied':
+      return row(entry.type, 'tool', entry.reason, 'error', `Refused · ${entry.tool}`)
     case 'usage':
       return row(entry.type, 'system', usage(entry), null, 'Usage')
     case 'error':

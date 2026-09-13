@@ -90,6 +90,59 @@ describe('CLI frame mapping', () => {
     ])
   })
 
+  /**
+   * The frame that was being dropped, byte for byte as the CLI emits it.
+   *
+   * A read outside the working directory is not *asked* about — there is no
+   * `can_use_tool` request to answer — it is decided, and announced like this.
+   * Until this mapping existed the orchestrator saw nothing: no event, no
+   * journal row, no transcript line, and a session that went on to end
+   * successfully having written nothing.
+   */
+  it('maps a refusal the CLI decided on its own', () => {
+    expect(
+      mapCliEvent({
+        type: 'system',
+        subtype: 'permission_denied',
+        tool_name: 'Read',
+        tool_use_id: 'toolu_01',
+        decision_reason_type: 'workingDir',
+        decision_reason: 'Path is outside allowed working directories',
+        message: 'Claude requested permissions to read from /repo/src/secret.ts, …',
+      }),
+    ).toEqual([{ type: 'permission_denied', tool: 'Read', reason: 'workingDir' }])
+  })
+
+  /**
+   * §11: the prose names the file that was being read. The decision token is a
+   * fixed word, which is what an operator acts on anyway — and the `tool_use`
+   * row above it in the transcript already carries what was attempted.
+   */
+  it('carries the decision token and never the vendor’s prose', () => {
+    const [event] = mapCliEvent({
+      type: 'system',
+      subtype: 'permission_denied',
+      tool_name: 'Read',
+      decision_reason_type: 'workingDir',
+      decision_reason: 'Path is outside allowed working directories',
+      message: 'Claude requested permissions to read from /repo/src/secret.ts, …',
+    })
+
+    expect(JSON.stringify(event)).not.toContain('secret.ts')
+    expect(JSON.stringify(event)).not.toContain('outside allowed')
+  })
+
+  /** A refusal with no reason attached is still a refusal, and still said. */
+  it('names a refusal that came with no decision token', () => {
+    expect(
+      mapCliEvent({ type: 'system', subtype: 'permission_denied', tool_name: 'Write' }),
+    ).toEqual([{ type: 'permission_denied', tool: 'Write', reason: 'denied' }])
+  })
+
+  it('ignores a refusal that does not say which tool', () => {
+    expect(mapCliEvent({ type: 'system', subtype: 'permission_denied' })).toEqual([])
+  })
+
   it('maps assistant text, thinking and tool use from one message', () => {
     const events = mapCliEvent({
       type: 'assistant',
