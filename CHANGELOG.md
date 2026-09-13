@@ -219,6 +219,42 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An agent still could not write in its own lane.** The entry below passed
+  claude-code `--permission-mode auto`, which matched our own vocabulary for
+  "works unattended" and is not what the vendor means by the word: `auto` still
+  routes a write to a permission prompt, and in `-p` there is nobody to answer
+  one. Run against the CLI, a `Write` to the agent's *own working directory*
+  comes back denied with no reason attached — the same dead end, wearing the
+  word that made it look closed. `acceptEdits` is the mode under which that
+  write succeeds, and is what `auto` now maps to. The test covering this
+  asserted the word rather than the behaviour, so it pinned the bug in place.
+
+- **A phase can read the operator's checkout.** A lane is a worktree cut from a
+  branch, so anything uncommitted — a plan written this morning, a spec that
+  never leaves the operator's machine — is present where they are and absent
+  from every lane. Reaching for it was refused before the model saw a byte, with
+  a message that reads like a prompt awaiting an answer ("Claude requested
+  permissions to read from …, but you haven't granted it yet") when in fact
+  nothing is asking: the CLI denies it outright, emits no permission request,
+  and the session then ends *successfully*, having written nothing.
+
+  The repository root is now granted to every claude-code agent for **reading**.
+  Granting a directory also grants writing in it, and the lane sits inside the
+  directory being granted, so the grant is paired with a deny list that keeps
+  the lane the only writable place under it — the operator's source and every
+  sibling lane stay refused. That list names the *siblings* at each level down
+  to the lane rather than the root itself, because the vendor resolves deny
+  before allow with no carve-out: `deny: <repo>/**` plus `allow: <lane>/**`
+  refuses the lane too. Each of those facts was established by running the CLI.
+
+  **This covers the file-editing tools and not `Bash`.** A shell redirection was
+  never confined to the working directory and is not confined now; that boundary
+  is the OS's, and the vendor's sandbox that enforces it also switches off the
+  network a phase needs to install anything.
+
+  codex needed nothing: under `--approve-for-me` it already reads anywhere on
+  disk, which was confirmed the same way.
+
 - **An agent can write in its own lane.** Every adapter declared
   `permissionControl: true` and passed no policy at all: claude-code was spawned
   as `-p --output-format stream-json …` with no `--permission-mode`, and codex as

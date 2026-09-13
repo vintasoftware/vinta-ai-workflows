@@ -14,7 +14,7 @@
  * includes CI, and includes the machine this was written on, where `claude` is
  * a shell alias rather than anything on PATH.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -26,7 +26,7 @@ import {
 } from '../src/harness/claude-code.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
-import { type FakeCliSpec, fakeCli } from './support/fake-cli.ts'
+import { type FakeCliSpec, fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
 const temps: string[] = []
 
@@ -480,6 +480,74 @@ describe('spawn against a fake binary', () => {
       { type: 'usage', input: 3, output: 4, costUsd: 0.01 },
       { type: 'session_ended', result: 'ok' },
     ])
+  })
+
+  /**
+   * The grant and its guard reach the CLI as arguments, so the assertion is
+   * about argv and nothing else.
+   *
+   * Worth pinning because the failure is invisible: `--add-dir` lifts the
+   * working-directory boundary in both directions, so a `--settings` that went
+   * missing would not break a run — it would quietly give every agent write
+   * access to the operator's checkout and to every sibling lane.
+   */
+  it('grants the read roots and denies writing in them', async () => {
+    const dir = makeTemp()
+    const lane = join(dir, 'lanes', 'mine')
+    mkdirSync(lane, { recursive: true })
+    const bin = fakeCliFromSource(
+      dir,
+      'claude-argv',
+      `import { writeFileSync } from 'node:fs'
+if (process.argv.includes('--version')) { console.log(${JSON.stringify(VERSION)}); process.exit(0) }
+writeFileSync(${JSON.stringify(join(dir, 'argv.json'))}, JSON.stringify(process.argv.slice(2)))
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-argv' }))
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }))
+`,
+    )
+
+    const outcome = await new ClaudeCodeAdapter({ bin, readRoots: [dir] }).spawn({
+      ...task(),
+      cwd: lane,
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    for await (const _event of outcome.session.events) void _event
+
+    const argv = JSON.parse(readFileSync(join(dir, 'argv.json'), 'utf8')) as string[]
+    expect(argv).toContain('--add-dir')
+    expect(argv[argv.indexOf('--add-dir') + 1]).toBe(dir)
+
+    const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] as string) as {
+      permissions: { deny: string[] }
+    }
+    // The corridor: the fake's own directory is denied, the lane is not.
+    expect(settings.permissions.deny.some((rule) => rule.includes('claude-argv'))).toBe(true)
+    expect(settings.permissions.deny.some((rule) => rule.includes('lanes/mine'))).toBe(false)
+  })
+
+  /** No roots, no grant — and therefore no policy that could contradict one. */
+  it('passes neither when nothing is granted', async () => {
+    const dir = makeTemp()
+    const bin = fakeCliFromSource(
+      dir,
+      'claude-bare',
+      `import { writeFileSync } from 'node:fs'
+if (process.argv.includes('--version')) { console.log(${JSON.stringify(VERSION)}); process.exit(0) }
+writeFileSync(${JSON.stringify(join(dir, 'bare.json'))}, JSON.stringify(process.argv.slice(2)))
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-bare' }))
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }))
+`,
+    )
+
+    const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    for await (const _event of outcome.session.events) void _event
+
+    const argv = JSON.parse(readFileSync(join(dir, 'bare.json'), 'utf8')) as string[]
+    expect(argv).not.toContain('--add-dir')
+    expect(argv).not.toContain('--settings')
   })
 
   it('classifies a CLI that refuses before announcing a session', async () => {

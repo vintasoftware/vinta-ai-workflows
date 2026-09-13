@@ -167,7 +167,7 @@ export async function runCommand(
   if (workflow === null) return FAILED
 
   const runId = deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`
-  const adapters = deps.adapters ?? defaultAdapters(workflow, permission)
+  const adapters = deps.adapters ?? defaultAdapters(workflow, permission, bind.repoPath)
   const laneRoot = laneRootFor(bind.repoPath)
 
   // §13.5, before a port is bound, a journal is opened or a worktree exists: a
@@ -585,16 +585,24 @@ function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
  * the command, not a field in the plan. A committed document that could say
  * "run agents without approvals" would say it on every machine that ever runs
  * it, including ones whose owner never agreed to that.
+ *
+ * The repository root goes with it, as the directory every agent may read.
+ * Lanes are worktrees of a branch, so whatever the operator has not committed
+ * is in their checkout and not in any lane — and a phase that reaches for it
+ * is refused with a message that reads like a question nobody can answer.
+ * Writing there stays impossible; `claude-code.ts` pairs the grant with the
+ * deny list that keeps it to reading.
  */
 function defaultAdapters(
   workflow: Workflow,
   permission: AgentPermission,
+  repoPath: string,
 ): Record<string, HarnessAdapter> {
   const adapters: Record<string, HarnessAdapter> = {}
   for (const id of referencedHarnesses(workflow)) {
     adapters[id] =
       id === 'claude-code'
-        ? new ClaudeCodeAdapter({ permission })
+        ? new ClaudeCodeAdapter({ permission, readRoots: [repoPath] })
         : id === 'codex'
           ? new CodexAdapter({ permission })
           : new OpencodeAdapter()

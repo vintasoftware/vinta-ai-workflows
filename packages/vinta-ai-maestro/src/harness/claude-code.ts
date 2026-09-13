@@ -31,6 +31,7 @@
  * tokens and exit codes only; the content lives in the transcript stream.
  */
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process'
+import { readdirSync } from 'node:fs'
 import {
   type AgentEvent,
   type AgentSession,
@@ -44,6 +45,7 @@ import {
   type SpawnRefusalKind,
 } from './adapter.ts'
 import { type AgentPermission, claudeCodeArgs, DEFAULT_PERMISSION } from './permissions.ts'
+import { addDirArgs, writeDenyRules, type ReadGrant } from './read-access.ts'
 import { openPty } from './pty.ts'
 import {
   EventQueue,
@@ -378,6 +380,44 @@ class ClaudeCodeSession implements AgentSession {
   }
 }
 
+/**
+ * `--add-dir` for each granted root, and the deny list that keeps the grant to
+ * reading.
+ *
+ * Computed per spawn because it is per lane: the deny list names the *other*
+ * children at every level between a root and this agent's working directory,
+ * which is the only shape the vendor's rules can express (`read-access.ts`).
+ *
+ * `full` gets the grant and no deny list. It means "no checks at all" and is
+ * documented as being for a box that is sandboxed by something else; writing a
+ * policy the mode is chosen to ignore would only make the flag look safer than
+ * the operator asked for.
+ */
+function readAccessArgs(
+  permission: AgentPermission,
+  roots: readonly string[],
+  lane: string,
+): readonly string[] {
+  if (roots.length === 0) return []
+  const grant: ReadGrant = { roots, lane }
+  if (permission === 'full') return addDirArgs(grant)
+  const deny = writeDenyRules(grant, (dir) => {
+    try {
+      return readdirSync(dir)
+    } catch {
+      // A directory that cannot be listed contributes no rules, which is the
+      // safe direction only because the corridor is what it would have named:
+      // an unlistable level leaves its siblings writable, never the lane
+      // unwritable.
+      return []
+    }
+  })
+  // Settings as a JSON string rather than a file: the policy is per spawn and
+  // a file would be one more thing to write into a lane, name uniquely and
+  // clean up after a kill.
+  return [...addDirArgs(grant), '--settings', JSON.stringify({ permissions: { deny } })]
+}
+
 const writeMessage = (child: ChildProcess, text: string): void => {
   const line = `${JSON.stringify({
     type: 'user',
@@ -404,6 +444,21 @@ export interface ClaudeCodeAdapterOptions {
    * invocation — never read from the workflow document (`permissions.ts`).
    */
   readonly permission?: AgentPermission
+  /**
+   * Directories the agent may *read* beyond its lane, as absolute paths.
+   *
+   * Normally the repository root: a lane is a worktree cut from a branch, so
+   * anything the operator has not committed — a plan written this morning, a
+   * spec that never leaves their checkout — is present where they are and
+   * missing where the agent is, and reaching for it is refused before the
+   * model sees a byte.
+   *
+   * Granting a directory to `claude` grants writing in it too, so the grant is
+   * paired with a deny list that keeps the lane as the only writable place
+   * under it (`read-access.ts`). Empty means the working directory is the
+   * whole world, which is what it was before this existed.
+   */
+  readonly readRoots?: readonly string[]
   /** How long a spawn may go without an init frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
@@ -464,6 +519,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   }
 
   async spawn(task: AgentTask): Promise<SpawnOutcome> {
+    const permission = this.options.permission ?? DEFAULT_PERMISSION
     const forced = this.#forced
     this.#forced = null
     if (forced !== null) {
@@ -481,7 +537,8 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       // `permission_request` event, the transcript renders it, and no answer is
       // ever sent — so the agent reports a blocked working directory and the
       // phase fails having written nothing.
-      ...claudeCodeArgs(this.options.permission ?? DEFAULT_PERMISSION),
+      ...claudeCodeArgs(permission),
+      ...readAccessArgs(permission, this.options.readRoots ?? [], task.cwd),
       '--model',
       task.model,
       ...(task.resumeSessionId === undefined ? [] : ['--resume', task.resumeSessionId]),
