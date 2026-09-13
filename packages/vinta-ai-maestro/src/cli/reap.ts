@@ -11,12 +11,20 @@
  * and the next run of the same plan cannot cut it. A failed attempt makes the
  * retry impossible until someone clears it by hand.
  *
- * **Two different kinds of destruction, and they are not offered together by
- * accident.** Removing a worktree discards whatever was uncommitted in it.
- * Deleting a branch discards commits. So this module finds and describes; the
- * caller confirms; and an unmerged branch is never deleted, only reported —
- * it is the only copy of whatever that phase wrote, and a cleanup command that
- * throws work away is one nobody can afford to run quickly.
+ * **One rule, applied to both kinds of destruction: never delete the only copy
+ * of work.** A phase can leave work in two places — committed on its branch, or
+ * uncommitted in its worktree — and both count. So a branch carrying commits no
+ * other branch has is kept, and a lane with a dirty tree is kept, and each is
+ * reported with the command to remove it by hand.
+ *
+ * An earlier version had this half-right: it guarded branches carefully and
+ * then removed every worktree with `--force`, silently discarding exactly the
+ * uncommitted work the branch guard existed to protect. Guarding one and not
+ * the other is worse than guarding neither, because it reads as safe.
+ *
+ * A cleanup command that occasionally eats work is one nobody can afford to run
+ * quickly, and running it quickly — between failed attempts, without reading the
+ * list every time — is the entire point.
  */
 import { execFile } from 'node:child_process'
 import { realpathSync } from 'node:fs'
@@ -31,16 +39,21 @@ export interface Lane {
   readonly path: string
   /** The branch it holds checked out, if any. */
   readonly branch: string | null
+  /** Uncommitted changes, including untracked files. Unknown reads as dirty. */
+  readonly dirty: boolean
 }
 
 export interface Reapable {
+  /** Lanes safe to remove: nothing uncommitted in them. */
   readonly lanes: readonly Lane[]
-  /** Summary files (`<name>.yaml` and any sidecars) belonging to those lanes. */
+  /** Lanes kept because their worktree holds uncommitted work. */
+  readonly dirtyLanes: readonly Lane[]
+  /** Summary files (`<name>.yaml` and any sidecars) belonging to `lanes`. */
   readonly summaries: readonly string[]
-  /** Phase branches safe to delete: not checked out anywhere, already merged. */
-  readonly mergedBranches: readonly string[]
-  /** Phase branches kept because deleting them would lose commits. */
-  readonly unmergedBranches: readonly string[]
+  /** Phase branches safe to delete: every commit on them is reachable elsewhere. */
+  readonly emptyBranches: readonly string[]
+  /** Phase branches kept because they carry commits no other branch has. */
+  readonly carryingBranches: readonly string[]
 }
 
 const git = async (repoPath: string, args: readonly string[]): Promise<string> => {
@@ -63,7 +76,7 @@ export async function worktrees(repoPath: string): Promise<readonly Lane[]> {
     return []
   }
 
-  const found: Lane[] = []
+  const found: { path: string; branch: string | null }[] = []
   let path: string | null = null
   let branch: string | null = null
   const flush = (): void => {
@@ -81,7 +94,32 @@ export async function worktrees(repoPath: string): Promise<readonly Lane[]> {
     }
   }
   flush()
-  return found
+
+  // Asked per worktree rather than inferred from the main checkout's status:
+  // each lane is its own working tree with its own index, and the main
+  // checkout's cleanliness says nothing about any of them.
+  return await Promise.all(
+    found.map(async (lane) => ({ ...lane, dirty: await isDirty(lane.path) })),
+  )
+}
+
+/**
+ * Whether a worktree holds uncommitted work, untracked files included.
+ *
+ * An untracked file counts. A phase that wrote three new modules and never
+ * committed them has produced exactly the work this command must not throw
+ * away, and `--porcelain` without `-uall` would call that tree clean.
+ *
+ * A tree that cannot be asked reads as dirty. The question is "is it safe to
+ * delete this", and an unanswerable question is not a yes.
+ */
+async function isDirty(path: string): Promise<boolean> {
+  try {
+    const output = await git(path, ['status', '--porcelain', '-uall'])
+    return output.trim() !== ''
+  } catch {
+    return true
+  }
 }
 
 /**
@@ -110,31 +148,38 @@ export async function findReapable(options: {
   // cheerfully.
   const root = realpath(laneRoot)
   const all = await worktrees(repoPath)
-  const lanes = all.filter((lane) => {
+  const mine = all.filter((lane) => {
     if (!isUnder(realpath(lane.path), root)) return false
     return runId === undefined || basename(lane.path).startsWith(`${runId}-`)
   })
 
+  const lanes = mine.filter((lane) => !lane.dirty)
+  const dirtyLanes = mine.filter((lane) => lane.dirty)
+
+  // Only the clean lanes' summaries. A kept lane keeps its summary: the file
+  // is how the pool knows what that worktree is, and orphaning it would leave
+  // a directory nothing can reset or tear down.
   const names = new Set(lanes.map((lane) => basename(lane.path)))
   const summaries = (await entriesOf(summaryDir))
     .filter((entry) => names.has(entry.replace(/\.(yaml|docker-compose\.override\.yml)$/, '')))
     .map((entry) => join(summaryDir, entry))
 
   if (!options.includeBranches) {
-    return { lanes, summaries, mergedBranches: [], unmergedBranches: [] }
+    return { lanes, dirtyLanes, summaries, emptyBranches: [], carryingBranches: [] }
   }
 
-  // Only the branches these lanes actually hold. Deleting every
-  // `plan/*/phase-*` in the repository would reach branches belonging to runs
-  // this command was not asked about.
+  // Only branches held by lanes that are actually going. A branch whose
+  // worktree is being kept cannot be deleted anyway — git refuses while it is
+  // checked out — so offering it would be a promise this cannot keep.
   const candidates = [...new Set(lanes.map((lane) => lane.branch).filter(isPhaseBranch))]
-  const merged = new Set(await mergedBranches(repoPath))
+  const carrying = await Promise.all(candidates.map((branch) => carriesCommits(repoPath, branch)))
 
   return {
     lanes,
+    dirtyLanes,
     summaries,
-    mergedBranches: candidates.filter((branch) => merged.has(branch)),
-    unmergedBranches: candidates.filter((branch) => !merged.has(branch)),
+    emptyBranches: candidates.filter((_, i) => carrying[i] === false),
+    carryingBranches: candidates.filter((_, i) => carrying[i] !== false),
   }
 }
 
@@ -172,10 +217,10 @@ export async function reap(
   }
 
   if (options.branches) {
-    for (const branch of target.mergedBranches) {
+    for (const branch of target.emptyBranches) {
       try {
-        // `-d`, never `-D`. Merged is checked before offering, and this is the
-        // second check: if git disagrees, the branch stays.
+        // `-d`, never `-D`. Emptiness is checked before offering, and this is
+        // the second check: if git disagrees, the branch stays.
         await git(repoPath, ['branch', '-d', branch])
       } catch {
         failures.push(`branch ${branch}`)
@@ -187,30 +232,39 @@ export async function reap(
 }
 
 /**
- * Branches already contained by the checkout's current HEAD.
+ * Whether a branch holds any commit no other branch does.
  *
- * `branch --merged HEAD` and the plain listing, for two separate reasons.
- * `--merged` takes an optional commit, so `--merged --format=…` is read as
- * `--merged <commit>` and dies on a malformed object name — the commit has to
- * be named before any other flag. And `%(refname:short)` is a `%` expression,
- * which on Windows goes through `cmd.exe` and is expanded before git ever sees
- * it, the same way `--format=%H` was.
+ * The question that decides whether deleting it loses anything, and it is not
+ * the same as "merged into HEAD" — which is what this used to ask. `--merged`
+ * is relative to wherever the operator happens to be standing: phase branches
+ * are cut from the plan's `base_branch`, so an operator sitting on an unrelated
+ * feature branch would see every empty phase branch as unmerged and keep all of
+ * them, and the command would tidy up nothing on the one checkout where it is
+ * most often run.
  *
- * So the human listing is parsed instead: one branch per line, with `*` for the
- * current branch and `+` for one checked out in another worktree — which every
- * lane branch is, and which is exactly what has to be recognised rather than
- * skipped.
+ * `rev-list <branch> --not --exclude=<branch> --branches` asks it directly:
+ * commits reachable from this branch and from no other. Empty output means
+ * every commit on it lives somewhere else too, so the ref is the only thing
+ * deletion removes. It also needs no format string, unlike
+ * `branch --format=%(refname:short)` — a `%` expression `cmd.exe` expands
+ * before git sees it, which is the same Windows trap that broke `--format=%H`.
+ *
+ * An unanswerable question counts as carrying commits: the safe direction is
+ * to keep the branch.
  */
-async function mergedBranches(repoPath: string): Promise<readonly string[]> {
+async function carriesCommits(repoPath: string, branch: string): Promise<boolean> {
   try {
-    const output = await git(repoPath, ['branch', '--merged', 'HEAD'])
-    return output
-      .split('\n')
-      .map((line) => line.replace(/^[*+]?\s+/, '').trim())
-      .filter((line) => line !== '' && !line.startsWith('('))
+    const output = await git(repoPath, [
+      'rev-list',
+      '--max-count=1',
+      branch,
+      '--not',
+      `--exclude=${branch}`,
+      '--branches',
+    ])
+    return output.trim() !== ''
   } catch {
-    // Unknown means unmerged: the safe direction is to keep the branch.
-    return []
+    return true
   }
 }
 

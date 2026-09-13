@@ -249,13 +249,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *next* run of that plan impossible, since git refuses to check out a branch a
   second worktree holds.
 
-  Both flags are opt-in and destructive in different ways, so they are not
-  bundled: removing a worktree discards whatever was uncommitted in it, and
-  deleting a branch discards commits. **An unmerged branch is never deleted**,
-  only listed with the command to delete it by hand — on a failed run that
-  branch is the only copy of whatever the phase wrote. `--dry-run` and `--yes`
-  work as they already did, and a worktree that will not go is named rather than
-  counted.
+  One rule decides both: **never delete the only copy of work.** A phase can
+  leave work committed on its branch or uncommitted in its worktree, and both
+  count — so a branch carrying commits no other branch has is kept, a lane with
+  a dirty tree is kept, and each is listed with the command to remove it by
+  hand. Untracked files count as work: a phase that wrote three new modules and
+  never committed them is exactly the case worth protecting.
+
+  Emptiness is measured as "carries no commit another branch does not already
+  have", not as "merged into HEAD". The latter is relative to wherever the
+  operator is standing, so on a feature branch — the checkout this is most often
+  run from — every empty phase branch looked unmerged and nothing was ever
+  cleaned up.
+
+  `--dry-run` and `--yes` work as they already did, and a worktree that will not
+  go is named rather than counted.
 
 - **`doctor` now catches, before a lane exists, the failures that used to take a
   run each.** Four consecutive runs of one plan failed four different ways, and

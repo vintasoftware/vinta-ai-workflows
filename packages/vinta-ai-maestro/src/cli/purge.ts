@@ -51,9 +51,19 @@ export const PURGE_USAGE = `usage: vinta-ai-maestro purge [run-id] [--repo <dir>
                  their summaries. Nothing else reaps these: a run's lanes are
                  not under runs/, so they outlive every purge and accumulate.
   --branches     Also delete the plan/<workflow>/phase-* branches those lanes
-                 held. Scoped to branches no longer checked out anywhere and
-                 already merged; an unmerged branch is listed and kept, because
-                 it is the only copy of whatever that phase wrote.`
+                 held — the ones carrying no commit another branch does not
+                 already have. A branch with commits of its own is listed and
+                 kept, as is a lane whose worktree is dirty: on a failed run
+                 either may be the only copy of what that phase produced.`
+
+/** Nothing found, for the case where lanes were never asked about. */
+const EMPTY_REAPABLE: Reapable = {
+  lanes: [],
+  dirtyLanes: [],
+  summaries: [],
+  emptyBranches: [],
+  carryingBranches: [],
+}
 
 /** A run id is a single directory name, never a path. */
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -98,10 +108,10 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
         ...(runId === undefined ? {} : { runId }),
         includeBranches: parsed.values.branches === true,
       })
-    : { lanes: [], summaries: [], mergedBranches: [], unmergedBranches: [] }
+    : EMPTY_REAPABLE
 
   const nothing =
-    targets.length === 0 && reapable.lanes.length === 0 && reapable.mergedBranches.length === 0
+    targets.length === 0 && reapable.lanes.length === 0 && reapable.emptyBranches.length === 0
   if (nothing) {
     // The wording widens only when the scope did. A plain `purge` that finds
     // nothing is still talking about run state, and saying "nothing to purge"
@@ -125,7 +135,7 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
     io.out(`  ${relative(repoPath, lane.path)}${lane.branch === null ? '' : ` (${lane.branch})`}`)
   }
   for (const summary of reapable.summaries) io.out(`  ${relative(repoPath, summary)}`)
-  for (const branch of reapable.mergedBranches) io.out(`  branch ${branch}`)
+  for (const branch of reapable.emptyBranches) io.out(`  branch ${branch}`)
   io.out('')
   if (targets.length > 0) {
     io.out('Run directories hold agent transcripts and gate logs, which contain')
@@ -143,7 +153,7 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
     return OK
   }
 
-  const count = targets.length + reapable.lanes.length + reapable.mergedBranches.length
+  const count = targets.length + reapable.lanes.length + reapable.emptyBranches.length
   if (parsed.values.yes !== true && !(await io.confirm(`Delete ${count} items?`))) {
     io.err('vinta-ai-maestro: cancelled. Nothing was deleted.')
     return FAILED
@@ -167,13 +177,27 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
   return OK
 }
 
-/** Says what was deliberately left alone, and why. Silence would read as a bug. */
+/**
+ * Says what was deliberately left alone, and why.
+ *
+ * Silence would read as a bug — an operator who asked for `--lanes --branches`
+ * and still sees a lane afterwards needs to know it was a decision. Both kinds
+ * of survivor get the command that removes them anyway, because the point is to
+ * let someone look at the reason and overrule it, not to hide the option.
+ */
 function reportKept(reapable: Reapable, io: Io): void {
-  if (reapable.unmergedBranches.length === 0) return
-  io.out('')
-  io.out('Kept — unmerged, so deleting them would lose commits:')
-  for (const branch of reapable.unmergedBranches) io.out(`  ${branch}`)
-  io.out('Delete one yourself with: git branch -D <branch>')
+  if (reapable.dirtyLanes.length > 0) {
+    io.out('')
+    io.out('Kept — uncommitted work in the worktree:')
+    for (const lane of reapable.dirtyLanes) io.out(`  ${lane.path}`)
+    io.out('Look first, then: git worktree remove --force <path>')
+  }
+  if (reapable.carryingBranches.length > 0) {
+    io.out('')
+    io.out('Kept — commits no other branch has:')
+    for (const branch of reapable.carryingBranches) io.out(`  ${branch}`)
+    io.out('Delete one anyway with: git branch -D <branch>')
+  }
 }
 
 /**

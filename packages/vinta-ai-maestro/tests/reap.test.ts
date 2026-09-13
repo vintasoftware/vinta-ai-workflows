@@ -110,7 +110,7 @@ describe('finding what a run left behind', () => {
    * holds the only copy of whatever the agent wrote. Deleting it to tidy up
    * would destroy exactly the thing worth keeping.
    */
-  it('keeps an unmerged branch and reports it instead of deleting it', async () => {
+  it('keeps a branch carrying its own commits, and reports it', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
     const lane = join(laneRoot, 'runa-crew-1-junior')
     writeFileSync(join(lane, 'work.txt'), 'the phase wrote this\n', 'utf8')
@@ -124,11 +124,11 @@ describe('finding what a run left behind', () => {
       includeBranches: true,
     })
 
-    expect(found.unmergedBranches).toEqual(['plan/p/phase-runa'])
-    expect(found.mergedBranches).toEqual([])
+    expect(found.carryingBranches).toEqual(['plan/p/phase-runa'])
+    expect(found.emptyBranches).toEqual([])
   })
 
-  it('offers a merged branch, which has nothing left to lose', async () => {
+  it('offers a branch whose every commit lives elsewhere too', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
 
     const found = await findReapable({
@@ -139,8 +139,8 @@ describe('finding what a run left behind', () => {
     })
 
     // Never committed to, so it is still exactly `main`.
-    expect(found.mergedBranches).toEqual(['plan/p/phase-runa'])
-    expect(found.unmergedBranches).toEqual([])
+    expect(found.emptyBranches).toEqual(['plan/p/phase-runa'])
+    expect(found.carryingBranches).toEqual([])
   })
 
   it('finds no branches at all unless branches were asked for', async () => {
@@ -154,8 +154,96 @@ describe('finding what a run left behind', () => {
     })
 
     expect(found.lanes).toHaveLength(1)
-    expect(found.mergedBranches).toEqual([])
-    expect(found.unmergedBranches).toEqual([])
+    expect(found.emptyBranches).toEqual([])
+    expect(found.carryingBranches).toEqual([])
+  })
+})
+
+describe('work left in the worktree', () => {
+  /**
+   * The asymmetry this fixes. An earlier version guarded branches carefully and
+   * then removed every worktree with `--force`, discarding exactly the
+   * uncommitted work the branch guard existed to protect.
+   */
+  it('keeps a lane whose worktree has uncommitted changes', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
+    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'seed.txt'), 'edited\n', 'utf8')
+
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    expect(found.lanes).toEqual([])
+    expect(found.dirtyLanes).toHaveLength(1)
+  })
+
+  /**
+   * A phase that wrote three new modules and never committed them has produced
+   * exactly the work this must not throw away. `--porcelain` without `-uall`
+   * would call that tree clean.
+   */
+  it('counts an untracked file as work', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
+    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    expect(found.dirtyLanes).toHaveLength(1)
+  })
+
+  /** A kept lane keeps its summary: the pool needs it to reset or tear down. */
+  it('keeps the summary of a lane it is keeping', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
+    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    expect(found.summaries).toEqual([])
+  })
+
+  /**
+   * A dirty lane still holds its branch checked out, so the branch could not be
+   * deleted even if it were empty. Offering it would be a promise this cannot
+   * keep.
+   */
+  it('does not offer the branch of a lane it is keeping', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
+    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    expect(found.emptyBranches).toEqual([])
+    expect(found.carryingBranches).toEqual([])
+  })
+
+  it('leaves a dirty lane on disk when it reaps', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa', 'runb'])
+    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    await reap(repo, found, { branches: true })
+
+    expect(existsSync(join(laneRoot, 'runa-crew-1-junior'))).toBe(true)
+    expect(existsSync(join(laneRoot, 'runb-crew-1-junior'))).toBe(false)
+  })
+})
+
+describe('emptiness is not measured from HEAD', () => {
+  /**
+   * `--merged HEAD` was the old test, and it is relative to wherever the
+   * operator is standing. Phase branches are cut from the plan's base, so an
+   * operator on an unrelated feature branch saw every empty phase branch as
+   * unmerged — and the command tidied up nothing, on the checkout where it is
+   * most often run.
+   */
+  it('finds an empty phase branch while HEAD is on an unrelated branch', async () => {
+    const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
+    git(repo, 'checkout', '-qb', 'unrelated-feature')
+    writeFileSync(join(repo, 'elsewhere.txt'), 'diverged\n', 'utf8')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-qm', 'diverge')
+
+    const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
+
+    expect(found.emptyBranches).toEqual(['plan/p/phase-runa'])
   })
 })
 
@@ -187,7 +275,7 @@ describe('reaping', () => {
     expect(git(repo, 'branch', '--list', 'plan/p/phase-runa').trim()).toContain('plan/p/phase-runa')
   })
 
-  it('does not delete an unmerged branch even when branches were asked for', async () => {
+  it('does not delete a branch carrying commits, even when branches were asked for', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
     const lane = join(laneRoot, 'runa-crew-1-junior')
     writeFileSync(join(lane, 'work.txt'), 'the phase wrote this\n', 'utf8')
