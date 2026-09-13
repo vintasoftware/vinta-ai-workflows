@@ -93,7 +93,7 @@ import {
   type ReviewDecision,
 } from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
-import { composeSpawnPrompt, type Reorientation } from '../prompts/index.ts'
+import { composeSpawnPrompt, PromptError, type Reorientation } from '../prompts/index.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { Node, Pipeline, Workflow } from '../types.ts'
 
@@ -171,6 +171,18 @@ class CapacityRetry extends Error {
 
 /** `fatal` only — a broken harness, which is the one refusal that fails a node. */
 class SpawnFatal extends Error {}
+
+/**
+ * A lane that could not be made clean for the next node.
+ *
+ * Its own type rather than a bare `Error` so `failureReason` can keep the
+ * message: `recycleStage` already reduced the cause to a stage or an error
+ * kind, so this text is identifiers by the time it is thrown. A plain `Error`
+ * would be indistinguishable from something a dependency threw, and would be
+ * flattened to `Error` — losing the lane name and the stage, which are the
+ * whole point of the message.
+ */
+class LaneUnusable extends Error {}
 
 /**
  * Unwinds a node the operator aborted (§9). It carries no message: the node is
@@ -296,6 +308,31 @@ interface NodeState {
  * output of something a project chose to run, and neither belongs on a stream
  * that is otherwise identifiers.
  */
+/**
+ * Why a node failed, in words safe to persist.
+ *
+ * The same rule `recycleStage` follows, for the same reason. Two of the three
+ * failure paths pass a literal this module wrote; the third passes whatever was
+ * thrown, and "whatever was thrown" is not a closed vocabulary. A `PromptError`
+ * is identifiers by construction — node id, reference, lane directory — and a
+ * `SpawnFatal` names a harness; both are worth keeping verbatim, because they
+ * are the ones an operator can act on. Anything else is reported by its *kind*:
+ * an error name and, where the runtime supplies one, a `code` like `ENOENT`.
+ *
+ * The alternative — persisting `error.message` whatever it is — is how a
+ * dependency's exception text ends up in a durable, API-served log. A gate's
+ * output, a git diagnostic and a file's contents have all been somebody's
+ * error message.
+ */
+function failureReason(error: unknown): string {
+  if (error instanceof PromptError || error instanceof SpawnFatal || error instanceof LaneUnusable) {
+    return String(error.message)
+  }
+  const named = error as { name?: unknown; code?: unknown }
+  const name = typeof named.name === 'string' ? named.name : 'Error'
+  return typeof named.code === 'string' ? `${name}: ${named.code}` : name
+}
+
 function recycleStage(error: unknown): string {
   if (error instanceof LaneRecycleError) return error.stage
   const named = error as { name?: unknown; code?: unknown }
@@ -815,7 +852,7 @@ export class Scheduler {
           this.#setStatus(state, 'running')
           continue
         }
-        this.#fail(state, error instanceof Error ? error.message : 'node failed')
+        this.#fail(state, failureReason(error))
         return
       }
     }
@@ -982,7 +1019,7 @@ export class Scheduler {
       // back to its base, and a slot that could not be torn down and rebuilt.
       // Without it "could not be recycled" sends an operator to read three
       // different pieces of machinery.
-      throw new Error(`lane "${lane}" could not be recycled (${recycleStage(error)})`)
+      throw new LaneUnusable(`lane "${lane}" could not be recycled (${recycleStage(error)})`)
     }
   }
 
@@ -1570,26 +1607,29 @@ export class Scheduler {
   /** Failure containment: exactly the transitive dependents, and nothing else. */
   #fail(state: NodeState, reason: string): void {
     state.failure = reason
-    this.#setStatus(state, 'failed')
+    this.#setStatus(state, 'failed', reason)
     // The member's context is the context that just failed. Carrying it into
     // their next phase carries whatever wrong turn it took with it, and a wrong
     // conclusion is more expensive to inherit than a repository is to re-read.
     const member = state.crew?.member ?? state.lastMember
     if (member !== null) this.#poisoned.add(member)
+    const blockedBy = `blocked by ${state.node.id}`
     for (const id of transitiveDependents(this.#workflow.nodes, state.node.id)) {
       const dependent = this.#states.get(id)
       // Only nodes that have not started: one already in flight finishes.
-      if (dependent?.status === 'pending') this.#setStatus(dependent, 'blocked')
+      if (dependent?.status === 'pending') this.#setStatus(dependent, 'blocked', blockedBy)
     }
   }
 
-  #setStatus(state: NodeState, status: NodeStatus): void {
+  #setStatus(state: NodeState, status: NodeStatus, reason?: string): void {
     state.status = status
     this.#options.journal.append({
       runId: this.#options.runId,
       nodeId: state.node.id,
       type: 'node_status',
-      payload: { status },
+      // Only on a failure, and only when there is one: a `reason` on a `done`
+      // row would be a field readers have to learn to ignore.
+      payload: { status, ...(reason === undefined ? {} : { reason }) },
     })
     this.#wake()
   }
