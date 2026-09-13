@@ -28,7 +28,21 @@ on:
       # the two families cannot collide — which is the whole reason those two
       # are spelled that way.
       - '[0-9]*'
-  workflow_dispatch: {}
+  # Dispatch has to be told the version, because `github.ref_name` on a manual
+  # run is a *branch* — the guard below would compare `alpha` against a version
+  # and stop. Without this input the option is decoration that fails at the
+  # first step, which is worse than not having it.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version to publish, e.g. 0.7.0-alpha5. Must match both manifests on this ref.'
+        required: true
+        type: string
+      dry_run:
+        description: 'Pack and check, publish nothing.'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -69,13 +83,41 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # One place decides what version this run is about, so the guard, the
+      # tarball names and the publish cannot disagree with each other.
+      - name: Which version this run publishes
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          node -e '
+            const version = process.env.INPUT_TAG || process.env.REF_NAME
+            console.log(`version: ${version}`)
+            require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`)
+          '
+
+      # What the registry will be asked for, and with what. Trusted publishing
+      # is invisible when it works and indistinguishable from a missing token
+      # when it does not — `ENEEDAUTH` is what npm says both when OIDC was never
+      # attempted and when the exchange was refused. These three lines are the
+      # difference between reading that error and guessing at it.
+      - name: What this runner can publish with
+        run: |
+          echo "npm: $(npm --version)  (trusted publishing needs >= 11.5.1)"
+          echo "node: $(node --version)"
+          echo "OIDC token endpoint present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}${ACTIONS_ID_TOKEN_REQUEST_URL:-NO — id-token: write is missing}"
+          echo "npm registry: $(npm config get registry)"
+          echo "npm userconfig: $(npm config get userconfig)"
+          test -f ~/.npmrc && { echo '~/.npmrc exists:'; sed 's/=.*/=<redacted>/' ~/.npmrc; } || echo '~/.npmrc: absent (expected under trusted publishing)'
+
       # The tag is the claim; the manifests are the artifact. A tag that names a
       # version the manifests do not carry would publish something other than
       # what it says — the one failure that cannot be corrected afterwards,
       # because a version number on the registry is permanent.
       - name: The tag and both manifests must agree
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.version }}
         run: |
           node -e '
             const { readFileSync } = require("node:fs")
@@ -98,7 +140,7 @@ jobs:
       - name: Pick the dist-tag from the version
         id: dist
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.version }}
         run: |
           node -e '
             const found = /-([a-zA-Z]+)/.exec(process.env.TAG)
@@ -144,20 +186,23 @@ jobs:
       # script, and the guard above — which would reject such a tag — runs in a
       # different step and cannot protect this one.
       - name: Publish vinta-ai-workflows
+        if: ${{ inputs.dry_run != true }}
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.dist.outputs.tag }}
         run: npm publish "./dist-tarballs/vinta-ai-workflows-${TAG}.tgz" --tag "$DIST_TAG"
 
       - name: Publish vinta-ai-maestro
+        if: ${{ inputs.dry_run != true }}
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.dist.outputs.tag }}
         run: npm publish "./dist-tarballs/vinta-ai-maestro-${TAG}.tgz" --tag "$DIST_TAG"
 
       - name: Say what was published
+        if: ${{ inputs.dry_run != true }}
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.dist.outputs.tag }}
         run: |
           {
