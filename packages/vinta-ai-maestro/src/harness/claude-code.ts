@@ -202,6 +202,25 @@ const mapResult = (value: Record<string, unknown>): AgentEvent[] => {
   return events
 }
 
+/**
+ * The refusal that never asks: `{"type":"system","subtype":"permission_denied",
+ * "tool_name":"Read","decision_reason_type":"workingDir", …}`.
+ *
+ * The CLI emits this instead of a `can_use_tool` control request whenever the
+ * answer is already decided — a path outside the working directory, a mode that
+ * forbids the tool. Nothing can be replied to, so the only thing to do with it
+ * is say it happened.
+ *
+ * `decision_reason` is prose and `message` names the path that was read; both
+ * are dropped. `decision_reason_type` is a fixed token, which is what §11
+ * allows in an event and what an operator can act on anyway.
+ */
+const mapPermissionDenied = (value: Record<string, unknown>): AgentEvent[] => {
+  const tool = asString(value['tool_name'])
+  if (tool === undefined) return []
+  return [{ type: 'permission_denied', tool, reason: asString(value['decision_reason_type']) ?? 'denied' }]
+}
+
 const mapControlRequest = (value: Record<string, unknown>): AgentEvent[] => {
   const request = asRecord(value['request'])
   if (!request || request['subtype'] !== 'can_use_tool') return []
@@ -219,6 +238,7 @@ export function mapCliEvent(raw: unknown): AgentEvent[] {
   if (!value) return []
   switch (value['type']) {
     case 'system': {
+      if (value['subtype'] === 'permission_denied') return mapPermissionDenied(value)
       const sessionId = asString(value['session_id'])
       return value['subtype'] === 'init' && sessionId !== undefined
         ? [{ type: 'session_started', sessionId }]
