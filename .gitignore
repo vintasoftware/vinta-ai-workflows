@@ -71,3 +71,6 @@ coverage/
 !.cursor/skills
 .agents/*
 !.agents/skills
+
+# Superpowers SDD scratch
+.superpowers/

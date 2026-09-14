@@ -237,6 +237,16 @@
           "description": "Write durable unit tests for a unit of behavior — mock only genuine externals, assert the full expected output (not counts/truthiness), clean up created data or run inside a rolled-back transaction, never hit an external service that can't run in dev/test, keep test logic literal, and decouple from implementation internals. Template-rendered (bucket B) from `vinta-derive-skills/resources/write-unit-test-template.md`, with best-practice packs copied verbatim into the skill's `resources/packs/` on two independent axes — one runner pack (`runners/`: pytest / vitest / jest) selected by the detected test framework, plus a stack pack per matched stack (`stacks/`: django / fastapi / flask / medplum / react / nextjs / tanstack-start / react-router / prisma / python-package / typescript-package) so framework-specific advice ships only when that framework is present. Default-on: bootstrap sets `enabled` whenever `vinta-analyze-codebase` detects a unit-test framework, `disabled` when none is found (there's nothing to render against). When `enabled`, project-level test conventions live under `skills.write-unit-test` (test style, data setup, assertion style, DB isolation, inferred extra conventions).",
           "type": "string",
           "enum": ["enabled", "disabled"]
+        },
+        "dev-desk-check": {
+          "description": "Drive a real browser through the app as a user, judge what renders, and produce evidence someone who wasn't there can trust — the manual counterpart to `add-e2e-test`'s automation. Plan source is the branch diff, ids from the project's QA use-cases doc, or a ticket. Template-rendered (bucket B) from `vinta-derive-skills/resources/dev-desk-check-template.md` and opt-in (bucket C). Invoked deliberately — never wired into `implement-plan`'s phase gate, because a browser pass per phase is too slow (the same reasoning that keeps `run_options.run_e2e` off). When `enabled`, project-level configuration lives under `skills.dev-desk-check` — the same block `qa-review` renders from.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        },
+        "qa-review": {
+          "description": "Portable QA pass for product managers and designers — the same browser walk and report shape as `dev-desk-check` with git, diffs, dev servers, service probes, PR edits and database access stripped out. Template-rendered (bucket B) from `vinta-derive-skills/resources/qa-review-template.md` and opt-in (bucket C), rendered **self-contained**: no relative links and no repo-dependent commands, so the single `SKILL.md` works when dropped at `~/.claude/skills/qa-review/SKILL.md` by someone with no checkout. Reads the same `skills.dev-desk-check` config block; this enum and `foundation_skills.dev-desk-check` are independent opt-ins, so a project can take the engineer path alone, the review path alone, or both.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
         }
       }
     },
@@ -339,6 +349,34 @@
               "description": "Whether the user is permitted to opt out of the MCP preflight + categories block on a per-run basis (e.g. `/systematic-debugging local-only — flaky test`). Defaults to `true`. Set to `false` for projects where production-only bugs must always go through the observability sweep — the skill will then refuse the `local-only` keyword and require the user to wire up an MCP server (or remove `systematic-debugging` from the project) instead.",
               "type": "boolean",
               "default": true
+            }
+          }
+        },
+        "dev-desk-check": {
+          "description": "Per-run defaults for `dev-desk-check` and `qa-review`. Both read this one block; `qa-review` ignores the options that have no meaning without a checkout. The skill still asks per run — these are the suggested defaults shown.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "screenshots": {
+              "description": "Capture a screenshot per distinct rendered state during the walk. Default `true` — a report with no evidence is hard for someone who wasn't there to trust. Screenshot handling is still bounded by the environment's `data_sensitivity`.",
+              "type": "boolean",
+              "default": true
+            },
+            "scope": {
+              "description": "Default plan source for Phase 1. `diff` maps the branch diff vs the PR's real base to reachable surfaces; `use-cases` walks ids from the project's QA use-cases doc (the strongest source — the document already states the steps and the expected outcome); `description` works from a ticket or a plain description. `qa-review` supports `use-cases` and `description` only.",
+              "type": "string",
+              "enum": ["diff", "use-cases", "description"],
+              "default": "diff"
+            },
+            "browser": {
+              "description": "Preferred browser-driving tool, named as the harness exposes it (e.g. `playwright-mcp`, `chrome-devtools`, the runtime's built-in browser). Free-form on purpose — this package ships no browser tooling and hardcoding a tool name goes stale. When the named tool is unavailable at runtime the skill falls back to whatever the harness does expose, and refuses to run when nothing does.",
+              "type": "string",
+              "minLength": 1
+            },
+            "dry_run": {
+              "description": "Plan and preflight only — enumerate the surfaces to walk and the writes the plan would require, print the write-authorization block, then stop before opening the browser. Default `false`.",
+              "type": "boolean",
+              "default": false
             }
           }
         }
@@ -520,6 +558,184 @@
               "items": { "type": "string", "minLength": 1 },
               "uniqueItems": true,
               "default": []
+            }
+          }
+        },
+        "dev-desk-check": {
+          "description": "Configuration for the `dev-desk-check` **and** `qa-review` foundation skills — both render from this one block. Required when either `foundation_skills.dev-desk-check` or `foundation_skills.qa-review` is `enabled`; ignored otherwise. Guard rails are data, not prose: a project declares its policy per environment and the rendered skill enforces exactly what it was given. **Never put a credential here** — `auth.accounts[].where` is a pointer to where a secret lives, not the secret.",
+          "type": "object",
+          "required": ["environments"],
+          "additionalProperties": false,
+          "properties": {
+            "use_cases_path": {
+              "description": "Repo-relative path to the project's QA use-cases checklist, the plan source both skills prefer. Usually the `QA_USE_CASES.md` that `create-qa-use-cases` bootstraps. The `qa-review` render deliberately does NOT inline this document's contents — a snapshot of a checklist the repo keeps updating is worse than no snapshot; it asks the reviewer to paste the use case instead.",
+              "type": "string",
+              "minLength": 1,
+              "default": "QA_USE_CASES.md"
+            },
+            "report_dir": {
+              "description": "Where QA reports and the incremental write ledger land, repo-relative. The default sits under the gitignored `.vinta-ai-workflows/`, which is what `data_sensitivity: client` and `phi` require — screenshots from those environments must not be committed, uploaded to a PR, or attached to a design tool.",
+              "type": "string",
+              "minLength": 1,
+              "default": ".vinta-ai-workflows/qa"
+            },
+            "escalation_contact": {
+              "description": "Who a reviewer asks when a run is blocked — a channel, a rotation, a role (e.g. `#acme-eng on Slack`, `the on-call engineer`). Inlined into the `qa-review` render because its holder has no repo and no other way to find out. Omit and the render says `the engineer who gave you this file`.",
+              "type": "string",
+              "minLength": 1
+            },
+            "environments": {
+              "description": "Declared QA environments, keyed by the name the team uses (`local`, `staging`, `production`, `demo`, …). At least one is required. Each entry states its own write policy and data sensitivity — the rendered skill enforces per environment, never globally.",
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "object",
+                "required": ["base_url", "writes"],
+                "additionalProperties": false,
+                "properties": {
+                  "base_url": {
+                    "description": "Where the app is reached in this environment. The browser opens here.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "api_url": {
+                    "description": "Backend base URL, when the backend is preflighted separately from the frontend. Omit for environments where there is nothing to probe independently.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "api_health_path": {
+                    "description": "Path appended to `api_url` for the backend preflight probe. Only meaningful when `api_url` is set and `edge_proxy` is absent.",
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "/health/"
+                  },
+                  "frontend_start": {
+                    "description": "Command that starts the frontend for this environment. **Opt-in by absence**: no key means the rendered skill probes `base_url` and stops rather than starting anything. A second dev server on an occupied port silently invalidates a whole run. In practice this is set for `local` only.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "writes": {
+                    "description": "What the run may mutate in this environment. `free` — writes proceed, and the ledger is still kept. `confirm` — every write is enumerated and authorised before the browser opens, in a confirmation that names this environment; the relaxed production gate and the right default for anything prod-like. `forbidden` — the run refuses to write, states what would be required, records it, and lets the operator decide. A per-run `--writes=allow` flag may only relax *within* the declared policy, never upgrade past it. Setup writes (feature flags, seeds, migrations) stay propose-only under every value.",
+                    "type": "string",
+                    "enum": ["free", "confirm", "forbidden"]
+                  },
+                  "data_sensitivity": {
+                    "description": "What the records in this environment are, which drives evidence handling and not just writes. `none` — screenshots and report contents unrestricted, Artifact deliverable offered. `client` — screenshots stay in the gitignored `report_dir` and are never uploaded to a PR or attached to a design tool; the report describes the shape of records rather than transcribing them; the Artifact deliverable is offered only behind an explicit confirmation. `phi` — as `client`, plus the report and the write ledger carry **opaque ids only, never field values**, and the Artifact deliverable is **not offered at all**, because publishing to hosted storage would move records outside the managed platform's access controls and audit logging.",
+                    "type": "string",
+                    "enum": ["none", "client", "phi"],
+                    "default": "none"
+                  },
+                  "edge_proxy": {
+                    "description": "Name of the edge proxy / WAF fronting this environment (e.g. `cloudflare`, `akamai`). When set, the rendered skill emits **no** `curl` preflight for this environment — such proxies answer non-browser traffic with a 403, and reading that as downtime kills a healthy run on evidence that never addressed the question. The browser is the preflight there.",
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "services": {
+              "description": "Backing services to probe before the frontend and backend checks, because a dependency that is down produces failures indistinguishable from product bugs. Omit entirely and the rendered skill's services section is stripped, not shipped empty.",
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "object",
+                "required": ["name", "probe"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "probe": {
+                    "description": "Health check for this service. **Must be read-only and time-bounded** — it runs before every QA pass and must not mutate state or hang (wrap in `timeout 5 …` when the tool has no timeout flag of its own). A probe that cannot run at all (binary missing) is reported as `unknown`, never as `down`.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "required": {
+                    "description": "`true` fails the run: stop, name the service, offer the declared `start`. `false` degrades it: continue, and record in the report that the service was down — findings from that run carry an asterisk a reader needs to see.",
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "start": {
+                    "description": "Command that brings the service up. Offered **only** in an environment named `local`, and only with the operator's approval. Elsewhere the rendered skill proposes it and waits.",
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "auth": {
+              "description": "How a QA run authenticates. There is no automated option: the agent can never type a password, in any environment.",
+              "type": "object",
+              "required": ["login"],
+              "additionalProperties": false,
+              "properties": {
+                "login": {
+                  "description": "Only `manual` is supported. The rendered skill asks the operator to log in before it reaches the login form, in every environment. This is an enum with one value on purpose — so a project cannot express an automated login the skills would have to refuse.",
+                  "type": "string",
+                  "enum": ["manual"]
+                },
+                "accounts": {
+                  "description": "Account roles a QA run may need, described so the rendered skill can name the right one without knowing a secret.",
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "type": "object",
+                    "required": ["role"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "role": {
+                        "description": "What this account is, in the team's words (e.g. `firm admin with docketing enabled`, `read-only auditor`).",
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "where": {
+                        "description": "**A pointer to where the credential lives, never the credential** — e.g. `e2e/.env (gitignored)`, `1Password → Acme QA vault`. Keeps this file committable and matches least-privilege.",
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "feature_flags": {
+              "description": "How this project gates features, so a QA run can tell 'the feature is broken' from 'the flag is off'. Omit entirely, or set `system: none`, and the rendered skill's feature-flag section is stripped rather than shipping as dead advice.",
+              "type": "object",
+              "required": ["system"],
+              "additionalProperties": false,
+              "properties": {
+                "system": {
+                  "description": "The flag system in use. `env` covers plain environment-variable gating.",
+                  "type": "string",
+                  "enum": ["waffle", "launchdarkly", "env", "none"]
+                },
+                "check": {
+                  "description": "Where to find which flags apply to which QA account (e.g. `e2e/README.md lists flags per QA user`). A pointer, not a flag list — flag lists go stale.",
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "design_source": {
+              "description": "What the design pass compares against. Omit entirely, or set `type: none`, and the design pass is skipped — the rendered skill then records the skip under *Not tested* with its reason, never silently drops it.",
+              "type": "object",
+              "required": ["type"],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "description": "`figma` — compare against the live node through whatever Figma MCP tooling the runtime exposes. `exports` — compare against static exports the designer supplied, which the report must label as exports (they can be older than the live file). `none` — skip the design pass.",
+                  "type": "string",
+                  "enum": ["figma", "exports", "none"]
+                },
+                "file_url": {
+                  "description": "Figma file or node URL. Used when `type` is `figma`.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "export_dir": {
+                  "description": "Repo-relative directory holding designer-supplied exports. Used when `type` is `exports`.",
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
             }
           }
         }

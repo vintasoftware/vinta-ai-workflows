@@ -97,7 +97,7 @@ These bleed across sub-skills, so capture once now:
 
 ### D. Optional foundation skills
 
-Seven skills are part of the foundation set but aren't always needed. Ask explicitly:
+Nine skills are part of the foundation set but aren't always needed. Ask explicitly:
 
 1. **`add-e2e-test`** — does the project have e2e tests (Playwright / Cypress / similar) or plan to add them? `AskUserQuestion` options: `Yes — already has them`, `Yes — planning to add`, `No — skip`. If yes, [vinta-derive-skills](../vinta-derive-skills/SKILL.md)'s **Optional — ask the user** bucket follows up to ask whether the user has a template or wants to draft from scratch. **This answer also governs `create-qa-use-cases` and the e2e content inside `plan-feature`**: on `No — skip`, set `foundation_skills.create-qa-use-cases: disabled` too — derive-skills won't ship `create-qa-use-cases` and strips `plan-feature`'s `<!-- e2e:start/end -->` regions so no-e2e projects carry zero Playwright / `QA_USE_CASES.md` / `pr-screenshots/` references. On either `Yes`, set both `add-e2e-test` and `create-qa-use-cases` to `enabled`.
 2. **`add-env-var`** — does the project have a non-trivial env-var propagation flow (multiple files / build configs / CI updates per new var) or a single `.env` file is enough? `AskUserQuestion` options: `Yes — non-trivial flow`, `No — single .env is enough`. Skip if `No`.
@@ -136,7 +136,25 @@ Seven skills are part of the foundation set but aren't always needed. Ask explic
    - **API spec path.** Open prose. Repo-relative path to a machine-readable spec (OpenAPI file, GraphQL schema, proto dir) plus the command that regenerates it, if one exists (e.g. `docs/openapi.yaml (regenerate: make openapi)`). Cross-check the inventory for spec files the user forgot. Empty is fine — the rendered skill then enumerates changes from route/serializer code alone.
    - **Output dir.** Default `.vinta-ai-workflows/client-handoffs`. Override if the team wants handoffs committed (e.g. `docs/api-changes/`) — note that the default lives under the gitignored `.vinta-ai-workflows/`, so docs there must be shared manually.
 
-If the user answers "No" to any of the seven, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above. `add-one-off-script` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/add-one-off-script/](../vinta-derive-skills/resources/foundation-skills/add-one-off-script/) — its body is project-agnostic; the per-project variability lives in the `skills.add-one-off-script.*` config block above and in env vars consumed at runtime. `prepare-worktree` is also copied verbatim from [vinta-derive-skills/resources/foundation-skills/prepare-worktree/](../vinta-derive-skills/resources/foundation-skills/prepare-worktree/) — same pattern: project-agnostic body, per-project defaults under `skills.prepare-worktree.*`. `thermo-nuclear-code-quality-review` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/](../vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/) with no follow-up config — its body is fully project-agnostic. `handoff-to-client` is always template-rendered from [vinta-derive-skills/resources/handoff-to-client-template.md](../vinta-derive-skills/resources/handoff-to-client-template.md) — no per-project drafting interview, just the client-handoff config follow-up above.
+8. **`dev-desk-check`** — should agents be able to QA a change by driving a real browser through the app: preflight the environment, walk the flows a user would, and report what actually renders? Ask only when the project has a user-facing frontend. `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` whenever the project has a frontend, and especially when `run_options.run_e2e` is off — nothing else exercises the browser then. Note the prerequisite: the skill needs a browser skill or MCP in the harness and refuses to run without one; it ships no browser tooling of its own.
+
+   **Follow-up only when `dev-desk-check` = Yes (or `qa-review` = Yes — the two share one config block).** These land under `skills.dev-desk-check.*`. Ask them once, even if both skills are enabled.
+
+   - **Environments.** For each environment the team QAs (`local`, `staging`, `production`, …): its base URL; optionally the API URL + health path; and for `local` only, the command that starts the frontend. **Leave the start command blank unless it should really be run** — no key means probe and stop, which is what you want when a dev server may already be up on that port.
+   - **Write policy per environment.** `AskUserQuestion` per environment: `free` (writes proceed; a ledger is kept either way), `confirm` (every write enumerated and authorised before the browser opens, in a confirmation that names the environment), `forbidden` (the run refuses and proposes instead). Recommend `confirm` for anything prod-like and `free` for local. Setup writes — feature flags, seeds, migrations — stay propose-only under every value; say so when the user picks `free` for production.
+   - **Data sensitivity per environment.** `AskUserQuestion`: `none`, `client`, `phi`. Default `none`. Explain what it drives: `client` keeps screenshots in the gitignored report dir and off PRs and design tools; `phi` adds opaque-ids-only reports and removes the shareable-Artifact deliverable entirely. Ask directly for any environment carrying production records — this is the field that keeps evidence handling correct, and guessing it wrong is the expensive kind of wrong.
+   - **Edge proxy per environment.** Open prose, usually empty. Name the proxy (`cloudflare`, …) when one fronts the environment; the rendered skill then emits no `curl` preflight there, because such proxies answer non-browser traffic with a 403 and reading that as downtime kills a healthy run.
+   - **Backing services (optional).** For each: name, a **read-only, time-bounded** probe command, whether it is required, and optionally a start command. Omit entirely and the services section is stripped from the rendered skill rather than shipped empty.
+   - **Auth accounts.** For each role a QA run may need: the role description, plus **a pointer to where the credential lives** (`e2e/.env (gitignored)`, `1Password → QA vault`). **Never the credential.** Login is always manual — the agent cannot type a password in any environment; say this out loud so nobody tries to supply one.
+   - **Feature-flag system.** `AskUserQuestion`: `waffle`, `launchdarkly`, `env`, `none`. On anything but `none`, ask where to find which flags apply to which QA account. On `none` the whole region is stripped rather than shipping as dead advice.
+   - **Design source.** `AskUserQuestion`: `Figma (live, via MCP)`, `Designer-supplied exports`, `None — skip the design pass`. On Figma, ask for the file / node URL; on exports, the directory. On `None` the design pass is skipped, and the rendered skill records the skip under *Not tested* rather than dropping it.
+   - **Escalation contact (optional).** Open prose: who a reviewer asks when blocked (`#acme-eng on Slack`, `the on-call engineer`). Mostly matters for `qa-review`, whose holder has no repo. Omit and the render says "the engineer who gave you this file".
+   - **Report dir + use-cases path.** Defaults `.vinta-ai-workflows/qa` and `QA_USE_CASES.md`. Keep the report default under the gitignored `.vinta-ai-workflows/` unless every environment is `data_sensitivity: none` — `client` and `phi` require it.
+   - **Per-run defaults.** `AskUserQuestion` for `screenshots` (default on) and default `scope` (`diff` / `use-cases` / `description`), plus open prose for the preferred `browser` tool name. Land in `run_options.dev-desk-check.*`.
+
+9. **`qa-review`** — do product managers or designers on this project need to QA a feature themselves, in a browser, without a code checkout? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Asked **independently** of `dev-desk-check` — a project can take the engineer path alone, the review path alone, or both — but it renders from the same `skills.dev-desk-check` config block, so ask the follow-ups above exactly once. Recommend `Yes` for teams where a PM or designer signs off on a flow before release. Explain what they get: one self-contained `SKILL.md` an engineer hands over, which works when dropped into their own agent setup with no repo, no terminal, and no install.
+
+If the user answers "No" to any of the nine, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above. `add-one-off-script` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/add-one-off-script/](../vinta-derive-skills/resources/foundation-skills/add-one-off-script/) — its body is project-agnostic; the per-project variability lives in the `skills.add-one-off-script.*` config block above and in env vars consumed at runtime. `prepare-worktree` is also copied verbatim from [vinta-derive-skills/resources/foundation-skills/prepare-worktree/](../vinta-derive-skills/resources/foundation-skills/prepare-worktree/) — same pattern: project-agnostic body, per-project defaults under `skills.prepare-worktree.*`. `thermo-nuclear-code-quality-review` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/](../vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/) with no follow-up config — its body is fully project-agnostic. `handoff-to-client` is always template-rendered from [vinta-derive-skills/resources/handoff-to-client-template.md](../vinta-derive-skills/resources/handoff-to-client-template.md) — no per-project drafting interview, just the client-handoff config follow-up above. `dev-desk-check` and `qa-review` are both template-rendered from [vinta-derive-skills/resources/dev-desk-check-template.md](../vinta-derive-skills/resources/dev-desk-check-template.md) and [qa-review-template.md](../vinta-derive-skills/resources/qa-review-template.md) — no per-project drafting interview, just the shared config follow-ups above. They are independent opt-ins over one config block: enabling only `qa-review` is a valid answer, and still requires the environment / write-policy / data-sensitivity questions.
 
 ### E. Existing AI artifacts (per-artifact disposition)
 
@@ -156,7 +174,7 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
 
-  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `deslop-comments`, `handoff`, `handoff-to-client`, `write-unit-test`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
+  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `deslop-comments`, `handoff`, `handoff-to-client`, `write-unit-test`, `dev-desk-check`, `qa-review`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
 
 - **Sub-agents** (each under any vendor `agents/` dir):
   - `Migrate to ai-tools/agents/<name>.yaml` — converts vendor-specific format → canonical YAML; `setup-ai-tools.mjs` re-emits per-vendor copies.
@@ -279,6 +297,8 @@ foundation_skills:
   handoff: enabled  # always ships — project-agnostic session-continuation handoff docs
   handoff-to-client: <Optional foundation skills → handoff-to-client answer → enabled | disabled; only asked for API-only repos>
   write-unit-test: <enabled when a unit-test framework was detected (Project conventions → Test framework(s)); disabled when none found — default-on, not an opt-in>
+  dev-desk-check: <Optional foundation skills → dev-desk-check answer → enabled | disabled>
+  qa-review: <Optional foundation skills → qa-review answer → enabled | disabled>
 
 foundation_agents:
   implementer: enabled
@@ -305,6 +325,12 @@ run_options:
     use_worktree: <Optional foundation skills → prepare-worktree follow-up → default for Step 0 question (c); false unless team opted in>
   amend-plan:
     blast_radius_signal_threshold: 2
+  # Only emit this block when foundation_skills.dev-desk-check or qa-review = enabled.
+  dev-desk-check:
+    screenshots: true
+    scope: <diff | use-cases | description>   # qa-review supports use-cases | description only
+    browser: <preferred browser tool as the harness names it; omit to let the skill pick>
+    dry_run: false
 
 skills:
   # Only emit this block when foundation_skills.systematic-debugging = enabled.
@@ -328,6 +354,40 @@ skills:
     assertion_style: <C.9 → plain-assert | framework-methods | framework-default>
     db_isolation: <C.9 → transaction-rollback | truncate | recreate | framework-default>
     additional_conventions: <C.9 → free-form array of extra conventions inferred/supplied; [] when none>
+
+  # Only emit this block when foundation_skills.dev-desk-check OR foundation_skills.qa-review = enabled.
+  # Both skills render from this one block. NEVER put a credential here — auth.accounts[].where
+  # is a pointer to where a secret lives, not the secret.
+  dev-desk-check:
+    use_cases_path: QA_USE_CASES.md
+    report_dir: .vinta-ai-workflows/qa
+    escalation_contact: <who a reviewer asks when blocked; omit when there is no single answer>
+    environments:
+      <name>:                                  # at least one required
+        base_url: <where the browser opens>
+        api_url: <backend base URL; omit when there is nothing to probe separately>
+        api_health_path: /health/
+        frontend_start: <command; OMIT unless it should really be run — absence means probe and stop>
+        writes: <free | confirm | forbidden>   # confirm is the default for anything prod-like
+        data_sensitivity: <none | client | phi>
+        edge_proxy: <cloudflare | ...; omit when none — presence suppresses the curl preflight>
+    services:                                  # omit entirely to strip the services region
+      - name: <service>
+        probe: <read-only, time-bounded command>
+        required: <true | false>
+        start: <command; offered in `local` only, and only with approval>
+    auth:
+      login: manual                            # the only supported value
+      accounts:
+        - role: <what this account is>
+          where: <pointer to where the credential lives — never the credential>
+    feature_flags:                             # omit, or system: none, to strip the region
+      system: <waffle | launchdarkly | env | none>
+      check: <where to find which flags apply to which QA account>
+    design_source:                             # omit, or type: none, to skip the design pass
+      type: <figma | exports | none>
+      file_url: <figma file/node URL; type: figma only>
+      export_dir: <exports directory; type: exports only>
 
   # Only emit this block when foundation_skills.prepare-worktree = enabled.
   prepare-worktree:
@@ -426,6 +486,8 @@ ai-tools/
 │   │       └── one_off_script_base.ts
 │   ├── prepare-worktree/SKILL.md       ← optional — only if user opts in (verbatim copy; project-agnostic body, defaults under skills.prepare-worktree.*)
 │   ├── thermo-nuclear-code-quality-review/SKILL.md ← optional — only if user opts in (verbatim copy; deep structural-maintainability audit, escalation target for review-phase Layer 3)
+│   ├── dev-desk-check/SKILL.md             ← optional — only if user opts in (template-rendered; config under skills.dev-desk-check.*)
+│   ├── qa-review/SKILL.md               ← optional — only if user opts in (template-rendered, self-contained: no relative links, no repo commands — handed to a PM / designer as one file)
 │   ├── run-one-off-script-django/       ← optional sister skill — only when stack matches + user supplies template (authors Jupyter notebook / mgmt command runner + JupyterRuntime / DjangoMgmtRuntime adapter in the per-script folder)
 │   ├── run-one-off-script-medplum/      ← optional sister skill — only when stack matches + user supplies template (authors Medplum bot + MedplumBotRuntime adapter in the per-script folder)
 │   └── <stack-specific skills>/SKILL.md ← only if user supplied templates
@@ -456,7 +518,7 @@ Foundation skills break into three buckets — see [vinta-derive-skills](../vint
 
 - **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`, `deslop-comments`, `handoff`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs). `deslop-comments` always ships because `review-phase`'s Layer 2 comment-hygiene check + fix loop dispatch it, and `integrate-phase` / `amend-plan` run it over the PR-context file. `handoff` always ships because its session-continuation body is fully project-agnostic.
 - **Always generate**: the plan-execution unit — `implement-plan` (conductor) + its co-shipped sub-skills `implement-phase` / `review-phase` / `integrate-phase`, plus `amend-plan` (conductor). Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates + shared partials using interview answers + inventory. The sub-skills are not independently opt-in; they always ship with the conductors. `write-unit-test` is also template-rendered but **conditionally generated** — it ships whenever a unit-test framework was detected (not an opt-in question, not ask-first): the rendered body bakes in the project's test command + captured `skills.write-unit-test.*` conventions, and the verbatim packs land in its `resources/packs/` — one runner pack for the detected test framework plus a stack pack per matched stack (Django / FastAPI / Flask / Medplum / React / Next.js / TanStack Start / React Router / Prisma / pure-package), so framework-specific advice only ships when that framework is present. A few stack packs also apply a one-time project-setup step at derive time (e.g. Medplum wires the two FHIR-indexing Vitest setup files — `test.globalSetup.ts` + `test.setup.ts` — into the Vitest config so `MockClient` search filtering works) — a project mutation done once, not per test.
-- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `handoff-to-client`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, and (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship. `thermo-nuclear-code-quality-review`: if yes → copy the bundled SKILL.md verbatim (no follow-up config); if no → don't ship. `handoff-to-client`: asked only for API-only repos; if yes → render the bundled template using `skills.handoff-to-client.*` (client platforms, API style, spec path, output dir) from its follow-ups; if no → don't ship.
+- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `handoff-to-client`, `dev-desk-check`, `qa-review`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, and (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship. `thermo-nuclear-code-quality-review`: if yes → copy the bundled SKILL.md verbatim (no follow-up config); if no → don't ship. `handoff-to-client`: asked only for API-only repos; if yes → render the bundled template using `skills.handoff-to-client.*` (client platforms, API style, spec path, output dir) from its follow-ups; if no → don't ship. `dev-desk-check` / `qa-review`: independent opt-ins over one shared `skills.dev-desk-check` config block (environments + per-environment write policy and data sensitivity, optional service probes, auth account pointers, feature-flag system, design source); if yes → render the matching template; if no → don't ship. `qa-review` additionally renders self-contained — no relative links, no repo-dependent commands — because it is handed to someone with no checkout.
 
 Stack-specific skills + agents land in the target only when the user provides templates for them. If they don't have templates yet, the orchestrator records the detected stacks + skill categories as a TODO list the user can address later via [vinta-derive-skills](../vinta-derive-skills/SKILL.md) / [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) standalone runs.
 
