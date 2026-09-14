@@ -323,6 +323,91 @@ describe('lane pool', () => {
     expect(pool.lanes[0]).toBe(fresh)
   })
 
+  it('gives every lane its own copy of the project’s env files', async () => {
+    await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+    const pool = await provision({ ...sqliteProject(), envFiles: ['.env'] }, 2)
+
+    for (const lane of pool.lanes) {
+      expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\n')
+    }
+
+    // A copy, not a link — the property the whole field exists for. Lane
+    // provisioning appends lane-specific lines to these files, and through a
+    // symlink every one of them would land in the main checkout instead.
+    const [first] = pool.lanes as [Lane]
+    await writeFile(join(first.path, '.env'), 'SHARED=1\nLANE=1\n', 'utf8')
+    expect(readFileSync(join(repo, '.env'), 'utf8')).toBe('SHARED=1\n')
+  })
+
+  it('refuses to provision when a declared env file is not there', async () => {
+    // Fail closed. The alternative is a lane that provisions cleanly and then
+    // cannot boot its stack, four steps later, wearing an unrelated error.
+    await expect(provision({ ...sqliteProject(), envFiles: ['.env.docker'] }, 1)).rejects.toThrow(
+      /\.env\.docker/,
+    )
+  })
+
+  it('restores an env file the phase edited when the lane is recycled', async () => {
+    await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+    const pool = await provision({ ...sqliteProject(), envFiles: ['.env'] }, 1)
+    const lane = pool.lanes[0] as Lane
+
+    await writeFile(join(lane.path, '.env'), 'SHARED=1\nMEDDLED=1\n', 'utf8')
+    await pool.recycle(lane.name)
+
+    // `git clean` cannot do this: the file is ignored, so the clean leaves it
+    // exactly as the previous phase left it. A lane is its env as much as it is
+    // its rows, and both go back.
+    expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\n')
+  })
+
+  // Writes the lane's own cwd-relative receipt out of the lane's own
+  // environment, so what it proves is that the hook ran *in the lane* and *with
+  // its env* rather than in the daemon's directory with the daemon's.
+  const SETUP_RECEIPT = 'setup.receipt'
+  const writesReceipt =
+    `node -e "require('fs').writeFileSync('${SETUP_RECEIPT}', ` +
+    `process.env.DATABASE_URL + '|' + process.env.COMPOSE_PROJECT_NAME)"`
+
+  it('runs the project’s setup command in the lane, with the lane’s environment', async () => {
+    const pool = await provision({ ...sqliteProject(), setupCmd: writesReceipt }, 2)
+
+    for (const lane of pool.lanes) {
+      const written = readFileSync(join(lane.path, SETUP_RECEIPT), 'utf8')
+      expect(written).toBe(`${envVar(lane, 'DATABASE_URL')}|${lane.composeProject}`)
+    }
+  })
+
+  it('runs the setup command again every time the lane is recycled', async () => {
+    // Which is why its contract says idempotent. The receipt is untracked, so
+    // the recycle's own `git clean` deletes it — a receipt standing afterwards
+    // can only have been written again, which is the assertion.
+    const pool = await provision({ ...sqliteProject(), setupCmd: writesReceipt }, 1)
+    const lane = pool.lanes[0] as Lane
+    expect(existsSync(join(lane.path, SETUP_RECEIPT))).toBe(true)
+
+    await pool.recycle(lane.name)
+
+    expect(existsSync(join(lane.path, SETUP_RECEIPT))).toBe(true)
+  })
+
+  it('fails the lane, naming no output, when the setup command fails', async () => {
+    const failure = await provision(
+      { ...sqliteProject(), setupCmd: 'node -e "console.log(process.cwd()); process.exit(3)"' },
+      1,
+    ).then(
+      () => null,
+      (error: unknown) => error as Error,
+    )
+
+    expect(failure?.name).toBe('LaneSetupError')
+    // §11 again: what the project's own command printed is the project's, and
+    // it reaches an error message no more than it reaches a log field. Nor does
+    // the command line itself — a lane name is enough to act on.
+    expect(failure?.message).not.toContain('node -e')
+    expect(failure?.message).not.toContain(root)
+  })
+
   it('refuses on the N× disk probe before provisioning anything', async () => {
     const { bavail, bsize } = await statfs(root)
     const available = bavail * bsize

@@ -245,6 +245,83 @@ describe('the implementer prompt', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 1a. The project's own commands
+// ---------------------------------------------------------------------------
+
+/**
+ * An agent told to "run the scoped suite" and given no command runs the one it
+ * knows. In a project whose suite only runs as `docker compose run --rm api
+ * python -m pytest …`, a bare `pytest` fails against a database it cannot see,
+ * for reasons that have nothing to do with the phase's code — and the agent
+ * then debugs *that*, with its fix rounds.
+ *
+ * So the project states its commands and every agent that will run something is
+ * handed them, with the one instruction that matters: these exactly, not the
+ * tool underneath them.
+ */
+describe('the project’s commands', () => {
+  const withCommands = (): Workflow => {
+    const base = diamond()
+    return WorkflowSchema.parse({
+      ...base,
+      project: {
+        migrate_cmd: 'make migrate',
+        commands: {
+          lint: 'make lint',
+          test: 'make test',
+          test_one: 'make test',
+          migrate: 'make migrate',
+        },
+      },
+    })
+  }
+
+  const roles = ['implementer', 'reviewer', 'fixer'] as const
+
+  it.each(roles)('hands them to the %s, which is who runs them', (role) => {
+    const prompt = compose('api-layer', role, { workflow: withCommands() })
+
+    expect(prompt).toContain('The project’s commands')
+    expect(prompt).toContain('Lint: `make lint`')
+    expect(prompt).toContain('The whole suite: `make test`')
+    // Glossed, so the agent knows what each one is *for* — `test_one` takes a
+    // target appended to it and `test` does not, and nothing but the gloss says
+    // so when both are spelled `make test`.
+    expect(prompt).toContain('One test, or one subtree — append the target: `make test`')
+  })
+
+  it('tells the implementer to use them rather than the tool underneath', () => {
+    const prompt = compose('api-layer', 'implementer', { workflow: withCommands() })
+
+    expect(prompt).toContain('Use these exactly as written')
+    // The inner loop points at them by name. An instruction to "run the scoped
+    // suite" sitting above a list the agent was never told to use is the same
+    // prompt it had before.
+    expect(prompt).toContain('through the project’s commands')
+  })
+
+  it('omits only the commands the project did not declare', () => {
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      project: { migrate_cmd: 'true', commands: { lint: 'make lint' } },
+    })
+    const prompt = compose('api-layer', 'implementer', { workflow })
+
+    expect(prompt).toContain('Lint: `make lint`')
+    expect(prompt).not.toContain('The whole suite')
+  })
+
+  it('changes nothing at all for a workflow that declares none', () => {
+    // A field added after a plan was written cannot make that plan's prompts
+    // worse. The section disappears, and so does the sentence pointing at it.
+    const bare = compose('api-layer', 'implementer')
+
+    expect(bare).not.toContain('The project’s commands')
+    expect(bare).toContain('then the scoped suite')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 1b. Plan-level context: the plan's own bounds, verbatim and labelled
 // ---------------------------------------------------------------------------
 

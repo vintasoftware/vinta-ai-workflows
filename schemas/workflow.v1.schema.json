@@ -191,6 +191,50 @@
             }
           },
           "additionalProperties": false
+        },
+        "env_files": {
+          "default": [],
+          "description": "Repo-relative ignored files every lane needs its own COPY of — `.env`, `.env.docker`, `.envrc`. Copied, never symlinked: lane provisioning appends to them (a connection string, a compose override path), and a symlink would write those lane-specific lines back into the main checkout. A declared file that is missing fails provisioning rather than producing a lane whose stack cannot boot.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "commands": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "lint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "typecheck": {
+              "type": "string",
+              "minLength": 1
+            },
+            "test": {
+              "description": "The whole suite.",
+              "type": "string",
+              "minLength": 1
+            },
+            "test_one": {
+              "description": "A single test or a subtree. The agent appends the target, so end it accordingly.",
+              "type": "string",
+              "minLength": 1
+            },
+            "migrate": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "description": "The project’s own command lines, handed to every agent verbatim. A fixed vocabulary rather than free-form, because the prompt has to be able to say which one step 3 of the working instructions means. Declaring these is how an agent stops guessing: a project whose suite only runs inside a container, or only against a lane-specific database, has no way of telling one otherwise, and `pytest` is a plausible guess that is wrong in exactly that project."
+        },
+        "setup_cmd": {
+          "description": "The project’s own lane-setup command, run inside each freshly provisioned lane with that lane’s environment applied. The escape hatch for whatever a project needs that no field here describes. It MUST be idempotent: it runs again every time the lane is recycled for another phase.",
+          "type": "string",
+          "minLength": 1
         }
       },
       "required": [

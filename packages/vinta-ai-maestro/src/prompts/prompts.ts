@@ -522,6 +522,7 @@ function renderImplementer(materials: Materials): string {
     'so in your report rather than reaching for it.',
     `Your branch is \`${materials.branch}\`, cut from \`${materials.baseBranch}\` — derived from`,
     "this phase's dependencies, not from plan order. Commit straight to it.",
+    ...commandBlock(materials),
     ...planLevel(materials, [
       'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim,',
       'and they bound your phase rather than describe it. A non-goal is out of scope',
@@ -540,8 +541,12 @@ function renderImplementer(materials: Materials): string {
     '## Working instructions',
     '1. Read the code paths your changes touch before you write anything.',
     '2. Implement, matching the patterns already in the repository.',
-    '3. Inner loop, scoped to what you touched: lint clean, then each new test on',
-    '   its own, then the scoped suite. Do not go on while any of them is red.',
+    hasCommands(materials)
+      ? '3. Inner loop, scoped to what you touched, through the project’s commands\n' +
+        '   above: lint clean, then each new test on its own, then the subtree you\n' +
+        '   touched. Do not go on while any of them is red.'
+      : '3. Inner loop, scoped to what you touched: lint clean, then each new test on\n' +
+        '   its own, then the scoped suite. Do not go on while any of them is red.',
     '4. Outer gate, only once the inner loop is green. These run against your lane',
     '   and must all pass before you commit:',
     ...gateList(materials),
@@ -609,6 +614,56 @@ function buildsOn(materials: Materials): string[] {
  * off the workflow, not off the lane, so a continued turn can restate them
  * without any of the materials a cold prompt resolves from disk.
  */
+/**
+ * The project's own command lines, in the order the inner loop uses them.
+ *
+ * A fixed vocabulary, glossed here rather than in the document, so an agent is
+ * told what each one is *for* and not merely that it exists.
+ */
+const COMMAND_GLOSS = [
+  ['lint', 'Lint'],
+  ['typecheck', 'Typecheck'],
+  ['test_one', 'One test, or one subtree — append the target'],
+  ['test', 'The whole suite'],
+  ['migrate', 'Migrate'],
+] as const
+
+/**
+ * What the project says its own commands are.
+ *
+ * This exists because of a specific and entirely avoidable failure: an agent
+ * told to "run the scoped suite" and given no command runs `pytest`, which in a
+ * project whose suite only runs as `docker compose run --rm api python -m
+ * pytest …` fails for reasons that have nothing to do with its code — against a
+ * database it cannot see, or with no database at all. It then debugs that.
+ *
+ * Empty when the project declares none, and then every prompt is byte for byte
+ * what it was: a workflow written before this field existed cannot be made
+ * worse by it.
+ */
+function commandBlock(materials: Continuation): string[] {
+  const commands = materials.workflow.project?.commands
+  if (commands === undefined) return []
+  const lines = COMMAND_GLOSS.flatMap(([key, gloss]) => {
+    const command = commands[key]
+    return command === undefined ? [] : [`- ${gloss}: \`${command}\``]
+  })
+  if (lines.length === 0) return []
+
+  return [
+    '',
+    '## The project’s commands',
+    'Use these exactly as written, from your own worktree. Do not substitute the',
+    'underlying tool and do not invent an equivalent: in this project a command may',
+    'only work inside a container, with a specific environment, or against this',
+    'lane’s own database, and the bare tool call that looks equivalent is not.',
+    ...lines,
+  ]
+}
+
+/** Whether there is a `## The project’s commands` section to point step 3 at. */
+const hasCommands = (materials: Continuation): boolean => commandBlock(materials).length > 0
+
 function gateList(materials: Continuation): string[] {
   const gates = materials.node.gates.flatMap((id) => {
     const gate = materials.workflow.gates[id]
@@ -630,6 +685,7 @@ function renderReviewer(materials: Materials): string {
     `The diff of \`${materials.branch}\` against its base \`${materials.baseBranch}\`:`,
     `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
     'Read the full diff of every changed file. Spot-checking is not enough.',
+    ...commandBlock(materials),
     '',
     '## What that diff was supposed to implement',
     materials.brief,
@@ -695,6 +751,7 @@ function renderFixer(materials: Materials): string {
   return section([
     `You are fixing ${node.id}: ${node.name} of plan ${workflow.id}.`,
     `Work entirely inside \`${materials.workspace}\`, on branch \`${materials.branch}\`.`,
+    ...commandBlock(materials),
     '',
     '## What failed',
     ...failure(materials),

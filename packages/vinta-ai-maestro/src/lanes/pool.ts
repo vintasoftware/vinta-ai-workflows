@@ -16,8 +16,8 @@
  */
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, rm, symlink } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { copyFile, mkdir, rm, symlink } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { isWindows, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import {
@@ -66,10 +66,49 @@ export class LaneRecycleError extends Error {
   }
 }
 
+/**
+ * A declared env file the main checkout does not have.
+ *
+ * Fail-closed, and deliberately so: the alternative is a lane that provisions
+ * cleanly and then cannot boot its stack, which is a failure four steps and one
+ * agent turn further along, wearing a completely unrelated error message.
+ *
+ * The *path* is named because it comes from the workflow document and is the
+ * one thing that makes this actionable. Nothing of the file's content is.
+ */
+export class LaneEnvFileError extends Error {
+  constructor(
+    readonly lane: string,
+    readonly file: string,
+  ) {
+    super(`lane "${lane}": the main checkout has no "${file}" to copy`)
+    this.name = 'LaneEnvFileError'
+  }
+}
+
+/**
+ * The project's own `setup_cmd` failed. Identifiers only — that command's
+ * output is the project's, and §11 keeps it out of error messages exactly as
+ * it keeps it out of log fields.
+ */
+export class LaneSetupError extends Error {
+  constructor(readonly lane: string) {
+    super(`lane "${lane}": the project's setup_cmd failed`)
+    this.name = 'LaneSetupError'
+  }
+}
+
 export interface ProjectSpec {
   readonly databases: { readonly dev?: DatabaseSpec; readonly test?: DatabaseSpec }
   /** The project's own migrate command, run once per template. */
   readonly migrateCmd: string
+  /**
+   * Repo-relative ignored files each lane gets its own copy of. Copied rather
+   * than linked, because lane provisioning *appends* to them.
+   */
+  readonly envFiles?: readonly string[]
+  /** The project's own idempotent lane-setup command, run inside the lane. */
+  readonly setupCmd?: string
 }
 
 export interface PoolOptions {
@@ -198,11 +237,18 @@ export class LanePool {
     const plan = resetPlan(summary)
     if (plan.reusable) {
       await this.#restoreWorktree(lane, summary)
+      // Both halves of "a working checkout" are put back, not just the rows.
+      // The clean above is `-e node_modules` and nothing more, so a copied env
+      // file the previous phase edited — or one it deleted — is restored here
+      // from the main checkout rather than inherited. And the project's own
+      // hook runs again, which is why its contract says idempotent.
+      await this.#copyEnvFiles(name, lane.path)
       try {
         for (const command of plan.commands) await sh(command, lane.path, lane.env)
       } catch {
         throw new LaneRecycleError(name, 'database')
       }
+      await this.#setup(lane)
       return lane
     }
 
@@ -335,6 +381,7 @@ export class LanePool {
     await mkdir(poolRoot, { recursive: true })
     await this.#git(['worktree', 'add', '-b', branch, path, baseRef])
     await this.#linkDeps(path)
+    await this.#copyEnvFiles(name, path)
 
     const databases: DatabasePlan[] = []
     for (const role of ROLES) {
@@ -365,8 +412,47 @@ export class LanePool {
       env,
       reusable: databases.every((db) => db.resetCmd !== null),
     }
+    // Written before the project's own hook runs, so a lane whose setup failed
+    // still leaves the record a human tears it down from.
     await this.#writeSummary(lane)
+    await this.#setup(lane)
     return lane
+  }
+
+  /**
+   * The project's ignored-but-required files, copied into the lane.
+   *
+   * Copied rather than linked, and the distinction is load-bearing rather than
+   * stylistic: lane provisioning *appends* to these files — a connection
+   * string, a `COMPOSE_FILE` pointing at the lane's own override — and through
+   * a symlink every one of those lines would land in the main checkout's
+   * `.env` instead, where it would then be wrong for every lane at once.
+   */
+  async #copyEnvFiles(name: string, lanePath: string): Promise<void> {
+    for (const file of this.#options.project.envFiles ?? []) {
+      const source = join(this.#options.repoPath, file)
+      if (!existsSync(source)) throw new LaneEnvFileError(name, file)
+      const destination = join(lanePath, file)
+      await mkdir(dirname(destination), { recursive: true })
+      await copyFile(source, destination)
+    }
+  }
+
+  /**
+   * The project's own setup hook, with the lane's environment applied — which
+   * is the whole point of it running here rather than being something the
+   * operator remembers to do. It sees `COMPOSE_PROJECT_NAME`, the forked
+   * connection strings and every service namespace, because a hook that had to
+   * re-derive those would be a second implementation of this file.
+   */
+  async #setup(lane: Lane): Promise<void> {
+    const { setupCmd } = this.#options.project
+    if (setupCmd === undefined) return
+    try {
+      await sh(setupCmd, lane.path, lane.env)
+    } catch {
+      throw new LaneSetupError(lane.name)
+    }
   }
 
   /**

@@ -215,13 +215,25 @@ export const NodeSchema = z.strictObject({
 // ---------------------------------------------------------------------------
 // The project — what a lane has to become a working checkout of it (§8)
 //
-// Deliberately not the whole of `prepare-worktree`'s summary. That file records
-// what a worktree *is*; this block records only what the daemon must know
-// *before* one exists, which is the set of databases to fork and the command
-// that migrates the template they are forked from. Everything else the skill
-// decides and records — dependency and env strategy, compose networks and
-// volume forks, sandbox tier, redis indices, S3 prefixes, seed commands — is
-// the skill's, is discovered per worktree, and is read back off the summary.
+// This block used to record only the databases to fork and the command that
+// migrates the template they fork from. Everything else a runnable checkout
+// needs — env files, compose isolation, redis indices, service namespaces —
+// was documented as `prepare-worktree`'s, discovered per worktree and read back
+// off the summary.
+//
+// That division did not survive contact. The daemon provisions its own lanes;
+// it never invokes the skill, so the skill's half of the contract simply did
+// not run, and a lane came up as a worktree with no `.env`, a compose stack
+// publishing the same fixed host ports as its five siblings, and — worse and
+// silently — every lane's stack mounting the same `external: true` data
+// volumes. The knowledge was real and written down, and nothing executed it.
+//
+// So the fields below are the ones the daemon must be able to act on itself:
+// the files a lane needs a copy of, the commands the project runs, the
+// services a lane needs its own namespace inside, and the project's own
+// setup hook for whatever remains irreducibly its. `prepare-worktree` still
+// owns discovering these for a project that has never declared them — it
+// writes this block — and still owns the interactive human path.
 //
 // A database declared here is always *forked*: `share` and `stub` are the
 // absence of a declaration, not a value, because a lane that shares the main
@@ -262,6 +274,27 @@ export const DatabaseSchema = z
   .discriminatedUnion('engine', [SqliteDatabaseSchema, PostgresDatabaseSchema])
   .describe('One forked database a lane gets its own copy of.')
 
+export const CommandsSchema = z
+  .strictObject({
+    lint: z.string().min(1).optional(),
+    typecheck: z.string().min(1).optional(),
+    test: z.string().min(1).optional().describe('The whole suite.'),
+    test_one: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('A single test or a subtree. The agent appends the target, so end it accordingly.'),
+    migrate: z.string().min(1).optional(),
+  })
+  .describe(
+    'The project’s own command lines, handed to every agent verbatim. A fixed vocabulary ' +
+      'rather than free-form, because the prompt has to be able to say which one step 3 of ' +
+      'the working instructions means. Declaring these is how an agent stops guessing: a ' +
+      'project whose suite only runs inside a container, or only against a lane-specific ' +
+      'database, has no way of telling one otherwise, and `pytest` is a plausible guess that ' +
+      'is wrong in exactly that project.',
+  )
+
 export const ProjectSchema = z
   .strictObject({
     migrate_cmd: z
@@ -278,6 +311,27 @@ export const ProjectSchema = z
       })
       .default({})
       .describe('Roles a lane forks. An undeclared role means the lane has no database of its own.'),
+    env_files: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Repo-relative ignored files every lane needs its own COPY of — `.env`, `.env.docker`, ' +
+          '`.envrc`. Copied, never symlinked: lane provisioning appends to them (a connection ' +
+          'string, a compose override path), and a symlink would write those lane-specific ' +
+          'lines back into the main checkout. A declared file that is missing fails ' +
+          'provisioning rather than producing a lane whose stack cannot boot.',
+      ),
+    commands: CommandsSchema.default({}),
+    setup_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'The project’s own lane-setup command, run inside each freshly provisioned lane with ' +
+          'that lane’s environment applied. The escape hatch for whatever a project needs that ' +
+          'no field here describes. It MUST be idempotent: it runs again every time the lane is ' +
+          'recycled for another phase.',
+      ),
   })
   .describe(
     'What a lane needs to be a working checkout of this project. Optional: with no project ' +
@@ -362,6 +416,7 @@ export type Node = z.infer<typeof NodeSchema>
 export type Dependency = z.infer<typeof DependencySchema>
 export type Gate = z.infer<typeof GateSchema>
 export type Project = z.infer<typeof ProjectSchema>
+export type ProjectCommands = z.infer<typeof CommandsSchema>
 export type ProjectDatabase = z.infer<typeof DatabaseSchema>
 export type Resource = z.infer<typeof ResourceSchema>
 export type CrewMember = z.infer<typeof CrewMemberSchema>

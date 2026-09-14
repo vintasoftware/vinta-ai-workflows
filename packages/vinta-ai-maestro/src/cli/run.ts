@@ -554,6 +554,8 @@ function projectSpec(project: Project | undefined): ProjectSpec {
       ...(dev === undefined ? {} : { dev: databaseSpec(dev) }),
       ...(test === undefined ? {} : { test: databaseSpec(test) }),
     },
+    envFiles: project.env_files,
+    ...(project.setup_cmd === undefined ? {} : { setupCmd: project.setup_cmd }),
   }
 }
 
