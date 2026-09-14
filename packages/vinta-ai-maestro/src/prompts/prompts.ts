@@ -523,6 +523,7 @@ function renderImplementer(materials: Materials): string {
     `Your branch is \`${materials.branch}\`, cut from \`${materials.baseBranch}\` — derived from`,
     "this phase's dependencies, not from plan order. Commit straight to it.",
     ...commandBlock(materials),
+    ...leaseBlock(materials),
     ...planLevel(materials, [
       'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim,',
       'and they bound your phase rather than describe it. A non-goal is out of scope',
@@ -661,6 +662,27 @@ function commandBlock(materials: Continuation): string[] {
   ]
 }
 
+/** The route from an agent's inner loop into the scheduler's semaphore pools. */
+function leaseBlock(materials: Continuation): string[] {
+  const resources = Object.entries(materials.workflow.resources)
+    .filter(([, resource]) => resource.kind === 'semaphore')
+    .map(([id]) => id)
+    .sort()
+  if (resources.length === 0) return []
+
+  return [
+    '',
+    '## Resource leases for heavy commands',
+    'This run coordinates scarce machine capacity through these resources:',
+    ...resources.map((id) => `- \`${id}\``),
+    'Before a heavy inner-loop command, take the matching resource through the',
+    'daemon. The command blocks until capacity is available and releases it on exit:',
+    `    vinta-ai-maestro with ${resources[0]} -- <command>`,
+    'Do not run that command bare: a bare command is invisible to the pool and may',
+    'stampede the same CPU, memory, or shared server as sibling lanes.',
+  ]
+}
+
 /** Whether there is a `## The project’s commands` section to point step 3 at. */
 const hasCommands = (materials: Continuation): boolean => commandBlock(materials).length > 0
 
@@ -686,6 +708,7 @@ function renderReviewer(materials: Materials): string {
     `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
     'Read the full diff of every changed file. Spot-checking is not enough.',
     ...commandBlock(materials),
+    ...leaseBlock(materials),
     '',
     '## What that diff was supposed to implement',
     materials.brief,
@@ -752,6 +775,7 @@ function renderFixer(materials: Materials): string {
     `You are fixing ${node.id}: ${node.name} of plan ${workflow.id}.`,
     `Work entirely inside \`${materials.workspace}\`, on branch \`${materials.branch}\`.`,
     ...commandBlock(materials),
+    ...leaseBlock(materials),
     '',
     '## What failed',
     ...failure(materials),

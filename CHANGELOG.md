@@ -18,6 +18,30 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A project declares what makes a lane runnable.** `project.env_files` copies
+  ignored configuration into each worktree, `project.setup_cmd` runs an
+  idempotent setup hook on provisioning and recycle, and the fixed
+  `project.commands` vocabulary tells implementers, reviewers and fixers the
+  project's real lint, typecheck, test and migration entry points.
+
+- **Compose-backed lanes are isolated past `COMPOSE_PROJECT_NAME`.** The daemon
+  now generates an out-of-tree Compose override per lane, strips fixed host
+  ports, re-pins fixed and external volumes, and carries the complete lane
+  environment into agent and takeover processes as well as gates. Explicitly
+  published services receive probed per-lane ports recorded in the teardown
+  summary.
+
+- **Shared services get one namespace per lane.** `project.services` models a
+  fixed index or lane-derived name inside one Redis, RabbitMQ, object-storage,
+  or similar server, with project-owned create/reset commands and capacity
+  validation before provisioning creates templates or worktrees.
+
+- **Agents can take the semaphore a workflow declares.**
+  `vinta-ai-maestro with <resource> -- <cmd>` waits on the run's existing
+  `ResourcePools`, runs the heavy inner-loop command, and releases on exit.
+  Renewable leases expire when their client disappears, are visible in the
+  live journal, and are surfaced in implementer, reviewer and fixer prompts.
+
 - **A failed phase retries itself, and then asks.** `--on-failure` defaults to
   `retry`: one cold re-attempt (`--retries <n>`, 0–5), and then the node parks
   on a question — retry, retry with another member of the crew, or stop. The

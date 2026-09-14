@@ -30,6 +30,7 @@ import { WebSocket } from 'ws'
 import { AdmissionControl } from '../src/admission/admission.ts'
 import {
   AmendResponseSchema,
+  AgentLeaseGrantSchema,
   ErrorResponseSchema,
   EventFrameSchema,
   FrameSchema,
@@ -59,6 +60,7 @@ import { MockAdapter } from '../src/harness/mock.ts'
 import { Monitor } from '../src/monitor/monitor.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
+import { AgentLeaseBroker } from '../src/resources/agent-leases.ts'
 import { createScheduler, type Scheduler } from '../src/scheduler/index.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 
@@ -178,6 +180,7 @@ interface Rig {
   readonly daemon: Daemon
   readonly journal: Journal
   readonly pools: ResourcePools
+  readonly agentLeases: AgentLeaseBroker
   readonly control: RunControl & { readonly calls: ControlCall[] }
   readonly dir: string
   readonly warnings: string[]
@@ -202,6 +205,7 @@ async function rig(
   journal.createRun(RUN_ID, workflow)
 
   const pools = new ResourcePools(workflow.resources, { agingMs: 0 })
+  const agentLeases = new AgentLeaseBroker(pools, journal)
   const control = recordingControl()
   const warnings: string[] = []
   const daemon = await startDaemon({
@@ -225,14 +229,16 @@ async function rig(
     control,
     pools,
     admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+    agentLeases,
   })
 
   cleanups.push(async () => {
+    agentLeases.close()
     await daemon.close()
     journal.close()
     rmSync(dir, { recursive: true, force: true })
   })
-  return { daemon, journal, pools, control, dir, warnings }
+  return { daemon, journal, pools, agentLeases, control, dir, warnings }
 }
 
 interface Result {
@@ -568,6 +574,76 @@ describe('snapshots', () => {
     const r = await rig()
     expect((await call(r.daemon, '/api/runs/nope')).status).toBe(404)
     expect((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/nope`)).status).toBe(404)
+  })
+})
+
+describe('agent-held leases', () => {
+  it('holds the request until the shared pool grants it, then releases idempotently', async () => {
+    const r = await rig()
+    const firstResult = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a' },
+    })
+    expect(firstResult.status).toBe(201)
+    const first = AgentLeaseGrantSchema.parse(firstResult.body)
+    expect(r.pools.held('test-suite')).toBe(1)
+
+    const waiting = call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b' },
+    })
+    await until(() => (r.pools.waiting === 1 ? true : undefined), 'lease waiter')
+
+    expect(
+      (
+        await call(r.daemon, `/api/runs/${RUN_ID}/leases/${first.leaseId}`, {
+          method: 'DELETE',
+        })
+      ).status,
+    ).toBe(200)
+    const secondResult = await waiting
+    expect(secondResult.status).toBe(201)
+    const second = AgentLeaseGrantSchema.parse(secondResult.body)
+    expect(r.journal.leases()[0]).toMatchObject({
+      holder_node: 'b',
+      lease_id: second.leaseId,
+      expires_at: second.expiresAt,
+    })
+
+    await call(r.daemon, `/api/runs/${RUN_ID}/leases/${second.leaseId}`, { method: 'DELETE' })
+    await call(r.daemon, `/api/runs/${RUN_ID}/leases/${second.leaseId}`, { method: 'DELETE' })
+    expect(r.pools.held('test-suite')).toBe(0)
+    expect(r.journal.leases()).toEqual([])
+  })
+
+  it('renews a live lease and refuses lane self-deadlocks and unknown holders', async () => {
+    const r = await rig()
+    const acquired = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a' },
+    })
+    const lease = AgentLeaseGrantSchema.parse(acquired.body)
+    const renewed = await call(r.daemon, `/api/runs/${RUN_ID}/leases/${lease.leaseId}`, {
+      method: 'PUT',
+    })
+    expect(renewed.status).toBe(200)
+    expect(AgentLeaseGrantSchema.parse(renewed.body).expiresAt).toBeGreaterThanOrEqual(
+      lease.expiresAt,
+    )
+
+    const lane = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['lane'], holderNode: 'a' },
+    })
+    expect(lane.status).toBe(400)
+    expect(ErrorResponseSchema.parse(lane.body).error).toBe('invalid_resource')
+
+    const holder = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'ghost' },
+    })
+    expect(holder.status).toBe(400)
+    expect(ErrorResponseSchema.parse(holder.body).error).toBe('invalid_holder')
   })
 })
 

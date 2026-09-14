@@ -85,6 +85,7 @@ import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
 import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
+import { MAESTRO_NODE_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import {
   assignCrew,
   assignReviewer,
@@ -1447,7 +1448,14 @@ export class Scheduler {
     const cwd = join(this.#options.laneRoot, state.lane as string)
     // The lane's own environment, for the process that is about to run the
     // project's commands in it.
-    const env = this.#options.laneEnv?.(state.lane as string) ?? {}
+    const laneEnv = this.#options.laneEnv?.(state.lane as string) ?? {}
+    // The lease client attributes journal rows to the phase that asked. Only
+    // add it where the host exposed a daemon URL; an injected/test host with no
+    // lease route keeps the exact environment it supplied before this feature.
+    const env =
+      laneEnv[MAESTRO_URL_ENV] === undefined
+        ? laneEnv
+        : { ...laneEnv, [MAESTRO_NODE_ENV]: state.node.id }
 
     // §15's decision, taken before the task is built because the prompt
     // depends on it: a continued session is handed a delta, and a cold one the

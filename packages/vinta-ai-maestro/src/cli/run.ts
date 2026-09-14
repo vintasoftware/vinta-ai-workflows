@@ -76,6 +76,12 @@ import {
   type IntegrationWaveRecord,
 } from '../postmortem/postmortem.ts'
 import { ResourcePools } from '../resources/pools.ts'
+import {
+  AgentLeaseBroker,
+  MAESTRO_RUN_ENV,
+  MAESTRO_TOKEN_ENV,
+  MAESTRO_URL_ENV,
+} from '../resources/agent-leases.ts'
 import { createScheduler, type RunStop } from '../scheduler/index.ts'
 import type { Project, ProjectDatabase, Workflow } from '../types.ts'
 import type { DoctorOverrides } from './doctor.ts'
@@ -255,6 +261,11 @@ export async function runCommand(
             repoPath: bind.repoPath,
             laneRoot,
             adapters,
+            agentEnv: {
+              [MAESTRO_URL_ENV]: daemon.url,
+              [MAESTRO_TOKEN_ENV]: daemon.token,
+              [MAESTRO_RUN_ENV]: runId,
+            },
             ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
           })
         : { executor: deps.executor, close: () => {} }
@@ -266,6 +277,7 @@ export async function runCommand(
   }
 
   const pools = new ResourcePools(workflow.resources)
+  const agentLeases = new AgentLeaseBroker(pools, journal)
   const admission = new AdmissionControl({
     journal,
     runId,
@@ -318,6 +330,7 @@ export async function runCommand(
     control: runControl(scheduler),
     pools,
     admission,
+    agentLeases,
     ...(amend === undefined ? {} : { amend }),
   }
   daemon.register(run)
@@ -366,6 +379,7 @@ export async function runCommand(
     // for the human who has to read what happened, and the skill's teardown
     // steps reverse them from the summary on disk.
     admission.close()
+    agentLeases.close()
     host.close()
     await daemon.close()
     journal.close()
@@ -442,6 +456,7 @@ interface ProvisionOptions {
   readonly repoPath: string
   readonly laneRoot: string
   readonly adapters: Readonly<Record<string, HarnessAdapter>>
+  readonly agentEnv: Readonly<Record<string, string>>
   readonly perLaneBytes?: number
 }
 
@@ -496,7 +511,11 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     integrator,
     integrationPath,
     laneRoot,
-    lanes: pool.lanes.map(({ name, path, env }) => ({ name, path, env })),
+    lanes: pool.lanes.map(({ name, path, env }) => ({
+      name,
+      path,
+      env: { ...env, ...options.agentEnv },
+    })),
     cache,
   })
 
@@ -525,7 +544,7 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     },
     // Read through the pool rather than captured, because a recycle that had to
     // re-provision hands back a different `Lane` object for the same slot.
-    laneEnv: (name: string) => pool.lane(name).env,
+    laneEnv: (name: string) => ({ ...pool.lane(name).env, ...options.agentEnv }),
     // What changed under a member while it was away: the files that differ
     // between the phase it last worked on and what is checked out now. It is
     // the whole safety argument for continuing a session across a phase, so a

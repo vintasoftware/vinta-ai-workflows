@@ -25,6 +25,7 @@ import type { AmendRunner } from '../amend/amend.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion } from './schemas.ts'
+import type { AgentLeaseGrant } from '../resources/agent-leases.ts'
 
 /** The five operations of §9, plus the two reads `Scheduler` already exposes. */
 export interface RunControl {
@@ -74,12 +75,21 @@ export interface CapacityView {
   wakeAt(harness: string): number | undefined
 }
 
+/** Renewable leases exposed to an agent through the daemon API. */
+export interface AgentLeasePort {
+  acquire(resources: readonly string[], holderNode: string): Promise<AgentLeaseGrant>
+  renew(leaseId: string): AgentLeaseGrant | null
+  release(leaseId: string): void
+}
+
 /** One run the daemon serves. Registered when the run starts. */
 export interface DaemonRun {
   readonly runId: string
   readonly control: RunControl
   readonly pools: PoolView
   readonly admission: CapacityView
+  /** Absent on read-only/test hosts that do not offer agent-held leases. */
+  readonly agentLeases?: AgentLeasePort
   /**
    * §9's amend path, when this host can drive it: the live statuses the gate
    * reads, the integration worktree a `done` node is rebased in, and the hand

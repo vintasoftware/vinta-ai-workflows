@@ -80,7 +80,7 @@ The published binary is a different file — `dist/cli/bin.js`, plain JavaScript
 
 Every command runs against a project checkout — your project, not this one. `--repo <dir>` names it; with no flag it is the current directory.
 
-## The five commands
+## The six commands
 
 | Command | What it does |
 |---|---|
@@ -89,10 +89,30 @@ Every command runs against a project checkout — your project, not this one. `-
 | `serve [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon and prints the URL to open. Its editor edits `<repo>/ai-plans/*.workflow.json`. |
 | `run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon *and* executes the workflow. Exits when the run ends. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. |
+| `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
 
-Exit codes are three, so a script can tell the cases apart: `0` success, `1` the command ran and the answer was no, `2` the command line was wrong.
+The daemon-facing commands use three exit codes, so a script can tell the cases
+apart: `0` success, `1` the command ran and the answer was no, `2` the command
+line was wrong. `with` passes through the leased command's exit code.
+
+### Leasing heavy inner-loop commands
+
+The scheduler acquires a gate's `requires` resources itself. Agents also run
+tests and other heavy commands before that outer gate, so their prompts expose
+the workflow's semaphore resources and tell them to use the same pools:
+
+```console
+$ vinta-ai-maestro with test-suite -- pnpm test
+```
+
+The command waits until the daemon grants the resource. While it runs, the CLI
+renews a short lease; on exit it releases in a `finally`. If the CLI disappears,
+the renewal stops and the daemon expires the lease, so a wedged turn cannot
+starve the rest of the run. The worktree lane itself is not leasable through
+this verb: the current phase already holds it, and asking for it again would
+deadlock against itself.
 
 ## Walkthrough — two phases in parallel
 

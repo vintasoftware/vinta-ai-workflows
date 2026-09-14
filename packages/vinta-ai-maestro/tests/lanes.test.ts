@@ -566,6 +566,9 @@ describe('lane pool', () => {
     )
 
     await expect(tooMany).rejects.toThrow(/raise its capacity, or run fewer lanes/)
+    expect(existsSync(poolRoot)).toBe(false)
+    expect(worktreePaths(repo)).toEqual([gitPath(repo)])
+    expect(existsSync(migrateLog)).toBe(false)
   })
 
   it('refuses on the N× disk probe before provisioning anything', async () => {

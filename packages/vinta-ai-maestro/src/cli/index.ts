@@ -1,16 +1,17 @@
 /**
  * The `vinta-ai-maestro` command line.
  *
- * Five subcommands, dispatched by hand. `node:util`'s `parseArgs` does the flag
+ * Six subcommands, dispatched by hand. `node:util`'s `parseArgs` does the flag
  * parsing inside each one, and nothing else does any: a framework here would be
  * a dependency, a plugin lifecycle and a help renderer bought to replace a
- * switch statement over five strings.
+ * switch statement over six strings.
  *
  * `main` returns an exit code rather than calling `process.exit`. That is what
  * makes the commands testable without a built binary, and it keeps the one
- * place that ends the process — `bin.ts` — down to a single line. Three codes,
- * so a script can tell the cases apart: `0` success, `1` the command ran and
- * the answer was no, `2` the command line itself was wrong.
+ * place that ends the process — `bin.ts` — down to a single line. Commands use
+ * three codes so a script can tell the cases apart: `0` success, `1` the
+ * command ran and the answer was no, `2` the command line itself was wrong.
+ * `with` is the exception: it passes through the leased child's exit code.
  */
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
@@ -18,6 +19,7 @@ import { PURGE_USAGE, purgeCommand } from './purge.ts'
 import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
 import { SIMULATE_USAGE, simulateCommand } from './simulate.ts'
+import { WITH_USAGE, withCommand } from './with.ts'
 
 export const HELP = `vinta-ai-maestro — code-orchestrated parallel execution of a plan.
 
@@ -31,6 +33,7 @@ usage: vinta-ai-maestro <command> [options]
   run <workflow.json>        Start the daemon and execute the workflow.
   purge [run-id]             Delete run state under .vinta-ai-maestro/ — transcripts
                              and gate logs hold repository contents verbatim.
+  with <resource> -- <cmd>   Run a command while holding a live run's resource.
 
   -h, --help                 Print this.
 
@@ -48,6 +51,7 @@ const USAGES: Readonly<Record<string, string>> = {
   serve: SERVE_USAGE,
   run: RUN_USAGE,
   purge: PURGE_USAGE,
+  with: WITH_USAGE,
 }
 
 export async function main(argv: readonly string[], io: Io = processIo()): Promise<number> {
@@ -81,6 +85,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await runCommand(rest, io)
     case 'purge':
       return await purgeCommand(rest, io)
+    case 'with':
+      return await withCommand(rest, io)
     default:
       // The unknown word is echoed back because a typo is the likely cause and
       // seeing it is how the reader spots one. It is an argument, never a path
@@ -98,4 +104,5 @@ export { simulateCommand } from './simulate.ts'
 export { serveCommand, announce, type ServeDeps } from './serve.ts'
 export { runCommand, type RunDeps } from './run.ts'
 export { purgeCommand } from './purge.ts'
+export { withCommand, type WithDeps } from './with.ts'
 export { laneRootFor, runsRootFor, storeFor } from './paths.ts'

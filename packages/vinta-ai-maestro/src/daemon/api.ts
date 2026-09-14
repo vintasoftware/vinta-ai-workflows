@@ -39,6 +39,7 @@ import { harnessCapabilities } from './harnesses.ts'
 import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
+  AgentLeaseRequestSchema,
   AnswerRequestSchema,
   HumanQuestionSchema,
   MonitorAskSchema,
@@ -47,6 +48,7 @@ import {
   toIssues,
   toWireIssues,
   type AmendResponse,
+  type AgentLeaseGrantResponse,
   type EventPage,
   type MonitorAnswer,
   type Issue,
@@ -240,6 +242,64 @@ export function createApi(options: ApiOptions): Hono {
       cost: usage.totals.cost,
       cache: usage.totals.cache,
     } satisfies RunUsageResponse)
+  })
+
+  /**
+   * A lease an agent can take during its own inner loop.
+   *
+   * The POST deliberately waits for `ResourcePools.acquire`: HTTP is the queue,
+   * so the CLI cannot mistake "accepted" for "granted" and start its command
+   * early. Only semaphore resources are legal here. A node already holds its
+   * lane for the whole turn; allowing it to ask for `lane` again would create a
+   * self-deadlock, not extra isolation.
+   */
+  app.post('/api/runs/:runId/leases', async (c) => {
+    const found = resolveLeaseRun(c)
+    if ('response' in found) return found.response
+
+    const body = await readBody(c, AgentLeaseRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    if (!journal.nodes(found.row.id).some((node) => node.node_id === body.value.holderNode)) {
+      return fail(c, 400, 'invalid_holder')
+    }
+
+    const wf = workflow(found.row.id)
+    if (
+      body.value.resources.some((id) => {
+        const resource = wf.resources[id]
+        return resource === undefined || resource.kind !== 'semaphore'
+      })
+    ) {
+      return fail(c, 400, 'invalid_resource')
+    }
+
+    try {
+      const grant = await found.run.agentLeases.acquire(
+        body.value.resources,
+        body.value.holderNode,
+      )
+      return c.json(grant satisfies AgentLeaseGrantResponse, 201)
+    } catch {
+      return fail(c, 409, 'lease_unavailable')
+    }
+  })
+
+  /** Renewal is the liveness proof that keeps a long command's lease valid. */
+  app.put('/api/runs/:runId/leases/:leaseId', (c) => {
+    const found = resolveLeaseRun(c)
+    if ('response' in found) return found.response
+    const grant = found.run.agentLeases.renew(c.req.param('leaseId') ?? '')
+    return grant === null
+      ? fail(c, 409, 'lease_expired')
+      : c.json(grant satisfies AgentLeaseGrantResponse)
+  })
+
+  /** Idempotent because expiry and the command's `finally` routinely race. */
+  app.delete('/api/runs/:runId/leases/:leaseId', (c) => {
+    const found = resolveLeaseRun(c)
+    if ('response' in found) return found.response
+    found.run.agentLeases.release(c.req.param('leaseId') ?? '')
+    return c.json({ ok: true })
   })
 
   app.get('/api/runs/:runId/nodes/:nodeId', (c) => {
@@ -571,6 +631,20 @@ export function createApi(options: ApiOptions): Hono {
     const node = journal.nodes(found.row.id).find((row) => row.node_id === nodeId)
     if (node === undefined) return { response: fail(c, 404, 'unknown_node') }
     return { run: found.run, runId: found.row.id, node }
+  }
+
+  function resolveLeaseRun(
+    c: Context,
+  ):
+    | { run: DaemonRun & { agentLeases: NonNullable<DaemonRun['agentLeases']> }; row: RunRow }
+    | { response: Response } {
+    const runId = c.req.param('runId') ?? ''
+    const row = journal.run(runId)
+    if (row === undefined) return { response: fail(c, 404, 'unknown_run') }
+    const run = runs.get(runId)
+    if (run === undefined) return { response: fail(c, 409, 'run_not_live') }
+    if (run.agentLeases === undefined) return { response: fail(c, 501, 'leases_unavailable') }
+    return { run: run as DaemonRun & { agentLeases: NonNullable<DaemonRun['agentLeases']> }, row }
   }
 
   async function operate<T>(

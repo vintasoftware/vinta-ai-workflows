@@ -1,6 +1,6 @@
 # Lane infrastructure: what a lane has to *be*
 
-Status: in progress, targeting `0.7.0-alpha9`.
+Status: implemented locally; CI and the `0.7.0-alpha9` release are pending.
 
 ## The failure this comes from
 

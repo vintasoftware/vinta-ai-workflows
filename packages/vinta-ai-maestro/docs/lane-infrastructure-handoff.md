@@ -1,6 +1,6 @@
 # Handoff: lane infrastructure (items 1–4), targeting `0.7.0-alpha9`
 
-Written mid-task, at the user's request, for whoever picks this up.
+Written mid-task, then updated after items 3 and 4 were completed locally.
 
 **Read [lane-infrastructure.md](lane-infrastructure.md) first.** It is the plan
 this is executing and it carries the diagnosis — the failing project's compose
@@ -19,12 +19,14 @@ alpha8 release commit). Nothing pushed, no PR open.
 4a90137 chore(release): v0.7.0-alpha8                                 # origin/alpha
 ```
 
-Working tree clean. **1070 tests passing**, both typechecks clean, as of
-`2f9b530`. CI has not run — none of this has been pushed.
+The working tree now contains the final item 3 preflight correction and item 4.
+**1082 tests pass** (1 skipped), both typechecks are clean, the workflow schema
+check passes, and the production build succeeds. These latest changes are not
+committed or pushed; CI has not run.
 
 The user's instruction was: *"implement all 4 items in the order you proposed
-and release alpha9. DO NOT SKIP/LEAVE ANY OF THEM FOR LATER!"* Items 1–3 are
-done. Item 4 is not started. The release is not done.
+and release alpha9. DO NOT SKIP/LEAVE ANY OF THEM FOR LATER!"* Items 1–4 are
+implemented locally. The release is not done.
 
 ## What is done
 
@@ -93,6 +95,10 @@ project's own lines, with `{namespace}`, `{url}`, `{lane}` substituted.
 A pool larger than a service's `capacity` is refused before anything is created
 (`ServiceCapacityError`), rather than wrapped with a modulo.
 
+The continuation closed a mismatch between that contract and the first
+implementation: capacity is now checked before the disk probe, templates, or
+git worktrees create anything, and includes the integration lane's namespace.
+
 Two decisions worth not re-litigating blindly:
 
 - `Lane.index` is **stable across a re-provision**, because an `index` namespace
@@ -104,11 +110,9 @@ Two decisions worth not re-litigating blindly:
   Making them vote would force a full worktree re-provision over an
   `S3_PREFIX`. This is a judgement call and it is written down in the code.
 
-## What is left
-
 ### Item 4 — a lease an agent can actually take
 
-Not started. The design, from the plan doc:
+Implemented. The design, from the plan doc:
 
 > `vinta-ai-maestro with <resource> -- <cmd>`: blocks until the daemon grants
 > the lease, runs the command, releases it on exit.
@@ -151,20 +155,36 @@ Sketch, not prescription:
    exists and nothing uses it — which is precisely the failure this whole branch
    is a correction of.
 
-Open question the user should settle: whether `requires` should also become
-declarable on a **node**, letting a phase hold a pool for its whole agent turn.
-It is simple, and it serializes the phase entirely, so it is usually too coarse
-— but it is the right answer for a phase that genuinely needs exclusive use of a
-machine-wide resource. I would build `with` first and offer this as an escape
-hatch, not instead of it.
+The implementation adds:
+
+- `AgentLeaseBroker`, over the existing `ResourcePools`, with a 30-second TTL
+  renewed by the client while its command is alive. Expiry and explicit release
+  are idempotent and both remove the live journal rows.
+- `POST /api/runs/:runId/leases`, a blocking acquisition; `PUT` on the returned
+  lease id to renew; and idempotent `DELETE` to release. Only semaphore
+  resources are accepted — a phase already holds its lane, so leasing `lane`
+  would self-deadlock.
+- `vinta-ai-maestro with <resource> -- <cmd>`, run through the platform shell
+  seam, with renewal, signal-aware child-tree teardown, and release in a
+  `finally`.
+- The daemon URL, token, run id and current phase id in real agent turns. The
+  token stays out of summaries and output, and provider credentials are still
+  stripped after the lane overlay.
+- Implementer, reviewer and fixer prompt guidance naming the workflow's
+  semaphore resources and the sanctioned wrapper.
+
+The node-level `requires` escape hatch remains deliberately undecided. `with`
+solves the inner-loop gap without serializing an entire agent turn.
+
+## What is left
 
 ### The release
 
 Not started. Before it:
 
-- **CHANGELOG.** No entries have been written for any of items 1–4. The
-  `release` skill validates that the in-progress section is non-empty and
-  refuses otherwise. Four bullets, in the style of the existing ones.
+- **Version and release commit.** Four CHANGELOG bullets are now present under
+  the open `0.7.0` section. The package remains `0.7.0-alpha8`; the alpha9
+  version bump belongs in the release commit, after CI is green.
 - **Push and get CI green** on macOS / Ubuntu / Windows. None of this has been
   near CI. Windows is the one to watch: this branch adds `delimiter`-joined
   `COMPOSE_FILE` values, new temp-directory fixtures, and commands spawned

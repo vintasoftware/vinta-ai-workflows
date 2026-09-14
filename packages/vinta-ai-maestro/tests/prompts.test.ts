@@ -321,6 +321,31 @@ describe('the project’s commands', () => {
   })
 })
 
+describe('agent-held resource leases', () => {
+  it.each(['implementer', 'reviewer', 'fixer'] as const)(
+    'tells the %s how heavy inner-loop commands reach the pool',
+    (role) => {
+      const base = diamond()
+      const workflow = WorkflowSchema.parse({
+        ...base,
+        resources: {
+          ...base.resources,
+          'test-suite': { capacity: 1, kind: 'semaphore' },
+        },
+      })
+      const prompt = compose('api-layer', role, { workflow })
+
+      expect(prompt).toContain('Resource leases for heavy commands')
+      expect(prompt).toContain('vinta-ai-maestro with test-suite -- <command>')
+      expect(prompt).toContain('Do not run that command bare')
+    },
+  )
+
+  it('does not advertise a lease when the workflow has only its lane pool', () => {
+    expect(compose('api-layer', 'implementer')).not.toContain('Resource leases for heavy commands')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 1b. Plan-level context: the plan's own bounds, verbatim and labelled
 // ---------------------------------------------------------------------------

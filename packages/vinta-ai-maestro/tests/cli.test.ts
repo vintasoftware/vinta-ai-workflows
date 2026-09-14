@@ -39,12 +39,19 @@ import { purgeCommand } from '../src/cli/purge.ts'
 import { runCommand } from '../src/cli/run.ts'
 import { serveCommand, reachableUrl } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
+import { withCommand } from '../src/cli/with.ts'
 import type { Daemon, DaemonRun } from '../src/daemon/index.ts'
 import type { HarnessAdapter } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { isWindows } from '../src/platform/platform.ts'
+import {
+  MAESTRO_NODE_ENV,
+  MAESTRO_RUN_ENV,
+  MAESTRO_TOKEN_ENV,
+  MAESTRO_URL_ENV,
+} from '../src/resources/agent-leases.ts'
 import { parsePostMortem } from '../src/postmortem/postmortem.ts'
 import { fakeCli } from './support/fake-cli.ts'
 import { renderGate } from './support/gate-script.ts'
@@ -264,6 +271,80 @@ describe('vinta-ai-maestro simulate', () => {
     const missing = recorder()
     expect(await simulateCommand([join(dir, 'nope.json')], missing.io)).toBe(FAILED)
     expect(missing.err.join('\n')).toContain('cannot read workflow file')
+  })
+})
+
+describe('vinta-ai-maestro with', () => {
+  it('acquires, runs, and releases while keeping the daemon token off output', async () => {
+    const prior = {
+      url: process.env[MAESTRO_URL_ENV],
+      token: process.env[MAESTRO_TOKEN_ENV],
+      run: process.env[MAESTRO_RUN_ENV],
+      node: process.env[MAESTRO_NODE_ENV],
+    }
+    Object.assign(process.env, {
+      [MAESTRO_URL_ENV]: 'http://127.0.0.1:4321',
+      [MAESTRO_TOKEN_ENV]: 'lease-secret',
+      [MAESTRO_RUN_ENV]: 'run-1',
+      [MAESTRO_NODE_ENV]: 'phase-a',
+    })
+    const requests: { url: string; init?: RequestInit }[] = []
+    const request: typeof fetch = async (input, init) => {
+      const url = String(input)
+      requests.push({ url, ...(init === undefined ? {} : { init }) })
+      if (init?.method === 'POST') {
+        return Response.json({ leaseId: 'lease-1', expiresAt: Date.now() + 30_000, ttlMs: 30_000 })
+      }
+      return Response.json({ ok: true })
+    }
+    const io = recorder()
+    const commands: string[] = []
+
+    try {
+      const code = await withCommand(['test-suite', '--', 'pnpm', 'test'], io.io, {
+        fetch: request,
+        run: async (command) => {
+          commands.push(command)
+          return 7
+        },
+      })
+
+      expect(code).toBe(7)
+      expect(commands).toEqual(['pnpm test'])
+      expect(requests.map((entry) => entry.init?.method)).toEqual(['POST', 'DELETE'])
+      expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+        resources: ['test-suite'],
+        holderNode: 'phase-a',
+      })
+      expect(io.all().join('\n')).not.toContain('lease-secret')
+    } finally {
+      for (const [key, value] of [
+        [MAESTRO_URL_ENV, prior.url],
+        [MAESTRO_TOKEN_ENV, prior.token],
+        [MAESTRO_RUN_ENV, prior.run],
+        [MAESTRO_NODE_ENV, prior.node],
+      ] as const) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
+  it('refuses outside an agent turn and validates the separator', async () => {
+    const prior = process.env[MAESTRO_URL_ENV]
+    delete process.env[MAESTRO_URL_ENV]
+    const io = recorder()
+    try {
+      expect(await withCommand(['test-suite', '--', 'pnpm test'], io.io)).toBe(FAILED)
+      expect(io.err.join('\n')).toContain('no live run')
+
+      const usage = recorder()
+      expect(await withCommand(['test-suite', 'pnpm test'], usage.io)).toBe(USAGE)
+      expect(usage.err.join('\n')).toContain('with <resource> -- <cmd>')
+    } finally {
+      if (prior === undefined) delete process.env[MAESTRO_URL_ENV]
+      else process.env[MAESTRO_URL_ENV] = prior
+    }
   })
 })
 
@@ -682,6 +763,27 @@ function whyNodesFailed(repo: string, runId: string): string {
 }
 
 describe('vinta-ai-maestro run, composed', () => {
+  it('carries the live lease connection and phase identity into each agent turn', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a')]))
+    const adapter = new MockAdapter({ id: 'claude-code' })
+
+    expect(
+      await runCommand([path, '--repo', dir], recorder().io, {
+        adapters: { 'claude-code': adapter },
+        runId: 'lease-env',
+        doctor: healthyBins(dir),
+        perLaneBytes: 1,
+      }),
+    ).toBe(OK)
+
+    const env = adapter.spawned[0]?.env
+    expect(env?.[MAESTRO_URL_ENV]).toMatch(/^http:\/\/127\.0\.0\.1:/)
+    expect(env?.[MAESTRO_TOKEN_ENV]).toBeTruthy()
+    expect(env?.[MAESTRO_RUN_ENV]).toBe('lease-env')
+    expect(env?.[MAESTRO_NODE_ENV]).toBe('a')
+  })
+
   it('provisions lanes, runs gates in them, and reaches done', async () => {
     const dir = gitRepo()
     const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a'), node('b', ['a'])], 2))

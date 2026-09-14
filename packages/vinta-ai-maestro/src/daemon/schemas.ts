@@ -75,6 +75,12 @@ export const RedirectRequestSchema = z.strictObject({ instruction: z.string().mi
 /** Pause and abort take no arguments; the strict empty object rejects the typo. */
 export const NoArgsRequestSchema = z.strictObject({})
 
+/** A command inside an agent turn asks for semaphore resources as one lease. */
+export const AgentLeaseRequestSchema = z.strictObject({
+  resources: z.array(z.string().min(1)).min(1).max(32),
+  holderNode: z.string().min(1),
+})
+
 /** §9.1 — the answer lands in the guard context as `human.answer`. */
 export const AnswerRequestSchema = z.strictObject({
   answer: z.union([z.string(), z.number(), z.boolean(), z.null()]),
@@ -85,6 +91,14 @@ export const AnswerRequestSchema = z.strictObject({
 // ---------------------------------------------------------------------------
 
 export const OkResponseSchema = z.strictObject({ ok: z.literal(true) })
+
+export const AgentLeaseGrantSchema = z.strictObject({
+  leaseId: z.string().min(1),
+  expiresAt: z.number().int(),
+  ttlMs: z.number().int().positive(),
+})
+
+export type AgentLeaseGrantResponse = z.infer<typeof AgentLeaseGrantSchema>
 
 export const RunSummarySchema = z.strictObject({
   runId: z.string(),

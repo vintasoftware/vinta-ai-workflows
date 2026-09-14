@@ -78,7 +78,9 @@ export interface PendingQuestion {
 export interface LeaseRow {
   readonly resource: string
   readonly holder_node: string
+  readonly lease_id: string
   readonly acquired_at: number
+  readonly expires_at: number | null
 }
 
 /** `transcript.jsonl` is the normalized AgentEvent stream; `raw.jsonl` is harness-native. */
@@ -143,11 +145,19 @@ CREATE TABLE IF NOT EXISTS questions (
   PRIMARY KEY (run_id, node_id)
 );
 
-CREATE TABLE IF NOT EXISTS leases (
+`
+
+// Leases describe live processes and are intentionally rebuilt empty on every
+// open. Keeping their DDL separate means an alpha with the old two-column key
+// migrates safely by replacement: there is no durable row to preserve.
+const LEASE_SCHEMA = `
+CREATE TABLE leases (
   resource TEXT NOT NULL,
   holder_node TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
   acquired_at INTEGER NOT NULL,
-  PRIMARY KEY (resource, holder_node)
+  expires_at INTEGER,
+  PRIMARY KEY (lease_id, resource)
 );
 `
 
@@ -177,7 +187,8 @@ export class Journal {
     // A recovering daemon and a still-draining one can briefly want the lock.
     this.db.pragma('busy_timeout = 5000')
     this.db.exec(SCHEMA)
-    this.db.prepare('DELETE FROM leases').run()
+    this.db.exec('DROP TABLE IF EXISTS leases')
+    this.db.exec(LEASE_SCHEMA)
   }
 
   /**
@@ -354,16 +365,25 @@ export class Journal {
     return rows.map(toPendingQuestion)
   }
 
-  acquireLease(resource: string, holderNode: string): void {
+  acquireLease(
+    resource: string,
+    holderNode: string,
+    leaseId = `${resource}:${holderNode}`,
+    expiresAt: number | null = null,
+  ): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO leases (resource, holder_node, acquired_at) VALUES (?, ?, ?)')
-      .run(resource, holderNode, Date.now())
+      .prepare(
+        'INSERT INTO leases ' +
+          '(resource, holder_node, lease_id, acquired_at, expires_at) VALUES (?, ?, ?, ?, ?) ' +
+          'ON CONFLICT (lease_id, resource) DO UPDATE SET expires_at = excluded.expires_at',
+      )
+      .run(resource, holderNode, leaseId, Date.now(), expiresAt)
   }
 
-  releaseLease(resource: string, holderNode: string): void {
+  releaseLease(resource: string, holderNode: string, leaseId = `${resource}:${holderNode}`): void {
     this.db
-      .prepare('DELETE FROM leases WHERE resource = ? AND holder_node = ?')
-      .run(resource, holderNode)
+      .prepare('DELETE FROM leases WHERE resource = ? AND holder_node = ? AND lease_id = ?')
+      .run(resource, holderNode, leaseId)
   }
 
   leases(): LeaseRow[] {

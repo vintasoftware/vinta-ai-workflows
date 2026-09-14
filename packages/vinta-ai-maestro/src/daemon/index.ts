@@ -4,6 +4,7 @@ export {
   runControl,
   UnsupportedOperation,
   type CapacityView,
+  type AgentLeasePort,
   type DaemonRun,
   type PoolView,
   type RunControl,
@@ -24,6 +25,8 @@ export {
 export { startDaemon, type Daemon, type DaemonOptions } from './server.ts'
 export {
   AddContextRequestSchema,
+  AgentLeaseGrantSchema,
+  AgentLeaseRequestSchema,
   AmendResponseSchema,
   AnswerRequestSchema,
   ErrorResponseSchema,
@@ -51,6 +54,7 @@ export {
   formatPath,
   toWireIssues,
   type AmendResponse,
+  type AgentLeaseGrantResponse,
   type EventFrame,
   type Frame,
   type HumanQuestion,

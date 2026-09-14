@@ -228,6 +228,18 @@ export class LanePool {
 
   static async provision(options: PoolOptions): Promise<LanePool> {
     const pool = new LanePool(options)
+    // Capacity is a property of the requested pool, not of one worktree. Check
+    // it before the disk probe creates `poolRoot`, before templates run the
+    // project's setup, and before git sees a branch. The integration worktree
+    // gets its own namespace too, so it consumes the slot after the last lane.
+    for (const service of options.project.services ?? []) {
+      if (service.namespace === 'index') {
+        planService(service, {
+          laneName: `${options.runId}-integ`,
+          laneIndex: options.laneCount,
+        })
+      }
+    }
     await pool.#probeDisk()
     await pool.#buildTemplates()
 
@@ -454,9 +466,8 @@ export class LanePool {
     const env: Record<string, string> = { COMPOSE_PROJECT_NAME: composeProject }
     for (const db of databases) env[db.connectionUrlVar] = db.connectionUrl
 
-    // One shared server, a namespace per lane. Planned before the commands run
-    // so a pool too big for a server's slots is refused with nothing created,
-    // the same shape of refusal as the N× disk probe.
+    // One shared server, a namespace per lane. The whole pool's capacity was
+    // checked before provisioning began; this derives the already-valid slice.
     const services = (project.services ?? []).map((spec) =>
       planService(spec, { laneName: name, laneIndex: index }),
     )
