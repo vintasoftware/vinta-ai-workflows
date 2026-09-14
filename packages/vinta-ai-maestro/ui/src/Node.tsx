@@ -393,6 +393,7 @@ function Steering({
 
   return (
     <Panel
+      expandable
       title="Steering"
       className="steering"
       description={<span data-delivery>{delivery(harness, status, declared.inject)}</span>}
@@ -453,6 +454,19 @@ function Steering({
             onClick={() => onOperate('abort', {}, 'Abort requested.')}
           >
             Abort node
+          </Button>
+          {/* Only for a phase that has stopped, because that is the only state
+              it means anything in — and the only one where the operator is
+              otherwise left with "re-run the whole plan". */}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-op="retry"
+            disabled={busy || status !== 'failed'}
+            onClick={() => onOperate('retry', {}, 'Retrying this phase, and unblocking what it held up.')}
+          >
+            Retry phase
           </Button>
         </HStack>
         {declared.pty && (
@@ -551,7 +565,7 @@ function Gates({
   readonly failing: string | null
 }) {
   return (
-    <Panel title="Gate logs" data-gates>
+    <Panel title="Gate logs" data-gates expandable>
       {gates.length === 0 ? (
         <EmptyNote>No gate has run yet.</EmptyNote>
       ) : (
@@ -563,7 +577,7 @@ function Gates({
                 {gate.gateId === failing && <Chip tone="error">failing</Chip>}
               </p>
               <pre
-                className="gate-log m-0 max-h-52 overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-xs"
+                className="gate-log m-0 max-h-[var(--panel-scroll,13rem)] overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-xs"
                 data-gate-log={gate.gateId}
               >
                 {gate.log}

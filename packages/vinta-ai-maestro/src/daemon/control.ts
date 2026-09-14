@@ -41,6 +41,15 @@ export interface RunControl {
   /** §9 — kill the session, mark failed, block dependents. */
   abortNode(nodeId: string): void | Promise<void>
   /**
+   * Run a failed node again, and unblock what its failure blocked.
+   *
+   * Not one of §9's five: those steer a node that is running, and this one
+   * reaches a node that has stopped. Optional, like `question`, so a host that
+   * schedules its own work is not obliged to implement it — and refuses
+   * honestly rather than pretending to have retried.
+   */
+  retry?(nodeId: string): void | Promise<void>
+  /**
    * The question a node is parked on (§9.1). Optional, and rarely needed: the
    * journal projects the pending question out of the `human_question` event,
    * which is what the API serves and what survives a restart. This is the
@@ -100,7 +109,7 @@ export function runControl(
   }
   // Destructured off the prototype, so every forward re-binds `this` to the
   // scheduler: these are class methods reaching private state.
-  const { addContext, redirect, pause, abortNode, question } = scheduler
+  const { addContext, redirect, pause, abortNode, question, retry } = scheduler
   const own =
     operations.question ??
     (question === undefined ? undefined : (nodeId: string) => question.call(scheduler, nodeId))
@@ -129,5 +138,12 @@ export function runControl(
         ? unsupported('abort')
         : (nodeId) => abortNode.call(scheduler, nodeId)),
     ...(own === undefined ? {} : { question: own }),
+    // Optional all the way through: a host without it answers "unsupported"
+    // rather than accepting a retry it will not perform.
+    ...(operations.retry !== undefined
+      ? { retry: operations.retry }
+      : retry === undefined
+        ? {}
+        : { retry: (nodeId: string) => retry.call(scheduler, nodeId) }),
   }
 }

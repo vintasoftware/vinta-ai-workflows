@@ -229,8 +229,14 @@ function rig(
     readonly recycleLane?: (name: string) => Promise<void>
     /** Session ids this harness has forgotten (§15.4). */
     readonly staleSessions?: readonly string[]
-    /** What a failed node does: end, or ask the operator first. */
-    readonly onFailure?: 'stop' | 'ask'
+    /**
+     * What a failed node does. Defaults to `stop` here; production defaults to
+     * `retry`. `null` passes nothing, which is how one test exercises the real
+     * default rather than the rig's.
+     */
+    readonly onFailure?: 'stop' | 'retry' | 'ask' | null
+    /** Automatic attempts under `retry`. */
+    readonly retries?: number
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-scheduler-'))
@@ -273,7 +279,18 @@ function rig(
     laneRoot: join(dir, 'lanes'),
     takeovers,
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
-    ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
+    // **`stop` unless a test says otherwise, and production's default is
+    // `retry`.** Every test below that asserts about a failure — containment,
+    // the reason text, which dependents block — is about what a *final* failure
+    // does, not about the recovery policy in front of it. Left on the
+    // production default they would all silently be testing the second attempt.
+    //
+    // The divergence is deliberate and is itself covered: `the default recovery
+    // policy` asserts that a scheduler built without this option retries. A rig
+    // default that quietly disagreed with production, with nothing holding the
+    // two together, is how a mode gets asserted by name instead of behaviour.
+    ...(options.onFailure === null ? {} : { onFailure: options.onFailure ?? 'stop' }),
+    ...(options.retries === undefined ? {} : { retries: options.retries }),
   })
 
   cleanups.push(() => {
@@ -2122,7 +2139,115 @@ describe('a failed phase the operator can retry', () => {
   /** Every spawn's model, in the order the harness was asked for them. */
   const modelsOf = (r: Rig): string[] => r.adapter.spawned.map((task) => task.model)
 
-  /** The default is what every run did before this existed. */
+  /**
+   * The production default, exercised here and nowhere else — the rig pins
+   * `stop` so the failure tests stay about failures. Without this, the two
+   * could drift apart with nothing to notice.
+   */
+  it('retries once and then asks, with no policy given', async () => {
+    // `null` is the rig passing nothing, so this is production's own default.
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: null })
+
+    const running = r.scheduler.run()
+    // Two attempts, unprompted, and then it waits for a person.
+    await until(() => r.adapter.spawned.length === 2, 'the automatic second attempt')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after it')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    // The reason says how hard it tried, which no event otherwise records.
+    expect(report.failures['a']).toContain('after 2 attempts')
+    expectDrained(r)
+  })
+
+  it('spends its whole budget before asking', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+      onFailure: 'retry',
+      retries: 3,
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.adapter.spawned.length === 4, 'three retries after the first attempt')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.failures['a']).toContain('after 4 attempts')
+    expectDrained(r)
+  })
+
+  /** `ask` skips the automatic attempts: the operator wanted the question. */
+  it('asks immediately when asked to', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: 'ask' })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+
+    expect(r.adapter.spawned).toHaveLength(1)
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+  })
+
+  /**
+   * The operator pointing at a stopped phase, rather than answering a question
+   * about one. It brings back the subtree the failure blocked, because a phase
+   * that failed for an environmental reason held up work that was never broken.
+   */
+  it('runs a failed phase again when the operator asks, and unblocks what it held', async () => {
+    // `c` is independent and parks, which is what keeps the run in flight while
+    // the operator deals with `a`. That is not a contrivance — it is the only
+    // situation a manual retry applies to, since a run whose nodes have all
+    // settled has already returned.
+    const r = rig(
+      makeWorkflow([node('a'), node('b', ['a']), node('c')], { pipeline: 'explode', lanes: 3 }),
+      { onFailure: 'ask' },
+    )
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'a to park')
+    await until(() => r.scheduler.statuses['c'] === 'awaiting_human', 'c to park')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await until(() => r.scheduler.statuses['a'] === 'failed', 'a to fail')
+    expect(r.scheduler.statuses['b']).toBe('blocked')
+
+    r.scheduler.retry('a')
+
+    // Back in the ready set, and its dependent with it.
+    expect(r.scheduler.statuses['b']).toBe('pending')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'a to park again')
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    r.scheduler.answer('c', { human: { answer: 'stop' } })
+    const report = await running
+
+    // `a` was spawned twice: once on its own, once because the operator said so.
+    expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(2)
+    expect(report.statuses['b']).toBe('blocked')
+    expectDrained(r)
+  })
+
+  it('refuses to retry a phase that has not failed', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: 'stop' })
+    expect(() => r.scheduler.retry('a')).toThrow(/not failed/)
+    expect(() => r.scheduler.retry('nope')).toThrow(/unknown node/)
+  })
+
+  /**
+   * A run that has ended has no loop left to dispatch into. Saying so is the
+   * difference between an operator re-running the plan and one clicking a
+   * button that does nothing.
+   */
+  it('refuses once the run has ended, because there is nothing left to dispatch', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: 'stop' })
+    await r.scheduler.run()
+
+    // The honest refusal. A button that silently did nothing here is worse than
+    // one that says the plan has to be started again.
+    expect(() => r.scheduler.retry('a')).toThrow(/run has ended/)
+  })
+
+  /** `stop` is for CI, where waiting is worse than failing. */
   it('fails without asking when nobody said to ask', async () => {
     const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }))
 

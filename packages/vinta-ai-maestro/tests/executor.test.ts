@@ -299,6 +299,12 @@ function setup(
           workflow,
           runId: RUN_ID,
           journal,
+          // These drive the *executor* through a real scheduler, and the two
+          // that assert about a failure are about what a final failure does —
+          // not about the recovery policy in front of it. Production defaults
+          // to `retry`, which would silently make them assert the second
+          // attempt (`scheduler.test.ts` covers that default).
+          onFailure: 'stop',
           pools,
           admission,
           adapters: adapters as Readonly<Record<string, HarnessAdapter>>,

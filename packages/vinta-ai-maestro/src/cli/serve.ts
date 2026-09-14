@@ -27,6 +27,7 @@
  * wrote and `vinta-ai-maestro run` is pointed at. Neither is passed separately, so
  * they cannot come to disagree about which checkout is open.
  */
+import { networkInterfaces } from 'node:os'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -46,20 +47,31 @@ import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
                               [--permission <ask|auto|full>]
-                              [--on-failure <stop|ask>]
+                              [--on-failure <stop|retry|ask>] [--retries <n>]
 
   --repo <dir>   The project whose .vinta-ai-maestro/ store is served, and whose
                  ai-plans/*.workflow.json the editor opens.
                  Defaults to the current directory.
-  --host <host>  Bind address. Defaults to 127.0.0.1. Any other value makes the
-                 daemon reachable from other machines and prints a warning.
+  --host <host>  Bind address. Defaults to 127.0.0.1 — this machine only.
+                 Pass 0.0.0.0 to reach it from the local network; the printed
+                 URL then names this machine's LAN address rather than the
+                 wildcard, so it can be opened from another device. The daemon
+                 warns, because the token in that URL is the only thing standing
+                 between the run — transcripts, diffs, gate logs — and anyone
+                 who can reach the port.
   --port <n>     Defaults to 0 — an OS-assigned port, printed with the URL.
-  --on-failure   What a failed phase does. "stop" (default) ends it and blocks
-                 whatever depended on it, as runs have always done. "ask" parks
-                 it on a question instead — retry, retry with another member of
-                 the crew, or stop — so an environmental failure can be fixed
-                 and the phase tried again without re-running the whole plan.
-                 Only pass "ask" when somebody is watching: the run waits.
+  --on-failure   What a failed phase does. "retry" is the default: it tries the
+                 phase again, cold, and then parks it on a question — retry,
+                 retry with another member of the crew, or stop. The failures
+                 this produces are mostly environmental and are gone by the
+                 second attempt; the ones that are not are worth a person.
+                 "ask" skips the automatic attempt and parks straight away.
+                 "stop" ends the phase and blocks whatever depended on it, which
+                 is the right choice for CI — everything else eventually waits,
+                 and nobody is watching there.
+  --retries <n>  Automatic attempts before the question, under "retry".
+                 Defaults to 1, and 0 to 5 are accepted. Raising it multiplies
+                 the cost of a phase that is simply broken.
   --permission   How much an agent may do without being asked. Defaults to
                  auto — it works in its own lane unattended, which is what a
                  lane is for. ask makes every tool use need approval, and
@@ -103,9 +115,38 @@ export function toBind(values: BindValues, io: Io): Bind | null {
  * secret it is.
  */
 export function announce(daemon: Daemon, io: Io): void {
+  const open = reachableUrl(daemon.url)
   io.out(`vinta-ai-maestro: daemon listening on ${daemon.url}`)
   io.out('Open this URL. It carries the access token, so treat it as a secret:')
-  io.out(`  ${daemon.url}/?${TOKEN_QUERY}=${daemon.token}`)
+  io.out(`  ${open}/?${TOKEN_QUERY}=${daemon.token}`)
+}
+
+/**
+ * A URL another machine can actually open.
+ *
+ * `--host 0.0.0.0` binds every interface, and the address the server reports
+ * back is the wildcard itself — so the line printed for the operator to share
+ * was `http://0.0.0.0:<port>`, which resolves for nobody. The flag worked and
+ * the URL did not, which is the most annoying shape a feature can have.
+ *
+ * The bind address is left exactly as it was; only the *printed* host changes,
+ * to this machine's first non-internal IPv4. Falls back to the wildcard when
+ * there is no such interface, because inventing one would be worse than
+ * printing the thing the operator can at least recognise as wrong.
+ */
+export function reachableUrl(url: string, interfaces = networkInterfaces()): string {
+  const parsed = new URL(url)
+  if (parsed.hostname !== '0.0.0.0' && parsed.hostname !== '::') return url
+
+  for (const addresses of Object.values(interfaces)) {
+    for (const address of addresses ?? []) {
+      if (address.family === 'IPv4' && !address.internal) {
+        parsed.hostname = address.address
+        return parsed.origin
+      }
+    }
+  }
+  return url
 }
 
 export interface ServeDeps {
@@ -229,6 +270,8 @@ function monitorFactory(
       adapter: new ClaudeCodeAdapter({ permission }),
       model: monitorModel(workflow),
       cwd: repoPath,
+      // The conversation is written here, so it survives the tab it was had in.
+      journal,
     })
   }
 }

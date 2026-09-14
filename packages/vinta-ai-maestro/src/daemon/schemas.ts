@@ -248,6 +248,16 @@ export const MonitorAnswerSchema = z.strictObject({
 export type MonitorAnswer = z.infer<typeof MonitorAnswerSchema>
 
 /**
+ * The conversation so far. Entries are transcript entries and are deliberately
+ * unvalidated here, exactly as a phase's are: the UI owns that union
+ * (`ui/src/transcript.ts`) and validates each row as it renders it, so a new
+ * event kind reaches the operator as an unknown row rather than a failed page.
+ */
+export const MonitorHistorySchema = z.strictObject({
+  entries: z.array(z.unknown()),
+})
+
+/**
  * What a `git diff` needs, not the diff itself. Computing it means running git
  * in the lane, which is the git unit's job; the node view asks for it by ref.
  */

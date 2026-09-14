@@ -53,6 +53,8 @@ const AUTHOR: Readonly<Record<string, string>> = {
 }
 
 export function Transcript({ entries }: { readonly entries: readonly unknown[] }) {
+  // The box's height is the panel's to decide (`Panel.tsx`): expanded it is a
+  // screen, collapsed it is 480px, and the following below works either way.
   const [visible, setVisible] = useState(TRANSCRIPT_WINDOW)
   const list = useRef<HTMLOListElement>(null)
   // Starts true so the first paint lands on the newest row. A ref rather than
@@ -76,6 +78,7 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
   return (
     <Panel
       title="Transcript"
+      expandable
       className="transcript"
       action={
         entries.length > 0 ? (
@@ -103,7 +106,7 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
           )}
           <ol
             ref={list}
-            className="entries max-h-[480px] divide-y overflow-y-auto"
+            className="entries max-h-[var(--panel-scroll,480px)] divide-y overflow-y-auto"
             onScroll={(event) => {
               const box = event.currentTarget
               following.current =

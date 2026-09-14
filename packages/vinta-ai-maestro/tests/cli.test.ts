@@ -37,7 +37,7 @@ import { FAILED, OK, USAGE, type Io } from '../src/cli/io.ts'
 import { main } from '../src/cli/index.ts'
 import { purgeCommand } from '../src/cli/purge.ts'
 import { runCommand } from '../src/cli/run.ts'
-import { serveCommand } from '../src/cli/serve.ts'
+import { serveCommand, reachableUrl } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
 import type { Daemon, DaemonRun } from '../src/daemon/index.ts'
 import type { HarnessAdapter } from '../src/harness/adapter.ts'
@@ -1186,5 +1186,36 @@ describe('vinta-ai-maestro dispatch', () => {
     const io = recorder()
     expect(await main(['simulate', 'x.json', '--fast'], io.io)).toBe(USAGE)
     expect(io.err.join('\n')).toContain('usage: vinta-ai-maestro simulate')
+  })
+})
+
+describe('the URL the operator is handed', () => {
+  /**
+   * `--host 0.0.0.0` binds every interface, and the address the server reports
+   * back is the wildcard — so the line printed to be opened, and shared, was
+   * `http://0.0.0.0:<port>`, which resolves for nobody. The flag worked and the
+   * URL did not.
+   */
+  it('names this machine on the network when the bind was a wildcard', () => {
+    const found = {
+      en0: [
+        { family: 'IPv4', internal: false, address: '192.168.1.42' },
+      ] as unknown as NodeJS.Dict<unknown>[string],
+    }
+    expect(reachableUrl('http://0.0.0.0:7777', found as never)).toBe('http://192.168.1.42:7777')
+  })
+
+  it('leaves a loopback bind exactly as it is', () => {
+    expect(reachableUrl('http://127.0.0.1:7777', {} as never)).toBe('http://127.0.0.1:7777')
+  })
+
+  /** Better the address the operator can see is wrong than one that is invented. */
+  it('keeps the wildcard when this machine has no network address', () => {
+    const loopbackOnly = {
+      lo0: [
+        { family: 'IPv4', internal: true, address: '127.0.0.1' },
+      ] as unknown as NodeJS.Dict<unknown>[string],
+    }
+    expect(reachableUrl('http://0.0.0.0:7777', loopbackOnly as never)).toBe('http://0.0.0.0:7777')
   })
 })

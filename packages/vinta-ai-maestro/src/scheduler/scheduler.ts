@@ -119,20 +119,30 @@ export interface SchedulerOptions {
   /** Where lane worktrees live — `LanePool`'s `poolRoot`. */
   readonly laneRoot: string
   /**
-   * What a node's failure does: end it, or ask the operator first.
+   * What a node's failure does.
    *
-   * `stop` is the default and is what a run has always done — a failed phase
-   * fails, its dependents block, the run finishes. It is the only safe default
-   * because the alternative *waits*, and a run in CI with nobody watching would
-   * wait forever.
+   * `retry` is the default: up to `retries` cold re-attempts, and then the
+   * operator is asked. The failures this system actually produces are
+   * overwhelmingly environmental — a permission wall, a stale session, a gate
+   * whose service was not up — and those recover on a second attempt for the
+   * price of one phase. A deterministic failure fails again identically, which
+   * is why the budget is small and why the ask comes after it rather than
+   * instead of it.
    *
-   * `ask` parks the node on a question instead. It exists because the failures
-   * worth retrying are overwhelmingly environmental — a permission wall, a
-   * missing grant, a flaky gate — and an operator who is watching can fix the
-   * cause in seconds. Without it their only recovery is to start the whole plan
-   * again, re-running every phase that already succeeded.
+   * `ask` skips the automatic attempts and parks immediately. `stop` is the
+   * old behaviour — fail, block the dependents, finish — and is the right
+   * choice for CI, because everything else eventually *waits*, and nobody is
+   * watching there.
    */
-  readonly onFailure?: 'stop' | 'ask'
+  readonly onFailure?: 'stop' | 'retry' | 'ask'
+  /**
+   * How many automatic attempts a failed node gets under `retry`.
+   *
+   * One, because the second attempt is where the value is: it catches
+   * everything transient, and a third rarely converts a failure a second did
+   * not. Raising it multiplies the cost of a phase that is simply broken.
+   */
+  readonly retries?: number
   /**
    * Returns a lane slot to a clean state before another node is given it —
    * `LanePool.recycle`, which resets what it can and re-provisions what it
@@ -180,6 +190,18 @@ export interface RunReport {
   readonly failures: Readonly<Record<string, string>>
   /** Loop turns taken. Bounded by state changes — a spin would show up here. */
   readonly iterations: number
+}
+
+/**
+ * The failure reason, with the attempts behind it.
+ *
+ * A phase that failed once and a phase that failed twice are different news,
+ * and without this the second is invisible: the retry leaves no event of its
+ * own, only a second session and a second transcript, which nobody reads to
+ * find out how hard the scheduler tried.
+ */
+function attempted(reason: string, state: NodeState): string {
+  return state.autoRetries === 0 ? reason : `${reason} (after ${state.autoRetries + 1} attempts)`
 }
 
 /** A refusal that is backpressure: unwinds the attempt so the lane is freed first. */
@@ -276,6 +298,8 @@ interface NodeState {
   retryMember: string | null
   /** How many times the operator has been offered this node. Keeps effect ids apart. */
   retries: number
+  /** Automatic attempts already spent on this node, under `onFailure: retry`. */
+  autoRetries: number
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -508,6 +532,7 @@ export class Scheduler {
       lane: null,
       retryMember: null,
       retries: 0,
+      autoRetries: 0,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -604,6 +629,52 @@ export class Scheduler {
       payload: { status: stop === null && this.#failures().length === 0 ? 'done' : 'failed' },
     })
     return this.#report(stop)
+  }
+
+  /**
+   * Runs a failed node again, at the operator's word.
+   *
+   * The §9 verbs steer a node that is *running*; this one reaches a node that
+   * has stopped, which is why it is separate. It returns the node to the ready
+   * set and releases the dependents its failure blocked — the whole subtree
+   * comes back, because a phase that failed for an environmental reason blocked
+   * work that was never broken.
+   *
+   * It needs the run to still be in flight: `run()` returns once every node has
+   * settled, and after that there is no loop left to dispatch into. With
+   * `onFailure: retry` — the default — a failing node parks on a question
+   * rather than ending the run, so the loop is usually still there. A run that
+   * has genuinely finished is re-run, not retried.
+   *
+   * Cold, like every other retry here: the context that failed is the thing
+   * being retried away from.
+   */
+  retry(nodeId: string): void {
+    const state = this.#states.get(nodeId)
+    if (state === undefined) throw new Error(`unknown node "${nodeId}"`)
+    if (state.status !== 'failed') {
+      throw new Error(`node "${nodeId}" is ${state.status}, not failed`)
+    }
+    if (this.#settled()) throw new Error(`run has ended; start it again instead`)
+
+    state.failure = null
+    state.autoRetries = 0
+    this.#clearLedger(state)
+    // A member poisoned by this node's failure is trusted again for it: the
+    // retry is cold anyway, so there is no failed context left to inherit.
+    const member = state.crew?.member ?? state.lastMember
+    if (member !== null) this.#poisoned.delete(member)
+    this.#setStatus(state, 'pending')
+
+    // Everything this failure blocked is unblocked. Only what *this* node
+    // blocked: a dependent blocked by some other failure stays where it is.
+    for (const id of transitiveDependents(this.#workflow.nodes, nodeId)) {
+      const dependent = this.#states.get(id)
+      if (dependent?.status === 'blocked' && dependent.failure === null) {
+        this.#setStatus(dependent, 'pending')
+      }
+    }
+    this.#wake()
   }
 
   /**
@@ -853,8 +924,8 @@ export class Scheduler {
         }
         else {
           const reason = `pipeline ended in state "${settled.state}"`
-          if (await this.#offerRetry(state)) continue
-          this.#fail(state, reason)
+          if (await this.#recover(state)) continue
+          this.#fail(state, attempted(reason, state))
         }
         return
       } catch (error) {
@@ -887,8 +958,8 @@ export class Scheduler {
           continue
         }
         const reason = failureReason(error)
-        if (await this.#offerRetry(state)) continue
-        this.#fail(state, reason)
+        if (await this.#recover(state)) continue
+        this.#fail(state, attempted(reason, state))
         return
       }
     }
@@ -1141,8 +1212,31 @@ export class Scheduler {
    * recycled, so a resumed session would hold a memory of files it wrote and a
    * tree without them — the same reasoning a capacity retry already follows.
    */
+  /**
+   * What to do about a failure, before it becomes one.
+   *
+   * Automatic attempts first and the operator afterwards, which is the order
+   * the failures justify: the transient ones are gone by the second attempt and
+   * never needed a person, and the ones that survive it are exactly the ones
+   * worth a person's judgement. Returning true re-drives the node.
+   */
+  async #recover(state: NodeState): Promise<boolean> {
+    const policy = this.#options.onFailure ?? 'retry'
+    if (policy === 'stop' || state.aborted) return false
+
+    if (policy === 'retry' && state.autoRetries < (this.#options.retries ?? 1)) {
+      state.autoRetries += 1
+      // Cold, for the reason a capacity retry is: the branch the last attempt
+      // built is gone and its worktree will be recycled, so a resumed session
+      // would hold a memory of files that are no longer there.
+      this.#clearLedger(state)
+      this.#setStatus(state, 'running')
+      return true
+    }
+    return await this.#offerRetry(state)
+  }
+
   async #offerRetry(state: NodeState): Promise<boolean> {
-    if ((this.#options.onFailure ?? 'stop') !== 'ask') return false
     if (state.aborted) return false
 
     state.retries += 1

@@ -34,6 +34,8 @@
  * built on demand, including for a run that finished days ago, which is when
  * "why did this fail" is usually asked.
  */
+import { dirname, join } from 'node:path'
+
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
@@ -62,6 +64,13 @@ export interface NodeDigest {
   readonly trouble: readonly string[]
   /** The last thing the agent said, trimmed. */
   readonly lastWord: string | null
+  /** Where this phase's brief lives, in the plan document. */
+  readonly promptRef: string | null
+  /** The worktree its agent worked in — an absolute path, or null before it started. */
+  readonly lanePath: string | null
+  /** The branch it committed to, and what that branch was cut from. */
+  readonly branch: string | null
+  readonly baseBranch: string | null
 }
 
 export interface RunDigest {
@@ -69,6 +78,12 @@ export interface RunDigest {
   readonly workflowId: string
   readonly status: string
   readonly baseBranch: string
+  /** The checkout everything hangs off — the monitor's own working directory. */
+  readonly repoPath: string
+  /** `<repo>/.vinta-ai-maestro`: the journal, the run directories, the lanes. */
+  readonly storePath: string
+  /** The plan document this run executes, if the workflow names one. */
+  readonly planRef: string | null
   readonly nodes: readonly NodeDigest[]
 }
 
@@ -83,14 +98,18 @@ export function runDigest(journal: Journal, runId: string, workflow: Workflow): 
   const row = journal.run(runId)
   if (row === undefined) return null
 
-  const names = new Map(workflow.nodes.map((node) => [node.id, node.name]))
+  const declared = new Map(workflow.nodes.map((node) => [node.id, node]))
   const failures = failureReasons(journal, runId)
+  // `Journal.root` is `<project>/.vinta-ai-maestro`, so its parent is the checkout.
+  const storePath = journal.root
+  const repoPath = dirname(storePath)
 
   const nodes = journal.nodes(runId).map((node): NodeDigest => {
     const entries = journal.tailTranscript(runId, node.node_id, SCAN_LIMIT) as readonly unknown[]
+    const spec = declared.get(node.node_id)
     return {
       nodeId: node.node_id,
-      name: names.get(node.node_id) ?? node.node_id,
+      name: spec?.name ?? node.node_id,
       status: node.status,
       wave: node.wave,
       harness: node.harness,
@@ -98,6 +117,11 @@ export function runDigest(journal: Journal, runId: string, workflow: Workflow): 
       question: journal.pendingQuestion(runId, node.node_id)?.question.question ?? null,
       trouble: troubleOf(entries),
       lastWord: lastWordOf(entries),
+      promptRef: spec?.prompt_ref ?? null,
+      // The name is what the journal records; the path is what a shell needs.
+      lanePath: node.lane === null ? null : join(storePath, 'lanes', node.lane),
+      branch: node.branch,
+      baseBranch: node.base_branch,
     }
   })
 
@@ -106,6 +130,9 @@ export function runDigest(journal: Journal, runId: string, workflow: Workflow): 
     workflowId: row.workflow_id,
     status: row.status,
     baseBranch: row.base_branch,
+    repoPath,
+    storePath,
+    planRef: workflow.plan_ref ?? null,
     nodes,
   }
 }
@@ -171,11 +198,19 @@ export function describe(digest: RunDigest): string {
   const lines = [
     `Run ${digest.runId} of plan "${digest.workflowId}" — status: ${digest.status}.`,
     `Base branch: ${digest.baseBranch}. ${digest.nodes.length} phases.`,
+    `Repository: ${digest.repoPath}`,
+    `Store: ${digest.storePath} (journal at flow.db, run state under runs/, lane worktrees under lanes/)`,
+    ...(digest.planRef === null ? [] : [`Plan document: ${digest.planRef}`]),
     '',
   ]
   for (const node of digest.nodes) {
     lines.push(`## ${node.nodeId} — ${node.name}`)
     lines.push(`status: ${node.status} · wave ${node.wave} · harness ${node.harness}`)
+    if (node.promptRef !== null) lines.push(`brief: ${node.promptRef}`)
+    if (node.lanePath !== null) lines.push(`worktree: ${node.lanePath}`)
+    if (node.branch !== null) {
+      lines.push(`branch: ${node.branch}${node.baseBranch === null ? '' : ` (cut from ${node.baseBranch})`}`)
+    }
     if (node.failure !== null) lines.push(`failed because: ${node.failure}`)
     if (node.question !== null) lines.push(`waiting on the operator: ${node.question}`)
     for (const line of node.trouble) lines.push(`- ${line}`)
@@ -185,26 +220,64 @@ export function describe(digest: RunDigest): string {
   return lines.join('\n')
 }
 
-/** The monitor's standing instructions — its brief, not the operator's question. */
+/**
+ * The monitor's standing instructions — its brief, not the operator's question.
+ *
+ * **It is told how to go and look, not only what happened.** The first version
+ * summarised a digest and nothing else, and read exactly as thin as that
+ * sounds: it could say a phase had failed and never say what the phase had
+ * actually written. It has a shell and it runs in the repository, so the honest
+ * brief is the one that hands it the map — where the lanes are, which branch
+ * each phase committed to, where the plan lives, where the journal lives — and
+ * expects it to read the diff before it draws a conclusion.
+ *
+ * The digest stays because it is the index: cheap, bounded, and enough to know
+ * *which* phase is worth a closer look. What changed is that a closer look is
+ * now possible.
+ */
 export function brief(digest: RunDigest): string {
   return [
-    'You are the monitor for a parallel implementation run. Several coding agents are',
-    'working in isolated git worktrees on phases of one plan. You do not write code and',
-    'you hold no permissions.',
+    'You are the technical project manager for a parallel implementation run. Several',
+    'coding agents work in isolated git worktrees on phases of one plan. You do not',
+    'write code and you do not approve anything — you find out what is true and tell',
+    'the operator.',
     '',
-    'Your job is to answer the operator’s questions about this run: what is happening,',
-    'what is blocked, why something failed, and what it would take to move forward.',
+    'You have a shell, and your working directory is the repository. Use it. The run',
+    'state below is an index, not the evidence; when it matters, go and look:',
     '',
-    'Answer from the run state below. Be specific and brief — name phases by their id,',
-    'say what your evidence is, and say plainly when the state does not tell you',
-    'something rather than filling the gap. If a phase is waiting on the operator,',
-    'explain what the question means and what each answer would do; the operator',
-    'decides, not you.',
+    `- **The plan.** ${digest.planRef ?? 'named in the workflow document under ai-plans/'}.`,
+    '  Each phase names the section of it that briefs the agent. Read the brief before',
+    '  judging whether a phase did what it was asked.',
+    '- **What a phase actually wrote.** Every phase has a worktree and a branch:',
+    '  `git -C <worktree> diff <base>...<branch>` for the change, `git -C <worktree>`',
+    '  `log --oneline <base>..<branch>` for the commits, `git -C <worktree> status`',
+    '  `--porcelain` for work it never committed. A phase that failed with an empty',
+    '  diff and a phase that failed having written six files are different failures.',
+    '- **The run’s own record.** The journal is SQLite at',
+    `  \`${digest.storePath}/flow.db\`: the \`events\` table carries every status change,`,
+    '  lease and session decision as JSON in `payload_json`. Transcripts are JSONL',
+    `  under \`${digest.storePath}/runs/<run>/nodes/<node>/transcript.jsonl\` — one`,
+    '  event per line, with `permission_denied` and `error` rows explaining refusals.',
+    '  Gate logs sit beside them.',
+    '',
+    'Answer specifically and briefly. Name phases by id, say what your evidence was —',
+    'the command you ran, the line you read — and say plainly when you could not find',
+    'out rather than filling the gap. If a phase waits on the operator, explain what',
+    'the question means and what each answer would do; the operator decides, not you.',
     '',
     '--- run state ---',
     describe(digest),
   ].join('\n')
 }
+
+/**
+ * Where the conversation is kept.
+ *
+ * A reserved node id, so the exchange lands in the same transcript store every
+ * phase uses and is read back by the same call. It cannot collide with a phase:
+ * `validate.ts` admits no node id containing a colon.
+ */
+export const MONITOR_NODE = 'monitor:conversation'
 
 export interface MonitorOptions {
   readonly adapter: HarnessAdapter
@@ -212,6 +285,15 @@ export interface MonitorOptions {
   readonly model: string
   /** Where it runs. The repository, not a lane — it writes nothing. */
   readonly cwd: string
+  /**
+   * Where the conversation is written, so it survives the tab.
+   *
+   * A monitor that forgot everything on reload would be a worse record than the
+   * journal it reads: the operator would have asked the question, got the
+   * answer, and be left with neither. Absent for a caller that only wants the
+   * answer — the digest tests do — and then nothing is recorded.
+   */
+  readonly journal?: Journal
 }
 
 /**
@@ -225,8 +307,16 @@ export interface MonitorOptions {
  */
 export class Monitor {
   #session: string | null = null
+  readonly #options: MonitorOptions
 
-  constructor(private readonly options: MonitorOptions) {}
+  // A field and an assignment rather than the parameter property its neighbours
+  // use. Both are fine for the shipped binary, whose shebang asks for
+  // `--experimental-transform-types` precisely so that parameter properties
+  // work (`cli/bin.ts`). This form additionally loads under the cheaper
+  // strip-only mode, which is what an ad-hoc `node src/...` reaches for.
+  constructor(options: MonitorOptions) {
+    this.#options = options
+  }
 
   /** The session this conversation is continuing, for tests and for the API. */
   get session(): string | null {
@@ -235,7 +325,7 @@ export class Monitor {
 
   /** Reported with every answer: the operator should know who is talking. */
   get model(): string {
-    return this.options.model
+    return this.#options.model
   }
 
   async ask(digest: RunDigest, question: string): Promise<string> {
@@ -251,13 +341,13 @@ export class Monitor {
           question,
         ].join('\n')
 
-    const outcome = await this.options.adapter.spawn({
+    const outcome = await this.#options.adapter.spawn({
       // Not a node. The id is a label for the journal and the logs, and it
       // cannot collide with a phase because a phase id has no colon in it.
       nodeId: `monitor:${digest.runId}`,
-      cwd: this.options.cwd,
+      cwd: this.#options.cwd,
       prompt,
-      model: this.options.model,
+      model: this.#options.model,
       ...(cold ? {} : { resumeSessionId: this.#session as string }),
     })
 
@@ -274,12 +364,28 @@ export class Monitor {
       throw new MonitorUnavailable(outcome.kind)
     }
 
+    // The operator's words, in the record, before the answer exists — so a
+    // question whose answer never arrives is still visibly a question that was
+    // asked, rather than nothing at all.
+    this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
+      type: 'user_message',
+      text: question,
+    })
+
     const said: string[] = []
     for await (const event of outcome.session.events) {
       if (event.type === 'session_started') this.#session = event.sessionId
       if (event.type === 'assistant_text') said.push(event.text)
     }
-    return said.join('\n').trim()
+    const answer = said.join('\n').trim()
+
+    if (answer !== '') {
+      this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
+        type: 'assistant_text',
+        text: answer,
+      })
+    }
+    return answer
   }
 
   /** Start over. A conversation that has gone wrong is cheaper to replace. */
@@ -290,8 +396,11 @@ export class Monitor {
 
 /** The monitor could not be reached. Carries a refusal kind, never prose. */
 export class MonitorUnavailable extends Error {
-  constructor(readonly kind: string) {
+  readonly kind: string
+
+  constructor(kind: string) {
     super(`monitor unavailable: ${kind}`)
+    this.kind = kind
   }
 }
 

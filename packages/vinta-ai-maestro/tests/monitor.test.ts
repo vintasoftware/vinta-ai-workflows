@@ -264,8 +264,8 @@ describe('the conversation', () => {
     expect(tasks[0]?.resumeSessionId).toBeUndefined()
     expect(tasks[1]?.resumeSessionId).toBe(monitor.session)
     // The brief is paid for once; the state is re-stated every time.
-    expect(tasks[0]?.prompt).toContain('You are the monitor')
-    expect(tasks[1]?.prompt).not.toContain('You are the monitor')
+    expect(tasks[0]?.prompt).toContain('You are the technical project manager')
+    expect(tasks[1]?.prompt).not.toContain('You are the technical project manager')
     expect(tasks[1]?.prompt).toContain('p1 — Filters')
   })
 

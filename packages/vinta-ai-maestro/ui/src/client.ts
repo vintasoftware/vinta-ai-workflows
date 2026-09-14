@@ -25,6 +25,7 @@ import {
   NoArgsRequestSchema,
   NodeDetailSchema,
   MonitorAnswerSchema,
+  MonitorHistorySchema,
   RunUsageResponseSchema,
   OkResponseSchema,
   RedirectRequestSchema,
@@ -63,6 +64,10 @@ const OPERATIONS = {
   pause: NoArgsRequestSchema,
   abort: NoArgsRequestSchema,
   answer: AnswerRequestSchema,
+  // Not one of §9's five: it reaches a node that has stopped rather than
+  // steering one that is running. It travels the same way because the shape is
+  // the same — a node, a verb, a code back.
+  retry: NoArgsRequestSchema,
 } as const
 
 export type NodeOperation = keyof typeof OPERATIONS
@@ -114,6 +119,13 @@ export interface Client {
    * Slow by nature, because a model is thinking; the caller shows that.
    */
   readonly ask: (runId: string, text: string) => Promise<MonitorAnswer>
+  /**
+   * Everything said to and by the monitor about this run, oldest first.
+   *
+   * Entries are transcript entries — the same shape a phase's are — so the
+   * conversation renders through the component that already knows how.
+   */
+  readonly conversation: (runId: string) => Promise<readonly unknown[]>
   /** Tails `runId` from after `since`. Closing the returned stream detaches. */
   readonly stream: (runId: string, since: number, handlers: StreamHandlers) => Stream
 }
@@ -151,6 +163,16 @@ export function createClient(origin: string, token: string): Client {
       if (!OkResponseSchema.safeParse(await response.json()).success) {
         throw new Error(`${path}: response did not match the daemon schema`)
       }
+    },
+    async conversation(runId) {
+      const path = `/api/runs/${encodeURIComponent(runId)}/monitor`
+      const response = await fetch(`${origin}${path}`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
+      const parsed = MonitorHistorySchema.safeParse(await response.json())
+      if (!parsed.success) throw new Error(`${path}: response did not match the daemon schema`)
+      return parsed.data.entries
     },
     async ask(runId, text) {
       const path = `/api/runs/${encodeURIComponent(runId)}/monitor`

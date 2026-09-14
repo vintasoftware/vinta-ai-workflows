@@ -27,14 +27,14 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
-import { type Monitor, runDigest } from '../monitor/monitor.ts'
+import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
 import type { Workflow } from '../types.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
 import { parseWorkflow } from '../validate.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
-import type { DaemonRun } from './control.ts'
+import { UnsupportedOperation, type DaemonRun } from './control.ts'
 import { harnessCapabilities } from './harnesses.ts'
 import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
@@ -73,6 +73,9 @@ const EventPageQuerySchema = z.object({
   since: z.coerce.number().int().min(0).default(0),
   limit: z.coerce.number().int().min(1).max(1000).default(500),
 })
+
+/** How much of a monitor conversation is served. Long enough to be a history. */
+const MONITOR_HISTORY = 200
 
 export interface ApiOptions {
   readonly journal: Journal
@@ -271,6 +274,22 @@ export function createApi(options: ApiOptions): Hono {
   })
 
   /**
+   * The conversation so far, oldest first.
+   *
+   * Kept in the transcript store under a reserved node id, so it outlives the
+   * tab and the daemon alike — and so the operator who asked a question
+   * yesterday can read the answer today. Entries are the same shape as a
+   * phase's, which is what lets the UI render both with one component.
+   */
+  app.get('/api/runs/:runId/monitor', (c) => {
+    const found = resolveRead(c)
+    if ('response' in found) return found.response
+    return c.json({
+      entries: journal.tailTranscript(found.row.id, MONITOR_NODE, MONITOR_HISTORY),
+    })
+  })
+
+  /**
    * Ask the monitor about this run.
    *
    * Deliberately not one of §9's operations: those reach the scheduler and
@@ -331,6 +350,21 @@ export function createApi(options: ApiOptions): Hono {
   )
 
   /** §9.1 — the answer enters the guard context as `human.answer`. */
+  /**
+   * Run a failed phase again.
+   *
+   * Separate from §9's five because it reaches a node that has *stopped*, and
+   * because it can fail for a reason none of those can: a run that has finished
+   * has no scheduler left to dispatch into, and is re-run rather than retried.
+   * That comes back as 409, like every other "not now".
+   */
+  app.post('/api/runs/:runId/nodes/:nodeId/retry', (c) =>
+    operate(c, NoArgsRequestSchema, (run, nodeId) => {
+      if (run.control.retry === undefined) throw new UnsupportedOperation('retry')
+      return run.control.retry(nodeId)
+    }),
+  )
+
   app.post('/api/runs/:runId/nodes/:nodeId/answer', (c) =>
     operate(c, AnswerRequestSchema, (run, nodeId, body) =>
       run.control.answer(nodeId, { human: { answer: body.answer } }),

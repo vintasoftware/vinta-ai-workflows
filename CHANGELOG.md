@@ -17,6 +17,45 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A failed phase retries itself, and then asks.** `--on-failure` defaults to
+  `retry`: one cold re-attempt (`--retries <n>`, 0–5), and then the node parks
+  on a question — retry, retry with another member of the crew, or stop. The
+  failures this system produces are overwhelmingly environmental and are gone by
+  the second attempt; the ones that survive it are the ones worth a person.
+  `ask` skips the automatic attempt. `stop` is the old behaviour and remains the
+  right choice for CI, because everything else eventually **waits**.
+
+  A failure that survives its retries says so: the reason carries
+  `(after N attempts)`, which no event otherwise records.
+
+- **A failed phase can be retried by hand.** A **Retry phase** button, and
+  `POST /api/runs/:runId/nodes/:nodeId/retry`. It returns the node to the ready
+  set and unblocks the subtree its failure blocked — a phase that died of
+  something environmental holds up work that was never broken. It needs the run
+  to still be in flight, which with the new default it usually is; a run that
+  has genuinely ended is re-run, not retried, and says so rather than doing
+  nothing.
+
+- **The monitor can go and look.** It was given a digest and nothing else, and
+  read exactly as thin as that sounds — it could say a phase had failed and
+  never say what the phase had written. It is briefed as a technical project
+  manager now, with the map: the plan document, each phase's brief, each lane's
+  worktree path, each branch and its base, and where the journal and transcripts
+  live. It has a shell and its working directory is the repository, so it can
+  read the diff before drawing a conclusion. The digest stays as the index —
+  bounded, cheap, enough to know which phase is worth a closer look.
+
+- **The monitor conversation is kept.** It lived in component state, so a reload
+  threw away every question and every answer — a worse record than the run it
+  describes. It is written to the transcript store under a reserved node id and
+  read back on load, so it outlives the tab, the daemon and the run.
+
+- **Panels expand.** Anything holding content that is only nominally
+  summarisable — an agent's transcript, a gate log, the monitor conversation,
+  the steering box — takes the full container width and about a screen of
+  height on demand. The height travels as a CSS variable, because the element
+  that has to grow is a scroller several components below the panel.
+
 - **A run has a spokesperson you can ask.** `serve` grows a **Monitor** panel on
   the run view: one agent that reads the journal and answers in prose — what is
   blocked, why a phase failed, what it would take to move on. It runs on the
@@ -253,6 +292,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   branch at each wave boundary, so the unit commits survive.
 
 ### Fixed
+
+- **`serve --host 0.0.0.0` prints a URL another machine can open.** Binding
+  every interface made the server report the wildcard back, so the line printed
+  for the operator to open — and share — was `http://0.0.0.0:<port>`, which
+  resolves for nobody. The bind is unchanged; the printed host is now this
+  machine's LAN address. The daemon still warns, because the token in that URL
+  is the only thing between the run and anyone who can reach the port.
 
 - **An agent can run a shell command.** `auto` mapped to the vendor's
   `acceptEdits`, which accepts file *edits* and nothing else — a shell command

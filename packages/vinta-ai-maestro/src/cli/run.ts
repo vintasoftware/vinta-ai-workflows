@@ -139,6 +139,7 @@ export async function runCommand(
         port: { type: 'string' },
         permission: { type: 'string' },
         'on-failure': { type: 'string' },
+        retries: { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -170,8 +171,23 @@ export async function runCommand(
   // that quietly became `stop` would look like the flag worked, and the
   // operator would find out by watching a failed run end without asking them.
   const onFailure = parsed.values['on-failure']
-  if (onFailure !== undefined && onFailure !== 'stop' && onFailure !== 'ask') {
-    io.err('vinta-ai-maestro: --on-failure must be one of stop, ask')
+  if (
+    onFailure !== undefined &&
+    onFailure !== 'stop' &&
+    onFailure !== 'retry' &&
+    onFailure !== 'ask'
+  ) {
+    io.err('vinta-ai-maestro: --on-failure must be one of stop, retry, ask')
+    return USAGE
+  }
+
+  // A budget, so it is bounded and finite. Zero is meaningful — it is `ask`
+  // spelled through this flag — and anything unparseable is a typo worth
+  // catching rather than a silent fallback to the default.
+  const rawRetries = parsed.values['retries']
+  const retries = rawRetries === undefined ? undefined : Number(rawRetries)
+  if (retries !== undefined && (!Number.isInteger(retries) || retries < 0 || retries > 5)) {
+    io.err('vinta-ai-maestro: --retries must be a whole number from 0 to 5')
     return USAGE
   }
 
@@ -270,6 +286,7 @@ export async function runCommand(
     executor: host.executor,
     laneRoot,
     ...(onFailure === undefined ? {} : { onFailure }),
+    ...(retries === undefined ? {} : { retries }),
     // §9's take over, wired: the scheduler offers each live turn here and the
     // daemon's PTY channel resolves an `attach` against the same registry.
     // Both sides default to this instance; naming it once is what makes the
@@ -667,6 +684,8 @@ function monitorFactory(
       adapter: new ClaudeCodeAdapter({ permission }),
       model: monitorModel(workflow),
       cwd: repoPath,
+      // The conversation is written here, so it survives the tab it was had in.
+      journal,
     })
   }
 }
