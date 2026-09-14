@@ -24,8 +24,21 @@ import { Monitor, MonitorUnavailable, describe as describeRun, monitorModel, run
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 
 const temps: string[] = []
+const opened: Journal[] = []
+
+/**
+ * Close before removing, and that order is not tidiness.
+ *
+ * The journal is SQLite, and Windows will not delete a file that is still open,
+ * where POSIX shrugs and drops the directory entry. A test that leaks an open
+ * handle passes on two platforms and fails on the third with `EBUSY` — an error
+ * that says nothing about the journal and everything about the teardown.
+ */
 afterEach(() => {
-  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true })
+  for (const journal of opened.splice(0)) journal.close()
+  for (const dir of temps.splice(0)) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }
 })
 
 const HARNESS = 'claude-code'
@@ -76,6 +89,7 @@ function journalWith(workflow: Workflow): Journal {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-monitor-'))
   temps.push(dir)
   const journal = openJournal(dir)
+  opened.push(journal)
   journal.createRun(RUN, workflow)
   return journal
 }
