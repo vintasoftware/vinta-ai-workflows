@@ -16,10 +16,17 @@
  */
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, rm, symlink } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { copyFile, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { basename, delimiter, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { isWindows, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
+import {
+  type ComposeConfig,
+  type ComposeIsolation,
+  findComposeFile,
+  planComposeIsolation,
+  readComposeConfig,
+} from './compose.ts'
 import {
   type DatabasePlan,
   type DatabaseRole,
@@ -109,6 +116,14 @@ export interface ProjectSpec {
   readonly envFiles?: readonly string[]
   /** The project's own idempotent lane-setup command, run inside the lane. */
   readonly setupCmd?: string
+  /**
+   * How the lane's compose stack is isolated past `COMPOSE_PROJECT_NAME`.
+   * Absent means the pool does not go looking for a compose file at all.
+   */
+  readonly compose?: {
+    readonly publish?: readonly string[]
+    readonly sharedVolumes?: readonly string[]
+  }
 }
 
 export interface PoolOptions {
@@ -132,6 +147,16 @@ export interface PoolOptions {
   readonly project: ProjectSpec
   /** Overrides the measured per-lane disk estimate the N× probe uses. */
   readonly perLaneBytes?: number
+  /**
+   * Overrides how the project's compose config is read — the same kind of seam
+   * as `perLaneBytes`, and for the same reason. The real one shells out to
+   * `docker compose config`, so without this the wiring around it (where the
+   * override lands, what `COMPOSE_FILE` is set to, what the summary records)
+   * would be testable only on a machine with docker running.
+   */
+  readonly readCompose?: (
+    repoPath: string,
+  ) => Promise<{ config: ComposeConfig; baseFile: string } | null>
 }
 
 export interface Lane {
@@ -140,6 +165,8 @@ export interface Lane {
   readonly path: string
   readonly branch: string
   readonly composeProject: string
+  /** What the lane's compose override does, or null where there is no compose. */
+  readonly compose: ComposeIsolation | null
   readonly databases: readonly DatabasePlan[]
   /** Gates and agents in this lane must run with this environment applied. */
   readonly env: Readonly<Record<string, string>>
@@ -172,6 +199,8 @@ export class LanePool {
   readonly #templatesDir: string
   readonly #summaryDir: string
   #all: Lane[] = []
+  /** Read once per pool. `undefined` is "not asked yet", `null` is "no compose". */
+  #compose: { config: ComposeConfig; baseFile: string } | null | undefined
   /**
    * git rewrites `.git/worktrees/` for every `worktree add`, and concurrent
    * adds corrupt each other's metadata. It is a second serialization point,
@@ -396,11 +425,22 @@ export class LanePool {
       databases.push(plan)
     }
 
-    // Set unconditionally: it is the isolation key for every `docker compose`
-    // any project command might reach for, and it costs nothing when unused.
+    // Set unconditionally, and *necessary but nowhere near sufficient*: it
+    // namespaces containers, networks and auto-named volumes, and leaves a
+    // pinned volume and a fixed host port exactly as shared as they were.
+    // `#isolateCompose` below is what closes those.
     const composeProject = `${basename(repoPath)}_${name}`
     const env: Record<string, string> = { COMPOSE_PROJECT_NAME: composeProject }
     for (const db of databases) env[db.connectionUrlVar] = db.connectionUrl
+
+    const compose = await this.#isolateCompose(name, composeProject)
+    if (compose !== null) {
+      Object.assign(env, compose.isolation.env)
+      // The base file stays relative — the lane carries its own tracked copy —
+      // while the override is absolute, because it lives outside the worktree
+      // and a bare name would not resolve from the compose project directory.
+      env['COMPOSE_FILE'] = [compose.baseFile, compose.overridePath].join(delimiter)
+    }
 
     const lane: Lane = {
       name,
@@ -408,6 +448,7 @@ export class LanePool {
       path,
       branch,
       composeProject,
+      compose: compose?.isolation ?? null,
       databases,
       env,
       reusable: databases.every((db) => db.resetCmd !== null),
@@ -417,6 +458,56 @@ export class LanePool {
     await this.#writeSummary(lane)
     await this.#setup(lane)
     return lane
+  }
+
+  /**
+   * The project's compose config, read **once per pool**.
+   *
+   * Once, because `docker compose config` is slow and the answer is the same
+   * for every lane — they are all worktrees of one base ref. It is also the
+   * bound on this: the config is the base branch's, so a phase that *adds* a
+   * compose service mid-run publishes a port this override does not know to
+   * strip. That is a narrower gap than the one it closes, and closing it would
+   * mean re-planning ports a running executor has already been handed.
+   */
+  async #composeConfig(): Promise<{ config: ComposeConfig; baseFile: string } | null> {
+    if (this.#options.project.compose === undefined) return null
+    if (this.#compose === undefined) {
+      const read =
+        this.#options.readCompose ??
+        ((repoPath: string) => readComposeConfig(repoPath, findComposeFile(repoPath)))
+      this.#compose = await read(this.#options.repoPath)
+    }
+    return this.#compose
+  }
+
+  /**
+   * The lane's override, written where the phase's diff cannot see it.
+   *
+   * Out of tree — under the already-ignored `.vinta-ai-workflows/` umbrella —
+   * rather than as a `docker-compose.override.yml` at the worktree root. That
+   * path is auto-loaded, which is convenient, and it is also frequently a
+   * *tracked* file: writing a generated override there would put the lane's
+   * isolation into the phase's commit, and from there into the merge.
+   */
+  async #isolateCompose(
+    name: string,
+    composeProject: string,
+  ): Promise<{ isolation: ComposeIsolation; baseFile: string; overridePath: string } | null> {
+    const found = await this.#composeConfig()
+    if (found === null) return null
+
+    const settings = this.#options.project.compose ?? {}
+    const isolation = await planComposeIsolation(found.config, {
+      composeProject,
+      ...(settings.publish === undefined ? {} : { publish: settings.publish }),
+      ...(settings.sharedVolumes === undefined ? {} : { sharedVolumes: settings.sharedVolumes }),
+    })
+
+    const overridePath = join(this.#summaryDir, `${name}.docker-compose.override.yml`)
+    await mkdir(this.#summaryDir, { recursive: true })
+    await writeFile(overridePath, isolation.overrideYaml, 'utf8')
+    return { isolation, baseFile: found.baseFile, overridePath }
   }
 
   /**
@@ -501,7 +592,24 @@ export class LanePool {
         deps: { strategy: 'symlink', paths: ['node_modules'] },
         dev_db: db('dev'),
         test_db: db('test'),
-        compose: { project_name: lane.composeProject },
+        compose: {
+          project_name: lane.composeProject,
+          override_path: lane.env['COMPOSE_FILE']?.split(delimiter)[1] ?? null,
+          base_compose_file: lane.env['COMPOSE_FILE']?.split(delimiter)[0] ?? null,
+          // The teardown manifest, and the reason each entry is on it.
+          forked_volumes: (lane.compose?.volumes ?? []).map(({ key, name, reason }) => ({
+            key,
+            name,
+            reason,
+          })),
+          ports_stripped_from: [...(lane.compose?.portsStrippedFrom ?? [])],
+          published_ports: (lane.compose?.published ?? []).map((port) => ({
+            service: port.service,
+            target: port.target,
+            published: port.published,
+            env_var: port.envVar,
+          })),
+        },
       },
     })
   }

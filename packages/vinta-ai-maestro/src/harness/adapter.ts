@@ -57,6 +57,26 @@ export interface AgentTask {
   readonly operatorText?: string
   /** Continue a prior session. Only meaningful where `capabilities.resume`. */
   readonly resumeSessionId?: string
+  /**
+   * The lane's environment, overlaid on the daemon's for this child.
+   *
+   * Everything that makes a lane *this* lane rather than any other lives here:
+   * `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` pointing at its own isolation
+   * override, its forked connection strings, the host ports it was granted.
+   *
+   * It used to reach gates and not agents, which is the narrower half of a
+   * correct design and produced a wrong one. An agent iterating in its lane
+   * runs the project's own commands — `docker compose up`, the test suite —
+   * and with the daemon's bare environment every lane's agent resolved to the
+   * *same* compose project, published the same fixed ports and mounted the
+   * same volumes. The isolation existed and the processes that needed it could
+   * not see it.
+   *
+   * Applied before `STRIPPED_ENV` is removed, never after: a lane environment
+   * is project configuration and §2's constraint on provider credentials is
+   * not something it may reopen.
+   */
+  readonly env?: Readonly<Record<string, string>>
 }
 
 export interface HarnessCapabilities {
@@ -186,6 +206,13 @@ export interface AgentSession {
 export interface PtyAttach {
   /** Absolute path to the lane worktree — the same one the headless turn ran in. */
   readonly cwd: string
+  /**
+   * The lane's environment, for the same reason the headless turn gets it: an
+   * operator dropped into this terminal runs the project's own commands, and a
+   * terminal in the lane with the daemon's environment would reach the wrong
+   * compose project from inside the right directory.
+   */
+  readonly env?: Readonly<Record<string, string>>
   /** The operator's terminal size at attach. Defaults are a plain 80×24. */
   readonly cols?: number
   readonly rows?: number

@@ -984,7 +984,7 @@ export class OpencodeAdapter implements HarnessAdapter {
       }
     }
 
-    const server = await this.#server(task.cwd)
+    const server = await this.#server(task.cwd, task.env)
     if (!(server instanceof OpencodeServer)) return server.refuse(task.nodeId)
 
     let sessionId = task.resumeSessionId
@@ -1039,12 +1039,23 @@ export class OpencodeAdapter implements HarnessAdapter {
    * message: a boot shared by racing spawns must not stamp the id of whichever
    * node triggered it onto every other node's refusal.
    */
-  async #server(cwd: string): Promise<OpencodeServer | BootFailure> {
+  /**
+   * The server for one lane, booted once and cached by its directory.
+   *
+   * Which is also where the lane's environment has to be applied: this adapter
+   * does not spawn a process per turn, so there is no later point at which a
+   * turn could be given an environment. One directory is one lane is one
+   * environment, so the cache and the env agree by construction.
+   */
+  async #server(
+    cwd: string,
+    env?: Readonly<Record<string, string>>,
+  ): Promise<OpencodeServer | BootFailure> {
     const key = this.options.baseUrl === undefined ? cwd : EXTERNAL_KEY
     const running = this.#servers.get(key)
     if (running !== undefined) return running
 
-    const booting = this.#booting.get(key) ?? this.#boot(cwd, key)
+    const booting = this.#booting.get(key) ?? this.#boot(cwd, key, env)
     this.#booting.set(key, booting)
     try {
       return await booting
@@ -1055,7 +1066,11 @@ export class OpencodeAdapter implements HarnessAdapter {
     }
   }
 
-  async #boot(cwd: string, key: string): Promise<OpencodeServer | BootFailure> {
+  async #boot(
+    cwd: string,
+    key: string,
+    env?: Readonly<Record<string, string>>,
+  ): Promise<OpencodeServer | BootFailure> {
     const configured = this.options.baseUrl
     if (configured !== undefined) {
       const baseUrl = configured.replace(/\/+$/, '')
@@ -1087,7 +1102,7 @@ export class OpencodeAdapter implements HarnessAdapter {
       child = spawnChild(spec.file, spec.args, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: childEnv(STRIPPED_ENV),
+        env: childEnv(STRIPPED_ENV, env),
         ...spec.options,
       })
     } catch (error) {

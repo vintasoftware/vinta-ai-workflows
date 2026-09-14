@@ -36,11 +36,45 @@ export const WorktreeSummarySchema = z.looseObject({
   state: z.looseObject({
     dev_db: ForkedDatabaseSchema.nullable().default(null),
     test_db: ForkedDatabaseSchema.nullable().default(null),
-    compose: z.looseObject({ project_name: z.string() }),
+    compose: z.looseObject({
+      project_name: z.string(),
+      /** Absolute. Null where the project has no compose file. */
+      override_path: z.string().nullable().default(null),
+      /** What `COMPOSE_FILE` names first — relative, and the lane's own copy. */
+      base_compose_file: z.string().nullable().default(null),
+      /**
+       * Volumes this lane forked off a shared one. **This is the teardown
+       * manifest**: each name is a `docker volume rm` target, and a volume that
+       * is not listed here is one somebody else is still using.
+       */
+      forked_volumes: z
+        .array(z.looseObject({ key: z.string(), name: z.string(), reason: z.string() }))
+        .default([]),
+      /** Services whose fixed host port publishing the override dropped. */
+      ports_stripped_from: z.array(z.string()).default([]),
+      /** Host ports this lane was granted, by service and container port. */
+      published_ports: z
+        .array(
+          z.looseObject({
+            service: z.string(),
+            target: z.number(),
+            published: z.number(),
+            env_var: z.string(),
+          }),
+        )
+        .default([]),
+    }),
   }),
 })
 
 export type WorktreeSummary = z.infer<typeof WorktreeSummarySchema>
+/**
+ * What a *writer* has to supply, which is less than what a reader gets back:
+ * the compose block's fields carry defaults, so a caller that has nothing to
+ * say about ports or volumes says nothing rather than spelling out five empty
+ * fields. The schema fills them in on the way to disk.
+ */
+export type WorktreeSummaryInput = z.input<typeof WorktreeSummarySchema>
 
 const summaryPath = (summaryDir: string, name: string): string => join(summaryDir, `${name}.yaml`)
 
@@ -48,9 +82,17 @@ export async function readSummary(summaryDir: string, name: string): Promise<Wor
   return WorktreeSummarySchema.parse(parse(await readFile(summaryPath(summaryDir, name), 'utf8')))
 }
 
-export async function writeSummary(summaryDir: string, summary: WorktreeSummary): Promise<void> {
+export async function writeSummary(
+  summaryDir: string,
+  summary: WorktreeSummaryInput,
+): Promise<void> {
+  // Parsed on the way out, not merely stringified. The file is the contract a
+  // recycle and a teardown are both decided from, so it is written complete —
+  // every default materialized — rather than as whatever the caller happened
+  // to hold.
+  const complete = WorktreeSummarySchema.parse(summary)
   await mkdir(summaryDir, { recursive: true })
-  await writeFile(summaryPath(summaryDir, summary.name), stringify(summary), 'utf8')
+  await writeFile(summaryPath(summaryDir, complete.name), stringify(complete), 'utf8')
 }
 
 /**

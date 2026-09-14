@@ -3,12 +3,18 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { cp, mkdtemp, realpath, rm, statfs, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { planDatabase, planTemplate, type PostgresSpec } from '../src/lanes/database.ts'
 import { DiskProbeError } from '../src/lanes/disk.ts'
-import { type Lane, LanePool, LaneRecycleError, type ProjectSpec } from '../src/lanes/pool.ts'
+import {
+  type Lane,
+  LanePool,
+  LaneRecycleError,
+  type PoolOptions,
+  type ProjectSpec,
+} from '../src/lanes/pool.ts'
 import { readSummary } from '../src/lanes/summary.ts'
 import { shellQuote } from '../src/platform/platform.ts'
 
@@ -157,7 +163,11 @@ describe('lane pool', () => {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   })
 
-  const provision = (project: ProjectSpec, laneCount = 3): Promise<LanePool> =>
+  const provision = (
+    project: ProjectSpec,
+    laneCount = 3,
+    extra: Partial<PoolOptions> = {},
+  ): Promise<LanePool> =>
     LanePool.provision({
       repoPath: repo,
       poolRoot,
@@ -165,6 +175,7 @@ describe('lane pool', () => {
       laneCount,
       baseRef: 'main',
       project,
+      ...extra,
     })
 
   const migrated = (): string[] =>
@@ -406,6 +417,73 @@ describe('lane pool', () => {
     // the command line itself — a lane name is enough to act on.
     expect(failure?.message).not.toContain('node -e')
     expect(failure?.message).not.toContain(root)
+  })
+
+  // The config `docker compose config` would have printed, supplied directly:
+  // the real read shells out to docker, and what is under test here is the
+  // wiring around it rather than compose's own parser.
+  const readCompose = async () => ({
+    baseFile: 'docker-compose.yml',
+    config: {
+      name: 'app',
+      services: { db: { ports: [{ target: 5432, published: '5432' }] } },
+      volumes: { dbdata: { name: 'app_dbdata', external: true } },
+    },
+  })
+
+  it('gives each lane its own compose override, outside the worktree', async () => {
+    const pool = await provision({ ...sqliteProject(), compose: {} }, 2, { readCompose })
+
+    for (const lane of pool.lanes) {
+      const composeFile = envVar(lane, 'COMPOSE_FILE')
+      const [base, override] = composeFile.split(delimiter)
+
+      // The base stays relative — the lane carries its own tracked copy — and
+      // the override is absolute, because it lives outside the worktree and a
+      // bare name would not resolve from the compose project directory.
+      expect(base).toBe('docker-compose.yml')
+      expect(isAbsolute(override as string)).toBe(true)
+      expect(existsSync(override as string)).toBe(true)
+
+      // And never at the worktree root. `docker-compose.override.yml` there is
+      // auto-loaded, which is convenient, and is also frequently a *tracked*
+      // file — writing this into it would put the lane's isolation into the
+      // phase's commit and from there into the merge.
+      expect(existsSync(join(lane.path, 'docker-compose.override.yml'))).toBe(false)
+
+      const written = readFileSync(override as string, 'utf8')
+      expect(written).toContain('ports: !override []')
+      expect(written).toContain(`name: "${lane.composeProject}_dbdata"`)
+    }
+
+    // Two lanes, two volume names. One would be two postmasters on one PGDATA.
+    const overrides = pool.lanes.map((lane) => envVar(lane, 'COMPOSE_FILE'))
+    expect(new Set(overrides).size).toBe(2)
+  })
+
+  it('records the forked volumes in the summary, which is the teardown manifest', async () => {
+    const pool = await provision({ ...sqliteProject(), compose: {} }, 1, { readCompose })
+    const lane = pool.lanes[0] as Lane
+
+    const summary = await readSummary(join(repo, '.vinta-ai-workflows', 'worktrees'), lane.name)
+
+    // A volume on this list is a `docker volume rm` target; one that is not is
+    // a volume somebody else is still using.
+    expect(summary.state.compose.forked_volumes).toEqual([
+      { key: 'dbdata', name: `${lane.composeProject}_dbdata`, reason: 'external: true' },
+    ])
+    expect(summary.state.compose.ports_stripped_from).toEqual(['db'])
+    expect(summary.state.compose.base_compose_file).toBe('docker-compose.yml')
+  })
+
+  it('leaves a project with no compose file entirely alone', async () => {
+    // Which is the fixture repo. No compose file means no docker call and no
+    // `COMPOSE_FILE`, not an empty override nobody asked for.
+    const pool = await provision({ ...sqliteProject(), compose: {} }, 1)
+    const lane = pool.lanes[0] as Lane
+
+    expect(lane.env['COMPOSE_FILE']).toBeUndefined()
+    expect(lane.compose).toBeNull()
   })
 
   it('refuses on the N× disk probe before provisioning anything', async () => {

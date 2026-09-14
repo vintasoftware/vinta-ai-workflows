@@ -60,6 +60,8 @@ export interface TakeoverTarget {
   readonly sessionId: string
   /** The lane worktree the headless turn ran in. */
   readonly cwd: string
+  /** That lane's environment — the same one the headless turn was given. */
+  readonly env?: Readonly<Record<string, string>>
   /** Stops the headless turn. Runs before the terminal opens. */
   interrupt(): Promise<void>
   /**
@@ -111,6 +113,7 @@ export async function takeOver(
   if (attachPty === undefined) throw new Error(`harness ${target.adapter.id} has no attachPty`)
   const handle = await attachPty.call(target.adapter, target.sessionId, {
     cwd: target.cwd,
+    ...(target.env === undefined ? {} : { env: target.env }),
     cols,
     rows,
   })

@@ -14,7 +14,7 @@
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { AdmissionControl } from '../src/admission/admission.ts'
@@ -237,6 +237,8 @@ function rig(
     readonly onFailure?: 'stop' | 'retry' | 'ask' | null
     /** Automatic attempts under `retry`. */
     readonly retries?: number
+    /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
+    readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-scheduler-'))
@@ -279,6 +281,7 @@ function rig(
     laneRoot: join(dir, 'lanes'),
     takeovers,
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
+    ...(options.laneEnv === undefined ? {} : { laneEnv: options.laneEnv }),
     // **`stop` unless a test says otherwise, and production's default is
     // `retry`.** Every test below that asserts about a failure — containment,
     // the reason text, which dependents block — is about what a *final* failure
@@ -809,6 +812,49 @@ describe('capacity', () => {
 // recycle one — between the phases that share it, never at the end of a run,
 // where §8 keeps the last phase's lane as evidence.
 // ---------------------------------------------------------------------------
+
+/**
+ * A lane's isolation is a set of environment variables — its compose project,
+ * the override that strips the host ports its siblings also publish, its own
+ * connection strings — and for a long time they reached gates and not agents.
+ *
+ * Which is the half that matters least. A gate is a declared command run once;
+ * an agent spends a whole phase in that worktree running `docker compose up`
+ * and the project's test suite, and with the daemon's bare environment every
+ * lane's agent resolved to the *same* compose project. The isolation existed
+ * and the processes that needed it could not see it.
+ */
+describe('the lane’s environment', () => {
+  it('reaches the agent, not only the gate', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b')], { lanes: 2 }), {
+      laneEnv: (name) => ({ COMPOSE_PROJECT_NAME: `app_${name}`, LANE_PORT_API_8000: '21080' }),
+    })
+
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned).not.toHaveLength(0)
+    for (const task of r.adapter.spawned) {
+      // Each task carries the environment of the lane it is dispatched into,
+      // and the lane is the directory it was given.
+      expect(task.env?.['COMPOSE_PROJECT_NAME']).toBe(`app_${basename(task.cwd)}`)
+      expect(task.env?.['LANE_PORT_API_8000']).toBe('21080')
+    }
+    // Two lanes, two compose projects. One would be the bug.
+    const projects = new Set(r.adapter.spawned.map((task) => task.env?.['COMPOSE_PROJECT_NAME']))
+    expect(projects.size).toBe(2)
+  })
+
+  it('carries nothing where the host owns its own lanes', async () => {
+    // A host that injected its own executor has no `Lane` to ask about, and a
+    // task with no environment is a child inheriting the daemon's — which is
+    // exactly what every such host had before this existed.
+    const r = rig(makeWorkflow([node('a')]))
+
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned[0]?.env).toBeUndefined()
+  })
+})
 
 describe('lane reuse', () => {
   it('recycles a lane between the phases that share it, and never after the last', async () => {

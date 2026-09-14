@@ -714,7 +714,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       child = spawnChild(spec.file, spec.args, {
         cwd: task.cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: childEnv(STRIPPED_ENV),
+        env: childEnv(STRIPPED_ENV, task.env),
         ...spec.options,
       })
     } catch (error) {
@@ -754,7 +754,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       sessionId,
       file: this.bin,
       args: ['--resume', sessionId],
-      env: childEnv(STRIPPED_ENV),
+      env: childEnv(STRIPPED_ENV, attach.env),
       attach,
     })
   }

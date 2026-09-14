@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import { stringify } from 'yaml'
 import { afterAll, describe, expect, it } from 'vitest'
 import { formatDoctorReport, runDoctor, type CheckResult, type DoctorOptions } from '../src/doctor/index.ts'
-import { writeSummary, type WorktreeSummary } from '../src/lanes/summary.ts'
+import { writeSummary, type WorktreeSummaryInput } from '../src/lanes/summary.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 import { fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
@@ -149,7 +149,7 @@ const workflow = (harnessOverride?: Workflow['defaults']['harness']): Workflow =
   })
 
 /** A summary with one forked dev database, with or without a reset. */
-const summary = (name: string, resetCmd: string | null): WorktreeSummary => ({
+const summary = (name: string, resetCmd: string | null): WorktreeSummaryInput => ({
   name,
   path: `/tmp/${name}`,
   branch: `wt/${name}`,

@@ -295,6 +295,9 @@ export async function runCommand(
     // §8: a lane slot outlives the phase that used it, and the next phase must
     // not start in the last one's worktree or against its rows.
     ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),
+    // The lane's isolation, reaching the process that needs it. Without this a
+    // turn runs in the right directory with the wrong compose project.
+    ...(host.laneEnv === undefined ? {} : { laneEnv: host.laneEnv }),
     // §15.2: an implementer keeps one worktree, so continuing across a phase is
     // safe as long as the agent is told which files moved under it.
     ...(host.laneDelta === undefined ? {} : { laneDelta: host.laneDelta }),
@@ -406,6 +409,8 @@ interface HostWiring {
   readonly rebase?: NonNullable<AmendRunner['rebase']>
   /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
   readonly recycleLane?: (name: string) => Promise<void>
+  /** One lane's environment, for the agent about to run in it. */
+  readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
   readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
   /** Handles this process opened. Never the lanes — see the `finally` above. */
   close(): void
@@ -518,6 +523,9 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     recycleLane: async (name: string) => {
       await pool.recycle(name)
     },
+    // Read through the pool rather than captured, because a recycle that had to
+    // re-provision hands back a different `Lane` object for the same slot.
+    laneEnv: (name: string) => pool.lane(name).env,
     // What changed under a member while it was away: the files that differ
     // between the phase it last worked on and what is checked out now. It is
     // the whole safety argument for continuing a session across a phase, so a
@@ -546,7 +554,12 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
  * document say something untrue.
  */
 function projectSpec(project: Project | undefined): ProjectSpec {
-  if (project === undefined) return { databases: {}, migrateCmd: 'true' }
+  // Compose isolation even here. A workflow with no `project` block is one
+  // whose lanes are "a worktree and nothing else" — which is a statement about
+  // databases and dependencies, and never a request to let six lanes publish
+  // the same host port and mount the same data volume. It costs nothing in a
+  // project with no compose file, which is what "nothing else" usually means.
+  if (project === undefined) return { databases: {}, migrateCmd: 'true', compose: {} }
   const { dev, test } = project.databases
   return {
     migrateCmd: project.migrate_cmd,
@@ -556,6 +569,9 @@ function projectSpec(project: Project | undefined): ProjectSpec {
     },
     envFiles: project.env_files,
     ...(project.setup_cmd === undefined ? {} : { setupCmd: project.setup_cmd }),
+    ...(project.compose.enabled
+      ? { compose: { publish: project.compose.publish, sharedVolumes: project.compose.shared_volumes } }
+      : {}),
   }
 }
 

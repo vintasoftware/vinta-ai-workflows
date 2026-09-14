@@ -231,6 +231,41 @@
           "additionalProperties": false,
           "description": "The project’s own command lines, handed to every agent verbatim. A fixed vocabulary rather than free-form, because the prompt has to be able to say which one step 3 of the working instructions means. Declaring these is how an agent stops guessing: a project whose suite only runs inside a container, or only against a lane-specific database, has no way of telling one otherwise, and `pytest` is a plausible guess that is wrong in exactly that project."
         },
+        "compose": {
+          "default": {
+            "enabled": true,
+            "publish": [],
+            "shared_volumes": []
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "Whether lane provisioning generates a compose override. On by default, and it does nothing at all in a project with no compose file. Where there is one and docker cannot answer, provisioning fails rather than quietly producing lanes that share a data volume — set this to false to say that is genuinely what you want.",
+              "type": "boolean"
+            },
+            "publish": {
+              "default": [],
+              "description": "Services that must keep a reachable host port, republished on one this lane was granted instead of the one the project pinned. Empty is the default and is usually right outright: where the project’s own test command runs inside compose, services reach each other by container DNS on the lane’s own network and a published port buys nothing but a collision. The granted port reaches the lane as `LANE_PORT_<SERVICE>_<CONTAINER_PORT>`.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "shared_volumes": {
+              "default": [],
+              "description": "Volume keys that leak past the project name and are to be left leaking. The escape hatch for the one decision this cannot make for you: re-pinning a shared dependency volume is correct, and it costs every lane the install that sharing it was avoiding. A read-only cache with no dependency churn in the plan is safe here. A data volume never is — that is two servers on one data directory, which is the bug this exists to prevent.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "additionalProperties": false,
+          "description": "How a lane’s compose stack is isolated past `COMPOSE_PROJECT_NAME`."
+        },
         "setup_cmd": {
           "description": "The project’s own lane-setup command, run inside each freshly provisioned lane with that lane’s environment applied. The escape hatch for whatever a project needs that no field here describes. It MUST be idempotent: it runs again every time the lane is recycled for another phase.",
           "type": "string",

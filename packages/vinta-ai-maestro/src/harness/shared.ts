@@ -406,8 +406,14 @@ export const agentSpawn = (
  * instead of using the seat the user already logged into. Which keys those are
  * is the adapter's business, so the caller names them.
  */
-export const childEnv = (strip: readonly string[]): NodeJS.ProcessEnv => {
-  const env = { ...process.env }
+export const childEnv = (
+  strip: readonly string[],
+  overlay: Readonly<Record<string, string>> = {},
+): NodeJS.ProcessEnv => {
+  const env = { ...process.env, ...overlay }
+  // After the overlay, not before. The overlay is a lane's own configuration
+  // and has no business reinstating a key this list exists to remove — and a
+  // strip that ran first would let it, silently, for every lane at once.
   for (const key of strip) delete env[key]
   return env
 }

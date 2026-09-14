@@ -295,6 +295,42 @@ export const CommandsSchema = z
       'is wrong in exactly that project.',
   )
 
+export const ComposeSchema = z
+  .strictObject({
+    enabled: z
+      .boolean()
+      .default(true)
+      .describe(
+        'Whether lane provisioning generates a compose override. On by default, and it does ' +
+          'nothing at all in a project with no compose file. Where there is one and docker ' +
+          'cannot answer, provisioning fails rather than quietly producing lanes that share ' +
+          'a data volume — set this to false to say that is genuinely what you want.',
+      ),
+    publish: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Services that must keep a reachable host port, republished on one this lane was ' +
+          'granted instead of the one the project pinned. Empty is the default and is usually ' +
+          'right outright: where the project’s own test command runs inside compose, services ' +
+          'reach each other by container DNS on the lane’s own network and a published port ' +
+          'buys nothing but a collision. The granted port reaches the lane as ' +
+          '`LANE_PORT_<SERVICE>_<CONTAINER_PORT>`.',
+      ),
+    shared_volumes: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Volume keys that leak past the project name and are to be left leaking. The escape ' +
+          'hatch for the one decision this cannot make for you: re-pinning a shared dependency ' +
+          'volume is correct, and it costs every lane the install that sharing it was avoiding. ' +
+          'A read-only cache with no dependency churn in the plan is safe here. A data volume ' +
+          'never is — that is two servers on one data directory, which is the bug this exists ' +
+          'to prevent.',
+      ),
+  })
+  .describe('How a lane’s compose stack is isolated past `COMPOSE_PROJECT_NAME`.')
+
 export const ProjectSchema = z
   .strictObject({
     migrate_cmd: z
@@ -322,6 +358,7 @@ export const ProjectSchema = z
           'provisioning rather than producing a lane whose stack cannot boot.',
       ),
     commands: CommandsSchema.default({}),
+    compose: ComposeSchema.default(() => ({ enabled: true, publish: [], shared_volumes: [] })),
     setup_cmd: z
       .string()
       .min(1)

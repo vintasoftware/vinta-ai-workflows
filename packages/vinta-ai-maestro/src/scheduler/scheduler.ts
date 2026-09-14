@@ -119,6 +119,20 @@ export interface SchedulerOptions {
   /** Where lane worktrees live — `LanePool`'s `poolRoot`. */
   readonly laneRoot: string
   /**
+   * One lane slot's environment, by slot name — `LanePool`'s `Lane.env`.
+   *
+   * Everything that makes a lane isolated is in here: its compose project, the
+   * override that strips the ports its siblings also publish, its forked
+   * connection strings. It reached gates from the start and did not reach
+   * agents, which made the isolation true of the cheap half of a run and false
+   * of the half that actually boots containers.
+   *
+   * Absent for a host that owns its own lanes, and then a task carries no
+   * environment and a child inherits the daemon's — which is exactly the old
+   * behaviour, for a host that never had a `Lane` to ask about.
+   */
+  readonly laneEnv?: (laneName: string) => Readonly<Record<string, string>>
+  /**
    * What a node's failure does.
    *
    * `retry` is the default: up to `retries` cold re-attempts, and then the
@@ -1431,6 +1445,9 @@ export class Scheduler {
     // point of reviewing here is to fix before the commit rather than to record
     // the mistake and then a correction on top of it.
     const cwd = join(this.#options.laneRoot, state.lane as string)
+    // The lane's own environment, for the process that is about to run the
+    // project's commands in it.
+    const env = this.#options.laneEnv?.(state.lane as string) ?? {}
 
     // §15's decision, taken before the task is built because the prompt
     // depends on it: a continued session is handed a delta, and a cold one the
@@ -1463,6 +1480,7 @@ export class Scheduler {
         ...(plan.crossPhase && reorientation !== null ? { reorientation } : {}),
       }),
       model: this.#modelFor(state, params),
+      ...(Object.keys(env).length === 0 ? {} : { env }),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
       // The handoff token: either the slot's session (§15) or, for a pipeline
       // that named no slot, the id an operator's takeover left behind (§9).
@@ -1704,6 +1722,9 @@ export class Scheduler {
       sessionId: session.id,
       // The lane worktree this turn is running in — never the repository.
       cwd,
+      // And its environment, so an operator typing in that worktree reaches the
+      // same compose project, ports and database the agent was reaching.
+      ...(lane === null ? {} : { env: this.#options.laneEnv?.(lane) ?? {} }),
       interrupt: async () => {
         // The node parks after this turn instead of stepping on: the operator
         // is about to be typing in that lane, and §6's "a paused node keeps
