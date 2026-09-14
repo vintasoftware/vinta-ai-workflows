@@ -1,21 +1,20 @@
 ---
 name: dev-desk-check
-description: Drive a real browser through {{PROJECT_NAME}} as a user and report what actually renders — the manual pass that complements automated e2e. Takes a plan from the branch diff, from QA use-case ids, or from a ticket; preflights services, frontend and backend for the chosen environment ({{QA_ENVIRONMENT_NAMES}}); walks the flows; and writes an evidence-backed report to {{QA_REPORT_DIR}} plus a Q.A. section on the PR. Enforces this project's per-environment write policy and data-sensitivity rules before it opens the browser. Use when the user says "desk check this branch", "QA this branch", "check this in the browser", "does this actually work", "walk through the new flow", or before handing a UI change to review.
+description: Drive a real browser through {{PROJECT_NAME}} as a user and report what actually renders — the manual pass that complements automated e2e. Takes a plan from the branch diff, from QA use-case ids, or from a ticket; preflights the frontend and backend for the chosen environment ({{QA_ENVIRONMENT_NAMES}}); walks the flows; and writes an evidence-backed report to {{QA_REPORT_DIR}} plus a Q.A. section on the PR. Enforces this project's per-environment write policy and data-sensitivity rules before it opens the browser. Use when the user says "desk check this branch", "QA this branch", "check this in the browser", "does this actually work", "walk through the new flow", or before handing a UI change to review.
 ---
 
 # Dev desk check
 
 {{PROJECT_NAME}} ({{STACK_SUMMARY}}) ships UI changes that nothing walks end to end. This skill drives a real
 browser through the running app the way a user would, judges what actually renders, and leaves evidence
-someone who wasn't in the session can trust. It is the manual counterpart to automated e2e, not a substitute:
-`add-e2e-test` owns automation, this owns the human-eye pass.
+someone who wasn't in the session can trust. It is the manual counterpart to an automated e2e suite, not a
+substitute: automation owns the repeatable regression pass, this owns the human-eye pass.
 
-It exists because the manual checklist has no tooling. `create-qa-use-cases`
-writes flows in user language specifically so a person can walk them, and then nothing executes them; the
-automated suite that would cover the same ground is opt-in and usually skipped. So the whole job is to judge
-**what renders, not what exists**. A component that compiles, a route that is registered, a query that returns
-200 and a passing unit test are all evidence about code — none of them is evidence that a user can complete
-the flow.
+It exists because the manual checklist has no executor. A QA checklist is written in user language precisely
+so that a person can walk it, and then nothing walks it; the automated suite that would cover the same ground
+is opt-in and usually skipped. So the whole job is to judge **what renders, not what exists**. A component
+that compiles, a route that is registered, a query that returns 200 and a passing unit test are all evidence
+about code — none of them is evidence that a user can complete the flow.
 
 This skill is invoked deliberately. It is **not wired into `implement-plan`'s phase gate**: a browser pass per
 phase is too slow to sit in a loop, the same reasoning that keeps `run_options.run_e2e` off by default. Run it
@@ -112,9 +111,9 @@ Resolve everything Step 0 left open, and state the resolved set back in one line
 
 ## Phase 3 — Preflight
 
-Fixed order: **services → frontend → backend → data preconditions**. The order is not cosmetic. A dependency
-that is down produces failures indistinguishable from product bugs, and a run that reaches the browser with a
-dead queue spends its findings section describing the outage.
+Fixed order: **frontend → backend → data preconditions**. The order is not cosmetic: a failure at one step is
+indistinguishable from a product bug at the next, and a run that reaches the browser on a broken foundation
+spends its findings section describing the breakage rather than the change.
 
 <!-- rendering note: {{QA_SERVICES_BLOCK}} owns its own `### Services pre-check` heading (h3 — it nests inside
 this phase). Do not add a literal heading above it. When `skills.dev-desk-check.services` is absent or empty the
