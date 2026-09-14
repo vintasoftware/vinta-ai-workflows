@@ -569,6 +569,15 @@ function projectSpec(project: Project | undefined): ProjectSpec {
     },
     envFiles: project.env_files,
     ...(project.setup_cmd === undefined ? {} : { setupCmd: project.setup_cmd }),
+    services: Object.entries(project.services).map(([id, service]) => ({
+      id,
+      namespace: service.namespace,
+      ...(service.url === undefined ? {} : { url: service.url }),
+      urlVar: service.url_var,
+      capacity: service.capacity,
+      ...(service.create_cmd === undefined ? {} : { createCmd: service.create_cmd }),
+      ...(service.reset_cmd === undefined ? {} : { resetCmd: service.reset_cmd }),
+    })),
     ...(project.compose.enabled
       ? { compose: { publish: project.compose.publish, sharedVolumes: project.compose.shared_volumes } }
       : {}),

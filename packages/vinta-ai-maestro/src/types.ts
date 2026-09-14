@@ -295,6 +295,59 @@ export const CommandsSchema = z
       'is wrong in exactly that project.',
   )
 
+export const ServiceSchema = z
+  .strictObject({
+    namespace: z
+      .enum(['index', 'name'])
+      .describe(
+        'How this lane’s namespace inside the shared server is derived. `index` is a small ' +
+          'integer, for a server with a fixed number of slots — redis’s sixteen databases are ' +
+          'the case it exists for. `name` is a token derived from the lane, for a server that ' +
+          'names things freely: a vhost, a bucket prefix, a schema.',
+      ),
+    url: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'The shared server, without the per-lane segment — `redis://localhost:6379`. Omit it ' +
+          'where the namespace *is* the value: an object-storage prefix has no URL to hang off, ' +
+          'and the variable then carries the bare token.',
+      ),
+    url_var: z.string().min(1).describe('Env var the lane reads this service’s address from.'),
+    capacity: z
+      .number()
+      .int()
+      .min(1)
+      .default(16)
+      .describe(
+        'How many distinct namespaces the server has. Only meaningful for `index`, where a ' +
+          'pool larger than this is refused before anything is created — two lanes on one ' +
+          'redis database is the bug this exists to prevent, and reaching it by arithmetic is ' +
+          'no better than reaching it by neglect.',
+      ),
+    create_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Run once per lane, in the lane. `{namespace}`, `{url}` and `{lane}` are substituted. ' +
+          'Declaring a vhost is a `rabbitmqadmin` invocation this package has no business ' +
+          'knowing; a project that needs none declares none.',
+      ),
+    reset_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Empties this lane’s namespace when the lane is handed to the next phase. Same ' +
+          'substitutions. A service without one keeps whatever the last phase left in it, ' +
+          'which for a cache is usually right and for a queue usually is not — declaring this ' +
+          'is how a project says which of those it has.',
+      ),
+  })
+  .describe('A shared server each lane gets its own namespace inside.')
+
 export const ComposeSchema = z
   .strictObject({
     enabled: z
@@ -358,6 +411,16 @@ export const ProjectSchema = z
           'provisioning rather than producing a lane whose stack cannot boot.',
       ),
     commands: CommandsSchema.default({}),
+    services: z
+      .record(Id, ServiceSchema)
+      .default({})
+      .describe(
+        'Shared servers each lane gets its own namespace inside, by id. One postgres, one ' +
+          'redis, one rabbit on the machine, with a database / db index / vhost per lane — ' +
+          'which is the difference between six lanes being viable on a laptop and not. The ' +
+          'alternative a project falls into without this is booting a server per lane, or ' +
+          'sharing one with no isolation at all.',
+      ),
     compose: ComposeSchema.default(() => ({ enabled: true, publish: [], shared_volumes: [] })),
     setup_cmd: z
       .string()
@@ -453,6 +516,7 @@ export type Node = z.infer<typeof NodeSchema>
 export type Dependency = z.infer<typeof DependencySchema>
 export type Gate = z.infer<typeof GateSchema>
 export type Project = z.infer<typeof ProjectSchema>
+export type ProjectService = z.infer<typeof ServiceSchema>
 export type ProjectCommands = z.infer<typeof CommandsSchema>
 export type ProjectDatabase = z.infer<typeof DatabaseSchema>
 export type Resource = z.infer<typeof ResourceSchema>

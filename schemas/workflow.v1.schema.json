@@ -231,6 +231,62 @@
           "additionalProperties": false,
           "description": "The project’s own command lines, handed to every agent verbatim. A fixed vocabulary rather than free-form, because the prompt has to be able to say which one step 3 of the working instructions means. Declaring these is how an agent stops guessing: a project whose suite only runs inside a container, or only against a lane-specific database, has no way of telling one otherwise, and `pytest` is a plausible guess that is wrong in exactly that project."
         },
+        "services": {
+          "default": {},
+          "description": "Shared servers each lane gets its own namespace inside, by id. One postgres, one redis, one rabbit on the machine, with a database / db index / vhost per lane — which is the difference between six lanes being viable on a laptop and not. The alternative a project falls into without this is booting a server per lane, or sharing one with no isolation at all.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "enum": [
+                  "index",
+                  "name"
+                ],
+                "description": "How this lane’s namespace inside the shared server is derived. `index` is a small integer, for a server with a fixed number of slots — redis’s sixteen databases are the case it exists for. `name` is a token derived from the lane, for a server that names things freely: a vhost, a bucket prefix, a schema."
+              },
+              "url": {
+                "description": "The shared server, without the per-lane segment — `redis://localhost:6379`. Omit it where the namespace *is* the value: an object-storage prefix has no URL to hang off, and the variable then carries the bare token.",
+                "type": "string",
+                "minLength": 1
+              },
+              "url_var": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Env var the lane reads this service’s address from."
+              },
+              "capacity": {
+                "default": 16,
+                "description": "How many distinct namespaces the server has. Only meaningful for `index`, where a pool larger than this is refused before anything is created — two lanes on one redis database is the bug this exists to prevent, and reaching it by arithmetic is no better than reaching it by neglect.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "create_cmd": {
+                "description": "Run once per lane, in the lane. `{namespace}`, `{url}` and `{lane}` are substituted. Declaring a vhost is a `rabbitmqadmin` invocation this package has no business knowing; a project that needs none declares none.",
+                "type": "string",
+                "minLength": 1
+              },
+              "reset_cmd": {
+                "description": "Empties this lane’s namespace when the lane is handed to the next phase. Same substitutions. A service without one keeps whatever the last phase left in it, which for a cache is usually right and for a queue usually is not — declaring this is how a project says which of those it has.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "namespace",
+              "url_var"
+            ],
+            "additionalProperties": false,
+            "description": "A shared server each lane gets its own namespace inside."
+          }
+        },
         "compose": {
           "default": {
             "enabled": true,

@@ -36,6 +36,22 @@ export const WorktreeSummarySchema = z.looseObject({
   state: z.looseObject({
     dev_db: ForkedDatabaseSchema.nullable().default(null),
     test_db: ForkedDatabaseSchema.nullable().default(null),
+    /**
+     * This lane's slice of each shared service — its redis index, its vhost,
+     * its bucket prefix. Recorded for the same reason a forked database is:
+     * teardown reverses it from this file, and a slice that exists only in a
+     * running daemon's memory is one nobody can clean up afterwards.
+     */
+    services: z
+      .array(
+        z.looseObject({
+          id: z.string(),
+          namespace: z.string(),
+          connection_url_var: z.string(),
+          reset_cmd: z.string().nullable(),
+        }),
+      )
+      .default([]),
     compose: z.looseObject({
       project_name: z.string(),
       /** Absolute. Null where the project has no compose file. */

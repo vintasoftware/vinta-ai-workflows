@@ -486,6 +486,88 @@ describe('lane pool', () => {
     expect(lane.compose).toBeNull()
   })
 
+  it('gives each lane its own namespace inside one shared service', async () => {
+    const receipts = join(root, 'created')
+    const pool = await provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+            // Stands in for `rabbitmqadmin declare vhost` and the like: proof
+            // the command ran, per lane, with its own namespace substituted.
+            createCmd: `node -e "require('fs').appendFileSync(process.argv[1], '{namespace},')" ${receipts}`,
+            resetCmd: `node -e "require('fs').appendFileSync(process.argv[1], 'r{namespace},')" ${receipts}`,
+          },
+        ],
+      },
+      2,
+    )
+
+    // One server. Three namespaces — two lanes and the integration worktree,
+    // which takes the slot after the last lane rather than sharing one.
+    expect(pool.lanes.map((lane) => envVar(lane, 'REDIS_URL'))).toEqual([
+      'redis://localhost:6379/0',
+      'redis://localhost:6379/1',
+    ])
+    expect(envVar(pool.integration, 'REDIS_URL')).toBe('redis://localhost:6379/2')
+    expect(readFileSync(receipts, 'utf8').split(',').filter(Boolean).sort()).toEqual(['0', '1', '2'])
+  })
+
+  it('empties a lane’s namespace when the lane is handed to the next phase', async () => {
+    const receipts = join(root, 'reset')
+    const pool = await provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+            resetCmd: `node -e "require('fs').appendFileSync(process.argv[1], '{namespace}')" ${receipts}`,
+          },
+        ],
+      },
+      1,
+    )
+    const lane = pool.lanes[0] as Lane
+
+    await pool.recycle(lane.name)
+
+    // The same stage as the database reset, because it is the same kind of
+    // thing: state the previous phase left that the next one must not read.
+    expect(readFileSync(receipts, 'utf8')).toBe('0')
+    // And the lane keeps its slot across the hand-over — a lane whose redis
+    // database moved between phases is a lane that lost its own state.
+    expect(envVar(pool.lane(lane.name), 'REDIS_URL')).toBe('redis://localhost:6379/0')
+  })
+
+  it('refuses a pool larger than a shared service has room for, before creating anything', async () => {
+    const tooMany = provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 2,
+          },
+        ],
+      },
+      3,
+    )
+
+    await expect(tooMany).rejects.toThrow(/raise its capacity, or run fewer lanes/)
+  })
+
   it('refuses on the N× disk probe before provisioning anything', async () => {
     const { bavail, bsize } = await statfs(root)
     const available = bavail * bsize

@@ -35,6 +35,7 @@ import {
   planTemplate,
 } from './database.ts'
 import { DiskProbeError, measureBytes, probePoolDisk } from './disk.ts'
+import { planService, type ServicePlan, type ServiceSpec } from './services.ts'
 import { readSummary, resetPlan, writeSummary, type WorktreeSummary } from './summary.ts'
 
 const run = promisify(execFile)
@@ -124,6 +125,8 @@ export interface ProjectSpec {
     readonly publish?: readonly string[]
     readonly sharedVolumes?: readonly string[]
   }
+  /** Shared servers each lane gets its own namespace inside. */
+  readonly services?: readonly ServiceSpec[]
 }
 
 export interface PoolOptions {
@@ -165,9 +168,17 @@ export interface Lane {
   readonly path: string
   readonly branch: string
   readonly composeProject: string
+  /**
+   * The lane's slot in the pool. Stable across a re-provision, because it is
+   * what an `index`-namespaced service resolves to and a lane whose redis
+   * database moved between phases is a lane that lost its own state.
+   */
+  readonly index: number
   /** What the lane's compose override does, or null where there is no compose. */
   readonly compose: ComposeIsolation | null
   readonly databases: readonly DatabasePlan[]
+  /** This lane's slice of each shared service. */
+  readonly services: readonly ServicePlan[]
   /** Gates and agents in this lane must run with this environment applied. */
   readonly env: Readonly<Record<string, string>>
   /** False when a forked database has no reset — the lane is single-use. */
@@ -229,7 +240,12 @@ export class LanePool {
     ]
     // Lanes share nothing but the source repo, so past the template they are
     // provisioned concurrently.
-    pool.#all = await Promise.all(names.map(([name, kind]) => pool.#provisionWorktree(name, kind)))
+    // The index is the lane's slot, and it is what an `index`-namespaced
+    // service is derived from — so the integration worktree takes the one after
+    // the last lane rather than sharing a lane's.
+    pool.#all = await Promise.all(
+      names.map(([name, kind], index) => pool.#provisionWorktree(name, kind, index)),
+    )
     return pool
   }
 
@@ -274,6 +290,11 @@ export class LanePool {
       await this.#copyEnvFiles(name, lane.path)
       try {
         for (const command of plan.commands) await sh(command, lane.path, lane.env)
+        // Same stage, because it is the same kind of thing: state the previous
+        // phase left behind that the next one must not read.
+        for (const service of lane.services) {
+          if (service.resetCmd !== null) await sh(service.resetCmd, lane.path, lane.env)
+        }
       } catch {
         throw new LaneRecycleError(name, 'database')
       }
@@ -331,7 +352,7 @@ export class LanePool {
     // "could not be recycled" while naming neither a stage nor a cause.
     let fresh: Lane
     try {
-      fresh = await this.#provisionWorktree(lane.name, lane.kind)
+      fresh = await this.#provisionWorktree(lane.name, lane.kind, lane.index)
     } catch {
       throw new LaneRecycleError(name, 'reprovision')
     }
@@ -402,7 +423,7 @@ export class LanePool {
     }
   }
 
-  async #provisionWorktree(name: string, kind: Lane['kind']): Promise<Lane> {
+  async #provisionWorktree(name: string, kind: Lane['kind'], index: number): Promise<Lane> {
     const { repoPath, poolRoot, baseRef, project } = this.#options
     const path = join(poolRoot, name)
     const branch = `wt/${name}`
@@ -433,6 +454,17 @@ export class LanePool {
     const env: Record<string, string> = { COMPOSE_PROJECT_NAME: composeProject }
     for (const db of databases) env[db.connectionUrlVar] = db.connectionUrl
 
+    // One shared server, a namespace per lane. Planned before the commands run
+    // so a pool too big for a server's slots is refused with nothing created,
+    // the same shape of refusal as the N× disk probe.
+    const services = (project.services ?? []).map((spec) =>
+      planService(spec, { laneName: name, laneIndex: index }),
+    )
+    for (const service of services) {
+      env[service.urlVar] = service.url
+      if (service.createCmd !== null) await sh(service.createCmd, path, {})
+    }
+
     const compose = await this.#isolateCompose(name, composeProject)
     if (compose !== null) {
       Object.assign(env, compose.isolation.env)
@@ -448,9 +480,18 @@ export class LanePool {
       path,
       branch,
       composeProject,
+      index,
       compose: compose?.isolation ?? null,
       databases,
+      services,
       env,
+      // Services deliberately do not vote here. A database without a reset
+      // cannot be handed to the next phase — it would run against the previous
+      // one's schema — while a shared service without one merely keeps what the
+      // last phase left in it, which for a cache is usually right. Declaring a
+      // `reset_cmd` is how a project says its queue is not a cache; forcing a
+      // whole worktree re-provision on a service that has nothing to reset
+      // would be a large cost for a `S3_PREFIX`.
       reusable: databases.every((db) => db.resetCmd !== null),
     }
     // Written before the project's own hook runs, so a lane whose setup failed
@@ -592,6 +633,12 @@ export class LanePool {
         deps: { strategy: 'symlink', paths: ['node_modules'] },
         dev_db: db('dev'),
         test_db: db('test'),
+        services: lane.services.map((service) => ({
+          id: service.id,
+          namespace: service.namespace,
+          connection_url_var: service.urlVar,
+          reset_cmd: service.resetCmd,
+        })),
         compose: {
           project_name: lane.composeProject,
           override_path: lane.env['COMPOSE_FILE']?.split(delimiter)[1] ?? null,
