@@ -46,6 +46,7 @@ import { Live } from './Live.tsx'
 import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import { nodeLabel, nodeTone, runTone } from './status.ts'
 import { elapsed, useNow } from './time.ts'
+import { MonitorPanel } from './Monitor.tsx'
 import { useRun } from './useRun.ts'
 
 /**
@@ -150,6 +151,7 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
           onSelect={setSelected}
         />
         <Rollup client={client} runId={runId} />
+        <MonitorPanel client={client} runId={runId} />
         <Pools resources={snapshot.resources} />
         <GateQueue queue={snapshot.gateQueue} now={now} />
         <Harnesses harnesses={snapshot.harnesses} now={now} />

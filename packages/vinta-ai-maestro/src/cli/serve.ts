@@ -31,7 +31,17 @@ import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { TOKEN_QUERY, startDaemon, type Daemon } from '../daemon/index.ts'
+import type { Journal } from '../journal/journal.ts'
 import { openJournal } from '../journal/journal.ts'
+import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
+import {
+  AGENT_PERMISSIONS,
+  DEFAULT_PERMISSION,
+  isAgentPermission,
+  type AgentPermission,
+} from '../harness/permissions.ts'
+import { Monitor, monitorModel } from '../monitor/monitor.ts'
+import type { Workflow } from '../types.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
@@ -133,6 +143,16 @@ export async function serveCommand(
     return USAGE
   }
 
+  // `serve` has accepted `--permission` since the flag existed and never read
+  // it. It matters now: the monitor is an agent, and the operator's policy is
+  // what decides how it is spawned.
+  const requested = parsed.values['permission']
+  if (requested !== undefined && !isAgentPermission(requested)) {
+    io.err(`vinta-ai-maestro: --permission must be one of ${AGENT_PERMISSIONS.join(', ')}`)
+    return USAGE
+  }
+  const permission = requested ?? DEFAULT_PERMISSION
+
   const bind = toBind(parsed.values, io)
   if (bind === null) return USAGE
 
@@ -144,6 +164,7 @@ export async function serveCommand(
       // The daemon's own `--host` warning (§11). Routed to stderr; it names the
       // host and, by contract, never the token.
       warn: (message) => io.err(message),
+      monitorFor: monitorFactory(journal, bind.repoPath, permission),
       ...(bind.host === undefined ? {} : { host: bind.host }),
       ...(bind.port === undefined ? {} : { port: bind.port }),
     })
@@ -176,4 +197,38 @@ function untilInterrupted(): Promise<void> {
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)
   })
+}
+
+/**
+ * Builds the run's spokesperson, on demand and per run.
+ *
+ * Per call rather than cached, because a monitor holds a conversation and two
+ * operators looking at two runs are having two of them. Cheap to build: it is a
+ * model name, an adapter and a directory; the session only exists once someone
+ * asks something.
+ *
+ * It reads the frozen workflow to pick its model — the dearest tier on the
+ * roster — and to name the phases, so a run whose plan cannot be read has no
+ * monitor rather than a confused one.
+ */
+function monitorFactory(
+  journal: Journal,
+  repoPath: string,
+  permission: AgentPermission,
+): (runId: string) => Monitor | null {
+  return (runId) => {
+    let workflow: Workflow
+    try {
+      workflow = journal.readWorkflow(runId)
+    } catch {
+      return null
+    }
+    return new Monitor({
+      // It answers questions; it does not touch the repository. The lane's read
+      // grant and write guard are not its concern, and it is given neither.
+      adapter: new ClaudeCodeAdapter({ permission }),
+      model: monitorModel(workflow),
+      cwd: repoPath,
+    })
+  }
 }

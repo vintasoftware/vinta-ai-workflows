@@ -81,6 +81,7 @@ import type { Project, ProjectDatabase, Workflow } from '../types.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 import { join } from 'node:path'
+import { Monitor, monitorModel } from '../monitor/monitor.ts'
 import { laneRootFor, storeFor } from './paths.ts'
 import { SERVE_USAGE, announce, toBind } from './serve.ts'
 
@@ -208,6 +209,7 @@ export async function runCommand(
     daemon = await startDaemon({
       journal,
       warn: (message) => io.err(message),
+      monitorFor: monitorFactory(journal, bind.repoPath, permission),
       ...(bind.host === undefined ? {} : { host: bind.host }),
       ...(bind.port === undefined ? {} : { port: bind.port }),
     })
@@ -633,4 +635,38 @@ function describeStop(stop: RunStop): string {
     return `node "${stop.nodeId}" requires unknown resource pool "${stop.resource}"`
   }
   return `deadlock, pending: ${stop.pending.join(', ')}`
+}
+
+/**
+ * Builds the run's spokesperson, on demand and per run.
+ *
+ * Per call rather than cached, because a monitor holds a conversation and two
+ * operators looking at two runs are having two of them. Cheap to build: it is a
+ * model name, an adapter and a directory; the session only exists once someone
+ * asks something.
+ *
+ * It reads the frozen workflow to pick its model — the dearest tier on the
+ * roster — and to name the phases, so a run whose plan cannot be read has no
+ * monitor rather than a confused one.
+ */
+function monitorFactory(
+  journal: Journal,
+  repoPath: string,
+  permission: AgentPermission,
+): (runId: string) => Monitor | null {
+  return (runId) => {
+    let workflow: Workflow
+    try {
+      workflow = journal.readWorkflow(runId)
+    } catch {
+      return null
+    }
+    return new Monitor({
+      // It answers questions; it does not touch the repository. The lane's read
+      // grant and write guard are not its concern, and it is given neither.
+      adapter: new ClaudeCodeAdapter({ permission }),
+      model: monitorModel(workflow),
+      cwd: repoPath,
+    })
+  }
 }

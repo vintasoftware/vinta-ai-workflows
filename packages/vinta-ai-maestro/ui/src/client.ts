@@ -24,6 +24,7 @@ import {
   FrameSchema,
   NoArgsRequestSchema,
   NodeDetailSchema,
+  MonitorAnswerSchema,
   RunUsageResponseSchema,
   OkResponseSchema,
   RedirectRequestSchema,
@@ -35,6 +36,7 @@ import {
   type RunUsageResponse,
   type RunSnapshot,
   type RunSummary,
+  type MonitorAnswer,
 } from '../../src/daemon/schemas.ts'
 import type { z } from 'zod'
 
@@ -104,6 +106,14 @@ export interface Client {
     operation: K,
     body: OperationBody<K>,
   ) => Promise<void>
+  /**
+   * Ask the run's monitor a question, and wait for its answer.
+   *
+   * Not an operation: it changes nothing about the run, and it works on one
+   * that has already finished — which is when most of the questions get asked.
+   * Slow by nature, because a model is thinking; the caller shows that.
+   */
+  readonly ask: (runId: string, text: string) => Promise<MonitorAnswer>
   /** Tails `runId` from after `since`. Closing the returned stream detaches. */
   readonly stream: (runId: string, since: number, handlers: StreamHandlers) => Stream
 }
@@ -141,6 +151,20 @@ export function createClient(origin: string, token: string): Client {
       if (!OkResponseSchema.safeParse(await response.json()).success) {
         throw new Error(`${path}: response did not match the daemon schema`)
       }
+    },
+    async ask(runId, text) {
+      const path = `/api/runs/${encodeURIComponent(runId)}/monitor`
+      const response = await fetch(`${origin}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      // The operator's own question never reaches this message, for the reason
+      // `operate` gives: what they typed is not error-message material (§11).
+      if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
+      const parsed = MonitorAnswerSchema.safeParse(await response.json())
+      if (!parsed.success) throw new Error(`${path}: response did not match the daemon schema`)
+      return parsed.data
     },
     stream(runId, since, handlers) {
       const url = new URL(WS_PATH, origin)

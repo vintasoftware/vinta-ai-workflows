@@ -51,11 +51,12 @@ import {
 } from '../src/daemon/index.ts'
 import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { CodexAdapter } from '../src/harness/codex.ts'
-import { MockAdapter } from '../src/harness/mock.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
 import { EventPageSchema } from '../src/daemon/schemas.ts'
 import type { NewEvent, StoredEvent } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
+import { MockAdapter } from '../src/harness/mock.ts'
+import { Monitor } from '../src/monitor/monitor.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import { createScheduler, type Scheduler } from '../src/scheduler/index.ts'
@@ -209,6 +210,15 @@ async function rig(
     ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
     pollMs: 5,
     warn: (message) => warnings.push(message),
+    // A monitor over the mock harness: the endpoint's contract is that it
+    // answers from the journal, which is testable; what a real model would say
+    // is not.
+    monitorFor: () =>
+      new Monitor({
+        adapter: new MockAdapter({ id: 'claude-code' }),
+        model: 'dear',
+        cwd: journal.root,
+      }),
   })
   daemon.register({
     runId: RUN_ID,
@@ -869,6 +879,15 @@ describe('replay pages', () => {
       body: { text: 'hello' },
     })
     expect(steered.status).toBe(409)
+
+    // The monitor answers about it too — a finished run is when "why did this
+    // fail" actually gets asked.
+    const asked = await call(r.daemon, '/api/runs/run-history/monitor', {
+      method: 'POST',
+      body: { text: 'why did this fail?' },
+    })
+    expect(asked.status).toBe(200)
+    expect((asked.body as { answer: string }).answer).not.toBe('')
 
     // Its history is readable, which is the case replay exists for.
     const page = EventPageSchema.parse((await call(r.daemon, '/api/runs/run-history/events')).body)

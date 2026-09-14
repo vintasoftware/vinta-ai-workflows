@@ -230,6 +230,24 @@ export const HumanQuestionSchema = z.strictObject({
 })
 
 /**
+ * §9's sixth verb, and the only one that is a question rather than an order.
+ *
+ * The body is the operator's own words, so it is bounded here rather than
+ * trusted: this becomes a prompt, and an unbounded one is a bill.
+ */
+export const MonitorAskSchema = z.strictObject({
+  text: z.string().min(1).max(4_000),
+})
+
+export const MonitorAnswerSchema = z.strictObject({
+  answer: z.string(),
+  /** The model that answered, so the operator knows what they are reading. */
+  model: z.string(),
+})
+
+export type MonitorAnswer = z.infer<typeof MonitorAnswerSchema>
+
+/**
  * What a `git diff` needs, not the diff itself. Computing it means running git
  * in the lane, which is the git unit's job; the node view asks for it by ref.
  */

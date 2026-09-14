@@ -27,6 +27,7 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
+import { type Monitor, runDigest } from '../monitor/monitor.ts'
 import type { Workflow } from '../types.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
@@ -40,12 +41,14 @@ import {
   AddContextRequestSchema,
   AnswerRequestSchema,
   HumanQuestionSchema,
+  MonitorAskSchema,
   NoArgsRequestSchema,
   RedirectRequestSchema,
   toIssues,
   toWireIssues,
   type AmendResponse,
   type EventPage,
+  type MonitorAnswer,
   type Issue,
   type NodeDetail,
   type RunSnapshot,
@@ -86,6 +89,16 @@ export interface ApiOptions {
    * and for a project that keeps its plans elsewhere.
    */
   readonly workflowsDir?: string
+  /**
+   * The run's spokesperson, built on demand (`monitor/monitor.ts`).
+   *
+   * A factory rather than an instance, and not part of `DaemonRun`, because a
+   * monitor is useful for a run that finished days ago — "why did this fail" is
+   * asked after the fact more often than during — and a finished run has no
+   * registry entry to hang one on. Absent for a host that wired no harness, in
+   * which case the endpoint says so instead of pretending.
+   */
+  readonly monitorFor?: (runId: string) => Monitor | null
 }
 
 export function createApi(options: ApiOptions): Hono {
@@ -255,6 +268,43 @@ export function createApi(options: ApiOptions): Hono {
       question: question(runId, found.run, node),
     }
     return c.json(detail)
+  })
+
+  /**
+   * Ask the monitor about this run.
+   *
+   * Deliberately not one of §9's operations: those reach the scheduler and
+   * change what a run is doing, and this one changes nothing. It works on a
+   * finished run for the same reason it reads the journal — the questions worth
+   * asking about a failed run are asked after it has failed.
+   *
+   * The answer is agent output and goes in a response body, which §11 allows
+   * for exactly this case: the operator asked for it, and it is the product.
+   * What must not appear is the *refusal* prose if the harness declines —
+   * that is a code.
+   */
+  app.post('/api/runs/:runId/monitor', async (c) => {
+    const found = resolveRead(c)
+    if ('response' in found) return found.response
+
+    const body = await readBody(c, MonitorAskSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+
+    const monitor = options.monitorFor?.(found.row.id) ?? null
+    if (monitor === null) return fail(c, 501, 'monitor_unavailable')
+
+    const digest = runDigest(journal, found.row.id, workflow(found.row.id))
+    if (digest === null) return fail(c, 404, 'unknown_run')
+
+    try {
+      const answer = await monitor.ask(digest, body.value.text)
+      return c.json({ answer, model: monitor.model } satisfies MonitorAnswer)
+    } catch {
+      // A harness that would not start, a session that would not resume. The
+      // kind is on the error and the prose is the vendor's; neither belongs in
+      // a browser, so the operator gets a code and the run is untouched.
+      return fail(c, 503, 'monitor_unavailable')
+    }
   })
 
   // The five operations of §9. Each one validates its body, forwards to the
@@ -664,7 +714,18 @@ async function readBody<T>(
   return parsed.success ? { value: parsed.data } : { issues: toIssues(parsed.error) }
 }
 
-function fail(c: Context, status: 400 | 401 | 404 | 409, error: string, issues?: Issue[]): Response {
+/**
+ * `501` and `503` are here for one endpoint: a host that wired no harness has
+ * no monitor to offer, and a harness that will not start is a failure of
+ * something behind this API rather than of the request. Both are distinct from
+ * "your request was wrong", which is what the other four say.
+ */
+function fail(
+  c: Context,
+  status: 400 | 401 | 404 | 409 | 501 | 503,
+  error: string,
+  issues?: Issue[],
+): Response {
   return c.json({ error, issues: issues ?? null }, status)
 }
 

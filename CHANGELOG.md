@@ -16,6 +16,38 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A run has a spokesperson you can ask.** `serve` grows a **Monitor** panel on
+  the run view: one agent that reads the journal and answers in prose — what is
+  blocked, why a phase failed, what it would take to move on. It runs on the
+  dearest tier on the crew, because it is read by a person deciding what to do
+  about a failing run, and it is asked a handful of times rather than hundreds.
+
+  Three things it deliberately is not.
+
+  **It is not in the permission path.** The obvious thought, once an agent has
+  been refused something, is to put a smarter agent in front of the refusals —
+  but a phase makes hundreds of tool calls (one node in one real run made 179)
+  and a model turn before each is latency and cost spent on questions like "may
+  I run ruff", which should never have been questions. Permissions are settled
+  structurally, once per spawn, for free.
+
+  **It does not read the transcripts.** Piping every agent's output into a
+  second agent would make the monitor the most expensive thing in the run and
+  tie its cost to the work rather than to the questions. It reads a bounded
+  digest — statuses, failure reasons, pending questions, the last few refusals
+  with their sentences, one trimmed last word per phase — so a one-hour run and
+  a one-day run cost about the same to ask about.
+
+  **It has no authority.** It can explain a §9.1 pause; it cannot answer one.
+  An agent that could quietly approve its colleagues' work would turn a
+  checkpoint into a formality, and the checkpoint is the point.
+
+  It answers about **finished runs too**, which is when "why did this fail" is
+  usually asked, and it needs no lane: it writes nothing.
+
+- **`serve` reads `--permission`.** The flag has been accepted and ignored since
+  it existed. It decides how the monitor is spawned, so it is read now.
+
 - **A plan staffs a team, instead of picking a model per phase.** Choosing a tier
   phase by phase answers "what runs this one" ten times and never adds it up, so the
   two questions that decide what a feature costs go unasked: how many agents does

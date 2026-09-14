@@ -28,6 +28,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { Duplex } from 'node:stream'
 import { WebSocketServer } from 'ws'
 import type { Journal } from '../journal/journal.ts'
+import type { Monitor } from '../monitor/monitor.ts'
 import { createApi } from './api.ts'
 import { createToken, isLoopback, presentedToken, tokenMatches } from './auth.ts'
 import type { DaemonRun } from './control.ts'
@@ -63,6 +64,11 @@ export interface DaemonOptions {
   readonly uiDir?: string
   /** Where the `--host` warning goes. `console.warn` by default. */
   readonly warn?: (message: string) => void
+  /**
+   * Builds the monitor for a run (`monitor/monitor.ts`). Absent for a host that
+   * wired no harness, and then the endpoint refuses instead of pretending.
+   */
+  readonly monitorFor?: (runId: string) => Monitor | null
 }
 
 export interface Daemon {
@@ -96,6 +102,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     token,
     runs,
     ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
+    ...(options.monitorFor === undefined ? {} : { monitorFor: options.monitorFor }),
   })
   const stream = new EventStream(options.journal, options.pollMs ?? DEFAULT_POLL_MS)
   const sockets = new WebSocketServer({ noServer: true })
