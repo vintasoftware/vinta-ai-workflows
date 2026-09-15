@@ -339,6 +339,33 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A live transcript stops following at entry sixty.** The effect that kept the
+  box on the newest row was keyed on how many rows were *shown*, which is
+  `min(entries, window)` — so it stopped changing the moment a transcript
+  outgrew one window, and the following died silently and permanently, including
+  after the operator scrolled back to the bottom to ask for it. Which is roughly
+  minute two of any real phase. It follows on the entry count now, growing the
+  window keeps the reader on the row they were reading instead of teleporting
+  them, and a **Jump to latest** button says so out loud rather than leaving a
+  60px band at the bottom of a scroller as the only way back in.
+
+- **The transcript spends its space on the noisiest rows.** An agent's answer,
+  its private reasoning and four hundred characters of tool-call JSON all
+  rendered as the same two lines at the same weight. Thinking is now small and
+  quiet, and a streamed thought is one row rather than the dozen events it
+  arrived as; tool calls and their results fold to the argument that says what
+  they did — a command, a path — and open individually or a whole kind at a time
+  from the panel header. Prose is untouched and never folds.
+
+- **A panel's expand control did nothing on the node view.** It expanded by
+  taking `col-span-full`, which on the run view bought a strip a third wider and
+  on the node view matched nothing at all — those panels sit in a flex column,
+  not a grid, so the only thing the button changed was the height of the
+  scroller inside it. It now opens the panel over the whole page through a
+  portal, so no scrolling ancestor can clip it, with Escape to leave and the
+  page behind it held still. A transcript that was following stays on its newest
+  row across the change.
+
 - **`doctor` checks that the shared servers answer.** It verified that binaries
   existed and disk fitted, and never looked at a `server_url` — so a project
   whose Postgres lives in another checkout's compose stack passed the preflight
