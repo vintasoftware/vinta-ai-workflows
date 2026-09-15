@@ -14,24 +14,51 @@
  * it in component state, which meant a reload lost every question and every
  * answer — a worse record than the run it was describing. It is written to the
  * transcript store under a reserved node id, so it survives the tab, the
- * daemon, and the run itself; this view reads it back on mount and after each
- * answer, and holds only the question currently in flight.
+ * daemon, and the run itself.
+ *
+ * **And the turn is the daemon's, not the tab's.** That is the other half, and
+ * it is newer. Asking used to be one long HTTP request with the whole answer in
+ * its response, so the turn lived exactly as long as the connection: switching
+ * view, reloading, or letting a laptop sleep killed the monitor mid-thought and
+ * left a question with no answer and no record that one had been attempted. The
+ * daemon owns the turn now. This posts a question, gets `202`, and reads the
+ * conversation back — which is also what a *second* tab, or the same tab
+ * tomorrow, would see.
+ *
+ * So there are two clocks here. A slow one that keeps a finished conversation
+ * fresh, and a fast one that runs only while an answer is arriving. The monitor
+ * journals as it thinks, so the fast one is what turns "Thinking…" from a word
+ * into the thing it is actually doing.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from 'vinta-design-system/ui/button'
 import type { Client } from './client.ts'
+import { CLOSED, Entries, FoldControls, type Folded } from './Entries.tsx'
 import { EmptyNote, ErrorNote, Panel } from './Panel.tsx'
-import { present } from './transcript.ts'
+import { fold } from './transcript.ts'
+
+/**
+ * How often the conversation is re-read while an answer is arriving.
+ *
+ * Fast, because this is the only thing on the page that moves and the operator
+ * is watching it. It costs one tail of a small file per second, against a
+ * daemon on the same machine, and only while a turn is running.
+ */
+const WHILE_THINKING_MS = 1_000
 
 export function MonitorPanel({ client, runId }: { readonly client: Client; readonly runId: string }) {
   const [entries, setEntries] = useState<readonly unknown[]>([])
-  const [pending, setPending] = useState<string | null>(null)
+  const [pending, setPending] = useState(false)
   const [text, setText] = useState('')
   const [failed, setFailed] = useState(false)
+  const [open, setOpen] = useState<Folded>(CLOSED)
+  const list = useRef<HTMLOListElement | null>(null)
 
   const reload = useCallback(async () => {
     try {
-      setEntries(await client.conversation(runId))
+      const conversation = await client.conversation(runId)
+      setEntries(conversation.entries)
+      setPending(conversation.pending)
     } catch {
       // A history that will not load is not worth an alarm: the box still
       // works, and the next answer brings the whole thing back with it.
@@ -42,25 +69,44 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
     void reload()
   }, [reload])
 
+  // Only while something is coming. A finished conversation is re-read when the
+  // view mounts and when a question is asked, and polling it every second for
+  // the rest of the session would be a request per second for a file that
+  // nothing is writing to.
+  useEffect(() => {
+    if (!pending) return
+    const tick = setInterval(() => void reload(), WHILE_THINKING_MS)
+    return () => clearInterval(tick)
+  }, [pending, reload])
+
+  // The answer arrives at the bottom, so that is where the box stays. No
+  // conditional following here, unlike a phase's transcript: this list is short,
+  // the operator just asked the question that is being answered, and there is
+  // nothing above to be reading instead.
+  useEffect(() => {
+    const element = list.current
+    if (element !== null && pending) element.scrollTop = element.scrollHeight
+  }, [entries.length, pending])
+
   async function ask(): Promise<void> {
     const question = text.trim()
-    if (question === '' || pending !== null) return
+    if (question === '' || pending) return
     setText('')
     setFailed(false)
-    // Held locally only while it is in flight. The daemon writes it to the
-    // journal before the model is asked, so the reload below is what makes it
-    // permanent — and what makes a question whose answer never came still
-    // visible as a question that was asked.
-    setPending(question)
+    // Set before the round trip so the polling starts immediately, and the
+    // journal has the question before the model is asked, so a reload during
+    // the turn shows a question being answered rather than nothing at all.
+    setPending(true)
     try {
       await client.ask(runId, question)
     } catch {
       setFailed(true)
-    } finally {
-      setPending(null)
-      await reload()
+      setPending(false)
     }
+    await reload()
   }
+
+  const rows = fold(entries, 0)
 
   return (
     <Panel
@@ -70,51 +116,42 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
       expandable
       action={
         entries.length > 0 ? (
-          <span className="muted text-xs text-muted-foreground" data-conversation-size>
-            {entries.length} in this conversation
-          </span>
+          <>
+            <FoldControls
+              open={open}
+              onToggle={(shape) => setOpen((current) => ({ ...current, [shape]: !current[shape] }))}
+            />
+            <span className="muted text-xs text-muted-foreground" data-conversation-size>
+              {entries.length} in this conversation
+            </span>
+          </>
         ) : undefined
       }
     >
-      {entries.length === 0 && pending === null ? (
+      {entries.length === 0 && !pending ? (
         <EmptyNote>
           Ask about this run — what is blocked, why a phase failed, what it would take to move on.
         </EmptyNote>
       ) : (
-        <ol
-          className="exchanges flex max-h-[var(--panel-scroll,320px)] flex-col gap-3 overflow-y-auto"
+        <Entries
+          rows={rows}
+          open={open}
+          listRef={(element) => {
+            list.current = element
+          }}
+          className="exchanges max-h-[var(--panel-scroll,320px)] overflow-y-auto"
           data-exchanges
-        >
-          {entries.map((entry, index) => {
-            const view = present(entry)
-            return (
-              <li key={index} className="flex flex-col gap-0.5" data-exchange={index}>
-                <p
-                  className={
-                    view.author === 'operator'
-                      ? 'text-[13px] font-semibold text-tone-attention-foreground'
-                      : 'text-[13px] font-semibold'
-                  }
-                  data-author={view.author}
-                >
-                  {view.label}
-                </p>
-                <p className="whitespace-pre-wrap text-sm" data-body>
-                  {view.body}
-                </p>
-              </li>
-            )
-          })}
-          {pending !== null && (
-            <li className="flex flex-col gap-0.5" data-pending>
-              <p className="text-[13px] font-semibold text-tone-attention-foreground">You</p>
-              <p className="whitespace-pre-wrap text-sm">{pending}</p>
-              <p className="text-sm text-muted-foreground" data-thinking>
-                Thinking…
-              </p>
-            </li>
-          )}
-        </ol>
+        />
+      )}
+
+      {/* Said once, under the conversation, and only while nothing of the
+          answer has arrived yet. Once the monitor starts thinking out loud the
+          rows say it better than a word does — which is the whole reason the
+          daemon journals a turn as it runs rather than at the end of it. */}
+      {pending && (
+        <p className="text-sm text-muted-foreground" data-thinking>
+          Thinking…
+        </p>
       )}
 
       {failed && <ErrorNote>The monitor could not be reached.</ErrorNote>}
@@ -142,13 +179,8 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
             }
           }}
         />
-        <Button
-          type="submit"
-          size="sm"
-          data-action="ask"
-          disabled={pending !== null || text.trim() === ''}
-        >
-          {pending !== null ? 'Asking…' : 'Ask'}
+        <Button type="submit" size="sm" data-action="ask" disabled={pending || text.trim() === ''}>
+          {pending ? 'Asking…' : 'Ask'}
         </Button>
       </form>
     </Panel>

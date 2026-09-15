@@ -31,6 +31,9 @@ import {
   EventFrameSchema,
   EventPageSchema,
   NoArgsRequestSchema,
+  MonitorAskSchema,
+  MonitorAskedSchema,
+  MonitorHistorySchema,
   NodeDetailSchema,
   OkResponseSchema,
   RunUsageResponseSchema,
@@ -149,6 +152,18 @@ export interface StubDaemon {
   readonly emit: (...events: NewEvent[]) => void
   readonly setSnapshot: (runId: string, snapshot: RunSnapshot) => void
   readonly setNodeDetail: (runId: string, nodeId: string, detail: NodeDetail) => void
+  /** Every question posted to the monitor, in order, parsed by the daemon's schema. */
+  readonly asked: readonly { runId: string; text: string }[]
+  /**
+   * Appends to a monitor conversation the way the daemon does — one entry at a
+   * time, while `pending` stays true. The turn is driven from the test rather
+   * than by a timer, because what is under test is a client that watches a
+   * conversation grow, and a client that polls is only testable against a
+   * server whose growth somebody else decides.
+   */
+  readonly monitorSays: (runId: string, ...entries: unknown[]) => void
+  /** Ends the turn: the next `GET` reports `pending: false`. */
+  readonly monitorDone: (runId: string) => void
   /** Kills every open socket without a close handshake — a dropped connection. */
   readonly drop: () => void
   readonly close: () => Promise<void>
@@ -166,8 +181,16 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
   const log: StoredEvent[] = []
   const eventReads: EventRead[] = []
   const connections: Connection[] = []
+  const asked: { runId: string; text: string }[] = []
+  const conversations = new Map<string, { entries: unknown[]; pending: boolean }>()
   const ptyFrames: PtyClientFrame[] = []
   const attached = new Map<WebSocket, { runId: string; cursor: number; record: Connection }>()
+
+  const conversation = (runId: string): { entries: unknown[]; pending: boolean } => {
+    const held = conversations.get(runId) ?? { entries: [], pending: false }
+    conversations.set(runId, held)
+    return held
+  }
 
   const server: Server = createServer((request, response) => {
     void handle(request, response)
@@ -290,6 +313,43 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       return json(response, 200, RunUsageResponseSchema.parse(totals))
     }
 
+    // The monitor: a question is accepted (`202`) and answered in the
+    // conversation, never in the response. The stub models exactly that
+    // contract — the turn outlives the request — because the client under test
+    // is the one that had to stop expecting an answer here.
+    const monitor = /^\/api\/runs\/([^/]+)\/monitor$/.exec(url.pathname)
+    if (monitor !== null) {
+      const runId = decodeURIComponent(monitor[1] ?? '')
+      if (!snapshots.has(runId)) return json(response, 404, { error: 'unknown_run', issues: null })
+      if (request.method === 'POST') {
+        let raw: unknown
+        try {
+          raw = JSON.parse(await readBody(request))
+        } catch {
+          return json(response, 400, { error: 'invalid_request', issues: null })
+        }
+        const parsed = MonitorAskSchema.safeParse(raw)
+        if (!parsed.success) {
+          return json(response, 400, { error: 'invalid_request', issues: toIssues(parsed.error) })
+        }
+        const held = conversation(runId)
+        if (held.pending) return json(response, 409, { error: 'monitor_busy', issues: null })
+        asked.push({ runId, text: parsed.data.text })
+        // The question is in the record before the model is asked, exactly as
+        // the daemon writes it — which is what makes a reload mid-turn show a
+        // question being answered rather than nothing at all.
+        held.entries.push({ type: 'user_message', text: parsed.data.text, by: { role: 'operator' } })
+        held.pending = true
+        return json(response, 202, MonitorAskedSchema.parse({ asked: true, model: 'dear' }))
+      }
+      const held = conversation(runId)
+      return json(
+        response,
+        200,
+        MonitorHistorySchema.parse({ entries: held.entries, pending: held.pending }),
+      )
+    }
+
     const node = /^\/api\/runs\/([^/]+)\/nodes\/([^/]+)$/.exec(url.pathname)
     if (node !== null) {
       const key = `${decodeURIComponent(node[1] ?? '')}/${decodeURIComponent(node[2] ?? '')}`
@@ -367,6 +427,13 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     },
     setNodeDetail(runId, nodeId, detail) {
       details.set(`${runId}/${nodeId}`, detail)
+    },
+    asked,
+    monitorSays(runId, ...entries) {
+      conversation(runId).entries.push(...entries)
+    },
+    monitorDone(runId) {
+      conversation(runId).pending = false
     },
     drop() {
       for (const ws of [...attached.keys()]) ws.terminate()

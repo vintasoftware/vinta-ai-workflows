@@ -122,8 +122,11 @@ test('every normalized event kind renders, and the operator’s own message is a
 })
 
 test('a long transcript mounts a window over its tail, not every row', async () => {
+  // Tool results rather than prose, because consecutive prose from one author
+  // is *one* row by design (`transcript.ts`'s `GROUPED`) and this test is about
+  // the window, not the folding. These are 400 entries and 400 rows.
   const entries = Array.from({ length: 400 }, (_, index) =>
-    entry({ type: 'assistant_text', text: `line ${index}` }),
+    entry({ type: 'tool_result', id: `t${index}`, ok: true, summary: `line ${index}` }),
   )
   const stub = await startStubDaemon({
     runs: [runSummary()],

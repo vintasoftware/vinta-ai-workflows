@@ -220,11 +220,17 @@ async function rig(
     // A monitor over the mock harness: the endpoint's contract is that it
     // answers from the journal, which is testable; what a real model would say
     // is not.
+    //
+    // The journal is not optional here any more, and it used to be missing.
+    // The answer used to come back on the POST, so a monitor that recorded
+    // nothing still looked like it worked; now the conversation *is* the
+    // answer, and one built without a journal is one whose replies go nowhere.
     monitorFor: () =>
       new Monitor({
         adapter: new MockAdapter({ id: 'claude-code' }),
         model: 'dear',
         cwd: journal.root,
+        journal,
       }),
   })
   daemon.register({
@@ -985,14 +991,34 @@ describe('replay pages', () => {
     })
     expect(steered.status).toBe(409)
 
-    // The monitor answers about it too — a finished run is when "why did this
-    // fail" actually gets asked.
+    // The monitor takes a question about it too — a finished run is when "why
+    // did this fail" actually gets asked. `202`, and no answer in the body: the
+    // turn belongs to the daemon rather than to this request, and what it says
+    // arrives in the conversation as it says it.
     const asked = await call(r.daemon, '/api/runs/run-history/monitor', {
       method: 'POST',
       body: { text: 'why did this fail?' },
     })
-    expect(asked.status).toBe(200)
-    expect((asked.body as { answer: string }).answer).not.toBe('')
+    expect(asked.status).toBe(202)
+    expect(asked.body).toEqual({ asked: true, model: expect.any(String) })
+
+    // `until` here reads synchronously; this one has to await a request, so it
+    // polls in the open. The answer lands in the conversation, not in the
+    // response above.
+    let conversation = { entries: [] as { type: string }[], pending: true }
+    for (let i = 0; i < 400 && conversation.pending; i += 1) {
+      await sleep(5)
+      const history = await call(r.daemon, '/api/runs/run-history/monitor')
+      conversation = history.body as { entries: { type: string }[]; pending: boolean }
+    }
+    expect(conversation.pending).toBe(false)
+    // The question, then the answer — which arrives as however many events the
+    // harness produced, because the monitor journals as it speaks rather than
+    // joining everything at the end. The view folds them back into one reply.
+    const kinds = conversation.entries.map((entry) => entry.type)
+    expect(kinds[0]).toBe('user_message')
+    expect(kinds.slice(1).every((kind) => kind === 'assistant_text')).toBe(true)
+    expect(kinds.length).toBeGreaterThan(1)
 
     // Its history is readable, which is the case replay exists for.
     const page = EventPageSchema.parse((await call(r.daemon, '/api/runs/run-history/events')).body)

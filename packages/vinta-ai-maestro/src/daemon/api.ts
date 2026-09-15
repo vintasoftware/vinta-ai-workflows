@@ -27,6 +27,7 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
+import { MONITOR_ROLE } from '../journal/transcript.ts'
 import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
 import type { Workflow } from '../types.ts'
 import { collectRunCrew } from '../usage/crew.ts'
@@ -52,7 +53,7 @@ import {
   type AgentLeaseGrantResponse,
   type AgentLeaseWaitingResponse,
   type EventPage,
-  type MonitorAnswer,
+  type MonitorAsked,
   type Issue,
   type NodeDetail,
   type RunSnapshot,
@@ -132,6 +133,15 @@ export function createApi(options: ApiOptions): Hono {
   // disagree about which project is being served.
   const store = createWorkflowStore(options.workflowsDir ?? plansDirFor(dirname(journal.root)))
   const ui = createStaticHandler(options.uiDir ?? DEFAULT_UI_DIR)
+  /**
+   * Monitor turns in flight, by run. The one piece of state this module keeps.
+   *
+   * It exists because a monitor turn is no longer bounded by the request that
+   * started it — see the `POST` below. Deliberately not durable: a daemon that
+   * restarts mid-turn has no turn to report, and a conversation holding a
+   * question with no answer is then exactly what happened.
+   */
+  const asking = new Map<string, Promise<unknown>>()
   const app = new Hono()
 
   /**
@@ -378,12 +388,18 @@ export function createApi(options: ApiOptions): Hono {
    * tab and the daemon alike — and so the operator who asked a question
    * yesterday can read the answer today. Entries are the same shape as a
    * phase's, which is what lets the UI render both with one component.
+   *
+   * `pending` is what makes it readable *while* a turn runs: the monitor
+   * journals as it goes now, so a client that knows an answer is still coming
+   * can poll this and watch it arrive. Without the flag it could not tell a
+   * monitor that is thinking from one that has finished saying nothing.
    */
   app.get('/api/runs/:runId/monitor', (c) => {
     const found = resolveRead(c)
     if ('response' in found) return found.response
     return c.json({
       entries: journal.tailTranscript(found.row.id, MONITOR_NODE, MONITOR_HISTORY),
+      pending: asking.has(found.row.id),
     })
   })
 
@@ -395,10 +411,25 @@ export function createApi(options: ApiOptions): Hono {
    * finished run for the same reason it reads the journal — the questions worth
    * asking about a failed run are asked after it has failed.
    *
-   * The answer is agent output and goes in a response body, which §11 allows
-   * for exactly this case: the operator asked for it, and it is the product.
-   * What must not appear is the *refusal* prose if the harness declines —
-   * that is a code.
+   * **The turn outlives the request, and that is the whole change here.** This
+   * used to drive the model inside the handler and answer with the finished
+   * prose, which made the turn's lifetime the browser's connection: switching
+   * view, reloading, or letting a laptop sleep killed a monitor mid-thought,
+   * and the operator came back to a question with no answer and no record that
+   * one had been attempted. A question is cheap to ask and expensive to answer,
+   * so the answering belongs to the daemon.
+   *
+   * `202` with nothing in it, therefore. The answer is not in this response
+   * because it does not exist yet; it arrives in the journal, entry by entry as
+   * the monitor produces it (`monitor/monitor.ts`), and `GET` above serves it
+   * with `pending` until the turn ends. That also puts the answer where it was
+   * always supposed to live rather than in one client's memory.
+   *
+   * One turn per run at a time. Not a lock for correctness — a second
+   * conversation would be merely confusing, not unsafe — but because two
+   * monitors interleaving their thinking into one transcript is a record
+   * nobody can read, and because the operator pressing Ask twice means "I am
+   * still waiting", not "answer it twice".
    */
   app.post('/api/runs/:runId/monitor', async (c) => {
     const found = resolveRead(c)
@@ -410,18 +441,36 @@ export function createApi(options: ApiOptions): Hono {
     const monitor = options.monitorFor?.(found.row.id) ?? null
     if (monitor === null) return fail(c, 501, 'monitor_unavailable')
 
-    const digest = runDigest(journal, found.row.id, workflow(found.row.id))
+    const runId = found.row.id
+    if (asking.has(runId)) return fail(c, 409, 'monitor_busy')
+
+    const digest = runDigest(journal, runId, workflow(runId))
     if (digest === null) return fail(c, 404, 'unknown_run')
 
-    try {
-      const answer = await monitor.ask(digest, body.value.text)
-      return c.json({ answer, model: monitor.model } satisfies MonitorAnswer)
-    } catch {
-      // A harness that would not start, a session that would not resume. The
-      // kind is on the error and the prose is the vendor's; neither belongs in
-      // a browser, so the operator gets a code and the run is untouched.
-      return fail(c, 503, 'monitor_unavailable')
-    }
+    const turn = monitor
+      .ask(digest, body.value.text)
+      .catch(() => {
+        // A harness that would not start, a session that would not resume.
+        //
+        // It goes in the *conversation*, which is new and is the point: with
+        // the answer no longer riding on this response, a failure that only
+        // rejected a promise nobody is awaiting would leave the operator's
+        // question sitting there forever with no answer and no explanation. The
+        // kind is on the error and the prose is the vendor's — neither belongs
+        // in a browser (§11) — so the record gets a sentence of this daemon's
+        // own, which is not repository content and never was.
+        journal.appendTranscript(runId, MONITOR_NODE, {
+          type: 'error',
+          message: 'The monitor could not be reached, so this question was not answered.',
+          by: { role: MONITOR_ROLE },
+        })
+      })
+      .finally(() => {
+        asking.delete(runId)
+      })
+    asking.set(runId, turn)
+
+    return c.json({ asked: true, model: monitor.model } satisfies MonitorAsked, 202)
   })
 
   // The five operations of §9. Each one validates its body, forwards to the
