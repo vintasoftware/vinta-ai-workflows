@@ -771,6 +771,43 @@ describe('journalled gate results', () => {
   })
 
   /**
+   * And again in the node's transcript, which is where somebody reading what
+   * happened to this phase actually looks. The gates were the one thing missing
+   * from it: four agents' output in order, and no sign of the thing that judged
+   * them.
+   */
+  it('puts the gate in the node’s transcript, attributed to the gate', async () => {
+    const rig = setup(() => noisy(3))
+    assign(rig)
+
+    await rig.invoke('p1', 'run_gate')
+
+    expect(rig.journal.tailTranscript(RUN_ID, 'p1', 100)).toEqual([
+      {
+        type: 'gate_run',
+        gate: 'unit',
+        exitCode: 3,
+        status: 'failed',
+        cached: false,
+        by: { role: 'gate' },
+      },
+    ])
+  })
+
+  /** §11 again, on the other file this step now writes. */
+  it('keeps the gate’s output out of the transcript too', async () => {
+    const rig = setup(() => noisy(3))
+    assign(rig)
+
+    await rig.invoke('p1', 'run_gate')
+
+    const entries = JSON.stringify(rig.journal.tailTranscript(RUN_ID, 'p1', 100))
+    expect(entries).not.toContain('SECRET-FROM-THE-REPO')
+    expect(entries).not.toContain('on-stderr')
+    expect(entries).not.toContain('echo')
+  })
+
+  /**
    * The line this step is not allowed to cross. Gate output is repository
    * content verbatim (§5.3, §11): it belongs in `gates/unit.log` and nowhere
    * else. This asserts against *every* event payload in the run, not just the

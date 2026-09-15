@@ -258,3 +258,69 @@ test('a streamed thought is one row', () => {
   expect(body).toContain('part 0')
   expect(body).toContain('part 11')
 })
+
+// ---------------------------------------------------------------------------
+// Whose rows these are
+// ---------------------------------------------------------------------------
+
+const from = (role: string, entry: unknown): unknown => ({ ...(entry as object), by: { role } })
+
+const bandsOf = (view: RenderResult): string[] =>
+  [...view.container.querySelectorAll<HTMLElement>('[data-turn]')].map(
+    (band) => band.dataset['turn'] ?? '',
+  )
+
+/**
+ * The complaint: a phase's transcript is an implementer, a reviewer and a fix
+ * round or three appended to one file in order, and mid-scroll there was no way
+ * to tell which of them you were reading.
+ */
+test('the list says where one agent stops and the next starts', () => {
+  const view = render(
+    <Transcript
+      entries={[
+        from('implementer', { type: 'assistant_text', text: 'implemented' }),
+        from('reviewer', { type: 'assistant_text', text: 'VERDICT: fail' }),
+        from('fixer', { type: 'assistant_text', text: 'fixed' }),
+        from('reviewer', { type: 'assistant_text', text: 'VERDICT: pass' }),
+        from('gate', { type: 'gate_run', gate: 'unit', exitCode: 0, status: 'passed', cached: false }),
+      ]}
+    />,
+  )
+
+  expect(bandsOf(view)).toEqual(['implementer', 'reviewer', 'fixer', 'reviewer', 'gate'])
+  expect(view.container.querySelector('[data-turn="gate"]')?.textContent).toContain('Gate')
+})
+
+/** The boundary, not a badge: ninety rows from one agent get one band. */
+test('a run of rows from one agent is announced once', () => {
+  const view = render(
+    <Transcript
+      entries={Array.from({ length: 12 }, (_, index) =>
+        from('implementer', { type: 'assistant_text', text: `step ${index}` }),
+      )}
+    />,
+  )
+
+  expect(bandsOf(view)).toEqual(['implementer'])
+  expect(view.container.querySelectorAll('li[data-entry]')).toHaveLength(12)
+})
+
+/** Every transcript recorded before the daemon wrote `by` renders as it did. */
+test('an unattributed transcript gets no bands at all', () => {
+  const view = render(<Transcript entries={lines(4)} />)
+
+  expect(bandsOf(view)).toEqual([])
+  expect(view.container.querySelectorAll('li[data-entry]')).toHaveLength(4)
+})
+
+/** A role this build has never heard of shows as itself, not as nothing. */
+test('an unknown role is still a band', () => {
+  const view = render(
+    <Transcript entries={[from('archaeologist', { type: 'assistant_text', text: 'hm' })]} />,
+  )
+
+  expect(view.container.querySelector('[data-turn="archaeologist"]')?.textContent).toContain(
+    'archaeologist',
+  )
+})

@@ -39,6 +39,7 @@ import { dirname, join } from 'node:path'
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
+import { MONITOR_ROLE, OPERATOR_ROLE } from '../journal/transcript.ts'
 import type { Workflow } from '../types.ts'
 
 /** How much of an agent's last word to carry. A gist, not a transcript. */
@@ -381,6 +382,9 @@ export class Monitor {
     this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
       type: 'user_message',
       text: question,
+      // The operator's, not the monitor's — the same §7 rule a phase's
+      // transcript follows (`journal/transcript.ts`).
+      by: { role: OPERATOR_ROLE },
     })
 
     const said: string[] = []
@@ -394,6 +398,7 @@ export class Monitor {
       this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
         type: 'assistant_text',
         text: answer,
+        by: { role: MONITOR_ROLE },
       })
     }
     return answer

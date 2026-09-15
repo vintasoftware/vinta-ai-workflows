@@ -337,6 +337,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is only as good as the `healthcheck` a service declares: without one, compose
   returns as soon as the container starts and `createdb` races the server.
 
+### Added
+
+- **A phase's transcript says which agent wrote each line, and holds the gates.**
+  Every spawn on a node appends to one file whatever its role, so a phase that
+  took two fix rounds held five agents' output in one undifferentiated stream —
+  the role was in scope at the append and simply not written down. Each line now
+  carries the role and the session slot that produced it, the view bands the
+  list where one agent stops and the next starts, and gate runs are entries in
+  it rather than only in a log beside it. The operator's own steering stays the
+  operator's (§7), even though the adapter echoes it back on the agent's event
+  stream. Transcripts written before this render exactly as they did, with no
+  bands.
+
 ### Fixed
 
 - **An implementer was told both to commit and never to commit.** The prompt

@@ -3,7 +3,7 @@
  * field the API adds or renames fails to compile here before it can fail in a
  * browser.
  */
-import type { AgentEvent } from '../../src/harness/adapter.ts'
+import type { TranscriptEntry } from '../../src/journal/transcript.ts'
 import type {
   NodeDetail,
   RunSnapshot,
@@ -100,11 +100,13 @@ export function statusEvent(nodeId: string, status: NodeStatus) {
 }
 
 /**
- * A transcript entry, typed as the harness's own `AgentEvent`. The journal
- * stores exactly this stream (§5.3) and the API serves it as `unknown`, so
- * typing the fixture is the only place the shape can be held to the source.
+ * A transcript entry, typed as the daemon's own `TranscriptEntry` — the harness
+ * events plus the kinds the daemon writes itself, each optionally attributed.
+ * The journal stores exactly this stream (§5.3) and the API serves it as
+ * `unknown`, so typing the fixture is the only place the shape can be held to
+ * the source.
  */
-export function entry(event: AgentEvent): AgentEvent {
+export function entry(event: TranscriptEntry): TranscriptEntry {
   return event
 }
 
