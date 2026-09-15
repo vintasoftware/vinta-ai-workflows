@@ -71,6 +71,22 @@ const g = (cwd: string, ...args: string[]): string =>
 
 const RUN_ID = 'run-1'
 
+/**
+ * The budget for a test that drives a whole run, matching the one `within`
+ * already promises those tests.
+ *
+ * The two disagreed. Seven tests here wrap their run in `within(60_000, …)` so
+ * that a hang is reported as *which await hung* rather than as a generic
+ * timeout — and all but one of them then ran under Vitest's 5s default, where
+ * the runner kills the test first and the named message can never appear. The
+ * helper's whole reason for existing was unreachable on two of three platforms.
+ *
+ * Wide on purpose. It is not a performance budget; it is the line past which
+ * "slow" becomes "stuck", and these suites spawn real processes, create real
+ * git worktrees and run real gates.
+ */
+const REAL_RUN_TIMEOUT_MS = 60_000
+
 /** A reviewer that states a verdict the executor can read back out of the transcript. */
 const PASSING: MockScript = {
   events: [{ type: 'assistant_text', text: 'VERDICT: pass' }],
@@ -446,8 +462,8 @@ describe('the shipped standard-phase, end to end', () => {
     expect(rig.pools.waiting).toBe(0)
     // Real git worktrees, real gate processes: ~1.5s alone, but it sits close
     // to vitest's 5s default and times out when the machine is loaded.
-  }, 60_000)
-})
+  })
+}, REAL_RUN_TIMEOUT_MS)
 
 // ---------------------------------------------------------------------------
 // 2–3. The fix loop
@@ -605,7 +621,7 @@ describe('the fix loop', () => {
     // `standard-phase`'s `failed` state notifies — identifiers and a fixed reason.
     expect(rig.notifications).toEqual([{ scope: 'node', id: 'p1', reason: 'phase failed' }])
   })
-})
+}, REAL_RUN_TIMEOUT_MS)
 
 // ---------------------------------------------------------------------------
 // 4. run_gate does not double-acquire
@@ -639,7 +655,7 @@ describe('gate pools', () => {
     const report = await within(30_000, rig.run(), 'the capacity-1 gate run')
     expect(report.statuses).toEqual({ p1: 'done', p2: 'done' })
   })
-})
+}, REAL_RUN_TIMEOUT_MS)
 
 // ---------------------------------------------------------------------------
 // 5. Gate caching
@@ -1058,4 +1074,4 @@ describe('composed prompts, end to end', () => {
     expect(report.statuses['p1']).toBe('failed')
     expect(report.statuses['p4']).toBe('blocked')
   })
-})
+}, REAL_RUN_TIMEOUT_MS)
