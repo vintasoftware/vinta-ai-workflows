@@ -339,6 +339,22 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An implementer was told both to commit and never to commit.** The prompt
+  carried "never commit while a gate is red" beside "the turn is not complete
+  until `git status --porcelain` is empty of your work" — a contradiction
+  whenever the gate could not be turned green inside the turn, which is most of
+  why fix rounds exist. Agents obeyed the `never`, and the reviewer one node
+  later raised the BLOCKER it is told to raise for uncommitted work, spending a
+  fix round re-implementing code that was already on disk. A red gate now
+  changes the report and never the decision to commit: commit, and report
+  FAILURE saying what is still red.
+
+  The reviewer's side was a false BLOCKER independently of that. Any unclean
+  tree was a finding, and a lane's tree is never clean — the pool copies
+  configuration in, links dependency trees, and the gates leave build output
+  behind, none of which the implementer is allowed to stage. It is scoped to
+  the failure it was written for now: work that is in the tree and missing from
+  the diff.
 - **A live transcript stops following at entry sixty.** The effect that kept the
   box on the newest row was keyed on how many rows were *shown*, which is
   `min(entries, window)` — so it stopped changing the moment a transcript

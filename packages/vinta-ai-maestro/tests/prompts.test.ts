@@ -291,6 +291,52 @@ describe('committing is part of the work', () => {
     // simply commits it — and getting it wrong costs every fix round there is.
     expect(prompt).toContain('not "the phase was not')
   })
+
+  /**
+   * The prompt used to say both "the turn is not complete until `git status` is
+   * empty of your work" and "never commit while a gate is red". Whenever the
+   * gate could not be turned green inside the turn — most of why fix rounds
+   * exist — that is a contradiction with a `never` on one side, and agents
+   * resolved it the way the stronger word points: they committed nothing. The
+   * reviewer then found a full tree and an empty diff and raised the BLOCKER it
+   * is told to raise, and a fix round went on re-implementing work that was
+   * already sitting on the disk.
+   */
+  describe('a red gate changes the report, not the decision to commit', () => {
+    it.each(writers)('never forbids the %s from committing', (role) => {
+      for (const prompt of [
+        compose('api-layer', role),
+        compose('api-layer', role, { continuation: true }),
+      ]) {
+        expect(prompt).not.toMatch(/[Nn]ever commit/)
+        expect(prompt).not.toContain('must all pass before you commit')
+      }
+    })
+
+    it.each(writers)('tells the %s to commit a phase that failed', (role) => {
+      expect(compose('api-layer', role)).toContain('Commit whether or not you succeeded')
+    })
+
+    /**
+     * The other half. "Where you find uncommitted work, that *is* the finding"
+     * made any unclean tree a BLOCKER — and a lane's tree is essentially never
+     * clean: the pool copies configuration in, links dependency trees, and the
+     * gates the reviewer was just asked to run leave caches and build output
+     * behind. The implementer is told by name not to stage any of it, so a
+     * phase could be implemented, committed and correct and still fail review
+     * for the files the harness itself created around it.
+     */
+    it('does not let the reviewer fail a committed phase over a dirty lane', () => {
+      for (const prompt of [
+        compose('api-layer', 'reviewer'),
+        compose('api-layer', 'reviewer', { continuation: true }),
+      ]) {
+        expect(prompt).toContain('not by itself a finding')
+        // The narrower failure it is actually for survives.
+        expect(prompt).toContain('missing from the diff')
+      }
+    })
+  })
 })
 
 /**
@@ -614,10 +660,10 @@ Add the Folder model and its migration.
 2. Implement, matching the patterns already in the repository.
 3. Inner loop, scoped to what you touched: lint clean, then each new test on
    its own, then the scoped suite. Do not go on while any of them is red.
-4. Outer gate, only once the inner loop is green. These run against your lane
-   and must all pass before you commit:
+4. Outer gate, only once the inner loop is green. These run against your lane:
    - the repository’s own type/build check and its test suite.
-5. A red outer gate sends you back to step 2. Never commit while one is red.
+5. A red outer gate sends you back to step 2, for as long as you have room to
+   work. It is not a reason to leave the work uncommitted — see below.
 
 ## Run everything in the foreground
 Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached
@@ -639,6 +685,16 @@ this worktree holds local files that are not yours to commit — then commit to
 \`HEAD\`. The repository's own git hooks run when you do; if one
 rewrites your files, stage the result and commit again rather than bypassing
 it.
+
+**Commit whether or not you succeeded.** A gate you could not turn green, a
+test you could not make pass, a phase you got half way through: none of them
+is a reason to end the turn with the work only on disk. Commit it and report
+FAILURE, saying what is still red. A commit is not a claim that the phase is
+finished — it is what makes the work exist for the reviewer, for the fixer who
+acts on their findings, and for the next turn on this branch. The alternative
+is not "a clean branch": it is a phase that is reviewed as though you had
+written nothing, fixed by someone writing it a second time, and then deleted
+with the lane.
 
 ## Required output (a single final report)
 - Status: SUCCESS or FAILURE, and why.
@@ -1216,9 +1272,15 @@ An implementer that did the work and never committed it leaves a full tree and
 an empty diff. That is a real failure, and it is not "the phase was not
 implemented" — the difference decides whether the fixer writes the code again
 or simply commits it, and getting it wrong costs the phase every fix round it
-has. Where you find uncommitted work, that *is* the finding: name the paths,
-make it a BLOCKER, and say that uncommitted work is neither reviewed nor
-merged and does not survive this lane.
+has. Where the phase’s work is in the tree and missing from the diff, that
+*is* the finding: name the paths, make it a BLOCKER, and say the work needs
+committing rather than writing again.
+
+An unclean tree is **not by itself a finding.** A lane carries files nobody is
+meant to commit — configuration the pool copied in, dependency trees it
+linked, caches and build output the gates you just ran produced — and the
+implementer is told by name not to stage them. If the diff holds the phase’s
+work, do not raise what is sitting in the tree beside it.
 
 ## What that diff was supposed to implement
 ## api-layer
@@ -1297,6 +1359,16 @@ this worktree holds local files that are not yours to commit — then commit to
 \`HEAD\`. The repository's own git hooks run when you do; if one
 rewrites your files, stage the result and commit again rather than bypassing
 it.
+
+**Commit whether or not you succeeded.** A gate you could not turn green, a
+test you could not make pass, a phase you got half way through: none of them
+is a reason to end the turn with the work only on disk. Commit it and report
+FAILURE, saying what is still red. A commit is not a claim that the phase is
+finished — it is what makes the work exist for the reviewer, for the fixer who
+acts on their findings, and for the next turn on this branch. The alternative
+is not "a clean branch": it is a phase that is reviewed as though you had
+written nothing, fixed by someone writing it a second time, and then deleted
+with the lane.
 
 ## Required output
 - Status: SUCCESS or FAILURE, and why.
