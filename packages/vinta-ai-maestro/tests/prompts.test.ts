@@ -293,6 +293,63 @@ describe('committing is part of the work', () => {
   })
 })
 
+/**
+ * An implementer started five commands with `run_in_background: true` and ended
+ * its turn with "I'll wait for the test result notification before continuing to
+ * the outer gate." There is no notification — a headless session ends when the
+ * turn ends, and whatever it backgrounded dies with it. Three sessions ended
+ * that way, with no report and no commit.
+ *
+ * Nothing had told it otherwise, and believing a tool that offers backgrounding
+ * will still be there afterwards is not an unreasonable thing to believe.
+ */
+describe('background work', () => {
+  const writers = ['implementer', 'fixer'] as const
+
+  it.each(writers)('forbids it to the %s, and says why', (role) => {
+    const prompt = compose('api-layer', role)
+
+    expect(prompt).toContain('Run everything in the foreground')
+    expect(prompt).toContain('run_in_background')
+    // The reason, not only the rule: an agent told a bare "do not" has no way
+    // to generalise to the `&` it was about to type instead.
+    expect(prompt).toContain('This session is headless')
+  })
+
+  it('says it in the continuations too', () => {
+    for (const role of writers) {
+      expect(compose('api-layer', role, { continuation: true })).toContain(
+        'Run everything in the foreground',
+      )
+    }
+  })
+})
+
+/**
+ * A reused reviewer session reached a verdict in under four minutes without
+ * running the project's test command at all. The prompt had asked it to confirm
+ * the gate was green, which an agent can do by reading a report.
+ */
+describe('the reviewer runs the gates', () => {
+  it('asks the cold reviewer to run them and report what they returned', () => {
+    const prompt = compose('api-layer', 'reviewer')
+
+    expect(prompt).toContain('you run these yourself and read what they print')
+    expect(prompt).toContain('is a claim, not evidence')
+    expect(prompt).toContain('Say in your report that you ran them')
+  })
+
+  it('asks again every round, because the tree has moved', () => {
+    const prompt = compose('api-layer', 'reviewer', { continuation: true })
+
+    expect(prompt).toContain('Run these again yourself, every round')
+    expect(prompt).toContain('unit: `pnpm test`')
+    // And the working tree with them: the round after a fix is the likeliest
+    // place to find work that was written and never committed.
+    expect(prompt).toContain('status --porcelain')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 1a. The project's own commands
 // ---------------------------------------------------------------------------
@@ -561,6 +618,14 @@ Add the Folder model and its migration.
    and must all pass before you commit:
    - the repository’s own type/build check and its test suite.
 5. A red outer gate sends you back to step 2. Never commit while one is red.
+
+## Run everything in the foreground
+Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached
+processes you intend to come back to. This session is headless: it ends when
+your turn ends, nothing will notify you, and anything still running is killed
+with it. A turn that finishes by waiting for a background result finishes
+having done nothing, and the phase is then judged on an empty branch.
+Long commands are fine — run them and wait for them to return.
 
 ## Committing is part of the work, not after it
 Your phase is reviewed and merged **from the commits on \`HEAD\`**. The
@@ -1162,8 +1227,12 @@ Add REST endpoints for folders.
 
 ## The three layers, all of them, in order
 1. Mechanical. The changed-file list matches the report; the whole diff read;
-   the outer gate confirmed green — vague confirmation means you re-run it:
+   and **you run these yourself and read what they print** — an implementer
+   saying they were green is a claim, not evidence, and a verdict reached
+   without running them is a guess:
    - unit: \`pnpm test\`
+   Say in your report that you ran them and what they returned. If you could
+   not run them, that is a finding, not something to pass over.
    Scope creep and unrelated churn surfaced; a scan of the diff for secrets
    (password, secret, token, api_key, AKIA, BEGIN … KEY).
 2. Plan compliance. Every change the phase body asked for is implemented;
@@ -1207,6 +1276,14 @@ Fix exactly what is listed above, and nothing else — an unrelated change here
 is scope creep the reviewer will send back. Then re-run the inner loop, and
 these, until they are green:
    - unit: \`pnpm test\`
+
+## Run everything in the foreground
+Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached
+processes you intend to come back to. This session is headless: it ends when
+your turn ends, nothing will notify you, and anything still running is killed
+with it. A turn that finishes by waiting for a background result finishes
+having done nothing, and the phase is then judged on an empty branch.
+Long commands are fine — run them and wait for them to return.
 
 ## Committing is part of the work, not after it
 Your phase is reviewed and merged **from the commits on \`HEAD\`**. The

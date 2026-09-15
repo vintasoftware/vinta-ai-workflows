@@ -675,7 +675,7 @@ export class Scheduler {
 
     state.failure = null
     state.autoRetries = 0
-    this.#clearLedger(state)
+    this.#restartAttempt(state)
     // A member poisoned by this node's failure is trusted again for it: the
     // retry is cold anyway, so there is no failed context left to inherit.
     const member = state.crew?.member ?? state.lastMember
@@ -966,7 +966,7 @@ export class Scheduler {
           // per member: it wiped everything the member had built up the instant
           // they started their second phase, which is the one thing this was
           // all for.
-          this.#clearLedger(state)
+          this.#restartAttempt(state)
           this.#setStatus(state, 'waiting_on_capacity')
           await error.waitFor()
           if (state.aborted) return
@@ -1087,7 +1087,28 @@ export class Scheduler {
   }
 
   /** Throws away this node's actor sessions, so its next attempt starts cold. */
-  #clearLedger(state: NodeState): void {
+  /**
+   * Everything a fresh attempt at this node must not inherit.
+   *
+   * Every caller is about to re-drive the node from its pipeline's initial
+   * state — a capacity refusal, an automatic retry, the operator's answer, the
+   * `retry` verb — which makes this the one place that knows an attempt is
+   * starting over.
+   *
+   * **The fix budget is per attempt, and it used to be per node.** `fixRounds`
+   * was set to 0 when the node was created and never again, so a phase that
+   * spent its whole budget on attempt 1 began attempt 2 already exhausted: one
+   * review, one fix, and the exhaustion transition fired again. Observed with
+   * `max_fix_rounds: 4` — the retry got a single fix round before it was asked
+   * about, forty seconds of work standing in for four rounds of it. A retry
+   * that inherits the reason the last attempt ran out is not a retry.
+   *
+   * The session ledger goes for the reason it always did: the branch the last
+   * attempt built is gone and its worktree will be recycled, so a resumed
+   * session would hold a memory of files that are no longer there.
+   */
+  #restartAttempt(state: NodeState): void {
+    state.fixRounds = 0
     if (state.crew === null) state.sessions.clear()
     else this.#ledgerFor(state.crew.member).clear()
   }
@@ -1245,7 +1266,7 @@ export class Scheduler {
       // Cold, for the reason a capacity retry is: the branch the last attempt
       // built is gone and its worktree will be recycled, so a resumed session
       // would hold a memory of files that are no longer there.
-      this.#clearLedger(state)
+      this.#restartAttempt(state)
       this.#setStatus(state, 'running')
       return true
     }
@@ -1283,7 +1304,7 @@ export class Scheduler {
 
     const member = chosen.startsWith(RETRY_WITH) ? chosen.slice(RETRY_WITH.length) : null
     if (member !== null && this.#workflow.crew[member] !== undefined) state.retryMember = member
-    this.#clearLedger(state)
+    this.#restartAttempt(state)
     return true
   }
 

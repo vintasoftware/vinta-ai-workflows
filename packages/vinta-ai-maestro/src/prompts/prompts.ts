@@ -552,6 +552,7 @@ function renderImplementer(materials: Materials): string {
     '   and must all pass before you commit:',
     ...gateList(materials),
     '5. A red outer gate sends you back to step 2. Never commit while one is red.',
+    ...foreground(),
     ...commitProtocol(materials),
     '',
     '## Required output (a single final report)',
@@ -584,6 +585,34 @@ function renderImplementer(materials: Materials): string {
  * own kind of damage. (The pool's rescue commit does use `--all`, on purpose
  * and only when the alternative is deletion; that is a different trade.)
  */
+/**
+ * That the turn has to finish inside itself.
+ *
+ * An implementer started five commands with `run_in_background: true` and
+ * closed its turn with "I'll wait for the test result notification before
+ * continuing to the outer gate." There is no notification: a headless session
+ * ends when the turn ends, and whatever it backgrounded is killed with it.
+ * Three sessions ended that way — no report, no commit — and the reviewer
+ * failed each of them for uncommitted work, which was true and was not the
+ * cause.
+ *
+ * Nothing in the prompt had said so, and "run this in the background and wait
+ * for it" is an entirely reasonable thing to believe when you have a tool that
+ * offers it.
+ */
+function foreground(): string[] {
+  return [
+    '',
+    '## Run everything in the foreground',
+    'Do not start background tasks — no `run_in_background`, no `&`, no detached',
+    'processes you intend to come back to. This session is headless: it ends when',
+    'your turn ends, nothing will notify you, and anything still running is killed',
+    'with it. A turn that finishes by waiting for a background result finishes',
+    'having done nothing, and the phase is then judged on an empty branch.',
+    'Long commands are fine — run them and wait for them to return.',
+  ]
+}
+
 function commitProtocol(materials: Continuation): string[] {
   return [
     '',
@@ -736,17 +765,16 @@ function gateList(materials: Continuation): string[] {
     : gates
 }
 
-function renderReviewer(materials: Materials): string {
-  const { node, workflow } = materials
-  return section([
-    `You are reviewing ${node.id}: ${node.name} of plan ${workflow.id}.`,
-    'You review: read, run and report, but never edit code. Every issue you find',
-    'is reported, not fixed — a fixer agent acts on your findings after you.',
-    '',
-    '## What to review',
-    `The diff of \`${materials.branch}\` against its base \`${materials.baseBranch}\`:`,
-    `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
-    'Read the full diff of every changed file. Spot-checking is not enough.',
+/**
+ * The reviewer's other source of evidence: what is on disk but not on the
+ * branch.
+ *
+ * Shared by both reviewer prompts, because the round *after* a fix is if
+ * anything the more likely one to find uncommitted work — the fixer has just
+ * been told to commit, and whether it did is the question.
+ */
+function workingTree(materials: Continuation): string[] {
+  return [
     '',
     '**Check the working tree too, before you conclude anything from an empty or a',
     'thin diff:**',
@@ -758,6 +786,21 @@ function renderReviewer(materials: Materials): string {
     'has. Where you find uncommitted work, that *is* the finding: name the paths,',
     'make it a BLOCKER, and say that uncommitted work is neither reviewed nor',
     'merged and does not survive this lane.',
+  ]
+}
+
+function renderReviewer(materials: Materials): string {
+  const { node, workflow } = materials
+  return section([
+    `You are reviewing ${node.id}: ${node.name} of plan ${workflow.id}.`,
+    'You review: read, run and report, but never edit code. Every issue you find',
+    'is reported, not fixed — a fixer agent acts on your findings after you.',
+    '',
+    '## What to review',
+    `The diff of \`${materials.branch}\` against its base \`${materials.baseBranch}\`:`,
+    `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
+    'Read the full diff of every changed file. Spot-checking is not enough.',
+    ...workingTree(materials),
     ...commandBlock(materials),
     ...leaseBlock(materials),
     '',
@@ -774,8 +817,12 @@ function renderReviewer(materials: Materials): string {
     '',
     '## The three layers, all of them, in order',
     '1. Mechanical. The changed-file list matches the report; the whole diff read;',
-    '   the outer gate confirmed green — vague confirmation means you re-run it:',
+    '   and **you run these yourself and read what they print** — an implementer',
+    '   saying they were green is a claim, not evidence, and a verdict reached',
+    '   without running them is a guess:',
     ...gateList(materials),
+    '   Say in your report that you ran them and what they returned. If you could',
+    '   not run them, that is a finding, not something to pass over.',
     '   Scope creep and unrelated churn surfaced; a scan of the diff for secrets',
     '   (password, secret, token, api_key, AKIA, BEGIN … KEY).',
     '2. Plan compliance. Every change the phase body asked for is implemented;',
@@ -839,6 +886,7 @@ function renderFixer(materials: Materials): string {
     'is scope creep the reviewer will send back. Then re-run the inner loop, and',
     'these, until they are green:',
     ...gateList(materials),
+    ...foreground(),
     ...commitProtocol(materials),
     '',
     '## Required output',
@@ -893,6 +941,7 @@ function renderFixerContinuation(materials: Continuation): string {
     'will send back, and it costs a fix round you may need. Then re-run the inner',
     'loop, and these, until they are green:',
     ...gateList(materials),
+    ...foreground(),
     ...commitProtocol(materials),
     '',
     '## Required output',
@@ -915,6 +964,11 @@ function renderReviewerContinuation(materials: Continuation): string {
     `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
     'Read it again in full. A fix moves lines you had already accepted, so a diff',
     'you only re-read around the findings is one you have not read.',
+    '',
+    '**Run these again yourself, every round.** A session that remembers running',
+    'them last round is remembering a different tree:',
+    ...gateList(materials),
+    ...workingTree(materials),
     '',
     '## What to decide',
     '1. Each finding you raised: addressed, addressed in a way that breaks something',
@@ -960,6 +1014,7 @@ function renderImplementerContinuation(materials: Continuation): string {
     'Finish the working instructions you were given, in the order you were given',
     'them, ending on a green outer gate:',
     ...gateList(materials),
+    ...foreground(),
     ...commitProtocol(materials),
     '',
     'Then file the single final report those instructions asked for.',

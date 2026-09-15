@@ -550,6 +550,42 @@ describe('the fix loop', () => {
     expect(reReview?.prompt).toContain(VERDICT_MARKER)
   })
 
+  it('reviews the last fix rather than failing the phase unread', async () => {
+    // `fix` used to go straight to `failed` once the budget was up, so the
+    // final fixer's work was never reviewed and never gated. Two phases in one
+    // run ended on a fixer reporting "all gates green, committed, tree clean"
+    // and were failed anyway — the work was done and nothing was asked to look
+    // at it.
+    //
+    // Here the gate flips green exactly once, on the attempt the old pipeline
+    // never reached: the first gate is red, the fixer spends the only round,
+    // and what happens next is the whole question.
+    const rig = setup((root) => flakyGate(root, 1), { script: PASSING })
+
+    const report = await within(60_000, rig.run(), 'the fix loop')
+
+    expect(report.statuses['p1']).toBe('done')
+    // Matched against both prompt forms. `fix` shares the implementer's
+    // session, so a fixer turn is a *continuation* — its delta never says "You
+    // are fixing", and a classifier that only knew the cold wording read it as
+    // an implementer and made this test lie about what ran.
+    const roles = rig.adapters['claude-code']?.spawned
+      // p1 only: this fixture also carries a p2, whose own turns would
+      // otherwise land in the middle of the sequence under test.
+      .filter((task) => task.nodeId === 'p1')
+      .map((task) =>
+      task.prompt.includes('You are fixing') ||
+      task.prompt.includes('Change exactly what is named above')
+        ? 'fixer'
+        : task.prompt.includes('You are reviewing') || task.prompt.includes('Still reviewing')
+          ? 'reviewer'
+          : 'implementer',
+    )
+    // The fixer's turn is followed by a review, and that review is what passes
+    // the phase. Under the old pipeline the list ended at the fixer.
+    expect(roles).toEqual(['implementer', 'reviewer', 'fixer', 'reviewer'])
+  })
+
   it('exhausted fix rounds fail the node and block its dependents', async () => {
     const rig = setup(
       (root) => {
