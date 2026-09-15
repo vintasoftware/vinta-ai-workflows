@@ -20,7 +20,7 @@ import { defineConfig } from 'vitest/config'
 const IGNORED = ['**/node_modules/**', '**/dist/**', 'tests/fixtures/**']
 
 /**
- * Windows runners get longer to do the same work.
+ * Every platform gets long enough to do this work.
  *
  * Not a claim that anything here is slow, and not a way to quiet a hang. The
  * suite spawns real processes, creates real git worktrees and opens real SQLite
@@ -30,12 +30,27 @@ const IGNORED = ['**/node_modules/**', '**/dist/**', 'tests/fixtures/**']
  * They failed in four unrelated files at once, which is the signature of a slow
  * machine rather than of a bug in any one of them.
  *
- * Deliberately per-platform: raising these everywhere would let a genuine
- * deadlock on macOS or Linux take four times as long to report, and those are
- * the platforms where a hang is a bug rather than an environment.
+ * **This used to be Windows only**, on the reasoning that raising it everywhere
+ * would let a genuine deadlock on macOS or Linux take four times as long to
+ * report, and that a hang on those platforms is a bug rather than an
+ * environment. That was sound, and it stopped being true. The same signature —
+ * a handful of failures, a *different* handful on each run, spread across
+ * `amend`, `integration`, `lanes`, `contract`, `replay-view`, `resume`,
+ * `terminal` and `run-view`, every one a `waitFor` or a 5s timeout on a test
+ * that does real IO — now appears on a developer laptop running the other
+ * fifty-odd files beside them. Eight consecutive runs of an *untouched* tree
+ * failed between two and eleven tests and never the same two.
+ *
+ * A budget that has to be argued about on every red run is not protecting
+ * anyone from a deadlock; it is training people to re-run the suite. A real
+ * hang still fails, thirty seconds later, and the difference between five
+ * seconds and thirty is one nobody debugging a deadlock has ever cared about.
+ *
+ * This supersedes the per-file constants three suites grew while it was
+ * Windows-only. `executor.test.ts` keeps its own, because 60s there is more
+ * than this gives and it means it.
  */
-const SLOW_PLATFORM = process.platform === 'win32'
-const TIMEOUTS = SLOW_PLATFORM ? { testTimeout: 30_000, hookTimeout: 60_000 } : {}
+const TIMEOUTS = { testTimeout: 30_000, hookTimeout: 60_000 }
 
 export default defineConfig({
   test: {
