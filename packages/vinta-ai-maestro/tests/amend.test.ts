@@ -627,18 +627,6 @@ describe('amending a live run', () => {
 // 3: the rebase, against real git
 // ---------------------------------------------------------------------------
 
-/**
- * What a test that drives real git gets instead of Vitest's 5s default.
- *
- * The same number, and the same reason, as `cli.test.ts` and `executor.test.ts`:
- * these two suites create repositories under `tmpdir()`, commit into them and
- * rebase branches across them, and on a machine running the other 53 test files
- * beside them that is regularly slower than five seconds. The number is not a
- * performance budget — it is the point past which "slow" becomes "stuck", so a
- * real deadlock still fails, just later.
- */
-const REAL_GIT_TIMEOUT_MS = 30_000
-
 describe('rebasing the done nodes', () => {
   it('rebases the closure in topological order, not declaration order', async () => {
     const rig = gitRig()
@@ -715,7 +703,7 @@ describe('rebasing the done nodes', () => {
     expect(bases['d']).toBe('plan/wf/phase-c')
     expect(bases['a']).toBe('main')
   })
-}, REAL_GIT_TIMEOUT_MS)
+})
 
 // ---------------------------------------------------------------------------
 // 4: the durable record
@@ -816,4 +804,4 @@ describe('journalling an amendment', () => {
     expect(rig.adapter.spawned.map((task) => task.nodeId)).toEqual(['a', 'b', 'c'])
     expect(rig.scheduler.statuses['c']).toBe('done')
   })
-}, REAL_GIT_TIMEOUT_MS)
+})

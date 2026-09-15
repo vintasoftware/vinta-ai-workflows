@@ -8,6 +8,7 @@
  *
  * `fetch` is left alone — Node's works in this environment.
  */
+import { configure } from '@testing-library/react'
 import { WebSocket as WsClient } from 'ws'
 
 globalThis.WebSocket = WsClient as unknown as typeof globalThis.WebSocket
@@ -34,3 +35,22 @@ globalThis.WebSocket = WsClient as unknown as typeof globalThis.WebSocket
  */
 HTMLCanvasElement.prototype.getContext = (() =>
   null) as unknown as typeof HTMLCanvasElement.prototype.getContext
+
+/**
+ * `waitFor` gets the same treatment `vitest.config.ts` gives `testTimeout`, and
+ * needs its own line to get it.
+ *
+ * Testing-library's async utilities have a timeout of their own — 1000ms by
+ * default — which the runner's has no bearing on. So raising `testTimeout` for
+ * every platform fixed the node suite outright and left the UI suite flaking in
+ * exactly the way it had been: `resume`, `run-view`, `notify-view`,
+ * `replay-view`, `node-view`, a different one or two on each run, every failure
+ * a `waitFor` that gave up after a second while fifty other test files competed
+ * for the machine.
+ *
+ * These are not slow tests. They stand up a real HTTP server and a real
+ * WebSocket, and a second is not long to wait for a socket handshake on a
+ * loaded laptop. Five is not a performance budget either — it is the point past
+ * which a frame that has not arrived is a frame that is not coming.
+ */
+configure({ asyncUtilTimeout: 5_000 })

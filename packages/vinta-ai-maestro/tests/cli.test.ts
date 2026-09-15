@@ -156,15 +156,6 @@ const node = (id: string, deps: readonly string[] = []): Record<string, unknown>
 const MISSING = '/nonexistent/vinta-ai-maestro-cli/not-a-binary'
 
 /**
- * What a test that drives a whole run gets instead of Vitest's 5s default.
- *
- * Generous on purpose: the number is not a performance budget, it is the point
- * past which "slow" becomes "stuck". A real deadlock in one of these still
- * fails, just later; a loaded laptop no longer fails one that works.
- */
-const REAL_RUN_TIMEOUT_MS = 30_000
-
-/**
  * A machine where nothing is wrong. Each test breaks exactly one thing.
  *
  * These are `tests/support/fake-cli.ts`'s fakes rather than shell scripts, so
@@ -1382,7 +1373,7 @@ describe('vinta-ai-maestro run, composed', () => {
     expect(existsSync(path)).toBe(true)
     expect(existsSync(join(dir, '.vinta-ai-maestro', 'runs', 'agreed-run', 'workflow.json'))).toBe(true)
   })
-}, REAL_RUN_TIMEOUT_MS)
+})
 
 // ---------------------------------------------------------------------------
 // 6: purge
