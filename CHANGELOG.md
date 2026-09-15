@@ -320,6 +320,66 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro with` waits for the lock instead of giving up on it.** Its
+  usage said it blocked until the resource was granted, and it did — for about
+  five minutes, which is where Node's own `fetch` stops waiting for a response.
+  A test suite behind a capacity-1 semaphore beats that regularly. What the
+  agent saw was "could not reach the lease daemon", and what agents did with
+  that, repeatedly, was run the command without a lease: exactly the stampede
+  the pool exists to prevent, arrived at by an agent behaving reasonably.
+
+  The wait is the client's now. The daemon answers `202 still queued` within
+  seconds and **leaves its own queue behind it**, so nothing is granted to a
+  request that has gone away; the client loops until it is granted, saying so
+  once and then occasionally, so a transcript shows a wait rather than a
+  silence. Only answers that waiting cannot change — a resource this run does
+  not declare, a run that is no longer live — end it.
+
+  And when it does end that way, the refusal says what not to do about it.
+  "The resource lease was not granted" is an error with no alternative in it;
+  the rule against working around it now travels with the message rather than
+  sitting only in a prompt the agent read twenty minutes earlier. The prompt
+  says it too, including that waiting is the expected outcome and not a failure.
+
+- **A retry gets a fresh fix budget.** `fix_rounds` was set to 0 when a node was
+  created and never again, so a phase that spent its whole budget on attempt 1
+  began attempt 2 already exhausted — one review, one fix, and the exhaustion
+  transition fired straight back. Seen with `max_fix_rounds: 4`: the retry got a
+  single round before the operator was asked again, forty seconds of work
+  standing in for four rounds of it. A retry that inherits the reason the last
+  attempt ran out is not a retry. It resets wherever a node is re-driven from
+  its pipeline's initial state — a capacity refusal, an automatic retry, the
+  operator's answer, the `retry` verb — which is one place rather than four.
+
+- **The last fix is reviewed rather than failed unread.** `standard-phase`
+  checked the budget on the way *out* of `fix`, so the final fixer's work went
+  straight to `failed` with nothing looking at it. Two phases in one run ended
+  on a fixer reporting "all gates green, committed, tree clean" and were failed
+  anyway. The check now sits in front of the fixer, on both doors into it: every
+  fixer that runs is reviewed, and the review after the last one can still pass
+  the phase. Guarding only the review side left a red gate under a passing
+  reviewer looping forever, which is the other half of the same change.
+
+  `max_fix_rounds` still means the number of fixers a phase may spend. `0` now
+  means none, where before it let one run and failed the phase regardless.
+
+- **Agents are told not to background their work.** An implementer started five
+  commands with `run_in_background: true` and closed its turn with "I'll wait for
+  the test result notification before continuing to the outer gate". There is no
+  notification: a headless session ends when the turn ends and whatever it
+  backgrounded is killed with it. Three sessions ended with no report and no
+  commit, and the reviewer failed each for uncommitted work — true, and not the
+  cause. Nothing had said so, and believing a tool that offers backgrounding will
+  still be there afterwards is not unreasonable.
+
+- **The reviewer runs the gates instead of taking their word for it.** The prompt
+  asked it to confirm the outer gate was green, which an agent can do by reading
+  the implementer's report — one reused reviewer session reached a verdict in
+  under four minutes without running the project's tests at all. It is now asked
+  to run them, to say what they returned, and to treat being unable to run them
+  as a finding. Re-review rounds are asked again, because a session that
+  remembers running them last round is remembering a different tree.
+
 - **A retried phase keeps the commits the attempt before it made.** A failed
   phase re-enters its pipeline at the initial state, which runs `git_branch`
   again — and `checkout -B` moves an existing branch unconditionally, so attempt

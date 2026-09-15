@@ -86,9 +86,11 @@ describe('standard-phase', () => {
       via: 't-review-fail',
     })
     // The host owns the counter; entering fix a first time makes it 1 of 2.
+    // Leaving `fix` is unconditional now — every fixer's work goes back to a
+    // reviewer, and the budget is spent on the way *in*.
     expect(await pipeline.send({ facts: { fix_rounds: 1 } })).toMatchObject({
       state: 'review',
-      via: 't-fix-retry',
+      via: 't-fix-reviewed',
     })
     await pipeline.send({ facts: { review: { verdict: 'pass' } } })
     await pipeline.send({ facts: { gate: { exit_code: 0 } } })
@@ -115,21 +117,42 @@ describe('standard-phase', () => {
     expect(await pipeline.send({})).toMatchObject({ kind: 'final', state: 'done' })
   })
 
-  it('ends in failed once fix rounds are exhausted', async () => {
+  it('ends in failed once fix rounds are exhausted — after a review, not before one', async () => {
     const { pipeline } = run()
 
     await pipeline.start()
     await pipeline.send({})
-    await pipeline.send({ facts: { review: { verdict: 'fail' } } })
-    expect(pipeline.state).toBe('fix')
 
-    // `fix_rounds >= node.max_fix_rounds` is what ends it.
-    expect(await pipeline.send({ facts: { fix_rounds: 2 } })).toEqual({
+    // The exhaustion check sits on the way *into* `fix`, which is what makes
+    // every fixer that runs also get reviewed. It used to sit on the way out,
+    // so the last fixer's work was never looked at: two phases in one run ended
+    // on a fixer reporting "all gates green, committed, tree clean" and were
+    // failed anyway.
+    expect(
+      await pipeline.send({ facts: { review: { verdict: 'fail' }, fix_rounds: 2 } }),
+    ).toEqual({
       kind: 'final',
       state: 'failed',
-      via: 't-fix-exhausted',
+      via: 't-review-exhausted',
     })
     expect(pipeline.status).toBe('final')
+  })
+
+  it('ends in failed when the gate is still red and the rounds are gone', async () => {
+    // The other door into `fix`, and the one a passing reviewer reaches. Left
+    // unguarded it was an endless loop: review → gate → fix → review → gate,
+    // with the budget counting up and nothing reading it.
+    const { pipeline } = run()
+
+    await pipeline.start()
+    await pipeline.send({})
+    await pipeline.send({ facts: { review: { verdict: 'pass' } } })
+
+    expect(await pipeline.send({ facts: { gate: { exit_code: 1 }, fix_rounds: 2 } })).toEqual({
+      kind: 'final',
+      state: 'failed',
+      via: 't-gate-exhausted',
+    })
   })
 
   it('respects a node overriding max_fix_rounds', async () => {
@@ -143,10 +166,15 @@ describe('standard-phase', () => {
       context: { node: { max_fix_rounds: 3 }, fix_rounds: 2 },
     })
     await pipeline.start()
+    // 2 < 3, so p4 still gets another round where p1 would have failed — and
+    // the override is read at the transition that decides it, which is now the
+    // failing review rather than the way out of `fix`.
     await pipeline.send({})
-    await pipeline.send({ facts: { review: { verdict: 'fail' } } })
-    // 2 < 3, so p4 still gets another round where p1 would have failed.
-    expect(await pipeline.send({})).toMatchObject({ state: 'review', via: 't-fix-retry' })
+    expect(await pipeline.send({ facts: { review: { verdict: 'fail' } } })).toMatchObject({
+      state: 'fix',
+      via: 't-review-fail',
+    })
+    expect(await pipeline.send({})).toMatchObject({ state: 'review', via: 't-fix-reviewed' })
   })
 })
 

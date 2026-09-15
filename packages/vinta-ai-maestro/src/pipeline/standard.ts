@@ -4,10 +4,29 @@
  *
  * ```
  * implement ──▶ review ──┬─ verdict=pass ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
- *                        │                          └─ exit≠0 ──▶ fix ──▶ review
- *                        └─ verdict=fail ──▶ fix ──▶ review
- * fix ── guard: fix_rounds >= node.max_fix_rounds ──▶ failed
+ *                        │                          ├─ exit≠0, rounds left ──▶ fix
+ *                        │                          └─ exit≠0, none left ──▶ failed
+ *                        ├─ verdict=fail, rounds left ──▶ fix ──▶ review
+ *                        └─ verdict=fail, none left ──▶ failed
  * ```
+ *
+ * **The budget is spent on the way *into* a fix, not on the way out of one.**
+ * It used to be the other way round: `fix` went straight to `failed` once the
+ * count was up, so the *last* fixer's work was never reviewed and never gated.
+ * Two phases in one run ended on a fixer reporting "all gates green, committed,
+ * tree clean" and were failed anyway — the work was done and nothing was ever
+ * asked to look at it. Every fix is reviewed now, and the review that follows
+ * the last one can still pass the phase.
+ *
+ * The cost is one extra review turn per exhausted phase. The alternative the
+ * report offered — run the gates on exhaustion and integrate if they are green
+ * — would merge a diff no reviewer ever approved, and gates catch what gates
+ * catch. The review is the thing standing between a plan and its merge, so the
+ * budget question belongs in front of the fixer rather than behind it.
+ *
+ * `max_fix_rounds` still means what it said: the number of fixers a phase may
+ * spend. `0` now means none at all, where before it let one run and then failed
+ * the phase regardless of what it did.
  *
  * The copy in `tests/fixtures/golden-workflow.json` is the same *graph* with
  * almost no effects: it is a schema fixture, and a fixture that ran agents
@@ -143,13 +162,42 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
   transitions: [
     { id: 't-implemented', from: 'implement', to: 'review' },
     { id: 't-review-pass', from: 'review', to: 'gate', guard: "review.verdict == 'pass'" },
-    { id: 't-review-fail', from: 'review', to: 'fix', guard: "review.verdict == 'fail'" },
+    // The budget is checked here, in front of the fixer, so that every fixer
+    // that does run is also reviewed. `max_fix_rounds: 2` allows two fixers:
+    // the count is of fixers already spent, so the third failing review is the
+    // one that ends the phase.
+    {
+      id: 't-review-fail',
+      from: 'review',
+      to: 'fix',
+      guard: "review.verdict == 'fail' && fix_rounds < node.max_fix_rounds",
+    },
+    {
+      id: 't-review-exhausted',
+      from: 'review',
+      to: 'failed',
+      guard: "review.verdict == 'fail' && fix_rounds >= node.max_fix_rounds",
+    },
     { id: 't-gate-pass', from: 'gate', to: 'integrate', guard: 'gate.exit_code == 0' },
-    { id: 't-gate-fail', from: 'gate', to: 'fix', guard: 'gate.exit_code != 0' },
-    // Evaluated on the way *out* of `fix`, by which time the fixer that just
-    // ran has been counted. `max_fix_rounds: 2` therefore allows two fixers.
-    { id: 't-fix-retry', from: 'fix', to: 'review', guard: 'fix_rounds < node.max_fix_rounds' },
-    { id: 't-fix-exhausted', from: 'fix', to: 'failed', guard: 'fix_rounds >= node.max_fix_rounds' },
+    // The same check, because this is the *other* door into `fix`. Guarding
+    // only the review side left a red gate under a passing reviewer with no
+    // exit at all: review → gate → fix → review → gate → fix, forever, with the
+    // budget counting up and nothing reading it.
+    {
+      id: 't-gate-fail',
+      from: 'gate',
+      to: 'fix',
+      guard: 'gate.exit_code != 0 && fix_rounds < node.max_fix_rounds',
+    },
+    {
+      id: 't-gate-exhausted',
+      from: 'gate',
+      to: 'failed',
+      guard: 'gate.exit_code != 0 && fix_rounds >= node.max_fix_rounds',
+    },
+    // Unconditional, and that is the fix: a fixer's work always goes back to a
+    // reviewer, which is the only thing that can say it worked.
+    { id: 't-fix-reviewed', from: 'fix', to: 'review' },
     { id: 't-integrated', from: 'integrate', to: 'done' },
   ],
   initialStateIds: ['implement'],

@@ -69,11 +69,23 @@ export class AgentLeaseBroker {
     this.#clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer))
   }
 
-  async acquire(resources: readonly string[], holderNode: string): Promise<AgentLeaseGrant> {
+  /**
+   * `signal` leaves the queue rather than cancelling a grant. The endpoint uses
+   * it to answer a waiting client on a short cycle instead of holding one HTTP
+   * request open for the whole wait — see `AcquireAborted`.
+   */
+  async acquire(
+    resources: readonly string[],
+    holderNode: string,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<AgentLeaseGrant> {
     if (this.#closed) throw new Error('agent lease broker is closed')
 
     const canonical = [...new Set(resources)].sort()
-    const lease = await this.#pools.acquire(canonical)
+    const lease = await this.#pools.acquire(
+      canonical,
+      options.signal === undefined ? {} : { signal: options.signal },
+    )
     if (this.#closed) {
       lease.release()
       throw new Error('agent lease broker is closed')

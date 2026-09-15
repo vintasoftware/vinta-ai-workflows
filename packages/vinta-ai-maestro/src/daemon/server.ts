@@ -69,6 +69,8 @@ export interface DaemonOptions {
    * wired no harness, and then the endpoint refuses instead of pretending.
    */
   readonly monitorFor?: (runId: string) => Monitor | null
+  /** Passed through to the API: how long a lease request waits before `202`. */
+  readonly leaseWaitMs?: number
 }
 
 export interface Daemon {
@@ -103,6 +105,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     runs,
     ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
     ...(options.monitorFor === undefined ? {} : { monitorFor: options.monitorFor }),
+    ...(options.leaseWaitMs === undefined ? {} : { leaseWaitMs: options.leaseWaitMs }),
   })
   const stream = new EventStream(options.journal, options.pollMs ?? DEFAULT_POLL_MS)
   const sockets = new WebSocketServer({ noServer: true })

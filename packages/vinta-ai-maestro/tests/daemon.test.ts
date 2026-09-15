@@ -197,6 +197,8 @@ async function rig(
     readonly host?: string
     readonly workflow?: Workflow
     readonly uiDir?: string
+    /** Shortened so a test can reach the "still queued" answer in milliseconds. */
+    readonly leaseWaitMs?: number
   } = {},
 ): Promise<Rig> {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-daemon-'))
@@ -213,6 +215,7 @@ async function rig(
     ...(options.host === undefined ? {} : { host: options.host }),
     ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
     pollMs: 5,
+    ...(options.leaseWaitMs === undefined ? {} : { leaseWaitMs: options.leaseWaitMs }),
     warn: (message) => warnings.push(message),
     // A monitor over the mock harness: the endpoint's contract is that it
     // answers from the journal, which is testable; what a real model would say
@@ -614,6 +617,32 @@ describe('agent-held leases', () => {
     await call(r.daemon, `/api/runs/${RUN_ID}/leases/${second.leaseId}`, { method: 'DELETE' })
     expect(r.pools.held('test-suite')).toBe(0)
     expect(r.journal.leases()).toEqual([])
+  })
+
+  /**
+   * A wait longer than one hop is answered rather than held. The client loops;
+   * what matters here is that the daemon lets go of its own queue slot, or the
+   * next grant goes to a request that has already gone away.
+   */
+  it('answers "still queued" instead of holding the request open', async () => {
+    const r = await rig({ leaseWaitMs: 20 })
+    const held = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a' },
+    })
+    expect(held.status).toBe(201)
+
+    const queued = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b' },
+    })
+
+    expect(queued.status).toBe(202)
+    expect(queued.body).toEqual({ waiting: true })
+    // And nothing of `b`'s is left in the queue: the slot that frees next
+    // belongs to whoever is still asking for it.
+    expect(r.pools.waiting).toBe(0)
+    expect(r.pools.held('test-suite')).toBe(1)
   })
 
   it('renews a live lease and refuses lane self-deadlocks and unknown holders', async () => {

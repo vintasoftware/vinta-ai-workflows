@@ -309,6 +309,103 @@ describe('vinta-ai-maestro simulate', () => {
 })
 
 describe('vinta-ai-maestro with', () => {
+  /** The daemon connection a turn started by `run` carries. Restored after. */
+  const leaseEnv = async (body: () => Promise<void>): Promise<void> => {
+    const prior = {
+      [MAESTRO_URL_ENV]: process.env[MAESTRO_URL_ENV],
+      [MAESTRO_TOKEN_ENV]: process.env[MAESTRO_TOKEN_ENV],
+      [MAESTRO_RUN_ENV]: process.env[MAESTRO_RUN_ENV],
+      [MAESTRO_NODE_ENV]: process.env[MAESTRO_NODE_ENV],
+    }
+    Object.assign(process.env, {
+      [MAESTRO_URL_ENV]: 'http://127.0.0.1:4321',
+      [MAESTRO_TOKEN_ENV]: 'lease-secret',
+      [MAESTRO_RUN_ENV]: 'run-1',
+      [MAESTRO_NODE_ENV]: 'phase-a',
+    })
+    try {
+      await body()
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }
+
+  const grant = () =>
+    Response.json({ leaseId: 'lease-1', expiresAt: Date.now() + 30_000, ttlMs: 30_000 }, { status: 201 })
+
+  /**
+   * Agents were seen taking a semaphore, being refused, and then running the
+   * command anyway — which is the stampede the pool exists to prevent, arrived
+   * at by an agent behaving reasonably. The refusal it saw came from a wait that
+   * gave up: one held HTTP request, and Node's own fetch stops waiting for a
+   * response after about five minutes, which a test suite behind a capacity-1
+   * semaphore beats regularly.
+   */
+  it('waits through "still queued" instead of failing', async () => {
+    await leaseEnv(async () => {
+      const posts: number[] = []
+      let attempts = 0
+      const request: typeof fetch = async (_input, init) => {
+        if (init?.method !== 'POST') return Response.json({ ok: true })
+        attempts += 1
+        posts.push(attempts)
+        // Queued behind another lane three times over, then granted.
+        return attempts < 4 ? Response.json({ waiting: true }, { status: 202 }) : grant()
+      }
+      const io = recorder()
+      const commands: string[] = []
+
+      const code = await withCommand(['test-suite', '--', 'pnpm', 'test'], io.io, {
+        fetch: request,
+        run: async (command) => {
+          commands.push(command)
+          return 0
+        },
+      })
+
+      expect(code).toBe(0)
+      // The command ran once, after the wait — not once per attempt, and not
+      // instead of waiting.
+      expect(commands).toEqual(['pnpm test'])
+      expect(posts).toHaveLength(4)
+      // And the turn says it is waiting, so a transcript shows a wait rather
+      // than a silence.
+      expect(io.all().join('\n')).toContain('waiting for "test-suite"')
+    })
+  })
+
+  it('never runs the command when the lease is refused for good', async () => {
+    // The refusals waiting cannot fix — a resource this run does not declare is
+    // the one an agent is most likely to reach for.
+    await leaseEnv(async () => {
+      const request: typeof fetch = async (_input, init) =>
+        init?.method === 'POST'
+          ? Response.json({ error: 'invalid_resource', issues: null }, { status: 400 })
+          : Response.json({ ok: true })
+      const io = recorder()
+      const commands: string[] = []
+
+      const code = await withCommand(['nope', '--', 'pnpm', 'test'], io.io, {
+        fetch: request,
+        run: async (command) => {
+          commands.push(command)
+          return 0
+        },
+      })
+
+      expect(code).toBe(FAILED)
+      expect(commands).toEqual([])
+      // The refusal names what to change, and says what not to do about it —
+      // the rule has to travel with the error, not only sit in a prompt the
+      // agent read twenty minutes earlier.
+      expect(io.err.join('\n')).toContain('declares no semaphore called "nope"')
+      expect(io.err.join('\n')).toContain('Do not run the command without the lease')
+    })
+  })
+
   it('acquires, runs, and releases while keeping the daemon token off output', async () => {
     const prior = {
       url: process.env[MAESTRO_URL_ENV],

@@ -200,7 +200,13 @@
           "id": "t-review-fail",
           "from": "review",
           "to": "fix",
-          "guard": "review.verdict == 'fail'"
+          "guard": "review.verdict == 'fail' && fix_rounds < node.max_fix_rounds"
+        },
+        {
+          "id": "t-review-exhausted",
+          "from": "review",
+          "to": "failed",
+          "guard": "review.verdict == 'fail' && fix_rounds >= node.max_fix_rounds"
         },
         {
           "id": "t-gate-pass",
@@ -212,19 +218,18 @@
           "id": "t-gate-fail",
           "from": "gate",
           "to": "fix",
-          "guard": "gate.exit_code != 0"
+          "guard": "gate.exit_code != 0 && fix_rounds < node.max_fix_rounds"
         },
         {
-          "id": "t-fix-retry",
-          "from": "fix",
-          "to": "review",
-          "guard": "fix_rounds < node.max_fix_rounds"
-        },
-        {
-          "id": "t-fix-exhausted",
-          "from": "fix",
+          "id": "t-gate-exhausted",
+          "from": "gate",
           "to": "failed",
-          "guard": "fix_rounds >= node.max_fix_rounds"
+          "guard": "gate.exit_code != 0 && fix_rounds >= node.max_fix_rounds"
+        },
+        {
+          "id": "t-fix-reviewed",
+          "from": "fix",
+          "to": "review"
         },
         {
           "id": "t-integrated",

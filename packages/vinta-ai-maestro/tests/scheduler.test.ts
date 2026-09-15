@@ -552,6 +552,14 @@ const FIXES = {
   finalStateIds: ['done'],
 }
 
+/** `FIXES`, but the exhausted budget ends the phase instead of completing it. */
+const FIX_THEN_FAIL = {
+  ...FIXES,
+  states: FIXES.states.map((state) =>
+    state.id === 'done' ? { ...state, data: { outcome: 'failed' } } : state,
+  ),
+}
+
 function makeWorkflow(
   nodes: readonly Record<string, unknown>[],
   options: {
@@ -581,6 +589,7 @@ function makeWorkflow(
       reuse: REUSE,
       slots: SLOTS,
       fixes: FIXES,
+      'fix-then-fail': FIX_THEN_FAIL,
     },
   })
 }
@@ -2176,6 +2185,61 @@ describe('crew', () => {
  * observable: a node that recovered would prove the plumbing once, while one
  * that fails every time can be asked, answered, and asked again.
  */
+/**
+ * `fixRounds` was set to 0 when a node was created and never again. So a phase
+ * that spent its whole budget on attempt 1 started attempt 2 already exhausted:
+ * one review, one fix, and the exhaustion transition fired straight away.
+ * Observed with `max_fix_rounds: 4` — the retry got a single round before the
+ * operator was asked about it again, forty seconds standing in for four rounds
+ * of work.
+ */
+describe('the fix budget on a second attempt', () => {
+  const phase = () =>
+    makeWorkflow([{ ...node('a'), max_fix_rounds: 2 }], { pipeline: 'fix-then-fail' })
+
+  it('starts over rather than inheriting the count that ended attempt one', async () => {
+    const r = rig(phase(), { onFailure: 'ask' })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+    // One implementer plus two fixers: the budget, spent.
+    expect(r.adapter.spawned).toHaveLength(3)
+
+    r.scheduler.answer('a', { human: { answer: 'retry' } })
+    // Waited on by spawn count rather than by status: answering does not change
+    // the status synchronously, so waiting for `awaiting_human` would match the
+    // park the node was just told to leave. Three more spawns, not one — a node
+    // that inherited the count would go from its implementer straight to the
+    // exhaustion transition, and this wait would time out at four.
+    await until(
+      () => r.adapter.spawned.length >= 6,
+      'the second attempt to spend a fresh budget',
+    )
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second offer')
+
+    expect(r.adapter.spawned).toHaveLength(6)
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+    expectDrained(r)
+  })
+
+  it('starts over on an automatic retry too', async () => {
+    // Same reset, the other door into it — and the one the default policy uses,
+    // so it is the one an operator hits without choosing to.
+    const r = rig(phase(), { onFailure: 'retry', retries: 1 })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after the retry')
+
+    expect(r.adapter.spawned).toHaveLength(6)
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+    expectDrained(r)
+  })
+})
+
 describe('a failed phase the operator can retry', () => {
   const ROSTER = {
     junior: { role: 'implementer', tier: 1, model: 'cheap' },

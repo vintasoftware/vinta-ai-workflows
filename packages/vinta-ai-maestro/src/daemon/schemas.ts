@@ -100,6 +100,16 @@ export const AgentLeaseGrantSchema = z.strictObject({
 
 export type AgentLeaseGrantResponse = z.infer<typeof AgentLeaseGrantSchema>
 
+/**
+ * The 202 body: still queued, ask again. Distinct from every failure shape on
+ * purpose — a client must be able to tell "wait" from "no", because the two
+ * deserve opposite reactions and conflating them is what sent agents around
+ * the lease entirely.
+ */
+export const AgentLeaseWaitingSchema = z.strictObject({ waiting: z.literal(true) })
+
+export type AgentLeaseWaitingResponse = z.infer<typeof AgentLeaseWaitingSchema>
+
 export const RunSummarySchema = z.strictObject({
   runId: z.string(),
   workflowId: z.string(),
