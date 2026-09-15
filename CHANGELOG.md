@@ -318,6 +318,89 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A retried phase keeps the commits the attempt before it made.** A failed
+  phase re-enters its pipeline at the initial state, which runs `git_branch`
+  again — and `checkout -B` moves an existing branch unconditionally, so attempt
+  2 began by resetting attempt 1's work to base. The files left the worktree,
+  the next reviewer correctly reported "phase not implemented at all", and the
+  fix budget burned re-implementing from nothing until the operator was asked. A
+  phase that produced real commits was guaranteed to lose them.
+
+  "Cold" was always meant to describe the agent's *session*, not its branch —
+  and the default policy targets environmental failures, which is exactly when
+  the previous attempt's code is worth keeping. A resumed branch is checked out,
+  never rebased onto a base that moved: a conflict there would fail the retry
+  during its setup, before the agent that might resolve it has run. A branch
+  that committed nothing is still moved up. Whether this is a second attempt is
+  read from the journal rather than from the ref, because a phase branch's name
+  carries the plan id and not the run id — an identically named branch left by
+  an earlier run must still be cut fresh. `node_assigned` now records
+  `previous_head`, so a reset that does happen is visible in the run rather than
+  only in a reflog.
+
+- **A phase is judged on commits, and the prompts finally say so.** An
+  implementer ran four sessions, reported `SUCCESS` with a green inner loop, and
+  never ran `git commit`: its deliverables were untracked files. The reviewer
+  reads the committed diff, so it saw an empty one and reported "not implemented
+  at all"; the fixer re-implemented, also without committing; the rounds ran out
+  and the lane was recycled over the files. Every instruction that agent had was
+  *about* committing — "never commit while a gate is red" — and none of them
+  said it had to.
+
+  Implementers and fixers, cold and continued, are now told that the phase is
+  reviewed and merged from commits on its branch, that an uncommitted file does
+  not exist as far as the run is concerned, and that the turn is not over until
+  `git status --porcelain` is empty of their work — staged by explicit path,
+  never `git add -A`, because a lane holds local files that are not theirs to
+  commit. The reviewer reads the working tree as well as the diff: a full tree
+  with an empty diff is a real failure and is *not* "not implemented", and the
+  difference decides whether the fixer writes the code again or simply commits
+  it.
+
+- **A recycled lane no longer deletes work nobody committed.** Both recycle
+  paths throw the working tree away. The tree is now committed first — with
+  plumbing, and **off the branch**, under `refs/vinta-ai-maestro/wip/`. On the
+  branch was the first implementation, and it was wrong: a lane's dirty tree
+  holds gate artifacts as often as deliverables, and a phase branch is the base
+  of its dependents, so one gate's scratch file reached the next phase and
+  failed a gate for a reason nothing in that phase caused. Nothing merges,
+  nothing reaches a dependent, and one `git restore --source <ref>` gets a file
+  back. Where the rescue itself fails, the recycle refuses and names the paths.
+
+  The retry question says how much is at stake: commits are kept, and *N*
+  uncommitted files in the lane will be set aside.
+
+- **`project.hooks: skip`.** Committing is not optional any more, and a
+  `language: system` pre-commit chain reads a never-committed-in worktree as a
+  fresh machine — one project's hooks built a 510 MB virtualenv before allowing
+  a first commit, per lane, after four attempts and a two-minute timeout. Set
+  per worktree, so the operator's own checkout keeps its hooks, and opt-in,
+  because hooks are usually there for a reason.
+
+- **`doctor` knows when a project needs docker compose.** It assembled its
+  options without a `project`, so `needsCompose` was handed `undefined` on every
+  invocation and reported "not required by this project" for a
+  compose-delivered database — and `run`'s own preflight did the same. A check
+  nothing can reach is worse than an absent one: it reads as a pass.
+
+- **A failing `setup_cmd` says why.** It carried a lane name and nothing else,
+  so the operator saw "could not provision the lane pool under …" and had to
+  replay the command by hand with the lane environment rebuilt to find a missing
+  settings module. It carries the exit code and a bounded stderr tail now — the
+  same class of thing as a harness refusal's own explanation, which this package
+  already decided to carry after an afternoon lost to the same silence.
+
+- **A lane the executor was not given is refused, not guessed.** It fell back to
+  the right directory with an *empty environment* — a gate running against the
+  wrong compose project and no forked connection string, with nothing anywhere
+  saying a lane was missing.
+
+- **The monitor reads, and does not run.** Its shell has no lane environment, so
+  the project's own commands run from it contend with the lanes instead of
+  observing them. One reported "the final gate fails on a port conflict" when no
+  gate had run at all, and the operator believed it. Gate results come from the
+  journal and the gate logs.
+
 - **`serve --host 0.0.0.0` prints a URL another machine can open.** Binding
   every interface made the server report the wildcard back, so the line printed
   for the operator to open — and share — was `http://0.0.0.0:<port>`, which
