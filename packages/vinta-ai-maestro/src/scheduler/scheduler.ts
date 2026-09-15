@@ -81,6 +81,7 @@ import type {
   OperatorOp,
 } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
+import { attribute, type Attribution } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
@@ -1613,9 +1614,17 @@ export class Scheduler {
     // operation can never reach a session whose stream has already ended.
     state.live = { session: outcome.session, adapter }
     const withdraw = this.#offer(state, outcome.session, adapter, cwd, plan.slot)
+    // Every spawn on this node appends to the same file, whatever its role, so
+    // without this the implementer's output, the reviewer's and three fix
+    // rounds' are one undifferentiated stream. Both facts are already here and
+    // were simply not written down (`journal/transcript.ts`).
+    const by: Attribution = {
+      role: typeof params['role'] === 'string' ? params['role'] : 'agent',
+      ...(plan.slot === null ? {} : { slot: plan.slot }),
+    }
     try {
       for await (const event of outcome.session.events) {
-        journal.appendTranscript(runId, state.node.id, event)
+        journal.appendTranscript(runId, state.node.id, { ...event, by: attribute(event, by) })
         if (event.type === 'session_started') {
           this.#assign(state, { session_id: event.sessionId })
           // The authoritative id. `AgentSession.id` is what the adapter knew

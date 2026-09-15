@@ -46,7 +46,7 @@
  * whole kind at once.
  */
 import { ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { cn } from 'vinta-design-system/lib/utils'
 import { Button } from 'vinta-design-system/ui/button'
 import { ToneDot } from './Chip.tsx'
@@ -255,17 +255,32 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
               if (hidden > 0 && box.scrollTop <= SCROLL_MARGIN) grow()
             }}
           >
-            {rows.map((row) => {
+            {rows.map((row, index) => {
               const shape = row.shape
-              if (shape === 'prose') return <Entry key={row.at} row={row} open />
-              const shown = overrides[row.at] ?? open[shape]
+              // The band, not a per-row badge. A phase is an implementer, a
+              // reviewer and three fix rounds in one file, and what a reader
+              // needs is the *boundary* — where one agent stopped and the next
+              // started — which a label repeated on ninety consecutive rows
+              // states ninety times and shows once.
+              const turn = row.role !== null && row.role !== rows[index - 1]?.role
               return (
-                <Entry
-                  key={row.at}
-                  row={row}
-                  open={shown}
-                  onToggle={() => setOverrides((current) => ({ ...current, [row.at]: !shown }))}
-                />
+                <Fragment key={row.at}>
+                  {turn && <Author role={row.role as string} first={index === 0} />}
+                  {shape === 'prose' ? (
+                    <Entry row={row} open />
+                  ) : (
+                    <Entry
+                      row={row}
+                      open={overrides[row.at] ?? open[shape]}
+                      onToggle={() =>
+                        setOverrides((current) => ({
+                          ...current,
+                          [row.at]: !(current[row.at] ?? open[shape]),
+                        }))
+                      }
+                    />
+                  )}
+                </Fragment>
               )
             })}
           </ol>
@@ -355,7 +370,11 @@ function Entry({
   if (row.shape === 'prose') {
     return (
       <li data-entry={row.at} data-kind={view.kind} data-shape="prose" data-open="" className={ROW}>
-        <p className="entry-head flex items-center gap-2 text-[13px]">{attribution}</p>
+        {/* An agent's answer under a band that already reads REVIEWER needs no
+            head at all; `transcript.ts` decides that and empties the label. */}
+        {(view.label !== '' || view.tone !== null) && (
+          <p className="entry-head flex items-center gap-2 text-[13px]">{attribution}</p>
+        )}
         <p className="entry-body text-sm">{view.body}</p>
       </li>
     )
@@ -417,3 +436,46 @@ function Entry({
 
 /** Shared by every row so the dividers land on an even rhythm. */
 const ROW = 'flex flex-col gap-0.5 py-2.5 first:pt-0 last:pb-0'
+
+/**
+ * Where one agent stops and the next starts.
+ *
+ * A phase's transcript is an implementer, a reviewer, and a fix round or three,
+ * appended to one file in order — and until the daemon started recording who
+ * wrote each line there was no way to tell, mid-scroll, which of them you were
+ * reading. This is that boundary, and only the boundary: a badge on every row
+ * would say the same thing ninety times running.
+ *
+ * `role` is whatever the daemon wrote (`journal/transcript.ts` explains why it
+ * is a string and not a union), so a role this build has never heard of shows
+ * as itself rather than as nothing.
+ */
+function Author({ role, first }: { readonly role: string; readonly first: boolean }) {
+  return (
+    <li
+      data-turn={role}
+      className={cn(
+        'flex items-center gap-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground',
+        first ? 'pt-0' : 'pt-3',
+      )}
+    >
+      <span className="h-px flex-none basis-3 bg-border" aria-hidden="true" />
+      {ROLE_NAMES[role] ?? role}
+      <span className="h-px min-w-0 flex-1 bg-border" aria-hidden="true" />
+    </li>
+  )
+}
+
+/** The roles the shipped pipeline and the daemon produce, in words. */
+const ROLE_NAMES: Readonly<Record<string, string>> = {
+  // §7's rule, in the band: the operator's steering is never filed under the
+  // agent that received it, even though the adapter echoes it back on that
+  // agent's own event stream.
+  operator: 'You',
+  implementer: 'Implementer',
+  reviewer: 'Reviewer',
+  fixer: 'Fixer',
+  'conflict-fixer': 'Conflict fixer',
+  gate: 'Gate',
+  monitor: 'Monitor',
+}

@@ -78,6 +78,7 @@ import { computeWaves } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
 import type { Integrator } from '../integration/integrator.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
+import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readVerdict } from '../prompts/index.ts'
@@ -274,6 +275,20 @@ export class RunEffectExecutor implements EffectExecutor {
         nodeId,
         type: 'gate_result',
         payload: { gate: gateId, exit_code: exitCode, status: result.status },
+      })
+      // And again in the node's transcript, which is where somebody reading
+      // what happened to this phase actually looks. The gates were the one
+      // thing missing from it: four agents' output in order, and no sign of
+      // the thing that judged them. Identifiers and an exit code only — the
+      // gate's output stays in `logPath`'s file, which the node endpoint
+      // already serves (§11).
+      this.#options.journal.appendTranscript(this.#options.runId, nodeId, {
+        type: 'gate_run',
+        gate: gateId,
+        exitCode,
+        status: result.status,
+        cached,
+        by: { role: GATE_ROLE },
       })
       last = {
         id: gateId,

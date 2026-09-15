@@ -6,23 +6,29 @@
  * copies whatever the adapter emitted — so the narrowing has to happen
  * somewhere, and this is the only place that knows what a chat row looks like.
  *
- * Two rules:
+ * Three rules:
  *
- * - **The union is `AgentEvent`'s, not a second opinion of it.** `KINDS` is
+ * - **The union is the daemon's, not a second opinion of it.** `AGENT_KINDS` is
  *   checked against `AgentEvent['type']` in both directions: `satisfies`
  *   rejects a kind that does not exist, and `ENTRY_KINDS_COVERED` fails to
  *   compile when a kind exists and has no member here. A harness that grows an
- *   event type breaks this file rather than rendering as a blank row.
+ *   event type breaks this file rather than rendering as a blank row. The same
+ *   holds for the kinds the daemon writes itself (`EXTRA_KINDS`).
  * - **An entry that does not parse is still a row.** A transcript is the
  *   record of a run; silently dropping a line the UI did not recognise would
  *   make the record lie. It renders as an unreadable entry, and its content is
  *   not guessed at.
+ * - **An entry with no attribution is still a row.** `by` is a sibling key the
+ *   daemon only started writing recently, so every line of every earlier run
+ *   lacks it. Those render exactly as they always did, with `role` null — an
+ *   old transcript reads as a transcript, not as an error.
  *
  * Nothing here logs. Transcript text is repository content (§11) and this
  * module's only output is a value handed to a component that renders it.
  */
 import { z } from 'zod'
 import type { AgentEvent } from '../../src/harness/adapter.ts'
+import type { TranscriptEntry } from '../../src/journal/transcript.ts'
 import type { Tone } from './status.ts'
 
 /** Mirrors `daemon/schemas.ts`'s exhaustiveness check, in the same shape. */
@@ -30,7 +36,7 @@ type Covers<Union extends string, Listed extends string> = [Exclude<Union, Liste
   ? true
   : never
 
-const KINDS = [
+const AGENT_KINDS = [
   'session_started',
   'user_message',
   'assistant_text',
@@ -43,6 +49,20 @@ const KINDS = [
   'error',
   'session_ended',
 ] as const satisfies readonly AgentEvent['type'][]
+
+/**
+ * Kinds the daemon writes that no harness emits (`journal/transcript.ts`).
+ *
+ * Split from the list above rather than merged into it, so the two-way check
+ * survives: `AGENT_KINDS` still cannot name a harness event that does not
+ * exist, and `ENTRY_KINDS_COVERED` below still fails to compile when one exists
+ * with no member here. Folding them together would have made both halves mean
+ * "some kind, somewhere", which is not a check.
+ */
+const EXTRA_KINDS = ['gate_run'] as const satisfies readonly Exclude<
+  TranscriptEntry['type'],
+  AgentEvent['type']
+>[]
 
 const EntrySchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('session_started'), sessionId: z.string() }),
@@ -66,18 +86,41 @@ const EntrySchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('error'), message: z.string() }),
   z.object({ type: z.literal('session_ended'), result: z.enum(['ok', 'error', 'interrupted']) }),
+  z.object({
+    type: z.literal('gate_run'),
+    gate: z.string(),
+    exitCode: z.number(),
+    status: z.string(),
+    cached: z.boolean(),
+  }),
 ])
 
 type Entry = z.infer<typeof EntrySchema>
 
 /**
- * `true` only while every `AgentEvent` kind has a member above. A new kind
- * makes this `never`, and the assignment stops compiling.
+ * `true` only while every kind a transcript can hold has a member above. A new
+ * one makes this `never`, and the assignment stops compiling.
  */
-export const ENTRY_KINDS_COVERED: Covers<AgentEvent['type'], Entry['type']> = true
+export const ENTRY_KINDS_COVERED: Covers<TranscriptEntry['type'], Entry['type']> = true
 
 /** Also exported so a test can name the kinds without restating them. */
-export const TRANSCRIPT_KINDS: readonly AgentEvent['type'][] = KINDS
+export const TRANSCRIPT_KINDS: readonly TranscriptEntry['type'][] = [...AGENT_KINDS, ...EXTRA_KINDS]
+
+/**
+ * Who wrote the line, when the daemon recorded it.
+ *
+ * Parsed separately from the event because it is a *sibling* of the event's own
+ * keys rather than part of any one kind's shape — see `journal/transcript.ts`
+ * for why it is stored that way. Absent on every line written before this
+ * existed, which is the case this has to survive rather than reject.
+ */
+const BySchema = z.object({ role: z.string(), slot: z.string().optional() })
+
+function attribution(raw: unknown): { role: string; slot: string | null } | null {
+  if (typeof raw !== 'object' || raw === null || !('by' in raw)) return null
+  const parsed = BySchema.safeParse(raw.by)
+  return parsed.success ? { role: parsed.data.role, slot: parsed.data.slot ?? null } : null
+}
 
 /** Who said it. The operator's own steering is never attributed to the agent. */
 export type Author = 'agent' | 'operator' | 'tool' | 'system'
@@ -113,6 +156,14 @@ export interface EntryView {
   readonly body: string
   readonly tone: Tone | null
   readonly shape: Shape
+  /**
+   * Which agent produced this — `implementer`, `reviewer`, `fixer`, `gate`,
+   * `monitor`. Null on a line written before the daemon recorded it, which is
+   * every line of every run before this shipped.
+   */
+  readonly role: string | null
+  /** The session slot (§15), where the turn ran on one. */
+  readonly slot: string | null
 }
 
 const AUTHOR_LABELS: Readonly<Record<Author, string>> = {
@@ -123,6 +174,31 @@ const AUTHOR_LABELS: Readonly<Record<Author, string>> = {
 }
 
 export function present(raw: unknown): EntryView {
+  const view = build(raw)
+  const by = attribution(raw)
+  if (by === null) return view
+  return { ...view, role: by.role, slot: by.slot, label: ATTRIBUTED[view.kind] ?? view.label }
+}
+
+/**
+ * What a row calls itself once something above it has already named the author.
+ *
+ * Only the labels that were *only* ever the author: an unattributed
+ * `assistant_text` has to say "Agent" because nothing else would, and an
+ * attributed one under a band reading REVIEWER spends its first line on the
+ * word "Agent". `Tool · Bash` and `Session started` are not in here because
+ * they describe the event rather than who produced it, and stay useful under
+ * any band.
+ *
+ * Keyed on the event kind rather than matched against the label text, so this
+ * cannot start silently doing nothing when a label is reworded.
+ */
+const ATTRIBUTED: Readonly<Record<string, string>> = {
+  assistant_text: '',
+  thinking: 'thinking',
+}
+
+function build(raw: unknown): EntryView {
   const parsed = EntrySchema.safeParse(raw)
   if (!parsed.success) {
     return {
@@ -133,6 +209,8 @@ export function present(raw: unknown): EntryView {
       body: 'This entry did not match any known agent event.',
       tone: null,
       shape: 'prose',
+      role: null,
+      slot: null,
     }
   }
   const entry = parsed.data
@@ -189,6 +267,16 @@ export function present(raw: unknown): EntryView {
       return row(entry.type, 'system', entry.message, 'error', 'Error')
     case 'session_ended':
       return row(entry.type, 'system', entry.result, entry.result === 'ok' ? 'ok' : 'error', 'Session ended')
+    // Prose, and never folded: a gate's verdict is the thing the rest of the
+    // phase turns on, and the row is three identifiers long anyway.
+    case 'gate_run':
+      return row(
+        entry.type,
+        'system',
+        `${entry.status}, exit ${entry.exitCode}${entry.cached ? ' — cached, not re-run' : ''}`,
+        entry.exitCode === 0 ? 'ok' : 'error',
+        `Gate \u00b7 ${entry.gate}`,
+      )
   }
 }
 
@@ -209,6 +297,8 @@ function row(
     body: text,
     tone,
     shape: options.shape ?? 'prose',
+    role: null,
+    slot: null,
   }
 }
 
@@ -230,11 +320,13 @@ export function fold(entries: readonly unknown[], offset: number): readonly Row[
   for (const [index, raw] of entries.entries()) {
     const view = present(raw)
     const last = rows.at(-1)
-    if (view.shape === 'thinking' && last?.shape === 'thinking') {
+    // Same shape *and* same author. Two agents thinking in sequence is two
+    // thoughts, and merging them would attribute half of one to the other.
+    if (view.shape === 'thinking' && last?.shape === 'thinking' && last.role === view.role) {
       last.views.push(view)
       continue
     }
-    rows.push({ at: offset + index, shape: view.shape, views: [view] })
+    rows.push({ at: offset + index, shape: view.shape, role: view.role, views: [view] })
   }
   return rows
 }
@@ -244,6 +336,8 @@ export interface Row {
   /** Absolute index of the first entry in the row. The React key. */
   readonly at: number
   readonly shape: Shape
+  /** Whose row it is, so the list can say when the author changes. */
+  readonly role: string | null
   readonly views: EntryView[]
 }
 
