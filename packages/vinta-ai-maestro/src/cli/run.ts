@@ -66,7 +66,13 @@ import { gitLines } from '../integration/git.ts'
 import { Integrator, type WaveResult } from '../integration/integrator.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
-import { LaneEnvFileError, LanePool, LaneSetupError } from '../lanes/pool.ts'
+import {
+  LaneEnvFileError,
+  LanePool,
+  LanePrepareError,
+  LaneSetupError,
+  prepareInfrastructure,
+} from '../lanes/pool.ts'
 import { laneHolders } from '../scheduler/crew.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import {
@@ -208,6 +214,24 @@ export async function runCommand(
   // run that cannot possibly work says so now, in one report, rather than
   // failing three phases in. A `warn` is a degraded run, not a stopped one.
   if (deps.executor === undefined) {
+    // **Before the preflight, not after it.** The hook's job is to make the
+    // shared servers reachable, and the preflight's new job is to check that
+    // they are — in the other order the check reports the world as it was and a
+    // project that can bring its own stack up still fails to start.
+    const project = projectSpec(workflow.project)
+    try {
+      await prepareInfrastructure(project, bind.repoPath)
+    } catch (error) {
+      // Nothing to unwind: this is before the port, the journal and the first
+      // worktree, which is the whole point of its position.
+      io.err(
+        error instanceof LanePrepareError
+          ? `vinta-ai-maestro: ${error.message}`
+          : 'vinta-ai-maestro: the project’s prepare_cmd could not be run.',
+      )
+      return FAILED
+    }
+
     const report = await runDoctor({
       workflow,
       repoPath: bind.repoPath,
@@ -216,7 +240,7 @@ export async function runCommand(
       // false, so a workflow with a compose-delivered database was preflighted
       // as though docker were irrelevant to it and the missing binary was
       // discovered by the first lane that tried to boot a stack.
-      project: projectSpec(workflow.project),
+      project,
       ...deps.doctor,
     })
     if (!report.ok) {

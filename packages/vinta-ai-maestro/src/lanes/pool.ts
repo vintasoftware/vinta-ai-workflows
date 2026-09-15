@@ -167,6 +167,53 @@ export class LaneSetupError extends Error {
   }
 }
 
+/** The project's `prepare_cmd` failed, with the same detail a setup failure has. */
+export class LanePrepareError extends Error {
+  constructor(
+    readonly exitCode: number | null,
+    readonly detail: string,
+  ) {
+    const code = exitCode === null ? 'was killed' : `exited ${exitCode}`
+    super(
+      `the project's prepare_cmd ${code} — the shared servers this run needs are not up` +
+        (detail === '' ? '' : `\n${detail}`),
+    )
+    this.name = 'LanePrepareError'
+  }
+}
+
+/**
+ * Makes the shared servers a run depends on reachable, before anything needs
+ * them.
+ *
+ * A project whose databases are `delivery: external` and whose services point
+ * at one Redis has no long-lived containers of its own — which is the shape the
+ * schema recommends, and it makes some *other* stack a hard dependency of every
+ * run. Nothing in this package could bring that up or check it.
+ *
+ * `setup_cmd` looks like the place and is not: it runs per lane, and by then
+ * the template database has already been created on a server that had to be up
+ * for `createdb` to work. So this runs earlier than everything — earlier even
+ * than the preflight, so that `doctor`'s reachability check is checking the
+ * world this command just made rather than the one before it.
+ *
+ * Standalone rather than a method, because its first caller needs it before a
+ * pool exists. `LanePool.recycle` calls it too: a server that died mid-run is
+ * then restored at the next lane hand-off instead of failing every phase after
+ * it.
+ */
+export async function prepareInfrastructure(
+  project: Pick<ProjectSpec, 'prepareCmd'>,
+  repoPath: string,
+): Promise<void> {
+  if (project.prepareCmd === undefined) return
+  try {
+    await sh(project.prepareCmd, repoPath, {})
+  } catch (error) {
+    throw new LanePrepareError(exitCodeOf(error), stderrTail(error))
+  }
+}
+
 /** The last of a failed child's stderr, bounded, or '' where it said nothing. */
 function stderrTail(error: unknown): string {
   const raw = (error as { stderr?: unknown } | null)?.stderr
@@ -191,6 +238,11 @@ export interface ProjectSpec {
   readonly envFiles?: readonly string[]
   /** The project's own idempotent lane-setup command, run inside the lane. */
   readonly setupCmd?: string
+  /**
+   * Run in the repository root before anything a run creates, to make the
+   * shared servers reachable. See `prepareInfrastructure`.
+   */
+  readonly prepareCmd?: string
   /** False points the lane at an empty `core.hooksPath`. Defaults to running them. */
   readonly hooks?: boolean
   /**
@@ -317,6 +369,11 @@ export class LanePool {
       }
     }
     await pool.#probeDisk()
+    // `run` has already done this, before its preflight — earlier than a pool
+    // can, and the right place for it. Repeated here so a host that drives the
+    // pool directly still gets a reachable server before `createdb` needs one;
+    // the command is required to be idempotent, so twice costs nothing.
+    await prepareInfrastructure(options.project, options.repoPath)
     await pool.#buildTemplates()
 
     const laneNames =
@@ -368,6 +425,10 @@ export class LanePool {
     const lane = this.lane(name)
     const summary = await readSummary(this.#summaryDir, name)
     const plan = resetPlan(summary)
+    // The shared servers first: a recycle resets databases and may re-run the
+    // project's own setup against them, and a server that fell over mid-run
+    // would otherwise fail every phase after it rather than this one hand-off.
+    await prepareInfrastructure(this.#options.project, this.#options.repoPath)
     // Before either path, because both destroy the working tree: one cleans it,
     // the other deletes the directory outright.
     await this.#preserveWork(lane)
@@ -548,13 +609,18 @@ export class LanePool {
 
     // One shared server, a namespace per lane. The whole pool's capacity was
     // checked before provisioning began; this derives the already-valid slice.
+    //
+    // Planned here and *created further down*, once the lane's environment is
+    // complete. The first version ran each `create_cmd` in this loop with an
+    // empty overlay, which `reset_cmd` never did — so a `create_cmd` that
+    // reached for `docker compose` ran against the lane's own compose file with
+    // no project name and no override, booting a stack on the project's fixed
+    // host ports. That is the exact collision the override exists to prevent,
+    // caused by the step that sets a lane up.
     const services = (project.services ?? []).map((spec) =>
       planService(spec, { laneName: name, laneIndex: index }),
     )
-    for (const service of services) {
-      env[service.urlVar] = service.url
-      if (service.createCmd !== null) await sh(service.createCmd, path, {})
-    }
+    for (const service of services) env[service.urlVar] = service.url
 
     const compose = await this.#isolateCompose(name, composeProject)
     if (compose !== null) {
@@ -585,6 +651,14 @@ export class LanePool {
       // would be a large cost for a `S3_PREFIX`.
       reusable: databases.every((db) => db.resetCmd !== null),
     }
+    // With the lane's own environment, exactly as `reset_cmd` gets it: the
+    // compose project, the override, the forked connection strings and every
+    // service namespace. A command that creates a vhost needs the address it is
+    // creating it on, and one that reaches for compose needs the isolation.
+    for (const service of services) {
+      if (service.createCmd !== null) await sh(service.createCmd, path, env)
+    }
+
     // Written before the project's own hook runs, so a lane whose setup failed
     // still leaves the record a human tears it down from.
     await this.#writeSummary(lane)

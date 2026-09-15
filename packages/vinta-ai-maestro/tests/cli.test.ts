@@ -26,6 +26,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { existsSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -226,6 +227,98 @@ describe('vinta-ai-maestro doctor', () => {
     expect(code).toBe(FAILED)
     expect(io.out.some((line) => line.includes('docker compose: unavailable'))).toBe(true)
     expect(io.out.some((line) => line.includes('not required by this project'))).toBe(false)
+  })
+
+  /**
+   * A project whose Postgres lives in some other checkout's compose stack could
+   * pass `doctor` with that stack down and then die on the very first
+   * `createdb`, before a single worktree existed. A preflight that cannot see
+   * the one hard dependency of every lane is checking the easy half.
+   */
+  describe('shared servers', () => {
+    /** A socket that accepts and says nothing — enough to answer "is it up". */
+    const listening = async (): Promise<{ url: string; close: () => void }> => {
+      const server = createServer()
+      await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready))
+      const address = server.address()
+      if (address === null || typeof address === 'string') throw new Error('no port')
+      return {
+        url: `postgres://127.0.0.1:${address.port}`,
+        close: () => {
+          server.close()
+        },
+      }
+    }
+
+    const externalDb = (serverUrl: string): Record<string, unknown> => ({
+      migrate_cmd: 'true',
+      databases: {
+        dev: {
+          engine: 'postgres',
+          delivery: 'external',
+          name: 'app',
+          server_url: serverUrl,
+          connection_url_var: 'DATABASE_URL',
+        },
+      },
+    })
+
+    it('passes when the shared server answers', async () => {
+      const server = await listening()
+      try {
+        const dir = makeTemp()
+        const path = writeJson(dir, 'workflow.json', {
+          ...workflowJson([node('a')]),
+          project: externalDb(server.url),
+        })
+        const io = recorder()
+
+        expect(await doctorCommand([path], io.io, healthyBins(dir))).toBe(OK)
+        expect(io.out.some((line) => line.includes(`${server.url} answers`))).toBe(true)
+      } finally {
+        server.close()
+      }
+    })
+
+    it('fails, naming the address, when nothing is listening', async () => {
+      // A port nothing could plausibly be on. The address is in the message
+      // because "a server did not answer" is not something anyone can act on.
+      const dead = 'postgres://127.0.0.1:1'
+      const dir = makeTemp()
+      const path = writeJson(dir, 'workflow.json', {
+        ...workflowJson([node('a')]),
+        project: externalDb(dead),
+      })
+      const io = recorder()
+
+      expect(await doctorCommand([path], io.io, healthyBins(dir))).toBe(FAILED)
+      expect(io.out.some((line) => line.includes(`nothing is listening on ${dead}`))).toBe(true)
+    })
+
+    it('does not probe a database the lane boots for itself', async () => {
+      // A compose-delivered server is correctly unreachable now: the lane
+      // starts it. Probing it would fail every run that uses one.
+      const dir = makeTemp()
+      const path = writeJson(dir, 'workflow.json', {
+        ...workflowJson([node('a')]),
+        project: {
+          migrate_cmd: 'true',
+          databases: {
+            dev: {
+              engine: 'postgres',
+              delivery: 'compose',
+              name: 'app',
+              server_url: 'postgres://127.0.0.1:1',
+              connection_url_var: 'DATABASE_URL',
+            },
+          },
+        },
+      })
+      const io = recorder()
+
+      expect(await doctorCommand([path], io.io, healthyBins(dir))).toBe(OK)
+      expect(io.out.some((line) => line.includes('none declared'))).toBe(true)
+    })
   })
 
   it('exits non-zero on a broken environment, and still reports every check', async () => {

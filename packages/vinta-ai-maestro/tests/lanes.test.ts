@@ -738,6 +738,97 @@ describe('lane pool', () => {
     })
   })
 
+  /**
+   * A project whose databases are `delivery: external` and whose services point
+   * at one Redis has no long-lived containers of its own — the shape the schema
+   * recommends — and that makes some *other* stack a hard dependency of every
+   * run. `setup_cmd` cannot start it: that runs per lane, long after the
+   * template database was created on a server that had to be up already for
+   * `createdb` to work at all.
+   */
+  describe('the project’s prepare_cmd', () => {
+    /** Appends one marker to the file named as argv[1]. */
+    const appends = (path: string, mark: string): string =>
+      `node -e "require('fs').appendFileSync(process.argv[1], '${mark}')" ${path}`
+
+    it('runs before the template databases are built', async () => {
+      // Both write to the migrate log, so their *order* is readable. The
+      // fixture's own migrate command appends to it too, and a marker landing
+      // first is the whole assertion: the server was made ready before
+      // anything asked it for a database.
+      const pool = await provision(
+        { ...sqliteProject(), prepareCmd: appends(migrateLog, 'prepared') },
+        1,
+      )
+
+      expect(pool.lanes).toHaveLength(1)
+      expect(readFileSync(migrateLog, 'utf8').startsWith('prepared')).toBe(true)
+    })
+
+    it('runs again before every recycle, so a server that died comes back', async () => {
+      const log = join(root, 'prepare.log')
+      const pool = await provision({ ...sqliteProject(), prepareCmd: appends(log, 'x') }, 1)
+      const lane = pool.lanes[0] as Lane
+      expect(readFileSync(log, 'utf8')).toBe('x')
+
+      await pool.recycle(lane.name)
+
+      expect(readFileSync(log, 'utf8')).toBe('xx')
+    })
+
+    it('refuses the run, with the exit code and the reason', async () => {
+      const failure = await provision(
+        {
+          ...sqliteProject(),
+          prepareCmd: 'node -e "console.error(\'Cannot connect to the Docker daemon\'); process.exit(1)"',
+        },
+        1,
+      ).then(
+        () => null,
+        (error: unknown) => error as Error,
+      )
+
+      expect(failure?.name).toBe('LanePrepareError')
+      expect(failure?.message).toContain('exited 1')
+      expect(failure?.message).toContain('Cannot connect to the Docker daemon')
+      // And says what the failure *means*: "a command failed" is not the point,
+      // "nothing this run needs is listening" is.
+      expect(failure?.message).toContain('shared servers')
+    })
+  })
+
+  it('gives a service’s create_cmd the lane’s own environment', async () => {
+    // `reset_cmd` always had it and `create_cmd` did not, so a `create_cmd`
+    // that reached for `docker compose` ran against the lane's own compose file
+    // with no project name and no override — booting a stack on the project's
+    // fixed host ports, which is the collision the override exists to prevent.
+    const receipt = join(root, 'create.env')
+    const pool = await provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+            createCmd: `node -e "require('fs').appendFileSync(process.argv[1], process.env.COMPOSE_PROJECT_NAME + '|' + process.env.REDIS_URL + ';')" ${receipt}`,
+          },
+        ],
+      },
+      1,
+    )
+    const lane = pool.lanes[0] as Lane
+    const wrote = readFileSync(receipt, 'utf8').split(';').filter(Boolean)
+
+    // Appended rather than written, because the integration worktree runs
+    // `create_cmd` too and takes the slot after the last lane — a receipt that
+    // overwrote would only ever show whichever finished last.
+    expect(wrote).toContain(`${lane.composeProject}|redis://localhost:6379/0`)
+    expect(wrote).toContain(`${pool.integration.composeProject}|redis://localhost:6379/1`)
+  })
+
   it('points a lane at empty hooks when the project asks', async () => {
     // A lane is a worktree that has never been committed in, and a
     // `language: system` pre-commit chain reads that as a fresh machine — one
