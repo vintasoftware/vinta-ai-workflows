@@ -207,6 +207,20 @@ interface NodePayloads {
     readonly branch?: string
     readonly base_branch?: string
     readonly session_id?: string
+    /**
+     * What the phase branch pointed at *before* this attempt took it over, or
+     * null on the first one. A commit id, which is an identifier and not
+     * repository content.
+     *
+     * It exists because the alternative record was a reflog. A retry used to
+     * reset the phase branch to base, and the only evidence that an attempt's
+     * commits had ever existed was `git reflog show <branch>` — which nobody
+     * reads unless they already suspect. Retries keep their predecessor's work
+     * now, so this is mostly a no-op; it is recorded anyway, because the case
+     * worth seeing is the one where something moved a branch and nothing in the
+     * run said so.
+     */
+    readonly previous_head?: string | null
   }
   /**
    * §9.1's pause, question and all. Journalled *before* the effect that raises

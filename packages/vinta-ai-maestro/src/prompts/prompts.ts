@@ -552,6 +552,7 @@ function renderImplementer(materials: Materials): string {
     '   and must all pass before you commit:',
     ...gateList(materials),
     '5. A red outer gate sends you back to step 2. Never commit while one is red.',
+    ...commitProtocol(materials),
     '',
     '## Required output (a single final report)',
     '- Status: SUCCESS or FAILURE, and why.',
@@ -560,6 +561,45 @@ function renderImplementer(materials: Materials): string {
     '- Deviations from the phase body above, and your reasoning.',
     "- Anything you could not do, with an explanation.",
   ])
+}
+
+/**
+ * That the phase is judged on commits, and that the turn is not over until the
+ * work is on the branch.
+ *
+ * This is not a reminder. A phase ran four sessions, reported `SUCCESS` with a
+ * green inner loop, and never once ran `git commit`: its deliverables existed
+ * only as untracked files. The reviewer reads `git diff <base>...<branch>` and
+ * so saw an empty diff, reported "phase not implemented at all", and the fixer
+ * re-implemented — also without committing — until the fix rounds ran out. Then
+ * the lane was recycled and the files were deleted.
+ *
+ * Every instruction the agent had was *about* committing (`never commit while a
+ * gate is red`) and none of them said it had to. An agent that reads its
+ * instructions carefully and never commits is following them.
+ *
+ * `git add -A` is refused explicitly because projects keep untracked local
+ * files at the worktree root — env files the pool copied in, a virtualenv a
+ * hook built, a database file — and sweeping those onto the phase branch is its
+ * own kind of damage. (The pool's rescue commit does use `--all`, on purpose
+ * and only when the alternative is deletion; that is a different trade.)
+ */
+function commitProtocol(materials: Continuation): string[] {
+  return [
+    '',
+    '## Committing is part of the work, not after it',
+    `Your phase is reviewed and merged **from the commits on \`${materials.branch}\`**. The`,
+    `reviewer reads \`git diff ${materials.baseBranch}...${materials.branch}\` and nothing else:`,
+    'a file you wrote and did not commit does not exist as far as the rest of this',
+    'run is concerned, and the lane it sits in is reset before the next phase.',
+    '',
+    'So the turn is not complete until `git status --porcelain` is empty of your',
+    'work. Stage **by explicit path** — never `git add -A` or `git add .`, because',
+    'this worktree holds local files that are not yours to commit — then commit to',
+    `\`${materials.branch}\`. The repository's own git hooks run when you do; if one`,
+    'rewrites your files, stage the result and commit again rather than bypassing',
+    'it.',
+  ]
 }
 
 /**
@@ -707,6 +747,17 @@ function renderReviewer(materials: Materials): string {
     `The diff of \`${materials.branch}\` against its base \`${materials.baseBranch}\`:`,
     `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
     'Read the full diff of every changed file. Spot-checking is not enough.',
+    '',
+    '**Check the working tree too, before you conclude anything from an empty or a',
+    'thin diff:**',
+    `    git -C ${materials.workspace} status --porcelain`,
+    'An implementer that did the work and never committed it leaves a full tree and',
+    'an empty diff. That is a real failure, and it is not "the phase was not',
+    'implemented" — the difference decides whether the fixer writes the code again',
+    'or simply commits it, and getting it wrong costs the phase every fix round it',
+    'has. Where you find uncommitted work, that *is* the finding: name the paths,',
+    'make it a BLOCKER, and say that uncommitted work is neither reviewed nor',
+    'merged and does not survive this lane.',
     ...commandBlock(materials),
     ...leaseBlock(materials),
     '',
@@ -788,6 +839,7 @@ function renderFixer(materials: Materials): string {
     'is scope creep the reviewer will send back. Then re-run the inner loop, and',
     'these, until they are green:',
     ...gateList(materials),
+    ...commitProtocol(materials),
     '',
     '## Required output',
     '- Status: SUCCESS or FAILURE, and why.',
@@ -841,6 +893,7 @@ function renderFixerContinuation(materials: Continuation): string {
     'will send back, and it costs a fix round you may need. Then re-run the inner',
     'loop, and these, until they are green:',
     ...gateList(materials),
+    ...commitProtocol(materials),
     '',
     '## Required output',
     '- Status: SUCCESS or FAILURE, and why.',
@@ -907,6 +960,8 @@ function renderImplementerContinuation(materials: Continuation): string {
     'Finish the working instructions you were given, in the order you were given',
     'them, ending on a green outer gate:',
     ...gateList(materials),
+    ...commitProtocol(materials),
+    '',
     'Then file the single final report those instructions asked for.',
   ])
 }

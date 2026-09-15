@@ -10,6 +10,7 @@
  * reaches a remote.
  */
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -186,6 +187,104 @@ describe('dependency-derived bases', () => {
 
     expect(run(lane, 'rev-parse', 'plan/wf/phase-a')).toBe(run(lane, 'rev-parse', 'main'))
     expect(isAncestor(lane, 'main', 'plan/wf/phase-a')).toBe(true)
+  })
+
+  /**
+   * A retry re-enters the pipeline at its initial state, which runs
+   * `git_branch` again. `checkout -B` moves an existing branch unconditionally,
+   * so attempt 2 used to begin by resetting attempt 1's commits to base — the
+   * files disappeared from the worktree, the next reviewer reported "phase not
+   * implemented at all", and the fix budget burned re-implementing from
+   * nothing. In a real run it showed as two implementer commits and three
+   * `branch: Reset to <base>` entries in one branch's reflog.
+   */
+  describe('a second attempt at the same phase', () => {
+    it('keeps the commits the first attempt made', async () => {
+      const repo = await makeRepo()
+      const integrator = new Integrator({
+        plan: plan([node('a')]),
+        integrationPath: repo.integ,
+        fixer: spyFixer(),
+      })
+
+      const lane = await repo.lane('lane-1')
+      await integrator.startNode('a', lane)
+      await repo.commit(lane, { 'a.ts': 'the first attempt\n' }, 'phase a: unit')
+      const attemptOne = run(lane, 'rev-parse', 'plan/wf/phase-a')
+
+      await integrator.startNode('a', lane, true)
+
+      expect(run(lane, 'rev-parse', 'plan/wf/phase-a')).toBe(attemptOne)
+      // And the files are still on disk, which is what the reviewer reads.
+      expect(existsSync(join(lane, 'a.ts'))).toBe(true)
+      expect(run(lane, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('plan/wf/phase-a')
+    })
+
+    it('still moves a branch that committed nothing up to its base', async () => {
+      // Nothing is lost by it and the retry starts from a fresher base, which
+      // is exactly what the old behaviour got right.
+      const repo = await makeRepo()
+      const integrator = new Integrator({
+        plan: plan([node('a')]),
+        integrationPath: repo.integ,
+        fixer: spyFixer(),
+      })
+
+      const lane = await repo.lane('lane-1')
+      await integrator.startNode('a', lane)
+      // In the main checkout, which is where `main` is actually checked out —
+      // the integration worktree is detached and committing there moves nothing.
+      await repo.commit(repo.main, { 'moved.ts': 'base moved on\n' }, 'base: another commit')
+
+      await integrator.startNode('a', lane, true)
+
+      expect(run(lane, 'rev-parse', 'plan/wf/phase-a')).toBe(run(lane, 'rev-parse', 'main'))
+    })
+
+    it('cuts a fresh branch when the node has not been branched in this run', async () => {
+      // A phase branch's name carries the plan id and not the run id, so an
+      // identically-named ref left by an unrelated earlier run is not this
+      // run's previous attempt and must not be inherited.
+      const repo = await makeRepo()
+      const integrator = new Integrator({
+        plan: plan([node('a')]),
+        integrationPath: repo.integ,
+        fixer: spyFixer(),
+      })
+
+      const lane = await repo.lane('lane-1')
+      run(lane, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+      await repo.commit(lane, { 'stale.ts': 'from a run last week\n' }, 'an older run')
+
+      await integrator.startNode('a', lane)
+
+      expect(run(lane, 'rev-parse', 'plan/wf/phase-a')).toBe(run(lane, 'rev-parse', 'main'))
+      expect(existsSync(join(lane, 'stale.ts'))).toBe(false)
+    })
+
+    it('does not rebase onto a base that moved under it', async () => {
+      // Either a rebase or a fast-forward could conflict, and a conflict here
+      // would fail the retry during its *setup* — before the agent that might
+      // resolve it has run. An out-of-date base is what any feature branch has,
+      // and the wave merge is what reconciles it.
+      const repo = await makeRepo()
+      const integrator = new Integrator({
+        plan: plan([node('a')]),
+        integrationPath: repo.integ,
+        fixer: spyFixer(),
+      })
+
+      const lane = await repo.lane('lane-1')
+      await integrator.startNode('a', lane)
+      await repo.commit(lane, { 'a.ts': 'the first attempt\n' }, 'phase a: unit')
+      const attemptOne = run(lane, 'rev-parse', 'plan/wf/phase-a')
+      await repo.commit(repo.main, { 'moved.ts': 'base moved on\n' }, 'base: another commit')
+
+      await integrator.startNode('a', lane, true)
+
+      expect(run(lane, 'rev-parse', 'plan/wf/phase-a')).toBe(attemptOne)
+      expect(isAncestor(lane, 'main', 'plan/wf/phase-a')).toBe(false)
+    })
   })
 
   it('branches a single-dependency node from that dependency’s branch', async () => {

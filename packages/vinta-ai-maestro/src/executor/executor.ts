@@ -72,7 +72,6 @@
  * this file puts any of them into a fact, an error, a tracking record or a
  * notification body.
  */
-import { join } from 'node:path'
 import { laneTreeHash, type GateCache } from '../gates/cache.ts'
 import { executeGate, type GateResult, type RunGateOptions } from '../gates/runner.ts'
 import { computeWaves } from '../graph.ts'
@@ -111,9 +110,14 @@ export interface RunExecutorOptions {
   readonly integrator: Integrator
   /** The dedicated integration worktree — the same one the `Integrator` was given. */
   readonly integrationPath: string
-  /** The scheduler's `laneRoot`: the fallback for a lane the host did not describe. */
+  /**
+   * The scheduler's `laneRoot`. Kept for symmetry with the rest of the wiring;
+   * it is no longer a fallback for a lane the host did not describe, because
+   * guessing a path with an empty environment turned out to cost more than the
+   * refusal does — see `#lane`.
+   */
   readonly laneRoot: string
-  /** Provisioned lanes by name. A lane not listed falls back to `laneRoot/<name>` and no env. */
+  /** Provisioned lanes by name. A node assigned one that is not here is refused. */
   readonly lanes?: readonly ExecutorLane[]
   /** §13.4's gate result cache. Omitted means every gate runs. */
   readonly cache?: GateCache
@@ -324,8 +328,22 @@ export class RunEffectExecutor implements EffectExecutor {
     const branch = integrator.nodeBranch(nodeId)
     const from = params['from']
 
-    if (typeof from === 'string') await git(lane.path, ['checkout', '-B', branch, from])
-    else await this.#integration(() => integrator.startNode(nodeId, lane.path))
+    // Whether this node has already been branched **in this run** — which is
+    // the question, and which only the journal can answer. A phase branch's
+    // name carries the plan id and not the run id, so an identically-named ref
+    // left behind by an unrelated earlier run must still be cut fresh; a ref
+    // this run assigned is the previous attempt, and resetting it is how a
+    // retry used to erase the work it was meant to recover.
+    const resume = this.#row(nodeId)?.branch === branch
+    // Read before anything moves it. Computed after the checkout it would be
+    // the *new* head, which is the one fact already recorded.
+    const previousHead = await this.#head(lane.path, branch)
+
+    if (typeof from === 'string') {
+      await git(lane.path, resume ? ['checkout', branch] : ['checkout', '-B', branch, from])
+    } else {
+      await this.#integration(() => integrator.startNode(nodeId, lane.path, resume))
+    }
 
     this.#options.journal.append({
       runId: this.#options.runId,
@@ -334,9 +352,25 @@ export class RunEffectExecutor implements EffectExecutor {
       payload: {
         branch,
         base_branch: typeof from === 'string' ? from : integrator.base(nodeId).branch,
+        // What the branch pointed at when this attempt took it over. Null on a
+        // first attempt. It is the one fact that makes a reset — this one or a
+        // hand-rolled one — visible in the journal rather than only in a reflog
+        // somebody has to know to read.
+        previous_head: previousHead,
       },
     })
     return {}
+  }
+
+  /** The branch's tip, or null where it does not exist yet. */
+  async #head(lanePath: string, branch: string): Promise<string | null> {
+    const lines = await gitLines(lanePath, [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `refs/heads/${branch}`,
+    ]).catch(() => [])
+    return lines[0] ?? null
   }
 
   /**
@@ -528,9 +562,17 @@ export class RunEffectExecutor implements EffectExecutor {
     if (name === null || name === undefined) {
       throw new Error(`node "${nodeId}" has no lane assigned`)
     }
-    return (
-      this.#lanes.get(name) ?? { name, path: join(this.#options.laneRoot, name), env: {} }
-    )
+    const known = this.#lanes.get(name)
+    if (known === undefined) {
+      // It used to fall back to `{ name, path: join(laneRoot, name), env: {} }`
+      // — the right directory with **no environment**, which is this area's
+      // recurring bug in miniature: a gate running against the wrong compose
+      // project and no forked connection string, with nothing anywhere saying
+      // a lane was missing. A guessed path is not worth what a silent empty
+      // environment costs, so it is a refusal now.
+      throw new Error(`node "${nodeId}" is in lane "${name}", which this executor was not given`)
+    }
+    return known
   }
 
   /** Serializes work in the single integration worktree. */

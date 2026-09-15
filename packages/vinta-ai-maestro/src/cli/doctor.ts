@@ -11,6 +11,7 @@ import { parseArgs } from 'node:util'
 
 import { formatDoctorReport, runDoctor, type DoctorOptions } from '../doctor/index.ts'
 import { laneRootFor } from './paths.ts'
+import { projectSpec } from './project.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 
 export const DOCTOR_USAGE = `usage: vinta-ai-maestro doctor <workflow.json> [--repo <dir>]
@@ -57,6 +58,12 @@ export async function doctorCommand(
     workflow,
     repoPath,
     poolRoot: laneRootFor(repoPath),
+    // The workflow's own project block, which this command never passed — so
+    // `needsCompose` saw `undefined` every time and the compose check reported
+    // "not required by this project" for a project whose database is delivered
+    // by compose. A check nothing can reach is worse than an absent one: it
+    // reads as a pass.
+    project: projectSpec(workflow.project),
     ...overrides,
   })
 

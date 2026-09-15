@@ -14,6 +14,7 @@ import {
   LaneRecycleError,
   type PoolOptions,
   type ProjectSpec,
+  WIP_REFS,
 } from '../src/lanes/pool.ts'
 import { readSummary } from '../src/lanes/summary.ts'
 import { shellQuote } from '../src/platform/platform.ts'
@@ -402,9 +403,21 @@ describe('lane pool', () => {
     expect(existsSync(join(lane.path, SETUP_RECEIPT))).toBe(true)
   })
 
-  it('fails the lane, naming no output, when the setup command fails', async () => {
+  it('says why when the setup command fails', async () => {
+    // The first version of this carried a lane name and nothing else, on a §11
+    // reading that turned out to be the wrong one: an operator whose setup
+    // command died of a missing settings module saw "could not provision the
+    // lane pool under …", and finding the real cause took a hand-rolled replay
+    // with the lane environment reconstructed. §11 keeps repository *contents*
+    // out of the record — an exit code and a bounded stderr tail are the same
+    // class of thing as a harness refusal's own explanation, which this package
+    // already decided to carry after an afternoon lost to the same shape of
+    // silence.
     const failure = await provision(
-      { ...sqliteProject(), setupCmd: 'node -e "console.log(process.cwd()); process.exit(3)"' },
+      {
+        ...sqliteProject(),
+        setupCmd: 'node -e "console.error(\'ModuleNotFoundError: settings.local\'); process.exit(3)"',
+      },
       1,
     ).then(
       () => null,
@@ -412,11 +425,28 @@ describe('lane pool', () => {
     )
 
     expect(failure?.name).toBe('LaneSetupError')
-    // §11 again: what the project's own command printed is the project's, and
-    // it reaches an error message no more than it reaches a log field. Nor does
-    // the command line itself — a lane name is enough to act on.
+    expect(failure?.message).toContain('exited 3')
+    expect(failure?.message).toContain('ModuleNotFoundError: settings.local')
+    // The command line itself still does not appear: the lane, the code and
+    // what the command said are enough to act on.
     expect(failure?.message).not.toContain('node -e')
-    expect(failure?.message).not.toContain(root)
+  })
+
+  it('bounds how much of a failing setup command’s output it carries', async () => {
+    const failure = await provision(
+      {
+        ...sqliteProject(),
+        setupCmd: `node -e "console.error('x'.repeat(4000)); process.exit(1)"`,
+      },
+      1,
+    ).then(
+      () => null,
+      (error: unknown) => error as Error,
+    )
+
+    // Bounded, and the *tail* — a stack trace puts the cause last.
+    expect(failure?.message.length).toBeLessThan(700)
+    expect(failure?.message).toContain('…')
   })
 
   // The config `docker compose config` would have printed, supplied directly:
@@ -569,6 +599,176 @@ describe('lane pool', () => {
     expect(existsSync(poolRoot)).toBe(false)
     expect(worktreePaths(repo)).toEqual([gitPath(repo)])
     expect(existsSync(migrateLog)).toBe(false)
+  })
+
+  /**
+   * A phase ran four sessions, reported SUCCESS with a green inner loop, and
+   * never ran `git commit`: its deliverables were untracked files. The reviewer
+   * reads the committed diff, so it saw nothing and reported "not implemented
+   * at all"; the fix rounds ran out; and then the lane was recycled and the
+   * files were deleted. The prompts now insist on committing — and this is the
+   * floor under that, for every way an agent can still end a turn with work on
+   * disk and nothing on the branch.
+   */
+  describe('uncommitted work in a lane that is being handed on', () => {
+    const dirtyLane = async (pool: LanePool): Promise<Lane> => {
+      const lane = pool.lanes[0] as Lane
+      // On the phase branch, which is where a real lane is when it fails.
+      execFileSync('git', ['checkout', '-B', 'plan/p/phase-a'], {
+        cwd: lane.path,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      await writeFile(join(lane.path, 'deliverable.ts'), 'export const real = true\n', 'utf8')
+      return lane
+    }
+
+    /** Every rescued tree in this repository. */
+    const rescues = (): string[] =>
+      execFileSync('git', ['for-each-ref', '--format=%(refname)', WIP_REFS], {
+        cwd: repo,
+        encoding: 'utf8',
+      })
+        .split('\n')
+        .filter(Boolean)
+
+    const filesIn = (ref: string): string =>
+      execFileSync('git', ['ls-tree', '-r', '--name-only', ref], { cwd: repo, encoding: 'utf8' })
+
+    it('is kept, rather than destroyed', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+
+      await pool.recycle(lane.name)
+
+      const [ref] = rescues()
+      expect(ref).toBeDefined()
+      expect(filesIn(ref as string)).toContain('deliverable.ts')
+    })
+
+    it('never moves the phase branch, because a phase branch is a base', async () => {
+      // The first version committed onto the checked-out branch, which is the
+      // obvious implementation and is wrong: a lane's dirty tree holds gate
+      // artifacts as often as deliverables, and a phase branch is the base of
+      // its dependents. A gate's scratch file went into phase a, which put it in
+      // phase b's base and failed b's gate — a failure nothing in b caused.
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+      const before = execFileSync('git', ['rev-parse', 'plan/p/phase-a'], {
+        cwd: repo,
+        encoding: 'utf8',
+      }).trim()
+
+      await pool.recycle(lane.name)
+
+      expect(
+        execFileSync('git', ['rev-parse', 'plan/p/phase-a'], {
+          cwd: repo,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe(before)
+      // And the rescue is outside refs/heads, so nothing merges it by accident.
+      expect(rescues()[0]).toContain('refs/vinta-ai-maestro/wip/')
+    })
+
+    it('is authored by the tool, never by the agent', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+
+      await pool.recycle(lane.name)
+
+      // Nothing anywhere may claim a phase finished work it did not.
+      const author = execFileSync('git', ['log', '--format=%an', '-1', rescues()[0] as string], {
+        cwd: repo,
+        encoding: 'utf8',
+      }).trim()
+      expect(author).toBe('vinta-ai-maestro')
+    })
+
+    it('keeps one rescue per recycle rather than overwriting the last', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      await dirtyLane(pool)
+      const lane = pool.lanes[0] as Lane
+
+      await pool.recycle(lane.name)
+      await writeFile(join(lane.path, 'second.ts'), 'x\n', 'utf8')
+      await pool.recycle(lane.name)
+
+      // A lane is recycled once per phase it serves; one ref per lane would let
+      // the second rescue delete the first.
+      expect(rescues()).toHaveLength(2)
+    })
+
+    it('does nothing at all to a clean lane', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      const lane = pool.lanes[0] as Lane
+
+      await pool.recycle(lane.name)
+
+      // A recycle of a lane that committed its work is the ordinary case and
+      // must stay free of side effects.
+      expect(rescues()).toEqual([])
+    })
+
+    it('survives the lane that is torn down rather than cleaned', async () => {
+      // The worse of the two paths: this one deletes the worktree outright, so
+      // an untracked file has nowhere to survive except a commit object.
+      const pool = await provision(composeProject(), 1)
+      const lane = await dirtyLane(pool)
+      expect(lane.reusable).toBe(false)
+
+      await pool.recycle(lane.name)
+
+      expect(filesIn(rescues()[0] as string)).toContain('deliverable.ts')
+    })
+
+    it('leaves the lane own index alone', async () => {
+      // The rescue stages into a scratch index. Staging into the real one would
+      // hand the next phase a worktree with someone else's changes staged.
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+
+      await pool.recycle(lane.name)
+
+      expect(existsSync(join(lane.path, '.git-wip-index'))).toBe(false)
+      const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {
+        cwd: lane.path,
+        encoding: 'utf8',
+      })
+      expect(staged.trim()).toBe('')
+    })
+  })
+
+  it('points a lane at empty hooks when the project asks', async () => {
+    // A lane is a worktree that has never been committed in, and a
+    // `language: system` pre-commit chain reads that as a fresh machine — one
+    // project's hooks built a 510 MB virtualenv before allowing the first
+    // commit, per lane. Committing is not optional here, so a hook chain that
+    // makes it expensive makes the whole design expensive.
+    const pool = await provision({ ...sqliteProject(), hooks: false }, 1)
+    const lane = pool.lanes[0] as Lane
+
+    const configured = execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+      cwd: lane.path,
+      encoding: 'utf8',
+    }).trim()
+    expect(configured).toBe(join(lane.path, '.git-hooks-disabled'))
+
+    // And only this worktree: the operator's own checkout keeps its hooks.
+    expect(() =>
+      execFileSync('git', ['config', '--get', 'core.hooksPath'], { cwd: repo, stdio: 'ignore' }),
+    ).toThrow()
+  })
+
+  it('leaves hooks alone by default', async () => {
+    const pool = await provision(sqliteProject(), 1)
+    const lane = pool.lanes[0] as Lane
+
+    expect(() =>
+      execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+        cwd: lane.path,
+        stdio: 'ignore',
+      }),
+    ).toThrow()
   })
 
   it('refuses on the N× disk probe before provisioning anything', async () => {

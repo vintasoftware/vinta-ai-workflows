@@ -209,7 +209,18 @@ export const NodeSchema = z.strictObject({
       'Its reviewer is not named here — it is the cheapest reviewer on the roster who is ' +
       'qualified for this phase, and it is never this member.',
   ),
-  max_fix_rounds: z.number().int().min(0).default(2),
+  max_fix_rounds: z
+    .number()
+    .int()
+    .min(0)
+    .default(2)
+    .describe(
+      'Rounds the fixer gets to clear a review’s findings before the phase fails. Two is a ' +
+        'budget, not a target, and it is measured in *rounds* rather than findings — a first ' +
+        'review raising four legitimate blockers can exhaust it while every round is making ' +
+        'progress. Raise it on a phase you expect to be argued over; it is the knob that ' +
+        'decides how much a phase gets to be wrong before it is handed to `--on-failure`.',
+    ),
 })
 
 // ---------------------------------------------------------------------------
@@ -411,6 +422,19 @@ export const ProjectSchema = z
           'provisioning rather than producing a lane whose stack cannot boot.',
       ),
     commands: CommandsSchema.default({}),
+    hooks: z
+      .enum(['run', 'skip'])
+      .default('run')
+      .describe(
+        'Whether the repository’s git hooks run on commits made inside a lane. `run` is the ' +
+          'default and is what a developer’s own checkout does. `skip` points the lane at an ' +
+          'empty `core.hooksPath`, for the case this exists for: a `language: system` ' +
+          'pre-commit chain that, in a worktree that has never been committed in, builds a ' +
+          'virtualenv per lane before it will let a commit through — observed as four failed ' +
+          'commit attempts, one of them a two-minute timeout, and a 510 MB `.venv` per lane. ' +
+          'The gates still run; this only stops each lane paying a whole-environment install ' +
+          'to make a commit.',
+      ),
     services: z
       .record(Id, ServiceSchema)
       .default({})

@@ -244,6 +244,55 @@ describe('the implementer prompt', () => {
   })
 })
 
+/**
+ * A phase ran four sessions, reported `## Status: SUCCESS` with a green inner
+ * loop, and never once ran `git commit`. Its deliverables were untracked files.
+ * The reviewer reads the committed diff, so it reported "phase not implemented
+ * at all"; the fixer re-implemented, also without committing; the fix rounds
+ * ran out; and the lane was then recycled and the files deleted.
+ *
+ * Every instruction that agent had was *about* committing — "never commit while
+ * a gate is red" — and not one of them said it had to. An agent that reads its
+ * instructions carefully and never commits was following them.
+ */
+describe('committing is part of the work', () => {
+  const writers = ['implementer', 'fixer'] as const
+
+  it.each(writers)('tells the %s the phase is judged on commits', (role) => {
+    const prompt = compose('api-layer', role)
+
+    expect(prompt).toContain('Committing is part of the work, not after it')
+    expect(prompt).toContain('git status --porcelain')
+    // Named concretely, because "commit your work" is what it already implied.
+    expect(prompt).toContain('reviewed and merged **from the commits on')
+  })
+
+  it.each(writers)('tells the %s to stage by path, never with -A', (role) => {
+    // Projects keep untracked local files at the worktree root — env files the
+    // pool copied in, a virtualenv a hook built, a database file — and sweeping
+    // those onto the phase branch is its own kind of damage.
+    expect(compose('api-layer', role)).toContain('never `git add -A`')
+  })
+
+  it('says it again in the continuations, which are the turns that end phases', () => {
+    // A delta that dropped this would leave the *last* writer the least told.
+    for (const role of writers) {
+      expect(compose('api-layer', role, { continuation: true })).toContain(
+        'Committing is part of the work',
+      )
+    }
+  })
+
+  it('has the reviewer read the working tree, not only the diff', () => {
+    const prompt = compose('api-layer', 'reviewer')
+
+    expect(prompt).toContain('status --porcelain')
+    // The distinction that decides whether the fixer writes the code again or
+    // simply commits it — and getting it wrong costs every fix round there is.
+    expect(prompt).toContain('not "the phase was not')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 1a. The project's own commands
 // ---------------------------------------------------------------------------
@@ -512,6 +561,19 @@ Add the Folder model and its migration.
    and must all pass before you commit:
    - the repository’s own type/build check and its test suite.
 5. A red outer gate sends you back to step 2. Never commit while one is red.
+
+## Committing is part of the work, not after it
+Your phase is reviewed and merged **from the commits on \`HEAD\`**. The
+reviewer reads \`git diff main...HEAD\` and nothing else:
+a file you wrote and did not commit does not exist as far as the rest of this
+run is concerned, and the lane it sits in is reset before the next phase.
+
+So the turn is not complete until \`git status --porcelain\` is empty of your
+work. Stage **by explicit path** — never \`git add -A\` or \`git add .\`, because
+this worktree holds local files that are not yours to commit — then commit to
+\`HEAD\`. The repository's own git hooks run when you do; if one
+rewrites your files, stage the result and commit again rather than bypassing
+it.
 
 ## Required output (a single final report)
 - Status: SUCCESS or FAILURE, and why.
@@ -1082,6 +1144,17 @@ The diff of \`HEAD\` against its base \`main\`:
     git -C ${dir} diff main...HEAD
 Read the full diff of every changed file. Spot-checking is not enough.
 
+**Check the working tree too, before you conclude anything from an empty or a
+thin diff:**
+    git -C ${dir} status --porcelain
+An implementer that did the work and never committed it leaves a full tree and
+an empty diff. That is a real failure, and it is not "the phase was not
+implemented" — the difference decides whether the fixer writes the code again
+or simply commits it, and getting it wrong costs the phase every fix round it
+has. Where you find uncommitted work, that *is* the finding: name the paths,
+make it a BLOCKER, and say that uncommitted work is neither reviewed nor
+merged and does not survive this lane.
+
 ## What that diff was supposed to implement
 ## api-layer
 
@@ -1134,6 +1207,19 @@ Fix exactly what is listed above, and nothing else — an unrelated change here
 is scope creep the reviewer will send back. Then re-run the inner loop, and
 these, until they are green:
    - unit: \`pnpm test\`
+
+## Committing is part of the work, not after it
+Your phase is reviewed and merged **from the commits on \`HEAD\`**. The
+reviewer reads \`git diff main...HEAD\` and nothing else:
+a file you wrote and did not commit does not exist as far as the rest of this
+run is concerned, and the lane it sits in is reset before the next phase.
+
+So the turn is not complete until \`git status --porcelain\` is empty of your
+work. Stage **by explicit path** — never \`git add -A\` or \`git add .\`, because
+this worktree holds local files that are not yours to commit — then commit to
+\`HEAD\`. The repository's own git hooks run when you do; if one
+rewrites your files, stage the result and commit again rather than bypassing
+it.
 
 ## Required output
 - Status: SUCCESS or FAILURE, and why.
