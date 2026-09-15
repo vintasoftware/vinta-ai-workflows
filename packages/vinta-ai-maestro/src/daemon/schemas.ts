@@ -263,22 +263,36 @@ export const MonitorAskSchema = z.strictObject({
   text: z.string().min(1).max(4_000),
 })
 
-export const MonitorAnswerSchema = z.strictObject({
-  answer: z.string(),
-  /** The model that answered, so the operator knows what they are reading. */
+/**
+ * What asking returns, which is not an answer.
+ *
+ * It used to be `{ answer, model }` — the finished prose, produced inside the
+ * request. That made the turn's lifetime the browser's connection, so a tab
+ * that navigated or a laptop that slept killed the monitor mid-thought. The
+ * turn belongs to the daemon now and the answer arrives in the conversation,
+ * so this says only that the question was accepted and who is working on it.
+ */
+export const MonitorAskedSchema = z.strictObject({
+  asked: z.literal(true),
+  /** The model that will answer, so the operator knows what they are waiting for. */
   model: z.string(),
 })
 
-export type MonitorAnswer = z.infer<typeof MonitorAnswerSchema>
+export type MonitorAsked = z.infer<typeof MonitorAskedSchema>
 
 /**
  * The conversation so far. Entries are transcript entries and are deliberately
  * unvalidated here, exactly as a phase's are: the UI owns that union
  * (`ui/src/transcript.ts`) and validates each row as it renders it, so a new
  * event kind reaches the operator as an unknown row rather than a failed page.
+ *
+ * `pending` is true while a turn is running. The monitor journals as it thinks,
+ * so this is what tells a client the difference between an answer still
+ * arriving and a conversation that has stopped growing.
  */
 export const MonitorHistorySchema = z.strictObject({
   entries: z.array(z.unknown()),
+  pending: z.boolean(),
 })
 
 /**

@@ -315,14 +315,28 @@ function row(
  * `offset` is the absolute index of `entries[0]` within the served tail, so a
  * row's key survives new entries arriving at the end.
  */
+/**
+ * The kinds that arrive in pieces and mean one thing.
+ *
+ * A streamed thought does not arrive as one event; it arrives as a dozen, and a
+ * dozen separately collapsible rows is not a thought the operator can open — it
+ * is twelve chevrons over one paragraph. An answer is the same story with a
+ * different consequence: the monitor journals as it speaks, so one reply is
+ * several `assistant_text` entries, and without this they render as several
+ * paragraphs with a divider ruled between each of them.
+ *
+ * Nothing else is in here. Two tool calls in a row are two tool calls.
+ */
+const GROUPED: ReadonlySet<string> = new Set(['thinking', 'assistant_text'])
+
 export function fold(entries: readonly unknown[], offset: number): readonly Row[] {
   const rows: Row[] = []
   for (const [index, raw] of entries.entries()) {
     const view = present(raw)
     const last = rows.at(-1)
-    // Same shape *and* same author. Two agents thinking in sequence is two
+    // Same kind *and* same author. Two agents thinking in sequence is two
     // thoughts, and merging them would attribute half of one to the other.
-    if (view.shape === 'thinking' && last?.shape === 'thinking' && last.role === view.role) {
+    if (GROUPED.has(view.kind) && last?.views.at(-1)?.kind === view.kind && last.role === view.role) {
       last.views.push(view)
       continue
     }

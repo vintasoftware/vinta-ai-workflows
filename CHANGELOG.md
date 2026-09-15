@@ -339,6 +339,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The monitor keeps thinking when you look away, and thinks out loud.**
+  Asking used to be one long HTTP request that produced the whole answer inside
+  it, which made the turn's lifetime the browser's connection: switching view,
+  reloading or letting a laptop sleep killed the monitor mid-thought and left a
+  question with no answer and no record that one had been attempted. The daemon
+  owns the turn now — `POST` answers `202`, and the monitor journals each
+  thought and each sentence as it produces them, so the conversation is
+  readable while it is being written and by any tab that opens it. The panel
+  renders through the same rows a phase's transcript uses, which is what the
+  API always claimed and the UI never did.
+
 - **A phase's transcript says which agent wrote each line, and holds the gates.**
   Every spawn on a node appends to one file whatever its role, so a phase that
   took two fix rounds held five agents' output in one undifferentiated stream —

@@ -24,7 +24,7 @@ import {
   FrameSchema,
   NoArgsRequestSchema,
   NodeDetailSchema,
-  MonitorAnswerSchema,
+  MonitorAskedSchema,
   MonitorHistorySchema,
   RunUsageResponseSchema,
   OkResponseSchema,
@@ -37,7 +37,7 @@ import {
   type RunUsageResponse,
   type RunSnapshot,
   type RunSummary,
-  type MonitorAnswer,
+  type MonitorAsked,
 } from '../../src/daemon/schemas.ts'
 import type { z } from 'zod'
 
@@ -112,20 +112,27 @@ export interface Client {
     body: OperationBody<K>,
   ) => Promise<void>
   /**
-   * Ask the run's monitor a question, and wait for its answer.
+   * Ask the run's monitor a question. Resolves when the daemon has *accepted*
+   * it, which is long before it is answered.
    *
    * Not an operation: it changes nothing about the run, and it works on one
    * that has already finished — which is when most of the questions get asked.
-   * Slow by nature, because a model is thinking; the caller shows that.
+   * The answer arrives in `conversation`, entry by entry as the monitor
+   * produces it, because the turn belongs to the daemon rather than to this
+   * tab: a browser that navigates away used to kill the monitor mid-thought.
    */
-  readonly ask: (runId: string, text: string) => Promise<MonitorAnswer>
+  readonly ask: (runId: string, text: string) => Promise<MonitorAsked>
   /**
-   * Everything said to and by the monitor about this run, oldest first.
+   * Everything said to and by the monitor about this run, oldest first, and
+   * whether a turn is still running.
    *
    * Entries are transcript entries — the same shape a phase's are — so the
    * conversation renders through the component that already knows how.
    */
-  readonly conversation: (runId: string) => Promise<readonly unknown[]>
+  readonly conversation: (runId: string) => Promise<{
+    entries: readonly unknown[]
+    pending: boolean
+  }>
   /** Tails `runId` from after `since`. Closing the returned stream detaches. */
   readonly stream: (runId: string, since: number, handlers: StreamHandlers) => Stream
 }
@@ -172,7 +179,7 @@ export function createClient(origin: string, token: string): Client {
       if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
       const parsed = MonitorHistorySchema.safeParse(await response.json())
       if (!parsed.success) throw new Error(`${path}: response did not match the daemon schema`)
-      return parsed.data.entries
+      return { entries: parsed.data.entries, pending: parsed.data.pending }
     },
     async ask(runId, text) {
       const path = `/api/runs/${encodeURIComponent(runId)}/monitor`
@@ -184,7 +191,7 @@ export function createClient(origin: string, token: string): Client {
       // The operator's own question never reaches this message, for the reason
       // `operate` gives: what they typed is not error-message material (§11).
       if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
-      const parsed = MonitorAnswerSchema.safeParse(await response.json())
+      const parsed = MonitorAskedSchema.safeParse(await response.json())
       if (!parsed.success) throw new Error(`${path}: response did not match the daemon schema`)
       return parsed.data
     },
