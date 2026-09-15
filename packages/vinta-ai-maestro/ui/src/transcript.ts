@@ -82,6 +82,21 @@ export const TRANSCRIPT_KINDS: readonly AgentEvent['type'][] = KINDS
 /** Who said it. The operator's own steering is never attributed to the agent. */
 export type Author = 'agent' | 'operator' | 'tool' | 'system'
 
+/**
+ * How much room a row is worth.
+ *
+ * A transcript is three kinds of thing wearing one costume. `prose` is what
+ * somebody wrote to be read — the agent's answer, the operator's steering, an
+ * error. `thinking` is the agent talking to itself, which is worth having and
+ * not worth the same type size. `tool` is machinery: a row whose body is four
+ * hundred characters of JSON, of which the first forty say everything.
+ *
+ * Rendering all three identically is what made the useful lines the hardest to
+ * find, so the shape travels with the view and the component spends its space
+ * accordingly.
+ */
+export type Shape = 'prose' | 'thinking' | 'tool'
+
 /** One chat row, ready to render. Presentation only — no element is built here. */
 export interface EntryView {
   /** The event's own `type`, or `unreadable`. Becomes `data-kind`. */
@@ -89,8 +104,15 @@ export interface EntryView {
   readonly author: Author
   /** The attribution shown beside the row. */
   readonly label: string
+  /**
+   * The single line a collapsed row shows. Equal to `body` when the body is
+   * already one short line, which is what lets a row with nothing hidden say
+   * so by offering no control.
+   */
+  readonly headline: string
   readonly body: string
   readonly tone: Tone | null
+  readonly shape: Shape
 }
 
 const AUTHOR_LABELS: Readonly<Record<Author, string>> = {
@@ -107,8 +129,10 @@ export function present(raw: unknown): EntryView {
       kind: 'unreadable',
       author: 'system',
       label: 'Unreadable entry',
+      headline: 'This entry did not match any known agent event.',
       body: 'This entry did not match any known agent event.',
       tone: null,
+      shape: 'prose',
     }
   }
   const entry = parsed.data
@@ -122,9 +146,15 @@ export function present(raw: unknown): EntryView {
     case 'assistant_text':
       return row(entry.type, 'agent', entry.text, null)
     case 'thinking':
-      return row(entry.type, 'agent', entry.text, null, 'Agent · thinking')
+      return row(entry.type, 'agent', entry.text, null, 'Agent · thinking', { shape: 'thinking' })
     case 'tool_use':
-      return row(entry.type, 'tool', preview(entry.input), null, `Tool · ${entry.name}`)
+      return row(entry.type, 'tool', payload(entry.input), null, `Tool · ${entry.name}`, {
+        shape: 'tool',
+        // Not the first line of the payload, which for every structured tool
+        // call is `{`. The argument that says what the call *does* — a command,
+        // a path — is the one the collapsed row is for.
+        headline: argument(entry.input),
+      })
     case 'tool_result':
       return row(
         entry.type,
@@ -132,9 +162,14 @@ export function present(raw: unknown): EntryView {
         entry.summary,
         entry.ok ? 'ok' : 'error',
         `Tool result · ${entry.ok ? 'ok' : 'failed'}`,
+        { shape: 'tool' },
       )
     case 'permission_request':
-      return row(entry.type, 'tool', preview(entry.detail), 'attention', `Permission · ${entry.tool}`)
+      // Compact, not the indented form the tool rows use. This one is prose —
+      // it is the thing the operator has to read and answer — so it is never
+      // folded, and an indented payload spends four lines of an unfoldable row
+      // on punctuation.
+      return row(entry.type, 'tool', compact(entry.detail), 'attention', `Permission · ${entry.tool}`)
     // `error`, not `attention`: a request is waiting for someone and a denial
     // is already over. The row above carries what the tool was trying to do.
     // The sentence when there is one, the token when there is not. The token
@@ -157,8 +192,117 @@ export function present(raw: unknown): EntryView {
   }
 }
 
-function row(kind: string, author: Author, body: string, tone: Tone | null, label?: string): EntryView {
-  return { kind, author, label: label ?? AUTHOR_LABELS[author], body, tone }
+function row(
+  kind: string,
+  author: Author,
+  body: string,
+  tone: Tone | null,
+  label?: string,
+  options: { readonly shape?: Shape; readonly headline?: string } = {},
+): EntryView {
+  const text = body.trim()
+  return {
+    kind,
+    author,
+    label: label ?? AUTHOR_LABELS[author],
+    headline: options.headline ?? firstLine(text),
+    body: text,
+    tone,
+    shape: options.shape ?? 'prose',
+  }
+}
+
+/**
+ * Folds a window of raw entries into the rows the view renders.
+ *
+ * The one thing it does beyond `present` is **group consecutive thinking**. A
+ * streamed thought does not arrive as one event; it arrives as a dozen, and a
+ * dozen separately collapsible rows is not a thought the operator can open —
+ * it is twelve chevrons over one paragraph. Grouping is by adjacency only, so
+ * a tool call between two thoughts still separates them, which is the sequence
+ * that actually happened.
+ *
+ * `offset` is the absolute index of `entries[0]` within the served tail, so a
+ * row's key survives new entries arriving at the end.
+ */
+export function fold(entries: readonly unknown[], offset: number): readonly Row[] {
+  const rows: Row[] = []
+  for (const [index, raw] of entries.entries()) {
+    const view = present(raw)
+    const last = rows.at(-1)
+    if (view.shape === 'thinking' && last?.shape === 'thinking') {
+      last.views.push(view)
+      continue
+    }
+    rows.push({ at: offset + index, shape: view.shape, views: [view] })
+  }
+  return rows
+}
+
+/** One rendered row: a single entry, or a run of consecutive thinking. */
+export interface Row {
+  /** Absolute index of the first entry in the row. The React key. */
+  readonly at: number
+  readonly shape: Shape
+  readonly views: EntryView[]
+}
+
+/** The body of a row, which for grouped thinking is every member's. */
+export function bodyOf(row: Row): string {
+  return row.views.map((view) => view.body).join('\n\n')
+}
+
+/** What a collapsed row shows: the first member's line, whatever the row holds. */
+export function headlineOf(row: Row): string {
+  return row.views[0]?.headline ?? ''
+}
+
+/** Whether opening the row would reveal anything the headline did not say. */
+export function hasMore(row: Row): boolean {
+  return bodyOf(row) !== headlineOf(row)
+}
+
+/** A headline is one line and fits on one line. */
+const HEADLINE_LIMIT = 140
+
+function firstLine(text: string): string {
+  const trimmed = text.trim()
+  const end = trimmed.indexOf('\n')
+  const first = end === -1 ? trimmed : trimmed.slice(0, end)
+  return first.length <= HEADLINE_LIMIT ? first : `${first.slice(0, HEADLINE_LIMIT)}…`
+}
+
+/**
+ * The argument of a tool call worth putting on the collapsed row, in the order
+ * worth trying.
+ *
+ * Deliberately a fixed list of *argument names* rather than a table of tools:
+ * the harnesses do not agree on a tool vocabulary and this file must not grow
+ * one. A tool nobody here has heard of that takes a `command` still gets a
+ * readable line, and one that takes none falls back to its payload.
+ */
+const HEADLINE_KEYS = [
+  'command',
+  'file_path',
+  'path',
+  'notebook_path',
+  'pattern',
+  'url',
+  'query',
+  'description',
+  'prompt',
+] as const
+
+function argument(input: unknown): string {
+  if (typeof input === 'string') return firstLine(input)
+  if (typeof input === 'object' && input !== null) {
+    const fields = input as Record<string, unknown>
+    for (const key of HEADLINE_KEYS) {
+      const value = fields[key]
+      if (typeof value === 'string' && value.trim() !== '') return firstLine(value)
+    }
+  }
+  return firstLine(payload(input))
 }
 
 function usage(entry: Extract<Entry, { type: 'usage' }>): string {
@@ -166,14 +310,32 @@ function usage(entry: Extract<Entry, { type: 'usage' }>): string {
   return `${entry.input} in · ${entry.output} out${cost}`
 }
 
-/** Tool payloads can be whole files. The row shows a look, the log has the rest. */
-const PREVIEW_LIMIT = 400
+/**
+ * Tool payloads can be whole files. An open row shows a generous look and the
+ * journal has the rest.
+ *
+ * Larger than the 400 characters this used to allow, and indented, because the
+ * payload is no longer what the row *is* — it is what opening the row reveals.
+ * A collapsed row costs one line whatever this holds, so the limit stopped
+ * being a defence of the page's length and became only a defence of its
+ * memory.
+ */
+const PAYLOAD_LIMIT = 4_000
 
-function preview(value: unknown): string {
+function payload(value: unknown): string {
+  return serialise(value, 2)
+}
+
+/** The same, on one line, for a row that does not fold. */
+function compact(value: unknown): string {
+  return serialise(value, 0)
+}
+
+function serialise(value: unknown, indent: number): string {
   if (typeof value === 'string') return clamp(value)
   let text: string
   try {
-    text = JSON.stringify(value) ?? String(value)
+    text = JSON.stringify(value, null, indent) ?? String(value)
   } catch {
     return '[unserialisable]'
   }
@@ -181,5 +343,5 @@ function preview(value: unknown): string {
 }
 
 function clamp(text: string): string {
-  return text.length <= PREVIEW_LIMIT ? text : `${text.slice(0, PREVIEW_LIMIT)}…`
+  return text.length <= PAYLOAD_LIMIT ? text : `${text.slice(0, PAYLOAD_LIMIT)}…`
 }
