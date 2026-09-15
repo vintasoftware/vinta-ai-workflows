@@ -71,6 +71,7 @@ import { join } from 'node:path'
 import type { AdmissionControl } from '../admission/admission.ts'
 import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
+import { gitLines } from '../integration/git.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
   GatePoolPhase,
@@ -1259,7 +1260,15 @@ export class Scheduler {
     this.#ask(state, effectId, {
       // The reason is already journalled by `#setStatus`; repeating it in the
       // question would put a failure message in a notification body (§11).
-      question: `This phase failed. Try it again?`,
+      //
+      // What the count *does* add is the one consequence the operator cannot
+      // see: a retry hands the node its lane again, and a lane handed on is
+      // recycled — `git clean` on a reusable one, a full re-provision on one
+      // whose database cannot be reset. Committed work survives that (the
+      // branch is a ref, and a retry resumes it); uncommitted work does not.
+      // A number is not repository content, and it is the difference between
+      // an informed "retry" and a surprised one.
+      question: `This phase failed. Try it again?${await this.#uncommittedNote(state)}`,
       kind: 'choice',
       choices: this.#retryChoices(state),
     })
@@ -1276,6 +1285,30 @@ export class Scheduler {
     if (member !== null && this.#workflow.crew[member] !== undefined) state.retryMember = member
     this.#clearLedger(state)
     return true
+  }
+
+  /**
+   * How much of this lane the retry will throw away, as a count.
+   *
+   * Only the count. The *paths* are repository content and would put a file
+   * list into a notification body (§11); the number is a fact about the lane
+   * and is what makes the choice an informed one. Silent on any failure —
+   * there is no lane, git will not answer, the host owns its own lanes — since
+   * a question that cannot be annotated is still a question worth asking.
+   */
+  async #uncommittedNote(state: NodeState): Promise<string> {
+    if (state.lane === null) return ''
+    try {
+      const dirty = await gitLines(join(this.#options.laneRoot, state.lane), [
+        'status',
+        '--porcelain',
+      ])
+      if (dirty.length === 0) return ''
+      const files = dirty.length === 1 ? '1 uncommitted file' : `${dirty.length} uncommitted files`
+      return ` Its commits are kept; ${files} in the lane will be discarded.`
+    } catch {
+      return ''
+    }
   }
 
   /**
