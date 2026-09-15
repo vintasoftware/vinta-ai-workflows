@@ -319,7 +319,43 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `plan/{plan-id}/lane-{phase-id}` branches, merged `--no-ff` into the single plan
   branch at each wave boundary, so the unit commits survive.
 
+- **`project.prepare_cmd`, for the shared servers a run depends on.** A project
+  whose databases are `delivery: external` and whose services point at one Redis
+  has no long-lived containers of its own — the shape these fields recommend —
+  and that makes some *other* stack a hard dependency of every run. Nothing in
+  the package could bring it up. `setup_cmd` looks like the place and is not: it
+  runs per lane, long after the template database was created on a server that
+  had to be up for `createdb` to work at all.
+
+  It runs in the repository root **before anything else a run does** — before
+  the preflight, before the templates, before the first worktree — and again
+  before every lane recycle, so a server that dies mid-run is restored at the
+  next hand-off rather than failing every phase after it. Failure aborts with
+  the exit code and a bounded stderr tail, and says what the failure means
+  rather than only that a command exited. It must be idempotent, and `--wait`
+  is only as good as the `healthcheck` a service declares: without one, compose
+  returns as soon as the container starts and `createdb` races the server.
+
 ### Fixed
+
+- **`doctor` checks that the shared servers answer.** It verified that binaries
+  existed and disk fitted, and never looked at a `server_url` — so a project
+  whose Postgres lives in another checkout's compose stack passed the preflight
+  with that stack down and died on the first `createdb`, before a worktree
+  existed. Each external database's server and each service URL is now probed
+  with a TCP connect, and a failure names the address that did not answer. A
+  compose-delivered database is deliberately not probed: the lane starts it.
+
+  The order matters as much as the check. `prepare_cmd` runs *before* the
+  preflight, so the check reports the world that hook just made rather than the
+  one in front of it.
+
+- **A service's `create_cmd` runs with the lane's environment.** `reset_cmd`
+  always had it and `create_cmd` did not, so a `create_cmd` that reached for
+  `docker compose` ran against the lane's own compose file with no project name
+  and no override — booting a stack on the project's fixed host ports, which is
+  the collision the override exists to prevent, caused by the step that sets a
+  lane up.
 
 - **`vinta-ai-maestro with` waits for the lock instead of giving up on it.** Its
   usage said it blocked until the resource was granted, and it did — for about

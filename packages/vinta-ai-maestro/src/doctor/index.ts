@@ -25,6 +25,7 @@
  * than quoted into a message.
  */
 import { execFile } from 'node:child_process'
+import { connect } from 'node:net'
 import { readdir } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import type { HarnessAdapter } from '../harness/adapter.ts'
@@ -266,6 +267,116 @@ async function checkCompose(bin: string, required: boolean): Promise<CheckResult
   return probe.ok
     ? pass('compose', 'docker compose: available')
     : flag('compose', 'docker compose: unavailable', 'fail', INSTALL_COMPOSE)
+}
+
+// ---------------------------------------------------------------------------
+// shared servers
+// ---------------------------------------------------------------------------
+
+/** How long a shared server has to accept a connection before it is unreachable. */
+const REACH_TIMEOUT_MS = 2_000
+
+/** Ports for the schemes a project is likely to point a shared service at. */
+const DEFAULT_PORTS: Readonly<Record<string, number>> = {
+  'postgres:': 5432,
+  'postgresql:': 5432,
+  'redis:': 6379,
+  'rediss:': 6380,
+  'amqp:': 5672,
+  'amqps:': 5671,
+  'mysql:': 3306,
+  'mongodb:': 27017,
+  'http:': 80,
+  'https:': 443,
+}
+
+/** Every shared server this project connects to but does not start. */
+export function sharedServers(project: ProjectSpec | undefined): { label: string; url: string }[] {
+  if (project === undefined) return []
+  const found: { label: string; url: string }[] = []
+
+  for (const [role, db] of Object.entries(project.databases)) {
+    // A compose-delivered database is booted *by the lane*, so it is correctly
+    // unreachable now; a file-delivered one is a path, not an address.
+    if (db?.engine === 'postgres' && db.delivery === 'external') {
+      found.push({ label: `database ${role}`, url: db.serverUrl })
+    }
+  }
+  for (const service of project.services ?? []) {
+    // A service with no URL *is* its namespace — an object-storage prefix has
+    // no address to connect to.
+    if (service.url !== undefined) found.push({ label: `service ${service.id}`, url: service.url })
+  }
+  return found
+}
+
+/**
+ * Whether a shared server answers.
+ *
+ * A TCP connect, not a protocol handshake: the question is whether the thing a
+ * lane is about to connect to is listening, and this package has no client for
+ * postgres, redis, rabbit or the rest — nor should it grow four.
+ */
+async function reachable(url: string): Promise<boolean> {
+  let target: URL
+  try {
+    target = new URL(url)
+  } catch {
+    return false
+  }
+  const port = target.port === '' ? DEFAULT_PORTS[target.protocol] : Number(target.port)
+  if (port === undefined || !Number.isInteger(port)) return false
+  const host = target.hostname === '' ? '127.0.0.1' : target.hostname
+
+  return await new Promise<boolean>((resolve) => {
+    const socket = connect({ host, port });
+    const settle = (answer: boolean): void => {
+      socket.destroy()
+      resolve(answer)
+    }
+    socket.setTimeout(REACH_TIMEOUT_MS)
+    socket.once('connect', () => {
+      settle(true)
+    })
+    socket.once('timeout', () => {
+      settle(false)
+    })
+    socket.once('error', () => {
+      settle(false)
+    })
+  })
+}
+
+/**
+ * The shared servers, probed.
+ *
+ * Without this, a `doctor` pass meant "the binaries are here and the disk
+ * fits", and a project whose Postgres lives in some other checkout's compose
+ * stack could pass it and then die on the very first `createdb` with a libpq
+ * connection error — before a single worktree existed. A preflight that cannot
+ * see the one hard dependency of every lane is checking the easy half.
+ *
+ * The address is named, because "a server did not answer" is not something
+ * anyone can act on and `postgres://localhost:5432` is.
+ */
+async function checkServers(project: ProjectSpec | undefined): Promise<CheckResult[]> {
+  const servers = sharedServers(project)
+  if (servers.length === 0) {
+    return [pass('servers', 'shared servers: none declared by this project')]
+  }
+  return await Promise.all(
+    servers.map(async ({ label, url }) =>
+      (await reachable(url))
+        ? pass(`server:${label}`, `${label}: ${url} answers`)
+        : flag(
+            `server:${label}`,
+            `${label}: nothing is listening on ${url}`,
+            'fail',
+            'start the shared stack this project connects to — a project.prepare_cmd is the ' +
+              'place to do that automatically',
+          ),
+    ),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -548,22 +659,32 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const summaryDir = options.summaryDir ?? `${repoPath}/.vinta-ai-workflows/worktrees`
   const laneCount = workflow.resources['lane']?.capacity ?? 1
 
-  const [harnesses, git, worktrees, compose, disk, lanes, briefs, branches] = await Promise.all([
-    Promise.all(
-      referencedHarnesses(workflow).map((id) =>
-        checkHarness(id, options.bins?.harness?.[id]),
+  const [harnesses, git, worktrees, compose, servers, disk, lanes, briefs, branches] =
+    await Promise.all([
+      Promise.all(
+        referencedHarnesses(workflow).map((id) => checkHarness(id, options.bins?.harness?.[id])),
       ),
-    ),
-    checkGit(gitBin),
-    checkWorktrees(gitBin, repoPath),
-    checkCompose(dockerBin, needsCompose(options.project)),
-    checkDisk(options, laneCount),
-    checkLaneSummaries(summaryDir),
-    checkBriefs(gitBin, repoPath, workflow),
-    checkHeldBranches(gitBin, repoPath, workflow),
-  ])
+      checkGit(gitBin),
+      checkWorktrees(gitBin, repoPath),
+      checkCompose(dockerBin, needsCompose(options.project)),
+      checkServers(options.project),
+      checkDisk(options, laneCount),
+      checkLaneSummaries(summaryDir),
+      checkBriefs(gitBin, repoPath, workflow),
+      checkHeldBranches(gitBin, repoPath, workflow),
+    ])
 
-  const checks = [...harnesses, git, worktrees, compose, disk, ...briefs, ...branches, ...lanes]
+  const checks = [
+    ...harnesses,
+    git,
+    worktrees,
+    compose,
+    ...servers,
+    disk,
+    ...briefs,
+    ...branches,
+    ...lanes,
+  ]
   const ok = !checks.some((check) => check.status === 'fail')
   return { checks, ok, exitCode: ok ? 0 : 1 }
 }

@@ -446,6 +446,22 @@ export const ProjectSchema = z
           'sharing one with no isolation at all.',
       ),
     compose: ComposeSchema.default(() => ({ enabled: true, publish: [], shared_volumes: [] })),
+    prepare_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Run in the repository root **before anything else a run does** — before the preflight, ' +
+          'before the template databases, before the first worktree. Its job is to make the ' +
+          'shared servers this project’s lanes connect to reachable: `docker compose up -d ' +
+          '--wait db redis` for a stack in the root checkout, `brew services start postgresql` ' +
+          'for a host install, nothing at all for a project whose lanes boot their own. ' +
+          '`setup_cmd` cannot do this — it runs per lane, long after the template database has ' +
+          'been created on a server that had to be up already. MUST be idempotent: it runs ' +
+          'again before every lane recycle, which is what restores a server that died mid-run. ' +
+          'Note that `--wait` only waits for services that declare a `healthcheck`; without one ' +
+          'it returns as soon as the container is started, and `createdb` races the server.',
+      ),
     setup_cmd: z
       .string()
       .min(1)

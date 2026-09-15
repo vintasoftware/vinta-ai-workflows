@@ -75,12 +75,13 @@ function screenState(container: HTMLElement, nodeIds: readonly string[]) {
 }
 
 /**
- * Samples `read` until two consecutive samples agree, so a comparison is made
- * against a screen that has stopped moving rather than one caught mid-fold.
+ * Samples `read` until two consecutive samples agree.
  *
- * Waiting on a specific element is not enough here: the live view folds a whole
- * log off the socket, and no single element's final value implies every other
- * one has arrived.
+ * **This is a second line, never the proof.** "Nothing changed for ten
+ * milliseconds" is also true between two frames on a slow machine, which is how
+ * this once sampled a snapshot and called it a folded log. What proves the fold
+ * is `foldedToEnd`: a value the view did not start with. Use both — the edge
+ * for correctness, this for the churn that can follow it.
  */
 async function settled<T>(read: () => T, tries = 50): Promise<T> {
   let previous = JSON.stringify(read())
@@ -108,6 +109,27 @@ const HISTORY: readonly NewEvent[] = [
 ]
 
 const NODES = [node('impl', 'failed'), node('review', 'failed', 1)]
+
+/**
+ * Waits until the whole of `HISTORY` has been folded, and proves it with a
+ * value the view did not start holding.
+ *
+ * **A wait is only proof when the value it waits for differs from the state the
+ * view began in.** `impl` is the one cell that qualifies here: the snapshot has
+ * it `failed` and the end of the log has it `done`. `review` is `failed` in
+ * both, so waiting for *that* passes at first render, before a single frame has
+ * arrived — and this test then sampled the snapshot and called it the live
+ * view. It failed on Windows CI exactly that way, reporting `impl` as Failed
+ * where the replay correctly had it Done.
+ *
+ * The earlier fix here reached for "wait until the screen stops changing"
+ * instead, which is a weaker thing: on a slow machine nothing changes for ten
+ * milliseconds *between* frames too.
+ */
+const foldedToEnd = async (container: HTMLElement): Promise<void> => {
+  await waitFor(() => expect(cardColorOf(container, 'impl')).toBe('var(--vdag-status-done)'))
+  await waitFor(() => expect(cardColorOf(container, 'review')).toBe('var(--vdag-status-failed)'))
+}
 
 test('scrubbing to a position reproduces the state that event produced', async () => {
   const stub = await startStubDaemon({
@@ -199,16 +221,9 @@ test('a run replayed to its end is the live view of that run', async () => {
 
   // The live view, folding the same log off the socket.
   const live = renderApp(stub, RUN_ROUTE)
-  await waitFor(() =>
-    expect(cardColorOf(live.container, 'review')).toBe('var(--vdag-status-failed)'),
-  )
-  await waitFor(() => expect(live.container.querySelector('.run-head .chip')?.textContent).toBe('failed'))
-  // Neither condition above proves the whole log has been folded: the chip can
-  // read `failed` straight off the snapshot before a single frame arrives, and
-  // `review` settling says nothing about a node whose status event comes later
-  // in the log. Sampling here caught the live view mid-fold, which is what made
-  // this test fail about one full-suite run in three. Wait for the rendered
-  // state to stop moving instead.
+  await foldedToEnd(live.container)
+  // A second line only. The edge above is the proof; this catches any further
+  // churn — the orphan's fallback, a late re-render — before the sample.
   const liveState = await settled(() => screenState(live.container, ids))
 
   cleanup()
@@ -217,11 +232,9 @@ test('a run replayed to its end is the live view of that run', async () => {
   const { container } = renderReplay(stub)
   await waitFor(() => expect(container.querySelector('[data-slider]')).not.toBe(null))
   await scrubTo(container, HISTORY.length)
-  await waitFor(() =>
-    expect(cardColorOf(container, 'review')).toBe('var(--vdag-status-failed)'),
-  )
+  await foldedToEnd(container)
 
-  expect(screenState(container, ids)).toEqual(liveState)
+  expect(await settled(() => screenState(container, ids))).toEqual(liveState)
 })
 
 test('scrubbing backwards re-reads nothing, and a long run is read once per page', async () => {

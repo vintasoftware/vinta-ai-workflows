@@ -26,6 +26,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { existsSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -155,6 +156,15 @@ const node = (id: string, deps: readonly string[] = []): Record<string, unknown>
 const MISSING = '/nonexistent/vinta-ai-maestro-cli/not-a-binary'
 
 /**
+ * What a test that drives a whole run gets instead of Vitest's 5s default.
+ *
+ * Generous on purpose: the number is not a performance budget, it is the point
+ * past which "slow" becomes "stuck". A real deadlock in one of these still
+ * fails, just later; a loaded laptop no longer fails one that works.
+ */
+const REAL_RUN_TIMEOUT_MS = 30_000
+
+/**
  * A machine where nothing is wrong. Each test breaks exactly one thing.
  *
  * These are `tests/support/fake-cli.ts`'s fakes rather than shell scripts, so
@@ -226,6 +236,98 @@ describe('vinta-ai-maestro doctor', () => {
     expect(code).toBe(FAILED)
     expect(io.out.some((line) => line.includes('docker compose: unavailable'))).toBe(true)
     expect(io.out.some((line) => line.includes('not required by this project'))).toBe(false)
+  })
+
+  /**
+   * A project whose Postgres lives in some other checkout's compose stack could
+   * pass `doctor` with that stack down and then die on the very first
+   * `createdb`, before a single worktree existed. A preflight that cannot see
+   * the one hard dependency of every lane is checking the easy half.
+   */
+  describe('shared servers', () => {
+    /** A socket that accepts and says nothing — enough to answer "is it up". */
+    const listening = async (): Promise<{ url: string; close: () => void }> => {
+      const server = createServer()
+      await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready))
+      const address = server.address()
+      if (address === null || typeof address === 'string') throw new Error('no port')
+      return {
+        url: `postgres://127.0.0.1:${address.port}`,
+        close: () => {
+          server.close()
+        },
+      }
+    }
+
+    const externalDb = (serverUrl: string): Record<string, unknown> => ({
+      migrate_cmd: 'true',
+      databases: {
+        dev: {
+          engine: 'postgres',
+          delivery: 'external',
+          name: 'app',
+          server_url: serverUrl,
+          connection_url_var: 'DATABASE_URL',
+        },
+      },
+    })
+
+    it('passes when the shared server answers', async () => {
+      const server = await listening()
+      try {
+        const dir = makeTemp()
+        const path = writeJson(dir, 'workflow.json', {
+          ...workflowJson([node('a')]),
+          project: externalDb(server.url),
+        })
+        const io = recorder()
+
+        expect(await doctorCommand([path], io.io, healthyBins(dir))).toBe(OK)
+        expect(io.out.some((line) => line.includes(`${server.url} answers`))).toBe(true)
+      } finally {
+        server.close()
+      }
+    })
+
+    it('fails, naming the address, when nothing is listening', async () => {
+      // A port nothing could plausibly be on. The address is in the message
+      // because "a server did not answer" is not something anyone can act on.
+      const dead = 'postgres://127.0.0.1:1'
+      const dir = makeTemp()
+      const path = writeJson(dir, 'workflow.json', {
+        ...workflowJson([node('a')]),
+        project: externalDb(dead),
+      })
+      const io = recorder()
+
+      expect(await doctorCommand([path], io.io, healthyBins(dir))).toBe(FAILED)
+      expect(io.out.some((line) => line.includes(`nothing is listening on ${dead}`))).toBe(true)
+    })
+
+    it('does not probe a database the lane boots for itself', async () => {
+      // A compose-delivered server is correctly unreachable now: the lane
+      // starts it. Probing it would fail every run that uses one.
+      const dir = makeTemp()
+      const path = writeJson(dir, 'workflow.json', {
+        ...workflowJson([node('a')]),
+        project: {
+          migrate_cmd: 'true',
+          databases: {
+            dev: {
+              engine: 'postgres',
+              delivery: 'compose',
+              name: 'app',
+              server_url: 'postgres://127.0.0.1:1',
+              connection_url_var: 'DATABASE_URL',
+            },
+          },
+        },
+      })
+      const io = recorder()
+
+      expect(await doctorCommand([path], io.io, healthyBins(dir))).toBe(OK)
+      expect(io.out.some((line) => line.includes('none declared'))).toBe(true)
+    })
   })
 
   it('exits non-zero on a broken environment, and still reports every check', async () => {
@@ -360,6 +462,9 @@ describe('vinta-ai-maestro with', () => {
 
       const code = await withCommand(['test-suite', '--', 'pnpm', 'test'], io.io, {
         fetch: request,
+        // The loop is the subject; its politeness between attempts is not, and
+        // sleeping for real made this the slowest test in the file.
+        sleep: async () => {},
         run: async (command) => {
           commands.push(command)
           return 0
@@ -893,6 +998,22 @@ function whyNodesFailed(repo: string, runId: string): string {
   }
 }
 
+/**
+ * Every test below drives a *whole run*: a bound daemon, real git worktrees,
+ * real gate processes, a scheduler going from start to `run_ended`. Idle they
+ * take about a second; inside a full parallel suite on a busy machine they have
+ * been measured at three and a half, against Vitest's 5s default. That margin
+ * is not a margin, and two of them failed on it intermittently — always with
+ * `Test timed out`, never with an assertion, never reproducibly on their own.
+ *
+ * So the headroom is here rather than in `vitest.config.ts`, whose per-platform
+ * choice is deliberate and worth keeping: on macOS and Linux a *unit* test that
+ * sits for five seconds is a deadlock and should be reported as one quickly.
+ * These are not unit tests. The cost of the wider budget is bounded to the
+ * suite that genuinely spawns processes, and it is the same reasoning the
+ * config already applies to Windows — a slow machine is an environment, not a
+ * bug.
+ */
 describe('vinta-ai-maestro run, composed', () => {
   it('carries the live lease connection and phase identity into each agent turn', async () => {
     const dir = gitRepo()
@@ -1261,7 +1382,7 @@ describe('vinta-ai-maestro run, composed', () => {
     expect(existsSync(path)).toBe(true)
     expect(existsSync(join(dir, '.vinta-ai-maestro', 'runs', 'agreed-run', 'workflow.json'))).toBe(true)
   })
-})
+}, REAL_RUN_TIMEOUT_MS)
 
 // ---------------------------------------------------------------------------
 // 6: purge

@@ -28,6 +28,13 @@ export const WITH_USAGE = `usage: vinta-ai-maestro with <resource> -- <cmd>
 export interface WithDeps {
   readonly fetch?: typeof fetch
   readonly run?: (command: string, signal: AbortSignal) => Promise<number>
+  /**
+   * How the wait pauses between attempts. Injected so a test of the *loop* does
+   * not pay for the politeness — real sleeping is the slowest thing about it,
+   * and a test that spends a second and a half asleep is a test that eventually
+   * flakes on a loaded machine for reasons that have nothing to do with it.
+   */
+  readonly sleep?: (ms: number) => Promise<void>
 }
 
 export async function withCommand(
@@ -65,7 +72,15 @@ export async function withCommand(
   const abort = new AbortController()
 
   try {
-    const grant = await waitForLease({ request, endpoint, headers, resource, holderNode, io })
+    const grant = await waitForLease({
+      request,
+      endpoint,
+      headers,
+      resource,
+      holderNode,
+      io,
+      ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
+    })
     if (grant === null) return FAILED
     leaseId = grant.leaseId
 
