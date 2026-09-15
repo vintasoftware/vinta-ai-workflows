@@ -231,6 +231,15 @@
           "additionalProperties": false,
           "description": "The project’s own command lines, handed to every agent verbatim. A fixed vocabulary rather than free-form, because the prompt has to be able to say which one step 3 of the working instructions means. Declaring these is how an agent stops guessing: a project whose suite only runs inside a container, or only against a lane-specific database, has no way of telling one otherwise, and `pytest` is a plausible guess that is wrong in exactly that project."
         },
+        "hooks": {
+          "default": "run",
+          "description": "Whether the repository’s git hooks run on commits made inside a lane. `run` is the default and is what a developer’s own checkout does. `skip` points the lane at an empty `core.hooksPath`, for the case this exists for: a `language: system` pre-commit chain that, in a worktree that has never been committed in, builds a virtualenv per lane before it will let a commit through — observed as four failed commit attempts, one of them a two-minute timeout, and a 510 MB `.venv` per lane. The gates still run; this only stops each lane paying a whole-environment install to make a commit.",
+          "type": "string",
+          "enum": [
+            "run",
+            "skip"
+          ]
+        },
         "services": {
           "default": {},
           "description": "Shared servers each lane gets its own namespace inside, by id. One postgres, one redis, one rabbit on the machine, with a database / db index / vhost per lane — which is the difference between six lanes being viable on a laptop and not. The alternative a project falls into without this is booting a server per lane, or sharing one with no isolation at all.",

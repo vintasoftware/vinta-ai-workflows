@@ -58,18 +58,56 @@ const sh = async (
   })
 }
 
+/** Who the rescue commit is by. Never the agent: it did not write this commit. */
+const WIP_AUTHOR = 'vinta-ai-maestro'
+const WIP_EMAIL = 'vinta-ai-maestro@localhost'
+
+/**
+ * Where a rescued tree is kept. Outside `refs/heads`, so it is reachable and
+ * mergeable by hand and reaches nothing on its own.
+ */
+export const WIP_REFS = 'refs/vinta-ai-maestro/wip'
+
+/** How many paths a failed rescue names before it stops listing. */
+const PRESERVE_PATH_LIMIT = 20
+
+/** git, in a lane rather than in the main checkout. */
+const gitIn = async (cwd: string, args: readonly string[]): Promise<void> => {
+  await run('git', [...args], { cwd })
+}
+
+/** Newline-delimited git output as a list. */
+const gitLines = async (cwd: string, args: readonly string[]): Promise<string[]> => {
+  const { stdout } = await run('git', [...args], { cwd })
+  return stdout.split('\n').filter((line) => line.length > 0)
+}
+
 /**
  * A lane that could not be handed on. Carries the lane name and which half of
  * the recycle failed, and nothing else: a reset command's own output is the
  * project's data — rows, paths, migration names — and §11 keeps it out of
  * error messages the same way it keeps it out of log fields.
+ *
+ * `preserve` is the exception, and it names paths. It is the stage that fires
+ * when work was about to be destroyed and could not be saved, so the list of
+ * what is at stake is the entire content of the message — an operator told only
+ * "could not be recycled (preserve)" has been warned about nothing they can
+ * act on. Bounded, and paths only: never a line of any file.
  */
 export class LaneRecycleError extends Error {
   constructor(
     readonly lane: string,
-    readonly stage: 'worktree' | 'database' | 'reprovision',
+    readonly stage: 'preserve' | 'worktree' | 'database' | 'reprovision',
+    readonly paths: readonly string[] = [],
   ) {
-    super(`lane "${lane}" could not be recycled (${stage})`)
+    const at =
+      paths.length === 0
+        ? ''
+        : `\nuncommitted, and still on disk in this lane:\n${paths
+            .slice(0, PRESERVE_PATH_LIMIT)
+            .map((path) => `  ${path}`)
+            .join('\n')}${paths.length > PRESERVE_PATH_LIMIT ? `\n  … and ${paths.length - PRESERVE_PATH_LIMIT} more` : ''}`
+    super(`lane "${lane}" could not be recycled (${stage})${at}`)
     this.name = 'LaneRecycleError'
   }
 }
@@ -153,6 +191,8 @@ export interface ProjectSpec {
   readonly envFiles?: readonly string[]
   /** The project's own idempotent lane-setup command, run inside the lane. */
   readonly setupCmd?: string
+  /** False points the lane at an empty `core.hooksPath`. Defaults to running them. */
+  readonly hooks?: boolean
   /**
    * How the lane's compose stack is isolated past `COMPOSE_PROJECT_NAME`.
    * Absent means the pool does not go looking for a compose file at all.
@@ -328,6 +368,9 @@ export class LanePool {
     const lane = this.lane(name)
     const summary = await readSummary(this.#summaryDir, name)
     const plan = resetPlan(summary)
+    // Before either path, because both destroy the working tree: one cleans it,
+    // the other deletes the directory outright.
+    await this.#preserveWork(lane)
     if (plan.reusable) {
       await this.#restoreWorktree(lane, summary)
       // Both halves of "a working checkout" are put back, not just the rows.
@@ -479,6 +522,7 @@ export class LanePool {
     await mkdir(poolRoot, { recursive: true })
     await this.#git(['worktree', 'add', '-b', branch, path, baseRef])
     await this.#linkDeps(path)
+    await this.#configureHooks(path)
     await this.#copyEnvFiles(name, path)
 
     const databases: DatabasePlan[] = []
@@ -546,6 +590,128 @@ export class LanePool {
     await this.#writeSummary(lane)
     await this.#setup(lane)
     return lane
+  }
+
+  /**
+   * Points the lane at an empty `core.hooksPath` when the project asks.
+   *
+   * A lane is a worktree that has never been committed in, and a `language:
+   * system` pre-commit chain treats that as a fresh machine: one project's
+   * hooks built a 510 MB virtualenv before they would let the first commit
+   * through, and the agent spent four attempts and a two-minute timeout getting
+   * past them. Per lane. Committing is not optional — the phase is judged on
+   * commits — so a hook chain that makes committing expensive makes the whole
+   * design expensive.
+   *
+   * Set per worktree rather than on the repository: the operator's own checkout
+   * keeps its hooks. And it is opt-in, because hooks are usually there for a
+   * reason and the gates that would catch what they catch are the project's own
+   * to declare.
+   */
+  async #configureHooks(lanePath: string): Promise<void> {
+    if (this.#options.project.hooks !== false) return
+    const empty = join(lanePath, '.git-hooks-disabled')
+    await mkdir(empty, { recursive: true })
+    // A worktree's `.git` is a file, and `--worktree` needs `extensions
+    // .worktreeConfig`; `--local` on a worktree reaches the shared config,
+    // which would disable hooks for the main checkout too. The env var form is
+    // not available here because the agent runs its own git. So: worktree
+    // config, with the extension enabled first.
+    await gitIn(lanePath, ['config', 'extensions.worktreeConfig', 'true'])
+    await gitIn(lanePath, ['config', '--worktree', 'core.hooksPath', empty])
+  }
+
+  /**
+   * Whatever the last phase left uncommitted, kept as a commit **off to one
+   * side**, before the recycle destroys it.
+   *
+   * A recycle hands a clean lane on, and both of its paths do that by throwing
+   * the working tree away — `git clean` on a reusable lane, `rm -rf` on one that
+   * has to be re-provisioned. A phase whose commits survive and whose in-flight
+   * edits do not is still a phase that lost work, and the deliverables of a real
+   * phase have been deleted this way: four sessions, a `SUCCESS` report, and
+   * every file untracked.
+   *
+   * **It does not move the branch, and the first version did.** Committing onto
+   * the checked-out phase branch is the obvious implementation and it is wrong:
+   * a lane's dirty tree holds gate artifacts and scratch files as often as it
+   * holds deliverables, and a phase branch is the *base of its dependents*. The
+   * test that caught this had a gate write `left-behind.txt`; committing it onto
+   * phase `a` put it in phase `b`'s base and failed `b`'s gate, which is a
+   * failure nothing in `b` caused. So the tree is committed with plumbing —
+   * a temporary index, `write-tree`, `commit-tree` — and only a ref under
+   * `refs/vinta-ai-maestro/wip/` points at the result. Nothing is merged,
+   * nothing reaches a dependent, and nothing is lost:
+   *
+   *     git -C <lane> checkout <ref> -- <path>
+   *
+   * This is the floor, not the fix. The fix is that the prompts now require
+   * committing and the reviewer reads the working tree, so work that matters
+   * should be on the branch before anything gets here.
+   *
+   * Identity is supplied for exactly this commit. A machine with no
+   * `user.email` must not be the reason work is lost, and `commit-tree` touches
+   * neither hooks nor the real index, so there is nothing else to opt out of.
+   */
+  async #preserveWork(lane: Lane): Promise<void> {
+    let dirty: string[]
+    try {
+      dirty = await gitLines(lane.path, ['status', '--porcelain'])
+    } catch {
+      // No worktree, or no git. Nothing to preserve and nothing to report.
+      return
+    }
+    if (dirty.length === 0) return
+
+    try {
+      // A scratch index, so the lane's own staged state is untouched — the
+      // same seam `GateCache` uses to hash a tree without disturbing one.
+      const index = join(lane.path, '.git-wip-index')
+      const scratch = { ...process.env, GIT_INDEX_FILE: index }
+      await run('git', ['read-tree', 'HEAD'], { cwd: lane.path, env: scratch })
+      await run('git', ['add', '--all'], { cwd: lane.path, env: scratch })
+      const { stdout: tree } = await run('git', ['write-tree'], { cwd: lane.path, env: scratch })
+      await rm(index, { force: true })
+
+      const { stdout: commit } = await run(
+        'git',
+        [
+          'commit-tree',
+          tree.trim(),
+          '-p',
+          'HEAD',
+          '-m',
+          `wip: ${lane.name} — uncommitted work, set aside before the lane was recycled`,
+        ],
+        {
+          cwd: lane.path,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: WIP_AUTHOR,
+            GIT_AUTHOR_EMAIL: WIP_EMAIL,
+            GIT_COMMITTER_NAME: WIP_AUTHOR,
+            GIT_COMMITTER_EMAIL: WIP_EMAIL,
+          },
+        },
+      )
+      // One ref per rescue: a lane is recycled once per phase it serves, and a
+      // single ref per lane would let the second rescue delete the first.
+      await gitIn(lane.path, [
+        'update-ref',
+        `${WIP_REFS}/${lane.name}/${Date.now()}`,
+        commit.trim(),
+      ])
+    } catch {
+      // Fail-closed, like every other stage of a recycle. The lane goes back on
+      // the free list dirty, the next node to take it fails the same way, and
+      // the work is still on disk for whoever reads the message — which is the
+      // whole point of refusing rather than cleaning. The paths are the message.
+      throw new LaneRecycleError(
+        lane.name,
+        'preserve',
+        dirty.map((line) => line.slice(3)),
+      )
+    }
   }
 
   /**

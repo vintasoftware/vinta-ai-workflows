@@ -422,6 +422,19 @@ export const ProjectSchema = z
           'provisioning rather than producing a lane whose stack cannot boot.',
       ),
     commands: CommandsSchema.default({}),
+    hooks: z
+      .enum(['run', 'skip'])
+      .default('run')
+      .describe(
+        'Whether the repository’s git hooks run on commits made inside a lane. `run` is the ' +
+          'default and is what a developer’s own checkout does. `skip` points the lane at an ' +
+          'empty `core.hooksPath`, for the case this exists for: a `language: system` ' +
+          'pre-commit chain that, in a worktree that has never been committed in, builds a ' +
+          'virtualenv per lane before it will let a commit through — observed as four failed ' +
+          'commit attempts, one of them a two-minute timeout, and a 510 MB `.venv` per lane. ' +
+          'The gates still run; this only stops each lane paying a whole-environment install ' +
+          'to make a commit.',
+      ),
     services: z
       .record(Id, ServiceSchema)
       .default({})
