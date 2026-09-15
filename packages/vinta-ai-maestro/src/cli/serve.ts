@@ -71,7 +71,14 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  and nobody is watching there.
   --retries <n>  Automatic attempts before the question, under "retry".
                  Defaults to 1, and 0 to 5 are accepted. Raising it multiplies
-                 the cost of a phase that is simply broken.
+                 the cost of a phase that is simply broken. A re-attempt keeps
+                 the previous one's commits and starts a fresh agent session —
+                 "cold" is about the session, not the branch.
+                 This is the *outer* budget. The inner one is each phase's own
+                 max_fix_rounds (default 2), which counts review rounds rather
+                 than findings: a first review raising four blockers can use it
+                 up while every round makes progress. A phase that keeps
+                 arriving here usually wants that raised, not this.
   --permission   How much an agent may do without being asked. Defaults to
                  auto — it works in its own lane unattended, which is what a
                  lane is for. ask makes every tool use need approval, and

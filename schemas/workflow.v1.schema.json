@@ -590,6 +590,7 @@
           },
           "max_fix_rounds": {
             "default": 2,
+            "description": "Rounds the fixer gets to clear a review’s findings before the phase fails. Two is a budget, not a target, and it is measured in *rounds* rather than findings — a first review raising four legitimate blockers can exhaust it while every round is making progress. Raise it on a phase you expect to be argued over; it is the knob that decides how much a phase gets to be wrong before it is handed to `--on-failure`.",
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991

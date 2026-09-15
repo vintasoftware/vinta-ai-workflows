@@ -186,12 +186,60 @@ export class Integrator {
    * Cuts the node's phase branch at its computed base, in the lane that will
    * run it. `checkout -B` creates the branch at the base without checking the
    * base out, so a base that is checked out in another worktree is fine.
+   *
+   * **`resume` is what stops a retry from erasing the attempt before it.** A
+   * failed phase is re-entered at the pipeline's initial state, which runs
+   * `git_branch` again — and `-B` moves an existing branch unconditionally. So
+   * a phase that committed real work in attempt 1 had it reset to base at the
+   * start of attempt 2, the files vanished from the worktree, and the next
+   * reviewer correctly reported "phase not implemented at all". The fix budget
+   * then burned on re-implementing from nothing, failed again, and the cycle
+   * repeated. Observed as two implementer commits and three `branch: Reset to
+   * <base>` entries in one phase branch's reflog.
+   *
+   * "Cold" was always meant to describe the agent's *session*, not its branch.
+   * The default policy calls the failures it targets environmental, and an
+   * environmental failure is exactly the case where the previous attempt's code
+   * is the thing worth keeping.
+   *
+   * It is a parameter rather than something inferred here because the question
+   * is "has this node been branched in *this run*", and only the caller holds
+   * the journal that answers it. A phase branch surviving from an unrelated
+   * earlier run of the same plan must still be cut fresh — its name carries the
+   * plan id and not the run id, so the ref alone cannot tell the two apart.
    */
-  async startNode(nodeId: string, lanePath: string): Promise<string> {
+  async startNode(nodeId: string, lanePath: string, resume = false): Promise<string> {
     const base = await this.prepareBase(nodeId)
     const branch = this.nodeBranch(nodeId)
+
+    if (resume && (await this.#carriesWork(lanePath, branch, base))) {
+      // Deliberately not rebased or fast-forwarded onto a base that has moved.
+      // Either could conflict, and a conflict here would fail the retry during
+      // its *setup*, before the agent that might resolve it has run. An
+      // out-of-date base is what an ordinary feature branch has, and the wave
+      // merge is what reconciles it.
+      await git(lanePath, ['checkout', branch])
+      return branch
+    }
+
     await git(lanePath, ['checkout', '-B', branch, base])
     return branch
+  }
+
+  /**
+   * Whether this branch holds commits the base does not — the only reason to
+   * keep it rather than cut it again.
+   *
+   * A branch that is an ancestor of its base contributed nothing (or has
+   * already been merged into it), so moving it up costs nothing and leaves the
+   * retry on a fresher base. A missing branch answers the same way: there is
+   * nothing to lose by creating it.
+   */
+  async #carriesWork(lanePath: string, branch: string, base: string): Promise<boolean> {
+    if (!(await gitOk(lanePath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]))) {
+      return false
+    }
+    return !(await gitOk(lanePath, ['merge-base', '--is-ancestor', branch, base]))
   }
 
   // -------------------------------------------------------------------------

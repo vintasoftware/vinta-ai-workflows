@@ -94,16 +94,52 @@ export class LaneEnvFileError extends Error {
   }
 }
 
+/** How much of a failing setup command's stderr is carried. */
+const STDERR_LIMIT = 500
+
 /**
- * The project's own `setup_cmd` failed. Identifiers only — that command's
- * output is the project's, and §11 keeps it out of error messages exactly as
- * it keeps it out of log fields.
+ * The project's own `setup_cmd` failed, with enough to act on.
+ *
+ * The first version carried the lane name and nothing else, on a §11 reading
+ * that turned out to be the wrong one. An operator whose `setup_cmd` died saw
+ * only "could not provision the lane pool under …" — no exit code, no reason —
+ * and had to replay the command by hand with the lane's environment
+ * reconstructed to discover a missing settings module. That is an afternoon to
+ * learn one line.
+ *
+ * §11 keeps repository *contents* out of the record: diffs, file bodies, gate
+ * output. A command's exit code is not that, and the tail of its stderr is the
+ * same class of thing as a harness refusal's own explanation — which this
+ * package already decided to carry, for exactly this reason, after a permission
+ * wall cost an afternoon for the same shape of reason. Bounded, and the tail
+ * rather than the head, because a stack trace puts the cause last.
  */
 export class LaneSetupError extends Error {
-  constructor(readonly lane: string) {
-    super(`lane "${lane}": the project's setup_cmd failed`)
+  constructor(
+    readonly lane: string,
+    readonly exitCode: number | null,
+    readonly detail: string,
+  ) {
+    const code = exitCode === null ? 'was killed' : `exited ${exitCode}`
+    super(
+      `lane "${lane}": the project's setup_cmd ${code}` +
+        (detail === '' ? '' : `\n${detail}`),
+    )
     this.name = 'LaneSetupError'
   }
+}
+
+/** The last of a failed child's stderr, bounded, or '' where it said nothing. */
+function stderrTail(error: unknown): string {
+  const raw = (error as { stderr?: unknown } | null)?.stderr
+  const text = typeof raw === 'string' ? raw.trimEnd() : ''
+  return text.length <= STDERR_LIMIT ? text : `…${text.slice(-STDERR_LIMIT)}`
+}
+
+/** A failed child's exit code, or null where it was killed by a signal. */
+function exitCodeOf(error: unknown): number | null {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'number' ? code : null
 }
 
 export interface ProjectSpec {
@@ -593,8 +629,8 @@ export class LanePool {
     if (setupCmd === undefined) return
     try {
       await sh(setupCmd, lane.path, lane.env)
-    } catch {
-      throw new LaneSetupError(lane.name)
+    } catch (error) {
+      throw new LaneSetupError(lane.name, exitCodeOf(error), stderrTail(error))
     }
   }
 

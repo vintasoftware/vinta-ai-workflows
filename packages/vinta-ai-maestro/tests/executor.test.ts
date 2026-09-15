@@ -815,6 +815,43 @@ describe('the git verbs', () => {
     await expect(rig.invoke('p1', 'git_push')).resolves.toEqual({})
   })
 
+  /**
+   * The half of the retry fix that lives here: *whether* this is a second
+   * attempt is a question about this run, and only the journal answers it.
+   * `node_assigned` carrying the phase branch is the record that the node has
+   * already been branched.
+   */
+  it('keeps the previous attempt’s commits when the node is branched again', async () => {
+    const rig = setup(twoNodes)
+    const lane = rig.lanes[0] as ExecutorLane
+    rig.journal.append({
+      runId: RUN_ID,
+      nodeId: 'p1',
+      type: 'node_assigned',
+      payload: { lane: lane.name },
+    })
+
+    await rig.invoke('p1', 'git_branch')
+    writeFileSync(join(lane.path, 'p1.txt'), 'the first attempt\n')
+    g(lane.path, 'add', '--all')
+    g(lane.path, 'commit', '-m', 'p1 work')
+    const attemptOne = g(lane.path, 'rev-parse', 'HEAD')
+
+    // The retry: same node, same effect, second time round.
+    await rig.invoke('p1', 'git_branch')
+
+    expect(g(lane.path, 'rev-parse', 'HEAD')).toBe(attemptOne)
+    expect(existsSync(join(lane.path, 'p1.txt'))).toBe(true)
+
+    // And the journal says what the branch pointed at when this attempt took
+    // it over — null the first time, the previous tip the second.
+    const assigned = rig.journal
+      .events(RUN_ID)
+      .filter((event) => event.type === 'node_assigned' && event.nodeId === 'p1')
+      .map((event) => (event.payload as { previous_head?: string | null }).previous_head)
+    expect(assigned).toEqual([undefined, null, attemptOne])
+  })
+
   it('writes the run and wave tracking records in the integration worktree', async () => {
     const rig = setup(twoNodes)
     const lane = rig.lanes[0] as ExecutorLane

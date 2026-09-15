@@ -171,9 +171,9 @@ const healthyBins = (dir: string): DoctorOverrides => ({
   perLaneBytes: 1,
   bins: {
     git: fakeCli(dir, 'git', { version: 'git version 2.45.2' }),
-    // Never actually probed: no workflow here declares a compose-delivered
-    // database, so the compose check is "not required by this project" and
-    // this binary only has to exist.
+    // Probed only by the workflow below that declares a compose-delivered
+    // database. For every other one the compose check is "not required by this
+    // project" and this binary has only to exist.
     docker: fakeCli(dir, 'docker', {}),
     harness: { 'claude-code': fakeCli(dir, 'claude', { version: '9.9.9 (Claude Code)' }) },
   },
@@ -192,6 +192,40 @@ describe('vinta-ai-maestro doctor', () => {
     expect(await doctorCommand([path], io.io, healthyBins(dir))).toBe(OK)
     expect(io.out.some((line) => line.includes('A run can start.'))).toBe(true)
     expect(io.out.some((line) => line.includes('FAIL'))).toBe(false)
+  })
+
+  it('knows a compose-delivered database needs docker compose', async () => {
+    // `doctor` assembled its options with no `project`, so `needsCompose` was
+    // handed `undefined` every time and reported "not required by this project"
+    // for a workflow whose database is delivered by compose. A check nothing
+    // can reach is worse than an absent one: it reads as a pass.
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', {
+      ...workflowJson([node('a')]),
+      project: {
+        migrate_cmd: 'true',
+        databases: {
+          dev: {
+            engine: 'postgres',
+            delivery: 'compose',
+            name: 'app',
+            server_url: 'postgres://localhost:5432',
+            connection_url_var: 'DATABASE_URL',
+          },
+        },
+      },
+    })
+    const base = healthyBins(dir)
+    const io = recorder()
+
+    const code = await doctorCommand([path], io.io, {
+      ...base,
+      bins: { ...base.bins, docker: MISSING },
+    })
+
+    expect(code).toBe(FAILED)
+    expect(io.out.some((line) => line.includes('docker compose: unavailable'))).toBe(true)
+    expect(io.out.some((line) => line.includes('not required by this project'))).toBe(false)
   })
 
   it('exits non-zero on a broken environment, and still reports every check', async () => {

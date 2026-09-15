@@ -209,7 +209,18 @@ export const NodeSchema = z.strictObject({
       'Its reviewer is not named here — it is the cheapest reviewer on the roster who is ' +
       'qualified for this phase, and it is never this member.',
   ),
-  max_fix_rounds: z.number().int().min(0).default(2),
+  max_fix_rounds: z
+    .number()
+    .int()
+    .min(0)
+    .default(2)
+    .describe(
+      'Rounds the fixer gets to clear a review’s findings before the phase fails. Two is a ' +
+        'budget, not a target, and it is measured in *rounds* rather than findings — a first ' +
+        'review raising four legitimate blockers can exhaust it while every round is making ' +
+        'progress. Raise it on a phase you expect to be argued over; it is the knob that ' +
+        'decides how much a phase gets to be wrong before it is handed to `--on-failure`.',
+    ),
 })
 
 // ---------------------------------------------------------------------------

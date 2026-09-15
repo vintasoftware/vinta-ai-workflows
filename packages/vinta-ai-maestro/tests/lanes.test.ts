@@ -402,9 +402,21 @@ describe('lane pool', () => {
     expect(existsSync(join(lane.path, SETUP_RECEIPT))).toBe(true)
   })
 
-  it('fails the lane, naming no output, when the setup command fails', async () => {
+  it('says why when the setup command fails', async () => {
+    // The first version of this carried a lane name and nothing else, on a §11
+    // reading that turned out to be the wrong one: an operator whose setup
+    // command died of a missing settings module saw "could not provision the
+    // lane pool under …", and finding the real cause took a hand-rolled replay
+    // with the lane environment reconstructed. §11 keeps repository *contents*
+    // out of the record — an exit code and a bounded stderr tail are the same
+    // class of thing as a harness refusal's own explanation, which this package
+    // already decided to carry after an afternoon lost to the same shape of
+    // silence.
     const failure = await provision(
-      { ...sqliteProject(), setupCmd: 'node -e "console.log(process.cwd()); process.exit(3)"' },
+      {
+        ...sqliteProject(),
+        setupCmd: 'node -e "console.error(\'ModuleNotFoundError: settings.local\'); process.exit(3)"',
+      },
       1,
     ).then(
       () => null,
@@ -412,11 +424,28 @@ describe('lane pool', () => {
     )
 
     expect(failure?.name).toBe('LaneSetupError')
-    // §11 again: what the project's own command printed is the project's, and
-    // it reaches an error message no more than it reaches a log field. Nor does
-    // the command line itself — a lane name is enough to act on.
+    expect(failure?.message).toContain('exited 3')
+    expect(failure?.message).toContain('ModuleNotFoundError: settings.local')
+    // The command line itself still does not appear: the lane, the code and
+    // what the command said are enough to act on.
     expect(failure?.message).not.toContain('node -e')
-    expect(failure?.message).not.toContain(root)
+  })
+
+  it('bounds how much of a failing setup command’s output it carries', async () => {
+    const failure = await provision(
+      {
+        ...sqliteProject(),
+        setupCmd: `node -e "console.error('x'.repeat(4000)); process.exit(1)"`,
+      },
+      1,
+    ).then(
+      () => null,
+      (error: unknown) => error as Error,
+    )
+
+    // Bounded, and the *tail* — a stack trace puts the cause last.
+    expect(failure?.message.length).toBeLessThan(700)
+    expect(failure?.message).toContain('…')
   })
 
   // The config `docker compose config` would have printed, supplied directly:

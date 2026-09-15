@@ -65,9 +65,8 @@ import { createAgentConflictFixer, type ConflictFixer } from '../integration/fix
 import { gitLines } from '../integration/git.ts'
 import { Integrator, type WaveResult } from '../integration/integrator.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
-import type { DatabaseSpec } from '../lanes/database.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
-import { LanePool, type ProjectSpec } from '../lanes/pool.ts'
+import { LaneEnvFileError, LanePool, LaneSetupError } from '../lanes/pool.ts'
 import { laneHolders } from '../scheduler/crew.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import {
@@ -83,12 +82,13 @@ import {
   MAESTRO_URL_ENV,
 } from '../resources/agent-leases.ts'
 import { createScheduler, type RunStop } from '../scheduler/index.ts'
-import type { Project, ProjectDatabase, Workflow } from '../types.ts'
+import type { Workflow } from '../types.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 import { join } from 'node:path'
 import { Monitor, monitorModel } from '../monitor/monitor.ts'
 import { laneRootFor, storeFor } from './paths.ts'
+import { projectSpec } from './project.ts'
 import { SERVE_USAGE, announce, toBind } from './serve.ts'
 
 export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]
@@ -212,6 +212,11 @@ export async function runCommand(
       workflow,
       repoPath: bind.repoPath,
       poolRoot: laneRoot,
+      // Without this the compose check is dead: `needsCompose(undefined)` is
+      // false, so a workflow with a compose-delivered database was preflighted
+      // as though docker were irrelevant to it and the missing binary was
+      // discovered by the first lane that tried to boot a stack.
+      project: projectSpec(workflow.project),
       ...deps.doctor,
     })
     if (!report.ok) {
@@ -564,64 +569,6 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
 }
 
 /**
- * The workflow's `project` block in `LanePool`'s terms.
- *
- * The two shapes differ only in casing, which is deliberate: the document is
- * snake_case like every other field a skill writes, and the pool's is the
- * package's own. `delivery: 'file'` is not a field a workflow may state — it
- * is what a SQLite database *is*, and offering the choice would only let a
- * document say something untrue.
- */
-function projectSpec(project: Project | undefined): ProjectSpec {
-  // Compose isolation even here. A workflow with no `project` block is one
-  // whose lanes are "a worktree and nothing else" — which is a statement about
-  // databases and dependencies, and never a request to let six lanes publish
-  // the same host port and mount the same data volume. It costs nothing in a
-  // project with no compose file, which is what "nothing else" usually means.
-  if (project === undefined) return { databases: {}, migrateCmd: 'true', compose: {} }
-  const { dev, test } = project.databases
-  return {
-    migrateCmd: project.migrate_cmd,
-    databases: {
-      ...(dev === undefined ? {} : { dev: databaseSpec(dev) }),
-      ...(test === undefined ? {} : { test: databaseSpec(test) }),
-    },
-    envFiles: project.env_files,
-    ...(project.setup_cmd === undefined ? {} : { setupCmd: project.setup_cmd }),
-    services: Object.entries(project.services).map(([id, service]) => ({
-      id,
-      namespace: service.namespace,
-      ...(service.url === undefined ? {} : { url: service.url }),
-      urlVar: service.url_var,
-      capacity: service.capacity,
-      ...(service.create_cmd === undefined ? {} : { createCmd: service.create_cmd }),
-      ...(service.reset_cmd === undefined ? {} : { resetCmd: service.reset_cmd }),
-    })),
-    ...(project.compose.enabled
-      ? { compose: { publish: project.compose.publish, sharedVolumes: project.compose.shared_volumes } }
-      : {}),
-  }
-}
-
-function databaseSpec(database: ProjectDatabase): DatabaseSpec {
-  if (database.engine === 'sqlite') {
-    return {
-      engine: 'sqlite',
-      delivery: 'file',
-      path: database.path,
-      connectionUrlVar: database.connection_url_var,
-    }
-  }
-  return {
-    engine: 'postgres',
-    delivery: database.delivery,
-    name: database.name,
-    serverUrl: database.server_url,
-    connectionUrlVar: database.connection_url_var,
-  }
-}
-
-/**
  * The agent a conflicted merge is handed to, in the integration worktree.
  *
  * A run whose adapters were injected need not carry the default harness. The
@@ -650,6 +597,13 @@ function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
       `${requiredBytes} bytes needed, ${availableBytes} available under ${laneRoot}. ` +
       'Free space, or lower resources.lane.capacity.'
     )
+  }
+  // The pool's own errors already say which lane and what went wrong; a generic
+  // line over the top of them is what made a failing `setup_cmd` take an
+  // afternoon to identify. Anything else stays generic, because anything else
+  // may be carrying repository content in its message.
+  if (error instanceof LaneSetupError || error instanceof LaneEnvFileError) {
+    return `vinta-ai-maestro: ${error.message}`
   }
   return `vinta-ai-maestro: could not provision the lane pool under ${laneRoot}.`
 }
