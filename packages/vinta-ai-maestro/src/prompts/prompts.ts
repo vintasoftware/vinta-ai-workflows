@@ -745,10 +745,21 @@ function leaseBlock(materials: Continuation): string[] {
     'This run coordinates scarce machine capacity through these resources:',
     ...resources.map((id) => `- \`${id}\``),
     'Before a heavy inner-loop command, take the matching resource through the',
-    'daemon. The command blocks until capacity is available and releases it on exit:',
+    'daemon. It waits — for as long as it takes — until capacity is free, then runs',
+    'your command and releases the lease on exit:',
     `    vinta-ai-maestro with ${resources[0]} -- <command>`,
     'Do not run that command bare: a bare command is invisible to the pool and may',
     'stampede the same CPU, memory, or shared server as sibling lanes.',
+    '',
+    '**Waiting is the expected outcome, not a failure.** If it prints that it is',
+    'waiting for a resource, another lane holds it and yours is queued — let it',
+    'wait. Do not interrupt it, do not add a timeout, and do not retry it in some',
+    'other form.',
+    '',
+    'And if it genuinely fails, that is the answer to the command, not permission',
+    'to run it yourself: say so in your report. Running the command unleased is',
+    'worse than not running it, because it takes the capacity anyway and the pool',
+    'cannot see that it did.',
   ]
 }
 

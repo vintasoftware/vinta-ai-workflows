@@ -320,6 +320,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro with` waits for the lock instead of giving up on it.** Its
+  usage said it blocked until the resource was granted, and it did — for about
+  five minutes, which is where Node's own `fetch` stops waiting for a response.
+  A test suite behind a capacity-1 semaphore beats that regularly. What the
+  agent saw was "could not reach the lease daemon", and what agents did with
+  that, repeatedly, was run the command without a lease: exactly the stampede
+  the pool exists to prevent, arrived at by an agent behaving reasonably.
+
+  The wait is the client's now. The daemon answers `202 still queued` within
+  seconds and **leaves its own queue behind it**, so nothing is granted to a
+  request that has gone away; the client loops until it is granted, saying so
+  once and then occasionally, so a transcript shows a wait rather than a
+  silence. Only answers that waiting cannot change — a resource this run does
+  not declare, a run that is no longer live — end it.
+
+  And when it does end that way, the refusal says what not to do about it.
+  "The resource lease was not granted" is an error with no alternative in it;
+  the rule against working around it now travels with the message rather than
+  sitting only in a prompt the agent read twenty minutes earlier. The prompt
+  says it too, including that waiting is the expected outcome and not a failure.
+
 - **A retry gets a fresh fix budget.** `fix_rounds` was set to 0 when a node was
   created and never again, so a phase that spent its whole budget on attempt 1
   began attempt 2 already exhausted — one review, one fix, and the exhaustion

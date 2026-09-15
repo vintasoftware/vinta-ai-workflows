@@ -25,6 +25,17 @@
  */
 import type { Resource } from '../types.ts'
 
+/**
+ * A wait that was abandoned before it was granted. Not a failure of the pool:
+ * the caller left the queue, and nothing was taken.
+ */
+export class AcquireAborted extends Error {
+  constructor() {
+    super('the wait for resources was abandoned before it was granted')
+    this.name = 'AcquireAborted'
+  }
+}
+
 /** Grant token. `release` is idempotent, so `finally { lease.release() }` is safe. */
 export interface Lease {
   release(): void
@@ -80,13 +91,46 @@ export class ResourcePools {
   /**
    * Resolves once every pool in `needs` has a free slot, all taken together.
    * The declared order is discarded in favour of the canonical one.
+   *
+   * `signal` gives a caller a way *out of the queue*, which the agent lease
+   * endpoint needs: it answers a waiting client every few seconds rather than
+   * holding one HTTP request open for an hour, and a caller that walks away
+   * without leaving the queue would be granted a slot nobody is waiting for.
+   * Aborting after the grant is too late by construction — the waiter is off
+   * the queue and holding real capacity — so it is ignored there, and the lease
+   * is released by whoever owns it.
    */
-  acquire(needs: readonly string[]): Promise<Lease> {
+  acquire(needs: readonly string[], options: { readonly signal?: AbortSignal } = {}): Promise<Lease> {
     const canonical = [...new Set(needs)].sort()
     for (const name of canonical) this.#pool(name)
+    const { signal } = options
 
-    return new Promise<Lease>((grant) => {
-      this.#queue.push({ needs: canonical, enqueuedAt: this.#now(), grant })
+    return new Promise<Lease>((resolve, reject) => {
+      if (signal?.aborted === true) {
+        reject(new AcquireAborted())
+        return
+      }
+
+      const waiter: Waiter = {
+        needs: canonical,
+        enqueuedAt: this.#now(),
+        grant: (lease) => {
+          signal?.removeEventListener('abort', leave)
+          resolve(lease)
+        },
+      }
+      // Named, so the grant path can take it off again: a listener left on a
+      // long-lived signal is a leak per acquisition, and this one runs once per
+      // heavy command in every lane.
+      const leave = (): void => {
+        const at = this.#queue.indexOf(waiter)
+        if (at === -1) return
+        this.#queue.splice(at, 1)
+        reject(new AcquireAborted())
+      }
+      signal?.addEventListener('abort', leave, { once: true })
+
+      this.#queue.push(waiter)
       this.#pump()
     })
   }

@@ -12,10 +12,15 @@ import { FAILED, USAGE, type Io } from './io.ts'
 
 export const WITH_USAGE = `usage: vinta-ai-maestro with <resource> -- <cmd>
 
-  Blocks until the running daemon grants <resource>, runs <cmd>, and releases
-  the lease on exit. Long commands renew their lease automatically. This verb
-  is intended for agent turns started by \`vinta-ai-maestro run\`; the daemon
-  connection and current phase are supplied through that turn's environment.
+  Waits — for as long as it takes — until the running daemon grants
+  <resource>, then runs <cmd> and releases the lease on exit. A resource held
+  by another lane is not an error: this reports that it is waiting and keeps
+  waiting. Long commands renew their lease automatically. This verb is intended
+  for agent turns started by \`vinta-ai-maestro run\`; the daemon connection and
+  current phase are supplied through that turn's environment.
+
+  If it does fail, the command is not run. Report the failure rather than
+  running <cmd> unleased.
 
   Quote <cmd> as one argument when it contains shell operators or significant
   whitespace.`
@@ -60,28 +65,15 @@ export async function withCommand(
   const abort = new AbortController()
 
   try {
-    const acquired = await request(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ resources: [resource], holderNode }),
-    })
-    if (!acquired.ok) {
-      io.err('vinta-ai-maestro: the resource lease was not granted')
-      return FAILED
-    }
-
-    const parsed = AgentLeaseGrantSchema.safeParse(await acquired.json())
-    if (!parsed.success) {
-      io.err('vinta-ai-maestro: the daemon returned an invalid lease')
-      return FAILED
-    }
-    leaseId = parsed.data.leaseId
+    const grant = await waitForLease({ request, endpoint, headers, resource, holderNode, io })
+    if (grant === null) return FAILED
+    leaseId = grant.leaseId
 
     let loseLease: ((reason: Error) => void) | undefined
     const lost = new Promise<never>((_, reject) => {
       loseLease = reject
     })
-    const every = Math.max(1_000, Math.floor(parsed.data.ttlMs / 3))
+    const every = Math.max(1_000, Math.floor(grant.ttlMs / 3))
     let renewing = false
     renewal = setInterval(() => {
       if (renewing || leaseId === null) return
@@ -109,7 +101,9 @@ export async function withCommand(
       return FAILED
     }
   } catch {
-    io.err('vinta-ai-maestro: could not reach the lease daemon')
+    // `waitForLease` reports its own refusals; anything reaching here is the
+    // renewal or the command itself coming apart.
+    io.err(`vinta-ai-maestro: the leased command could not complete. ${DO_NOT_WORK_AROUND}`)
     return FAILED
   } finally {
     if (renewal !== undefined) clearInterval(renewal)
@@ -121,6 +115,139 @@ export async function withCommand(
         await request(`${endpoint}/${encodeURIComponent(leaseId)}`, { method: 'DELETE', headers })
       } catch {}
     }
+  }
+}
+
+/** Between attempts, once the daemon has said "still queued". */
+const RETRY_MS = 500
+
+/** How often a long wait says so out loud. */
+const NOTICE_MS = 120_000
+
+/** Consecutive transport failures tolerated before the wait gives up. */
+const TRANSPORT_ATTEMPTS = 10
+
+/**
+ * The line every refusal ends on.
+ *
+ * Because the observed failure was not the lease mechanism: it was what an
+ * agent did when the lease mechanism said no. Told "the resource lease was not
+ * granted", agents ran the command without a lease — a reasonable reading of an
+ * error that offers no alternative, and exactly the stampede the pool exists to
+ * prevent. The rule has to travel with the refusal, not only in a prompt the
+ * agent read twenty minutes earlier.
+ */
+const DO_NOT_WORK_AROUND =
+  'Do not run the command without the lease. Report this instead — running it ' +
+  'unleased stampedes the same machine as every sibling lane.'
+
+interface LeaseWait {
+  readonly request: typeof fetch
+  readonly endpoint: string
+  readonly headers: Readonly<Record<string, string>>
+  readonly resource: string
+  readonly holderNode: string
+  readonly io: Io
+  readonly sleep?: (ms: number) => Promise<void>
+  readonly now?: () => number
+}
+
+/**
+ * Blocks until the lease is granted, which is what the usage always claimed and
+ * what this now does.
+ *
+ * It used to be one HTTP request, awaited. That reads as a wait and behaves as
+ * one for about five minutes, which is where Node's own fetch stops waiting for
+ * a response — and a test suite behind a capacity-1 semaphore is regularly
+ * slower than that. What the agent saw was "could not reach the lease daemon",
+ * and what it did was run the command bare.
+ *
+ * So the wait belongs on this side. The daemon answers `202` for "still
+ * queued", leaving its own queue behind it so nothing is granted to a request
+ * that has gone away, and this loops. Only the answers that waiting cannot
+ * change end it.
+ */
+async function waitForLease(wait: LeaseWait): Promise<{ leaseId: string; ttlMs: number } | null> {
+  const { request, endpoint, headers, resource, holderNode, io } = wait
+  const sleep = wait.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)))
+  const now = wait.now ?? (() => Date.now())
+  const body = JSON.stringify({ resources: [resource], holderNode })
+
+  let transportFailures = 0
+  let announcedAt: number | null = null
+
+  for (;;) {
+    let response: Response
+    try {
+      response = await request(endpoint, { method: 'POST', headers, body })
+      transportFailures = 0
+    } catch {
+      // A daemon that is restarting is worth waiting through; one that is gone
+      // is not, and an unbounded retry against it would hang the whole turn.
+      transportFailures += 1
+      if (transportFailures >= TRANSPORT_ATTEMPTS) {
+        io.err(`vinta-ai-maestro: could not reach the lease daemon. ${DO_NOT_WORK_AROUND}`)
+        return null
+      }
+      await sleep(RETRY_MS)
+      continue
+    }
+
+    if (response.status === 202) {
+      // Said once, then occasionally: a transcript should show a turn waiting
+      // rather than a turn that stopped saying anything.
+      if (announcedAt === null) {
+        io.err(`vinta-ai-maestro: waiting for "${resource}" — it is held by another lane.`)
+        announcedAt = now()
+      } else if (now() - announcedAt >= NOTICE_MS) {
+        io.err(`vinta-ai-maestro: still waiting for "${resource}".`)
+        announcedAt = now()
+      }
+      await sleep(RETRY_MS)
+      continue
+    }
+
+    // Any other success is a grant. `202` is the one 2xx that is not, which is
+    // why it is checked first; keying on `201` alone would make the contract
+    // narrower than "it worked" for no benefit.
+    if (response.ok) {
+      const parsed = AgentLeaseGrantSchema.safeParse(await response.json())
+      if (!parsed.success) {
+        io.err(`vinta-ai-maestro: the daemon returned an invalid lease. ${DO_NOT_WORK_AROUND}`)
+        return null
+      }
+      return { leaseId: parsed.data.leaseId, ttlMs: parsed.data.ttlMs }
+    }
+
+    io.err(`vinta-ai-maestro: ${await refusal(response, resource)} ${DO_NOT_WORK_AROUND}`)
+    return null
+  }
+}
+
+/** What a refusal means, in terms of the thing the operator can change. */
+async function refusal(response: Response, resource: string): Promise<string> {
+  let code = ''
+  try {
+    const body: unknown = await response.json()
+    const named = (body as { error?: unknown } | null)?.error
+    if (typeof named === 'string') code = named
+  } catch {
+    // A body that will not parse tells us nothing the status does not.
+  }
+
+  switch (code) {
+    case 'invalid_resource':
+      return `this run declares no semaphore called "${resource}" — the ones it does are listed in your instructions.`
+    case 'invalid_holder':
+      return 'this turn is not attributed to a phase of the running plan.'
+    case 'run_not_live':
+      return 'the run is no longer live, so it can grant nothing.'
+    case 'leases_unavailable':
+      return 'this run was started by a host that offers no resource leases.'
+    case 'unauthorized':
+      return 'the daemon rejected this turn’s token.'
+    default:
+      return `the lease was refused (${response.status}).`
   }
 }
 

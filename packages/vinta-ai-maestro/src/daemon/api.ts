@@ -32,6 +32,7 @@ import type { Workflow } from '../types.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
+import { AcquireAborted } from '../resources/pools.ts'
 import { parseWorkflow } from '../validate.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import { UnsupportedOperation, type DaemonRun } from './control.ts'
@@ -49,6 +50,7 @@ import {
   toWireIssues,
   type AmendResponse,
   type AgentLeaseGrantResponse,
+  type AgentLeaseWaitingResponse,
   type EventPage,
   type MonitorAnswer,
   type Issue,
@@ -61,6 +63,15 @@ import {
   type WorkflowResponse,
 } from './schemas.ts'
 import { createWorkflowStore, isWorkflowId, plansDirFor } from './workflows.ts'
+
+/**
+ * How long one lease request waits before answering "not yet".
+ *
+ * Short enough that no client timeout, proxy or keep-alive window has an
+ * opinion about it, and long enough that a queue moving at a normal pace is
+ * usually answered on the first hop.
+ */
+const LEASE_WAIT_MS = 15_000
 
 /** The last 64 KiB of a gate log. Enough for a failure tail, bounded by design. */
 const GATE_LOG_TAIL_BYTES = 64 * 1024
@@ -104,6 +115,12 @@ export interface ApiOptions {
    * which case the endpoint says so instead of pretending.
    */
   readonly monitorFor?: (runId: string) => Monitor | null
+  /**
+   * How long one lease request waits before answering "not yet" (`202`).
+   * Defaults to `LEASE_WAIT_MS`; a test shortens it to reach the queued answer
+   * without waiting fifteen real seconds for it.
+   */
+  readonly leaseWaitMs?: number
 }
 
 export function createApi(options: ApiOptions): Hono {
@@ -273,14 +290,35 @@ export function createApi(options: ApiOptions): Hono {
       return fail(c, 400, 'invalid_resource')
     }
 
+    // Waited for in short hops rather than one held request. A test suite
+    // behind a capacity-1 semaphore waits as long as it waits — routinely
+    // longer than the five minutes Node's own fetch gives a response before it
+    // times out, and every intermediary has an opinion too. A client that timed
+    // out got an error that read like "the lease mechanism is broken", and
+    // agents did the reasonable thing with that: ran the command without a
+    // lease. The wait is the *client's* loop now; this answers "not yet"
+    // quickly and leaves the queue behind it, so nothing is granted to a
+    // request that has gone away.
+    const abort = new AbortController()
+    const hop = setTimeout(() => {
+      abort.abort()
+    }, options.leaseWaitMs ?? LEASE_WAIT_MS)
     try {
       const grant = await found.run.agentLeases.acquire(
         body.value.resources,
         body.value.holderNode,
+        { signal: abort.signal },
       )
       return c.json(grant satisfies AgentLeaseGrantResponse, 201)
-    } catch {
+    } catch (error) {
+      // Still queued behind someone, which is the ordinary case and not an
+      // error: 202 is "come back", and the client does.
+      if (error instanceof AcquireAborted) {
+        return c.json({ waiting: true } satisfies AgentLeaseWaitingResponse, 202)
+      }
       return fail(c, 409, 'lease_unavailable')
+    } finally {
+      clearTimeout(hop)
     }
   })
 

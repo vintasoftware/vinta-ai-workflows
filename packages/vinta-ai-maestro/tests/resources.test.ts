@@ -265,6 +265,67 @@ describe('resource pools', () => {
     expect(pool.held('slot')).toBe(0)
   })
 
+  /**
+   * The agent lease endpoint answers a waiting client every few seconds instead
+   * of holding one HTTP request open for the whole wait. That only works if
+   * leaving the queue is real: a caller that walks away and stays queued gets
+   * granted a slot nobody is waiting for, which is capacity held by no one
+   * until its lease expires.
+   */
+  describe('a wait that is abandoned', () => {
+    it('leaves the queue, so the slot goes to whoever is still waiting', async () => {
+      const pool = pools({ slot: 1 }, { agingMs: 0 })
+      const a = await pool.acquire(['slot'])
+
+      const leaving = new AbortController()
+      const abandoned = pool.acquire(['slot'], { signal: leaving.signal })
+      let stayedGranted = false
+      const stayed = pool.acquire(['slot']).then((held) => {
+        stayedGranted = true
+        return held
+      })
+      await settle()
+      expect(pool.waiting).toBe(2)
+
+      leaving.abort()
+      await expect(abandoned).rejects.toThrow(/abandoned/)
+      expect(pool.waiting).toBe(1)
+
+      a.release()
+      await settle()
+      // The slot went to the waiter that stayed, not to the one that left.
+      expect(stayedGranted).toBe(true)
+      ;(await within(1_000, stayed)).release()
+      expect(pool.held('slot')).toBe(0)
+    })
+
+    it('takes nothing when it is abandoned before it ever queues', async () => {
+      const pool = pools({ slot: 1 }, { agingMs: 0 })
+      const leaving = new AbortController()
+      leaving.abort()
+
+      await expect(pool.acquire(['slot'], { signal: leaving.signal })).rejects.toThrow(/abandoned/)
+      expect(pool.held('slot')).toBe(0)
+      expect(pool.waiting).toBe(0)
+    })
+
+    it('ignores an abort that loses the race to the grant', async () => {
+      // Aborting after the grant is too late by construction: the waiter is off
+      // the queue and holding real capacity, and the lease is the holder's to
+      // release.
+      const pool = pools({ slot: 1 }, { agingMs: 0 })
+      const leaving = new AbortController()
+
+      const lease = await pool.acquire(['slot'], { signal: leaving.signal })
+      leaving.abort()
+      await settle()
+
+      expect(pool.held('slot')).toBe(1)
+      lease.release()
+      expect(pool.held('slot')).toBe(0)
+    })
+  })
+
   it('releases on the throwing path when the caller uses finally', async () => {
     const pool = pools({ slot: 1 }, { agingMs: 0 })
 

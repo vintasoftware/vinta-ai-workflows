@@ -77,7 +77,17 @@ export interface CapacityView {
 
 /** Renewable leases exposed to an agent through the daemon API. */
 export interface AgentLeasePort {
-  acquire(resources: readonly string[], holderNode: string): Promise<AgentLeaseGrant>
+  /**
+   * `signal` leaves the queue without taking anything — how the endpoint
+   * answers a waiting client on a short cycle instead of holding one request
+   * open for the length of the wait. An implementation that ignores it still
+   * works; it just makes its callers wait longer for "not yet".
+   */
+  acquire(
+    resources: readonly string[],
+    holderNode: string,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<AgentLeaseGrant>
   renew(leaseId: string): AgentLeaseGrant | null
   release(leaseId: string): void
 }
