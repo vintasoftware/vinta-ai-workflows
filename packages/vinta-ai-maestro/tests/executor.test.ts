@@ -84,6 +84,10 @@ const RUN_ID = 'run-1'
  * Wide on purpose. It is not a performance budget; it is the line past which
  * "slow" becomes "stuck", and these suites spawn real processes, create real
  * git worktrees and run real gates.
+ *
+ * Kept after `vitest.config.ts` raised the default for every platform, because
+ * this is longer than that default and says so deliberately: `within(60_000, …)`
+ * has to be the thing that fires, not the runner.
  */
 const REAL_RUN_TIMEOUT_MS = 60_000
 
