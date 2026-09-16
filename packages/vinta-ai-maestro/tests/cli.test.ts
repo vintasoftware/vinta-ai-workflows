@@ -46,6 +46,7 @@ import type { Daemon, DaemonRun } from '../src/daemon/index.ts'
 import type { HarnessAdapter } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal } from '../src/journal/journal.ts'
+import { parseWorkflow } from '../src/validate.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { isWindows } from '../src/platform/platform.ts'
 import {
@@ -1754,5 +1755,305 @@ describe('the URL the operator is handed', () => {
       ] as unknown as NodeJS.Dict<unknown>[string],
     }
     expect(reachableUrl('http://0.0.0.0:7777', loopbackOnly as never)).toBe('http://0.0.0.0:7777')
+  })
+})
+
+/**
+ * Picking a run back up — the half of durability the journal already made
+ * possible and nothing could reach.
+ *
+ * Every test here builds the state a killed process leaves behind rather than
+ * killing one: `createRun` freezes the snapshot and registers the nodes exactly
+ * as a first attempt would, a `node_status` marks what finished, and the run
+ * row is left `running` because nothing ever wrote `run_ended`. That is
+ * precisely the shape a closed terminal used to produce, and it is the shape
+ * `--resume` has to understand.
+ */
+describe('vinta-ai-maestro run --resume', () => {
+  /** An interrupted run: `a` finished, `b` never started, the row still `running`. */
+  const interrupt = (dir: string, runId: string): void => {
+    const journal = openJournal(dir)
+    try {
+      const plan = parseWorkflow(workflowJson([node('a'), node('b', ['a'])]))
+      if (!plan.ok) throw new Error('fixture workflow is invalid')
+      journal.createRun(runId, plan.workflow)
+      journal.append({ runId, nodeId: 'a', type: 'node_status', payload: { status: 'running' } })
+      journal.append({ runId, nodeId: 'a', type: 'node_status', payload: { status: 'done' } })
+      expect(journal.runs().find((row) => row.id === runId)?.status).toBe('running')
+    } finally {
+      journal.close()
+    }
+  }
+
+  const statuses = (dir: string, runId: string, nodeId: string): string[] => {
+    const journal = openJournal(dir)
+    try {
+      return journal
+        .events(runId)
+        .filter((event) => event.type === 'node_status' && event.nodeId === nodeId)
+        .map((event) => (event.payload as { status: string }).status)
+    } finally {
+      journal.close()
+    }
+  }
+
+  it('finishes the run without running the phase that was already done', async () => {
+    const dir = makeTemp()
+    interrupt(dir, 'resume-run')
+    const io = recorder()
+
+    const code = await runCommand(['--resume', 'resume-run', '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+    })
+
+    expect(code).toBe(OK)
+    expect(io.out).toContain('vinta-ai-maestro: run resume-run resumed (2 nodes).')
+    // `a` carries the two transitions the dead process wrote and nothing more:
+    // no second `running`, so it was never dispatched again. Re-running a
+    // finished phase is the failure this whole path exists to avoid — it would
+    // throw away its commits and its review.
+    expect(statuses(dir, 'resume-run', 'a')).toEqual(['running', 'done'])
+    // `b` is the work that was actually left.
+    expect(statuses(dir, 'resume-run', 'b')).toEqual(['running', 'done'])
+  })
+
+  it('puts the run back to running, keeping when it originally started', async () => {
+    const dir = makeTemp()
+    interrupt(dir, 'attempt-run')
+    const before = openJournal(dir)
+    const startedAt = before.runs().find((row) => row.id === 'attempt-run')?.started_at
+    before.close()
+
+    await runCommand(['--resume', 'attempt-run', '--repo', dir], recorder().io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+    })
+
+    const journal = openJournal(dir)
+    try {
+      // The whole reason `run_resumed` is not a second `run_started`: that one
+      // is an INSERT OR REPLACE carrying `started_at`, so replaying it would
+      // move the run's beginning to whenever it was last picked up, and every
+      // duration derived from the row would be short by the outage.
+      expect(journal.runs().find((row) => row.id === 'attempt-run')?.started_at).toBe(startedAt)
+      const resumed = journal.events('attempt-run').filter((e) => e.type === 'run_resumed')
+      expect(resumed).toHaveLength(1)
+      expect((resumed[0]?.payload as { attempt: number }).attempt).toBe(2)
+    } finally {
+      journal.close()
+    }
+  })
+
+  it('refuses a run that already finished, rather than writing over its history', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    await runCommand([path, '--repo', dir], recorder().io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+      runId: 'finished-run',
+    })
+
+    const io = recorder()
+    const code = await runCommand(['--resume', 'finished-run', '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+    })
+
+    expect(code).toBe(FAILED)
+    expect(io.err.join('\n')).toContain('already finished')
+  })
+
+  it('refuses a run this store has never heard of', async () => {
+    const dir = makeTemp()
+    const io = recorder()
+
+    const code = await runCommand(['--resume', 'ghost-run', '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+    })
+
+    expect(code).toBe(FAILED)
+    expect(io.err.join('\n')).toContain('no run "ghost-run"')
+  })
+
+  it('refuses a workflow path and a --resume id together', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    const io = recorder()
+
+    // They name the run in incompatible ways — a document whose snapshot is not
+    // frozen yet, and a run whose snapshot was frozen hours ago. Any precedence
+    // rule here is a way to silently run a plan nobody asked for.
+    const code = await runCommand([path, '--resume', 'x', '--repo', dir], io.io, {
+      executor: NO_EFFECTS,
+    })
+
+    expect(code).toBe(USAGE)
+  })
+})
+
+/**
+ * A run whose lifetime is the daemon's, not the terminal's.
+ *
+ * This is the end-to-end proof of the whole feature: `serve` brings a daemon up
+ * with no run at all, a plain HTTP request submits one, the request comes back
+ * with an id long before the run is finished, and the run then reaches `done`
+ * inside a daemon that knew nothing about it at boot. Every previous way to
+ * start a run built its own daemon and died with it.
+ */
+describe('vinta-ai-maestro serve, hosting runs', () => {
+  /** `POST /api/runs`, as a client with nothing but the URL and the token. */
+  const submit = async (daemon: Daemon, body: unknown): Promise<{ status: number; body: any }> => {
+    const response = await fetch(`${daemon.url}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${daemon.token}` },
+      body: JSON.stringify(body),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+
+  it('runs a plan submitted over HTTP, in a daemon that started with none', async () => {
+    const dir = gitRepo()
+    // Where the editor lists from and `plan-feature` writes to — the id in the
+    // request is this file's basename, never a path the caller chose.
+    mkdirSync(join(dir, 'ai-plans'), { recursive: true })
+    writeFileSync(
+      join(dir, 'ai-plans', 'assembly.workflow.json'),
+      JSON.stringify(assemblyWorkflow([node('a')])),
+      'utf8',
+    )
+    const io = recorder()
+    const seen: { status: number; body: any }[] = []
+
+    await serveCommand(['--repo', dir], io.io, {
+      doctor: healthyBins(dir),
+      wait: async (daemon) => {
+        seen.push(await submit(daemon, { workflow: 'assembly' }))
+        // Registered, so the run is reachable the moment the POST returns —
+        // and the run itself is still going.
+        const snapshot = await fetch(`${daemon.url}/api/runs/${seen[0]!.body.runId}`, {
+          headers: { authorization: `Bearer ${daemon.token}` },
+        })
+        expect(snapshot.status).toBe(200)
+      },
+    })
+
+    expect(seen[0]?.status).toBe(201)
+    const runId = seen[0]?.body.runId as string
+    expect(runId.startsWith('assembly-')).toBe(true)
+
+    // The daemon and the process that hosted it are both gone by here. What
+    // proves the run was real is the journal it left on disk.
+    const journal = openJournal(dir)
+    try {
+      expect(journal.runs().map((row) => row.id)).toContain(runId)
+      expect(journal.nodes(runId).map((row) => row.node_id)).toEqual(['a'])
+    } finally {
+      journal.close()
+    }
+  })
+
+  it('answers 404 for a plan that is not in ai-plans/', async () => {
+    const dir = gitRepo()
+    const io = recorder()
+    const seen: { status: number; body: any }[] = []
+
+    await serveCommand(['--repo', dir], io.io, {
+      wait: async (daemon) => {
+        seen.push(await submit(daemon, { workflow: 'nothing-here' }))
+      },
+    })
+
+    expect(seen[0]?.status).toBe(404)
+    expect(seen[0]?.body.error).toBe('unknown_workflow')
+  })
+
+  it('refuses an id that would escape ai-plans/', async () => {
+    const dir = gitRepo()
+    const io = recorder()
+    const seen: { status: number; body: any }[] = []
+
+    await serveCommand(['--repo', dir], io.io, {
+      wait: async (daemon) => {
+        // An id becomes a path, so a traversal is the one thing the caller must
+        // not be able to spell. Refused as "no such workflow" rather than read.
+        seen.push(await submit(daemon, { workflow: '../../etc/passwd' }))
+      },
+    })
+
+    expect(seen[0]?.status).toBe(404)
+    expect(seen[0]?.body.error).toBe('unknown_workflow')
+  })
+
+  it('refuses to resume a run that already finished', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    await runCommand([path, '--repo', dir], recorder().io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+      runId: 'served-done',
+    })
+
+    const io = recorder()
+    const seen: { status: number; body: any }[] = []
+    await serveCommand(['--repo', dir], io.io, {
+      wait: async (daemon) => {
+        seen.push(await submit(daemon, { resume: 'served-done' }))
+      },
+    })
+
+    expect(seen[0]?.status).toBe(409)
+    expect(seen[0]?.body.error).toBe('run_finished')
+  })
+})
+
+/**
+ * Shutting a hosting daemon down while its runs are still going.
+ *
+ * The failure this pins is one the feature created: a daemon-hosted run is
+ * awaited by nobody, so a `serve` on its way out used to close the journal
+ * underneath live schedulers — which surfaced as "the database connection is
+ * not open" from whichever lease released last, and left the run `running` in
+ * the journal for ever. Both halves are checked here: the run is recorded as
+ * interrupted, and it is resumable afterwards.
+ */
+describe('vinta-ai-maestro serve, shutting down mid-run', () => {
+  it('records its live runs as interrupted, and says how to resume them', async () => {
+    const dir = gitRepo()
+    mkdirSync(join(dir, 'ai-plans'), { recursive: true })
+    writeFileSync(
+      join(dir, 'ai-plans', 'assembly.workflow.json'),
+      JSON.stringify(assemblyWorkflow([node('a'), node('b', ['a'])])),
+      'utf8',
+    )
+    const io = recorder()
+    const ids: string[] = []
+
+    await serveCommand(['--repo', dir], io.io, {
+      doctor: healthyBins(dir),
+      // Returns the instant the POST does, which is exactly the shape of an
+      // operator pressing Ctrl-C while a run is under way.
+      wait: async (daemon) => {
+        const response = await fetch(`${daemon.url}/api/runs`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${daemon.token}` },
+          body: JSON.stringify({ workflow: 'assembly' }),
+        })
+        ids.push(((await response.json()) as { runId: string }).runId)
+      },
+    })
+
+    const runId = ids[0] as string
+    expect(io.err.join('\n')).toContain(`run --resume ${runId}`)
+
+    const journal = openJournal(dir)
+    try {
+      // Not `running`: the row moved, so the run list and the UI can tell it
+      // apart from one still in flight. And not `done`, so `--resume` takes it.
+      expect(journal.runs().find((row) => row.id === runId)?.status).toBe('failed')
+    } finally {
+      journal.close()
+    }
   })
 })

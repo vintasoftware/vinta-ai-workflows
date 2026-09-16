@@ -6,110 +6,60 @@
  * only reach the UI after the run finished would have no way to watch, steer or
  * answer an `await_human` gate — which is the entire §9 interaction model.
  *
- * This command composes; it decides nothing. The journal freezes the workflow
- * snapshot, `ResourcePools` owns capacity, `AdmissionControl` owns backpressure,
- * and `Scheduler` owns dispatch. What is assembled here is only the wiring, and
- * the one thing wiring can get wrong — teardown — is done in a `finally` so a
- * failed run does not leave a bound port and an open database behind.
+ * **What is left here.** The composition moved to `src/run/`, where `serve`'s
+ * `POST /api/runs` reaches it too. What stays is everything that is genuinely
+ * about a command line: parsing flags, bringing up a daemon this process owns,
+ * printing, turning an outcome into an exit code — and deciding to wait, which
+ * is the one thing that distinguishes this host from the daemon-hosted one.
  *
- * **What this composes.** The scheduler implements two effect verbs itself
- * (`spawn_agent`, and the pools around `run_gate`) and delegates every other
- * verb body to an `EffectExecutor`. The production one is `src/executor/`, and
- * it needs two things this command owns: the lanes its gates and agents run in
- * (`LanePool`) and the integration worktree its merges happen in
- * (`Integrator`). Both are built here, before the first node dispatches, and
- * both are handed to the same `RunEffectExecutor`. `RunDeps.executor` replaces
- * all of it — a host that injects one owns its own lanes, so neither the
- * preflight nor the pool runs.
- *
- * **Preflight, then provision, and never the other way round.** `doctor` runs
- * before anything is created and a single `fail` refuses the run (§13.5): every
- * minute-zero failure reported in one pass beats discovering them one at a time
- * across a half-started run. `LanePool`'s own N× disk probe is the same rule
- * one level down (§8) — it refuses before the first worktree exists rather than
- * filling the filesystem partway through wave 1.
+ * **This command no longer owns the run's durability.** It used to be the only
+ * way to start a run, which made the terminal the run's lifetime: closing it
+ * killed the daemon, the scheduler and every agent, and left the `runs` row
+ * saying `running` forever with nothing able to pick it up. Two things changed
+ * that. A run can now be submitted to a daemon that was already up (`serve`),
+ * and a run that *was* interrupted can be picked up again (`--resume`). What is
+ * left in this file for the operator who does neither is the signal handling
+ * below: SIGHUP, SIGINT and SIGTERM end the run through the same path a
+ * finished one takes, so the journal says what actually happened.
  *
  * **Teardown is asymmetric on purpose.** The port, the databases and the caches
  * are closed in a `finally`; the *lanes are not*. §8 is explicit that a
  * finished run leaves its worktrees, branches and databases in place — they are
- * the evidence a human reads when something went wrong.
- *
- * **The post-mortem is emitted here.** It is true at exactly one moment —
- * after `run_ended` — and the scheduler journals that as it returns, so this
- * is the only place that moment is reachable while the journal is still open.
- * Conflicts are not journalled by anything, so they are read back off the
- * `Integrator` this file built (`deps.waveResults` overrides); with neither the
- * artifact says "unrecorded" rather than "none".
+ * the evidence a human reads when something went wrong, and since `--resume`
+ * they are also what the next attempt continues in.
  */
 import { parseArgs } from 'node:util'
 
-import { AdmissionControl } from '../admission/admission.ts'
-import type { AmendRunner } from '../amend/amend.ts'
-import { createRebaser } from '../amend/rebase.ts'
-import {
-  runControl,
-  startDaemon,
-  type AgentGatePort,
-  type Daemon,
-  type DaemonRun,
-} from '../daemon/index.ts'
-import { takeovers } from '../daemon/pty.ts'
-import { formatDoctorReport, referencedHarnesses, runDoctor } from '../doctor/index.ts'
-import { createRunExecutor } from '../executor/index.ts'
-import { GateCache } from '../gates/cache.ts'
+import { startDaemon, type Daemon, type DaemonRun } from '../daemon/index.ts'
+import { formatDoctorReport } from '../doctor/index.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
-import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import {
   AGENT_PERMISSIONS,
-  type AgentPermission,
   DEFAULT_PERMISSION,
   isAgentPermission,
 } from '../harness/permissions.ts'
-import { CodexAdapter } from '../harness/codex.ts'
-import { OpencodeAdapter } from '../harness/opencode.ts'
-import type { ConflictFixer } from '../integration/fixer.ts'
-import { gitLines } from '../integration/git.ts'
-import { Integrator, type WaveResult } from '../integration/integrator.ts'
-import { createCrewConflictFixer } from '../integration/staffing.ts'
-import type { StoredEvent } from '../journal/events.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
-import { DiskProbeError } from '../lanes/disk.ts'
-import {
-  LaneEnvFileError,
-  LanePool,
-  LanePrepareError,
-  LaneSetupError,
-  prepareInfrastructure,
-} from '../lanes/pool.ts'
-import { laneHolders } from '../scheduler/crew.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
-import {
-  postMortem,
-  writePostMortem,
-  type IntegrationWaveRecord,
-} from '../postmortem/postmortem.ts'
-import { ResourcePools } from '../resources/pools.ts'
-import { AgentGateBroker } from '../resources/agent-gates.ts'
-import {
-  AgentLeaseBroker,
-  MAESTRO_RUN_ENV,
-  MAESTRO_TOKEN_ENV,
-  MAESTRO_URL_ENV,
-} from '../resources/agent-leases.ts'
-import { createScheduler, type RunStop } from '../scheduler/index.ts'
-import type { Workflow } from '../types.ts'
+import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
+import { preflightRun, startRun, type StartedRun } from '../run/index.ts'
+import type { RunStop } from '../scheduler/index.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
-import { join } from 'node:path'
-import { Monitor, monitorModel } from '../monitor/monitor.ts'
-import { laneRootFor, storeFor } from './paths.ts'
-import { projectSpec } from './project.ts'
-import { SERVE_USAGE, announce, toBind } from './serve.ts'
+import { SERVE_USAGE, announce, monitorFactory, toBind, untilSignalled } from './serve.ts'
 
 export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]
+       vinta-ai-maestro run --resume <runId> [--repo <dir>] [--host <host>] [--port <n>]
 
   <workflow.json>  Usually ai-plans/<feature>.workflow.json — the committed
                  document plan-feature wrote and the editor edits.
+  --resume <id>  Pick up a run that was interrupted, instead of starting one.
+                 Phases already done stay done, their lane worktrees are reused
+                 rather than recreated — whatever an agent had written and not
+                 committed is still there — and a phase that was mid-turn when
+                 the run stopped runs again from the top of its pipeline.
+                 The plan comes from the run's frozen snapshot, not from the
+                 file it was written from: editing that file afterwards does not
+                 reach back into a run already under way.
 ${SERVE_USAGE.split('\n').slice(1).join('\n')}`
 
 export interface RunDeps {
@@ -127,10 +77,7 @@ export interface RunDeps {
    * The integrator's wave results, read once the run has ended (§13.6).
    * Conflicts are returned by `mergeWave` in process and no event carries
    * them. The composed run reads them off its own `Integrator`; this overrides
-   * that, and is the only source for a run whose executor was injected. A
-   * callback rather than a value because the merges have not happened yet when
-   * this is passed. With neither, the post-mortem records
-   * `integration_record_unavailable` — "unrecorded", never "clean".
+   * that, and is the only source for a run whose executor was injected.
    */
   readonly waveResults?: () => readonly IntegrationWaveRecord[]
   /**
@@ -161,6 +108,7 @@ export async function runCommand(
         permission: { type: 'string' },
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
+        resume: { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -169,8 +117,13 @@ export async function runCommand(
     return USAGE
   }
 
+  // Exactly one of the two, because they name the run in incompatible ways: a
+  // path starts a new run from a document, an id continues one whose plan is
+  // already frozen. Accepting both would raise the question of which wins, and
+  // every answer to that is a way to run the wrong plan.
   const path = parsed.positionals[0]
-  if (path === undefined || parsed.positionals.length > 1) {
+  const resumeId = parsed.values['resume']
+  if (parsed.positionals.length > 1 || (path === undefined) === (resumeId === undefined)) {
     io.err(RUN_USAGE)
     return USAGE
   }
@@ -212,57 +165,72 @@ export async function runCommand(
     return USAGE
   }
 
-  const workflow = await loadWorkflow(path, io)
-  if (workflow === null) return FAILED
-
-  const runId = deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`
-  const adapters = deps.adapters ?? defaultAdapters(workflow, permission, bind.repoPath)
-  const laneRoot = laneRootFor(bind.repoPath)
-
-  // §13.5, before a port is bound, a journal is opened or a worktree exists: a
-  // run that cannot possibly work says so now, in one report, rather than
-  // failing three phases in. A `warn` is a degraded run, not a stopped one.
-  if (deps.executor === undefined) {
-    // **Before the preflight, not after it.** The hook's job is to make the
-    // shared servers reachable, and the preflight's new job is to check that
-    // they are — in the other order the check reports the world as it was and a
-    // project that can bring its own stack up still fails to start.
-    const project = projectSpec(workflow.project)
+  // The plan, and where it came from. A resume reads the *frozen* snapshot —
+  // the document the run actually started with — rather than the file on disk,
+  // which may well have been edited in the hours since.
+  //
+  // A resume has to open the journal to find any of that out, and a fresh run
+  // deliberately does not: §13.5's refusal creates nothing at all, and a store
+  // opened before the preflight would already have broken that.
+  let workflow
+  let runId: string
+  let resumeJournal: Journal | undefined
+  if (resumeId === undefined) {
+    const loaded = await loadWorkflow(path as string, io)
+    if (loaded === null) return FAILED
+    workflow = loaded
+    runId = deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`
+  } else {
+    resumeJournal = openJournal(bind.repoPath)
+    const row = resumeJournal.runs().find((candidate) => candidate.id === resumeId)
+    if (row === undefined) {
+      resumeJournal.close()
+      io.err(`vinta-ai-maestro: no run "${resumeId}" in ${bind.repoPath}`)
+      return FAILED
+    }
+    if (row.status === 'done') {
+      resumeJournal.close()
+      // Refused rather than started, because there is nothing to resume: every
+      // node settled and a resume would do nothing but write a second
+      // `run_ended` over a finished history. Re-running the plan is a different
+      // request with a different answer.
+      io.err(`vinta-ai-maestro: run "${resumeId}" already finished. Run the plan again instead.`)
+      return FAILED
+    }
     try {
-      await prepareInfrastructure(project, bind.repoPath)
-    } catch (error) {
-      // Nothing to unwind: this is before the port, the journal and the first
-      // worktree, which is the whole point of its position.
-      io.err(
-        error instanceof LanePrepareError
-          ? `vinta-ai-maestro: ${error.message}`
-          : 'vinta-ai-maestro: the project’s prepare_cmd could not be run.',
-      )
+      workflow = resumeJournal.readWorkflow(resumeId)
+    } catch {
+      resumeJournal.close()
+      io.err(`vinta-ai-maestro: run "${resumeId}" has no readable frozen workflow.`)
       return FAILED
     }
-
-    const report = await runDoctor({
-      workflow,
-      repoPath: bind.repoPath,
-      poolRoot: laneRoot,
-      // Without this the compose check is dead: `needsCompose(undefined)` is
-      // false, so a workflow with a compose-delivered database was preflighted
-      // as though docker were irrelevant to it and the missing binary was
-      // discovered by the first lane that tried to boot a stack.
-      project,
-      ...deps.doctor,
-    })
-    if (!report.ok) {
-      io.out(formatDoctorReport(report))
-      io.err('vinta-ai-maestro: refusing to start — this environment cannot run this workflow.')
-      return FAILED
-    }
-    for (const check of report.checks) {
-      if (check.status === 'warn') io.err(`vinta-ai-maestro: ${check.label}`)
-    }
+    runId = resumeId
   }
 
-  const journal = openJournal(bind.repoPath)
+  // §13.5, and the position is the guarantee: before a port is bound, before a
+  // journal is created and before the first worktree exists. Every minute-zero
+  // failure reported in one pass beats discovering them one at a time across a
+  // half-started run — and a refusal here leaves the checkout exactly as it was.
+  //
+  // Skipped for an injected executor, which owns its own lanes and needs none
+  // of what this checks.
+  const warnings: string[] = []
+  if (deps.executor === undefined) {
+    const preflight = await preflightRun({
+      workflow,
+      repoPath: bind.repoPath,
+      ...(deps.doctor === undefined ? {} : { doctor: deps.doctor }),
+    })
+    if (!preflight.ok) {
+      resumeJournal?.close()
+      if (preflight.report !== undefined) io.out(formatDoctorReport(preflight.report))
+      io.err(preflight.message)
+      return FAILED
+    }
+    warnings.push(...preflight.warnings)
+  }
+
+  const journal = resumeJournal ?? openJournal(bind.repoPath)
 
   let daemon: Daemon
   try {
@@ -279,112 +247,85 @@ export async function runCommand(
     return FAILED
   }
 
-  // Freezes the snapshot and journals `run_started` plus one `node_registered`
-  // per node — the log the projections are rebuilt from (§5.3).
-  journal.createRun(runId, workflow)
-
   // Before the pool, which takes real time: an operator whose lanes are being
   // provisioned can already open the UI and watch them appear.
   announce(daemon, io)
-  io.out(`vinta-ai-maestro: run ${runId} started (${workflow.nodes.length} nodes).`)
 
-  let host: HostWiring
+  let started: StartedRun
   try {
-    host =
-      deps.executor === undefined
-        ? await provision({
-            workflow,
-            runId,
-            journal,
-            repoPath: bind.repoPath,
-            laneRoot,
-            adapters,
-            agentEnv: {
-              [MAESTRO_URL_ENV]: daemon.url,
-              [MAESTRO_TOKEN_ENV]: daemon.token,
-              [MAESTRO_RUN_ENV]: runId,
-            },
-            ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
-          })
-        : { executor: deps.executor, close: () => {} }
-  } catch (error) {
+    const result = await startRun({
+      workflow,
+      runId,
+      journal,
+      daemon,
+      repoPath: bind.repoPath,
+      permission,
+      ...(resumeId === undefined ? {} : { resume: true }),
+      ...(onFailure === undefined ? {} : { onFailure }),
+      ...(retries === undefined ? {} : { retries }),
+      ...(deps.executor === undefined ? {} : { executor: deps.executor }),
+      ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
+      ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
+      ...(deps.waveResults === undefined ? {} : { waveResults: deps.waveResults }),
+    })
+    if (!result.ok) {
+      await daemon.close()
+      journal.close()
+      io.err(result.message)
+      return FAILED
+    }
+    started = result
+  } catch {
     await daemon.close()
     journal.close()
-    io.err(refusal(error, workflow, laneRoot))
+    io.err(`vinta-ai-maestro: run ${runId} could not be started.`)
     return FAILED
   }
 
-  const pools = new ResourcePools(workflow.resources)
-  const agentLeases = new AgentLeaseBroker(pools, journal, runId)
-  const admission = new AdmissionControl({
-    journal,
-    runId,
-    // A starting hint, not a contract: O1 settles that the real ceiling is
-    // discovered at runtime, so the lane count is as good a first guess as any.
-    ceilings: Object.fromEntries(
-      Object.keys(adapters).map((id) => [id, workflow.resources['lane']?.capacity ?? 1]),
-    ),
-  })
+  for (const warning of warnings) io.err(warning)
+  io.out(
+    resumeId === undefined
+      ? `vinta-ai-maestro: run ${runId} started (${workflow.nodes.length} nodes).`
+      : `vinta-ai-maestro: run ${runId} resumed (${workflow.nodes.length} nodes).`,
+  )
+  deps.onStarted?.(daemon, started.registered)
 
-  const scheduler = createScheduler({
-    workflow,
-    runId,
-    journal,
-    pools,
-    admission,
-    adapters,
-    executor: host.executor,
-    laneRoot,
-    ...(onFailure === undefined ? {} : { onFailure }),
-    ...(retries === undefined ? {} : { retries }),
-    // §9's take over, wired: the scheduler offers each live turn here and the
-    // daemon's PTY channel resolves an `attach` against the same registry.
-    // Both sides default to this instance; naming it once is what makes the
-    // button on a running node reach a session rather than an empty map.
-    takeovers,
-    // §8: a lane slot outlives the phase that used it, and the next phase must
-    // not start in the last one's worktree or against its rows.
-    ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),
-    // The lane's isolation, reaching the process that needs it. Without this a
-    // turn runs in the right directory with the wrong compose project.
-    ...(host.laneEnv === undefined ? {} : { laneEnv: host.laneEnv }),
-    // §15.2: an implementer keeps one worktree, so continuing across a phase is
-    // safe as long as the agent is told which files moved under it.
-    ...(host.laneDelta === undefined ? {} : { laneDelta: host.laneDelta }),
-  })
-
-  // §9's amend needs two things this file owns: the integration worktree a
-  // `done` node's branch is moved in, and the live scheduler that hands an
-  // amended definition to its unstarted nodes. Without the rebaser an
-  // amendment that moves a `done` node's base is refused (`rebase_unavailable`)
-  // rather than half-applied.
-  const amend: AmendRunner | undefined =
-    host.rebase === undefined
-      ? undefined
-      : { rebase: host.rebase, adopt: (amended: Workflow) => scheduler.adopt(amended) }
-
-  const run: DaemonRun = {
-    runId,
-    control: runControl(scheduler),
-    pools,
-    admission,
-    agentLeases,
-    // The `gate` verb's route in. Built here because this is where the pools
-    // are; absent for a host with no lanes, and then the verb refuses rather
-    // than running a gate against a directory it guessed.
-    ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
-    ...(amend === undefined ? {} : { amend }),
-  }
-  daemon.register(run)
-  deps.onStarted?.(daemon, run)
-
+  const signals = untilSignalled()
+  // Declared out here because the `finally` has to know which way the race
+  // below went — the two paths tear down differently.
+  let interrupted = false
   try {
-    const report = await scheduler.run()
-    // `scheduler.run` journalled `run_ended`, which is the one moment a
-    // post-mortem is true (§13.6). Emitted before the `finally` closes the
-    // journal, and before the exit code is decided: a failed run is exactly
-    // the run whose plan the next one most needs to learn from.
-    emitPostMortem(journal, runId, deps.waveResults ?? host.waveResults, io)
+    // Whichever comes first. A run that finishes normally resolves on the left;
+    // an operator closing the terminal resolves on the right.
+    interrupted = await Promise.race([
+      started.finished.then(() => false),
+      signals.signalled.then(() => true),
+    ])
+
+    if (interrupted) {
+      // **Written before anything is closed, and this is the whole point of
+      // handling the signal at all.** The scheduler is still mid-run and will
+      // never reach its own `run_ended`, because this process is about to end
+      // underneath it. Without this line the run stays `running` in the journal
+      // for ever — indistinguishable, to the run list and to the UI, from one
+      // still in flight — and the operator has a zombie instead of something
+      // they can pick up again.
+      //
+      // `failed` rather than a status of its own: the run did not complete, and
+      // the node rows say exactly how far it got. `--resume` refuses only a
+      // `done` run, so this is precisely the state a resume expects to find.
+      journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
+      io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
+      io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
+      return FAILED
+    }
+
+    const { report, postMortem } = await started.finished
+    if (postMortem !== null) io.out(`vinta-ai-maestro: post-mortem written to ${postMortem}`)
+    if (report === null) {
+      io.err(`vinta-ai-maestro: run ${runId} aborted. Its journal is intact and can be inspected.`)
+      return FAILED
+    }
 
     const failed = Object.entries(report.statuses)
       .filter(([, status]) => status === 'failed')
@@ -412,315 +353,23 @@ export async function runCommand(
 
     io.out(`vinta-ai-maestro: run ${runId} ${report.status}.`)
     return report.status === 'completed' && failed.length === 0 ? OK : FAILED
-  } catch {
-    io.err(`vinta-ai-maestro: run ${runId} aborted. Its journal is intact and can be inspected.`)
-    return FAILED
   } finally {
-    // Everything closed here is a handle this process opened. The lanes are
-    // deliberately absent: §8 leaves worktrees, branches and databases in place
-    // for the human who has to read what happened, and the skill's teardown
-    // steps reverse them from the summary on disk.
-    admission.close()
-    agentLeases.close()
-    host.close()
+    // Unhooked whichever way the race went: a watch left on a process that is
+    // trying to exit is a listener holding the event loop open.
+    signals.cancel()
+    // The run's own handles are closed by `started.finished`, which owns them
+    // whether or not anyone awaits it. What is left is what *this process*
+    // opened around the run: the port and the journal.
     await daemon.close()
-    journal.close()
+    // **Not closed on the interrupt path, and this is not an oversight.** The
+    // scheduler is still running there — nobody awaited `finished` — and it
+    // holds this exact journal: closing it underneath a live run turns every
+    // in-flight `releaseLease` into "the database connection is not open",
+    // which is a crash report standing where an interruption should be. The
+    // process is exiting within milliseconds either way, and SQLite commits per
+    // transaction, so the `run_ended` written above is already durable.
+    if (!interrupted) journal.close()
   }
-}
-
-/**
- * Writes `runs/<id>/postmortem.json` (§13.6), the artifact `plan-feature`
- * reads when planning the next feature in this repo.
- *
- * Never fatal. The run is over and its journal is intact by the time this
- * runs; failing the command because a derived report could not be written
- * would throw away the work to report on the reporting. The message carries
- * identifiers and a path, like every other line here.
- */
-function emitPostMortem(
-  journal: Journal,
-  runId: string,
-  waveResults: (() => readonly IntegrationWaveRecord[]) | undefined,
-  io: Io,
-): void {
-  try {
-    const integration = waveResults?.()
-    const report = postMortem(journal, runId, integration === undefined ? {} : { integration })
-    io.out(`vinta-ai-maestro: post-mortem written to ${writePostMortem(journal.root, report)}`)
-  } catch {
-    io.err(`vinta-ai-maestro: run ${runId} produced no post-mortem.`)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// The host composition: lanes, the integrator, and the executor over both
-// ---------------------------------------------------------------------------
-
-/** What the run needs from whoever owns the lanes — this file, or `RunDeps`. */
-interface HostWiring {
-  readonly executor: EffectExecutor
-  /** Read after `run_ended`. Absent for an injected executor, which owns its own. */
-  readonly waveResults?: () => readonly IntegrationWaveRecord[]
-  /** `DaemonRun.amend`'s rebase. Absent means an amendment that needs one is refused. */
-  readonly rebase?: NonNullable<AmendRunner['rebase']>
-  /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
-  readonly recycleLane?: (name: string) => Promise<void>
-  /** One lane's environment, for the agent about to run in it. */
-  readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
-  readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
-  /**
-   * The `gate` verb's port, once the run's pools exist.
-   *
-   * A factory rather than a value because the two things it needs are owned on
-   * opposite sides of this seam: the lane pool and the gate cache are
-   * `provision`'s and stay private to it, and `ResourcePools` is built out
-   * there, after. Handing the pools in is cheaper than moving either of the
-   * others out, and it keeps the cache closed by the same `close` that opened
-   * it. Absent for an injected executor, which provisions no lanes to run a
-   * gate against.
-   */
-  readonly gatesFor?: (pools: ResourcePools) => AgentGatePort
-  /** Handles this process opened. Never the lanes — see the `finally` above. */
-  close(): void
-}
-
-/**
- * The `Integrator` the run uses, keeping what `mergeWave` returns.
- *
- * A wave's `ConflictRecord`s exist for the duration of that call and reach no
- * event, so §13.6's `wave_conflicts` is either captured at the one moment it
- * passes through or reported as unrecorded. Subclassed rather than wrapped
- * because `Integrator` calls its own methods on `this`.
- */
-class RecordingIntegrator extends Integrator {
-  readonly records: IntegrationWaveRecord[] = []
-
-  override async mergeWave(wave: number): Promise<WaveResult> {
-    const result = await super.mergeWave(wave)
-    // Identifiers only, as `ConflictRecord` already is: node ids, paths, rounds.
-    this.records.push({ wave: result.wave, conflicts: result.conflicts })
-    return result
-  }
-}
-
-interface ProvisionOptions {
-  readonly workflow: Workflow
-  readonly runId: string
-  readonly journal: Journal
-  readonly repoPath: string
-  readonly laneRoot: string
-  readonly adapters: Readonly<Record<string, HarnessAdapter>>
-  readonly agentEnv: Readonly<Record<string, string>>
-  readonly perLaneBytes?: number
-}
-
-/**
- * Provisions the pool and builds the production executor over it.
- *
- * The order is the one §8 requires: the pool's disk probe runs first and
- * throws before a single worktree exists, so a refusal costs nothing to
- * recover from. Everything after it is pure wiring.
- */
-async function provision(options: ProvisionOptions): Promise<HostWiring> {
-  const { workflow, runId, journal, repoPath, laneRoot, adapters } = options
-
-  // A staffed run gives every *implementer* its own worktree for the whole run —
-  // the thing that lets a member's session outlive a phase, because a session is
-  // about a directory. Reviewers get none: a review runs in the lane it is
-  // reviewing, so that it reads the working tree before anything is committed.
-  // The names are derived from the roster here and in the scheduler, from the
-  // same function, so neither can drift from the other.
-  const crewLanes = laneHolders(workflow.crew).map(
-    (member, i) => `${runId}-crew-${i + 1}-${member.id}`,
-  )
-
-  const pool = await LanePool.provision({
-    repoPath,
-    poolRoot: laneRoot,
-    runId,
-    // The scheduler names its lane slots the same way, so a node's assigned
-    // lane is one of these worktrees rather than a directory nobody made.
-    laneCount: crewLanes.length > 0 ? crewLanes.length : (workflow.resources['lane']?.capacity ?? 1),
-    ...(crewLanes.length === 0 ? {} : { laneNames: crewLanes }),
-    baseRef: workflow.base_branch,
-    // With no `project` block a lane is a worktree and nothing else, and
-    // `migrateCmd` is never reached — templates are built per declared role.
-    project: projectSpec(workflow.project),
-    ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
-  })
-
-  const integrationPath = pool.integration.path
-  const integrator = new RecordingIntegrator({
-    // `Workflow` satisfies `IntegrationPlan` structurally.
-    plan: workflow,
-    integrationPath,
-    fixer: conflictFixer(workflow, adapters, () => journal.crewAssignments(runId)),
-  })
-
-  const cache = new GateCache(repoPath)
-  const executor = createRunExecutor({
-    workflow,
-    runId,
-    journal,
-    integrator,
-    integrationPath,
-    laneRoot,
-    lanes: pool.lanes.map(({ name, path, env }) => ({
-      name,
-      path,
-      env: { ...env, ...options.agentEnv },
-    })),
-    cache,
-  })
-
-  const rebase = createRebaser({
-    integrationPath,
-    // The base the run recorded, not the one the amended graph implies: it is
-    // the fork point the rebase replays from.
-    baseOf: (nodeId) =>
-      journal.nodes(runId).find((row) => row.node_id === nodeId)?.base_branch ?? null,
-    onRebased: (nodeId, base) => {
-      journal.append({
-        runId,
-        nodeId,
-        type: 'node_assigned',
-        payload: { branch: integrator.nodeBranch(nodeId), base_branch: base },
-      })
-    },
-  })
-
-  return {
-    executor,
-    waveResults: () => integrator.records,
-    rebase,
-    recycleLane: async (name: string) => {
-      await pool.recycle(name)
-    },
-    // Read through the pool rather than captured, because a recycle that had to
-    // re-provision hands back a different `Lane` object for the same slot.
-    laneEnv: (name: string) => ({ ...pool.lane(name).env, ...options.agentEnv }),
-    // The same cache the executor was given, so a gate an agent ran is a hit
-    // for the `gate` node afterwards. Two caches over one project would be two
-    // databases in one file's place and the hits would land in whichever one
-    // nobody asked.
-    gatesFor: (pools) =>
-      new AgentGateBroker({
-        workflow,
-        runId,
-        journal,
-        pools,
-        cache,
-        // Through the pool for `laneEnv`'s reason, and with the same agent
-        // environment overlaid: a gate run from inside a turn must see the
-        // lane's forked database and compose project, exactly as the gate node's
-        // run of it will.
-        lane: (name: string) => {
-          const lane = pool.lane(name)
-          return { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
-        },
-      }),
-    // What changed under a member while it was away: the files that differ
-    // between the phase it last worked on and what is checked out now. It is
-    // the whole safety argument for continuing a session across a phase, so a
-    // failure here is reported as "unknown" by the caller rather than swallowed
-    // into "nothing changed".
-    laneDelta: async (name: string, priorNodeId: string) => {
-      const lane = pool.lane(name)
-      return await gitLines(lane.path, [
-        'diff',
-        '--name-only',
-        integrator.nodeBranch(priorNodeId),
-        'HEAD',
-      ])
-    },
-    close: () => cache.close(),
-  }
-}
-
-/**
- * The agent a conflicted merge is handed to, in the integration worktree.
- *
- * A run whose adapters were injected need not carry the default harness. The
- * orchestrator never resolves a conflict itself, so with no agent to hand it
- * to the merge exhausts its rounds and stops as the plan defect it is.
- *
- * On a staffed run the model comes off the roster rather than `defaults`, and
- * the journal is read at conflict time to find whose work is in the conflict —
- * both decided in `integration/staffing.ts`, which is also where the reason a
- * member's *session* is left behind is written down.
- */
-function conflictFixer(
-  workflow: Workflow,
-  adapters: Readonly<Record<string, HarnessAdapter>>,
-  crewAssignments: () => readonly StoredEvent[],
-): ConflictFixer {
-  return createCrewConflictFixer({
-    adapters,
-    defaults: { harness: workflow.defaults.harness, model: workflow.defaults.model },
-    crew: workflow.crew,
-    crewAssignments,
-  })
-}
-
-/**
- * Why the pool refused. Byte counts and a path — never git's output, which
- * carries repository content (§11).
- */
-function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
-  const lanes = workflow.resources['lane']?.capacity ?? 1
-  if (error instanceof DiskProbeError) {
-    const { requiredBytes, availableBytes } = error.probe
-    return (
-      `vinta-ai-maestro: refusing to provision ${lanes} lanes + 1 integration worktree — ` +
-      `${requiredBytes} bytes needed, ${availableBytes} available under ${laneRoot}. ` +
-      'Free space, or lower resources.lane.capacity.'
-    )
-  }
-  // The pool's own errors already say which lane and what went wrong; a generic
-  // line over the top of them is what made a failing `setup_cmd` take an
-  // afternoon to identify. Anything else stays generic, because anything else
-  // may be carrying repository content in its message.
-  if (error instanceof LaneSetupError || error instanceof LaneEnvFileError) {
-    return `vinta-ai-maestro: ${error.message}`
-  }
-  return `vinta-ai-maestro: could not provision the lane pool under ${laneRoot}.`
-}
-
-/**
- * One real adapter per harness the workflow could dispatch to, each carrying
- * the operator's permission policy.
- *
- * The policy reaches the adapters here and nowhere else: it is an argument to
- * the command, not a field in the plan. A committed document that could say
- * "run agents without approvals" would say it on every machine that ever runs
- * it, including ones whose owner never agreed to that.
- *
- * The repository root goes with it, as the directory every agent may read.
- * Lanes are worktrees of a branch, so whatever the operator has not committed
- * is in their checkout and not in any lane — and a phase that reaches for it
- * is refused with a message that reads like a question nobody can answer.
- * Writing there stays impossible; `claude-code.ts` pairs the grant with the
- * deny list that keeps it to reading.
- */
-function defaultAdapters(
-  workflow: Workflow,
-  permission: AgentPermission,
-  repoPath: string,
-): Record<string, HarnessAdapter> {
-  const adapters: Record<string, HarnessAdapter> = {}
-  for (const id of referencedHarnesses(workflow)) {
-    adapters[id] =
-      id === 'claude-code'
-        ? new ClaudeCodeAdapter({
-            permission,
-            readRoots: [repoPath],
-            settingsDir: join(storeFor(repoPath), 'harness'),
-          })
-        : id === 'codex'
-          ? new CodexAdapter({ permission })
-          : new OpencodeAdapter()
-  }
-  return adapters
 }
 
 /** Identifiers only, matching what `formatSimulation` says about the same union. */
@@ -730,40 +379,4 @@ function describeStop(stop: RunStop): string {
     return `node "${stop.nodeId}" requires unknown resource pool "${stop.resource}"`
   }
   return `deadlock, pending: ${stop.pending.join(', ')}`
-}
-
-/**
- * Builds the run's spokesperson, on demand and per run.
- *
- * Per call rather than cached, because a monitor holds a conversation and two
- * operators looking at two runs are having two of them. Cheap to build: it is a
- * model name, an adapter and a directory; the session only exists once someone
- * asks something.
- *
- * It reads the frozen workflow to pick its model — the dearest tier on the
- * roster — and to name the phases, so a run whose plan cannot be read has no
- * monitor rather than a confused one.
- */
-function monitorFactory(
-  journal: Journal,
-  repoPath: string,
-  permission: AgentPermission,
-): (runId: string) => Monitor | null {
-  return (runId) => {
-    let workflow: Workflow
-    try {
-      workflow = journal.readWorkflow(runId)
-    } catch {
-      return null
-    }
-    return new Monitor({
-      // It answers questions; it does not touch the repository. The lane's read
-      // grant and write guard are not its concern, and it is given neither.
-      adapter: new ClaudeCodeAdapter({ permission }),
-      model: monitorModel(workflow),
-      cwd: repoPath,
-      // The conversation is written here, so it survives the tab it was had in.
-      journal,
-    })
-  }
 }

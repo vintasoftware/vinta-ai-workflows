@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { cp, mkdtemp, realpath, rm, statfs, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, realpath, rm, statfs, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { planDatabase, planTemplate, type PostgresSpec } from '../src/lanes/database.ts'
 import { DiskProbeError } from '../src/lanes/disk.ts'
 import {
+  LaneAdoptError,
   type Lane,
   LanePool,
   LaneRecycleError,
@@ -883,6 +884,195 @@ describe('lane pool', () => {
     expect(existsSync(poolRoot)).toBe(false)
     expect(worktreePaths(repo)).toEqual([gitPath(repo)])
     expect(existsSync(migrateLog)).toBe(false)
+  })
+
+  /**
+   * A run's process is killed. Its worktrees are still on disk, and whatever
+   * the agents had not committed is still in them — which is, for an untracked
+   * deliverable, the only copy of it. Resuming has to take those over: creating
+   * them again is exactly the destruction `reap` refuses to perform, carried
+   * out by the step that was meant to get the run going again.
+   */
+  describe('adopting the worktrees a killed run left standing', () => {
+    /**
+     * A lane in the state a kill leaves one: on its phase branch, with a
+     * deliverable nobody committed and rows a phase's suite wrote.
+     *
+     * The branch is the part that matters to what is under test. The
+     * integrator puts a lane on `plan/<id>/phase-<n>` for the duration of a
+     * phase, so a run killed *while working* — the only kind with uncommitted
+     * work to lose — is never sitting on `wt/<name>`.
+     */
+    const abandoned = async (pool: LanePool): Promise<Lane> => {
+      const lane = pool.lanes[0] as Lane
+      execFileSync('git', ['checkout', '-B', 'plan/p/phase-a'], {
+        cwd: lane.path,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      await writeFile(join(lane.path, 'deliverable.ts'), 'export const real = true\n', 'utf8')
+      const db = new Database(envVar(lane, 'TEST_DATABASE_URL'))
+      try {
+        db.prepare('INSERT INTO widgets (label) VALUES (?)').run('mid-phase')
+      } finally {
+        db.close()
+      }
+      return lane
+    }
+
+    it('keeps the uncommitted work in the worktree, and the rows under it', async () => {
+      const project = sqliteProject()
+      const killed = await provision(project, 2)
+      const lane = await abandoned(killed)
+
+      const resumed = await provision(project, 2, { adopt: true })
+
+      // The whole point. An untracked deliverable has nowhere else to be.
+      expect(existsSync(join(lane.path, 'deliverable.ts'))).toBe(true)
+      // And the database clone is skipped for the same reason: returning the
+      // lane's rows to the template is the same loss wearing a different hat,
+      // and it reaches the resumed phase as a suite that suddenly sees an
+      // empty database.
+      expect(widgetCount(envVar(resumed.lane(lane.name), 'TEST_DATABASE_URL'))).toBe(1)
+      // The same worktree, taken over — not a second one beside it.
+      expect(resumed.lane(lane.name).path).toBe(lane.path)
+      expect(worktreePaths(repo)).toHaveLength(4)
+    })
+
+    it('leaves an env file the phase edited exactly as the phase left it', async () => {
+      // `#copyEnvFiles` is the quiet one of the skipped steps: it would restore
+      // the main checkout's copy over a file the agent had changed, and nothing
+      // downstream would report that anything had happened.
+      await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+      const project = { ...sqliteProject(), envFiles: ['.env'] }
+      const killed = await provision(project, 1)
+      const lane = killed.lanes[0] as Lane
+      await writeFile(join(lane.path, '.env'), 'SHARED=1\nPHASE=1\n', 'utf8')
+
+      await provision(project, 1, { adopt: true })
+
+      expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\nPHASE=1\n')
+    })
+
+    it('describes an adopted lane exactly as provisioning described it', async () => {
+      // A `Lane` is derived from `(name, kind, index, project, repoPath)` and
+      // discovered from nothing, which is the property that lets resume exist
+      // at all: every caller — the scheduler, the executor, `recycle` — gets a
+      // descriptor it cannot tell apart from a provisioned one, so none of them
+      // needs to know that resuming is a thing that happens.
+      const project: ProjectSpec = {
+        ...sqliteProject(),
+        compose: {},
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+          },
+        ],
+      }
+      const killed = await provision(project, 2, { readCompose })
+      const before = [...killed.lanes, killed.integration]
+
+      const resumed = await provision(project, 2, { adopt: true, readCompose })
+
+      expect([...resumed.lanes, resumed.integration]).toEqual(before)
+    })
+
+    it('provisions a lane the killed run never reached', async () => {
+      // Per worktree, not per pool: a run that died partway through
+      // provisioning left some lanes standing and never created the rest, and
+      // an all-or-nothing decision would have to destroy the survivors to get
+      // the missing one.
+      const project = sqliteProject()
+      const killed = await provision(project, 1)
+      const lane = killed.lanes[0] as Lane
+      await writeFile(join(lane.path, 'deliverable.ts'), 'x\n', 'utf8')
+
+      const resumed = await provision(project, 2, { adopt: true })
+
+      const fresh = resumed.lanes[1] as Lane
+      expect(existsSync(join(fresh.path, '.git'))).toBe(true)
+      // Provisioned in full, not half: its database was cloned from the
+      // template the way a first run clones one.
+      expect(widgetCount(envVar(fresh, 'TEST_DATABASE_URL'))).toBe(0)
+      expect(existsSync(join(lane.path, 'deliverable.ts'))).toBe(true)
+      expect(worktreePaths(repo)).toHaveLength(4)
+    })
+
+    it('does not charge the disk probe for worktrees it is not creating', async () => {
+      // The probe sizes N new worktrees, and an adopted one is not new — its
+      // bytes were spent by the run that died. Charging for them refuses a
+      // resume that needs no new space at all, and refuses it harder the more
+      // lanes survived.
+      const project = sqliteProject()
+      await provision(project, 2)
+      const { bavail, bsize } = await statfs(root)
+
+      const resumed = await provision(project, 2, {
+        adopt: true,
+        // Enough per lane that three of them would not fit twice over — the
+        // estimate that makes the first pool impossible and this one free.
+        perLaneBytes: Math.floor((bavail * bsize) / 2),
+      })
+
+      expect(resumed.lanes).toHaveLength(2)
+    })
+
+    it('refuses a directory that is not a worktree, rather than failing inside git', async () => {
+      // `worktree add` fails on any path that already exists, so falling
+      // through would reach the operator as git's own sentence about a path,
+      // naming no lane and reading like a bug in the pool. The other
+      // resolution is worse: adopting a directory that is not this lane's
+      // hands the phase somebody else's tree, and the first thing a phase does
+      // with a tree is commit it.
+      await mkdir(join(poolRoot, 'run-1-lane-1'), { recursive: true })
+
+      const failure = await provision(sqliteProject(), 1, { adopt: true }).then(
+        () => null,
+        (error: unknown) => error as Error,
+      )
+
+      expect(failure?.name).toBe('LaneAdoptError')
+      expect((failure as LaneAdoptError).lane).toBe('run-1-lane-1')
+      expect(failure?.message).toContain('not a linked git worktree')
+      // It says what to do about it, and it is not git talking.
+      expect(failure?.message).toContain('reap the lane')
+      expect(failure?.message).not.toContain('fatal:')
+    })
+
+    it('refuses a worktree that belongs to some other repository', async () => {
+      // A `.git` file is not enough to prove whose lane this is. The two sides
+      // are compared by the commit `wt/<name>` resolves to on each — never by
+      // matching paths, which is the comparison `reap` explains loses to
+      // Windows on separators, drive-letter case and 8.3 short names.
+      const other = await materializeFixtureRepo(join(root, 'elsewhere'))
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-b', 'wt/run-1-lane-1', join(poolRoot, 'run-1-lane-1'), 'main'],
+        // git narrates this one on stderr, and it is the suite's own setup
+        // rather than anything under test.
+        { cwd: other, stdio: ['ignore', 'pipe', 'pipe'] },
+      )
+
+      const failure = await provision(sqliteProject(), 1, { adopt: true }).then(
+        () => null,
+        (error: unknown) => error as Error,
+      )
+
+      expect(failure?.name).toBe('LaneAdoptError')
+      expect(failure?.message).toContain('wt/run-1-lane-1')
+    })
+
+    it('is off unless it is asked for', async () => {
+      // A first run expects every one of these paths to be absent, and a
+      // surprise there is a surprise — not something to absorb silently.
+      const project = sqliteProject()
+      await provision(project, 1)
+
+      await expect(provision(project, 1)).rejects.toThrow()
+    })
   })
 })
 

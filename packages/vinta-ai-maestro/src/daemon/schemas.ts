@@ -103,6 +103,31 @@ export const AnswerRequestSchema = z.strictObject({
   answer: z.union([z.string(), z.number(), z.boolean(), z.null()]),
 })
 
+/**
+ * `POST /api/runs` — start a plan, or pick an interrupted run back up.
+ *
+ * Exactly one of the two, rejected here rather than resolved by precedence.
+ * They name the work in incompatible ways: `workflow` is a document in
+ * `ai-plans/` whose snapshot has yet to be frozen, `resume` is a run whose
+ * snapshot was frozen hours ago and may no longer match that document at all.
+ * Any rule for which one wins when both are sent is a rule for silently running
+ * a plan the caller did not ask for.
+ */
+export const StartRunRequestSchema = z
+  .strictObject({
+    /** A workflow id — the basename of `ai-plans/<id>.workflow.json`. */
+    workflow: z.string().min(1).optional(),
+    /** A run id from `GET /api/runs`. */
+    resume: z.string().min(1).optional(),
+  })
+  .refine(
+    (body) => (body.workflow === undefined) !== (body.resume === undefined),
+    { message: 'Send exactly one of "workflow" or "resume"' },
+  )
+
+/** What `POST /api/runs` answers with. The id is how everything else addresses it. */
+export const StartRunResponseSchema = z.strictObject({ runId: z.string() })
+
 // ---------------------------------------------------------------------------
 // Responses
 // ---------------------------------------------------------------------------
@@ -632,6 +657,7 @@ export type RunSnapshot = z.infer<typeof RunSnapshotSchema>
 export type NodeDetail = z.infer<typeof NodeDetailSchema>
 export type SessionTurn = z.infer<typeof SessionTurnSchema>
 export type RunUsageResponse = z.infer<typeof RunUsageResponseSchema>
+export type StartRunResponse = z.infer<typeof StartRunResponseSchema>
 export type EventFrame = z.infer<typeof EventFrameSchema>
 export type EventPage = z.infer<typeof EventPageSchema>
 export type JournalEvent = z.infer<typeof JournalEventSchema>

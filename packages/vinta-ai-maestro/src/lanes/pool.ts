@@ -10,13 +10,21 @@
  * because reusing it across a migration boundary would run the next phase
  * against the previous one's schema.
  *
+ * That a lane is *derived* rather than discovered is what makes resume cheap:
+ * the compose project, the env map, the database plans and the service plans
+ * all fall out of `(name, kind, index, project, repoPath)`, so a worktree left
+ * on disk by a killed run can be adopted — see `PoolOptions.adopt` — without
+ * anyone having to remember what it was. Only the steps that write into the
+ * working tree are skipped, and they are skipped because the agents'
+ * uncommitted work is in there.
+ *
  * Teardown is never automatic. A finished run leaves its worktrees, branches
  * and databases in place — they are the evidence a human reads when something
  * went wrong, and the skill's teardown steps reverse them from the summary.
  */
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, delimiter, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { isWindows, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
@@ -129,6 +137,37 @@ export class LaneEnvFileError extends Error {
   ) {
     super(`lane "${lane}": the main checkout has no "${file}" to copy`)
     this.name = 'LaneEnvFileError'
+  }
+}
+
+/**
+ * A directory standing where a lane's worktree should be that this run cannot
+ * take over.
+ *
+ * Raised only by a resume, and it refuses rather than falling through to a
+ * fresh provision on purpose. `worktree add` fails on a path that already
+ * exists whatever is in it, so the fall-through would reach the operator as
+ * git's own sentence about a path — naming no lane, and reading like a bug in
+ * the pool rather than like something on disk that needs a decision. And the
+ * one thing that must never happen here is the other resolution: adopting a
+ * directory that is *not* this lane's worktree hands the phase somebody else's
+ * tree, and the first thing it does with it is commit.
+ *
+ * The path is named, and nothing from inside it is. §11 is about repository
+ * contents; a directory this tool chose the name of is not that, and without it
+ * the message says nothing an operator can go and look at.
+ */
+export class LaneAdoptError extends Error {
+  constructor(
+    readonly lane: string,
+    readonly path: string,
+    readonly reason: string,
+  ) {
+    super(
+      `lane "${lane}": ${path} is ${reason}, so this run cannot resume into it — ` +
+        `move it aside or reap the lane, then run again`,
+    )
+    this.name = 'LaneAdoptError'
   }
 }
 
@@ -276,6 +315,23 @@ export interface PoolOptions {
   readonly laneNames?: readonly string[]
   readonly baseRef: string
   readonly project: ProjectSpec
+  /**
+   * Take over lane worktrees already on disk instead of creating them — what a
+   * resumed run needs, and nothing else should set.
+   *
+   * A run whose process was killed leaves its worktrees standing with whatever
+   * the agents had not committed still in them. Re-creating those is not a
+   * slower route to the same place: it is exactly the destruction `reap`
+   * refuses to perform, carried out by the step meant to get the run going
+   * again. Off by default, because for a first run every one of these paths
+   * being absent is the only correct expectation and a surprise there should
+   * fail rather than be absorbed.
+   *
+   * Decided per worktree rather than per pool. A run that died partway through
+   * provisioning left some lanes standing and never reached the others, so a
+   * path that is not there is provisioned exactly as a first run would.
+   */
+  readonly adopt?: boolean
   /** Overrides the measured per-lane disk estimate the N× probe uses. */
   readonly perLaneBytes?: number
   /**
@@ -368,14 +424,6 @@ export class LanePool {
         })
       }
     }
-    await pool.#probeDisk()
-    // `run` has already done this, before its preflight — earlier than a pool
-    // can, and the right place for it. Repeated here so a host that drives the
-    // pool directly still gets a reachable server before `createdb` needs one;
-    // the command is required to be idempotent, so twice costs nothing.
-    await prepareInfrastructure(options.project, options.repoPath)
-    await pool.#buildTemplates()
-
     const laneNames =
       options.laneNames ??
       Array.from({ length: options.laneCount }, (_, i) => `${options.runId}-lane-${i + 1}`)
@@ -383,13 +431,47 @@ export class LanePool {
       ...laneNames.map((name): [string, Lane['kind']] => [name, 'lane']),
       [`${options.runId}-integ`, 'integration'],
     ]
+
+    // Which worktrees are already there, settled before anything is created or
+    // measured. Every question `#adoptable` asks is a read — `existsSync`, a
+    // `stat`, two `rev-parse`s — so this stays on the near side of the line the
+    // disk probe draws: a pool that refuses still leaves the filesystem exactly
+    // as it found it, which is what the probe's own test asserts.
+    const adopting = await Promise.all(
+      names.map(([name]) => (options.adopt === true ? pool.#adoptable(name) : false)),
+    )
+
+    // Sized for the worktrees that will really be created, not for the ones
+    // asked for. An adopted lane's bytes were spent by the run that died; still
+    // charging the probe for them refuses a resume that needs almost no new
+    // space, on a filesystem already holding every worktree it is about to
+    // reuse — a refusal that gets stranger the closer the pool is to correct,
+    // because the more lanes survived the more disk the probe demands.
+    await pool.#probeDisk(adopting.filter((adopt) => !adopt).length)
+    // `run` has already done this, before its preflight — earlier than a pool
+    // can, and the right place for it. Repeated here so a host that drives the
+    // pool directly still gets a reachable server before `createdb` needs one;
+    // the command is required to be idempotent, so twice costs nothing.
+    await prepareInfrastructure(options.project, options.repoPath)
+    // Built even when every lane is adopted, and the wasted migrate run is the
+    // price of a correct one. The template is not only what a lane is cloned
+    // from — it is what a lane is *reset to*, so the first recycle after a
+    // resume reads it, and a resumed run recycles a lane at every phase
+    // boundary it crosses. Rebuilding also settles what a leftover template
+    // from the dead run cannot be trusted about: this one is migrated from the
+    // base ref this run was given. Nothing here touches a lane — the setup
+    // drops and recreates the template alone, never a lane's own fork.
+    await pool.#buildTemplates()
+
     // Lanes share nothing but the source repo, so past the template they are
     // provisioned concurrently.
     // The index is the lane's slot, and it is what an `index`-namespaced
     // service is derived from — so the integration worktree takes the one after
     // the last lane rather than sharing a lane's.
     pool.#all = await Promise.all(
-      names.map(([name, kind], index) => pool.#provisionWorktree(name, kind, index)),
+      names.map(([name, kind], index) =>
+        pool.#provisionWorktree(name, kind, index, adopting[index] === true),
+      ),
     )
     return pool
   }
@@ -536,12 +618,78 @@ export class LanePool {
 
   /** Whether the ref is there. A missing branch is an answer, not a failure. */
   async #hasBranch(branch: string): Promise<boolean> {
+    return (await this.#revParse(`refs/heads/${branch}`)) !== null
+  }
+
+  /** What a ref points at in the main checkout, or null where it is not there. */
+  async #revParse(ref: string): Promise<string | null> {
     try {
-      await this.#git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
-      return true
+      const { stdout } = (await this.#git(['rev-parse', '--verify', '--quiet', ref])) as {
+        stdout: string
+      }
+      return stdout.trim()
     } catch {
-      return false
+      return null
     }
+  }
+
+  /**
+   * Whether this lane's worktree is already on disk and is really *this lane's*
+   * — the question a resume asks before reusing a directory instead of making
+   * one.
+   *
+   * Three answers, and the third is why this is not a boolean in disguise. A
+   * path nothing was ever provisioned at is `false`, and the lane is created
+   * exactly as a first run would create it: a run that died between its second
+   * and third `worktree add` left two lanes standing and never reached the
+   * third, and refusing the whole resume over that would mean destroying the
+   * two that survived to get going again. A path holding this lane's worktree
+   * is `true`. Anything else throws — see `LaneAdoptError`.
+   *
+   * **A phase branch checked out here is not "anything else".** The obvious
+   * identity check is that HEAD is on `wt/<name>`, and it is wrong in the one
+   * case this whole capability is for: the integrator puts every lane on
+   * `plan/<id>/phase-<n>` for the duration of a phase, so a run killed *during*
+   * a phase — the kill that leaves uncommitted work — is never on the lane
+   * branch, and a run killed between phases is only because `recycle` put it
+   * back. That check would therefore adopt exactly the lanes with nothing in
+   * them to save and refuse the ones with work.
+   *
+   * So identity is the lane *branch existing in this repository*, which the
+   * worktree agrees about, and not whatever HEAD happens to be mid-phase. The
+   * two sides are compared by the commit the ref resolves to rather than by
+   * matching `git worktree list`'s paths against this one: git prints posix
+   * paths on every platform while Node hands back the platform's, so on Windows
+   * that comparison loses to drive-letter case, separators and 8.3 short names
+   * — silently, and in the direction that calls every lane unadoptable.
+   */
+  async #adoptable(name: string): Promise<boolean> {
+    const path = join(this.#options.poolRoot, name)
+    const branch = `wt/${name}`
+    if (!existsSync(path)) return false
+
+    // A linked worktree carries a `.git` **file** where an ordinary checkout
+    // has a directory. The filesystem is asked rather than git, for the reason
+    // `reap` gives: the pool root can sit inside the repository, and a plain
+    // subdirectory of it answers every git question perfectly well while being
+    // no worktree at all.
+    const linked = await stat(join(path, '.git')).then(
+      (entry) => entry.isFile(),
+      () => false,
+    )
+    if (!linked) throw new LaneAdoptError(name, path, 'not a linked git worktree')
+
+    const mine = await this.#revParse(`refs/heads/${branch}`)
+    if (mine === null) {
+      throw new LaneAdoptError(name, path, `a worktree, but this checkout has no "${branch}"`)
+    }
+    const theirs = await gitLines(path, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+      .then((lines) => lines[0] ?? null)
+      .catch(() => null)
+    if (theirs !== mine) {
+      throw new LaneAdoptError(name, path, 'a worktree of some other repository')
+    }
+    return true
   }
 
   #git(args: readonly string[]): Promise<unknown> {
@@ -552,11 +700,21 @@ export class LanePool {
     return turn
   }
 
-  async #probeDisk(): Promise<void> {
-    const { repoPath, poolRoot, laneCount, perLaneBytes } = this.#options
+  /**
+   * Refuses the pool that will not fit, before a byte of it exists.
+   *
+   * Counted in worktrees this call is about to create — the lanes plus the
+   * integration worktree, which is a lane in every way that costs disk, less
+   * any a resume is adopting. Zero of them is not a probe that trivially
+   * passes but one that is not run: `measureBytes` walks the whole main
+   * checkout, and a resume that creates nothing has nothing to weigh it
+   * against.
+   */
+  async #probeDisk(worktreeCount: number): Promise<void> {
+    if (worktreeCount === 0) return
+    const { repoPath, poolRoot, perLaneBytes } = this.#options
     const perLane = perLaneBytes ?? (await measureBytes(repoPath))
-    // The integration worktree is a lane in every way that costs disk.
-    const probe = await probePoolDisk(poolRoot, perLane, laneCount + 1)
+    const probe = await probePoolDisk(poolRoot, perLane, worktreeCount)
     if (!probe.fits) throw new DiskProbeError(probe)
   }
 
@@ -575,16 +733,47 @@ export class LanePool {
     }
   }
 
-  async #provisionWorktree(name: string, kind: Lane['kind'], index: number): Promise<Lane> {
+  /**
+   * One worktree, and the `Lane` that describes it.
+   *
+   * `adopt` is a resume taking over a worktree that is already there, and the
+   * steps it skips are the ones that would **write into a lane an agent is
+   * still mid-phase in**. `worktree add` is the obvious one. The other two are
+   * what make this a resume rather than a restart: `#copyEnvFiles` would put
+   * the main checkout's `.env` over the one the phase edited, and a database's
+   * `cloneCmd` would return the lane's rows to the template — which to a phase
+   * being resumed is the same loss as deleting its files, arriving as a test
+   * suite that suddenly sees an empty database.
+   *
+   * Everything else runs, because everything else derives the lane rather than
+   * building it. `#configureHooks` and `#isolateCompose` are idempotent and
+   * write outside the working tree; the descriptor below is a pure function of
+   * `(name, kind, index, project, repoPath)`. So an adopted lane is
+   * indistinguishable from a provisioned one to every caller, which is what
+   * lets the scheduler, the executor and `recycle` stay unaware that resume
+   * exists at all.
+   *
+   * `#linkDeps` is the one skipped-looking step that is not skipped, and it is
+   * deliberate: it already swallows "there is one there", so on an adopted lane
+   * it costs a failed `symlink` — and on the lane that died *between* its
+   * `worktree add` and its link it is the difference between a resumed phase
+   * and one whose every gate cannot resolve a dependency.
+   */
+  async #provisionWorktree(
+    name: string,
+    kind: Lane['kind'],
+    index: number,
+    adopt = false,
+  ): Promise<Lane> {
     const { repoPath, poolRoot, baseRef, project } = this.#options
     const path = join(poolRoot, name)
     const branch = `wt/${name}`
 
     await mkdir(poolRoot, { recursive: true })
-    await this.#git(['worktree', 'add', '-b', branch, path, baseRef])
+    if (!adopt) await this.#git(['worktree', 'add', '-b', branch, path, baseRef])
     await this.#linkDeps(path)
     await this.#configureHooks(path)
-    await this.#copyEnvFiles(name, path)
+    if (!adopt) await this.#copyEnvFiles(name, path)
 
     const databases: DatabasePlan[] = []
     for (const role of ROLES) {
@@ -595,7 +784,7 @@ export class LanePool {
         lanePath: path,
         templatesDir: this.#templatesDir,
       })
-      if (plan.cloneCmd) await sh(plan.cloneCmd, path, {})
+      if (plan.cloneCmd && !adopt) await sh(plan.cloneCmd, path, {})
       databases.push(plan)
     }
 
@@ -655,12 +844,22 @@ export class LanePool {
     // compose project, the override, the forked connection strings and every
     // service namespace. A command that creates a vhost needs the address it is
     // creating it on, and one that reaches for compose needs the isolation.
+    //
+    // Run for an adopted lane too, unlike the database clone above, and the
+    // difference is what each command is *defined* to do. A clone overwrites —
+    // that is the whole of it. A `create_cmd` makes a namespace exist, and
+    // already runs a second time against one it made whenever a single-use lane
+    // is re-provisioned mid-run, so a project whose `create_cmd` cannot survive
+    // that has a lane it cannot recycle today, resume or no resume.
     for (const service of services) {
       if (service.createCmd !== null) await sh(service.createCmd, path, env)
     }
 
     // Written before the project's own hook runs, so a lane whose setup failed
-    // still leaves the record a human tears it down from.
+    // still leaves the record a human tears it down from. Rewritten for an
+    // adopted lane rather than trusted: the summary is what `recycle` reads to
+    // decide whether the lane can be handed on and how to reset it, and a run
+    // that was killed is precisely the one that may have left half a file.
     await this.#writeSummary(lane)
     await this.#setup(lane)
     return lane

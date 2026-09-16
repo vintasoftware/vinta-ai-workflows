@@ -28,6 +28,7 @@ import type {
   SpawnRefusalKind,
 } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
+import type { NodeStatus } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import type { GuardContext } from '../src/pipeline/guard.ts'
@@ -239,12 +240,31 @@ function rig(
     readonly retries?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
     readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
+    /**
+     * The state a killed process left in the journal, by node id: the run is
+     * then built as a resume of it.
+     *
+     * Written as the `node_status` events the dead run would have written,
+     * rather than as hand-built rows, so the scheduler resumes from a real
+     * projection and the duplicate-event assertions are counting the same log
+     * the post-mortem reads.
+     */
+    readonly resumeFrom?: Readonly<Record<string, NodeStatus>>
+    /** What that process had assigned, for the fields a row carries past a status. */
+    readonly assigned?: Readonly<Record<string, { readonly session_id?: string }>>
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-scheduler-'))
   const journal = openJournal(dir)
   const runId = 'run-1'
   if (options.register !== false) journal.createRun(runId, workflow)
+
+  for (const [nodeId, payload] of Object.entries(options.assigned ?? {})) {
+    journal.append({ runId, nodeId, type: 'node_assigned', payload })
+  }
+  for (const [nodeId, status] of Object.entries(options.resumeFrom ?? {})) {
+    journal.append({ runId, nodeId, type: 'node_status', payload: { status } })
+  }
 
   // Strict FIFO: the aging window is a wall-clock affordance, and a test that
   // depended on it would be asserting about `Date.now()`.
@@ -282,6 +302,7 @@ function rig(
     takeovers,
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
     ...(options.laneEnv === undefined ? {} : { laneEnv: options.laneEnv }),
+    ...(options.resumeFrom === undefined ? {} : { resumeFrom: journal.nodes(runId) }),
     // **`stop` unless a test says otherwise, and production's default is
     // `retry`.** Every test below that asserts about a failure — containment,
     // the reason text, which dependents block — is about what a *final* failure
@@ -322,6 +343,16 @@ const operationsOf = (rig_: Rig, nodeId: string): unknown[] =>
     .events('run-1')
     .filter((event) => event.type === 'node_operation' && event.nodeId === nodeId)
     .map((event) => event.payload)
+
+/**
+ * Every status this node's log claims, in order — including the ones a
+ * previous process wrote, which is what makes a duplicated transition visible.
+ */
+const statusesOf = (rig_: Rig, nodeId: string): string[] =>
+  rig_.journal
+    .events('run-1')
+    .filter((event) => event.type === 'node_status' && event.nodeId === nodeId)
+    .map((event) => String((event.payload as { status?: unknown }).status))
 
 /** Every §15 session decision for a node, in order. */
 const sessionsOf = (rig_: Rig, nodeId: string): unknown[] =>
@@ -1055,6 +1086,125 @@ describe('deadlock detection', () => {
     expect(report.status).toBe('stopped')
     expect(report.stop).toEqual({ kind: 'unsatisfiable', nodeId: 'a', resource: 'gpu' })
     expect(r.adapter.spawned).toEqual([])
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5b: resuming a run the journal already has
+//
+// The process that started the run was killed, so everything it held is gone
+// and everything it wrote is not. These tests are about the seam between those
+// two: which phases the resume believes, which it re-runs, and what it is
+// careful *not* to write a second time into a log the post-mortem folds.
+// ---------------------------------------------------------------------------
+
+describe('resuming a run', () => {
+  it('does not re-dispatch a node the journal left done', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), { resumeFrom: { a: 'done' } })
+
+    const report = await r.scheduler.run()
+
+    expect(report.status).toBe('completed')
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // The phase that finished before the kill is not paid for twice.
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['b'])
+    expectDrained(r)
+  })
+
+  it('re-dispatches a node the journal left running', async () => {
+    const r = rig(makeWorkflow([node('a')]), { resumeFrom: { a: 'running' } })
+
+    const report = await r.scheduler.run()
+
+    // Nothing was behind that `running` — the process holding its session died
+    // with it — so the phase runs again from the start of its pipeline.
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['a'])
+    expectDrained(r)
+  })
+
+  it('re-dispatches the nodes a previous failure left failed and blocked', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), {
+      resumeFrom: { a: 'failed', b: 'blocked' },
+    })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['a', 'b'])
+    expectDrained(r)
+  })
+
+  it('seeds a done node without journalling its status a second time', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), {
+      resumeFrom: { a: 'done', b: 'running' },
+    })
+
+    await r.scheduler.run()
+
+    // One `done`: the one the dead process wrote. A second would read as a
+    // phase that finished twice.
+    expect(statusesOf(r, 'a')).toEqual(['done'])
+    // `b` is the other half of the rule. The projection was claiming `running`
+    // with nothing behind it, so the correction to `pending` *is* journalled,
+    // and the re-run follows it.
+    expect(statusesOf(r, 'b')).toEqual(['running', 'pending', 'running', 'done'])
+    expectDrained(r)
+  })
+
+  it('settles immediately when the journal says every node is done', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a']), node('c', ['b'])]), {
+      resumeFrom: { a: 'done', b: 'done', c: 'done' },
+    })
+
+    const report = await r.scheduler.run()
+
+    // Completed rather than hung, and not mistaken for a deadlock: `#settled`
+    // is asked before `#deadlock` is.
+    expect(report.status).toBe('completed')
+    expect(report.stop).toBeUndefined()
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    expect(r.adapter.spawned).toEqual([])
+    // One turn of the loop: dispatch nothing, settle, stop.
+    expect(report.iterations).toBe(1)
+    expectDrained(r)
+  })
+
+  it('dispatches a wave whose dependencies were done before the resume', async () => {
+    const r = rig(
+      makeWorkflow([node('a'), node('b', ['a']), node('c', ['a']), node('d', ['b', 'c'])]),
+      { resumeFrom: { a: 'done', b: 'done' } },
+    )
+
+    const report = await r.scheduler.run()
+
+    expect(report.status).toBe('completed')
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done', d: 'done' })
+    // `#dispatchReady` counts a dependency green only when its *state* says
+    // `done`, so `c` starting at all is the seeding working, and `d` starting
+    // after it is the half of its dependency set that survived the kill.
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['c', 'd'])
+    expect(report.waves).toEqual({ a: 1, b: 2, c: 2, d: 3 })
+    expectDrained(r)
+  })
+
+  it('does not hand the resumed node the session id the journal recorded', async () => {
+    const r = rig(makeWorkflow([node('a')]), {
+      resumeFrom: { a: 'running' },
+      assigned: { a: { session_id: 'sess-before-the-kill' } },
+    })
+
+    await r.scheduler.run()
+
+    // `solo` names no slot, which is the one path a staged id would reach
+    // (§15's `takeoverSessionId`). The row's id says which role spawned *last*
+    // and nothing about the lane, the harness or the turns behind it, so there
+    // is no §15.2 rule that could decline it — and the phase is re-driven from
+    // its initial state anyway. Cold is the only honest spawn.
+    expect(r.adapter.spawned).toHaveLength(1)
+    expect(r.adapter.spawned[0]?.resumeSessionId).toBeUndefined()
+    expect(sessionsOf(r, 'a')).toEqual([])
     expectDrained(r)
   })
 })

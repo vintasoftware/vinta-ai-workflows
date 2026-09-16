@@ -31,7 +31,17 @@ import { networkInterfaces } from 'node:os'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { TOKEN_QUERY, startDaemon, type Daemon } from '../daemon/index.ts'
+import {
+  TOKEN_QUERY,
+  createWorkflowStore,
+  isWorkflowId,
+  plansDirFor,
+  startDaemon,
+  type Daemon,
+  type RunStartOutcome,
+  type RunStartPort,
+  type RunStartRequest,
+} from '../daemon/index.ts'
 import type { Journal } from '../journal/journal.ts'
 import { openJournal } from '../journal/journal.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
@@ -42,7 +52,10 @@ import {
   type AgentPermission,
 } from '../harness/permissions.ts'
 import { Monitor, monitorModel } from '../monitor/monitor.ts'
+import { preflightRun, startRun } from '../run/index.ts'
 import type { Workflow } from '../types.ts'
+import { parseWorkflow } from '../validate.ts'
+import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
@@ -163,6 +176,13 @@ export interface ServeDeps {
    * cannot wait for.
    */
   readonly wait?: (daemon: Daemon) => Promise<void>
+  /**
+   * Preflight overrides for the runs this daemon hosts — the same injected
+   * binaries and disk estimate `RunDeps.doctor` takes, and there for the same
+   * reason: a preflight that read its answers from the command line would not
+   * be one, so there is no flag and tests reach it here.
+   */
+  readonly doctor?: DoctorOverrides
 }
 
 export async function serveCommand(
@@ -179,6 +199,8 @@ export async function serveCommand(
         host: { type: 'string' },
         port: { type: 'string' },
         permission: { type: 'string' },
+        'on-failure': { type: 'string' },
+        retries: { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -200,6 +222,29 @@ export async function serveCommand(
     return USAGE
   }
   const permission = requested ?? DEFAULT_PERMISSION
+
+  // Parsed at last. Both flags have been in `SERVE_USAGE` since `run` and
+  // `serve` started sharing it, and until this command could host a run they
+  // were documentation for something it did not do. Validated exactly as `run`
+  // validates them, because they are now the same settings reaching the same
+  // scheduler.
+  const onFailure = parsed.values['on-failure']
+  if (
+    onFailure !== undefined &&
+    onFailure !== 'stop' &&
+    onFailure !== 'retry' &&
+    onFailure !== 'ask'
+  ) {
+    io.err('vinta-ai-maestro: --on-failure must be one of stop, retry, ask')
+    return USAGE
+  }
+
+  const rawRetries = parsed.values['retries']
+  const retries = rawRetries === undefined ? undefined : Number(rawRetries)
+  if (retries !== undefined && (!Number.isInteger(retries) || retries < 0 || retries > 5)) {
+    io.err('vinta-ai-maestro: --retries must be a whole number from 0 to 5')
+    return USAGE
+  }
 
   const bind = toBind(parsed.values, io)
   if (bind === null) return USAGE
@@ -223,28 +268,227 @@ export async function serveCommand(
     return FAILED
   }
 
+  // What turns this from a window onto the journal into a host for runs. Until
+  // this line the daemon serves history and refuses `POST /api/runs`.
+  const host = runStarter({
+      journal,
+      daemon,
+      repoPath: bind.repoPath,
+      permission,
+      warn: (message) => io.err(message),
+      ...(onFailure === undefined ? {} : { onFailure }),
+      ...(retries === undefined ? {} : { retries }),
+      ...(deps.doctor === undefined ? {} : { doctor: deps.doctor }),
+  })
+  daemon.acceptRuns(host)
+
   announce(daemon, io)
 
   try {
-    await (deps.wait ?? untilInterrupted)(daemon)
+    await (deps.wait ?? (() => untilSignalled().signalled))(daemon)
   } finally {
     await daemon.close()
-    journal.close()
+    // **The runs this daemon was driving are ending with it**, and each one is
+    // recorded as interrupted before anything is closed. Without this they stay
+    // `running` in the journal for ever — the exact zombie that made a closed
+    // terminal unrecoverable — and with it they are resumable, which is the
+    // whole point of hosting them here.
+    //
+    // `failed` rather than a status of its own: the run did not complete, and
+    // its node rows say how far it got. `--resume` refuses only a `done` run.
+    const interrupted = host.inFlight()
+    for (const runId of interrupted) {
+      journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
+      io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
+      io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
+    }
+    // Left open when runs were still live, for `run`'s reason: their schedulers
+    // are still holding this journal and the process is exiting in
+    // milliseconds. SQLite commits per transaction, so the rows above are
+    // already durable.
+    if (interrupted.length === 0) journal.close()
   }
   return OK
 }
 
-/** Resolves on the first SIGINT or SIGTERM, and unhooks itself either way. */
-function untilInterrupted(): Promise<void> {
-  return new Promise<void>((resolve_) => {
+interface StarterOptions {
+  readonly journal: Journal
+  readonly daemon: Daemon
+  readonly repoPath: string
+  readonly permission: AgentPermission
+  readonly onFailure?: 'stop' | 'retry' | 'ask'
+  readonly retries?: number
+  /** Where a preflight warning goes. A daemon-hosted run has no stdout of its own. */
+  readonly warn: (message: string) => void
+  readonly doctor?: DoctorOverrides
+}
+
+/**
+ * `POST /api/runs`, implemented: resolve what was asked for, preflight it, and
+ * compose a run on the daemon that is already listening.
+ *
+ * This is the half of daemon-hosted runs that could not live in `src/daemon/`.
+ * Starting a run means a lane pool, a harness, a preflight and a scheduler —
+ * none of which an HTTP module should know about — so the daemon declares the
+ * narrow `RunStartPort` and this supplies it.
+ *
+ * **It resolves as soon as the run is registered.** Nothing here awaits
+ * `finished`: a run takes hours and the request that submitted it must not.
+ * The run tidies up after itself (see `StartedRun.finished`), which is what
+ * makes it safe for nobody to be holding it.
+ *
+ * **What it deliberately does not do is decide.** Every refusal below is the
+ * same check `run` makes, in the same order, through the same functions — a
+ * daemon that was more permissive than the command line would be a second,
+ * quieter way to start a run that `run` would have refused.
+ */
+export interface RunHost extends RunStartPort {
+  /**
+   * Runs this host is still driving, newest last.
+   *
+   * Exists for shutdown. A daemon-hosted run is not awaited by anybody, so
+   * without this the process on its way out has no idea it is about to close a
+   * journal three schedulers are still writing to — which surfaces as
+   * "the database connection is not open" from whichever lease released last,
+   * a crash report standing where an orderly interruption should be.
+   */
+  inFlight(): readonly string[]
+}
+
+export function runStarter(options: StarterOptions): RunHost {
+  const { journal, daemon, repoPath, permission } = options
+  // The same directory the API lists workflows from, derived the same way, so
+  // an id the editor offered is an id this can start.
+  const store = createWorkflowStore(plansDirFor(repoPath))
+  // Insertion-ordered, and entries are removed as runs settle, so this is the
+  // set of runs that would be lost if the process ended right now.
+  const live = new Set<string>()
+
+  return {
+    inFlight: () => [...live],
+    async start(request: RunStartRequest): Promise<RunStartOutcome> {
+      let workflow: Workflow
+      let runId: string
+
+      if (request.kind === 'workflow') {
+        // Checked before the read, for the reason `isWorkflowId` exists: an id
+        // is turned into a path, and a path is the one thing a caller must not
+        // be able to choose.
+        if (!isWorkflowId(request.workflowId)) {
+          return { ok: false, code: 'unknown_workflow', message: 'no such workflow' }
+        }
+        const read = store.read(request.workflowId)
+        if (!read.ok) {
+          return read.reason === 'missing'
+            ? { ok: false, code: 'unknown_workflow', message: 'no such workflow' }
+            : { ok: false, code: 'invalid_workflow', message: 'workflow file is not valid JSON' }
+        }
+        const parsed = parseWorkflow(read.value)
+        if (!parsed.ok || parsed.workflow.id !== request.workflowId) {
+          return { ok: false, code: 'invalid_workflow', message: 'workflow is not valid' }
+        }
+        workflow = parsed.workflow
+        runId = `${workflow.id}-${Date.now().toString(36)}`
+      } else {
+        const row = journal.runs().find((candidate) => candidate.id === request.runId)
+        if (row === undefined) {
+          return { ok: false, code: 'unknown_run', message: 'no such run' }
+        }
+        if (row.status === 'done') {
+          // Nothing to resume: every node settled, and a resume would write a
+          // second `run_ended` over a finished history. Running the plan again
+          // is a different request with a different answer.
+          return { ok: false, code: 'run_finished', message: 'run already finished' }
+        }
+        try {
+          // The *frozen* snapshot, never the file it came from: that document
+          // may have been edited in the hours since, and a resume that silently
+          // switched plans mid-run is the worst version of this feature.
+          workflow = journal.readWorkflow(request.runId)
+        } catch {
+          return { ok: false, code: 'invalid_workflow', message: 'frozen workflow is unreadable' }
+        }
+        runId = request.runId
+      }
+
+      const preflight = await preflightRun({
+        workflow,
+        repoPath,
+        ...(options.doctor === undefined ? {} : { doctor: options.doctor }),
+      })
+      if (!preflight.ok) return { ok: false, code: 'environment', message: preflight.message }
+      for (const warning of preflight.warnings) options.warn(warning)
+
+      const started = await startRun({
+        workflow,
+        runId,
+        journal,
+        daemon,
+        repoPath,
+        permission,
+        ...(request.kind === 'resume' ? { resume: true } : {}),
+        ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
+        ...(options.retries === undefined ? {} : { retries: options.retries }),
+      })
+      if (!started.ok) {
+        options.warn(started.message)
+        return { ok: false, code: 'provision', message: started.message }
+      }
+
+      live.add(started.runId)
+      // Deliberately not awaited — see the docstring. The run outlives this call.
+      void started.finished.then(({ postMortem }) => {
+        live.delete(started.runId)
+        options.warn(
+          postMortem === null
+            ? `vinta-ai-maestro: run ${started.runId} ended; no post-mortem could be written.`
+            : `vinta-ai-maestro: run ${started.runId} ended; post-mortem at ${postMortem}`,
+        )
+      })
+
+      return { ok: true, runId: started.runId }
+    },
+  }
+}
+
+/** A signal watch that can be called off, for a caller that stopped for another reason. */
+export interface SignalWatch {
+  /** Resolves on the first signal. Never rejects, and never resolves after `cancel`. */
+  readonly signalled: Promise<void>
+  /** Unhooks the handlers. Idempotent. */
+  cancel(): void
+}
+
+/**
+ * Resolves on the first SIGINT, SIGTERM or **SIGHUP**.
+ *
+ * SIGHUP is the one that matters here and the one that was missing. It is what
+ * a terminal sends to its foreground process when the window closes, and with
+ * no handler for it Node's default action is to die on the spot — no `finally`,
+ * no teardown, and for `run` no `run_ended`, so a run whose operator simply
+ * closed their terminal stayed `running` in the journal forever with nothing
+ * able to tell it apart from one still in flight.
+ *
+ * Cancellable because `run` races it against the run finishing, and a watch
+ * left hooked keeps a listener on a process that is trying to exit.
+ */
+export function untilSignalled(): SignalWatch {
+  let cancel = (): void => {}
+  const signalled = new Promise<void>((resolve_) => {
     const stop = (): void => {
+      cancel()
+      resolve_()
+    }
+    cancel = (): void => {
       process.off('SIGINT', stop)
       process.off('SIGTERM', stop)
-      resolve_()
+      process.off('SIGHUP', stop)
     }
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)
+    process.once('SIGHUP', stop)
   })
+  return { signalled, cancel: () => cancel() }
 }
 
 /**
@@ -259,7 +503,7 @@ function untilInterrupted(): Promise<void> {
  * roster — and to name the phases, so a run whose plan cannot be read has no
  * monitor rather than a confused one.
  */
-function monitorFactory(
+export function monitorFactory(
   journal: Journal,
   repoPath: string,
   permission: AgentPermission,

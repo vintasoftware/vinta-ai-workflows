@@ -212,6 +212,22 @@ interface RunPayloads {
   run_started: { readonly workflow_id: string; readonly base_branch: string }
   run_ended: { readonly status: Exclude<RunStatus, 'running'> }
   /**
+   * A run picked up again by a process that did not start it.
+   *
+   * Its own event rather than a second `run_started`, for a reason the
+   * projection makes plain: `run_started` is an `INSERT OR REPLACE` carrying
+   * `started_at`, so replaying it would move the run's start to whenever
+   * someone last resumed it. A run that took three days across four processes
+   * would report having begun on the last one, and every duration derived from
+   * that row — the post-mortem's, the UI's — would be wrong by the length of
+   * the outage.
+   *
+   * `attempt` counts *hosting* processes, not retries: 2 on the first resume.
+   * It is what lets the history distinguish a phase that ran twice because it
+   * failed from one that ran twice because the machine rebooted underneath it.
+   */
+  run_resumed: { readonly attempt: number }
+  /**
    * §9's amend, as the run's own history: the reason a node's base moved.
    *
    * Deliberately *not* projected. The frozen snapshot on disk is the run's

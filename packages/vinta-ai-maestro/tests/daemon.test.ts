@@ -54,7 +54,12 @@ import {
 import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { CodexAdapter } from '../src/harness/codex.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
-import { EventPageSchema } from '../src/daemon/schemas.ts'
+import { EventPageSchema, StartRunResponseSchema } from '../src/daemon/schemas.ts'
+import type {
+  RunStartOutcome,
+  RunStartPort,
+  RunStartRequest,
+} from '../src/daemon/control.ts'
 import type { NewEvent, StoredEvent } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
@@ -2268,5 +2273,154 @@ describe('workflow editing', () => {
     expect(JSON.parse(readFileSync(join(workflowsDir(r.dir), 'editable.workflow.json'), 'utf8'))).toEqual(
       EDITABLE,
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Submitting a run to a daemon that is already listening
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /api/runs` — the endpoint that decouples a run's lifetime from the
+ * terminal that asked for it.
+ *
+ * The port is faked here on purpose. What this endpoint owns is resolution and
+ * refusal — is there a starter, is the body one of the two shapes, is this run
+ * already being driven — and each of those is a decision about a call. Whether
+ * a real composition then provisions lanes is `cli.test.ts`'s question, and
+ * asserting it here would mean asserting about a model's mood.
+ */
+describe('starting a run through the API', () => {
+  /** Records what the daemon asked it to start, and answers however the test says. */
+  const starter = (
+    answer: RunStartOutcome = { ok: true, runId: 'new-run' },
+  ): RunStartPort & { readonly calls: RunStartRequest[] } => {
+    const calls: RunStartRequest[] = []
+    return {
+      calls,
+      start: async (request) => {
+        calls.push(request)
+        return answer
+      },
+    }
+  }
+
+  it('refuses on a host that serves history and drives nothing', async () => {
+    const r = await rig()
+    // No `acceptRuns`, which is every read-only host. `501` rather than a
+    // cheerful `201`: a caller left waiting for a run nobody is driving has no
+    // way to find that out.
+    const result = await call(r.daemon, '/api/runs', {
+      method: 'POST',
+      body: { workflow: 'w' },
+    })
+
+    expect(result.status).toBe(501)
+    expect(ErrorResponseSchema.parse(result.body).error).toBe('runs_unsupported')
+  })
+
+  it('answers with the run id as soon as the run is registered', async () => {
+    const r = await rig()
+    const port = starter()
+    r.daemon.acceptRuns(port)
+
+    const result = await call(r.daemon, '/api/runs', {
+      method: 'POST',
+      body: { workflow: 'checkout-rewrite' },
+    })
+
+    expect(result.status).toBe(201)
+    expect(StartRunResponseSchema.parse(result.body).runId).toBe('new-run')
+    expect(port.calls).toEqual([{ kind: 'workflow', workflowId: 'checkout-rewrite' }])
+  })
+
+  it('passes a resume through as a resume, not as a fresh workflow', async () => {
+    const r = await rig()
+    const port = starter({ ok: true, runId: 'old-run' })
+    r.daemon.acceptRuns(port)
+
+    const result = await call(r.daemon, '/api/runs', {
+      method: 'POST',
+      body: { resume: 'old-run' },
+    })
+
+    expect(result.status).toBe(201)
+    expect(port.calls).toEqual([{ kind: 'resume', runId: 'old-run' }])
+  })
+
+  it('refuses to resume a run this daemon is already driving', async () => {
+    const r = await rig()
+    const port = starter()
+    r.daemon.acceptRuns(port)
+
+    // `RUN_ID` is registered by the rig, so it has a live scheduler behind it.
+    // Two schedulers on one journal would fight over every node, and the
+    // registry is the only place that can see the collision.
+    const result = await call(r.daemon, '/api/runs', {
+      method: 'POST',
+      body: { resume: RUN_ID },
+    })
+
+    expect(result.status).toBe(409)
+    expect(ErrorResponseSchema.parse(result.body).error).toBe('run_active')
+    expect(port.calls).toEqual([])
+  })
+
+  const refusals = [
+    { code: 'unknown_workflow', status: 404 },
+    { code: 'unknown_run', status: 404 },
+    { code: 'invalid_workflow', status: 409 },
+    { code: 'run_finished', status: 409 },
+    { code: 'environment', status: 409 },
+    { code: 'provision', status: 409 },
+  ] as const
+
+  for (const refusal of refusals) {
+    it(`answers ${refusal.status} for ${refusal.code}`, async () => {
+      const r = await rig()
+      r.daemon.acceptRuns(starter({ ok: false, code: refusal.code, message: 'no' }))
+
+      const result = await call(r.daemon, '/api/runs', {
+        method: 'POST',
+        body: { workflow: 'w' },
+      })
+
+      expect(result.status).toBe(refusal.status)
+      expect(ErrorResponseSchema.parse(result.body).error).toBe(refusal.code)
+    })
+  }
+
+  const malformed = [
+    { label: 'neither field', body: {} },
+    { label: 'both fields', body: { workflow: 'w', resume: 'r' } },
+    { label: 'an unknown field', body: { workflow: 'w', force: true } },
+    { label: 'an empty id', body: { workflow: '' } },
+  ] as const
+
+  for (const testCase of malformed) {
+    it(`rejects ${testCase.label} without reaching the starter`, async () => {
+      const r = await rig()
+      const port = starter()
+      r.daemon.acceptRuns(port)
+
+      const result = await call(r.daemon, '/api/runs', { method: 'POST', body: testCase.body })
+
+      expect(result.status).toBe(400)
+      expect(ErrorResponseSchema.parse(result.body).error).toBe('invalid_request')
+      expect(port.calls).toEqual([])
+    })
+  }
+
+  it('still requires the token', async () => {
+    const r = await rig()
+    r.daemon.acceptRuns(starter())
+
+    const result = await call(r.daemon, '/api/runs', {
+      method: 'POST',
+      body: { workflow: 'w' },
+      token: 'wrong',
+    })
+
+    expect(result.status).toBe(401)
   })
 })

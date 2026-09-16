@@ -9,6 +9,10 @@ export {
   type DaemonRun,
   type PoolView,
   type RunControl,
+  type RunStartOutcome,
+  type RunStartPort,
+  type RunStartRefusal,
+  type RunStartRequest,
 } from './control.ts'
 export { createApi, type ApiOptions } from './api.ts'
 export { harnessCapabilities } from './harnesses.ts'
@@ -53,6 +57,8 @@ export {
   RunSummarySchema,
   RunUsageResponseSchema,
   SaveWorkflowRequestSchema,
+  StartRunRequestSchema,
+  StartRunResponseSchema,
   WorkflowListResponseSchema,
   WorkflowResponseSchema,
   formatPath,
@@ -68,6 +74,7 @@ export {
   type RunSnapshot,
   type RunSummary,
   type RunUsageResponse,
+  type StartRunResponse,
   type WorkflowListResponse,
   type WorkflowResponse,
 } from './schemas.ts'
