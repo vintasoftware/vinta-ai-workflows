@@ -369,6 +369,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Crew members are named after their tier, not after a seniority.** A roster
+  reads `tier1`, `tier2-1`, `tier2-2`, `tier4` and `reviewer` where it used to
+  read `junior`, `mid-1`, `mid-2` and `senior`. Nothing about the data model
+  moved — `tier` was already the 1-4 number the orchestrator staffs on, and it
+  is still the only thing compared when one member covers for another. What
+  changed is that the label beside it now says the same thing, instead of
+  offering a second vocabulary that could drift from it and that reads as a
+  ranking of people rather than of difficulty. Workflows using the old ids keep
+  running: the ids are free-form and nothing resolves them by name.
+
+- **`plan-feature` emits its workflow with the plan's date prefix.** The
+  executable sibling is now
+  `ai-plans/YYYY-MM-DD-<feature-kebab>.workflow.json` — previously it carried
+  no date, which sorted it away from the `YYYY-MM-DD-FEATURE_NAME_PLAN.md` and
+  `_SPEC.md` it belongs to, so the one file you want with the plan open was the
+  one you had to go looking for. A feature's three files now land adjacent. The
+  case difference between them is not an oversight: the markdown convention is
+  `UPPERCASE_WITH_UNDERSCORES` and a workflow's filename stem *is* its `id`,
+  which the schema requires to be lowercase kebab-case, so the date prefix is
+  the only part the three can share. Existing dateless workflows are unaffected
+  — this is the emitter's convention, not a schema rule.
+
 - **A session cannot inherit a machine's decision to stop compacting.** All
   three harnesses compact automatically when their context fills — there was
   never a flag to turn on — but each honours an environment variable that turns

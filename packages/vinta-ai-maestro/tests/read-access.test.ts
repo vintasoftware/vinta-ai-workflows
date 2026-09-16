@@ -27,13 +27,13 @@ import { addDirArgs, writeDenyRules, type ListDir } from '../src/harness/read-ac
 const REPO = join('/repo')
 const STORE = join(REPO, '.vinta-ai-maestro')
 const LANES = join(STORE, 'lanes')
-const LANE = join(LANES, 'run-crew-1-junior')
+const LANE = join(LANES, 'run-crew-1-tier1')
 
 /** A repository with source beside the store, and two lanes in it. */
 const tree: Record<string, readonly string[]> = {
   [REPO]: ['src', 'package.json', '.vinta-ai-maestro', '.git'],
   [STORE]: ['lanes', 'runs'],
-  [LANES]: ['run-crew-1-junior', 'run-crew-2-senior'],
+  [LANES]: ['run-crew-1-tier1', 'run-crew-2-tier4'],
 }
 const list: ListDir = (dir) => tree[dir] ?? []
 
@@ -60,7 +60,7 @@ describe('the corridor down to the lane', () => {
 
   /** Two phases run at once. One writing in the other's worktree corrupts it. */
   it('denies a sibling lane', () => {
-    expect(denies(rulesFor([REPO]), join(LANES, 'run-crew-2-senior'))).toBe(true)
+    expect(denies(rulesFor([REPO]), join(LANES, 'run-crew-2-tier4'))).toBe(true)
   })
 
   /** Transcripts and the journal are the run's own record of itself. */
@@ -81,7 +81,7 @@ describe('the corridor down to the lane', () => {
     expect(denies(rules, REPO)).toBe(false)
     expect(denies(rules, STORE)).toBe(false)
     expect(denies(rules, LANES)).toBe(false)
-    expect(rules.some((rule) => rule.includes('run-crew-1-junior'))).toBe(false)
+    expect(rules.some((rule) => rule.includes('run-crew-1-tier1'))).toBe(false)
   })
 
   it('covers every file-editing tool, and never Bash', () => {

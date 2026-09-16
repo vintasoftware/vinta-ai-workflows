@@ -20,7 +20,7 @@ The plan's **Phased Rollout** section opens with an **Execution graph** table an
    - **A phase assigned to a reviewer, or a reviewer that also takes phases** → stop and ask. The two roles are disjoint precisely so that an agent reviewing its own work is unrepresentable.
    - **A reviewer below every phase on the plan** → stop and ask. A reviewer's tier is a floor too, so one below the cheapest phase would never be picked.
    - **No reviewer at all** → not an error. Reviews fall back to `agent_models.reviewer`, cold, one session per phase. Say so once in the pool report so nobody reads the roster and assumes otherwise.
-   - **A wave the roster cannot staff** → warn. Sort the wave's assigned tiers and the roster's tiers, compare one for one: a wave of two Tier 3 phases needs two members at Tier 3 or above, and a junior on the roster does not help because the floor forbids handing them one. Such a wave still runs — it serializes — so say so now rather than letting it look like a slow machine later.
+   - **A wave the roster cannot staff** → warn. Sort the wave's assigned tiers and the roster's tiers, compare one for one: a wave of two Tier 3 phases needs two members at Tier 3 or above, and a Tier 1 member on the roster does not help because the floor forbids handing them one. Such a wave still runs — it serializes — so say so now rather than letting it look like a slow machine later.
    - **A plan with no Crew table at all** is a legacy plan. Read each phase's `**Suggested AI model**:` tier instead and skip every check above.
 6. **Record the resolved graph and the roster** in `run.md` (see [Update tracking](#1d-update-tracking)) so a resume rebuilds the identical schedule and the identical staffing without re-asking anything.
 
@@ -169,7 +169,7 @@ while PENDING or RUNNING:
 `claim_agent(p)` is the staffing half of a dispatch, and it runs **before** the lane is taken. A lane is disk; who is holding it is what the phase costs and whether the result is any good.
 
 1. **The member the plan assigned, if they are free.** The common case, and the one the plan's cost estimate is written against.
-2. **Otherwise the cheapest free member at or above that member's tier.** A wave should not serialize behind one agent when a qualified peer is idle. Reach for the *cheapest* qualified one, not the best available — covering for a peer must not quietly promote the phase to the top tier, or a busy wave silently runs every mid-tier phase on the senior's model.
+2. **Otherwise the cheapest free member at or above that member's tier.** A wave should not serialize behind one agent when a qualified peer is idle. Reach for the *cheapest* qualified one, not the best available — covering for a peer must not quietly promote the phase to the top tier, or a busy wave silently runs every Tier 2 phase on the Tier 4 member's model.
 3. **Otherwise nobody, and the phase waits** — even with a lane free. This is the one place staffing costs throughput, and it is deliberate: a phase run below its tier does not fail cleanly. It produces plausible code that fails review two rounds later, by which point nothing points back at the staffing decision.
 
 An implementer is held for the **whole phase**, not one turn of it: the fixer answering a review finding is the implementer continuing its own session, so handing the phase to someone else mid-flight would hand it to an agent with no session to continue. Release it when the phase settles.

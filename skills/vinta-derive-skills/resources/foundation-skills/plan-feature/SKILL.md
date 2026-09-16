@@ -7,7 +7,7 @@ description: Author a phased implementation plan for a new feature following the
 
 Plans live in `ai-plans/` as `YYYY-MM-DD-FEATURE_NAME_IMPLEMENTATION_PLAN.md` (uppercase + underscores). `..._SPEC.md` sibling exists → **read first**. Plan translates spec into phased delivery, doesn't re-derive requirements. No spec? Point at [create-spec](../create-spec/SKILL.md) first; plan without spec = plausible-sounding but unverified. Spec/plan pair share `YYYY-MM-DD-FEATURE_NAME` prefix.
 
-Every plan ships **two** files: the markdown above, and its executable sibling `ai-plans/<feature-kebab>.workflow.json` — the same phase graph in the form an orchestrator runs. See "Emit the executable workflow". Written every time; never gated on a question.
+Every plan ships **two** files: the markdown above, and its executable sibling `ai-plans/{TODAY}-<feature-kebab>.workflow.json` — same date prefix, the same phase graph in the form an orchestrator runs. See "Emit the executable workflow". Written every time; never gated on a question.
 
 ## Step 0 — Interrogate before drafting (NON-NEGOTIABLE)
 
@@ -226,15 +226,15 @@ dependency on each other and are implemented concurrently.
 
 | Wave | Phases | Agent | Depends on |
 |---|---|---|---|
-| 1 | Phase 0, Phase 1b | `junior`, `mid-2` | — |
-| 2 | Phase 1, Phase 2 | `mid-1`, `mid-2` | Phase 0 |
-| 3 | Phase 3 | `senior` | Phase 1, Phase 2 |
-| 4 | Phase 4 — remove the `bookmarks-v2` flag | `junior` | Phase 3 (deferred — soak-gated) |
+| 1 | Phase 0, Phase 1b | `tier1`, `tier2-2` | — |
+| 2 | Phase 1, Phase 2 | `tier2-1`, `tier2-2` | Phase 0 |
+| 3 | Phase 3 | `tier4` | Phase 1, Phase 2 |
+| 4 | Phase 4 — remove the `bookmarks-v2` flag | `tier1` | Phase 3 (deferred — soak-gated) |
 
 **File overlap:** phases in the same wave touch disjoint files, with one exception —
 Phase 1 and Phase 2 both export from `@app/bookmarks/__init__.py`. Trivial merge.
 
-**Idle:** `senior` has nothing until wave 3 and `mid-1` nothing until wave 2 — the
+**Idle:** `tier4` has nothing until wave 3 and `tier2-1` nothing until wave 2 — the
 foundation phase is the whole of wave 1 and only one agent can write it.
 ```
 
@@ -262,7 +262,7 @@ Don't contort the plan for concurrency, though. A genuinely sequential feature i
 
 ### Read the previous runs' post-mortems before drawing the graph
 
-Every plan you write is a guess about coupling. Every plan the orchestrator *ran* turned that guess into evidence, and it wrote the evidence down: one `postmortem.json` per finished run under `.vinta-ai-maestro/runs/<run-id>/`, plus any copy the team committed beside its plan as `ai-plans/<feature-kebab>.postmortem.json`. **Read them before the `**Depends on**:` lines, not after.** Newest first, and all of them — one run is an anecdote, three runs saying the same thing about the same layer is a rule about this codebase.
+Every plan you write is a guess about coupling. Every plan the orchestrator *ran* turned that guess into evidence, and it wrote the evidence down: one `postmortem.json` per finished run under `.vinta-ai-maestro/runs/<run-id>/`, plus any copy the team committed beside its plan as `ai-plans/{DATE}-<feature-kebab>.postmortem.json`. **Read them before the `**Depends on**:` lines, not after.** Newest first, and all of them — one run is an anecdote, three runs saying the same thing about the same layer is a rule about this codebase.
 
 ```bash
 ls -t .vinta-ai-maestro/runs/*/postmortem.json ai-plans/*.postmortem.json 2>/dev/null | head -5
@@ -430,7 +430,7 @@ The mandatory final flag-removal phase depends on **every** gated phase — it d
 
 A plan does not pick a model per phase. It **staffs a team**, then assigns each phase to somebody on it.
 
-The difference is not cosmetic. Choosing a tier phase by phase answers "what should run this one" ten times and never adds it up, so the two questions that actually decide what a feature costs go unasked: **how many agents does this need at once, and is any of them too junior for what it was handed.** A roster asks both before a line is written, and it is falsifiable — you can look at it and say "nobody needs three seniors here".
+The difference is not cosmetic. Choosing a tier phase by phase answers "what should run this one" ten times and never adds it up, so the two questions that actually decide what a feature costs go unasked: **how many agents does this need at once, and is any of them below the tier of what it was handed.** A roster asks both before a line is written, and it is falsifiable — you can look at it and say "nobody needs three Tier 4 members here".
 
 ### The Crew table
 
@@ -441,12 +441,16 @@ First thing under **Phased Rollout**, before the **Execution graph**:
 
 | Agent | Role | Tier | Takes | Why this tier |
 |---|---|---|---|---|
-| `junior` | implementer | 1 | Phase 0, Phase 4 | An empty module and a flag deletion — exact precedent, both of them. |
-| `mid-1` | implementer | 2 | Phase 1 | A DRF viewset mirroring `@app/tags/api/views.py` almost line for line. |
-| `mid-2` | implementer | 2 | Phase 1b, Phase 2 | Serializer with cross-field validation; the producer stub is the same shape. |
-| `senior` | implementer | 4 | Phase 3 | Cycle detection over a user-mutable tree — no precedent in this repo. |
+| `tier1` | implementer | 1 | Phase 0, Phase 4 | An empty module and a flag deletion — exact precedent, both of them. |
+| `tier2-1` | implementer | 2 | Phase 1 | A DRF viewset mirroring `@app/tags/api/views.py` almost line for line. |
+| `tier2-2` | implementer | 2 | Phase 1b, Phase 2 | Serializer with cross-field validation; the producer stub is the same shape. |
+| `tier4` | implementer | 4 | Phase 3 | Cycle detection over a user-mutable tree — no precedent in this repo. |
 | `reviewer` | reviewer | 4 | — reviews every phase | Reads the tree phase too; a reviewer below the hardest phase can never take it. |
 ```
+
+**Name members after their tier, never after a seniority.** An implementer is `tier<N>`, or `tier<N>-<k>` when the roster carries more than one at that tier; a reviewer is `reviewer`, or `reviewer-<k>` when there are several. Ids are lowercase kebab-case — the schema rejects anything else.
+
+The rule exists because the tier *is* the whole of what the orchestrator knows about a member: it is the floor on what they may be handed and the only thing compared when one covers for another. A roster that names members after seniority grades names people instead, and invites two mistakes — reading a capability ranking as a career one, and letting the label drift from the `tier` beside it, which is the number that actually decides anything.
 
 **Implementers write; reviewers read; nobody does both.** That is not a convention, it is the shape of the document — an implementer cannot be assigned a review and a reviewer cannot be assigned a phase, so an agent grading its own work is not something a plan can express. It replaces the older "review one tier above the author" rule, which was a proxy for independence and broke in both directions: a phase covered by the top-tier implementer had nobody above it, and a tier says nothing about *who* now that a member is a durable agent rather than a model id.
 
@@ -456,25 +460,25 @@ Staff **at least one reviewer** on every plan. A roster of implementers only sti
 
 **Every implementer has to earn their place, and there are exactly two ways to do it:**
 
-- **Concurrency.** A wave of three phases needs three pairs of hands, and they must be hands *at or above* each of those phases' tiers — two mids and a junior cannot run three Tier 2 phases two-wide, because the junior is not allowed to take one. So go wave by wave: sort the wave's phase tiers, sort the roster's tiers, and check the roster covers them one for one.
-- **Cheapness.** A member below the roster's other tiers earns their place by taking work the dearer members would otherwise do. A junior who runs the migration and the flag deletion is worth having even in a graph that is never two phases wide, because those two phases run at Tier 1 instead of Tier 2.
+- **Concurrency.** A wave of three phases needs three pairs of hands, and they must be hands *at or above* each of those phases' tiers — two Tier 2 members and a Tier 1 cannot run three Tier 2 phases two-wide, because the Tier 1 member is not allowed to take one. So go wave by wave: sort the wave's phase tiers, sort the roster's tiers, and check the roster covers them one for one.
+- **Cheapness.** A member below the roster's other tiers earns their place by taking work the dearer members would otherwise do. A Tier 1 member who runs the migration and the flag deletion is worth having even in a graph that is never two phases wide, because those two phases run at Tier 1 instead of Tier 2.
 
-**A member who does neither should not be on the roster** — a second mid in a graph that is never two wide adds no concurrency and saves nothing, and the executor refuses a member assigned no phase at all.
+**A member who does neither should not be on the roster** — a second Tier 2 member in a graph that is never two wide adds no concurrency and saves nothing, and the executor refuses a member assigned no phase at all.
 
 Note what this does *not* say: the roster is not capped at the widest wave. Concurrency is capped there, but a cheaper member is bought with money, not with parallelism, and adding one to a narrow graph is a perfectly good trade — it now costs a worktree, which is the honest price (see "Every member gets a desk").
 
 Two more rules:
 
-- **Prefer fewer tiers over more.** Two mids beat one mid and one "upper-mid": a tier is a floor on what a member may be handed, so a roster that draws fine distinctions only makes it harder to cover for a busy peer.
+- **Prefer fewer tiers over more.** Two members at Tier 2 beat one at Tier 2 and one at Tier 3 when both phases are Tier 2 work: a tier is a floor on what a member may be handed, so a roster that draws fine distinctions only makes it harder to cover for a busy peer.
 - **The `Takes` column is the assignment**, and it must agree with every phase's `**Assigned to**:` line. They are two renderings of one decision, so write the phases and let the table fall out — never the reverse.
 
 ### Assigning a phase
 
 Two constraints, and they pull against each other. That is what makes this a judgement rather than a lookup.
 
-**The rubric tier is a floor.** Never hand a Tier 3 phase to a junior to save money. A cheap model on work above its tier does not fail cleanly — it produces plausible code that fails review two rounds later, and by then nothing points back at the staffing decision. Default to the cheapest tier that plausibly works; that is not the same as the cheapest tier available.
+**The rubric tier is a floor.** Never hand a Tier 3 phase to a Tier 1 member to save money. A cheap model on work above its tier does not fail cleanly — it produces plausible code that fails review two rounds later, and by then nothing points back at the staffing decision. Default to the cheapest tier that plausibly works; that is not the same as the cheapest tier available.
 
-**Nobody should be idle while work they could do is queued.** If the senior is busy from wave 1 to wave 4 and the two juniors are idle after wave 1, the plan is a senior-shaped chain with decoration. Rebalance by splitting a phase or moving a dependency, not by handing the senior's work to a junior.
+**Nobody should be idle while work they could do is queued.** If the Tier 4 member is busy from wave 1 to wave 4 and the two Tier 1 members are idle after wave 1, the plan is a Tier 4-shaped chain with decoration. Rebalance by splitting a phase or moving a dependency, not by handing Tier 4 work down to Tier 1.
 
 When those two genuinely cannot both hold, **the floor wins and the plan says so** in the **Idle** note. A wave that serializes is a schedule; a phase run below its tier is a defect.
 
@@ -562,7 +566,17 @@ Don't mix styles within one sentence. In **Touch List**, use `@path` for new fil
 
 ## Emit the executable workflow
 
-Alongside the markdown plan, write `ai-plans/<feature-kebab>.workflow.json` — same directory, feature name lowercased with hyphens (`BOOKMARK_FOLDERS` → `ai-plans/bookmark-folders.workflow.json`), no date prefix. The markdown is what humans review; the JSON is the same phase graph in the form an orchestrator runs — one worktree lane per phase, branches cut from each phase's dependencies, gates queued behind capacity limits instead of stampeding.
+Alongside the markdown plan, write `ai-plans/{TODAY}-<feature-kebab>.workflow.json` — same directory, same date prefix as the plan and the spec, feature name lowercased with hyphens (`2026-03-04` + `BOOKMARK_FOLDERS` → `ai-plans/2026-03-04-bookmark-folders.workflow.json`). The markdown is what humans review; the JSON is the same phase graph in the form an orchestrator runs — one worktree lane per phase, branches cut from each phase's dependencies, gates queued behind capacity limits instead of stampeding.
+
+**The date prefix is what keeps the three files together.** `ai-plans/` accumulates every feature this repo has ever planned, and a dateless `bookmark-folders.workflow.json` sorts into a different part of the directory from the `2026-03-04-BOOKMARK_FOLDERS_PLAN.md` it belongs to — so the one file you need when the plan is in front of you is the one you have to search for. With the prefix a feature's three files land adjacent:
+
+```
+ai-plans/2026-03-04-BOOKMARK_FOLDERS_PLAN.md
+ai-plans/2026-03-04-BOOKMARK_FOLDERS_SPEC.md
+ai-plans/2026-03-04-bookmark-folders.workflow.json
+```
+
+The case difference is not an inconsistency to fix: the markdown convention is `UPPERCASE_WITH_UNDERSCORES`, and the workflow's stem **is** its `id`, which the schema requires to be lowercase kebab-case. They cannot be spelled the same way, so they share the one part that can be shared.
 
 **Unconditional.** Write it on every plan. Don't ask, don't gate it on a config field, don't skip it because the project has no orchestrator installed — a project without one carries a few KB it never reads, and a project that installs one later finds its plans already executable. The one thing that is *not* free is emitting it inconsistently: a half-populated `ai-plans/` teaches the team the file is optional.
 
@@ -576,7 +590,7 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 |---|---|
 | `$schema` | The URL above, literally. |
 | `schema_version` | `1`. |
-| `id` | The feature kebab — same slug as the filename. It lands in branch names (`plan/{id}/wave-2`), so kebab-case only, no dates, no underscores. |
+| `id` | `{TODAY}-<feature-kebab>` — the filename's stem, exactly. Digits and hyphens only, no underscores and no uppercase: it is both the filename the daemon resolves and the slug in every branch name (`plan/2026-03-04-bookmark-folders/wave-2`), and the daemon refuses a workflow whose `id` and filename disagree. |
 | `plan_ref` | Repo-relative path of the markdown plan, e.g. `ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md`. |
 | `plan_context_refs` | The two plan sections that bound **every** phase, as anchors into the plan you just wrote: `<plan_ref>#1-goals` (which carries Non-goals with it) and `<plan_ref>#2-guiding-decisions`, in that order. Same file-and-anchor form as `prompt_ref`. See "Plan-level context". |
 | `base_branch` | What `**Depends on**: nothing — starts from the base branch` means concretely: the repo's default branch, unless **Guiding Decisions** names a long-lived feature branch. |
@@ -705,18 +719,18 @@ staffed by this **Crew** table:
 ```markdown
 | Agent | Role | Tier | Takes | Why this tier |
 |---|---|---|---|---|
-| `junior` | implementer | 1 | Phase 1, Phase 5 | A model plus its migration, and a flag deletion. Exact precedent, both. |
-| `mid-1` | implementer | 2 | Phase 2 | A DRF viewset mirroring the tags viewset almost line for line. |
-| `mid-2` | implementer | 2 | Phase 3, Phase 4 | Tree serializer and the list action that returns it — same shape twice. |
+| `tier1` | implementer | 1 | Phase 1, Phase 5 | A model plus its migration, and a flag deletion. Exact precedent, both. |
+| `tier2-1` | implementer | 2 | Phase 2 | A DRF viewset mirroring the tags viewset almost line for line. |
+| `tier2-2` | implementer | 2 | Phase 3, Phase 4 | Tree serializer and the list action that returns it — same shape twice. |
 | `reviewer` | reviewer | 2 | — reviews every phase | Tier 2 is the hardest phase here, so one reviewer covers the plan. |
 ```
 
 Three implementers for a graph that is never more than **two** phases wide,
-which is the case worth reading closely. The two mids are there for concurrency:
-wave 2 is two Tier 2 phases, and two hands at Tier 2 is the only way to run it
-two-wide — a junior cannot take one of them. `junior` is there for cheapness:
-without them, Phase 1 and Phase 5 would run on a mid's model for work that has
-exact precedent. `junior` is idle in waves 2 and 3 and that is not a defect; a
+which is the case worth reading closely. The two Tier 2 members are there for
+concurrency: wave 2 is two Tier 2 phases, and two hands at Tier 2 is the only
+way to run it two-wide — `tier1` cannot take one of them. `tier1` is there for
+cheapness: without them, Phase 1 and Phase 5 would run on a Tier 2 model for
+work that has exact precedent. `tier1` is idle in waves 2 and 3 and that is not a defect; a
 fourth implementer would be, because there would be nothing left for them to
 make cheaper and no third phase for them to run alongside.
 
@@ -731,22 +745,22 @@ and this **Execution graph** table:
 ```markdown
 | Wave | Phases | Agent | Depends on |
 |---|---|---|---|
-| 1 | Phase 1 | `junior` | — |
-| 2 | Phase 2, Phase 3 | `mid-1`, `mid-2` | Phase 1 |
-| 3 | Phase 4 | `mid-2` | Phase 2, Phase 3 |
-| 4 | Phase 5 — remove the `bookmark-folders` flag | `junior` | Phase 2, Phase 3, Phase 4 (deferred — soak-gated) |
+| 1 | Phase 1 | `tier1` | — |
+| 2 | Phase 2, Phase 3 | `tier2-1`, `tier2-2` | Phase 1 |
+| 3 | Phase 4 | `tier2-2` | Phase 2, Phase 3 |
+| 4 | Phase 5 — remove the `bookmark-folders` flag | `tier1` | Phase 2, Phase 3, Phase 4 (deferred — soak-gated) |
 
-**Idle:** both mids in wave 1 — the model has to exist before anything reads it.
-`mid-1` in wave 3, `junior` in waves 2 and 3.
+**Idle:** both Tier 2 members in wave 1 — the model has to exist before anything
+reads it. `tier2-1` in wave 3, `tier1` in waves 2 and 3.
 ```
 
-and this `ai-plans/bookmark-folders.workflow.json`:
+and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
 
 ```json
 {
   "$schema": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
   "schema_version": 1,
-  "id": "bookmark-folders",
+  "id": "2026-03-04-bookmark-folders",
   "plan_ref": "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md",
   "plan_context_refs": [
     "ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md#1-goals",
@@ -773,19 +787,19 @@ and this `ai-plans/bookmark-folders.workflow.json`:
     }
   },
   "crew": {
-    "junior": {
+    "tier1": {
       "role": "implementer",
       "tier": 1,
       "model": "claude-haiku-4-5",
       "description": "A model plus its migration, and a flag deletion."
     },
-    "mid-1": {
+    "tier2-1": {
       "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
       "description": "A DRF viewset mirroring the tags viewset."
     },
-    "mid-2": {
+    "tier2-2": {
       "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
@@ -843,7 +857,7 @@ and this `ai-plans/bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "junior"
+      "crew": "tier1"
     },
     {
       "id": "p2",
@@ -864,7 +878,7 @@ and this `ai-plans/bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "mid-1"
+      "crew": "tier2-1"
     },
     {
       "id": "p3",
@@ -884,7 +898,7 @@ and this `ai-plans/bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "mid-2"
+      "crew": "tier2-2"
     },
     {
       "id": "p4",
@@ -909,7 +923,7 @@ and this `ai-plans/bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "mid-2"
+      "crew": "tier2-2"
     },
     {
       "id": "p5",
@@ -940,7 +954,7 @@ and this `ai-plans/bookmark-folders.workflow.json`:
         "types",
         "unit"
       ],
-      "crew": "junior"
+      "crew": "tier1"
     }
   ]
 }
@@ -948,15 +962,15 @@ and this `ai-plans/bookmark-folders.workflow.json`:
 
 Read the three renderings against each other: `p2` and `p3` both name only `p1`, so they sit in wave 2 and run at once; `p4` names both, so it is wave 3; `p5` names every gated phase, so it is wave 4 and alone there. `p2` and `p4` both touch `apps/bookmarks/api/views.py` — allowed, because the edge between them puts them in different waves; had they been same-wave, that overlap is what "Same-wave phases must not fight over the same files" is about.
 
-No node carries a `model`. `p1` and `p5` are the Tier 1 phases and run on `junior`'s model because that is who took them — the roster says it once instead of two nodes repeating an id that goes stale on the next model bump.
+No node carries a `model`. `p1` and `p5` are the Tier 1 phases and run on `tier1`'s model because that is who took them — the roster says it once instead of two nodes repeating an id that goes stale on the next model bump.
 
-`mid-2` takes `p3` and then `p4`, which is the pairing worth seeing: the same agent writes the tree serializer and the action that returns it, in the same worktree, **continuing the same session**. Its second phase does not pay to work out where the serializers live or how the suite is run — it did that in `p3`. What it *is* told, because the tree moved underneath it, is that it is now on `p4`'s branch, that `p3`'s work is in this tree (`p4` depends on it), and exactly which files differ from what it last saw.
+`tier2-2` takes `p3` and then `p4`, which is the pairing worth seeing: the same agent writes the tree serializer and the action that returns it, in the same worktree, **continuing the same session**. Its second phase does not pay to work out where the serializers live or how the suite is run — it did that in `p3`. What it *is* told, because the tree moved underneath it, is that it is now on `p4`'s branch, that `p3`'s work is in this tree (`p4` depends on it), and exactly which files differ from what it last saw.
 
 No node names a reviewer. Every phase is read by `reviewer`, the only member on the roster whose role is to read them — so no agent ever reads its own diff. Its session carries only between reviews that land in the same lane, because it goes where the work is rather than keeping a tree of its own.
 
 `plan_context_refs` points at the same plan file the `prompt_ref`s do, at its **Goals** and **Guiding Decisions** headings. Each of the five phases is handed those two sections whole, so the implementer of `p3` knows that the tree serializer is deliberately not paginated if the plan's Non-goals said so, and the reviewer of `p3` can call a paginated one scope creep instead of a bonus.
 
-The lane pool is **three**: one desk per implementer, kept for the whole run so each one's session has a directory to come back to. Only two are ever busy at once — the graph is never wider than that — and the third idle desk is the price of `junior`'s session. `reviewer` has no desk at all; it reads whichever lane it is reviewing, changes still uncommitted, which is what lets a finding be fixed before the commit rather than after it. The `project` block is what lets those worktrees exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
+The lane pool is **three**: one desk per implementer, kept for the whole run so each one's session has a directory to come back to. Only two are ever busy at once — the graph is never wider than that — and the third idle desk is the price of `tier1`'s session. `reviewer` has no desk at all; it reads whichever lane it is reviewing, changes still uncommitted, which is what lets a finding be fixed before the commit rather than after it. The `project` block is what lets those worktrees exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
 
 ## What to avoid
 
@@ -1019,7 +1033,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] Open Questions lists what couldn't resolve, with recommended default.
 - [ ] Touch List groups files by phase.
 - [ ] All file references use `@path/to/file.py` or `[name](relative-path#Lline)`.
-- [ ] **`ai-plans/<feature-kebab>.workflow.json` written** — every plan, no exceptions — with `$schema` set to the canonical URL and `schema_version: 1`.
+- [ ] **`ai-plans/{TODAY}-<feature-kebab>.workflow.json` written** — every plan, no exceptions — with `$schema` set to the canonical URL and `schema_version: 1`.
 - [ ] Workflow graph matches the **Execution graph** table: one node per phase, one `depends_on` entry per `**Depends on**:` clause carrying both the node id and the artifact, same waves.
 - [ ] Every node has `prompt_ref` (`<plan_ref>#phase-<number>`), `touches` from its **Touch List** block, and the `gates` it must pass.
 - [ ] **`plan_context_refs` names the Goals and Guiding Decisions anchors** (`<plan_ref>#1-goals`, `<plan_ref>#2-guiding-decisions`), matching the headings as written — references, never a summary of them. Every phase's implementer and reviewer read them; a phase that doesn't know the non-goals is a phase that scope-creeps.

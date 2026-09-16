@@ -159,7 +159,7 @@ and that is the whole fix.
 
 A repository with two phases that depend on nothing, so both belong to wave 1 and both run at once.
 
-**1. Have a workflow.** `plan-feature` writes one beside every plan, as `ai-plans/<feature-kebab>.workflow.json` — committed, reviewed with the markdown plan, and the same file every command below is pointed at. By hand, save the smallest one that runs two phases in parallel as `ai-plans/widget-tags.workflow.json`:
+**1. Have a workflow.** `plan-feature` writes one beside every plan, as `ai-plans/YYYY-MM-DD-<feature-kebab>.workflow.json` — sharing the date prefix of the plan and spec it belongs to, so a feature's three files sort together — committed, reviewed with the markdown plan, and the same file every command below is pointed at. By hand, save the smallest one that runs two phases in parallel as `ai-plans/widget-tags.workflow.json`:
 
 ```jsonc
 {

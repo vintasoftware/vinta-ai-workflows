@@ -3,10 +3,11 @@
  *
  * Every way this can be wrong is silent. A conflict between two Tier 4 phases
  * resolved by the default-tier model does not throw — it produces a merge that
- * compiles, passes the gate, and quietly keeps whichever side the junior model
- * found easier to read. The whole point of the roster is that work of that
- * difficulty is not given to that model, so these assert the *model the adapter
- * was spawned with*, which is the only place the decision becomes observable.
+ * compiles, passes the gate, and quietly keeps whichever side the lower-tier
+ * model found easier to read. The whole point of the roster is that work of
+ * that difficulty is not given to that model, so these assert the *model the
+ * adapter was spawned with*, which is the only place the decision becomes
+ * observable.
  *
  * Fast on purpose: no git, no worktrees. Selection is a fold over journal rows
  * and a roster, and the spawn is a `MockAdapter` — the real-git conflict loop
@@ -17,7 +18,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgentTask } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import type { ConflictRequest } from '../src/integration/fixer.ts'
-import { createCrewConflictFixer, seniorImplementer } from '../src/integration/staffing.ts'
+import { createCrewConflictFixer, highestTierImplementer } from '../src/integration/staffing.ts'
 import type { StoredEvent } from '../src/journal/events.ts'
 import type { CrewMember } from '../src/types.ts'
 
@@ -39,10 +40,10 @@ function claim(nodeId: string, payload: Record<string, unknown>): StoredEvent {
 const member = (tier: number, model: string, harness?: string): CrewMember =>
   ({ role: 'implementer', tier, model, ...(harness === undefined ? {} : { harness }) }) as CrewMember
 
-/** A roster with one member per tier, so "most senior" has a single answer. */
+/** A roster with one member per tier, so "highest tier" has a single answer. */
 const ROSTER: Readonly<Record<string, CrewMember>> = {
-  junior: member(1, 'cheap-model'),
-  senior: member(4, 'expensive-model'),
+  tier1: member(1, 'cheap-model'),
+  tier4: member(4, 'expensive-model'),
   peer: member(4, 'other-expensive-model'),
 }
 
@@ -61,18 +62,18 @@ const request = (nodes: readonly string[]): ConflictRequest => ({
 // Selection
 // ---------------------------------------------------------------------------
 
-describe('seniorImplementer', () => {
+describe('highestTierImplementer', () => {
   it('takes the highest tier among the nodes in conflict', () => {
-    const staff = seniorImplementer(
+    const staff = highestTierImplementer(
       [
-        claim('a', { member: 'junior', tier: 1, substitute: false }),
-        claim('b', { member: 'senior', tier: 4, substitute: false }),
+        claim('a', { member: 'tier1', tier: 1, substitute: false }),
+        claim('b', { member: 'tier4', tier: 4, substitute: false }),
       ],
       ['a', 'b'],
       ROSTER,
     )
 
-    expect(staff?.member).toBe('senior')
+    expect(staff?.member).toBe('tier4')
     expect(staff?.model).toBe('expensive-model')
     expect(staff?.implemented).toEqual(['b'])
   })
@@ -84,45 +85,45 @@ describe('seniorImplementer', () => {
    * never wrote a line of either side.
    */
   it('resolves a substituted node to the member who actually ran', () => {
-    const staff = seniorImplementer(
+    const staff = highestTierImplementer(
       [
-        claim('a', { member: 'junior', tier: 1, substitute: false }),
-        claim('b', { member: 'senior', tier: 4, substitute: true, instead_of: 'junior' }),
+        claim('a', { member: 'tier1', tier: 1, substitute: false }),
+        claim('b', { member: 'tier4', tier: 4, substitute: true, instead_of: 'tier1' }),
       ],
       ['a', 'b'],
       ROSTER,
     )
 
-    expect(staff?.member).toBe('senior')
+    expect(staff?.member).toBe('tier4')
     expect(staff?.implemented).toEqual(['b'])
   })
 
   /** A retried node is claimed again; the branch is what the last attempt left. */
   it('takes the last claim on a node, not the first', () => {
-    const staff = seniorImplementer(
+    const staff = highestTierImplementer(
       [
-        claim('a', { member: 'senior', tier: 4, substitute: false }),
-        claim('a', { member: 'junior', tier: 1, substitute: false }),
+        claim('a', { member: 'tier4', tier: 4, substitute: false }),
+        claim('a', { member: 'tier1', tier: 1, substitute: false }),
       ],
       ['a'],
       ROSTER,
     )
 
-    expect(staff?.member).toBe('junior')
+    expect(staff?.member).toBe('tier1')
   })
 
   /** A reviewer read the phase. The implementer wrote the code in conflict. */
   it('ignores reviewer claims', () => {
-    const staff = seniorImplementer(
+    const staff = highestTierImplementer(
       [
-        claim('a', { member: 'junior', tier: 1, substitute: false }),
-        claim('a', { member: 'senior', tier: 4, substitute: false, role: 'reviewer' }),
+        claim('a', { member: 'tier1', tier: 1, substitute: false }),
+        claim('a', { member: 'tier4', tier: 4, substitute: false, role: 'reviewer' }),
       ],
       ['a'],
       ROSTER,
     )
 
-    expect(staff?.member).toBe('junior')
+    expect(staff?.member).toBe('tier1')
   })
 
   /**
@@ -132,18 +133,18 @@ describe('seniorImplementer', () => {
    */
   it('breaks a tier tie on member id, stably', () => {
     const rows = [
-      claim('a', { member: 'senior', tier: 4, substitute: false }),
+      claim('a', { member: 'tier4', tier: 4, substitute: false }),
       claim('b', { member: 'peer', tier: 4, substitute: false }),
     ]
-    expect(seniorImplementer(rows, ['a', 'b'], ROSTER)?.member).toBe('peer')
+    expect(highestTierImplementer(rows, ['a', 'b'], ROSTER)?.member).toBe('peer')
     // Same answer whichever order the conflict presents the nodes in.
-    expect(seniorImplementer(rows, ['b', 'a'], ROSTER)?.member).toBe('peer')
+    expect(highestTierImplementer(rows, ['b', 'a'], ROSTER)?.member).toBe('peer')
   })
 
   it('declines when there are no rows, and when a member left the roster', () => {
-    expect(seniorImplementer([], ['a', 'b'], ROSTER)).toBeNull()
+    expect(highestTierImplementer([], ['a', 'b'], ROSTER)).toBeNull()
     expect(
-      seniorImplementer([claim('a', { member: 'gone', tier: 4, substitute: false })], ['a'], ROSTER),
+      highestTierImplementer([claim('a', { member: 'gone', tier: 4, substitute: false })], ['a'], ROSTER),
     ).toBeNull()
   })
 })
@@ -153,16 +154,16 @@ describe('seniorImplementer', () => {
 // ---------------------------------------------------------------------------
 
 describe('the crew conflict fixer', () => {
-  it('spawns the senior implementing member’s model, on their harness', async () => {
+  it('spawns the highest-tier implementing member’s model, on their harness', async () => {
     const claudeAdapter = new MockAdapter({ id: 'claude' })
     const codexAdapter = new MockAdapter({ id: 'codex' })
     const fixer = createCrewConflictFixer({
       adapters: { claude: claudeAdapter, codex: codexAdapter },
       defaults: { harness: 'claude', model: 'default-model' },
-      crew: { junior: member(1, 'cheap-model'), senior: member(4, 'expensive-model', 'codex') },
+      crew: { tier1: member(1, 'cheap-model'), tier4: member(4, 'expensive-model', 'codex') },
       crewAssignments: () => [
-        claim('a', { member: 'junior', tier: 1, substitute: false }),
-        claim('b', { member: 'senior', tier: 4, substitute: false }),
+        claim('a', { member: 'tier1', tier: 1, substitute: false }),
+        claim('b', { member: 'tier4', tier: 4, substitute: false }),
       ],
     })
 
@@ -208,7 +209,7 @@ describe('the crew conflict fixer', () => {
       adapters: { claude: adapter },
       defaults: { harness: 'claude', model: 'default-model' },
       crew: ROSTER,
-      crewAssignments: () => [claim('z', { member: 'senior', tier: 4, substitute: false })],
+      crewAssignments: () => [claim('z', { member: 'tier4', tier: 4, substitute: false })],
     })
 
     await fixer.fix(request(['a', 'b']))
@@ -219,15 +220,15 @@ describe('the crew conflict fixer', () => {
   /**
    * A member's `harness` is only honoured if the run built that adapter. The
    * model is the half of the decision that matters, so a run handed one
-   * injected adapter still gets the senior member's model through it.
+   * injected adapter still gets that member's model through it.
    */
-  it('keeps the senior model when their harness has no adapter', async () => {
+  it('keeps the highest-tier member’s model when their harness has no adapter', async () => {
     const adapter = new MockAdapter({ id: 'claude' })
     const fixer = createCrewConflictFixer({
       adapters: { claude: adapter },
       defaults: { harness: 'claude', model: 'default-model' },
-      crew: { senior: member(4, 'expensive-model', 'codex') },
-      crewAssignments: () => [claim('a', { member: 'senior', tier: 4, substitute: false })],
+      crew: { tier4: member(4, 'expensive-model', 'codex') },
+      crewAssignments: () => [claim('a', { member: 'tier4', tier: 4, substitute: false })],
     })
 
     await fixer.fix(request(['a']))
@@ -249,8 +250,8 @@ describe('the crew conflict fixer', () => {
       defaults: { harness: 'claude', model: 'default-model' },
       crew: ROSTER,
       crewAssignments: () => [
-        claim('a', { member: 'junior', tier: 1, substitute: false }),
-        claim('b', { member: 'senior', tier: 4, substitute: false }),
+        claim('a', { member: 'tier1', tier: 1, substitute: false }),
+        claim('b', { member: 'tier4', tier: 4, substitute: false }),
       ],
     })
 

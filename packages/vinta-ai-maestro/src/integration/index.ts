@@ -14,5 +14,5 @@ export {
   createCrewConflictFixer,
   type CrewConflictFixerOptions,
   type FixerStaffing,
-  seniorImplementer,
+  highestTierImplementer,
 } from './staffing.ts'

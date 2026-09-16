@@ -2081,10 +2081,10 @@ describe('a session the vendor has forgotten (§15.4)', () => {
 
 describe('crew', () => {
   const CREW = {
-    junior: { role: 'implementer', tier: 1, model: 'cheap' },
-    'mid-a': { role: 'implementer', tier: 2, model: 'mid' },
-    'mid-b': { role: 'implementer', tier: 2, model: 'mid' },
-    senior: { role: 'implementer', tier: 4, model: 'dear' },
+    tier1: { role: 'implementer', tier: 1, model: 'cheap' },
+    'tier2-1': { role: 'implementer', tier: 2, model: 'medium' },
+    'tier2-2': { role: 'implementer', tier: 2, model: 'medium' },
+    tier4: { role: 'implementer', tier: 4, model: 'dear' },
   } as const
 
   const CHECKER = { role: 'reviewer', tier: 4, model: 'checker' } as const
@@ -2101,8 +2101,8 @@ describe('crew', () => {
   it('runs each node on its member’s model, not on defaults.model', async () => {
     const r = rig(
       makeWorkflow(
-        [node('a', [], { crew: 'junior' }), node('b', ['a'], { crew: 'senior' })],
-        { crew: { junior: CREW.junior, senior: CREW.senior } },
+        [node('a', [], { crew: 'tier1' }), node('b', ['a'], { crew: 'tier4' })],
+        { crew: { tier1: CREW.tier1, tier4: CREW.tier4 } },
       ),
     )
     const report = await r.scheduler.run()
@@ -2122,48 +2122,52 @@ describe('crew', () => {
 
   /**
    * The substitution, end to end. Two same-wave phases are both assigned to
-   * `mid-a`; `mid-b` is free and equally qualified, so the wave still runs two
-   * wide instead of serialising behind one member.
+   * `tier2-1`; `tier2-2` is free and equally qualified, so the wave still runs
+   * two wide instead of serialising behind one member.
    */
   it('covers for a busy member with a free peer at the same tier', async () => {
     const r = rig(
-      makeWorkflow(
-        [node('a', [], { crew: 'mid-a' }), node('b', [], { crew: 'mid-a' })],
-        { lanes: 2, crew: { 'mid-a': CREW['mid-a'], 'mid-b': CREW['mid-b'] } },
-      ),
+      makeWorkflow([node('a', [], { crew: 'tier2-1' }), node('b', [], { crew: 'tier2-1' })], {
+        lanes: 2,
+        crew: { 'tier2-1': CREW['tier2-1'], 'tier2-2': CREW['tier2-2'] },
+      }),
     )
     const report = await r.scheduler.run()
 
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
     // Both ran, both on the tier the plan asked for, and exactly one of them
     // was somebody else's work.
-    expect(modelsOf(r)).toEqual(['mid', 'mid'])
+    expect(modelsOf(r)).toEqual(['medium', 'medium'])
     const members = crewEvents(r)
-    expect(members.map((event) => event['member']).sort()).toEqual(['mid-a', 'mid-b'])
+    expect(members.map((event) => event['member']).sort()).toEqual(['tier2-1', 'tier2-2'])
     expect(members.filter((event) => event['substitute'] === true)).toHaveLength(1)
-    expect(members.find((event) => event['substitute'] === true)?.['instead_of']).toBe('mid-a')
+    expect(members.find((event) => event['substitute'] === true)?.['instead_of']).toBe('tier2-1')
     expectDrained(r)
   })
 
   /**
    * The floor, end to end, and the one case where staffing costs throughput:
-   * two lanes, a free junior, a ready phase — and it waits anyway, because the
-   * phase is Tier 2 work.
+   * two lanes, a free Tier 1 member, a ready phase — and it waits anyway,
+   * because the phase is Tier 2 work.
    */
   it('leaves a lane idle rather than run a phase below its tier', async () => {
     const r = rig(
       makeWorkflow(
-        [node('a', [], { crew: 'mid-a' }), node('b', [], { crew: 'mid-a' }), node('c', [], { crew: 'junior' })],
-        { lanes: 3, crew: { junior: CREW.junior, 'mid-a': CREW['mid-a'] } },
+        [
+          node('a', [], { crew: 'tier2-1' }),
+          node('b', [], { crew: 'tier2-1' }),
+          node('c', [], { crew: 'tier1' }),
+        ],
+        { lanes: 3, crew: { tier1: CREW.tier1, 'tier2-1': CREW['tier2-1'] } },
       ),
     )
     const report = await r.scheduler.run()
 
     expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
     // Three phases, two members, and nothing ran on a tier it was not entitled
-    // to: the junior's model appears exactly once.
+    // to: the Tier 1 model appears exactly once.
     expect(modelsOf(r).filter((model) => model === 'cheap')).toHaveLength(1)
-    expect(modelsOf(r).filter((model) => model === 'mid')).toHaveLength(2)
+    expect(modelsOf(r).filter((model) => model === 'medium')).toHaveLength(2)
     expect(crewEvents(r).some((event) => event['substitute'] === true)).toBe(false)
     expectDrained(r)
   })
@@ -2175,8 +2179,8 @@ describe('crew', () => {
    */
   it('sends the review to the reviewer and keeps the fix with the author', async () => {
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'junior', pipeline: 'slots' })], {
-        crew: { junior: CREW.junior, checker: CHECKER },
+      makeWorkflow([node('a', [], { crew: 'tier1', pipeline: 'slots' })], {
+        crew: { tier1: CREW.tier1, checker: CHECKER },
       }),
     )
     await r.scheduler.run()
@@ -2191,8 +2195,8 @@ describe('crew', () => {
     // Every workflow written before reviewers were members. The review is still
     // its own session; it simply has nobody of its own to run as.
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'senior', pipeline: 'slots' })], {
-        crew: { senior: CREW.senior },
+      makeWorkflow([node('a', [], { crew: 'tier4', pipeline: 'slots' })], {
+        crew: { tier4: CREW.tier4 },
       }),
     )
     await r.scheduler.run()
@@ -2210,10 +2214,13 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'mid-a', pipeline: 'slots' }),
-          node('b', [], { crew: 'mid-b', pipeline: 'slots' }),
+          node('a', [], { crew: 'tier2-1', pipeline: 'slots' }),
+          node('b', [], { crew: 'tier2-2', pipeline: 'slots' }),
         ],
-        { lanes: 2, crew: { 'mid-a': CREW['mid-a'], 'mid-b': CREW['mid-b'], checker: CHECKER } },
+        {
+          lanes: 2,
+          crew: { 'tier2-1': CREW['tier2-1'], 'tier2-2': CREW['tier2-2'], checker: CHECKER },
+        },
       ),
     )
     const report = await r.scheduler.run()
@@ -2231,8 +2238,8 @@ describe('crew', () => {
    */
   it('reviews in the implementer’s own lane, not a tree of its own', async () => {
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'mid-a', pipeline: 'slots' })], {
-        crew: { 'mid-a': CREW['mid-a'], checker: CHECKER },
+      makeWorkflow([node('a', [], { crew: 'tier2-1', pipeline: 'slots' })], {
+        crew: { 'tier2-1': CREW['tier2-1'], checker: CHECKER },
       }),
     )
     await r.scheduler.run()
@@ -2240,14 +2247,14 @@ describe('crew', () => {
     const cwds = new Set(r.adapter.spawned.map((task) => task.cwd))
     expect(cwds.size).toBe(1)
     // And it is the member's desk, named for them rather than numbered.
-    expect([...cwds][0]).toContain('mid-a')
+    expect([...cwds][0]).toContain('tier2-1')
     expectDrained(r)
   })
 
   it('gives desks to implementers only — a reviewer has no worktree', async () => {
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'mid-a', pipeline: 'slots' })], {
-        crew: { 'mid-a': CREW['mid-a'], checker: CHECKER },
+      makeWorkflow([node('a', [], { crew: 'tier2-1', pipeline: 'slots' })], {
+        crew: { 'tier2-1': CREW['tier2-1'], checker: CHECKER },
       }),
     )
     await r.scheduler.run()
@@ -2258,8 +2265,8 @@ describe('crew', () => {
 
   it('never lets the phase’s own author review it', async () => {
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'senior', pipeline: 'slots' })], {
-        crew: { senior: CREW.senior, checker: CHECKER },
+      makeWorkflow([node('a', [], { crew: 'tier4', pipeline: 'slots' })], {
+        crew: { tier4: CREW.tier4, checker: CHECKER },
       }),
     )
     await r.scheduler.run()
@@ -2279,10 +2286,10 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
-          node('b', ['a'], { crew: 'senior', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier4', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'tier4', pipeline: 'reuse' }),
         ],
-        { crew: { senior: CREW.senior }, lanes: 1 },
+        { crew: { tier4: CREW.tier4 }, lanes: 1 },
       ),
     )
     const report = await r.scheduler.run()
@@ -2305,11 +2312,11 @@ describe('crew', () => {
    * The ledgers are per member and do not leak between them.
    *
    * **The tiers here are load-bearing and were the other way round.** It used
-   * to be a warm `mid-a` followed by a `junior` phase, which stopped testing
-   * this the moment warmth became a staffing input: `mid-a` clears a junior's
-   * floor, so the second phase was promoted to `mid-a` and legitimately
+   * to be a warm `tier2-1` followed by a `tier1` phase, which stopped testing
+   * this the moment warmth became a staffing input: `tier2-1` clears a Tier 1
+   * floor, so the second phase was promoted to `tier2-1` and legitimately
    * resumed — the assertion failed on the feature working, not on a leak. The
-   * senior's floor is the one thing a warm `mid-a` cannot clear, so `b` is
+   * Tier 4 floor is the one thing a warm `tier2-1` cannot clear, so `b` is
    * still guaranteed to be staffed to a member who has never run, which is
    * what makes "cold" mean "did not inherit" rather than "was not promoted".
    */
@@ -2317,16 +2324,16 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'mid-a', pipeline: 'reuse' }),
-          node('b', ['a'], { crew: 'senior', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier2-1', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'tier4', pipeline: 'reuse' }),
         ],
-        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 2 },
       ),
     )
     await r.scheduler.run()
 
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['mid-a', 'senior'])
-    // `senior` has never run: its first turn is cold, whatever `mid-a` built up.
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier2-1', 'tier4'])
+    // `tier4` has never run: its first turn is cold, whatever `tier2-1` built up.
     expect(sessionsOf(r, 'b')[0]).toEqual({
       slot: 'main',
       disposition: 'fresh',
@@ -2339,35 +2346,35 @@ describe('crew', () => {
    * Warmth, end to end, and the whole point of computing it from `planSession`
    * rather than from "has this member run before".
    *
-   * `a` is the senior's; `b` is `mid-a`'s and `mid-a` is free. Today's rule
+   * `a` is `tier4`'s; `b` is `tier2-1`'s and `tier2-1` is free. Today's rule
    * staffs `b` as written and opens a second session. The new one hands it to
-   * the senior — dearer per token, and it resumes instead of cold-starting,
-   * which is the trade. Both halves are asserted, because either alone would
-   * pass on a bug: the promotion without the resume is the failure mode that
-   * costs on both axes.
+   * `tier4` — dearer per token, and it resumes instead of cold-starting, which
+   * is the trade. Both halves are asserted, because either alone would pass on
+   * a bug: the promotion without the resume is the failure mode that costs on
+   * both axes.
    */
-  it('gives a phase to a warm senior rather than cold-start the member the plan named', async () => {
+  it('gives a phase to a warm higher-tier member rather than cold-start the member the plan named', async () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
-          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier4', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'tier2-1', pipeline: 'reuse' }),
         ],
-        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 2 },
       ),
     )
     const report = await r.scheduler.run()
 
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
-    // `mid` never appears: the Tier 2 phase ran on the Tier 4 model.
+    // `medium` never appears: the Tier 2 phase ran on the Tier 4 model.
     expect(modelsOf(r)).toEqual(['dear', 'dear', 'dear', 'dear'])
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'senior'])
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier4', 'tier4'])
     // The reason token, which is the only thing that tells this apart from a
-    // busy-peer cover afterwards — and `mid-a` was never busy.
+    // busy-peer cover afterwards — and `tier2-1` was never busy.
     expect(crewEvents(r)[1]).toMatchObject({
-      member: 'senior',
+      member: 'tier4',
       substitute: true,
-      instead_of: 'mid-a',
+      instead_of: 'tier2-1',
       reason: 'warm_session',
     })
     // What was actually bought: `b`'s first turn continued rather than opened.
@@ -2380,49 +2387,49 @@ describe('crew', () => {
   })
 
   /**
-   * The other side of the user's rule: only when a session is already up. The
-   * senior here has never run, so both members would open one and the dearer
+   * The other side of the user's rule: only when a session is already up.
+   * `tier4` here has never run, so both members would open one and the dearer
    * model would buy nothing whatsoever. The plan's own level stands.
    */
-  it('staffs a phase as written when the senior is cold, however idle they are', async () => {
+  it('staffs a phase as written when the higher tier is cold, however idle they are', async () => {
     const r = rig(
-      makeWorkflow(
-        [node('a', [], { crew: 'mid-a', pipeline: 'reuse' })],
-        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
-      ),
+      makeWorkflow([node('a', [], { crew: 'tier2-1', pipeline: 'reuse' })], {
+        crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 },
+        lanes: 2,
+      }),
     )
     await r.scheduler.run()
 
-    expect(modelsOf(r)).toEqual(['mid', 'mid'])
-    expect(crewEvents(r)).toEqual([{ member: 'mid-a', tier: 2, substitute: false }])
+    expect(modelsOf(r)).toEqual(['medium', 'medium'])
+    expect(crewEvents(r)).toEqual([{ member: 'tier2-1', tier: 2, substitute: false }])
     expectDrained(r)
   })
 
   /**
-   * The floor, against the new pressure. A junior with a warm session is the
-   * cheapest possible way to avoid a cold start, and a Tier 2 phase still does
-   * not go to them. Warmth reorders who qualifies; it never widens the set.
+   * The floor, against the new pressure. A Tier 1 member with a warm session is
+   * the cheapest possible way to avoid a cold start, and a Tier 2 phase still
+   * does not go to them. Warmth reorders who qualifies; it never widens the set.
    */
-  it('will not promote a phase down to a warm junior', async () => {
+  it('will not promote a phase down to a warm lower-tier member', async () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'junior', pipeline: 'reuse' }),
-          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier1', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'tier2-1', pipeline: 'reuse' }),
         ],
-        { crew: { junior: CREW.junior, 'mid-a': CREW['mid-a'] }, lanes: 2 },
+        { crew: { tier1: CREW.tier1, 'tier2-1': CREW['tier2-1'] }, lanes: 2 },
       ),
     )
     await r.scheduler.run()
 
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['junior', 'mid-a'])
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier1', 'tier2-1'])
     expect(crewEvents(r)[1]).toMatchObject({ substitute: false })
     expectDrained(r)
   })
 
   /**
    * The refusals are the reason warmth is `planSession`'s answer and not a
-   * `has-run-before` flag. The senior's slot is at its ceiling, so its next
+   * `has-run-before` flag. `tier4`'s slot is at its ceiling, so its next
    * turn is cold whatever we do — and a promotion bought on that would pay the
    * Tier 4 rate *and* cold-start, which is strictly worse than changing
    * nothing. `turn_ceiling` stands in for its siblings here because it is the
@@ -2432,18 +2439,18 @@ describe('crew', () => {
     const workflow = WorkflowSchema.parse({
       ...makeWorkflow(
         [
-          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
-          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier4', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'tier2-1', pipeline: 'reuse' }),
         ],
-        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 2 },
       ),
       defaults: { harness: HARNESS, model: 'opus', pipeline: 'solo', max_session_turns: 1 },
     })
     const r = rig(workflow)
     await r.scheduler.run()
 
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'mid-a'])
-    expect(crewEvents(r)[1]).toMatchObject({ member: 'mid-a', substitute: false })
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier4', 'tier2-1'])
+    expect(crewEvents(r)[1]).toMatchObject({ member: 'tier2-1', substitute: false })
     expectDrained(r)
   })
 
@@ -2452,16 +2459,16 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
-          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier4', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'tier2-1', pipeline: 'reuse' }),
         ],
-        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 2 },
       ),
       { capabilities: { resume: false } },
     )
     await r.scheduler.run()
 
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'mid-a'])
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier4', 'tier2-1'])
     expectDrained(r)
   })
 
@@ -2474,17 +2481,17 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'senior', pipeline: 'explode' }),
-          node('b', [], { crew: 'mid-a', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier4', pipeline: 'explode' }),
+          node('b', [], { crew: 'tier2-1', pipeline: 'reuse' }),
         ],
-        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 1 },
+        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 1 },
       ),
     )
     const report = await r.scheduler.run()
 
     expect(report.statuses['a']).toBe('failed')
     expect(crewEvents(r).find((event) => event['instead_of'] !== undefined)).toBeUndefined()
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'mid-a'])
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier4', 'tier2-1'])
     expectDrained(r)
   })
 
@@ -2499,16 +2506,16 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'junior', pipeline: 'slots' }),
-          node('b', ['a'], { crew: 'junior', pipeline: 'slots' }),
+          node('a', [], { crew: 'tier1', pipeline: 'slots' }),
+          node('b', ['a'], { crew: 'tier1', pipeline: 'slots' }),
         ],
-        { crew: { junior: CREW.junior, checker: CHECKER }, lanes: 2 },
+        { crew: { tier1: CREW.tier1, checker: CHECKER }, lanes: 2 },
       ),
     )
     await r.scheduler.run()
 
     const phases = crewEvents(r).filter((event) => event['role'] !== 'reviewer')
-    expect(phases.map((event) => event['member'])).toEqual(['junior', 'junior'])
+    expect(phases.map((event) => event['member'])).toEqual(['tier1', 'tier1'])
     expectDrained(r)
   })
 
@@ -2521,10 +2528,10 @@ describe('crew', () => {
     const r = rig(
       makeWorkflow(
         [
-          node('a', [], { crew: 'senior', pipeline: 'explode' }),
-          node('b', [], { crew: 'senior', pipeline: 'reuse' }),
+          node('a', [], { crew: 'tier4', pipeline: 'explode' }),
+          node('b', [], { crew: 'tier4', pipeline: 'reuse' }),
         ],
-        { crew: { senior: CREW.senior }, lanes: 1 },
+        { crew: { tier4: CREW.tier4 }, lanes: 1 },
       ),
     )
     const report = await r.scheduler.run()
@@ -2539,20 +2546,20 @@ describe('crew', () => {
   })
 
   it('gives the member back when a waiting node is aborted', async () => {
-    // `b` cannot start: the roster has one senior and `a` is holding them. An
-    // abort has to reach it *while it waits*, and has to leave the roster in a
-    // state where a third phase could still be staffed.
+    // `b` cannot start: the roster has one Tier 4 member and `a` is holding
+    // them. An abort has to reach it *while it waits*, and has to leave the
+    // roster in a state where a third phase could still be staffed.
     const r = rig(
       makeWorkflow(
-        [node('a', [], { crew: 'senior' }), node('b', [], { crew: 'senior' })],
-        { lanes: 2, crew: { senior: CREW.senior } },
+        [node('a', [], { crew: 'tier4' }), node('b', [], { crew: 'tier4' })],
+        { lanes: 2, crew: { tier4: CREW.tier4 } },
       ),
       { stall: true },
     )
 
     const running = r.scheduler.run()
     await until(() => r.stall.live(), "node a's session to open")
-    expect(r.scheduler.busyCrew()).toEqual(['senior'])
+    expect(r.scheduler.busyCrew()).toEqual(['tier4'])
 
     await r.scheduler.abortNode('b')
     r.stall.release()
@@ -2565,14 +2572,14 @@ describe('crew', () => {
   it('gives the member back when the node settles, so the next one can have them', async () => {
     const r = rig(
       makeWorkflow(
-        [node('a', [], { crew: 'senior' }), node('b', ['a'], { crew: 'senior' })],
-        { lanes: 2, crew: { senior: CREW.senior } },
+        [node('a', [], { crew: 'tier4' }), node('b', ['a'], { crew: 'tier4' })],
+        { lanes: 2, crew: { tier4: CREW.tier4 } },
       ),
     )
     const report = await r.scheduler.run()
 
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
-    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'senior'])
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['tier4', 'tier4'])
     expectDrained(r)
   })
 })
@@ -2646,8 +2653,8 @@ describe('the fix budget on a second attempt', () => {
 
 describe('a failed phase the operator can retry', () => {
   const ROSTER = {
-    junior: { role: 'implementer', tier: 1, model: 'cheap' },
-    senior: { role: 'implementer', tier: 4, model: 'dear' },
+    tier1: { role: 'implementer', tier: 1, model: 'cheap' },
+    tier4: { role: 'implementer', tier: 4, model: 'dear' },
   } as const
 
   /** Every spawn's model, in the order the harness was asked for them. */
@@ -2841,9 +2848,9 @@ describe('a failed phase the operator can retry', () => {
    */
   it('offers the members who could take the phase, and honours the pick', async () => {
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'junior' })], {
+      makeWorkflow([node('a', [], { crew: 'tier1' })], {
         pipeline: 'explode',
-        crew: { junior: ROSTER.junior, senior: ROSTER.senior },
+        crew: { tier1: ROSTER.tier1, tier4: ROSTER.tier4 },
       }),
       { onFailure: 'ask' },
     )
@@ -2853,17 +2860,17 @@ describe('a failed phase the operator can retry', () => {
 
     expect(r.journal.pendingQuestion('run-1', 'a')?.question.choices).toEqual([
       'retry',
-      'retry with senior',
+      'retry with tier4',
       'stop',
     ])
 
-    r.scheduler.answer('a', { human: { answer: 'retry with senior' } })
+    r.scheduler.answer('a', { human: { answer: 'retry with tier4' } })
     await until(() => r.adapter.spawned.length === 2, 'the second attempt')
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second offer')
     r.scheduler.answer('a', { human: { answer: 'stop' } })
     await running
 
-    // The junior took the first attempt and the senior the second.
+    // `tier1` took the first attempt and `tier4` the second.
     expect(modelsOf(r)).toEqual(['cheap', 'dear'])
     expectDrained(r)
   })
@@ -2871,13 +2878,13 @@ describe('a failed phase the operator can retry', () => {
   /**
    * A member below the phase's tier is not offered. The floor is the whole
    * point of staffing a plan, and an operator answering a question is not a
-   * reason to hand a phase to somebody the plan judged too junior for it.
+   * reason to hand a phase to somebody the plan judged too low a tier for it.
    */
   it('never offers a member below the phase’s tier', async () => {
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'senior' })], {
+      makeWorkflow([node('a', [], { crew: 'tier4' })], {
         pipeline: 'explode',
-        crew: { junior: ROSTER.junior, senior: ROSTER.senior },
+        crew: { tier1: ROSTER.tier1, tier4: ROSTER.tier4 },
       }),
       { onFailure: 'ask' },
     )

@@ -4,9 +4,9 @@
  * A pure function over explicit inputs, for the same reason `sessions.ts` is
  * one: the interesting cases are the ones an end-to-end run reaches rarely and
  * a wrong answer is invisible when it happens. A node dispatched to a member
- * one tier too junior does not fail — it produces plausible code that fails
- * review two rounds later, by which point nothing points back at the staffing
- * decision that caused it.
+ * one tier below the phase does not fail — it produces plausible code that
+ * fails review two rounds later, by which point nothing points back at the
+ * staffing decision that caused it.
  *
  * Two rules, and they pull in opposite directions on purpose:
  *
@@ -23,7 +23,7 @@
  * **The second rule has one exception, and it is about sessions rather than
  * tiers.** A member who is already *warm* — who holds a session this node would
  * genuinely resume — takes the phase ahead of a cheaper member who would have
- * to start cold, even when they are more senior than the phase needs. A cold
+ * to start cold, even when they sit above the tier the phase needs. A cold
  * start is not free: the new session re-reads the repository, rebuilds the
  * context the warm one already has, and pays for all of it in input tokens
  * before it writes a line. Against that, a dearer model on a cheaper phase is
@@ -38,16 +38,16 @@
  * - **Warmth is a fact about a session, not about a member.** It means "this
  *   member's next turn on *this* node would resume", which is `sessions.ts`'s
  *   answer and not an approximation of it. A member promoted on a warmth that
- *   then fails to resume is the worst of both: the senior's price *and* a cold
- *   start. So the caller computes `warm` by asking `planSession` itself, with
- *   this node's lane, harness and ledger — see `Scheduler.#warmCrew`. A member
- *   who has merely run before is not warm.
+ *   then fails to resume is the worst of both: the higher tier's price *and* a
+ *   cold start. So the caller computes `warm` by asking `planSession` itself,
+ *   with this node's lane, harness and ledger — see `Scheduler.#warmCrew`. A
+ *   member who has merely run before is not warm.
  *
  * With nobody warm this is exactly what it was: the plan's member, else the
  * cheapest qualified cover. That matters — when nothing is warm we are opening
  * a session either way, and there is no cold start left to save. Paying for a
- * senior then would buy nothing at all, which is why the promotion is spelled
- * as "reuse what is already up" and not as "use the best free member".
+ * higher tier then would buy nothing at all, which is why the promotion is
+ * spelled as "reuse what is already up" and not as "use the best free member".
  *
  * When neither rule holds — every qualified member busy — the answer is to
  * wait, even though a lane is free. That is the one place this module can cost
@@ -116,7 +116,7 @@ export interface CrewAssignInput {
    * Optional, and absent means empty: a caller that cannot answer the question
    * gets the behaviour this module had before warmth existed, which is the
    * right failure. Over-reporting warmth is the expensive mistake — it buys a
-   * senior model and a cold start — so the default is to claim none.
+   * higher-tier model and a cold start — so the default is to claim none.
    */
   readonly warm?: ReadonlySet<string>
 }
@@ -198,8 +198,8 @@ export function assignCrew(input: CrewAssignInput): CrewDecision {
   const warm = input.warm ?? EMPTY
 
   // Warm first, and the plan's own member first among the warm. Without that
-  // second half, a roster with two warm peers would hand `mid-b`'s phase to
-  // `mid-a` on nothing but alphabetical order and journal it as a
+  // second half, a roster with two warm peers would hand `tier2-2`'s phase to
+  // `tier2-1` on nothing but alphabetical order and journal it as a
   // substitution — a divergence from the plan bought for no saving at all,
   // since both were warm and neither would have started cold.
   const reuse =
@@ -243,11 +243,12 @@ export interface ReviewAssignInput {
  *
  * **Claimed, not borrowed.** The previous design resolved a reviewer *model* a
  * tier above the author and spawned it without holding anything, on the
- * grounds that a review is short and a senior mid-phase should still be able to
- * read a junior's diff. That works for a model and not for an agent: a member
- * has one session ledger, and two reviews running as the same member would
- * either resume one session twice or overwrite each other's entry — so a
- * reviewer is held for its turn and a node whose reviewer is busy waits.
+ * grounds that a review is short and a higher-tier member mid-phase should
+ * still be able to read a lower-tier member's diff. That works for a model and
+ * not for an agent: a member has one session ledger, and two reviews running as
+ * the same member would either resume one session twice or overwrite each
+ * other's entry — so a reviewer is held for its turn and a node whose reviewer
+ * is busy waits.
  *
  * Not for a worktree: a reviewer has none, and reads the lane it is reviewing.
  * A plan that finds one reviewer too serialising staffs a second.
