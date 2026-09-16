@@ -27,6 +27,17 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
+import {
+  LEVELS,
+  MAX_PAGE,
+  activePath,
+  errorFields,
+  logDirFor,
+  nullLogger,
+  readAfter,
+  readTail,
+  type Logger,
+} from '../log/index.ts'
 import { MONITOR_ROLE } from '../journal/transcript.ts'
 import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
 import type { Workflow } from '../types.ts'
@@ -61,6 +72,7 @@ import {
   type AgentLeaseGrantResponse,
   type AgentLeaseWaitingResponse,
   type EventPage,
+  type LogPage,
   type MonitorAsked,
   type Issue,
   type NodeDetail,
@@ -100,6 +112,26 @@ const EventPageQuerySchema = z.object({
 /** How much of a monitor conversation is served. Long enough to be a history. */
 const MONITOR_HISTORY = 200
 
+/**
+ * `/api/logs`, in both its modes.
+ *
+ * `after` and `tail` are not mutually exclusive in the schema, and `after`
+ * wins in the handler. That is not laziness: the view opens with a tail and
+ * then follows, and a client that keeps its `tail` parameter across the switch
+ * is doing the ordinary thing rather than something to be refused.
+ */
+const LogQuerySchema = z.object({
+  /** A cursor from a previous page. Absent means "give me the tail". */
+  after: z.string().optional(),
+  tail: z.coerce.number().int().min(1).max(MAX_PAGE).default(200),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE).default(MAX_PAGE),
+  level: z.enum(LEVELS).optional(),
+  run: z.string().optional(),
+  node: z.string().optional(),
+  /** Substring over the event name and the field values — identifiers, not prose. */
+  q: z.string().max(200).optional(),
+})
+
 export interface ApiOptions {
   readonly journal: Journal
   readonly token: string
@@ -137,6 +169,18 @@ export interface ApiOptions {
    * drive — see `RunStartPort`.
    */
   readonly runStarter?: RunStartPort | undefined
+  /**
+   * Where this module's own records go. Absent in tests, and then nothing is
+   * written — see `nullLogger`.
+   */
+  readonly logger?: Logger
+  /**
+   * Where the log is read from. Defaults to the journal's own
+   * `.vinta-ai-maestro/logs`, derived rather than passed for the same reason
+   * `workflowsDir` is: every caller already agrees on the journal, and a second
+   * parameter is a second chance to disagree about which project is open.
+   */
+  readonly logDir?: string
 }
 
 export function createApi(options: ApiOptions): Hono {
@@ -148,6 +192,8 @@ export function createApi(options: ApiOptions): Hono {
   // disagree about which project is being served.
   const store = createWorkflowStore(options.workflowsDir ?? plansDirFor(dirname(journal.root)))
   const ui = createStaticHandler(options.uiDir ?? DEFAULT_UI_DIR)
+  const log = options.logger ?? nullLogger()
+  const logDir = options.logDir ?? logDirFor(journal.root)
   /**
    * Monitor turns in flight, by run. The one piece of state this module keeps.
    *
@@ -174,6 +220,49 @@ export function createApi(options: ApiOptions): Hono {
     const method = c.req.method
     if (method !== 'GET' && method !== 'HEAD') return await next()
     return ui(path, method)
+  })
+
+  /**
+   * What the API did, per request.
+   *
+   * Above the token check so a `401` is on the record: an operator whose UI
+   * shows nothing has two very different problems — a daemon that never
+   * received the request, and one that received it and refused the token — and
+   * without this row they look identical from the browser.
+   *
+   * **The path, never the query string.** The token rides in the query on the
+   * WebSocket upgrade and can be put there on any request, so `c.req.url` is a
+   * string that sometimes contains the secret. `pathname` carries the run and
+   * node ids, which are identifiers and the part worth having.
+   *
+   * A thrown handler is logged and rethrown. Hono would turn it into a 500 and
+   * the bridge in `server.ts` would turn that into a body with no detail —
+   * correct, and completely opaque, which is the shape of failure this unit
+   * exists to remove.
+   */
+  app.use('*', async (c, next) => {
+    // `error` rather than `debug`: this is the cheapest test for "is there a
+    // logger at all", and it is the right one. Guarding on `debug` skipped the
+    // whole middleware at `--log-level error` — including the 500s, which is
+    // the one level an operator picks *because* they only want those.
+    if (!log.enabled('error')) return await next()
+    const started = Date.now()
+    const path = new URL(c.req.url).pathname
+    const method = c.req.method
+    try {
+      await next()
+    } catch (error) {
+      log.error('api.threw', { method, path, ...errorFields(error) })
+      throw error
+    }
+    const status = c.res.status
+    const fields = { method, path, status, ms: Date.now() - started }
+    // A refusal is the interesting one and is kept at the default level; an
+    // ordinary 200 is `debug`, because a UI polling four endpoints a second
+    // would otherwise be the entire file.
+    if (status >= 500) log.error('api.request', fields)
+    else if (status >= 400) log.warn('api.request', fields)
+    else log.debug('api.request', fields)
   })
 
   /** §11: every request, without exception, including the ones that 404. */
@@ -228,12 +317,28 @@ export function createApi(options: ApiOptions): Hono {
       return fail(c, 409, 'run_active')
     }
 
-    const outcome = await starter.start(
+    const request =
       body.value.resume === undefined
-        ? { kind: 'workflow', workflowId: body.value.workflow as string }
-        : { kind: 'resume', runId: body.value.resume },
-    )
-    if (!outcome.ok) return fail(c, STATUS_FOR[outcome.code], outcome.code)
+        ? ({ kind: 'workflow', workflowId: body.value.workflow as string } as const)
+        : ({ kind: 'resume', runId: body.value.resume } as const)
+
+    const outcome = await starter.start(request)
+    if (!outcome.ok) {
+      // The refusal an operator most needs on the record. A start that never
+      // happened leaves no run, so it leaves no journal row, no transcript and
+      // no post-mortem — the whole apparatus for explaining a run is keyed by
+      // an id this request did not produce. Without this line, "I clicked run
+      // and nothing happened" is unanswerable.
+      log.warn('runs.refused', {
+        code: outcome.code,
+        kind: request.kind,
+        ...(request.kind === 'workflow'
+          ? { workflow: request.workflowId }
+          : { run: request.runId }),
+      })
+      return fail(c, STATUS_FOR[outcome.code], outcome.code)
+    }
+    log.info('runs.started', { run: outcome.runId, kind: request.kind })
     return c.json({ runId: outcome.runId } satisfies StartRunResponse, 201)
   })
 
@@ -655,6 +760,57 @@ export function createApi(options: ApiOptions): Hono {
   //   rebases the `done` nodes whose base moved, and journals what it did. The
   //   refusal comes back located, like every other refusal here.
   // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // The daemon's own log
+  // -------------------------------------------------------------------------
+  //
+  // The one read here that is not a projection of the journal, because it is
+  // not about a run. It is about *this process*: what it bound, what it
+  // refused, what it dispatched, and — the case this whole unit exists for —
+  // what killed it.
+  //
+  // Deliberately not per-run, and deliberately not on the run's WebSocket. A
+  // run-scoped log cannot hold the records worth having: a daemon that failed
+  // to bind, a preflight that refused, a start request rejected before a run
+  // id existed, a crash with three runs in flight. Those are the moments with
+  // no run to hang a record on, and they are the moments somebody is looking.
+  //
+  // Two modes on one route, matching the events route above: `tail` for the
+  // last N records — the "show me what just happened" read — and `after` for
+  // a follow. Both are bounded by the reader, which never opens more than a
+  // few MiB however long the daemon has been up.
+  app.get('/api/logs', (c) => {
+    const query = LogQuerySchema.safeParse(c.req.query())
+    if (!query.success) return fail(c, 400, 'invalid_request', toIssues(query.error))
+
+    const { after, tail, limit, level, run, node, q } = query.data
+    const filter = {
+      ...(level === undefined ? {} : { level }),
+      ...(run === undefined ? {} : { runId: run }),
+      ...(node === undefined ? {} : { nodeId: node }),
+      ...(q === undefined ? {} : { search: q }),
+    }
+    const page =
+      after === undefined ? readTail(logDir, tail, filter) : readAfter(logDir, after, limit, filter)
+
+    return c.json({
+      records: page.records.map((record) => ({
+        ts: record.ts,
+        seq: record.seq,
+        pid: record.pid,
+        level: record.level,
+        event: record.event,
+        runId: record.runId ?? null,
+        nodeId: record.nodeId ?? null,
+        fields: record.fields,
+      })),
+      cursor: page.cursor,
+      reset: page.reset,
+      more: page.more,
+      path: activePath(logDir),
+    } satisfies LogPage)
+  })
 
   app.get('/api/workflows', (c) => {
     return c.json({

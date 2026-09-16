@@ -45,6 +45,8 @@ import { preflightRun, startRun, type StartedRun } from '../run/index.ts'
 import type { RunStop } from '../scheduler/index.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
+import { errorFields, installCrashHandlers, redactValue } from '../log/index.ts'
+import { reportLogFailures, toLogSetup } from './logging.ts'
 import { SERVE_USAGE, announce, monitorFactory, toBind, untilSignalled } from './serve.ts'
 
 export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]
@@ -109,6 +111,9 @@ export async function runCommand(
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
         resume: { type: 'string' },
+        'log-level': { type: 'string' },
+        'log-stderr': { type: 'boolean' },
+        'log-detail': { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -232,24 +237,57 @@ export async function runCommand(
 
   const journal = resumeJournal ?? openJournal(bind.repoPath)
 
+  // Same log the daemon-hosted path writes, in the same file. A run started
+  // from a terminal and one submitted over HTTP are the same run to whoever is
+  // debugging it a day later, and two log locations would be a question they
+  // have to answer before they can start.
+  const logging = toLogSetup(parsed.values, bind.repoPath, io)
+  if (logging === null) {
+    journal.close()
+    return USAGE
+  }
+  const log = logging.logger
+
   let daemon: Daemon
   try {
     daemon = await startDaemon({
       journal,
+      logger: log,
       warn: (message) => io.err(message),
       monitorFor: monitorFactory(journal, bind.repoPath, permission),
       ...(bind.host === undefined ? {} : { host: bind.host }),
       ...(bind.port === undefined ? {} : { port: bind.port }),
     })
-  } catch {
+  } catch (error) {
+    log.error('run.bind_failed', {
+      host: bind.host ?? '127.0.0.1',
+      port: bind.port ?? 0,
+      ...errorFields(error),
+    })
+    reportLogFailures(logging.sink, io)
     journal.close()
     io.err(`vinta-ai-maestro: could not bind ${bind.host ?? '127.0.0.1'}:${bind.port ?? 0}`)
     return FAILED
   }
 
+  redactValue(daemon.token)
+
+  // Installed before the run exists, so an exception during provisioning is
+  // caught too — that is where a run spends its first minute, and a crash
+  // there leaves the least behind.
+  const uninstallCrashHandlers = installCrashHandlers({
+    logger: log,
+    detail: logging.detail,
+    inFlight: () => [runId],
+    onFatal: () => {
+      journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
+    },
+  })
+
   // Before the pool, which takes real time: an operator whose lanes are being
   // provisioned can already open the UI and watch them appear.
   announce(daemon, io)
+  io.out(`Daemon log: ${logging.path}`)
 
   let started: StartedRun
   try {
@@ -260,6 +298,7 @@ export async function runCommand(
       daemon,
       repoPath: bind.repoPath,
       permission,
+      logger: log,
       ...(resumeId === undefined ? {} : { resume: true }),
       ...(onFailure === undefined ? {} : { onFailure }),
       ...(retries === undefined ? {} : { retries }),
@@ -269,13 +308,19 @@ export async function runCommand(
       ...(deps.waveResults === undefined ? {} : { waveResults: deps.waveResults }),
     })
     if (!result.ok) {
+      log.error('run.provision_failed', { run: runId, reason: result.message })
+      uninstallCrashHandlers()
+      reportLogFailures(logging.sink, io)
       await daemon.close()
       journal.close()
       io.err(result.message)
       return FAILED
     }
     started = result
-  } catch {
+  } catch (error) {
+    log.error('run.start_threw', { run: runId, ...errorFields(error) })
+    uninstallCrashHandlers()
+    reportLogFailures(logging.sink, io)
     await daemon.close()
     journal.close()
     io.err(`vinta-ai-maestro: run ${runId} could not be started.`)
@@ -315,6 +360,7 @@ export async function runCommand(
       // the node rows say exactly how far it got. `--resume` refuses only a
       // `done` run, so this is precisely the state a resume expects to find.
       journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
+      log.warn('run.interrupted', { run: runId })
       io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
       io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
       return FAILED
@@ -355,8 +401,12 @@ export async function runCommand(
     return report.status === 'completed' && failed.length === 0 ? OK : FAILED
   } finally {
     // Unhooked whichever way the race went: a watch left on a process that is
-    // trying to exit is a listener holding the event loop open.
+    // trying to exit is a listener holding the event loop open. The crash
+    // handlers go for the same reason — and only here, once the race is
+    // decided, so an exception thrown during teardown is still recorded.
     signals.cancel()
+    uninstallCrashHandlers()
+    reportLogFailures(logging.sink, io)
     // The run's own handles are closed by `started.finished`, which owns them
     // whether or not anyone awaits it. What is left is what *this process*
     // opened around the run: the port and the journal.

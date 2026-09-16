@@ -52,6 +52,7 @@ import {
   MAESTRO_TOKEN_ENV,
   MAESTRO_URL_ENV,
 } from '../resources/agent-leases.ts'
+import type { Logger } from '../log/index.ts'
 import { createScheduler, type RunReport } from '../scheduler/index.ts'
 import type { Workflow } from '../types.ts'
 import { laneRootFor } from '../cli/paths.ts'
@@ -84,6 +85,11 @@ export interface StartRunOptions {
   readonly adapters?: Readonly<Record<string, HarnessAdapter>>
   readonly perLaneBytes?: number
   readonly waveResults?: () => readonly IntegrationWaveRecord[]
+  /**
+   * The daemon's log, handed on to the scheduler this composes. Absent for a
+   * host that wired none, and then nothing is written.
+   */
+  readonly logger?: Logger
 }
 
 /**
@@ -272,6 +278,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     // §15.2: an implementer keeps one worktree, so continuing across a phase is
     // safe as long as the agent is told which files moved under it.
     ...(host.laneDelta === undefined ? {} : { laneDelta: host.laneDelta }),
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
   })
 
   // §9's amend needs two things this composition owns: the integration worktree

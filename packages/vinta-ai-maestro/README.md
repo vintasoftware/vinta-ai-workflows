@@ -311,6 +311,8 @@ Everything a run writes lives inside the project, never in a global cache direct
 .vinta-ai-maestro/
   flow.db                       # SQLite event log — opaque identifiers only
   gate-cache.db                 # gate results keyed by (gate id, lane tree hash)
+  logs/daemon.ndjson            # the daemon's own log — opaque identifiers only
+  logs/daemon.<n>.ndjson        # rotations, oldest pruned past five
   lanes/<lane>/                 # the lane worktrees, and .templates/ for forked DBs
   runs/<run-id>/
     workflow.json               # the snapshot frozen at run start
@@ -336,6 +338,76 @@ $ vinta-ai-maestro purge <run-id> --yes     # for scripts
 ```
 
 It removes the run *directory* — snapshot, transcripts, raw streams, gate logs. It does not touch `flow.db`, which holds the identifiers the post-mortem is built from and no repository contents. A run id is a single name, never a path: anything containing a separator or `..` is refused before anything is unlinked.
+
+## When something goes wrong: the daemon's own log
+
+Transcripts say what the *agents* did. This says what the *daemon* did — which is the half you need when the answer is "nothing happened", "it stopped", or "the process is gone".
+
+It is a file and a view, and they show the same records:
+
+```console
+$ vinta-ai-maestro serve
+vinta-ai-maestro: daemon listening on http://127.0.0.1:52765
+Open this URL. It carries the access token, so treat it as a secret:
+  http://127.0.0.1:52765/?token=<the-token-printed-here>
+Daemon log: /your/project/.vinta-ai-maestro/logs/daemon.ndjson
+```
+
+Open the **Logs** tab in the UI to read it live — filter by level, by run, or by a substring of any event name or field; it follows the tail until you scroll up, and resumes following when you scroll back down. Or read the file directly, since it is NDJSON:
+
+```console
+$ tail -f .vinta-ai-maestro/logs/daemon.ndjson | jq -c '{ts,level,event,run,fields}'
+$ jq -c 'select(.level=="error")' .vinta-ai-maestro/logs/daemon.ndjson
+```
+
+### What it records
+
+| Event | When |
+|---|---|
+| `daemon.listening`, `daemon.closing` | The process's own lifetime. The host and the port; never the token. |
+| `daemon.uncaught_exception`, `daemon.unhandled_rejection` | **A crash.** The error's kind and message, its stack frames, and which runs were in flight when it died. |
+| `daemon.process_warning` | A Node warning — `MaxListenersExceededWarning` is what a leak looks like an hour before it matters. |
+| `api.request`, `api.threw`, `bridge.threw` | Every HTTP request's method, path and status. Refusals at `warn`; the ordinary 200s at `debug`. |
+| `ws.refused`, `ws.attached` | Why a socket upgrade was turned away — a bad token, an unknown run, a malformed cursor. From the browser these are one symptom. |
+| `runs.refused`, `runs.started` | A start request that produced no run has no run id, so it has no journal row, no transcript and no post-mortem. This is the only record of it. |
+| `run.preflight_refused`, `run.provision_failed` | The two commonest ways a run does not begin. |
+| `scheduler.started`, `scheduler.dispatch`, `scheduler.node_status`, `scheduler.ended` | Every dispatch and every node transition, on the same clock as everything above. |
+| `scheduler.deadlock` | Nothing running, nothing ready, something pending — the failure that looks like nothing at all, with the pending set named. |
+| `scheduler.node_threw` | An exception escaping a node's own handling. The node fails and its dependents block; the rest of the DAG keeps going. |
+
+### Why a crash used to be silent
+
+The scheduler dispatches each node as a floating promise. An exception escaping one became an unhandled rejection, and an unhandled rejection terminates the process — correctly, and with nothing written anywhere. A plan that had been running for hours simply was not any more, and the only evidence was the shape of the hole.
+
+Three things changed. A node that throws is now **contained** rather than fatal, by the same rule a failed node already followed: it fails, its transitive dependents block, and everything independent of it finishes. A crash that is still fatal is **recorded first** — kind, frames, and the ids of every run in flight. And before the process goes, those runs are journalled as ended, so `vinta-ai-maestro run --resume <run-id>` can pick them up instead of finding a row that says `running` for ever.
+
+### Errors carry their own words
+
+Every record that describes a failure has two fields: `error`, the kind (`TypeError`, `Error: ENOENT`), and `message`, what the error actually said. A crash adds numbered `stack_N` frames. The kind names a category; the message names the bug, and you want both.
+
+```json
+{"ts":1758035071550,"level":"error","event":"scheduler.node_threw","run":"auth-m9x2k1",
+ "fields":{"node":"p1-endpoints","error":"TypeError",
+           "message":"Cannot read properties of undefined (reading 'lane')"}}
+```
+
+`--log-detail kind` drops the message and keeps the kind and the frames, for a checkout under a data-handling obligation stricter than this store's own. It is not the default, because `.vinta-ai-maestro/runs/` in this same directory already holds every agent transcript and gate log **verbatim** — an error message is a rounding error against that, and excluding it costs the one string that most often explains a failure.
+
+### What it will not record
+
+Everything other than `message` is **identifiers only** — the rule `flow.db` follows — and it is enforced rather than asked for. A field may only be a string, a number, a boolean or null, so an object handed to the logger is *dropped* rather than stringified, which is how a diff or a file read would otherwise become a log line. Identifier values are capped at 200 characters and `message`, the single allowlisted prose field, at 2000. Field names that are secrets by their name are redacted. And the daemon's token is registered as a secret at boot, so any value containing it — including inside a message — comes back `<redacted>`.
+
+Flags:
+
+```console
+$ vinta-ai-maestro serve --log-level debug   # adds a line per request and per socket
+$ vinta-ai-maestro serve --log-stderr        # also print to the terminal, one line each
+$ vinta-ai-maestro serve --log-detail kind   # drop error messages, keep kinds and frames
+```
+
+`run` accepts the same three, and writes to the same file.
+
+**It is bounded, and `purge` does not touch it.** The active file rotates at 8 MiB and five rotations are kept — about 40 MiB, whatever the daemon's uptime. `purge` leaves it alone for the same reason it leaves `flow.db` alone: it holds no repository contents, and deleting it would remove the record of the failure somebody is about to ask about.
 
 ## The URL is the credential
 

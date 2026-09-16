@@ -26,6 +26,54 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The daemon now has a log of its own, and a Logs view to read it in.**
+  Transcripts said what the agents did; nothing said what the *daemon* did, so
+  "the run stopped and I don't know why" had no evidence behind it at all.
+  `.vinta-ai-maestro/logs/daemon.ndjson` now records what the process bound,
+  every HTTP request and socket upgrade it refused and why, every start request
+  that produced no run, every scheduler dispatch and node transition, and every
+  deadlock — on one clock, so a node failure can be read beside the refusal
+  thirty seconds before it. `GET /api/logs` serves it as a tail or a follow,
+  with filters for level, run, node and a substring of any event or field; the
+  UI's new **Logs** section follows the tail until you scroll up. The file
+  rotates at 8 MiB and keeps five rotations, so it is bounded whatever the
+  daemon's uptime, and `purge` leaves it alone for the same reason it leaves
+  `flow.db` alone — it holds no repository contents, and it is the record of the
+  failure somebody is about to ask about.
+
+- **A crash is no longer silent.** An exception escaping a node's own handling
+  used to become an unhandled rejection on a promise the scheduler does not
+  hold, and an unhandled rejection ends the process: hours of agent turns and a
+  real amount of money, gone with no journal row, no transcript entry and
+  nothing on disk saying why — because the thing that would have said it was the
+  thing that died. Three changes. A node that throws is now **contained** by the
+  rule §6 already states for failures: it fails, its transitive dependents
+  block, and everything independent of it keeps going. A crash that is still
+  fatal is **recorded first** — `daemon.uncaught_exception` /
+  `daemon.unhandled_rejection`, with the error's kind, its stack frames and the
+  ids of every run in flight. And the in-flight runs are **journalled as ended**
+  before the process goes, so `run --resume <run-id>` picks them up instead of
+  finding a row that says `running` for ever. `serve` and `run` both take
+  `--log-level`, `--log-stderr` and `--log-detail`.
+
+- **The log is identifiers only, enforced rather than asked for — plus the one
+  field that is deliberately prose.** A log is called from anywhere, and "please
+  do not log repository contents" is a hope rather than a control. So a field
+  may only hold a string, a number, a boolean or null — an object is dropped,
+  never stringified, which is the way a diff or a file read becomes a log line —
+  identifier values are capped at 200 characters, field names that are secrets
+  by their name are redacted, and the daemon's token is registered at boot so
+  any value containing it is written `<redacted>`.
+
+  The exception is an error's **`message`**, which every failure record carries
+  beside its kind, capped at 2000 characters and redacted like anything else. It
+  is the default because `.vinta-ai-maestro/runs/` already holds every agent
+  transcript and gate log *verbatim*, in the same gitignored store and under the
+  same `purge` — an error message is a rounding error against a directory that
+  is already a copy of the repository, and excluding it cost the one string that
+  most often explains a failure. `--log-detail kind` narrows to the kind and the
+  stack frames for a checkout under a stricter obligation than this store's own.
+
 - **A run no longer dies with the terminal that started it.** `vinta-ai-maestro
   serve` accepts `POST /api/runs`, so a run can be submitted to a daemon that
   was already listening and belongs to that daemon rather than to the shell that

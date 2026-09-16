@@ -470,6 +470,7 @@ React + Vite, served by the daemon at `127.0.0.1` behind a random per-run token 
 | Node | Transcript (chat-rendered normalized events), gate logs, `git diff` for the node's branch, the steering box, the pending human question with its context (§9.1), and the five operations from §9 |
 | Terminal | `xterm.js` over WebSocket — PTY takeover and raw stream tailing |
 | Editor | `vinta-dag-editor` in edit mode (add node, draw dependency, set gates/harness/model) plus `vinta-state-machine-editor` for pipelines |
+| Logs | The daemon's own log (§13.8) — level, run, node and substring filters, following the tail. Its own section rather than a run panel, because the records worth reading most are the ones with no run to file them under |
 
 The run view and the workflow editor are **the same component in two modes**, which is what keeps them from drifting into two different pictures of the same graph.
 
@@ -602,6 +603,20 @@ A dry run also creates and deletes a throwaway journal, because `Journal` is man
 **13.6 Plan post-mortem fed back to `plan-feature`.** A run knows things the plan's author could not: dependencies that were declared but never used, dependencies discovered at gate time that were missing, same-wave nodes that actually conflicted, and phases whose real duration diverged wildly from their wave placement. Emit that as a structured post-mortem the `plan-feature` skill reads when planning the next feature in the same repo. This is the one addition that makes the two halves of the system compound rather than merely coexist, and it is unique to owning both.
 
 **13.7 Cost and token accounting.** Every harness already reports usage; aggregating it per node, wave and run is bookkeeping, not new machinery. It belongs in the product because model choice per node is a first-class field in the workflow — without the numbers, tuning it is superstition.
+
+**13.8 A log of the daemon itself.** Everything else in this document records what a *run* did — `events` is the run's history, transcripts are its agents' words, the post-mortem is its retrospective. None of it records what the **process** did, and that is the half an operator needs when the answer is "nothing happened", "it stopped", or "the daemon is gone". A run that was refused before it had an id has no journal row to carry the refusal; a bind that failed has no run at all; a crash takes down the thing that would have explained it.
+
+So: `.vinta-ai-maestro/logs/daemon.ndjson`, one JSON record per line, served by `GET /api/logs` as a tail or a cursor-follow, and rendered as a fourth UI section beside Runs, Editor and the per-run views. It is **not** part of §5.3's event log, and the separation is load-bearing: `events` is a closed union every projection is folded from, and a diagnostic stream in it would make "drop the projections and replay" mean something different. It is also not per-run, because the records most worth reading are the ones with no run to file them under.
+
+Three properties it must keep.
+
+- **It survives what it describes.** Writes are synchronous (`appendFileSync`), because a buffered logger loses exactly the records explaining why the process died. Process-level `uncaughtException` and `unhandledRejection` handlers record the kind, the stack frames and the ids of every run in flight, give the host one synchronous chance to journal those runs as ended — so `--resume` can pick them up instead of finding `running` for ever — and then exit. They do not swallow: an exception unwound an unknown number of frames, and a scheduler running on that heap makes decisions about worktrees and branches.
+- **It never fails its host.** A full disk or a read-only checkout makes every write a no-op and increments a counter the command reports on exit. Instrumentation that can take down a run is a liability, and "the log is empty" must stay distinguishable from "the log could not be written".
+- **It carries identifiers only, by construction, with one deliberate exception.** §11 says structured log fields hold opaque identifiers and never file contents. For the journal that is achievable by review — its payloads are a closed union. A log is called from anywhere, so the rule is enforced instead: a field admits only a string, number, boolean or null (an object is **dropped**, never stringified); values are capped; secret-by-name keys and the registered daemon token are redacted, including inside the exception below.
+
+  The exception is an error's **`message`**, recorded by default beside its kind. The case against it is real — a message is prose a dependency composed out of whatever it was holding, and a git diagnostic or a line of a source file can end up in one. The case for it is that §5.3 already puts every transcript and every gate log **verbatim** in the same store, under the same `purge`: the repository is already at rest in that directory, so excluding one string bought no protection worth having and cost the field that most often explains a failure. `message` is therefore the single allowlisted prose field — capped longer than an identifier, redacted like everything else — and `--log-detail kind` narrows to the kind alone for a checkout whose obligation is stricter than this store's own.
+
+Bounded by rotation rather than by `purge`: 8 MiB per file, five rotations kept. `purge` leaves it alone for the same reason it leaves `flow.db` alone — no repository contents, and it is the record of the failure somebody is about to ask about.
 
 *(Notifications were proposed here and have been promoted to a required feature — see §9.1.)*
 
