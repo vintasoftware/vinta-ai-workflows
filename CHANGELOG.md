@@ -185,10 +185,33 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     claimed per review turn rather than per phase — it has one session ledger and
     two concurrent reviews would collide over it — so one reviewer on a three-lane
     plan is a queue at the review step and not a serialised run.
+    - **"Cheapest qualified" has one exception, and it is about sessions.** A
+      member who already holds a session this phase would genuinely resume takes
+      it ahead of a cheaper member who would have to start cold — even when they
+      are more senior than the phase needs, and even when the member the plan
+      named is free. What it buys is the context a cold session spends its first
+      turn rebuilding; what it costs is the dearer model for that phase, which is
+      the smaller of the two bills. **The tier floor is untouched**: warmth
+      reorders the members who already qualify and never widens them, so a warm
+      junior still cannot take a Tier 3 phase.
+    - **Only when a session is genuinely already up.** "Warm" means the scheduler
+      asked its own session-reuse rules and got a yes — same pinned lane, same
+      harness, under the turn ceiling, not poisoned by a failed phase. A member
+      who has merely run before is not warm, because a promotion bought on a
+      resume that is then refused pays the senior's rate *and* cold-starts
+      anyway. With nobody warm, staffing is exactly what it was: a session is
+      being opened either way, and the plan's own level wins.
+    - An operator who picks the member by hand on a retry gets that member. A
+      saving nobody asked for does not overrule an explicit answer.
   - The run view reports who actually worked against who the plan said would.
     `substituted` is the figure to read beside a cost that overran: every
     substitution ran at or above the budgeted tier, so a run can be entirely green
-    and still have been staffed dearer than planned.
+    and still have been staffed dearer than planned. The phases promoted to reuse
+    a warm session are counted **within** that figure and reported apart from it —
+    a peer covering for a busy member costs what the plan budgeted, while a warm
+    promotion is the scheduler deliberately trading model rate against cold
+    starts, and folded together a run that promoted everything to the top tier
+    would read as an ordinary busy wave.
 
 - **`implement-plan` runs independent phases in parallel.** The plan now carries a
   dependency graph and the conductor schedules against it: a phase starts as soon as

@@ -2151,24 +2151,214 @@ describe('crew', () => {
     expectDrained(r)
   })
 
+  /**
+   * The ledgers are per member and do not leak between them.
+   *
+   * **The tiers here are load-bearing and were the other way round.** It used
+   * to be a warm `mid-a` followed by a `junior` phase, which stopped testing
+   * this the moment warmth became a staffing input: `mid-a` clears a junior's
+   * floor, so the second phase was promoted to `mid-a` and legitimately
+   * resumed — the assertion failed on the feature working, not on a leak. The
+   * senior's floor is the one thing a warm `mid-a` cannot clear, so `b` is
+   * still guaranteed to be staffed to a member who has never run, which is
+   * what makes "cold" mean "did not inherit" rather than "was not promoted".
+   */
   it('does not carry one member’s session into another member’s phase', async () => {
     const r = rig(
       makeWorkflow(
         [
           node('a', [], { crew: 'mid-a', pipeline: 'reuse' }),
-          node('b', ['a'], { crew: 'junior', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'senior', pipeline: 'reuse' }),
+        ],
+        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+      ),
+    )
+    await r.scheduler.run()
+
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['mid-a', 'senior'])
+    // `senior` has never run: its first turn is cold, whatever `mid-a` built up.
+    expect(sessionsOf(r, 'b')[0]).toEqual({
+      slot: 'main',
+      disposition: 'fresh',
+      reason: 'no_prior_session',
+    })
+    expectDrained(r)
+  })
+
+  /**
+   * Warmth, end to end, and the whole point of computing it from `planSession`
+   * rather than from "has this member run before".
+   *
+   * `a` is the senior's; `b` is `mid-a`'s and `mid-a` is free. Today's rule
+   * staffs `b` as written and opens a second session. The new one hands it to
+   * the senior — dearer per token, and it resumes instead of cold-starting,
+   * which is the trade. Both halves are asserted, because either alone would
+   * pass on a bug: the promotion without the resume is the failure mode that
+   * costs on both axes.
+   */
+  it('gives a phase to a warm senior rather than cold-start the member the plan named', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
+        ],
+        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // `mid` never appears: the Tier 2 phase ran on the Tier 4 model.
+    expect(modelsOf(r)).toEqual(['dear', 'dear', 'dear', 'dear'])
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'senior'])
+    // The reason token, which is the only thing that tells this apart from a
+    // busy-peer cover afterwards — and `mid-a` was never busy.
+    expect(crewEvents(r)[1]).toMatchObject({
+      member: 'senior',
+      substitute: true,
+      instead_of: 'mid-a',
+      reason: 'warm_session',
+    })
+    // What was actually bought: `b`'s first turn continued rather than opened.
+    expect(sessionsOf(r, 'b')[0]).toMatchObject({
+      slot: 'main',
+      disposition: 'reused',
+      session_id: 'claude-code-session-1',
+    })
+    expectDrained(r)
+  })
+
+  /**
+   * The other side of the user's rule: only when a session is already up. The
+   * senior here has never run, so both members would open one and the dearer
+   * model would buy nothing whatsoever. The plan's own level stands.
+   */
+  it('staffs a phase as written when the senior is cold, however idle they are', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'mid-a', pipeline: 'reuse' })],
+        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+      ),
+    )
+    await r.scheduler.run()
+
+    expect(modelsOf(r)).toEqual(['mid', 'mid'])
+    expect(crewEvents(r)).toEqual([{ member: 'mid-a', tier: 2, substitute: false }])
+    expectDrained(r)
+  })
+
+  /**
+   * The floor, against the new pressure. A junior with a warm session is the
+   * cheapest possible way to avoid a cold start, and a Tier 2 phase still does
+   * not go to them. Warmth reorders who qualifies; it never widens the set.
+   */
+  it('will not promote a phase down to a warm junior', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'junior', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
         ],
         { crew: { junior: CREW.junior, 'mid-a': CREW['mid-a'] }, lanes: 2 },
       ),
     )
     await r.scheduler.run()
 
-    // `junior` has never run: its first turn is cold, whatever `mid-a` built up.
-    expect(sessionsOf(r, 'b')[0]).toEqual({
-      slot: 'main',
-      disposition: 'fresh',
-      reason: 'no_prior_session',
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['junior', 'mid-a'])
+    expect(crewEvents(r)[1]).toMatchObject({ substitute: false })
+    expectDrained(r)
+  })
+
+  /**
+   * The refusals are the reason warmth is `planSession`'s answer and not a
+   * `has-run-before` flag. The senior's slot is at its ceiling, so its next
+   * turn is cold whatever we do — and a promotion bought on that would pay the
+   * Tier 4 rate *and* cold-start, which is strictly worse than changing
+   * nothing. `turn_ceiling` stands in for its siblings here because it is the
+   * one a test can reach without a second vendor.
+   */
+  it('does not count a member as warm when their next turn would be refused', async () => {
+    const workflow = WorkflowSchema.parse({
+      ...makeWorkflow(
+        [
+          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
+        ],
+        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+      ),
+      defaults: { harness: HARNESS, model: 'opus', pipeline: 'solo', max_session_turns: 1 },
     })
+    const r = rig(workflow)
+    await r.scheduler.run()
+
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'mid-a'])
+    expect(crewEvents(r)[1]).toMatchObject({ member: 'mid-a', substitute: false })
+    expectDrained(r)
+  })
+
+  /** A harness that cannot resume makes nobody warm, so nothing is promoted. */
+  it('promotes nothing on a harness that cannot continue a session', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'senior', pipeline: 'reuse' }),
+          node('b', ['a'], { crew: 'mid-a', pipeline: 'reuse' }),
+        ],
+        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 2 },
+      ),
+      { capabilities: { resume: false } },
+    )
+    await r.scheduler.run()
+
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'mid-a'])
+    expectDrained(r)
+  })
+
+  /**
+   * A member whose last phase failed is `prior_phase_failed` on their next
+   * turn, so they are cold — and promoting a phase onto a poisoned session
+   * would be buying the one context §15.2 deliberately throws away.
+   */
+  it('does not treat a poisoned member as warm', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'senior', pipeline: 'explode' }),
+          node('b', [], { crew: 'mid-a', pipeline: 'reuse' }),
+        ],
+        { crew: { 'mid-a': CREW['mid-a'], senior: CREW.senior }, lanes: 1 },
+      ),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses['a']).toBe('failed')
+    expect(crewEvents(r).find((event) => event['instead_of'] !== undefined)).toBeUndefined()
+    expect(crewEvents(r).map((event) => event['member'])).toEqual(['senior', 'mid-a'])
+    expectDrained(r)
+  })
+
+  /**
+   * Warmth is per slot, and a reviewer's session is filed under the reviewer.
+   * `SLOTS` spawns the implementer on `main` and the reviewer on `review`, so
+   * the checker being warm on `review` must not make it a candidate for a
+   * phase — the two roles are disjoint sets, and a staffing shortcut is exactly
+   * how that gets breached one layer down.
+   */
+  it('never lets a warm reviewer take a phase', async () => {
+    const r = rig(
+      makeWorkflow(
+        [
+          node('a', [], { crew: 'junior', pipeline: 'slots' }),
+          node('b', ['a'], { crew: 'junior', pipeline: 'slots' }),
+        ],
+        { crew: { junior: CREW.junior, checker: CHECKER }, lanes: 2 },
+      ),
+    )
+    await r.scheduler.run()
+
+    const phases = crewEvents(r).filter((event) => event['role'] !== 'reviewer')
+    expect(phases.map((event) => event['member'])).toEqual(['junior', 'junior'])
     expectDrained(r)
   })
 

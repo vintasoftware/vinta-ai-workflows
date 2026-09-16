@@ -69,6 +69,43 @@ describe('collectRunCrew', () => {
     expect(run.members.find((member) => member.member === 'senior')?.coveredFor).toBe(1)
   })
 
+  /**
+   * The two kinds of substitution do not cost the same thing to explain. A
+   * peer covering for a busy member is the roster absorbing its own load; a
+   * warm promotion is the scheduler choosing to pay a dearer model to avoid a
+   * cold start, on a phase that could have run as planned. Folded into one
+   * number, a run that promoted everything to the top tier reads as an
+   * ordinary busy wave.
+   */
+  it('counts warm promotions inside the substitutions, not beside them', () => {
+    const run = collectRunCrew(
+      source([
+        claim('p1', { member: 'mid-a', tier: 2, substitute: false }),
+        claim('p2', { member: 'mid-b', tier: 2, substitute: true, instead_of: 'mid-a', reason: 'peer_busy' }),
+        claim('p3', { member: 'senior', tier: 4, substitute: true, instead_of: 'mid-a', reason: 'warm_session' }),
+      ]),
+      'r1',
+    )
+
+    expect(run.substituted).toBe(2)
+    expect(run.warmReuse).toBe(1)
+  })
+
+  /**
+   * A `substitute` row from before there were two ways to be one. `peer_busy`
+   * was the only kind then, so an absent reason is that — never a warm
+   * promotion, which is the direction that would invent an overspend.
+   */
+  it('reads a substitution with no reason as a peer covering, not a promotion', () => {
+    const run = collectRunCrew(
+      source([claim('p1', { member: 'senior', tier: 4, substitute: true, instead_of: 'mid-a' })]),
+      'r1',
+    )
+
+    expect(run.substituted).toBe(1)
+    expect(run.warmReuse).toBe(0)
+  })
+
   it('names the declared members who took nothing', () => {
     const run = collectRunCrew(
       source([claim('p1', { member: 'junior', tier: 1, substitute: false })]),
@@ -98,6 +135,7 @@ describe('collectRunCrew', () => {
       members: [],
       asPlanned: 0,
       substituted: 0,
+      warmReuse: 0,
       idle: [],
     })
   })

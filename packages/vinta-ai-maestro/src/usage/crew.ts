@@ -14,7 +14,8 @@
  * a live run could not answer questions about the run that just ended.
  *
  * Nothing here reads a prompt, a transcript or a vendor's words: a row is a
- * member id, an integer tier and two booleans (§11).
+ * member id, an integer tier, a boolean and a reason token from a closed set
+ * (§11).
  */
 import type { StoredEvent } from '../journal/events.ts'
 
@@ -34,14 +35,29 @@ export interface RunCrew {
   /** Node attempts that went to the member the plan named. */
   readonly asPlanned: number
   /**
-   * Node attempts that went to somebody else because the named member was busy.
+   * Node attempts that went to somebody other than the member the plan named.
    *
-   * Never a failure on its own — substitution is what keeps a wave from
-   * serialising behind one agent. It is the number to read against the plan's
-   * cost estimate, because every one of these ran at a tier at or above the one
-   * the plan budgeted for.
+   * Never a failure on its own — a substitution is either a wave declining to
+   * serialise behind one busy agent, or a phase reusing a session that was
+   * already open. It is the number to read against the plan's cost estimate,
+   * because every one of these ran at a tier at or above the one the plan
+   * budgeted for, and `warmReuse` says how many of them were bought
+   * deliberately rather than forced.
    */
   readonly substituted: number
+  /**
+   * Of those, the ones taken to reuse a session that was already open.
+   *
+   * A subset of `substituted`, not a sibling of it — every warm promotion is
+   * still a divergence from the plan's staffing. It is counted apart because
+   * the two are answerable in opposite directions. A `peer_busy` substitution
+   * is the roster absorbing its own load and costs what was budgeted; a warm
+   * one is the scheduler choosing to pay a dearer model to avoid a cold start,
+   * a trade that is only worth making while it actually saves one. Folded into
+   * one number, a run that promoted every phase to the top tier looks exactly
+   * like a busy wave.
+   */
+  readonly warmReuse: number
   /**
    * Members the roster declared who took nothing here. Empty on a completed
    * run of a validated workflow — `validate.ts` refuses a member assigned no
@@ -59,6 +75,8 @@ interface Claim {
   readonly member: string
   readonly tier: number
   readonly substitute: boolean
+  /** Why, when the row says. Absent on rows written before it did (§15.6). */
+  readonly reason: string | null
 }
 
 export function collectRunCrew(
@@ -69,6 +87,7 @@ export function collectRunCrew(
   const byMember = new Map<string, { tier: number; nodes: number; coveredFor: number }>()
   let asPlanned = 0
   let substituted = 0
+  let warmReuse = 0
 
   for (const event of source.crewAssignments(runId)) {
     const claim = read(event)
@@ -82,6 +101,7 @@ export function collectRunCrew(
     if (claim.substitute) {
       entry.coveredFor += 1
       substituted += 1
+      if (claim.reason === 'warm_session') warmReuse += 1
     } else {
       asPlanned += 1
     }
@@ -102,6 +122,7 @@ export function collectRunCrew(
     members,
     asPlanned,
     substituted,
+    warmReuse,
     idle: declared.filter((member) => !byMember.has(member)).sort(),
   }
 }
@@ -114,5 +135,11 @@ function read(event: StoredEvent): Claim | null {
   const tier = payload['tier']
   if (typeof member !== 'string' || member === '') return null
   if (typeof tier !== 'number' || !Number.isFinite(tier)) return null
-  return { member, tier, substitute: payload['substitute'] === true }
+  const reason = payload['reason']
+  return {
+    member,
+    tier,
+    substitute: payload['substitute'] === true,
+    reason: typeof reason === 'string' ? reason : null,
+  }
 }

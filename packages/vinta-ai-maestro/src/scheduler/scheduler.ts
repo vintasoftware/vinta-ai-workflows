@@ -92,13 +92,14 @@ import {
   assignCrew,
   assignReviewer,
   type CrewDecision,
+  implementers,
   laneHolders,
   type ReviewDecision,
 } from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import { composeSpawnPrompt, PromptError, type Reorientation } from '../prompts/index.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
-import type { Node, Pipeline, Workflow } from '../types.ts'
+import type { Node, Pipeline, SideEffect, Workflow } from '../types.ts'
 
 /** The pool a node is dispatched into. Required of every workflow (§5.1). */
 const LANE = 'lane'
@@ -1005,6 +1006,17 @@ export class Scheduler {
         assigned: state.retryMember ?? state.node.crew,
         crew: this.#workflow.crew,
         busy: this.#busyCrew,
+        // Recomputed every pass, not hoisted: this loop only goes round again
+        // because somebody settled, and settling is exactly what writes a
+        // ledger and clears a poisoning. A warm set from before the wait would
+        // describe a roster that no longer exists.
+        //
+        // Withheld entirely when the operator named the member. `retryMember`
+        // is an answer to a question we asked them, and promoting away from it
+        // to save a cold start would quietly overrule the person who was shown
+        // the menu — a saving nobody asked for, spent against an explicit
+        // instruction.
+        ...(state.retryMember === null ? { warm: this.#warmCrew(state) } : {}),
       })
 
       if (decision.kind === 'unstaffed') return
@@ -1026,6 +1038,7 @@ export class Scheduler {
             tier: decision.tier,
             substitute: decision.substitute,
             ...(decision.insteadOf === null ? {} : { instead_of: decision.insteadOf }),
+            ...(decision.reason === null ? {} : { reason: decision.reason }),
           },
         })
         return
@@ -1036,6 +1049,122 @@ export class Scheduler {
       // signal the dispatch loop does rather than polling.
       await this.#changed()
     }
+  }
+
+  /**
+   * Which free members would *resume* a session if they took this node, rather
+   * than open one.
+   *
+   * `assignCrew` spends real money on this answer — a warm member takes a phase
+   * ahead of a cheaper cold one, which means a dearer model for the whole phase
+   * — so the one thing it must not be is optimistic. "Has run before" would be
+   * optimistic: a member can hold a ledger entry that §15.2 will refuse on the
+   * next turn for four separate reasons, and a promotion bought on a refusal
+   * pays the senior's rate *and* cold-starts anyway. Strictly worse than doing
+   * nothing, and invisible — the phase completes.
+   *
+   * So this does not re-implement the rules; it runs them. `planSession` is
+   * called with the inputs the spawn will genuinely present, and `continuation`
+   * is the answer. The two can therefore not drift: a rule added to §15.2
+   * tightens this in the same commit, with no second list to remember.
+   *
+   * The inputs a claim can know, and why each is the real one:
+   *
+   * - **lane** — `#laneFor`, the member's own worktree, fixed for the run. This
+   *   is the whole reason the optimization exists at all: an anonymous lane
+   *   made `lane_changed` fire on nearly every cross-phase turn, and a pinned
+   *   one makes the answer usually yes.
+   * - **harness** — resolved exactly as `#harnessOf` will for an implementer
+   *   turn: the member's own override, then the node's, then the default. A
+   *   member on `codex` is cold for a node pinned to `claude-code`, and
+   *   `harness_changed` is what says so.
+   * - **ledger, poisoned, maxTurns** — the live ones, so `turn_ceiling` and a
+   *   member whose last phase failed both read as cold here.
+   * - **slot** — the ones this node's own pipeline declares for an implementer
+   *   turn. A member warm on `review` is not warm for a phase that will spawn
+   *   `main`, and the ledger is keyed by slot, so guessing would be wrong in
+   *   the expensive direction.
+   *
+   * `fixRounds: 0` because a claim starts an attempt; `takeoverSessionId: null`
+   * because §9's handoff belongs to a node, not to a member the claim is still
+   * choosing between.
+   */
+  #warmCrew(state: NodeState): ReadonlySet<string> {
+    const warm = new Set<string>()
+    if (!this.#staffed) return warm
+
+    const slots = this.#implementerSlots(state.pipeline)
+    if (slots.length === 0) return warm
+
+    for (const member of implementers(this.#workflow.crew)) {
+      // A busy member is not a candidate, warm or not, and asking costs a
+      // `planSession` per slot for an answer nobody reads.
+      if (this.#busyCrew.has(member.id)) continue
+      const ledger = this.#memberSessions.get(member.id)
+      // Read, never created. `#ledgerFor` would file an empty map for every
+      // member the scheduler ever *considered*, which is a different set from
+      // the members who ever ran — and that map is what `#restartAttempt` and
+      // the reuse rollup read as "this member has history".
+      if (ledger === undefined || ledger.size === 0) continue
+
+      const harnessId = member.harness ?? state.node.harness ?? this.#workflow.defaults.harness
+      const adapter = this.#options.adapters[harnessId]
+      // No adapter registered is a spawn-time failure (`#adapter` throws), and
+      // a staffing decision is not the place to raise it. Cold is the safe
+      // reading: it changes nothing about how the node then fails.
+      if (adapter === undefined) continue
+
+      const resumable = slots.some(
+        (slot) =>
+          planSession({
+            declaredSlot: slot,
+            role: 'implementer',
+            canResume: adapter.capabilities.resume,
+            harnessId: adapter.id,
+            lane: this.#laneFor(member.id),
+            ledger,
+            nodeId: state.node.id,
+            maxTurns: this.#workflow.defaults.max_session_turns,
+            poisoned: this.#poisoned.has(member.id),
+            fixRounds: 0,
+            maxFixRounds: state.node.max_fix_rounds,
+            takeoverSessionId: null,
+          }).continuation,
+      )
+      if (resumable) warm.add(member.id)
+    }
+
+    return warm
+  }
+
+  /**
+   * The slots this pipeline names on an implementer spawn.
+   *
+   * Roles, not just slot names: `main` is shared by `implement` and `fix` in
+   * the standard pipeline while `review` belongs to the reviewer, and a
+   * reviewer's session is filed under the reviewer's own ledger. Counting it
+   * here would make a member look warm for a phase on the strength of a session
+   * that this claim will never reach.
+   *
+   * A pipeline that names no slot has opted out of §15 entirely, so nobody is
+   * ever warm for it and the staffing question never arises.
+   */
+  #implementerSlots(pipeline: Pipeline): readonly string[] {
+    const slots = new Set<string>()
+    const scan = (effects: readonly SideEffect[]): void => {
+      for (const effect of effects) {
+        if (!effect.enabled || effect.definitionId !== 'spawn_agent') continue
+        if (effect.params['role'] !== 'implementer') continue
+        const slot = effect.params['session']
+        if (typeof slot === 'string' && slot.length > 0) slots.add(slot)
+      }
+    }
+    for (const node of pipeline.states) {
+      scan(node.onEnter)
+      scan(node.onLeave)
+    }
+    for (const transition of pipeline.transitions) scan(transition.effects)
+    return [...slots]
   }
 
   /**

@@ -261,6 +261,7 @@ export function createApi(options: ApiOptions): Hono {
         members: crew.members.map((member) => ({ ...member })),
         asPlanned: crew.asPlanned,
         substituted: crew.substituted,
+        warmReuse: crew.warmReuse,
         idle: [...crew.idle],
       },
       inputTokens: usage.totals.inputTokens,
