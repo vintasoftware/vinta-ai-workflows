@@ -345,6 +345,22 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A session cannot inherit a machine's decision to stop compacting.** All
+  three harnesses compact automatically when their context fills — there was
+  never a flag to turn on — but each honours an environment variable that turns
+  it off, and an agent spawned on a machine carrying one would run a long phase
+  straight into a wall it was supposed to be able to survive. Those variables
+  are now stripped from every child the daemon spawns, and claude-code's own
+  setting is reasserted in the per-lane file beside its permission rules. The
+  window itself is left alone: an operator who narrowed theirs compacts earlier,
+  which is not the failure this guards against. A harness that compacts declares
+  it, and a compaction the harness reports is a transcript row like any other.
+
+  One consequence worth knowing: `max_session_turns` used to be a proxy for "this
+  session is nearing a context window it will die on". That death no longer
+  happens, so the ceiling now guards a different thing — a session whose memory
+  was replaced by a summary of itself, and which answers just as confidently.
+
 - **Agent prompts name gates by id rather than printing their commands.** The
   implementer's step 4 was descriptive — "Outer gate… These run against your
   lane:" followed by the gate commands — and implementers were observed reading
@@ -435,6 +451,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recall.
 
 ### Fixed
+
+- **An agent taking a lease left the resource panel showing the one before it.**
+  The scheduler's own gate-pool transitions are journalled as `gate_pool`
+  events, so the browser re-reads the snapshot when one lands. An agent's lease,
+  taken through `vinta-ai-maestro with`, was only a row in the `leases` table —
+  correct in the daemon's projection and announced to nobody. A projection
+  nobody is told changed is a projection nobody sees change, so the panel showed
+  whatever holders it had last time some unrelated event happened to arrive, and
+  the waits it was stalest about were the agent ones, which are the long ones.
+  The broker now journals `agent_lease` on both edges. A renewal writes nothing:
+  it is a heartbeat on a lease already reported, and journalling it would bury
+  the two rows that are transitions under a liveness log.
 
 - **An agent waiting for a semaphore could be overtaken without bound.** A
   `vinta-ai-maestro with` wait is served in fifteen-second hops so no client
