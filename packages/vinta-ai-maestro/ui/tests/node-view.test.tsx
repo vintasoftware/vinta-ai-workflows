@@ -54,6 +54,10 @@ const ALL_KINDS = [
   entry({ type: 'usage', input: 1200, output: 340, costUsd: 0.12 }),
   entry({ type: 'error', message: 'the harness stream ended early' }),
   entry({ type: 'session_ended', result: 'ok' }),
+  // Not an `AgentEvent`: the daemon writes this one itself, so a phase's
+  // transcript holds the thing that judged it as well as the agents that
+  // worked on it (`journal/transcript.ts`).
+  entry({ type: 'gate_run', gate: 'unit', exitCode: 1, status: 'failed', cached: false }),
 ]
 
 test('every normalized event kind renders, and the operator’s own message is attributed to them', async () => {
@@ -72,7 +76,7 @@ test('every normalized event kind renders, and the operator’s own message is a
   daemon = stub
   const { container } = open(stub, 'impl')
 
-  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(11))
+  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(12))
 
   // Not one kind falls through to a blank row, and no two look alike.
   const labels = TRANSCRIPT_KINDS.map((kind) => {

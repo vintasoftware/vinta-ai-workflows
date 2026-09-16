@@ -330,12 +330,23 @@ const sessionsOf = (rig_: Rig, nodeId: string): unknown[] =>
     .filter((event) => event.type === 'node_session' && event.nodeId === nodeId)
     .map((event) => event.payload)
 
-/** The node's normalized transcript, which is where a session's own record is. */
-const transcriptOf = (rig_: Rig, nodeId: string): { type: string; text?: string; result?: string }[] =>
+/**
+ * The node's normalized transcript, which is where a session's own record is.
+ *
+ * Entries also carry `by` — who wrote the line (`journal/transcript.ts`) — which
+ * is why the assertions below match on the fields they mean rather than on the
+ * whole object. A test that pinned the exact shape would fail on every key the
+ * daemon ever adds, without any of them being wrong.
+ */
+const transcriptOf = (
+  rig_: Rig,
+  nodeId: string,
+): { type: string; text?: string; result?: string; by?: { role: string; slot?: string } }[] =>
   rig_.journal.tailTranscript('run-1', nodeId, 100) as {
     type: string
     text?: string
     result?: string
+    by?: { role: string; slot?: string }
   }[]
 
 /** No leaked leases: every pool back to zero, and nobody still queued. */
@@ -1185,6 +1196,45 @@ describe('standard-phase under the scheduler', () => {
     expect(r.calls.some((call) => call.effect === 'e-failed')).toBe(true)
     expectDrained(r)
   })
+
+  /**
+   * Every spawn on a node appends to the same transcript file whatever its
+   * role, so a phase that took two fix rounds holds five agents' output in one
+   * stream. Both facts needed to tell them apart — the role and the session
+   * slot — were in scope at the append and simply not written down, and the one
+   * question the file could not answer was who said what.
+   */
+  it('records which agent wrote each transcript entry, and on which slot', async () => {
+    const r = rig(
+      standardWorkflow([node('a', [], { gates: ['unit'] })]),
+      {
+        outcomes: {
+          'e-review': { facts: { review: { verdict: 'fail' } } },
+          'e-gate': { facts: { gate: { exit_code: 0 } } },
+        },
+      },
+    )
+
+    await r.scheduler.run()
+
+    const attributions = r.journal
+      .tailTranscript('run-1', 'a', 200)
+      .map((entry) => (entry as { by?: { role: string; slot?: string } }).by)
+
+    // Not one entry unattributed, and the roles are the pipeline's own.
+    expect(attributions.every((by) => by !== undefined)).toBe(true)
+    expect(new Set(attributions.map((by) => by?.role))).toEqual(
+      new Set(['implementer', 'reviewer', 'fixer']),
+    )
+    // §15's slots: the fixer continues the implementer's, the reviewer holds
+    // its own — which is exactly what the transcript now says out loud.
+    const slotFor = (role: string): Set<string | undefined> =>
+      new Set(attributions.filter((by) => by?.role === role).map((by) => by?.slot))
+    expect(slotFor('implementer')).toEqual(new Set(['main']))
+    expect(slotFor('fixer')).toEqual(new Set(['main']))
+    expect(slotFor('review')).toEqual(new Set())
+    expect(slotFor('reviewer')).toEqual(new Set(['review']))
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1265,10 +1315,16 @@ describe('§9 operations', () => {
     expect(report.statuses).toEqual({ a: 'done' })
     // The message reached the session: §15's rule is that it shows up in the
     // transcript of the run it steered.
-    expect(transcriptOf(r, 'a')).toContainEqual({
-      type: 'user_message',
-      text: 'the composite index is the fast one',
-    })
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({
+        type: 'user_message',
+        text: 'the composite index is the fast one',
+        // §7: the operator's, never the implementer's — even though the adapter
+        // echoes it back on the implementer's own event stream, which is how it
+        // reaches this file in the first place.
+        by: { role: 'operator' },
+      }),
+    )
     expect(operationsOf(r, 'a')).toEqual([
       { op: 'add_context', text: 'the composite index is the fast one', delivery: 'sent' },
     ])
@@ -1293,10 +1349,12 @@ describe('§9 operations', () => {
     // delivery moment differs (the next spawn, via `AgentTask.operatorText`),
     // but the record of what the operator said must not. That is what §7's
     // `user_message` variant exists for.
-    expect(transcriptOf(r, 'a')).toContainEqual({
-      type: 'user_message',
-      text: 'prefer a migration over a backfill',
-    })
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({
+        type: 'user_message',
+        text: 'prefer a migration over a backfill',
+      }),
+    )
     // Delivered on the node's next resume, into the guard context every later
     // effect reads — including the one that composes the next agent turn.
     const next = r.calls.find((call) => call.effect === 'e-2')
@@ -1319,7 +1377,9 @@ describe('§9 operations', () => {
 
     expect(report.statuses).toEqual({ a: 'done' })
     // The interrupt reached the session: its first turn ended early and said so.
-    expect(transcriptOf(r, 'a')).toContainEqual({ type: 'session_ended', result: 'interrupted' })
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'session_ended', result: 'interrupted' }),
+    )
     const next = r.calls.find((call) => call.effect === 'e-2')
     expect(next?.context.human?.['pending_context']).toBe('use the queue, not a cron')
     expect(operationsOf(r, 'a')).toEqual([
@@ -1384,7 +1444,9 @@ describe('§9 operations', () => {
 
     expect(report.statuses).toEqual({ a: 'failed', b: 'blocked', c: 'blocked', d: 'done' })
     expect(report.failures).toEqual({ a: 'aborted by the operator' })
-    expect(transcriptOf(r, 'a')).toContainEqual({ type: 'session_ended', result: 'interrupted' })
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'session_ended', result: 'interrupted' }),
+    )
     expect(operationsOf(r, 'a')).toEqual([{ op: 'abort', delivery: 'sent' }])
     expectDrained(r)
   })
@@ -1554,7 +1616,9 @@ describe('§9 take over', () => {
     await target?.interrupt()
     r.stall.release()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
-    expect(transcriptOf(r, 'a')).toContainEqual({ type: 'session_ended', result: 'interrupted' })
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'session_ended', result: 'interrupted' }),
+    )
     expect(r.pools.held('lane')).toBe(1)
 
     // §9's last step, which the channel hangs off the terminal's exit.

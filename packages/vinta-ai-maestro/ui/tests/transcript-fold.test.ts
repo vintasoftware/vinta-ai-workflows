@@ -96,3 +96,134 @@ test('prose, thinking and tools are three shapes', () => {
   // to hide: it is the one `tool`-authored entry that stays prose.
   expect(present({ type: 'permission_request', tool: 'Bash', detail: {} }).shape).toBe('prose')
 })
+
+// ---------------------------------------------------------------------------
+// Who said it
+// ---------------------------------------------------------------------------
+
+const by = (role: string, entry: unknown): unknown => ({ ...(entry as object), by: { role } })
+
+/**
+ * The scheduler appends to `state.node.id` for every spawn whatever the role, so
+ * a phase's transcript already held the implementer, the reviewer and every fix
+ * round, in order and indistinguishable. The role was in scope at the append and
+ * simply not written down.
+ */
+test('an entry says which agent produced it', () => {
+  const view = present(by('reviewer', said('VERDICT: fail')))
+
+  expect(view.role).toBe('reviewer')
+  expect(view.body).toBe('VERDICT: fail')
+})
+
+test('a slot rides along when the turn ran on one', () => {
+  const view = present({ type: 'assistant_text', text: 'done', by: { role: 'fixer', slot: 'main' } })
+
+  expect(view.role).toBe('fixer')
+  expect(view.slot).toBe('main')
+})
+
+/**
+ * `by` is a sibling key the daemon only started writing recently. Every line of
+ * every run before that lacks it, and an old transcript has to read as a
+ * transcript rather than as an error — which is the whole reason it is a sibling
+ * and not an envelope.
+ */
+test('an entry written before attribution existed still renders', () => {
+  const view = present(said('from an older run'))
+
+  expect(view.role).toBeNull()
+  expect(view.slot).toBeNull()
+  expect(view.body).toBe('from an older run')
+  expect(view.kind).toBe('assistant_text')
+})
+
+/** A `by` that is there but malformed is not worth failing a row over. */
+test('an unreadable attribution reads as none', () => {
+  expect(present({ type: 'assistant_text', text: 'x', by: 'reviewer' }).role).toBeNull()
+  expect(present({ type: 'assistant_text', text: 'x', by: { slot: 'main' } }).role).toBeNull()
+})
+
+/** Two agents thinking in sequence is two thoughts, not one. */
+test('a change of author breaks a thinking group', () => {
+  const rows = fold(
+    [by('implementer', thinking('mine')), by('reviewer', thinking('theirs'))],
+    0,
+  )
+
+  expect(rows).toHaveLength(2)
+  expect(rows.map((row) => row.role)).toEqual(['implementer', 'reviewer'])
+})
+
+test('one author’s consecutive thinking still folds', () => {
+  const rows = fold([by('fixer', thinking('a')), by('fixer', thinking('b'))], 0)
+
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.role).toBe('fixer')
+})
+
+/**
+ * Gates were the one thing missing from a phase's transcript entirely: four
+ * agents' output in order, and no sign of the thing that judged them.
+ */
+test('a gate run is a row, carrying identifiers and an exit code', () => {
+  const view = present({
+    type: 'gate_run',
+    gate: 'unit',
+    exitCode: 1,
+    status: 'failed',
+    cached: false,
+    by: { role: 'gate' },
+  })
+
+  expect(view.kind).toBe('gate_run')
+  expect(view.role).toBe('gate')
+  expect(view.label).toContain('unit')
+  expect(view.tone).toBe('error')
+  // Never folded: the verdict is what the rest of the phase turns on.
+  expect(view.shape).toBe('prose')
+})
+
+test('a cached gate does not claim to have run', () => {
+  const view = present({
+    type: 'gate_run',
+    gate: 'lint',
+    exitCode: 0,
+    status: 'passed',
+    cached: true,
+    by: { role: 'gate' },
+  })
+
+  expect(view.tone).toBe('ok')
+  expect(view.body).toContain('cached')
+})
+
+/**
+ * §7, in the one place it is easy to lose. Steering does not arrive out of band:
+ * the adapter injects it and echoes it back as a `user_message` on the agent's
+ * own event stream, so it reaches the append inside the same loop as everything
+ * the model said. Stamping the loop's role would file the operator's words under
+ * the implementer that received them.
+ */
+test('the operator’s steering is never the agent’s', () => {
+  const view = present({ type: 'user_message', text: 'prefer a migration', by: { role: 'operator' } })
+
+  expect(view.role).toBe('operator')
+  expect(view.author).toBe('operator')
+  expect(view.label).toContain('Operator')
+})
+
+/**
+ * A band above the row already names the author, so the row does not repeat it.
+ * An *un*attributed row still has to say it, because nothing else will.
+ */
+test('an attributed row stops repeating who it is', () => {
+  expect(present(said('done')).label).toBe('Agent')
+  expect(present(by('implementer', said('done'))).label).toBe('')
+
+  expect(present(thinking('hmm')).label).toBe('Agent · thinking')
+  expect(present(by('reviewer', thinking('hmm'))).label).toBe('thinking')
+
+  // Labels that describe the *event* stay useful under any band.
+  expect(present(by('fixer', used('Bash', { command: 'ls' }))).label).toBe('Tool · Bash')
+})
