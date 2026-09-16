@@ -306,7 +306,7 @@ export async function runCommand(
   }
 
   const pools = new ResourcePools(workflow.resources)
-  const agentLeases = new AgentLeaseBroker(pools, journal)
+  const agentLeases = new AgentLeaseBroker(pools, journal, runId)
   const admission = new AdmissionControl({
     journal,
     runId,

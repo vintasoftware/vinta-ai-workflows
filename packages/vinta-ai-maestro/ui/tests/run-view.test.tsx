@@ -2,6 +2,7 @@ import { cleanup, waitFor } from '@testing-library/react'
 import { afterEach, expect, test } from 'vitest'
 import {
   harness,
+  leaseEvent,
   node,
   resource,
   RUN_ID,
@@ -133,6 +134,78 @@ test('pool occupancy and the gate queue update live', async () => {
   expect(textOf(container, '[data-waiting]')).toBe('3 waiting')
   expect(container.querySelector('[data-waiting] .chip')?.getAttribute('data-tone')).toBe('wait')
   expect(textOf(container, '[data-holder="impl"]')).toContain('impl holds test-suite')
+})
+
+/**
+ * The same panel, moved by the agent's own lease rather than by something
+ * else that happened to be journalled at the same time.
+ *
+ * The test above emits a `node_status` to make the snapshot be re-read, which
+ * is how this panel used to update at all: an agent taking a semaphore wrote a
+ * `leases` row and nothing else, so the holders on screen were whatever they
+ * had been the last time an unrelated event arrived. Here the lease event is
+ * the only traffic on the socket, and the panel still has to follow it — no
+ * new polling, and no new handling in the projection, which folds node status
+ * and nothing else.
+ */
+test('an agent taking and dropping a lease moves the panel on its own', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: {
+      [RUN_ID]: snapshot({
+        nodes: [node('impl', 'running')],
+        resources: [resource('test-suite', 1, 0)],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+  await waitFor(() =>
+    expect(textOf(container, '[data-resource="test-suite"] [data-occupancy]')).toBe('0 / 1'),
+  )
+
+  stub.setSnapshot(
+    RUN_ID,
+    snapshot({
+      nodes: [node('impl', 'running')],
+      resources: [resource('test-suite', 1, 1, ['impl'])],
+      gateQueue: {
+        waiting: 1,
+        holders: [{ resource: 'test-suite', nodeId: 'impl', acquiredAt: Date.now() }],
+      },
+    }),
+  )
+  stub.emit(leaseEvent('impl', 'acquired', ['test-suite']))
+
+  await waitFor(() =>
+    expect(textOf(container, '[data-resource="test-suite"] [data-occupancy]')).toBe('1 / 1'),
+  )
+  expect(textOf(container, '[data-holder="impl"]')).toContain('impl holds test-suite')
+  expect(textOf(container, '[data-waiting]')).toBe('1 waiting')
+
+  // And back again on release, which is the half that makes a queue look like
+  // it is draining rather than wedged.
+  stub.setSnapshot(
+    RUN_ID,
+    snapshot({
+      nodes: [node('impl', 'running')],
+      resources: [resource('test-suite', 1, 0)],
+    }),
+  )
+  stub.emit(leaseEvent('impl', 'released', ['test-suite']))
+
+  await waitFor(() =>
+    expect(textOf(container, '[data-resource="test-suite"] [data-occupancy]')).toBe('0 / 1'),
+  )
+  expect(textOf(container, '[data-waiting]')).toBe('0 waiting')
+  expect(container.textContent).toContain('No gate held.')
+
+  // The node is untouched by all of it: a lease is capacity, not status, and
+  // the graph must not have invented a transition from these frames.
+  expect(cardColorOf(container, 'impl')).toBe('var(--vdag-status-running)')
+  // One socket, and every event went down it — no second connection, and
+  // nothing here added a timer.
+  expect(stub.connections).toHaveLength(1)
 })
 
 test('a run with no nodes and no events renders', async () => {

@@ -100,6 +100,20 @@ export function statusEvent(nodeId: string, status: NodeStatus) {
 }
 
 /**
+ * One edge of a lease an agent holds. Identifiers only, exactly as
+ * `src/resources/agent-leases.ts` writes it: the browser never sees what
+ * command the lease was taken for, because nothing upstream records one.
+ */
+export function leaseEvent(
+  nodeId: string,
+  phase: 'acquired' | 'released',
+  resources: string[],
+  leaseId = `lease-${nodeId}`,
+) {
+  return { nodeId, type: 'agent_lease', payload: { phase, lease_id: leaseId, resources } }
+}
+
+/**
  * A transcript entry, typed as the daemon's own `TranscriptEntry` — the harness
  * events plus the kinds the daemon writes itself, each optionally attributed.
  * The journal stores exactly this stream (§5.3) and the API serves it as

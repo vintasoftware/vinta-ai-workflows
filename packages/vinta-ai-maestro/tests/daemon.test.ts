@@ -207,7 +207,7 @@ async function rig(
   journal.createRun(RUN_ID, workflow)
 
   const pools = new ResourcePools(workflow.resources, { agingMs: 0 })
-  const agentLeases = new AgentLeaseBroker(pools, journal)
+  const agentLeases = new AgentLeaseBroker(pools, journal, RUN_ID)
   const control = recordingControl()
   const warnings: string[] = []
   const daemon = await startDaemon({
@@ -679,6 +679,70 @@ describe('agent-held leases', () => {
     })
     expect(holder.status).toBe(400)
     expect(ErrorResponseSchema.parse(holder.body).error).toBe('invalid_holder')
+  })
+
+  /**
+   * Both edges reach a watching client, over the socket, without anything else
+   * being journalled to carry them.
+   *
+   * This is the whole point of the event. The `leases` row was always written
+   * and the snapshot always reported it correctly — but the browser re-reads
+   * the snapshot when a frame arrives, so a holder set that changed with no
+   * frame behind it changed where nobody was looking. Asserted end to end
+   * because the defect lived in the gap between the two: a unit test on the
+   * broker proves a row was appended, not that a connected client was told.
+   */
+  it('tells a connected client when an agent takes a lease and when it drops it', async () => {
+    const r = await rig()
+    const connection = await connect(r.daemon, `?run=${RUN_ID}&token=${r.daemon.token}`)
+    if (!('socket' in connection)) throw new Error('handshake refused')
+    await until(() => (connection.frames.length > 0 ? true : undefined), 'the backlog frame')
+
+    const leaseEvents = () =>
+      connection.frames
+        .flatMap((frame) => EventFrameSchema.parse(frame).events)
+        .filter((event) => event.type === 'agent_lease')
+
+    const acquired = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a' },
+    })
+    const lease = AgentLeaseGrantSchema.parse(acquired.body)
+
+    await until(() => (leaseEvents().length === 1 ? true : undefined), 'the acquire frame')
+    expect(leaseEvents()[0]).toMatchObject({
+      nodeId: 'a',
+      type: 'agent_lease',
+      payload: { phase: 'acquired', lease_id: lease.leaseId, resources: ['test-suite'] },
+    })
+
+    // A renewal is a heartbeat on a lease already announced. It must not put a
+    // frame on the wire, or a long command buries the run's log in its own
+    // liveness checks and every one of them costs the browser a snapshot read.
+    expect(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/leases/${lease.leaseId}`, { method: 'PUT' }))
+        .status,
+    ).toBe(200)
+
+    await call(r.daemon, `/api/runs/${RUN_ID}/leases/${lease.leaseId}`, { method: 'DELETE' })
+    await until(() => (leaseEvents().length === 2 ? true : undefined), 'the release frame')
+    expect(leaseEvents()[1]).toMatchObject({
+      nodeId: 'a',
+      payload: { phase: 'released', lease_id: lease.leaseId, resources: ['test-suite'] },
+    })
+
+    // Exactly two: the renewal above contributed nothing, and the second
+    // DELETE below is idempotent in the record as well as in the pool.
+    await call(r.daemon, `/api/runs/${RUN_ID}/leases/${lease.leaseId}`, { method: 'DELETE' })
+    expect(leaseEvents()).toHaveLength(2)
+
+    // §11: pool ids and a lease id, beside the node id the event is keyed by.
+    // Asserted as the whole key set, so a field added later that carried a
+    // command line fails here rather than slipping past a substring check.
+    expect(leaseEvents().map((event) => Object.keys(event.payload as object).sort())).toEqual([
+      ['lease_id', 'phase', 'resources'],
+      ['lease_id', 'phase', 'resources'],
+    ])
   })
 })
 
