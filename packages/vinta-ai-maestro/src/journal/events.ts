@@ -58,6 +58,18 @@ export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort'
  */
 export type GatePoolPhase = 'requested' | 'granted' | 'released'
 
+/**
+ * Which edge of an agent-held lease an `agent_lease` event marks.
+ *
+ * Two, where `gate_pool` has three, and the missing one is `requested`. An
+ * agent does not queue *here*: the daemon's lease endpoint answers "not yet"
+ * on a short cycle and the client asks again, so a wait is a sequence of
+ * requests that each entered and left the pool queue. A `requested` row per
+ * hop would count polls, not waiting — and the one row that could honestly
+ * mark the start of a wait is the client's, which this process never sees.
+ */
+export type AgentLeasePhase = 'acquired' | 'released'
+
 /** The gate runner's verdict, as journalled. Mirrors `GateStatus` in `gates/runner.ts`. */
 export type GateStatus = 'passed' | 'failed' | 'timed_out'
 
@@ -304,6 +316,43 @@ interface NodePayloads {
     readonly gate: string
     readonly exit_code: number
     readonly status: GateStatus
+  }
+  /**
+   * One edge of a lease an *agent* holds — a command it runs inside its own
+   * turn through `vinta-ai-maestro with`, brokered by `resources/agent-leases.ts`.
+   *
+   * It exists because writing the `leases` row was not enough. That row is
+   * read by the daemon's snapshot and reported correctly, but a projection
+   * nobody is told changed is a projection nobody sees change: the browser
+   * re-reads the snapshot when a frame arrives, so a table write with no event
+   * behind it left the resource panel showing the holders it had last time
+   * some unrelated event happened to land. The queue was moving and the screen
+   * said it was stalled — worst for agent waits, which are the long ones.
+   *
+   * Separate from `gate_pool` because the holder is separate. A gate's pools
+   * are taken by the scheduler around a gate it is about to run; an agent's
+   * are taken by the agent's inner loop and held for as long as its command
+   * lives. They land in the same table and the same meters, and only one of
+   * them was ever announced.
+   *
+   * `lease_id` has no counterpart in `gate_pool` because one node can hold
+   * several agent leases at once — the broker keys them by id — so without it
+   * an `acquired` row could not be paired with the `released` row ending it.
+   *
+   * A renewal writes nothing. It is a liveness heartbeat on a lease already
+   * reported, repeated every TTL for as long as the command runs, and nothing
+   * about the holder set changes when one lands. Journalling it would bury the
+   * two rows that are transitions under a heartbeat log.
+   *
+   * Pool ids and a lease id, beside the node id the event is already keyed by.
+   * The broker is never told what command the lease is for, so there is no
+   * field here that a command line or a line of repository text could reach
+   * (§11).
+   */
+  agent_lease: {
+    readonly phase: AgentLeasePhase
+    readonly lease_id: string
+    readonly resources: readonly string[]
   }
 }
 

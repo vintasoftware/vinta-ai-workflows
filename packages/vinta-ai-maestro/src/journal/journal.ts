@@ -12,6 +12,17 @@
  * holds a pool slot; after a restart no such process exists, so carrying leases
  * across a boot would leak capacity permanently. The table is cleared on open.
  *
+ * Because it is not derived, nothing about a lease reaches a watching client on
+ * its own. Writing the row is only half of taking one: the browser re-reads the
+ * snapshot when an event arrives, so a holder set that changes with no event
+ * behind it changes on disk and not on screen. `acquireLease` and
+ * `releaseLease` below are therefore deliberately *only* the table write — the
+ * callers that own a transition journal it, and the one that does not own a
+ * transition (a renewal, which repeats a lease already announced) journals
+ * nothing. Putting an `append` in here instead would have emitted a row for
+ * every heartbeat, and a second row for every gate pool the scheduler already
+ * announces as `gate_pool`.
+ *
  * Transcripts are files, not rows: they grow to megabytes, are written once and
  * read by tailing, and putting them in SQLite would make every agent token
  * compete with the event log for one write lock.
@@ -554,10 +565,17 @@ export class Journal {
         return
       case 'gate_pool':
       case 'gate_result':
+      case 'agent_lease':
         // History, deliberately not a projection. `leases` is the *current*
         // holder set and must not survive a restart, so folding these into it
         // would resurrect capacity no live process holds; `analytics.ts` and
         // `postmortem.ts` read them from `events`, where the history is.
+        //
+        // `agent_lease` sits here for the same reason and not because it is an
+        // afterthought: the row it announces is written by the broker beside
+        // it, in the same call. The event is what makes the write *visible* —
+        // it is not a second copy of the holder set, and a rebuild that folded
+        // it would be reconstructing live process state from a log.
         return
     }
   }
