@@ -49,6 +49,7 @@ describe('assignCrew — the plan’s own staffing', () => {
       harness: null,
       substitute: false,
       insteadOf: null,
+      reason: null,
     })
   })
 
@@ -85,6 +86,7 @@ describe('assignCrew — covering for a busy peer', () => {
       harness: null,
       substitute: true,
       insteadOf: 'mid-a',
+      reason: 'peer_busy',
     })
   })
 
@@ -120,6 +122,135 @@ describe('assignCrew — covering for a busy peer', () => {
     const decision = assignCrew(input({ assigned: 'senior', busy: new Set(['senior']) }))
 
     expect(decision).toEqual({ kind: 'wait', requiredTier: 4 })
+  })
+})
+
+describe('assignCrew — reusing a session that is already open', () => {
+  /**
+   * The trade the whole feature is: a Tier 4 model on a Tier 2 phase costs more
+   * per token, and it buys not starting a fifth session that would re-read the
+   * repository before writing a line. The plan's own member is free here and is
+   * passed over anyway, which is the part that has to be deliberate rather than
+   * incidental — so it is asserted as a substitution with its own reason, not
+   * merely as "senior took it".
+   */
+  it('gives a phase to a warm senior rather than cold-starting the plan’s member', () => {
+    const decision = assignCrew(input({ warm: new Set(['senior']) }))
+
+    expect(decision).toEqual({
+      kind: 'assigned',
+      member: 'senior',
+      tier: 4,
+      model: 'dear-1',
+      harness: null,
+      substitute: true,
+      insteadOf: 'mid-a',
+      reason: 'warm_session',
+    })
+  })
+
+  /**
+   * The case that pins "only if we already have started sessions". Nobody is
+   * warm, so a session is being opened whichever member takes this — there is
+   * no cold start left to save, and the senior's rate would buy nothing at all.
+   * The pre-defined level wins.
+   */
+  it('leaves a cold senior alone and staffs the phase as the plan wrote it', () => {
+    expect(assignCrew(input({ warm: new Set() }))).toMatchObject({
+      member: 'mid-a',
+      substitute: false,
+      reason: null,
+    })
+  })
+
+  /**
+   * The floor, against the one pressure designed to cross it. A junior's
+   * session is open, warm and free, and running a Tier 2 phase on it would save
+   * a cold start — and the answer is still no. Warmth reorders the qualified;
+   * it never enlarges them.
+   */
+  it('never reaches down to a warm member below the phase’s tier', () => {
+    const decision = assignCrew(input({ warm: new Set(['junior']) }))
+
+    expect(decision).toMatchObject({ member: 'mid-a', tier: 2, substitute: false })
+  })
+
+  it('waits rather than take a warm member below the floor', () => {
+    const decision = assignCrew(
+      input({ busy: new Set(['mid-a', 'mid-b', 'senior']), warm: new Set(['junior']) }),
+    )
+
+    expect(decision).toEqual({ kind: 'wait', requiredTier: 2 })
+  })
+
+  /** A warm member holding another node is not available to be reused. */
+  it('does not reach for a warm member who is busy', () => {
+    const decision = assignCrew(input({ busy: new Set(['senior']), warm: new Set(['senior']) }))
+
+    expect(decision).toMatchObject({ member: 'mid-a', substitute: false })
+  })
+
+  /**
+   * Warmth is the primary key and cost is the tiebreak, not the other way
+   * round — but between two warm members, neither of whom would cold-start,
+   * there is nothing left to buy and the cheaper one takes it.
+   */
+  it('takes the cheapest warm member when more than one would resume', () => {
+    const decision = assignCrew(
+      input({ assigned: 'junior', busy: new Set(['junior']), warm: new Set(['mid-b', 'senior']) }),
+    )
+
+    expect(decision).toMatchObject({ member: 'mid-b', tier: 2, reason: 'warm_session' })
+  })
+
+  /**
+   * The plan's own member wins among equals. Without this, a roster where both
+   * peers are warm would hand `mid-b`'s phase to `mid-a` on alphabetical order
+   * and journal it as a substitution — a divergence from the plan recorded for
+   * a saving that was never on offer, since neither would have started cold.
+   */
+  it('prefers the plan’s member over an equally warm peer, recording no substitution', () => {
+    const decision = assignCrew(
+      input({ assigned: 'mid-b', warm: new Set(['mid-a', 'mid-b', 'senior']) }),
+    )
+
+    expect(decision).toMatchObject({ member: 'mid-b', substitute: false, reason: null })
+  })
+
+  /**
+   * Covering and reuse can want different people. `mid-a` is busy, `mid-b` is
+   * free and cheap, and the senior is warm — the old rule says `mid-b`, the new
+   * one says senior. The reason token is what keeps the two distinguishable
+   * afterwards: both are `substitute: true`, and only one of them was a choice.
+   */
+  it('prefers a warm senior over a cheaper cold peer when covering', () => {
+    const decision = assignCrew(input({ busy: new Set(['mid-a']), warm: new Set(['senior']) }))
+
+    expect(decision).toMatchObject({
+      member: 'senior',
+      substitute: true,
+      insteadOf: 'mid-a',
+      reason: 'warm_session',
+    })
+  })
+
+  /**
+   * Warmth is asked of implementers only, and `warm` is an input this module
+   * does not get to sanity-check. A reviewer id in it must still be unable to
+   * take a phase: disjoint roles are what make an agent reviewing its own diff
+   * unrepresentable, and a staffing shortcut is exactly the kind of thing that
+   * would breach that one layer down.
+   */
+  it('cannot staff a phase to a warm reviewer', () => {
+    const crew = { ...CREW, checker: reviewer(4, 'dear-1') }
+    const decision = assignCrew(input({ crew, warm: new Set(['checker']) }))
+
+    expect(decision).toMatchObject({ member: 'mid-a', substitute: false })
+  })
+
+  /** No `warm` at all is the pre-warmth behaviour, not "everyone is warm". */
+  it('behaves exactly as before when the caller cannot answer the question', () => {
+    expect(assignCrew(input())).toMatchObject({ member: 'mid-a', substitute: false })
   })
 })
 

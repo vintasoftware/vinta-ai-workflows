@@ -328,6 +328,7 @@ test('the rollup names who worked, and flags the phases a peer covered', async (
           ],
           asPlanned: 4,
           substituted: 1,
+          warmReuse: 0,
           idle: ['mid-a'],
         },
       }),

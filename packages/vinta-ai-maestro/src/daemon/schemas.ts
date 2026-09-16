@@ -460,7 +460,10 @@ export const ReuseTotalsSchema = z.strictObject({
  * Who worked, against who the plan said would. `substituted` is the field to
  * read next to a cost that overran: every substitution ran at a tier at or
  * above the one budgeted for, so a run can be entirely green and still have
- * been staffed dearer than planned.
+ * been staffed dearer than planned. `warmReuse` is the part of that the
+ * scheduler chose rather than was forced into — phases promoted to a member
+ * whose session was already open, trading model rate against cold starts —
+ * and it is a subset of `substituted`, never an addition to it.
  *
  * Empty `members` is the normal shape for an unstaffed workflow, not an error.
  */
@@ -475,6 +478,7 @@ export const CrewTotalsSchema = z.strictObject({
   ),
   asPlanned: z.number().int(),
   substituted: z.number().int(),
+  warmReuse: z.number().int(),
   idle: z.array(z.string()),
 })
 

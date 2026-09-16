@@ -455,14 +455,21 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
 
       {staffed && (
         <div className="flex flex-col gap-1.5 border-t pt-3">
-          {/* The roster against what it actually did. `covered` is the number
-              worth reading next to the cost above: a substitution always runs
-              at or above the tier the plan budgeted for, so a run can be
-              entirely green and still have been staffed dearer than planned. */}
+          {/* The roster against what it actually did. `substituted` is the
+              number worth reading next to the cost above: a substitution always
+              runs at or above the tier the plan budgeted for, so a run can be
+              entirely green and still have been staffed dearer than planned.
+              `warmReuse` is split out of it rather than folded in, because the
+              two are answerable differently — a peer covering for a busy member
+              costs what was planned, while a warm promotion is the scheduler
+              deliberately buying a dearer model to avoid a cold start. Reported
+              as "covered by a peer" alone, a run that promoted every phase to
+              the top tier read as an ordinary busy wave. */}
           <Hint className="crew-head text-xs">
             Crew
             {crew.substituted > 0 &&
               ` — ${crew.substituted} of ${crew.asPlanned + crew.substituted} phases covered by a peer`}
+            {crew.warmReuse > 0 && `, ${crew.warmReuse} to reuse a warm session`}
           </Hint>
           <ul className="crew-members flex flex-col gap-1 text-xs">
             {crew.members.map((member) => (

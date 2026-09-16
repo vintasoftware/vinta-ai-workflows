@@ -120,6 +120,36 @@ export type SessionFreshReason =
   | 'prior_phase_failed'
 
 /**
+ * Why a phase went to somebody other than the member the plan named. A closed
+ * set, for the same reason the one above is: a `substitute` row is how a run
+ * comes in dearer than the roster predicted, and it is only answerable if the
+ * row says which kind of substitution it was.
+ *
+ * Declared here rather than in `scheduler/crew.ts` so the payload's vocabulary
+ * lives with the payload, exactly as `SessionFreshReason` does for the module
+ * that decides it (`scheduler/sessions.ts` imports this file, not the reverse).
+ */
+export type CrewSubstituteReason =
+  /**
+   * The named member was working, and somebody at or above their tier covered
+   * so the phase would not queue behind them. Costs what the plan budgeted:
+   * the floor guarantees the cover was qualified, and `assignCrew` takes the
+   * cheapest member who is.
+   */
+  | 'peer_busy'
+  /**
+   * The phase was promoted to a member who already holds a session it can
+   * resume, ahead of a cheaper member who would have started cold (§15).
+   *
+   * The one substitution that is a deliberate overspend rather than the roster
+   * absorbing load: the named member may well have been free. What it buys is
+   * the context a cold session would have to rebuild before writing a line;
+   * what it costs is the dearer model for the whole phase. Both halves are
+   * real, which is why this is its own token instead of another `peer_busy`.
+   */
+  | 'warm_session'
+
+/**
  * Where the operation went. `sent` reached the live session; `queued` is
  * waiting for the node's next resume (§9's queue for harnesses that cannot
  * inject); `delivered` is that queue draining; `ignored` is an operation on a
@@ -290,10 +320,23 @@ interface NodePayloads {
   node_crew: {
     readonly member: string
     readonly tier: number
-    /** True when the plan named someone else and they were busy. */
+    /** True when the plan named someone else. */
     readonly substitute: boolean
     /** Who the plan named. Present only on a substitution. */
     readonly instead_of?: string
+    /**
+     * Why somebody else took it. Present only on a substitution, and absent on
+     * rows written before there were two ways to be one — which read as
+     * `peer_busy`, because that was the only way then.
+     *
+     * The field that makes a `substitute` row answerable. `peer_busy` is the
+     * roster absorbing its own load and costs what the plan budgeted. A
+     * `warm_session` row is a phase that could have run as planned and was
+     * promoted anyway to reuse a session already open: cheaper in cold starts,
+     * dearer per token, and the trade an operator has to be able to see before
+     * they can judge whether it was worth it.
+     */
+    readonly reason?: CrewSubstituteReason
     /**
      * Which seat this claim filled. Absent means `implementer`, so rows written
      * before reviewers were members read as what they were.
