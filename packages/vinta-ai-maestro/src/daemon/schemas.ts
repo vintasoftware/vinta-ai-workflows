@@ -474,8 +474,10 @@ export const CrewTotalsSchema = z.strictObject({
     z.strictObject({
       member: z.string(),
       tier: z.number().int(),
+      /** Phases implemented. Reviews are `reviews`, and were once folded here. */
       nodes: z.number().int(),
       coveredFor: z.number().int(),
+      reviews: z.number().int(),
     }),
   ),
   asPlanned: z.number().int(),

@@ -42,8 +42,8 @@ describe('collectRunCrew', () => {
     )
 
     expect(run.members).toEqual([
-      { member: 'junior', tier: 1, nodes: 2, coveredFor: 0 },
-      { member: 'senior', tier: 4, nodes: 1, coveredFor: 0 },
+      { member: 'junior', tier: 1, nodes: 2, coveredFor: 0, reviews: 0 },
+      { member: 'senior', tier: 4, nodes: 1, coveredFor: 0, reviews: 0 },
     ])
     expect(run.asPlanned).toBe(3)
     expect(run.substituted).toBe(0)
@@ -167,5 +167,121 @@ describe('collectRunCrew', () => {
 
     expect(run.asPlanned).toBe(1)
     expect(run.members[0]?.coveredFor).toBe(0)
+  })
+})
+
+/**
+ * The seat the fold ignored.
+ *
+ * `node_crew` is written for both — the reviewer's claim carries
+ * `role: 'reviewer'`, the implementer's omits it — and `read()` looked at
+ * neither, so a phase a member reviewed was counted as a phase they took. Every
+ * run with reviewers reported an inflated node count, in the direction that
+ * reads as "more of the roster was used than the plan budgeted".
+ */
+describe('the two seats a member can fill', () => {
+  it('counts a phase reviewed apart from a phase taken', () => {
+    const run = collectRunCrew(
+      source([
+        claim('p1', { member: 'alice', tier: 3, substitute: false }),
+        claim('p2', { member: 'alice', tier: 3, substitute: false, role: 'reviewer' }),
+        claim('p3', { member: 'alice', tier: 3, substitute: false, role: 'reviewer' }),
+      ]),
+      'r1',
+    )
+
+    // One phase implemented, two reviewed — not three taken.
+    expect(run.members).toEqual([
+      { member: 'alice', tier: 3, nodes: 1, coveredFor: 0, reviews: 2 },
+    ])
+    // And the divergence numbers measure staffing against the plan, which named
+    // alice for `p1` and for nothing else.
+    expect(run.asPlanned).toBe(1)
+    expect(run.substituted).toBe(0)
+  })
+
+  /**
+   * The case that decides this is a fix and not a second bug. `idle` means
+   * "declared but never reached", and a member who reviewed six phases has been
+   * reached. Dropping reviewer rows from the fold entirely would have moved the
+   * inflation from one number into a plain falsehood in another.
+   */
+  it('does not report a member who only reviewed as idle', () => {
+    const run = collectRunCrew(
+      source([
+        claim('p1', { member: 'alice', tier: 3, substitute: false }),
+        claim('p1', { member: 'bob', tier: 4, substitute: false, role: 'reviewer' }),
+      ]),
+      'r1',
+      ['alice', 'bob', 'carol'],
+    )
+
+    expect(run.idle).toEqual(['carol'])
+    expect(run.members.find((m) => m.member === 'bob')).toEqual({
+      member: 'bob',
+      tier: 4,
+      nodes: 0,
+      coveredFor: 0,
+      reviews: 1,
+    })
+  })
+
+  /** An explicit `implementer` says what an absent role already meant. */
+  it('reads an explicit implementer role the same as an absent one', () => {
+    const run = collectRunCrew(
+      source([
+        claim('p1', { member: 'alice', tier: 2, substitute: false, role: 'implementer' }),
+        claim('p2', { member: 'alice', tier: 2, substitute: false }),
+      ]),
+      'r1',
+    )
+
+    expect(run.members[0]).toEqual({
+      member: 'alice',
+      tier: 2,
+      nodes: 2,
+      coveredFor: 0,
+      reviews: 0,
+    })
+  })
+
+  /**
+   * A reviewer claim carries `substitute: false` always, so folding the seats
+   * together did not corrupt `substituted` — but it did corrupt `asPlanned`,
+   * which is the denominator the run view divides by.
+   */
+  it('keeps reviewer claims out of the plan-versus-outcome counts', () => {
+    const run = collectRunCrew(
+      source([
+        claim('p1', { member: 'mid-a', tier: 2, substitute: false }),
+        claim('p2', { member: 'senior', tier: 4, substitute: true, instead_of: 'mid-a' }),
+        claim('p1', { member: 'senior', tier: 4, substitute: false, role: 'reviewer' }),
+        claim('p2', { member: 'mid-a', tier: 2, substitute: false, role: 'reviewer' }),
+      ]),
+      'r1',
+    )
+
+    // Two phases, one covered. The two reviews are not phases and are not in it.
+    expect(run.asPlanned).toBe(1)
+    expect(run.substituted).toBe(1)
+    expect(run.asPlanned + run.substituted).toBe(2)
+  })
+
+  /**
+   * A row from a newer daemon naming a seat this build has never heard of keeps
+   * its member visible rather than vanishing them into `idle`. `SEATS` in
+   * `crew.ts` is what stops that tolerance being a slow leak back into the bug
+   * above: adding a seat to `CrewRole` fails its `satisfies` and forces the
+   * choice to be made deliberately.
+   */
+  it('keeps a member whose seat this build does not recognise', () => {
+    const run = collectRunCrew(
+      source([claim('p1', { member: 'alice', tier: 3, substitute: false, role: 'archivist' })]),
+      'r1',
+      ['alice'],
+    )
+
+    expect(run.idle).toEqual([])
+    expect(run.members[0]?.member).toBe('alice')
   })
 })

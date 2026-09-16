@@ -323,8 +323,11 @@ test('the rollup names who worked, and flags the phases a peer covered', async (
       [RUN_ID]: runUsage({
         crew: {
           members: [
-            { member: 'junior', tier: 1, nodes: 2, coveredFor: 0 },
-            { member: 'senior', tier: 4, nodes: 3, coveredFor: 1 },
+            { member: 'junior', tier: 1, nodes: 2, coveredFor: 0, reviews: 0 },
+            { member: 'senior', tier: 4, nodes: 3, coveredFor: 1, reviews: 2 },
+            // Reviewed only. The seat this panel used to report as three
+            // phases taken, and the reason `idle` must not claim them.
+            { member: 'mid-b', tier: 2, nodes: 0, coveredFor: 0, reviews: 3 },
           ],
           asPlanned: 4,
           substituted: 1,

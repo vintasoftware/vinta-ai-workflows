@@ -453,6 +453,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A member's reviews were counted as phases they took.** `node_crew` is
+  written for both seats — the reviewer's claim carries `role: 'reviewer'`, the
+  implementer's omits it — and the staffing rollup read neither, so every phase
+  a member reviewed was folded into the count of phases they implemented. On any
+  run with reviewers that inflated the number the rollup exists to put beside
+  the plan's estimate, and inflated `asPlanned`, which the run view divides by.
+  The two seats are counted apart now rather than one of them dropped: a review
+  is real work by a real member, and a member who only reviewed is neither a
+  phase-taker nor idle.
+
 - **An agent taking a lease left the resource panel showing the one before it.**
   The scheduler's own gate-pool transitions are journalled as `gate_pool`
   events, so the browser re-reads the snapshot when one lands. An agent's lease,
