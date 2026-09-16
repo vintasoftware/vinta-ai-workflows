@@ -270,13 +270,45 @@ const ROW = 'flex flex-col gap-0.5 py-2.5 first:pt-0 last:pb-0'
  * `role` is whatever the daemon wrote (`journal/transcript.ts` explains why it
  * is a string and not a union), so a role this build has never heard of shows
  * as itself rather than as nothing.
+ *
+ * **It sticks.** A boundary you can only read by scrolling back to it answers
+ * the question one row too late: sixty rows into a fixer's output the band that
+ * named it is long gone, and "whose output am I reading" is exactly what the
+ * band exists to answer. Pinned, it stays over its own run of rows, and the
+ * next band takes the offset off it on the way in — consecutive sticky siblings
+ * all resolve to the same `top`, and the later one paints over the earlier, so
+ * the handover needs no measuring and no grouping element per run. What that
+ * costs is a few pixels of scroll where the outgoing label is half covered by
+ * the incoming one; a true slide-out would mean giving each run its own
+ * containing block, which is a nested list to buy an animation.
+ *
+ * Three things make that work, and each of them is a way it silently does not:
+ *
+ * - **The `ol` is the sticky ancestor**, because it is the element carrying
+ *   `overflow-y-auto`, and these are its direct children. Any `overflow`,
+ *   `transform`, `filter` or `contain` on an element *between* the two would
+ *   retarget or kill the stick with no error and no visual clue — the card and
+ *   its content well are checked clean, so keep them that way.
+ * - **`bg-card` is not decoration.** A pinned band with a transparent
+ *   background has rows sliding through the letters. The token is the card's
+ *   own surface, which is also what the expanded panel paints (`Panel.tsx`
+ *   portals the same `Card` to `document.body`, so the ground does not change),
+ *   and it follows the theme where a literal colour would be wrong at night.
+ * - **`z-10` puts it over the rows** and nowhere near the panel's own z-50
+ *   overlay, which is an ancestor and so not something a child can climb past.
+ *
+ * The hairlines stay. In flow they read as a rule broken by a label; pinned,
+ * the one running to the right edge is what keeps the band reading as a band
+ * rather than as a stray line of text laid over the transcript. The bottom
+ * padding is the other half of that — it is the gap rows pass through, so it is
+ * wider than the flow layout strictly needed.
  */
 function Author({ role, first }: { readonly role: string; readonly first: boolean }) {
   return (
     <li
       data-turn={role}
       className={cn(
-        'flex items-center gap-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground',
+        'sticky top-0 z-10 flex items-center gap-2 bg-card pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground',
         first ? 'pt-0' : 'pt-3',
       )}
     >

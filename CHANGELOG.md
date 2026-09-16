@@ -303,7 +303,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it rather than only in a log beside it. The operator's own steering stays the
   operator's (§7), even though the adapter echoes it back on the agent's event
   stream. Transcripts written before this render exactly as they did, with no
-  bands.
+  bands. The band stays pinned to the top of the scroller while its own run of
+  rows goes past, so the agent you are reading is named without scrolling back
+  to where it started — in the phase transcript and in the monitor conversation
+  alike.
 
 ### Changed
 

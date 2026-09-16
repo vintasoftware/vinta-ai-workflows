@@ -343,3 +343,41 @@ test('an unknown role is still a band', () => {
     'archaeologist',
   )
 })
+
+/**
+ * The band is pinned to the top of the scroller — and this test cannot say so.
+ *
+ * jsdom has no layout engine, so "is it stuck" is unanswerable here: every box
+ * is zero high, and `position` changes nothing the DOM will report. That was
+ * checked in a browser by hand. What is left for a test is the set of classes
+ * without which it silently is *not* stuck, and "silently" is the word that
+ * earns the assertion — a band that has lost `bg-card` renders perfectly in
+ * every test this suite can run, and in a real browser has the transcript
+ * sliding through its letters.
+ *
+ * `overflow-y-auto` is asserted on the *list*, because that is the whole
+ * arrangement rather than a second fact about it: `top-0` resolves against the
+ * nearest scrolling ancestor, and the band is a direct child of the one element
+ * that scrolls. Move the scroller, or give anything between the two an
+ * `overflow`, `transform`, `filter` or `contain`, and the band quietly pins to
+ * something else or to nothing.
+ */
+test('the author band carries what pins it to the scroller', () => {
+  const view = render(
+    <Transcript
+      entries={[
+        from('implementer', { type: 'assistant_text', text: 'implemented' }),
+        from('reviewer', { type: 'assistant_text', text: 'VERDICT: pass' }),
+      ]}
+    />,
+  )
+
+  const band = view.container.querySelector<HTMLElement>('[data-turn="reviewer"]')!
+  for (const pinned of ['sticky', 'top-0', 'z-10', 'bg-card']) {
+    expect([...band.classList]).toContain(pinned)
+  }
+
+  const list = band.parentElement!
+  expect(list.tagName).toBe('OL')
+  expect([...list.classList]).toContain('overflow-y-auto')
+})
