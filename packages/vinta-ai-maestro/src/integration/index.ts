@@ -10,3 +10,9 @@ export {
   type WaveResult,
 } from './integrator.ts'
 export { openPullRequest, type OpenPrOptions, type PrResult } from './pr.ts'
+export {
+  createCrewConflictFixer,
+  type CrewConflictFixerOptions,
+  type FixerStaffing,
+  seniorImplementer,
+} from './staffing.ts'

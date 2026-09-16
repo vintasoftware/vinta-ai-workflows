@@ -1017,6 +1017,33 @@ describe('the conflict-fixer prompt', () => {
     expect(prompt).toContain('src/folders.ts')
     expect(prompt).toContain('plan.md#web-ui')
     expect(prompt).toContain('--ours')
+    // Nothing claims authorship on an unstaffed run: there is nobody to name.
+    expect(prompt).not.toContain('You implemented')
+  })
+
+  /**
+   * The fixer is now the member who wrote one side (`integration/staffing.ts`),
+   * and that changes how it should resolve — the temptation is to keep your own
+   * half and call it merged. It is told together with the reason it cannot
+   * treat that as memory: a fresh session in the integration worktree, not the
+   * lane the phase was written in.
+   */
+  it('names the phases the fixer implemented, and refuses to let that stand as memory', () => {
+    const prompt = composeConflictPrompt({
+      into: 'plan/bookmarks/wave-2',
+      incoming: 'plan/bookmarks/phase-web-ui',
+      nodes: ['api-layer', 'web-ui'],
+      paths: ['src/folders.ts'],
+      promptRefs: ['plan.md#api-layer', 'plan.md#web-ui'],
+      implemented: ['api-layer'],
+    })
+
+    expect(prompt).toContain('You implemented api-layer')
+    expect(prompt).toContain('fresh')
+    expect(prompt).toContain('do not privilege your own side')
+    // Identifiers and plan references only (§11) — no path outside `paths`,
+    // no hunk, nothing a diff could have leaked into.
+    expect(prompt).not.toContain('<<<<<<<')
   })
 })
 

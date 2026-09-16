@@ -39,9 +39,25 @@ export interface ConflictFixer {
   fix(request: ConflictRequest): Promise<void>
 }
 
-export interface AgentConflictFixerOptions {
+/** One conflict's staffing: the capability to spawn with, never a session. */
+export interface FixerAgent {
   readonly adapter: HarnessAdapter
   readonly model: string
+  /** Which of the conflicting nodes this agent's member implemented. */
+  readonly implemented?: readonly string[]
+}
+
+export interface AgentConflictFixerOptions {
+  /** Used when `staff` is absent or declines — `defaults`, in a composed run. */
+  readonly adapter: HarnessAdapter
+  readonly model: string
+  /**
+   * Who this particular conflict goes to, resolved per call because staffing
+   * depends on *which* nodes are in the conflict and that is only known once
+   * the merge has failed (`integration/staffing.ts`). Returning null keeps the
+   * `adapter`/`model` above, which is the pre-roster path.
+   */
+  readonly staff?: (request: ConflictRequest) => FixerAgent | null
 }
 
 /**
@@ -51,19 +67,37 @@ export interface AgentConflictFixerOptions {
  * invariant worth enforcing here is that the fixer runs where the merge is —
  * an agent pointed at a lane would resolve a conflict in a tree the merge
  * cannot see, and the lane's own phase would inherit the edit.
+ *
+ * *Which* agent is `staff`'s answer, one conflict at a time, because the nodes
+ * in a conflict are what decide it (`integration/staffing.ts`). It supplies a
+ * model, a harness and the node ids the member implemented — never a session
+ * id; the reason that distinction is load-bearing is written down there.
  */
 export function createAgentConflictFixer(options: AgentConflictFixerOptions): ConflictFixer {
   return {
     async fix(request: ConflictRequest): Promise<void> {
+      const staffed = options.staff?.(request) ?? null
+      const context =
+        staffed?.implemented === undefined
+          ? request
+          : { ...request, implemented: staffed.implemented }
       const task: AgentTask = {
         nodeId: request.nodeId,
         cwd: request.cwd,
         // The same composer every other role's prompt comes from, so a change
         // to what an agent is told stays one edit (`src/prompts`).
-        prompt: composeConflictPrompt(request),
-        model: options.model,
+        prompt: composeConflictPrompt(context),
+        model: staffed?.model ?? options.model,
+        // No `resumeSessionId`, deliberately, even when the staffed member has
+        // a live session from the phase they just implemented. That session ran
+        // in their lane; this runs in the integration worktree, where the files
+        // in dispute are half-merged and unlike anything the session saw. §15.2
+        // would refuse the resume anyway — `lane_changed` is its first rule —
+        // and asking for one here would only encode the wrong intent for
+        // whoever reads this next.
       }
-      const outcome = await options.adapter.spawn(task)
+      const adapter = staffed?.adapter ?? options.adapter
+      const outcome = await adapter.spawn(task)
       if (!outcome.ok) throw new Error(`conflict fixer spawn refused: ${outcome.kind}`)
 
       // Draining is mandatory — an unread stream never ends — and the outcome

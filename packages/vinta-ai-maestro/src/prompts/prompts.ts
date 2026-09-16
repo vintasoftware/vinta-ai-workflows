@@ -107,6 +107,11 @@ export interface ConflictContext {
   readonly nodes: readonly string[]
   readonly paths: readonly string[]
   readonly promptRefs: readonly string[]
+  /**
+   * Which of `nodes` the fixer's own crew member implemented, when the roster
+   * staffed this conflict (`integration/staffing.ts`). Node ids, so §11 holds.
+   */
+  readonly implemented?: readonly string[]
 }
 
 export interface SpawnPromptRequest {
@@ -221,12 +226,29 @@ export function composeSpawnPrompt(request: SpawnPromptRequest): string {
   return preamble + renderFixer(materials)
 }
 
-/** The conflict fixer's prompt. Shared with `integration/fixer.ts`, not forked. */
+/**
+ * The conflict fixer's prompt. Shared with `integration/fixer.ts`, not forked.
+ *
+ * `implemented` is told to the agent because the fixer is now the member who
+ * wrote one side, and knowing which side is yours changes how you resolve: the
+ * temptation is to keep your own and call it merged. It is told together with
+ * the reason it cannot be trusted as memory — this is a fresh session in the
+ * integration worktree, not the lane that phase was written in — because the
+ * alternative is an agent that acts on recall of files it has not read here.
+ */
 export function composeConflictPrompt(context: ConflictContext): string {
+  const mine = context.implemented ?? []
   return [
     `Resolve the merge conflict from merging ${context.incoming} into ${context.into}.`,
     `Conflicted paths: ${context.paths.join(' ')}`,
     `Nodes involved: ${context.nodes.join(' ')}`,
+    ...(mine.length === 0
+      ? []
+      : [
+          `You implemented ${mine.join(' ')}. This is a different worktree and a fresh ` +
+            'session, so read the files here rather than recalling them — and do not ' +
+            'privilege your own side of the conflict.',
+        ]),
     `Phase briefs: ${context.promptRefs.join(' ')}`,
     'Resolve for both phases’ intents. Never resolve with --ours or --theirs.',
   ].join('\n')
