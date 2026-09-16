@@ -1,20 +1,23 @@
 /**
  * The `vinta-ai-maestro` command line.
  *
- * Six subcommands, dispatched by hand. `node:util`'s `parseArgs` does the flag
+ * Seven subcommands, dispatched by hand. `node:util`'s `parseArgs` does the flag
  * parsing inside each one, and nothing else does any: a framework here would be
  * a dependency, a plugin lifecycle and a help renderer bought to replace a
- * switch statement over six strings.
+ * switch statement over seven strings.
  *
  * `main` returns an exit code rather than calling `process.exit`. That is what
  * makes the commands testable without a built binary, and it keeps the one
  * place that ends the process — `bin.ts` — down to a single line. Commands use
  * three codes so a script can tell the cases apart: `0` success, `1` the
  * command ran and the answer was no, `2` the command line itself was wrong.
- * `with` is the exception: it passes through the leased child's exit code.
+ * `with` and `gate` are the exceptions: both pass through the exit code of the
+ * thing they ran, because a caller asking whether the gate passed wants the
+ * gate's answer and not this process's opinion of how the request went.
  */
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
+import { GATE_USAGE, gateCommand } from './gate.ts'
 import { PURGE_USAGE, purgeCommand } from './purge.ts'
 import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
@@ -34,6 +37,8 @@ usage: vinta-ai-maestro <command> [options]
   purge [run-id]             Delete run state under .vinta-ai-maestro/ — transcripts
                              and gate logs hold repository contents verbatim.
   with <resource> -- <cmd>   Run a command while holding a live run's resource.
+  gate <gate-id>             Run one of a live run's declared gates against this
+                             turn's lane, leased and cached by the daemon.
 
   -h, --help                 Print this.
 
@@ -52,6 +57,7 @@ const USAGES: Readonly<Record<string, string>> = {
   run: RUN_USAGE,
   purge: PURGE_USAGE,
   with: WITH_USAGE,
+  gate: GATE_USAGE,
 }
 
 export async function main(argv: readonly string[], io: Io = processIo()): Promise<number> {
@@ -87,6 +93,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await purgeCommand(rest, io)
     case 'with':
       return await withCommand(rest, io)
+    case 'gate':
+      return await gateCommand(rest, io)
     default:
       // The unknown word is echoed back because a typo is the likely cause and
       // seeing it is how the reader spots one. It is an argument, never a path
@@ -105,4 +113,5 @@ export { serveCommand, announce, type ServeDeps } from './serve.ts'
 export { runCommand, type RunDeps } from './run.ts'
 export { purgeCommand } from './purge.ts'
 export { withCommand, type WithDeps } from './with.ts'
+export { gateCommand, type GateDeps } from './gate.ts'
 export { laneRootFor, runsRootFor, storeFor } from './paths.ts'

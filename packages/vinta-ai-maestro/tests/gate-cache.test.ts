@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -206,6 +207,92 @@ describe('gate result caching', () => {
     const reopened = await run()
     expect(reopened.cached).toBe(true)
     expect(await runs()).toBe(1)
+  })
+
+  /**
+   * What the caching is actually worth once agents run gates through it.
+   *
+   * The `gate` verb's whole speed argument is that four agents running the same
+   * suite against one unchanged tree pay for it once. That argument rests on
+   * `laneTreeHash`, and `laneTreeHash` hashes **untracked but non-ignored**
+   * files — so a gate that drops `coverage/`, `.pytest_cache/` or a build
+   * directory into the lane changes the key it was just looked up under. It
+   * invalidates itself, and nobody watching a run would be able to tell that
+   * from the cache simply not working.
+   *
+   * These three measure it rather than reasoning about it, because the answer
+   * turned out to depend on something no design document would have mentioned:
+   * whether the artifact's *bytes* are stable.
+   */
+  describe('a gate that writes into its own lane', () => {
+    /** `coverage/` as a real suite leaves it. Empty here, so git cannot see it yet. */
+    const artifact = (): string => {
+      mkdirSync(join(repo, 'coverage'), { recursive: true })
+      return join(repo, 'coverage', 'report.txt')
+    }
+
+    it('hits every time when it leaves nothing behind — the baseline the verb assumes', async () => {
+      for (let i = 0; i < 4; i += 1) await run()
+
+      // Four asks, one suite. This is the number the prompts are written around.
+      expect(await runs()).toBe(1)
+    })
+
+    it('never hits when the artifact’s contents change each run', async () => {
+      // An appended line stands in for the timestamp, duration or run id that
+      // real coverage and JUnit reports carry. Every run writes a tree nobody
+      // has seen, so every lookup misses — including the `gate` node's, which
+      // pays full price for a suite four agents already ran.
+      const growing = gate({
+        append: [
+          { path: counter(), line: 'ran' },
+          { path: artifact(), line: 'cov' },
+        ],
+      })
+
+      const results = []
+      for (let i = 0; i < 4; i += 1) results.push((await run({ gate: growing })).cached)
+
+      expect(results).toEqual([false, false, false, false])
+      expect(await runs()).toBe(4)
+    })
+
+    it('hits after one extra run when the artifact is byte-identical', async () => {
+      // The gentler and commoner case: a build directory whose output is
+      // reproducible. Run 1 runs against a tree with no artifact and creates
+      // one; run 2 runs against the tree *with* it and rewrites the same bytes,
+      // which leaves the hash where it is; run 3 onwards hit. The cache still
+      // pays, one run later than it looks like it should.
+      const stable = gate({ write: { path: artifact(), line: 'cov' } })
+
+      const results = []
+      for (let i = 0; i < 4; i += 1) results.push((await run({ gate: stable })).cached)
+
+      expect(results).toEqual([false, false, true, true])
+      expect(await runs()).toBe(2)
+    })
+
+    it('hits every time once the artifact path is ignored — the mitigation', async () => {
+      // The fix a project applies, and the reason `.gitignore` is honoured by
+      // the key at all: ignore what the gate produces and the gate stops
+      // invalidating itself. Nothing in the orchestrator can do this for a
+      // project — which is why it is worth saying out loud that a plan whose
+      // gates write untracked output into the lane gets no caching until it
+      // does.
+      await writeFile(join(repo, '.gitignore'), 'ignored.txt\ncoverage/\n')
+      const growing = gate({
+        append: [
+          { path: counter(), line: 'ran' },
+          { path: artifact(), line: 'cov' },
+        ],
+      })
+
+      const results = []
+      for (let i = 0; i < 4; i += 1) results.push((await run({ gate: growing })).cached)
+
+      expect(results).toEqual([false, true, true, true])
+      expect(await runs()).toBe(1)
+    })
   })
 
   it('does not collide across gate ids on the same tree', async () => {

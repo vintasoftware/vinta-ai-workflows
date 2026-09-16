@@ -90,12 +90,14 @@ Every command runs against a project checkout — your project, not this one. `-
 | `run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon *and* executes the workflow. Exits when the run ends. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
+| `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
 
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
 
 The daemon-facing commands use three exit codes, so a script can tell the cases
 apart: `0` success, `1` the command ran and the answer was no, `2` the command
-line was wrong. `with` passes through the leased command's exit code.
+line was wrong. `with` and `gate` pass through the exit code of the thing they
+ran.
 
 ### Leasing heavy inner-loop commands
 
@@ -113,6 +115,45 @@ the renewal stops and the daemon expires the lease, so a wedged turn cannot
 starve the rest of the run. The worktree lane itself is not leasable through
 this verb: the current phase already holds it, and asking for it again would
 deadlock against itself.
+
+### Running the outer gate
+
+The gates themselves are not commands an agent should type. A phase's
+implementer, its reviewer and each fixer round are all told to run the outer
+gate, and before this verb every one of those was a bare shell line: invisible
+to the gate cache, and inside the resource pool only if the agent remembered to
+wrap it. The authoritative `gate` node then ran the same suite a fifth time.
+
+So agents ask for a gate by id instead:
+
+```console
+$ vinta-ai-maestro gate unit
+```
+
+The daemon resolves the id to the gate's declared `cmd`, runs it in the asking
+phase's lane with that lane's environment, and exits with the gate's own code.
+Three things follow from the daemon being the one that runs it:
+
+- **The result is cached**, on the same `(gate id, lane tree hash)` key the
+  `gate` node reads — so the reviewer's run of a gate the implementer already
+  ran against an unchanged tree is a lookup, and so is the gate node's
+  afterwards.
+- **The lease cannot be forgotten**, because the daemon takes the gate's
+  `requires` around the run rather than trusting the agent to.
+- **The command cannot be improvised**, because an id resolves to the plan's
+  own command. "I ran the unit gate" in a report means the command the gate
+  node will run.
+
+A gate is recorded whoever asked for it: a `gate_result` event and a `gate_run`
+entry in the phase transcript, attributed to `gate`.
+
+**Caching depends on your gates not writing into the lane.** The tree hash
+covers untracked but non-ignored files, so a gate that leaves `coverage/`,
+`.pytest_cache/` or a build directory behind changes the key it was just looked
+up under. Where that output varies run to run — a timestamp, a duration, a run
+id — the gate invalidates itself every time and nothing is ever cached. Add
+those paths to `.gitignore`: ignored files are deliberately outside the key,
+and that is the whole fix.
 
 ## Walkthrough — two phases in parallel
 

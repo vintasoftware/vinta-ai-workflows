@@ -34,6 +34,17 @@ import type { Gate } from '../types.ts'
 
 export type GateStatus = 'passed' | 'failed' | 'timed_out'
 
+/**
+ * The exit code a timed-out gate reports. `GateResult.exitCode` is null there —
+ * the gate never got to say anything — and a guard reading `gate.exit_code`
+ * needs a number that is not zero. 124 is `timeout(1)`'s.
+ *
+ * It lives here rather than beside either caller because both of them turn a
+ * `GateResult` into an exit code, and two copies of a stand-in value is one
+ * copy too many for a number a guard compares against.
+ */
+export const TIMEOUT_EXIT = 124
+
 export interface GateResult {
   readonly gateId: string
   /** `timed_out` is distinct from `failed`: the gate never got to say anything. */

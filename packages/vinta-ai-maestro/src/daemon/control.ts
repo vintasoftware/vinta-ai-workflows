@@ -25,6 +25,7 @@ import type { AmendRunner } from '../amend/amend.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion } from './schemas.ts'
+import type { AgentGateResult } from '../resources/agent-gates.ts'
 import type { AgentLeaseGrant } from '../resources/agent-leases.ts'
 
 /** The five operations of §9, plus the two reads `Scheduler` already exposes. */
@@ -92,6 +93,18 @@ export interface AgentLeasePort {
   release(leaseId: string): void
 }
 
+/**
+ * Declared gates, run for an agent that asks for one by id.
+ *
+ * Narrow on purpose, and narrower than `AgentLeasePort`: there is one verb and
+ * it takes no command. That *is* the contract — the daemon resolves the id to
+ * the gate's declared `cmd`, so what an agent can reach through here is the
+ * command the authoritative `gate` node will run and nothing else.
+ */
+export interface AgentGatePort {
+  run(gateId: string, holderNode: string): Promise<AgentGateResult>
+}
+
 /** One run the daemon serves. Registered when the run starts. */
 export interface DaemonRun {
   readonly runId: string
@@ -100,6 +113,12 @@ export interface DaemonRun {
   readonly admission: CapacityView
   /** Absent on read-only/test hosts that do not offer agent-held leases. */
   readonly agentLeases?: AgentLeasePort
+  /**
+   * Absent on a host with no lanes or no gate cache to run a gate against —
+   * the endpoint then refuses rather than running the command somewhere it
+   * guessed.
+   */
+  readonly agentGates?: AgentGatePort
   /**
    * §9's amend path, when this host can drive it: the live statuses the gate
    * reads, the integration worktree a `done` node is rebased in, and the hand

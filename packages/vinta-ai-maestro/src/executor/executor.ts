@@ -73,7 +73,7 @@
  * notification body.
  */
 import { laneTreeHash, type GateCache } from '../gates/cache.ts'
-import { executeGate, type GateResult, type RunGateOptions } from '../gates/runner.ts'
+import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from '../gates/runner.ts'
 import { computeWaves } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
 import type { Integrator } from '../integration/integrator.ts'
@@ -129,13 +129,6 @@ export interface RunExecutorOptions {
   /** Injected in tests, and on a platform with no notification channel. */
   readonly notifier?: Notifier
 }
-
-/**
- * The exit code a timed-out gate reports. `GateResult.exitCode` is null there —
- * the gate never got to say anything — and a guard reading `gate.exit_code`
- * needs a number that is not zero. 124 is `timeout(1)`'s.
- */
-const TIMEOUT_EXIT = 124
 
 /** How many transcript entries back to look for the reviewer's verdict. */
 const TRANSCRIPT_WINDOW = 50

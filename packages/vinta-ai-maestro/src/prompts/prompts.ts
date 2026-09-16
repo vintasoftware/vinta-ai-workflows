@@ -523,6 +523,7 @@ function renderImplementer(materials: Materials): string {
     `Your branch is \`${materials.branch}\`, cut from \`${materials.baseBranch}\` — derived from`,
     "this phase's dependencies, not from plan order. Commit straight to it.",
     ...commandBlock(materials),
+    ...gateBlock(materials),
     ...leaseBlock(materials),
     ...planLevel(materials, [
       'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim,',
@@ -548,7 +549,14 @@ function renderImplementer(materials: Materials): string {
         '   touched. Do not go on while any of them is red.'
       : '3. Inner loop, scoped to what you touched: lint clean, then each new test on\n' +
         '   its own, then the scoped suite. Do not go on while any of them is red.',
-    '4. Outer gate, only once the inner loop is green. These run against your lane:',
+    // Imperative, and naming the command. It read "Outer gate, only once the
+    // inner loop is green. These run against your lane:" followed by the gate
+    // commands — a description of what would happen to the lane later, which is
+    // exactly how agents took it. They finished the scoped suite in step 3 and
+    // went to step 5 having run no gate at all.
+    '4. Outer gate, once the inner loop is green. Run every one of these yourself',
+    '   and read what it returns — step 3 does not speak for them, and the phase is',
+    '   judged on these:',
     ...gateList(materials),
     '5. A red outer gate sends you back to step 2, for as long as you have room to',
     '   work. It is not a reason to leave the work uncommitted — see below.',
@@ -558,6 +566,7 @@ function renderImplementer(materials: Materials): string {
     '## Required output (a single final report)',
     '- Status: SUCCESS or FAILURE, and why.',
     '- Files created or modified, paths only.',
+    ...gateReport(materials),
     '- A 5–15 line summary of what you implemented and the decisions you took.',
     '- Deviations from the phase body above, and your reasoning.',
     "- Anything you could not do, with an explanation.",
@@ -791,14 +800,97 @@ function leaseBlock(materials: Continuation): string[] {
 /** Whether there is a `## The project’s commands` section to point step 3 at. */
 const hasCommands = (materials: Continuation): boolean => commandBlock(materials).length > 0
 
+/**
+ * The node's gates, as the command that runs one.
+ *
+ * It used to print `id: <cmd>` — the gate's declared command line, verbatim —
+ * which is how the gates came to be run four and five times a phase against a
+ * tree nothing had changed, every one of them outside the cache and outside the
+ * pool. Given the command, an agent runs the command; there was nothing else on
+ * the page to run.
+ *
+ * So the command is gone and the id is the whole of it. `gateBlock` below says
+ * what the verb does and why it is not the same as typing the line, and this is
+ * the list every step points at.
+ */
 function gateList(materials: Continuation): string[] {
-  const gates = materials.node.gates.flatMap((id) => {
-    const gate = materials.workflow.gates[id]
-    return gate === undefined ? [] : [`   - ${id}: \`${gate.cmd}\``]
-  })
+  const gates = materials.node.gates.filter((id) => materials.workflow.gates[id] !== undefined)
   return gates.length === 0
     ? ['   - the repository’s own type/build check and its test suite.']
-    : gates
+    : gates.map((id) => `   - \`vinta-ai-maestro gate ${id}\``)
+}
+
+/**
+ * The report line that says which gates ran and what they said.
+ *
+ * A record, and deliberately not a substitute for one. The reviewer is told in
+ * the same breath to run the gates itself — that instruction predates this and
+ * stays exactly as it was, because the bug it was written for was reviewers
+ * reaching a verdict on an implementer's word. What this adds is something to
+ * check *against*: a phase whose report claims a green `unit` and whose gate
+ * node then fails on `unit` is a specific, findable disagreement, and before
+ * this there was nothing on either side to compare.
+ */
+function gateReport(materials: Continuation): string[] {
+  // The ids are deliberately not interpolated: they are already on the page
+  // twice, and a list spliced mid-sentence re-wraps this paragraph differently
+  // for every workflow that reads it.
+  if (!hasGates(materials)) return []
+  return [
+    '- Every gate you ran, by id, and what it returned. If you did not run one of',
+    '  the gates listed above, say so and say why rather than leaving it out.',
+  ]
+}
+
+/** Whether this node has declared gates to point the verb at. */
+const hasGates = (materials: Continuation): boolean =>
+  materials.node.gates.some((id) => materials.workflow.gates[id] !== undefined)
+
+/**
+ * How to run a gate, and why by id rather than by command.
+ *
+ * The companion to `leaseBlock`, and written for the same failure one level up.
+ * `leaseBlock` gets an agent to queue for a resource before a heavy command;
+ * this removes the step where an agent decides what the heavy command *is*. The
+ * observed run had an implementer running `project.commands` — lint, typecheck,
+ * a scoped suite — and reporting the outer gate as done, because step 4 was
+ * phrased as a description of what would run against its lane later. There was
+ * no way for the phase to notice: the gate node ran the real suite afterwards
+ * and found what the implementer had never looked at.
+ *
+ * Only rendered for a node with declared gates. A node with none has no id to
+ * name, and a block explaining a verb it cannot use is one more thing to
+ * misread.
+ */
+function gateBlock(materials: Continuation): string[] {
+  const first = materials.node.gates.find((id) => materials.workflow.gates[id] !== undefined)
+  if (first === undefined) return []
+
+  return [
+    '',
+    '## The outer gate — ask the orchestrator to run it',
+    'This plan declares its gates, and the orchestrator runs them for you. Ask for',
+    'one by id, from your own worktree:',
+    `    vinta-ai-maestro gate ${first}`,
+    'It runs the plan’s own command for that gate, in your lane, and exits with the',
+    'gate’s exit code — `0` is green. It prints the path to the gate’s output; read',
+    'that file when a gate is red, rather than inferring what broke from the code.',
+    '',
+    '**Run gates this way rather than running their commands yourself.** Three',
+    'things are true of a gate the orchestrator ran and none of them survive a',
+    'command you typed: the result is cached against your lane’s contents, so a',
+    'gate you have already run on an unchanged tree returns instantly the next time',
+    'anyone asks; the machine capacity it needs is queued for rather than taken out',
+    'from under the other lanes; and what runs is the command this plan declares —',
+    'the same one the orchestrator will run to judge this phase. Something you ran',
+    'that resembles the gate is not the gate, and reporting it as one is how a',
+    'phase passes review and fails its gate afterwards.',
+    '',
+    'Waiting is the expected outcome, not a failure: it queues for capacity and then',
+    'runs a suite. Let it finish — do not interrupt it, add a timeout, or retry it',
+    'in some other form. And if it refuses outright, that is the answer to the gate',
+    'rather than permission to run the command by hand: say so in your report.',
+  ]
 }
 
 /**
@@ -859,6 +951,7 @@ function renderReviewer(materials: Materials): string {
     'Read the full diff of every changed file. Spot-checking is not enough.',
     ...workingTree(materials),
     ...commandBlock(materials),
+    ...gateBlock(materials),
     ...leaseBlock(materials),
     '',
     '## What that diff was supposed to implement',
@@ -880,6 +973,14 @@ function renderReviewer(materials: Materials): string {
     ...gateList(materials),
     '   Say in your report that you ran them and what they returned. If you could',
     '   not run them, that is a finding, not something to pass over.',
+    // The implementer now reports its own gate runs, and that report is a thing
+    // to check rather than a thing to accept. Saying so here because the
+    // obvious misreading of a new "gates I ran" section in the material under
+    // review is that the running has been done — which is the reviewer bug this
+    // layer was written for, arriving from a new direction.
+    '   The implementer’s report lists the gates it ran and what they returned.',
+    '   That is a claim to check against your own run, not one to accept in place',
+    '   of it. Running them again is cheap: an unchanged tree is served from cache.',
     '   Scope creep and unrelated churn surfaced; a scan of the diff for secrets',
     '   (password, secret, token, api_key, AKIA, BEGIN … KEY).',
     '2. Plan compliance. Every change the phase body asked for is implemented;',
@@ -930,6 +1031,7 @@ function renderFixer(materials: Materials): string {
     `You are fixing ${node.id}: ${node.name} of plan ${workflow.id}.`,
     `Work entirely inside \`${materials.workspace}\`, on branch \`${materials.branch}\`.`,
     ...commandBlock(materials),
+    ...gateBlock(materials),
     ...leaseBlock(materials),
     '',
     '## What failed',
@@ -940,17 +1042,41 @@ function renderFixer(materials: Materials): string {
     '',
     '## What to do',
     'Fix exactly what is listed above, and nothing else — an unrelated change here',
-    'is scope creep the reviewer will send back. Then re-run the inner loop, and',
-    'these, until they are green:',
+    'is scope creep the reviewer will send back. Then re-run the inner loop, and run',
+    'each of these yourself:',
     ...gateList(materials),
+    ...gateStopCondition(),
     ...foreground(),
     ...commitProtocol(materials),
     '',
     '## Required output',
     '- Status: SUCCESS or FAILURE, and why.',
     '- Files modified, paths only.',
+    ...gateReport(materials),
     '- What you changed for each finding, and any finding you did not act on.',
   ])
+}
+
+/**
+ * What "green" is, for a fixer that may not reach it.
+ *
+ * Both fixer prompts said to re-run the gates "until they are green", and the
+ * `commitProtocol` section immediately below said to commit and report FAILURE
+ * whether or not anything went green. Read together those are a loop with no
+ * exit and a rule about how to exit it, and the observed resolution was the
+ * wrong one: a fixer that could not turn a gate green had been given no
+ * described way to stop, so it kept going until the turn ended — with the work
+ * uncommitted, which is the exact failure `commitProtocol` exists to prevent.
+ *
+ * This is the same word that section uses, in the place the contradiction was.
+ */
+function gateStopCondition(): string[] {
+  return [
+    'Keep at it while you have a red gate you know how to fix and room to fix it.',
+    'A gate you cannot turn green is not a reason to keep going until the turn ends:',
+    'commit what you have and report FAILURE naming the gate and what it said. Green',
+    'is what you are aiming at, not the condition for finishing.',
+  ]
 }
 
 // ---------------------------------------------------------------------------
@@ -996,14 +1122,16 @@ function renderFixerContinuation(materials: Continuation): string {
     'Change exactly what is named above and nothing else. Everything else on this',
     'branch stays as it is — an unrelated edit here is scope creep the next review',
     'will send back, and it costs a fix round you may need. Then re-run the inner',
-    'loop, and these, until they are green:',
+    'loop, and run each of these yourself:',
     ...gateList(materials),
+    ...gateStopCondition(),
     ...foreground(),
     ...commitProtocol(materials),
     '',
     '## Required output',
     '- Status: SUCCESS or FAILURE, and why.',
     '- Files modified, paths only.',
+    ...gateReport(materials),
     '- What you changed for each finding, and any finding you did not act on.',
   ])
 }
@@ -1025,6 +1153,11 @@ function renderReviewerContinuation(materials: Continuation): string {
     '**Run these again yourself, every round.** A session that remembers running',
     'them last round is remembering a different tree:',
     ...gateList(materials),
+    // The verification stays; only the cost of it changed. A reviewer told the
+    // repetition is cheap has one fewer reason to talk itself out of it.
+    'A round that changed nothing they touch is served from cache and returns at',
+    'once, so this costs you very little — and a round that did change something is',
+    'exactly the round where last round’s answer is wrong.',
     ...workingTree(materials),
     '',
     '## What to decide',

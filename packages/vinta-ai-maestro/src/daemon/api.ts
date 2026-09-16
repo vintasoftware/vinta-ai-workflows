@@ -33,6 +33,7 @@ import type { Workflow } from '../types.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
+import { AgentGateRefusal } from '../resources/agent-gates.ts'
 import { AcquireAborted } from '../resources/pools.ts'
 import { parseWorkflow } from '../validate.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
@@ -41,6 +42,7 @@ import { harnessCapabilities } from './harnesses.ts'
 import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
+  AgentGateRequestSchema,
   AgentLeaseRequestSchema,
   AnswerRequestSchema,
   HumanQuestionSchema,
@@ -50,6 +52,7 @@ import {
   toIssues,
   toWireIssues,
   type AmendResponse,
+  type AgentGateResultResponse,
   type AgentLeaseGrantResponse,
   type AgentLeaseWaitingResponse,
   type EventPage,
@@ -348,6 +351,53 @@ export function createApi(options: ApiOptions): Hono {
     if ('response' in found) return found.response
     found.run.agentLeases.release(c.req.param('leaseId') ?? '')
     return c.json({ ok: true })
+  })
+
+  /**
+   * One declared gate, run by the daemon on an agent's behalf.
+   *
+   * This is the same work the `gate` node does, moved to where the agents
+   * already were. They were running the gate commands by hand four times a
+   * phase — the implementer's outer gate, the reviewer's first layer, the
+   * fixer, the reviewer again — and every one of those was a bare shell line:
+   * outside `GateCache`, so the fifth run by the `gate` node paid full price
+   * for a tree nothing had changed, and outside the pool unless the agent
+   * remembered to wrap it.
+   *
+   * Through here all three are structural. The broker keys on the same
+   * `(gate id, lane tree hash)` as the `gate` node, so the run that node
+   * eventually makes can be a hit on what an agent already proved; it takes
+   * the gate's pools itself, so the lease is not something an agent can omit;
+   * and it is given a gate *id*, so the command is the workflow's rather than
+   * whatever the agent recalled of it.
+   *
+   * It does not wait in hops the way `POST /leases` does. A gate acquires its
+   * pools and then runs a test suite, so the response is slow for reasons the
+   * client cannot shorten, and the CLI is built to wait for it.
+   */
+  app.post('/api/runs/:runId/gates', async (c) => {
+    const found = resolveGateRun(c)
+    if ('response' in found) return found.response
+
+    const body = await readBody(c, AgentGateRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    if (!journal.nodes(found.row.id).some((node) => node.node_id === body.value.holderNode)) {
+      return fail(c, 400, 'invalid_holder')
+    }
+    if (workflow(found.row.id).gates[body.value.gate] === undefined) {
+      return fail(c, 400, 'unknown_gate')
+    }
+
+    try {
+      const result = await found.run.agentGates.run(body.value.gate, body.value.holderNode)
+      return c.json(result satisfies AgentGateResultResponse)
+    } catch (error) {
+      // Codes only, and the code is the broker's own where it had one. A gate
+      // that failed is a `200` with a non-zero `exitCode`; reaching here means
+      // the gate could not be *started* — no lane, or a `requires` that would
+      // have deadlocked against the lane the node is holding.
+      return fail(c, 409, error instanceof AgentGateRefusal ? error.code : 'gate_unavailable')
+    }
   })
 
   app.get('/api/runs/:runId/nodes/:nodeId', (c) => {
@@ -732,6 +782,21 @@ export function createApi(options: ApiOptions): Hono {
     if (run === undefined) return { response: fail(c, 409, 'run_not_live') }
     if (run.agentLeases === undefined) return { response: fail(c, 501, 'leases_unavailable') }
     return { run: run as DaemonRun & { agentLeases: NonNullable<DaemonRun['agentLeases']> }, row }
+  }
+
+  /** `resolveLeaseRun`'s twin. Same three refusals, about the other port. */
+  function resolveGateRun(
+    c: Context,
+  ):
+    | { run: DaemonRun & { agentGates: NonNullable<DaemonRun['agentGates']> }; row: RunRow }
+    | { response: Response } {
+    const runId = c.req.param('runId') ?? ''
+    const row = journal.run(runId)
+    if (row === undefined) return { response: fail(c, 404, 'unknown_run') }
+    const run = runs.get(runId)
+    if (run === undefined) return { response: fail(c, 409, 'run_not_live') }
+    if (run.agentGates === undefined) return { response: fail(c, 501, 'gates_unavailable') }
+    return { run: run as DaemonRun & { agentGates: NonNullable<DaemonRun['agentGates']> }, row }
   }
 
   async function operate<T>(
