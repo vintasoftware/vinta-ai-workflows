@@ -20,7 +20,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentTask, HarnessAdapter, SpawnOutcome } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
-import { Monitor, MonitorUnavailable, describe as describeRun, monitorModel, runDigest } from '../src/monitor/monitor.ts'
+import {
+  MONITOR_NODE,
+  Monitor,
+  MonitorUnavailable,
+  describe as describeRun,
+  monitorModel,
+  runDigest,
+} from '../src/monitor/monitor.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 
 const temps: string[] = []
@@ -319,5 +326,44 @@ describe('the conversation', () => {
         'why?',
       ),
     ).rejects.toBeInstanceOf(MonitorUnavailable)
+  })
+})
+
+/**
+ * The reserved id is a *directory name*, and that was a Windows bug for as long
+ * as the conversation has existed.
+ *
+ * It was `monitor:conversation` — a colon, chosen because no phase id may
+ * contain one. But the id becomes
+ * `<journal>/runs/<run>/nodes/<MONITOR_NODE>`, and on Windows a colon is the
+ * drive and alternate-stream separator: `mkdir` fails with `ENOENT`, so every
+ * question threw on its first append and the endpoint reported the monitor
+ * unavailable. It had never worked there and could not have.
+ *
+ * What hid it for so long is that a colon is perfectly legal in a macOS or
+ * Linux filename, so a round-trip test passes on every machine this was
+ * developed on. That is why this asserts the *characters* rather than writing a
+ * file: a test that only fails on one platform is a test that fails in CI,
+ * after the fact, for somebody else.
+ */
+describe('the reserved node id', () => {
+  it('is a legal directory name on every platform', () => {
+    // The set Windows forbids outright, plus the control characters.
+    // eslint-disable-next-line no-control-regex
+    expect(MONITOR_NODE).not.toMatch(/[<>:"/\\|?*\u0000-\u001f]/)
+    // And nothing that needs quoting or trips a shell glob.
+    expect(MONITOR_NODE).toMatch(/^[A-Za-z0-9._-]+$/)
+  })
+
+  it('cannot collide with a phase, which is why it is reserved at all', () => {
+    // Node ids are lowercase kebab-case (`types.ts`), so one that does not
+    // begin with a letter or a digit is not merely unused but unrepresentable.
+    const asNodeId = WorkflowSchema.safeParse({
+      id: 'w',
+      version: 1,
+      base_branch: 'main',
+      nodes: [{ id: MONITOR_NODE, name: 'n', prompt_ref: 'p.md#1' }],
+    })
+    expect(asNodeId.success).toBe(false)
   })
 })

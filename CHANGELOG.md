@@ -339,6 +339,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The monitor's conversation could never be written on Windows.** It is kept
+  under a reserved node id that becomes a directory, and that id was
+  `monitor:conversation` — a colon, chosen because no phase id may contain one,
+  and the drive separator on Windows. `mkdir` failed with `ENOENT`, so every
+  question threw on its first append and the endpoint reported the monitor
+  unavailable. A colon is legal in a macOS or Linux filename, which is why no
+  machine the feature was built on ever saw it. The id is now
+  `_monitor-conversation`: still unrepresentable as a phase id, and legal
+  everywhere. Conversations recorded under the old id are not migrated.
+
 - **The monitor keeps thinking when you look away, and thinks out loud.**
   Asking used to be one long HTTP request that produced the whole answer inside
   it, which made the turn's lifetime the browser's connection: switching view,

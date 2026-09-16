@@ -287,9 +287,23 @@ export function brief(digest: RunDigest): string {
  *
  * A reserved node id, so the exchange lands in the same transcript store every
  * phase uses and is read back by the same call. It cannot collide with a phase:
- * `validate.ts` admits no node id containing a colon.
+ * node ids are lowercase kebab-case (`types.ts`), so one beginning with `_` is
+ * not merely unused but unrepresentable.
+ *
+ * **It used to be `monitor:conversation`, and that was a Windows bug.** The
+ * colon was chosen for exactly the reason the underscore is now — no phase id
+ * may contain one — but this id is not only a key: it becomes a *directory*,
+ * `<journal>/runs/<run>/nodes/<MONITOR_NODE>`, and a colon is the drive and
+ * alternate-stream separator on Windows. `mkdir` there fails with `ENOENT`, so
+ * on Windows every question threw on the first append and the endpoint reported
+ * the monitor unavailable. It had never worked on that platform, and could not
+ * have: a colon is legal in a macOS or Linux filename, so every machine the
+ * feature was developed and tested on hid it.
+ *
+ * The character set here is therefore load-bearing, and `monitor.test.ts` holds
+ * it to the characters every platform accepts.
  */
-export const MONITOR_NODE = 'monitor:conversation'
+export const MONITOR_NODE = '_monitor-conversation'
 
 export interface MonitorOptions {
   readonly adapter: HarnessAdapter
