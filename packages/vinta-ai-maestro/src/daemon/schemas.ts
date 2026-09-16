@@ -86,6 +86,18 @@ export const AgentLeaseRequestSchema = z.strictObject({
   waitToken: z.string().min(1).optional(),
 })
 
+/**
+ * An agent asking the daemon to run one declared gate in its own lane.
+ *
+ * A gate *id*, never a command. The whole reason the verb exists is that the
+ * id resolves to the workflow's own `cmd` on this side, so an agent cannot run
+ * a scoped approximation of the suite and report it as the gate.
+ */
+export const AgentGateRequestSchema = z.strictObject({
+  gate: z.string().min(1),
+  holderNode: z.string().min(1),
+})
+
 /** §9.1 — the answer lands in the guard context as `human.answer`. */
 export const AnswerRequestSchema = z.strictObject({
   answer: z.union([z.string(), z.number(), z.boolean(), z.null()]),
@@ -123,6 +135,25 @@ export const AgentLeaseWaitingSchema = z.strictObject({
 })
 
 export type AgentLeaseWaitingResponse = z.infer<typeof AgentLeaseWaitingSchema>
+
+/**
+ * What a gate returned.
+ *
+ * `logRef` is a path and the output is not here, for §11's reason: gate output
+ * is repository content verbatim, it already lives in the log file, and a
+ * second copy of it on the wire is a second place it can leak from. The agent
+ * reads the file — it is in the agent's own lane's run store, which it can
+ * read — and this says where.
+ */
+export const AgentGateResultSchema = z.strictObject({
+  gateId: z.string().min(1),
+  status: z.string().min(1),
+  exitCode: z.number().int(),
+  cached: z.boolean(),
+  logRef: z.string().min(1),
+})
+
+export type AgentGateResultResponse = z.infer<typeof AgentGateResultSchema>
 
 export const RunSummarySchema = z.strictObject({
   runId: z.string(),

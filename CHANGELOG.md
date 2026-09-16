@@ -23,6 +23,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro gate <gate-id>` runs a declared gate from inside an agent
+  turn.** A phase used to run its full gate suite five or six times a round —
+  implementer, reviewer, fixer, reviewer again, then the authoritative `gate`
+  node — and only the last of those consulted the gate cache or the resource
+  pool. Agents now ask the daemon for a gate by id: the result is cached on the
+  same `(gate id, lane tree hash)` key the `gate` node reads, the gate's
+  resources are held by the daemon rather than by whichever agent remembered to
+  wrap the command, and the id resolves to the plan's own command so a scoped
+  approximation cannot be reported as the gate. Each run is journalled as a
+  `gate_result` event and a `gate_run` transcript entry under the GATE band,
+  whoever asked for it.
+
 - **A project declares what makes a lane runnable.** `project.env_files` copies
   ignored configuration into each worktree, `project.setup_cmd` runs an
   idempotent setup hook on provisioning and recycle, and the fixed
@@ -309,6 +321,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   alike.
 
 ### Changed
+
+- **Agent prompts name gates by id rather than printing their commands.** The
+  implementer's step 4 was descriptive — "Outer gate… These run against your
+  lane:" followed by the gate commands — and implementers were observed reading
+  it as a note about what would run later, finishing the scoped inner loop and
+  never running a gate at all. It is imperative now, and every role that runs a
+  gate (implementer, reviewer, fixer, and the continuation of each) is pointed
+  at `vinta-ai-maestro gate <id>`. The fixer prompts no longer say to re-run the
+  gates "until they are green", which contradicted the commit protocol directly
+  below them and left fixers running out the turn with the work uncommitted;
+  they now say to commit and report FAILURE when a gate cannot be turned green.
+  Implementers and fixers report which gates they ran and what each returned —
+  a record for the reviewer to check against, explicitly not a licence for the
+  reviewer to skip running them itself.
 
 - **Phase branches base on their dependencies, not on the previous phase.** A phase
   with no dependencies cuts from the default branch; one with a single dependency

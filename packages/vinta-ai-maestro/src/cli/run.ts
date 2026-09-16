@@ -46,7 +46,13 @@ import { parseArgs } from 'node:util'
 import { AdmissionControl } from '../admission/admission.ts'
 import type { AmendRunner } from '../amend/amend.ts'
 import { createRebaser } from '../amend/rebase.ts'
-import { runControl, startDaemon, type Daemon, type DaemonRun } from '../daemon/index.ts'
+import {
+  runControl,
+  startDaemon,
+  type AgentGatePort,
+  type Daemon,
+  type DaemonRun,
+} from '../daemon/index.ts'
 import { takeovers } from '../daemon/pty.ts'
 import { formatDoctorReport, referencedHarnesses, runDoctor } from '../doctor/index.ts'
 import { createRunExecutor } from '../executor/index.ts'
@@ -83,6 +89,7 @@ import {
   type IntegrationWaveRecord,
 } from '../postmortem/postmortem.ts'
 import { ResourcePools } from '../resources/pools.ts'
+import { AgentGateBroker } from '../resources/agent-gates.ts'
 import {
   AgentLeaseBroker,
   MAESTRO_RUN_ENV,
@@ -362,6 +369,10 @@ export async function runCommand(
     pools,
     admission,
     agentLeases,
+    // The `gate` verb's route in. Built here because this is where the pools
+    // are; absent for a host with no lanes, and then the verb refuses rather
+    // than running a gate against a directory it guessed.
+    ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
     ...(amend === undefined ? {} : { amend }),
   }
   daemon.register(run)
@@ -457,6 +468,18 @@ interface HostWiring {
   /** One lane's environment, for the agent about to run in it. */
   readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
   readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
+  /**
+   * The `gate` verb's port, once the run's pools exist.
+   *
+   * A factory rather than a value because the two things it needs are owned on
+   * opposite sides of this seam: the lane pool and the gate cache are
+   * `provision`'s and stay private to it, and `ResourcePools` is built out
+   * there, after. Handing the pools in is cheaper than moving either of the
+   * others out, and it keeps the cache closed by the same `close` that opened
+   * it. Absent for an injected executor, which provisions no lanes to run a
+   * gate against.
+   */
+  readonly gatesFor?: (pools: ResourcePools) => AgentGatePort
   /** Handles this process opened. Never the lanes — see the `finally` above. */
   close(): void
 }
@@ -576,6 +599,26 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     // Read through the pool rather than captured, because a recycle that had to
     // re-provision hands back a different `Lane` object for the same slot.
     laneEnv: (name: string) => ({ ...pool.lane(name).env, ...options.agentEnv }),
+    // The same cache the executor was given, so a gate an agent ran is a hit
+    // for the `gate` node afterwards. Two caches over one project would be two
+    // databases in one file's place and the hits would land in whichever one
+    // nobody asked.
+    gatesFor: (pools) =>
+      new AgentGateBroker({
+        workflow,
+        runId,
+        journal,
+        pools,
+        cache,
+        // Through the pool for `laneEnv`'s reason, and with the same agent
+        // environment overlaid: a gate run from inside a turn must see the
+        // lane's forked database and compose project, exactly as the gate node's
+        // run of it will.
+        lane: (name: string) => {
+          const lane = pool.lane(name)
+          return { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
+        },
+      }),
     // What changed under a member while it was away: the files that differ
     // between the phase it last worked on and what is checked out now. It is
     // the whole safety argument for continuing a session across a phase, so a

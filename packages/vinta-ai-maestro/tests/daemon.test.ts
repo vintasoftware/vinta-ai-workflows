@@ -814,6 +814,112 @@ describe('agent-held leases', () => {
 // 3: request validation
 // ---------------------------------------------------------------------------
 
+/**
+ * The endpoint behind `vinta-ai-maestro gate`.
+ *
+ * What is asserted here is the *door*, not the gate: that it takes an id and
+ * never a command, that it checks the id and the holder against the frozen
+ * workflow and the journal before anything runs, and that a red gate comes back
+ * as a result rather than as an error. What happens behind it — the cache, the
+ * pools, the lane — is `agent-gates.test.ts`'s.
+ */
+describe('gates run for an agent', () => {
+  /** Records what it was asked for; the broker's own behaviour is tested elsewhere. */
+  const recordingGates = () => {
+    const calls: { gateId: string; holderNode: string }[] = []
+    return {
+      calls,
+      run: async (gateId: string, holderNode: string) => {
+        calls.push({ gateId, holderNode })
+        return {
+          gateId,
+          status: 'failed',
+          exitCode: 1,
+          cached: false,
+          logRef: '/runs/run-1/nodes/a/gates/unit.log',
+        }
+      },
+    }
+  }
+
+  it('runs the named gate for the asking node and returns its verdict', async () => {
+    const r = await rig()
+    const gates = recordingGates()
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      agentLeases: r.agentLeases,
+      agentGates: gates,
+    })
+
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'a' },
+    })
+
+    // A failing gate is a `200` carrying a non-zero exit code. It is an answer,
+    // not a transport failure, and a client that conflated the two would treat
+    // "the suite is red" as "ask again".
+    expect(result.status).toBe(200)
+    expect(result.body).toMatchObject({ gateId: 'unit', exitCode: 1, cached: false })
+    expect(gates.calls).toEqual([{ gateId: 'unit', holderNode: 'a' }])
+  })
+
+  it('refuses an undeclared gate, a node that is not the run’s, and a body carrying a command', async () => {
+    const r = await rig()
+    const gates = recordingGates()
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      agentLeases: r.agentLeases,
+      agentGates: gates,
+    })
+
+    const unknown = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'nope', holderNode: 'a' },
+    })
+    expect(unknown.status).toBe(400)
+    expect(unknown.body).toMatchObject({ error: 'unknown_gate' })
+
+    const holder = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'ghost' },
+    })
+    expect(holder.status).toBe(400)
+    expect(holder.body).toMatchObject({ error: 'invalid_holder' })
+
+    // The strict object is what makes "by id, never by command" a property of
+    // the wire rather than of the CLI's good manners.
+    const smuggled = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'a', cmd: 'echo green' },
+    })
+    expect(smuggled.status).toBe(400)
+    expect(smuggled.body).toMatchObject({ error: 'invalid_request' })
+
+    // None of the three reached the runner.
+    expect(gates.calls).toEqual([])
+  })
+
+  it('says so rather than pretending when the host offers no gates', async () => {
+    // The default rig registers no `agentGates` — a read-only or injected host.
+    const r = await rig()
+
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'a' },
+    })
+
+    expect(result.status).toBe(501)
+    expect(result.body).toMatchObject({ error: 'gates_unavailable' })
+  })
+})
+
 describe('request validation', () => {
   const cases = [
     { path: 'context', body: {}, path_: 'text' },

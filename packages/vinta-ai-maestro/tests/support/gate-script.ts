@@ -31,6 +31,16 @@ export type Platform = NodeJS.Platform
 
 const isWindows = (platform: Platform): boolean => platform === 'win32'
 
+/** One line written to one file. */
+export interface FileLine {
+  readonly path: string
+  readonly line: string
+}
+
+/** One entry or several, as one list. */
+const many = (value: FileLine | readonly FileLine[] | undefined): readonly FileLine[] =>
+  value === undefined ? [] : Array.isArray(value) ? value : [value as FileLine]
+
 /** What a gate does, as data. Rendered in order, as one shell line. */
 export interface GateScript {
   /** Lines echoed to stdout. */
@@ -41,8 +51,23 @@ export interface GateScript {
   readonly echoEnv?: readonly string[]
   /** Print the working directory, to prove the gate ran where it was sent. */
   readonly printCwd?: boolean
-  /** Append a line to a file — how a fixture counts the times it ran. */
-  readonly append?: { readonly path: string; readonly line: string }
+  /**
+   * Append a line to a file — how a fixture counts the times it ran.
+   *
+   * Several, because counting runs and leaving an artifact behind are two jobs
+   * a single gate often has to do at once: the counter lives outside the repo
+   * so it cannot move the tree hash, and the artifact lives inside it because
+   * moving the tree hash is the thing under test.
+   */
+  readonly append?: FileLine | readonly FileLine[]
+  /**
+   * Overwrite a file with one line — a gate leaving an artifact behind.
+   *
+   * Distinct from `append` because the difference decides the cache question:
+   * a gate that writes the same bytes every run settles on one tree hash, and
+   * one whose output grows or carries a timestamp never does.
+   */
+  readonly write?: FileLine
   /**
    * Background a grandchild that outlives the shell, record its pid, and wait.
    *
@@ -72,14 +97,25 @@ export function renderGate(script: GateScript, platform: Platform = process.plat
   // the POSIX spelling of the same question.
   if (script.printCwd === true) steps.push(windows ? 'cd' : 'pwd')
 
-  if (script.append !== undefined) {
-    const { path, line } = script.append
+  for (const { path, line } of many(script.append)) {
     // No space before `>>` on Windows: `echo ran >> f` writes "ran " with the
     // trailing space, which a test counting exact lines would not match.
     steps.push(
       windows
         ? `echo ${literal(line, platform)}>> "${path}"`
         : `echo ${literal(line, platform)} >> ${shellQuote(path, platform)}`,
+    )
+  }
+
+  if (script.write !== undefined) {
+    const { path, line } = script.write
+    // Same spelling rule as `append` above: no space before the operator on
+    // Windows, or the trailing space lands in the file and the artifact this
+    // is meant to hold steady is a different one every run.
+    steps.push(
+      windows
+        ? `echo ${literal(line, platform)}> "${path}"`
+        : `echo ${literal(line, platform)} > ${shellQuote(path, platform)}`,
     )
   }
 

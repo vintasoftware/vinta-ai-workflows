@@ -40,6 +40,7 @@ import { purgeCommand } from '../src/cli/purge.ts'
 import { runCommand } from '../src/cli/run.ts'
 import { serveCommand, reachableUrl } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
+import { gateCommand } from '../src/cli/gate.ts'
 import { withCommand } from '../src/cli/with.ts'
 import type { Daemon, DaemonRun } from '../src/daemon/index.ts'
 import type { HarnessAdapter } from '../src/harness/adapter.ts'
@@ -631,6 +632,134 @@ describe('vinta-ai-maestro with', () => {
       const usage = recorder()
       expect(await withCommand(['test-suite', 'pnpm test'], usage.io)).toBe(USAGE)
       expect(usage.err.join('\n')).toContain('with <resource> -- <cmd>')
+    } finally {
+      if (prior === undefined) delete process.env[MAESTRO_URL_ENV]
+      else process.env[MAESTRO_URL_ENV] = prior
+    }
+  })
+})
+
+/**
+ * The verb that took the gate command out of the agent's hands.
+ *
+ * `with` leaves the command with the agent and only wraps it; this replaces it
+ * with an id, because the four gate runs a phase made before the gate node ran
+ * a fifth were all outside the cache, and the implementer's were often not the
+ * gate at all — it ran `project.commands` and reported the outer gate done.
+ */
+describe('vinta-ai-maestro gate', () => {
+  const gateEnv = async (body: () => Promise<void>): Promise<void> => {
+    const prior = {
+      [MAESTRO_URL_ENV]: process.env[MAESTRO_URL_ENV],
+      [MAESTRO_TOKEN_ENV]: process.env[MAESTRO_TOKEN_ENV],
+      [MAESTRO_RUN_ENV]: process.env[MAESTRO_RUN_ENV],
+      [MAESTRO_NODE_ENV]: process.env[MAESTRO_NODE_ENV],
+    }
+    Object.assign(process.env, {
+      [MAESTRO_URL_ENV]: 'http://127.0.0.1:4321',
+      [MAESTRO_TOKEN_ENV]: 'gate-secret',
+      [MAESTRO_RUN_ENV]: 'run-1',
+      [MAESTRO_NODE_ENV]: 'phase-a',
+    })
+    try {
+      await body()
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }
+
+  it('asks by id and exits with the gate’s own code, saying where the output is', async () => {
+    await gateEnv(async () => {
+      const requests: { url: string; init?: RequestInit }[] = []
+      const request: typeof fetch = async (input, init) => {
+        requests.push({ url: String(input), ...(init === undefined ? {} : { init }) })
+        return Response.json({
+          gateId: 'unit',
+          status: 'failed',
+          exitCode: 3,
+          cached: false,
+          logRef: '/runs/run-1/nodes/phase-a/gates/unit.log',
+        })
+      }
+      const io = recorder()
+
+      // A red gate is a non-zero exit, not a CLI failure: the caller asked
+      // whether the gate passed and this is the gate's answer.
+      expect(await gateCommand(['unit'], io.io, { fetch: request })).toBe(3)
+
+      expect(requests).toHaveLength(1)
+      expect(requests[0]?.url).toBe('http://127.0.0.1:4321/api/runs/run-1/gates')
+      // A gate *id* and the turn's own node. There is no field for a command.
+      expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+        gate: 'unit',
+        holderNode: 'phase-a',
+      })
+      expect(io.all().join('\n')).toContain('gate unit failed (exit 3)')
+      expect(io.all().join('\n')).toContain('/runs/run-1/nodes/phase-a/gates/unit.log')
+      // §11, and the same rule `with` is held to.
+      expect(io.all().join('\n')).not.toContain('gate-secret')
+    })
+  })
+
+  it('says when an answer came from the cache, so a green gate is not mistaken for a run', async () => {
+    await gateEnv(async () => {
+      const request: typeof fetch = async () =>
+        Response.json({
+          gateId: 'unit',
+          status: 'passed',
+          exitCode: 0,
+          cached: true,
+          logRef: '/runs/run-1/nodes/phase-a/gates/unit.log',
+        })
+      const io = recorder()
+
+      expect(await gateCommand(['unit'], io.io, { fetch: request })).toBe(0)
+      expect(io.all().join('\n')).toContain('from cache')
+    })
+  })
+
+  it('never suggests running the command by hand, whatever the refusal', async () => {
+    // The lesson `with` had to learn the hard way: an error with no alternative
+    // in it reads as permission to improvise one, and the improvised gate is
+    // not the gate.
+    await gateEnv(async () => {
+      const request: typeof fetch = async () =>
+        Response.json({ error: 'unknown_gate', issues: null }, { status: 400 })
+      const io = recorder()
+
+      expect(await gateCommand(['nope'], io.io, { fetch: request })).toBe(FAILED)
+      expect(io.err.join('\n')).toContain('declares no gate called "nope"')
+      expect(io.err.join('\n')).toContain('Do not run the gate command yourself')
+    })
+  })
+
+  it('explains the one refusal that is about deadlock rather than a typo', async () => {
+    await gateEnv(async () => {
+      const request: typeof fetch = async () =>
+        Response.json({ error: 'gate_needs_lane', issues: null }, { status: 409 })
+      const io = recorder()
+
+      expect(await gateCommand(['unit'], io.io, { fetch: request })).toBe(FAILED)
+      expect(io.err.join('\n')).toContain('requires the lane resource your own phase is holding')
+    })
+  })
+
+  it('refuses outside an agent turn, and rejects a command where an id belongs', async () => {
+    const prior = process.env[MAESTRO_URL_ENV]
+    delete process.env[MAESTRO_URL_ENV]
+    try {
+      const io = recorder()
+      expect(await gateCommand(['unit'], io.io)).toBe(FAILED)
+      expect(io.err.join('\n')).toContain('no live run')
+
+      // `gate unit -- pnpm test` is the `with`-shaped mistake, and it is a
+      // usage error rather than something to half-honour.
+      const usage = recorder()
+      expect(await gateCommand(['unit', '--', 'pnpm', 'test'], usage.io)).toBe(USAGE)
+      expect(usage.err.join('\n')).toContain('gate <gate-id>')
     } finally {
       if (prior === undefined) delete process.env[MAESTRO_URL_ENV]
       else process.env[MAESTRO_URL_ENV] = prior

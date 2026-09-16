@@ -239,8 +239,18 @@ describe('the implementer prompt', () => {
     )
   })
 
-  it('lists the gates the phase has to survive, with their commands', () => {
-    expect(compose('api-layer', 'implementer')).toContain('unit: `pnpm test`')
+  /**
+   * It used to assert the gate's declared command line was printed. That is
+   * what the implementers were running by hand — outside the cache, outside the
+   * pool, and four times a phase before the gate node ran it a fifth. The id
+   * and the verb are the whole listing now; the command stays on the daemon's
+   * side, which is the point of the verb.
+   */
+  it('names the gates the phase has to survive, as the command that runs one', () => {
+    const prompt = compose('api-layer', 'implementer')
+
+    expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+    expect(prompt).not.toContain('unit: `pnpm test`')
   })
 })
 
@@ -389,7 +399,7 @@ describe('the reviewer runs the gates', () => {
     const prompt = compose('api-layer', 'reviewer', { continuation: true })
 
     expect(prompt).toContain('Run these again yourself, every round')
-    expect(prompt).toContain('unit: `pnpm test`')
+    expect(prompt).toContain('`vinta-ai-maestro gate unit`')
     // And the working tree with them: the round after a fix is the likeliest
     // place to find work that was written and never committed.
     expect(prompt).toContain('status --porcelain')
@@ -660,7 +670,9 @@ Add the Folder model and its migration.
 2. Implement, matching the patterns already in the repository.
 3. Inner loop, scoped to what you touched: lint clean, then each new test on
    its own, then the scoped suite. Do not go on while any of them is red.
-4. Outer gate, only once the inner loop is green. These run against your lane:
+4. Outer gate, once the inner loop is green. Run every one of these yourself
+   and read what it returns — step 3 does not speak for them, and the phase is
+   judged on these:
    - the repository’s own type/build check and its test suite.
 5. A red outer gate sends you back to step 2, for as long as you have room to
    work. It is not a reason to leave the work uncommitted — see below.
@@ -1121,7 +1133,7 @@ describe('a continuation prompt', () => {
 
       expect(continued).toContain('Gate unit failed with exit code 1')
       expect(continued).toContain('/runs/run-1/gates/unit.log')
-      expect(continued).toContain('unit: `pnpm test`')
+      expect(continued).toContain('`vinta-ai-maestro gate unit`')
       // The gate, not the review that passed before it — same rule as cold.
       expect(continued).not.toContain('VERDICT: pass')
     })
@@ -1218,7 +1230,7 @@ describe('a continuation prompt', () => {
 
       expect(prompt).toContain('git status')
       expect(prompt).toContain('say so in your report instead of')
-      expect(prompt).toContain('unit: `pnpm test`')
+      expect(prompt).toContain('`vinta-ai-maestro gate unit`')
     })
   })
 
@@ -1309,6 +1321,29 @@ linked, caches and build output the gates you just ran produced — and the
 implementer is told by name not to stage them. If the diff holds the phase’s
 work, do not raise what is sitting in the tree beside it.
 
+## The outer gate — ask the orchestrator to run it
+This plan declares its gates, and the orchestrator runs them for you. Ask for
+one by id, from your own worktree:
+    vinta-ai-maestro gate unit
+It runs the plan’s own command for that gate, in your lane, and exits with the
+gate’s exit code — \`0\` is green. It prints the path to the gate’s output; read
+that file when a gate is red, rather than inferring what broke from the code.
+
+**Run gates this way rather than running their commands yourself.** Three
+things are true of a gate the orchestrator ran and none of them survive a
+command you typed: the result is cached against your lane’s contents, so a
+gate you have already run on an unchanged tree returns instantly the next time
+anyone asks; the machine capacity it needs is queued for rather than taken out
+from under the other lanes; and what runs is the command this plan declares —
+the same one the orchestrator will run to judge this phase. Something you ran
+that resembles the gate is not the gate, and reporting it as one is how a
+phase passes review and fails its gate afterwards.
+
+Waiting is the expected outcome, not a failure: it queues for capacity and then
+runs a suite. Let it finish — do not interrupt it, add a timeout, or retry it
+in some other form. And if it refuses outright, that is the answer to the gate
+rather than permission to run the command by hand: say so in your report.
+
 ## What that diff was supposed to implement
 ## api-layer
 
@@ -1319,9 +1354,12 @@ Add REST endpoints for folders.
    and **you run these yourself and read what they print** — an implementer
    saying they were green is a claim, not evidence, and a verdict reached
    without running them is a guess:
-   - unit: \`pnpm test\`
+   - \`vinta-ai-maestro gate unit\`
    Say in your report that you ran them and what they returned. If you could
    not run them, that is a finding, not something to pass over.
+   The implementer’s report lists the gates it ran and what they returned.
+   That is a claim to check against your own run, not one to accept in place
+   of it. Running them again is cheap: an unchanged tree is served from cache.
    Scope creep and unrelated churn surfaced; a scan of the diff for secrets
    (password, secret, token, api_key, AKIA, BEGIN … KEY).
 2. Plan compliance. Every change the phase body asked for is implemented;
@@ -1350,6 +1388,29 @@ const COLD_FIXER = (dir: string): string =>
   `You are fixing api-layer: API of plan bookmarks.
 Work entirely inside \`${dir}\`, on branch \`HEAD\`.
 
+## The outer gate — ask the orchestrator to run it
+This plan declares its gates, and the orchestrator runs them for you. Ask for
+one by id, from your own worktree:
+    vinta-ai-maestro gate unit
+It runs the plan’s own command for that gate, in your lane, and exits with the
+gate’s exit code — \`0\` is green. It prints the path to the gate’s output; read
+that file when a gate is red, rather than inferring what broke from the code.
+
+**Run gates this way rather than running their commands yourself.** Three
+things are true of a gate the orchestrator ran and none of them survive a
+command you typed: the result is cached against your lane’s contents, so a
+gate you have already run on an unchanged tree returns instantly the next time
+anyone asks; the machine capacity it needs is queued for rather than taken out
+from under the other lanes; and what runs is the command this plan declares —
+the same one the orchestrator will run to judge this phase. Something you ran
+that resembles the gate is not the gate, and reporting it as one is how a
+phase passes review and fails its gate afterwards.
+
+Waiting is the expected outcome, not a failure: it queues for capacity and then
+runs a suite. Let it finish — do not interrupt it, add a timeout, or retry it
+in some other form. And if it refuses outright, that is the answer to the gate
+rather than permission to run the command by hand: say so in your report.
+
 ## What failed
 The reviewer reported:
 
@@ -1362,9 +1423,13 @@ Add REST endpoints for folders.
 
 ## What to do
 Fix exactly what is listed above, and nothing else — an unrelated change here
-is scope creep the reviewer will send back. Then re-run the inner loop, and
-these, until they are green:
-   - unit: \`pnpm test\`
+is scope creep the reviewer will send back. Then re-run the inner loop, and run
+each of these yourself:
+   - \`vinta-ai-maestro gate unit\`
+Keep at it while you have a red gate you know how to fix and room to fix it.
+A gate you cannot turn green is not a reason to keep going until the turn ends:
+commit what you have and report FAILURE naming the gate and what it said. Green
+is what you are aiming at, not the condition for finishing.
 
 ## Run everything in the foreground
 Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached
@@ -1400,6 +1465,8 @@ with the lane.
 ## Required output
 - Status: SUCCESS or FAILURE, and why.
 - Files modified, paths only.
+- Every gate you ran, by id, and what it returned. If you did not run one of
+  the gates listed above, say so and say why rather than leaving it out.
 - What you changed for each finding, and any finding you did not act on.
 `
 
