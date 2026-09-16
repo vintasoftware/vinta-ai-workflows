@@ -89,6 +89,26 @@ export interface HarnessCapabilities {
   readonly pty: boolean
   /** Non-interactive tool permission policy. */
   readonly permissionControl: boolean
+  /**
+   * The harness compacts its own context when the window fills, rather than
+   * failing the turn — and this adapter has made sure the machine it spawns on
+   * cannot silently switch that off (`compaction.ts`).
+   *
+   * Both halves matter, which is why this is one capability and not two. A
+   * vendor that compacts by default is not a guarantee while any stray
+   * environment variable in the daemon's shell reaches the child and disables
+   * it; an adapter that sanitizes its environment has guaranteed nothing if the
+   * vendor was never going to compact in the first place.
+   *
+   * Unlike every other capability here, **no operation rejects with
+   * `HarnessCapabilityError` when this is false**. There is no method to call:
+   * compaction is something a harness does on its own behalf mid-turn, so the
+   * false case is not a button to grey out but a fact about how long a phase
+   * may safely run before its session should be retired. A caller that cares
+   * reads it when deciding how much work to put on one session, and the honest
+   * false is worth more than a true nobody can hold the adapter to.
+   */
+  readonly autoCompact: boolean
 }
 
 export interface PreflightResult {
@@ -169,6 +189,39 @@ export type AgentEvent =
        */
       readonly cacheRead?: number
       readonly cacheWrite?: number
+    }
+  /**
+   * The harness replaced this session's history with a summary of it.
+   *
+   * A kind of its own rather than an `assistant_text` or an `error`, because it
+   * is neither: nothing failed, and nobody said anything. What happened is that
+   * the session's *memory changed underneath it* — same session id, same
+   * worktree, thinner recollection — and that is the one fact a reader of the
+   * transcript cannot reconstruct from any other line. Without it a compacted
+   * turn reads as an agent that inexplicably stopped knowing what it had
+   * already done, which is precisely the wrong conclusion to invite about a run
+   * that was in fact working correctly.
+   *
+   * It matters downstream as well as in the record. §15's session reuse hands a
+   * later phase the same session on the strength of its context, and
+   * `max_session_turns` is the crude proxy for "the context still fits". A
+   * compaction is the real event that proxy was standing in for, and a caller
+   * that wants to retire a session before it forgets the brief needs to be able
+   * to see one happen.
+   *
+   * **Counts only, never the summary.** The summary is agent output about
+   * repository content and belongs in the transcript's own text events like any
+   * other agent output; these three fields are integers and a closed-set token,
+   * so §11 is untouched. `preTokens`/`postTokens` are optional for the usual
+   * reason — a harness that reports no figures must read as unknown rather than
+   * as a compaction that freed nothing.
+   */
+  | {
+      readonly type: 'context_compacted'
+      /** `auto` when the window filled; `manual` when a human asked, mid-takeover. */
+      readonly trigger: 'auto' | 'manual'
+      readonly preTokens?: number
+      readonly postTokens?: number
     }
   | { readonly type: 'error'; readonly message: string }
   | { readonly type: 'session_ended'; readonly result: 'ok' | 'error' | 'interrupted' }

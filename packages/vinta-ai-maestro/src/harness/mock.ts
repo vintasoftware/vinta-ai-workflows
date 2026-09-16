@@ -74,6 +74,13 @@ const DEFAULT_CAPABILITIES: HarnessCapabilities = {
   resume: true,
   pty: true,
   permissionControl: true,
+  /**
+   * False, where every other capability here is true — because a scripted
+   * double does not compact anything, and because a suite in which all three
+   * shipped adapters say `true` would never once exercise a caller's handling
+   * of `false`. The honest value and the useful one are the same value.
+   */
+  autoCompact: false,
 }
 
 /** Long enough that a consumer can interrupt after the first event and still truncate the rest. */

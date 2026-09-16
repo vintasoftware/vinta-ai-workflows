@@ -166,6 +166,32 @@ export function planSession(input: SessionPlanInput): SessionPlan {
   // forgets to pin a member to a lane is wrong; a host that cannot express the
   // mistake is worse.
   if (input.lane === null || entry.lane !== input.lane) return fresh('lane_changed')
+  // The turn ceiling, and what it has quietly stopped meaning.
+  //
+  // §15.2 lists "past the point its context still fits" among the ways reuse
+  // becomes wrong, and this counter is the proxy that stood in for it: turns
+  // were a cheap way to guess that a session was approaching a window it would
+  // die on. Every shipped harness now auto-compacts (`harness/compaction.ts`),
+  // so that death does not happen any more — a session that runs long enough
+  // gets summarized and carries on under the same id.
+  //
+  // Which means this rule now guards the *other* hazard, and the two are not
+  // the same. A compacted session is not a session that ran out of room; it is
+  // one whose memory was replaced by a summary of itself. It answers, it sounds
+  // certain, and the detail it lost is invisible from here — a `context_compacted`
+  // event in the transcript is the only trace, and nothing in this function
+  // sees the transcript. The fixer continuing the implementer's session and the
+  // reviewer continuing across rounds are both continuations that assume the
+  // session still holds what it was told.
+  //
+  // Left as a turn count deliberately. Counting turns over-retires a session
+  // that never compacted and under-retires one that compacted twice, but it is
+  // wrong in a direction that costs tokens rather than correctness, and the
+  // alternative — feeding compaction events back into this pure function —
+  // would make the reuse decision depend on the transcript it was written to
+  // stay out of. Worth revisiting with a `compactions` counter on the entry if
+  // a resumed agent is ever caught confidently describing work it has
+  // forgotten.
   if (entry.turns >= input.maxTurns) return fresh('turn_ceiling')
 
   return {

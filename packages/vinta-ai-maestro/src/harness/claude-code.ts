@@ -46,6 +46,10 @@ import {
   type SpawnOutcome,
   type SpawnRefusalKind,
 } from './adapter.ts'
+import {
+  CLAUDE_CODE_COMPACTION_ENV,
+  CLAUDE_CODE_COMPACTION_SETTINGS,
+} from './compaction.ts'
 import { type AgentPermission, claudeCodeArgs, DEFAULT_PERMISSION } from './permissions.ts'
 import { addDirArgs, writeDenyRules, type ReadGrant } from './read-access.ts'
 import { openPty } from './pty.ts'
@@ -81,6 +85,7 @@ const CAPABILITIES: HarnessCapabilities = {
   resume: true,
   pty: true,
   permissionControl: true,
+  autoCompact: true,
 }
 
 /** Tool results can be whole files. The transcript keeps them; an event carries a look. */
@@ -256,6 +261,42 @@ const mapTurnSummary = (value: Record<string, unknown>): AgentEvent[] =>
     ? [{ type: 'error', message: 'claude-code: the turn ended blocked' }]
     : []
 
+/**
+ * The moment the session's memory got thinner:
+ * `{"type":"system","subtype":"compact_boundary","compact_metadata":
+ * {"trigger":"auto","pre_tokens":183000,"post_tokens":24000}}`.
+ *
+ * The CLI emits this itself, which is the only reason this adapter can report
+ * compaction at all — the turn carries on across the boundary with no other
+ * outward sign, and the next assistant frame looks exactly like any other.
+ *
+ * `trigger` is narrowed to the two values the union admits rather than passed
+ * through: it is the vendor's field and the vendor may grow it, and an unknown
+ * value read as `auto` would claim the window filled when it may have been a
+ * person at a takeover terminal. Anything unrecognised means this frame is not
+ * one we can describe, so it produces no event — the same rule every other
+ * mapper here follows, for the same reason.
+ *
+ * The token counts are carried and the summary is not. The counts are the half
+ * that says how much was lost; the summary is agent prose about the repository
+ * and stays in the transcript's text events (§11).
+ */
+const mapCompactBoundary = (value: Record<string, unknown>): AgentEvent[] => {
+  const metadata = asRecord(value['compact_metadata']) ?? {}
+  const trigger = asString(metadata['trigger'])
+  if (trigger !== 'auto' && trigger !== 'manual') return []
+  const preTokens = asNumber(metadata['pre_tokens'])
+  const postTokens = asNumber(metadata['post_tokens'])
+  return [
+    {
+      type: 'context_compacted',
+      trigger,
+      ...(preTokens === undefined ? {} : { preTokens }),
+      ...(postTokens === undefined ? {} : { postTokens }),
+    },
+  ]
+}
+
 const mapControlRequest = (value: Record<string, unknown>): AgentEvent[] => {
   const request = asRecord(value['request'])
   if (!request || request['subtype'] !== 'can_use_tool') return []
@@ -275,6 +316,7 @@ export function mapCliEvent(raw: unknown): AgentEvent[] {
     case 'system': {
       if (value['subtype'] === 'permission_denied') return mapPermissionDenied(value)
       if (value['subtype'] === 'post_turn_summary') return mapTurnSummary(value)
+      if (value['subtype'] === 'compact_boundary') return mapCompactBoundary(value)
       const sessionId = asString(value['session_id'])
       return value['subtype'] === 'init' && sessionId !== undefined
         ? [{ type: 'session_started', sessionId }]
@@ -481,9 +523,17 @@ class ClaudeCodeSession implements AgentSession {
  * `ask` deliberately does not allow it: that mode is for a human at the
  * browser, and its whole purpose is the prompt.
  *
- * `full` gets the grant and no policy at all. It means "no checks" and is
- * documented as being for a box sandboxed by something else; writing rules the
- * mode is chosen to ignore would make the flag look safer than it is.
+ * `full` still gets no permission *rules* — it means "no checks" and is
+ * documented as being for a box sandboxed by something else, so writing rules
+ * the mode is chosen to ignore would make the flag look safer than it is. It
+ * does now get a settings file, carrying nothing but the compaction assertion.
+ * That is not a loophole in the paragraph above: `autoCompactEnabled` grants
+ * the agent nothing and forbids it nothing, and a run told to skip every check
+ * is still a run that must not die of a full context window.
+ *
+ * Which is why the early return for the "nothing to say" case is gone. There is
+ * no such case any more — every spawn has at least one thing to put in the file
+ * (`compaction.ts`), so every spawn writes one.
  *
  * The deny list is computed per spawn because it is per lane: it names the
  * *other* children at every level between a root and this agent's working
@@ -496,16 +546,14 @@ function readAccessArgs(
   lane: string,
   settingsDir: string,
 ): readonly string[] {
-  if (permission === 'full') return roots.length === 0 ? [] : addDirArgs({ roots, lane })
-
-  // `auto` needs a settings file even with nothing granted, because the shell
-  // allowance lives in it and is not about the grant at all.
-  const allow = permission === 'auto' ? ['Bash'] : []
-  if (roots.length === 0 && allow.length === 0) return []
-
   const grant: ReadGrant = { roots, lane }
+  const dirs = roots.length === 0 ? [] : addDirArgs(grant)
+
+  // `auto` is the only mode that allows the shell, and the allowance lives in
+  // this file rather than in the grant — see the paragraph above.
+  const allow = permission === 'auto' ? ['Bash'] : []
   const deny =
-    roots.length === 0
+    permission === 'full' || roots.length === 0
       ? []
       : writeDenyRules(grant, (dir) => {
           try {
@@ -529,8 +577,18 @@ function readAccessArgs(
   // guard — the one direction in which this may silently do less. It costs the
   // shell allowance too, which fails the phase loudly rather than quietly
   // widening what it may touch.
-  if (settings === null) return []
-  return [...(roots.length === 0 ? [] : addDirArgs(grant)), '--settings', settings]
+  //
+  // `full` is the exception, and was before this: it has no guard to lose, so
+  // an unwritable settings directory costs it only the compaction assertion and
+  // there is no reason to take its read access away as well.
+  //
+  // What that assertion's loss actually costs is worth stating, because it is
+  // less than it looks: compaction is the vendor's default and the environment
+  // has already been sanitized by the time this runs. What falls away is only
+  // the override of a `settings.json` that had turned compaction off — a
+  // machine-specific hole, not the feature.
+  if (settings === null) return permission === 'full' ? dirs : []
+  return [...dirs, '--settings', settings]
 }
 
 /**
@@ -554,9 +612,16 @@ function writeSettings(
     ...(allow.length === 0 ? {} : { allow: [...allow] }),
     ...(deny.length === 0 ? {} : { deny: [...deny] }),
   }
+  // The compaction assertion sits beside the permissions rather than inside
+  // them because it is not one: it grants nothing and denies nothing. It is
+  // here at all because this file is the only thing the adapter layers on top
+  // of the user's own settings, and their `autoCompactEnabled: false` is the
+  // one way a machine can turn compaction off that stripping the environment
+  // does not reach (`compaction.ts`).
+  const content = { ...CLAUDE_CODE_COMPACTION_SETTINGS, permissions }
   try {
     mkdirSync(dir, { recursive: true })
-    writeFileSync(path, `${JSON.stringify({ permissions }, null, 2)}\n`, 'utf8')
+    writeFileSync(path, `${JSON.stringify(content, null, 2)}\n`, 'utf8')
     return path
   } catch {
     return null
@@ -572,10 +637,24 @@ const writeMessage = (child: ChildProcess, text: string): void => {
 }
 
 /**
- * A child must reach Anthropic through the seat the user logged into, never
- * through an API key that would bill an account nobody chose for this run.
+ * What must not reach a child, for two unrelated reasons.
+ *
+ * The API keys are about *whose account pays*: a child must reach Anthropic
+ * through the seat the user logged into, never through a key that would bill an
+ * account nobody chose for this run.
+ *
+ * The compaction switches are about *whether the phase survives its own
+ * length*, and they are here rather than in a second list because the mechanism
+ * is identical and `childEnv` takes one array. A daemon that inherits
+ * `DISABLE_AUTO_COMPACT` from whatever shell started it hands that variable to
+ * every agent in every lane, and the phase that dies of a full window reports
+ * nothing an operator could trace back to it (`compaction.ts`).
  */
-const STRIPPED_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const
+const STRIPPED_ENV = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  ...CLAUDE_CODE_COMPACTION_ENV,
+] as const
 
 // ---------------------------------------------------------------------------
 // Adapter
