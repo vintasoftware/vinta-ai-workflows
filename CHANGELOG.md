@@ -7,6 +7,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.0] — YYYY-MM-DD
 
+<!-- pre-release: 0.7.0-alpha13 on 2026-09-16 -->
 <!-- pre-release: 0.7.0-alpha12 on 2026-09-15 -->
 <!-- pre-release: 0.7.0-alpha11 on 2026-09-15 -->
 <!-- pre-release: 0.7.0-alpha10 on 2026-09-15 -->
@@ -282,6 +283,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **generated** from a zod source rather than hand-written — see
   [`schemas/README.md`](schemas/README.md).
 
+- **The monitor keeps thinking when you look away, and thinks out loud.**
+  Asking used to be one long HTTP request that produced the whole answer inside
+  it, which made the turn's lifetime the browser's connection: switching view,
+  reloading or letting a laptop sleep killed the monitor mid-thought and left a
+  question with no answer and no record that one had been attempted. The daemon
+  owns the turn now — `POST` answers `202`, and the monitor journals each
+  thought and each sentence as it produces them, so the conversation is
+  readable while it is being written and by any tab that opens it. The panel
+  renders through the same rows a phase's transcript uses, which is what the
+  API always claimed and the UI never did.
+
+- **A phase's transcript says which agent wrote each line, and holds the gates.**
+  Every spawn on a node appends to one file whatever its role, so a phase that
+  took two fix rounds held five agents' output in one undifferentiated stream —
+  the role was in scope at the append and simply not written down. Each line now
+  carries the role and the session slot that produced it, the view bands the
+  list where one agent stops and the next starts, and gate runs are entries in
+  it rather than only in a log beside it. The operator's own steering stays the
+  operator's (§7), even though the adapter echoes it back on the agent's event
+  stream. Transcripts written before this render exactly as they did, with no
+  bands.
+
 ### Changed
 
 - **Phase branches base on their dependencies, not on the previous phase.** A phase
@@ -337,7 +360,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is only as good as the `healthcheck` a service declares: without one, compose
   returns as soon as the container starts and `createdb` races the server.
 
-### Added
+### Fixed
 
 - **The monitor's conversation could never be written on Windows.** It is kept
   under a reserved node id that becomes a directory, and that id was
@@ -348,30 +371,6 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   machine the feature was built on ever saw it. The id is now
   `_monitor-conversation`: still unrepresentable as a phase id, and legal
   everywhere. Conversations recorded under the old id are not migrated.
-
-- **The monitor keeps thinking when you look away, and thinks out loud.**
-  Asking used to be one long HTTP request that produced the whole answer inside
-  it, which made the turn's lifetime the browser's connection: switching view,
-  reloading or letting a laptop sleep killed the monitor mid-thought and left a
-  question with no answer and no record that one had been attempted. The daemon
-  owns the turn now — `POST` answers `202`, and the monitor journals each
-  thought and each sentence as it produces them, so the conversation is
-  readable while it is being written and by any tab that opens it. The panel
-  renders through the same rows a phase's transcript uses, which is what the
-  API always claimed and the UI never did.
-
-- **A phase's transcript says which agent wrote each line, and holds the gates.**
-  Every spawn on a node appends to one file whatever its role, so a phase that
-  took two fix rounds held five agents' output in one undifferentiated stream —
-  the role was in scope at the append and simply not written down. Each line now
-  carries the role and the session slot that produced it, the view bands the
-  list where one agent stops and the next starts, and gate runs are entries in
-  it rather than only in a log beside it. The operator's own steering stays the
-  operator's (§7), even though the adapter echoes it back on the agent's event
-  stream. Transcripts written before this render exactly as they did, with no
-  bands.
-
-### Fixed
 
 - **An implementer was told both to commit and never to commit.** The prompt
   carried "never commit while a gate is red" beside "the turn is not complete
@@ -1255,7 +1254,6 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Consumers**: re-sync to pick up the opt-in questions. E2E-disabled projects
   are unaffected (the e2e regions strip out as before).
 
-
 <!-- pre-release: 0.2.0-alpha6 on 2026-07-13 -->
 
 ### Changed
@@ -1291,7 +1289,6 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- pre-release: 0.2.0-alpha5 on 2026-07-13 -->
 
 ### Added
-
 
 - **`handoff` foundation skill — session-continuation handoff docs between
   agents.** Write mode captures the current task (goal, verified-vs-unverified
