@@ -302,9 +302,16 @@ export async function serveCommand(
       io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
       io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
     }
-    // Left open when runs were still live, for `run`'s reason: their schedulers
-    // are still holding this journal and the process is exiting in
-    // milliseconds. SQLite commits per transaction, so the rows above are
+    // Closed only when nothing is still holding it. A daemon-hosted run is
+    // awaited by nobody, and closing under a live scheduler turns every
+    // in-flight lease release into "the database connection is not open" —
+    // a crash report standing where an orderly shutdown should be.
+    //
+    // Shutdown deliberately does not *wait* for those runs: they last hours,
+    // the agents under them die with this process anyway, and a `serve` that
+    // hung until its runs finished would be a `serve` nobody can stop. So the
+    // handle is left to the exiting process and the OS reclaims it — safe,
+    // because SQLite commits per transaction and the rows written above are
     // already durable.
     if (interrupted.length === 0) journal.close()
   }

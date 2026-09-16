@@ -74,7 +74,23 @@ const makeTemp = (): string => {
 }
 
 afterAll(() => {
-  for (const dir of temps) rmSync(dir, { recursive: true, force: true })
+  for (const dir of temps) {
+    // **Best-effort, and it has to be.** A test that interrupts a `serve` with
+    // runs still in flight leaves the journal open on purpose: that is the
+    // production behaviour under test, because shutting down does not wait for
+    // hours-long runs. Windows will not remove a file something still holds, so
+    // failing this teardown would turn a correct behaviour into a red build —
+    // which is exactly what it did the first time round.
+    //
+    // It hides no real leak. The failure that mattered — closing the journal
+    // *under* a live scheduler — surfaces as an unhandled "the database
+    // connection is not open" rejection, which vitest reports either way.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    } catch {
+      // Left for the OS to reap.
+    }
+  }
 })
 
 interface Recorder {
