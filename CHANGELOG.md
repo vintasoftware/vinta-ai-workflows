@@ -360,6 +360,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is only as good as the `healthcheck` a service declares: without one, compose
   returns as soon as the container starts and `createdb` races the server.
 
+- **A merge conflict goes to the most senior member who wrote one of its
+  sides.** The conflict fixer was staffed from `defaults` and ignored the roster
+  entirely, so on a tiered crew a collision between two Tier 4 phases was handed
+  to a default-tier agent that had read neither of them — the hardest merge in
+  the run going to the least contextualised agent available, and resolved by
+  guessing which side looked more finished.
+
+  `Integrator` already knows which nodes own the contested paths, and `node_crew`
+  already records who took each one; this is the join. Highest tier among them
+  wins, on that member's own `model` and `harness`, and a tier tie breaks on
+  member id the way roster substitution breaks its own. An unstaffed workflow
+  still resolves through `defaults`, unchanged, and so does a conflict whose
+  nodes cannot be resolved to a member.
+
+  What is carried is the member's **capability, not their session**. A phase's
+  session ran in that phase's lane; the fixer runs in the integration worktree,
+  where the files in dispute are half-merged and unlike anything that session
+  saw — resuming there would give the agent confident, false memories of exactly
+  the files it is merging. The prompt tells the fixer which side is its own, and
+  in the same breath that it is a fresh session and must read rather than
+  recall.
+
 ### Fixed
 
 - **The monitor's conversation could never be written on Windows.** It is kept

@@ -61,9 +61,11 @@ import {
 } from '../harness/permissions.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
-import { createAgentConflictFixer, type ConflictFixer } from '../integration/fixer.ts'
+import type { ConflictFixer } from '../integration/fixer.ts'
 import { gitLines } from '../integration/git.ts'
 import { Integrator, type WaveResult } from '../integration/integrator.ts'
+import { createCrewConflictFixer } from '../integration/staffing.ts'
+import type { StoredEvent } from '../journal/events.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
 import {
@@ -529,7 +531,7 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
     // `Workflow` satisfies `IntegrationPlan` structurally.
     plan: workflow,
     integrationPath,
-    fixer: conflictFixer(workflow, adapters),
+    fixer: conflictFixer(workflow, adapters, () => journal.crewAssignments(runId)),
   })
 
   const cache = new GateCache(repoPath)
@@ -598,14 +600,23 @@ async function provision(options: ProvisionOptions): Promise<HostWiring> {
  * A run whose adapters were injected need not carry the default harness. The
  * orchestrator never resolves a conflict itself, so with no agent to hand it
  * to the merge exhausts its rounds and stops as the plan defect it is.
+ *
+ * On a staffed run the model comes off the roster rather than `defaults`, and
+ * the journal is read at conflict time to find whose work is in the conflict —
+ * both decided in `integration/staffing.ts`, which is also where the reason a
+ * member's *session* is left behind is written down.
  */
 function conflictFixer(
   workflow: Workflow,
   adapters: Readonly<Record<string, HarnessAdapter>>,
+  crewAssignments: () => readonly StoredEvent[],
 ): ConflictFixer {
-  const adapter = adapters[workflow.defaults.harness] ?? Object.values(adapters)[0]
-  if (adapter === undefined) return { fix: async () => {} }
-  return createAgentConflictFixer({ adapter, model: workflow.defaults.model })
+  return createCrewConflictFixer({
+    adapters,
+    defaults: { harness: workflow.defaults.harness, model: workflow.defaults.model },
+    crew: workflow.crew,
+    crewAssignments,
+  })
 }
 
 /**
