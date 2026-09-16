@@ -61,6 +61,7 @@ export const CLAUDE_CODE_CAPABILITIES = {
   resume: true,
   pty: true,
   permissionControl: true,
+  autoCompact: true,
 } as const satisfies NonNullable<Capabilities>
 
 /** Codex's, which differs from claude-code's in exactly the field that matters. */
@@ -70,6 +71,7 @@ export const CODEX_CAPABILITIES = {
   resume: true,
   pty: true,
   permissionControl: true,
+  autoCompact: true,
 } as const satisfies NonNullable<Capabilities>
 
 export function harness(

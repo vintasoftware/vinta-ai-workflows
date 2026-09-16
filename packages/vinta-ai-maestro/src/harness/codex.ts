@@ -88,6 +88,21 @@ const BASE_ARGS = ['exec', '--json'] as const
  * line — which this adapter now actually passes (`permissions.ts`). It did not
  * before, and the comment claiming otherwise was the only thing standing where
  * the flags should have been.
+ *
+ * **`autoCompact` is true and this adapter passes nothing to make it so**,
+ * which is the one capability here that is not backed by a flag. codex compacts
+ * on its own and ships no way to stop it: no CLI flag, no environment variable,
+ * and the only related config key — `model_auto_compact_token_limit`, the one
+ * spelling of it `--strict-config` accepts — sets the *threshold*, not a
+ * switch. Its own system prompt tells the model the conversation is summarized
+ * automatically when it runs out of context.
+ *
+ * So there is nothing to pass and nothing to sanitize, and the temptation to
+ * pass the threshold anyway is the mistake to avoid: a constant written here
+ * would not track the context window of whichever model the workflow named, and
+ * would move compaction to the wrong point on every other one. The vendor's
+ * default is `null`, which means the model's own limit — better information
+ * than this repository has.
  */
 const CAPABILITIES: HarnessCapabilities = {
   inject: false,
@@ -95,6 +110,7 @@ const CAPABILITIES: HarnessCapabilities = {
   resume: true,
   pty: true,
   permissionControl: true,
+  autoCompact: true,
 }
 
 /** Command output can be a whole file. The transcript keeps it; an event carries a look. */

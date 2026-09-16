@@ -215,6 +215,8 @@ export const HarnessCapabilitiesSchema = z.strictObject({
   pty: z.boolean(),
   /** Non-interactive tool permission policy. */
   permissionControl: z.boolean(),
+  /** Compacts its own context instead of failing the turn when the window fills. */
+  autoCompact: z.boolean(),
 })
 
 type WireCapability = keyof z.infer<typeof HarnessCapabilitiesSchema>

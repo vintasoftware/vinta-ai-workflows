@@ -46,6 +46,7 @@ const AGENT_KINDS = [
   'permission_request',
   'permission_denied',
   'usage',
+  'context_compacted',
   'error',
   'session_ended',
 ] as const satisfies readonly AgentEvent['type'][]
@@ -83,6 +84,12 @@ const EntrySchema = z.discriminatedUnion('type', [
     input: z.number(),
     output: z.number(),
     costUsd: z.number().optional(),
+  }),
+  z.object({
+    type: z.literal('context_compacted'),
+    trigger: z.enum(['auto', 'manual']),
+    preTokens: z.number().optional(),
+    postTokens: z.number().optional(),
   }),
   z.object({ type: z.literal('error'), message: z.string() }),
   z.object({ type: z.literal('session_ended'), result: z.enum(['ok', 'error', 'interrupted']) }),
@@ -263,6 +270,14 @@ function build(raw: unknown): EntryView {
       )
     case 'usage':
       return row(entry.type, 'system', usage(entry), null, 'Usage')
+    // `wait`, not `error` and not null. Nothing failed — this is the harness
+    // doing the thing that keeps a long phase alive — so `error` would be a
+    // lie. But it is also the line that explains why the agent below it stops
+    // referring to work it plainly did, and a row with no tone at all reads as
+    // bookkeeping worth skipping. `wait` is the one that says "notice this,
+    // nothing is broken".
+    case 'context_compacted':
+      return row(entry.type, 'system', compaction(entry), 'wait', 'Context compacted')
     case 'error':
       return row(entry.type, 'system', entry.message, 'error', 'Error')
     case 'session_ended':
@@ -416,6 +431,23 @@ function argument(input: unknown): string {
 function usage(entry: Extract<Entry, { type: 'usage' }>): string {
   const cost = entry.costUsd === undefined ? '' : ` · $${entry.costUsd.toFixed(2)}`
   return `${entry.input} in · ${entry.output} out${cost}`
+}
+
+/**
+ * What the session traded away, when the harness said.
+ *
+ * The counts are optional and a missing one is not a zero — the same rule
+ * `usage` follows for cost. opencode reports no figures at all, so its row says
+ * only that compaction happened; rendering "0 → 0 tokens" there would describe
+ * a session that lost nothing, which is the opposite of what occurred.
+ */
+function compaction(entry: Extract<Entry, { type: 'context_compacted' }>): string {
+  const how = entry.trigger === 'manual' ? 'compacted on request' : 'context window filled'
+  const counts =
+    entry.preTokens === undefined || entry.postTokens === undefined
+      ? ''
+      : ` · ${entry.preTokens} → ${entry.postTokens} tokens`
+  return `${how}${counts}`
 }
 
 /**

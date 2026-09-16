@@ -723,8 +723,19 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     expect((settings.permissions.deny ?? []).length).toBeGreaterThan(0)
   })
 
-  /** `full` means no checks. A policy it is chosen to ignore would only mislead. */
-  it('writes no policy at all under full', async () => {
+  /**
+   * `full` means no checks, and still does: a permission rule it is chosen to
+   * ignore would only mislead.
+   *
+   * It does get a settings *file* now, and this test used to assert it got
+   * none. The assertion changed because the file stopped being only about
+   * permissions: it carries the compaction assertion, which grants nothing and
+   * forbids nothing (`compaction.ts`). "No policy" is therefore asserted
+   * against the file's contents rather than against its absence — which is the
+   * stronger claim of the two anyway, since it would still catch a rule that
+   * crept in.
+   */
+  it('writes no permission policy at all under full, only the compaction assertion', async () => {
     const dir = makeTemp()
     const lane = join(dir, 'lanes', 'mine')
     mkdirSync(lane, { recursive: true })
@@ -742,7 +753,13 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 
     const argv = JSON.parse(readFileSync(join(dir, 'full.json'), 'utf8')) as string[]
     expect(argv).toContain('--add-dir')
-    expect(argv).not.toContain('--settings')
+
+    const settings = settingsOf(dir, 'full.json')
+    expect(settings.permissions.allow).toBeUndefined()
+    expect(settings.permissions.deny).toBeUndefined()
+    // The one thing `full` does get, because a run told to skip every check is
+    // still a run that must not die of a full context window.
+    expect(settings.autoCompactEnabled).toBe(true)
   })
 
   /**
@@ -851,16 +868,19 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     )
   }
 
-  /** The policy file the adapter wrote, read back through the argv it passed. */
+  interface Settings {
+    readonly permissions: { allow?: string[]; deny?: string[] }
+    readonly autoCompactEnabled?: boolean
+  }
+
+  /** The settings file the adapter wrote, read back through the argv it passed. */
   function settingsOf(
     dir: string,
     out: string,
-  ): { permissions: { allow?: string[]; deny?: string[] } } {
+  ): Settings {
     const argv = JSON.parse(readFileSync(join(dir, out), 'utf8')) as string[]
     const path = argv[argv.indexOf('--settings') + 1] as string
-    return JSON.parse(readFileSync(path, 'utf8')) as {
-      permissions: { allow?: string[]; deny?: string[] }
-    }
+    return JSON.parse(readFileSync(path, 'utf8')) as Settings
   }
 
   it('classifies a CLI that refuses before announcing a session', async () => {

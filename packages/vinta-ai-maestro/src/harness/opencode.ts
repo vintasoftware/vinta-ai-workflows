@@ -70,6 +70,7 @@ import {
   probe as probeBin,
   signalGroup,
 } from './shared.ts'
+import { OPENCODE_COMPACTION_ENV } from './compaction.ts'
 import { politeKillFirst } from '../platform/platform.ts'
 
 /**
@@ -88,6 +89,16 @@ import { politeKillFirst } from '../platform/platform.ts'
  * adapter sets per spawn; declaring it true would be a promise this code does
  * not keep, and `HarnessCapabilities` exists precisely so the UI greys the
  * button instead of failing when it is pressed.
+ *
+ * `autoCompact` is true on a narrower reading than the one that made
+ * `permissionControl` false, and the difference is worth being explicit about.
+ * opencode compacts by default — the server decides it, so a headless run gets
+ * it exactly as a TUI one does — and the server's environment is the one thing
+ * here this adapter *does* own, so `OPENCODE_DISABLE_AUTOCOMPACT` is stripped
+ * from it. What the adapter still cannot reach is `compaction.auto: false` in a
+ * project's own `opencode.json`, which is the same config boundary that decided
+ * `permissionControl`, and which `OPENCODE_CONFIG_CAVEAT` records rather than
+ * papers over.
  */
 const CAPABILITIES: HarnessCapabilities = {
   inject: true,
@@ -95,6 +106,7 @@ const CAPABILITIES: HarnessCapabilities = {
   resume: true,
   pty: false,
   permissionControl: false,
+  autoCompact: true,
 }
 
 /** Tool output can be a whole file. The transcript keeps it; an event carries a look. */
@@ -238,6 +250,19 @@ export class OpencodeEventMapper {
         // the UI treats as a tool name.
         const tool = asString(properties['type'])
         return tool === undefined ? [] : [{ type: 'permission_request', tool, detail: properties['metadata'] }]
+      }
+      case 'session.compacted': {
+        // Filtered by session id like everything else on this bus, and for the
+        // sharper reason: the server is shared by every lane on this worktree,
+        // so an unfiltered compaction would mark some *other* lane's session as
+        // having forgotten its brief.
+        if (properties['sessionID'] !== this.sessionId) return []
+        // The payload is `{ sessionID }` and nothing else — no token counts and
+        // no trigger — so both optional fields are left off rather than
+        // invented, and the trigger is `auto` because this server compacts for
+        // exactly one reason. A human asking is `POST /session/:id/summarize`,
+        // which this adapter never calls.
+        return [{ type: 'context_compacted', trigger: 'auto' }]
       }
       case 'session.error': {
         // `sessionID` is optional on this event. An unattributed error is not
@@ -553,6 +578,12 @@ const trackServer = (child: ChildProcess): void => {
  * The server must reach every provider through the credentials the user
  * configured in opencode itself, never through an API key inherited from this
  * process that would bill an account nobody chose for this run.
+ *
+ * The compaction switch at the end is not about credentials and is here because
+ * the mechanism is the same one. It is stripped from the *server's* environment
+ * rather than a session's, which is the level that matters: the server is what
+ * decides a session has overflowed, so one inherited variable would disable
+ * compaction for every lane that server is hosting at once (`compaction.ts`).
  */
 const STRIPPED_ENV = [
   'ANTHROPIC_API_KEY',
@@ -560,6 +591,7 @@ const STRIPPED_ENV = [
   'OPENAI_API_KEY',
   // Our own server must not demand a password we would then have to hold.
   'OPENCODE_SERVER_PASSWORD',
+  ...OPENCODE_COMPACTION_ENV,
 ] as const
 
 /** Ask the OS for a port rather than assuming opencode's default is free. */

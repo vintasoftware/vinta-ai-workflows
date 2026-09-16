@@ -52,6 +52,9 @@ const ALL_KINDS = [
   entry({ type: 'permission_request', tool: 'Bash', detail: { cmd: 'pnpm test' } }),
   entry({ type: 'permission_denied', tool: 'Read', reason: 'workingDir' }),
   entry({ type: 'usage', input: 1200, output: 340, costUsd: 0.12 }),
+  // The lossy moment. It renders because the rows after it stop referring to
+  // work the rows before it did, and this is the only line that explains why.
+  entry({ type: 'context_compacted', trigger: 'auto', preTokens: 183_000, postTokens: 24_000 }),
   entry({ type: 'error', message: 'the harness stream ended early' }),
   entry({ type: 'session_ended', result: 'ok' }),
   // Not an `AgentEvent`: the daemon writes this one itself, so a phase's
@@ -76,7 +79,7 @@ test('every normalized event kind renders, and the operator’s own message is a
   daemon = stub
   const { container } = open(stub, 'impl')
 
-  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(12))
+  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(13))
 
   // Not one kind falls through to a blank row, and no two look alike.
   const labels = TRANSCRIPT_KINDS.map((kind) => {
