@@ -129,6 +129,24 @@ export type SessionFreshReason =
  * lives with the payload, exactly as `SessionFreshReason` does for the module
  * that decides it (`scheduler/sessions.ts` imports this file, not the reverse).
  */
+/**
+ * Which seat a `node_crew` claim filled.
+ *
+ * Named rather than written inline on the payload, so the one fold that has to
+ * tell the two apart can be held to the set exhaustively (`usage/crew.ts`).
+ * That is not tidiness: the rollup ignored this field for as long as it
+ * existed, counted every reviewer's claim as a phase that member *took*, and
+ * reported an inflated node count for every run that had reviewers at all. The
+ * cost of a third seat being added and silently folded into one of these two is
+ * the same bug again, so adding one here is meant to break that fold's build.
+ *
+ * Mirrors `CREW_ROLES` in `types.ts`, which is the schema's side of the same
+ * vocabulary. Kept as its own declaration rather than an import because this
+ * file deliberately imports nothing — the payload vocabulary lives with the
+ * payload — and the two are held together by `crew.ts`'s own check.
+ */
+export type CrewRole = 'implementer' | 'reviewer'
+
 export type CrewSubstituteReason =
   /**
    * The named member was working, and somebody at or above their tier covered
@@ -341,7 +359,7 @@ interface NodePayloads {
      * Which seat this claim filled. Absent means `implementer`, so rows written
      * before reviewers were members read as what they were.
      */
-    readonly role?: 'implementer' | 'reviewer'
+    readonly role?: CrewRole
   }
   /**
    * One edge of a gate-pool acquisition, for the whole set the gate needs —
