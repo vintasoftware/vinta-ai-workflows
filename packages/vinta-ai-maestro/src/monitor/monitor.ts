@@ -287,9 +287,23 @@ export function brief(digest: RunDigest): string {
  *
  * A reserved node id, so the exchange lands in the same transcript store every
  * phase uses and is read back by the same call. It cannot collide with a phase:
- * `validate.ts` admits no node id containing a colon.
+ * node ids are lowercase kebab-case (`types.ts`), so one beginning with `_` is
+ * not merely unused but unrepresentable.
+ *
+ * **It used to be `monitor:conversation`, and that was a Windows bug.** The
+ * colon was chosen for exactly the reason the underscore is now — no phase id
+ * may contain one — but this id is not only a key: it becomes a *directory*,
+ * `<journal>/runs/<run>/nodes/<MONITOR_NODE>`, and a colon is the drive and
+ * alternate-stream separator on Windows. `mkdir` there fails with `ENOENT`, so
+ * on Windows every question threw on the first append and the endpoint reported
+ * the monitor unavailable. It had never worked on that platform, and could not
+ * have: a colon is legal in a macOS or Linux filename, so every machine the
+ * feature was developed and tested on hid it.
+ *
+ * The character set here is therefore load-bearing, and `monitor.test.ts` holds
+ * it to the characters every platform accepts.
  */
-export const MONITOR_NODE = 'monitor:conversation'
+export const MONITOR_NODE = '_monitor-conversation'
 
 export interface MonitorOptions {
   readonly adapter: HarnessAdapter
@@ -387,21 +401,31 @@ export class Monitor {
       by: { role: OPERATOR_ROLE },
     })
 
+    // Journalled **as it arrives**, not joined and written at the end.
+    //
+    // The end was where the whole answer used to appear, which is why a
+    // conversation with the monitor was a question, a spinner, and then a wall
+    // of text: nothing existed to show until the turn was over. Now the record
+    // grows while the turn runs, and anything reading the conversation back —
+    // this daemon's own endpoint, a reloaded tab — sees a monitor thinking
+    // rather than a monitor that has not answered yet.
+    //
+    // `thinking` is kept for the same reason it is kept in a phase's
+    // transcript: it is most of what there is to see while a model works, and
+    // dropping it was what left the browser with nothing to render but a word.
     const said: string[] = []
     for await (const event of outcome.session.events) {
       if (event.type === 'session_started') this.#session = event.sessionId
+      if (event.type !== 'thinking' && event.type !== 'assistant_text') continue
       if (event.type === 'assistant_text') said.push(event.text)
-    }
-    const answer = said.join('\n').trim()
-
-    if (answer !== '') {
+      if (event.text.trim() === '') continue
       this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
-        type: 'assistant_text',
-        text: answer,
+        type: event.type,
+        text: event.text,
         by: { role: MONITOR_ROLE },
       })
     }
-    return answer
+    return said.join('\n').trim()
   }
 
   /** Start over. A conversation that has gone wrong is cheaper to replace. */

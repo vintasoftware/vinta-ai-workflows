@@ -34,6 +34,22 @@ function sizeByRows(box: HTMLElement, { row, view }: { row: number; view: number
 const lines = (count: number): readonly unknown[] =>
   Array.from({ length: count }, (_, index) => ({ type: 'assistant_text', text: `line ${index}` }))
 
+/**
+ * The same count, as entries that do not fold into each other.
+ *
+ * Consecutive prose from one author is one row by design (`transcript.ts`'s
+ * `GROUPED`), so `lines(100)` is a hundred entries and a single `li`. The tests
+ * below that measure the list's *geometry* need one row per entry, and a tool
+ * result is the cheapest entry that never groups.
+ */
+const rowsOf = (count: number): readonly unknown[] =>
+  Array.from({ length: count }, (_, index) => ({
+    type: 'tool_result',
+    id: `t${index}`,
+    ok: true,
+    summary: `line ${index}`,
+  }))
+
 const boxOf = (view: RenderResult): HTMLElement =>
   view.container.querySelector('.entries') as HTMLElement
 
@@ -120,7 +136,7 @@ test('following survives a transcript longer than the window', () => {
  * leaves alone.
  */
 test('growing the window leaves the reader on the row they were reading', () => {
-  const view = render(<Transcript entries={lines(100)} />)
+  const view = render(<Transcript entries={rowsOf(100)} />)
   const box = boxOf(view)
   sizeByRows(box, { row: 50, view: 500 })
 
@@ -302,8 +318,11 @@ test('a run of rows from one agent is announced once', () => {
     />,
   )
 
+  // One band, and — because consecutive prose from one author is one statement
+  // — one row holding all twelve.
   expect(bandsOf(view)).toEqual(['implementer'])
-  expect(view.container.querySelectorAll('li[data-entry]')).toHaveLength(12)
+  expect(view.container.querySelectorAll('li[data-entry]')).toHaveLength(1)
+  expect(view.container.querySelector('.entry-body')?.textContent).toContain('step 11')
 })
 
 /** Every transcript recorded before the daemon wrote `by` renders as it did. */
@@ -311,7 +330,7 @@ test('an unattributed transcript gets no bands at all', () => {
   const view = render(<Transcript entries={lines(4)} />)
 
   expect(bandsOf(view)).toEqual([])
-  expect(view.container.querySelectorAll('li[data-entry]')).toHaveLength(4)
+  expect(view.container.querySelectorAll('li[data-entry]')).toHaveLength(1)
 })
 
 /** A role this build has never heard of shows as itself, not as nothing. */
