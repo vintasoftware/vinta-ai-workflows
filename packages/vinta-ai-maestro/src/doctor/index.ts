@@ -500,7 +500,7 @@ async function checkLaneSummary(summaryDir: string, name: string): Promise<Check
 /**
  * Phase branches that another worktree already has checked out.
  *
- * Lane directories are named per *run* (`<run-id>-crew-2-mid`) and phase
+ * Lane directories are named per *run* (`<run-id>-crew-2-tier3`) and phase
  * branches are named per *workflow* (`plan/<id>/phase-p0`). So a run that fails
  * leaves worktrees holding branch names the next run of the same workflow will
  * try to cut — and git refuses to check out a branch a second worktree already

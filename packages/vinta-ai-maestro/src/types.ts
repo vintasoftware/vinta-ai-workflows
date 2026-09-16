@@ -140,7 +140,7 @@ export const DependencySchema = z.strictObject({
 // The alternative this replaces is a per-node `model`, picked phase by phase
 // with nothing anywhere adding it up. That reads fine one node at a time and
 // hides the two questions a plan is actually being asked: how many agents does
-// this feature need at once, and is any of them too junior for what it was
+// this feature need at once, and is any of them too low a tier for what it was
 // handed. A roster answers both before the run starts.
 //
 // **A member is an agent, not a model.** Each one owns a worktree for the whole

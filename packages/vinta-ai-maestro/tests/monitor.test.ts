@@ -206,8 +206,8 @@ describe('which model it thinks with', () => {
     expect(
       monitorModel(
         workflowOf({
-          junior: { role: 'implementer', tier: 1, model: 'cheap' },
-          senior: { role: 'implementer', tier: 4, model: 'dear' },
+          tier1: { role: 'implementer', tier: 1, model: 'cheap' },
+          tier4: { role: 'implementer', tier: 4, model: 'dear' },
         }),
       ),
     ).toBe('dear')

@@ -8,7 +8,7 @@
  * A roster exists precisely to say that work of that difficulty is not handed
  * to that model, and integration was the one place the roster was ignored.
  *
- * So the fixer is the **most senior crew member who implemented one of the
+ * So the fixer is the **highest-tier crew member who implemented one of the
  * conflicting nodes**. `Integrator.#owners()` already answers "who worked on
  * the code in conflict" — the incoming node plus every already-merged node
  * that touched a contested path — and `node_crew` already records who took
@@ -51,7 +51,7 @@ export interface CrewSource {
 }
 
 /**
- * The most senior member who implemented one of `nodes`, or null when none of
+ * The highest-tier member who implemented one of `nodes`, or null when none of
  * them can be resolved to a roster member.
  *
  * Null is the ordinary answer for every workflow written before rosters
@@ -64,7 +64,7 @@ export interface CrewSource {
  * the code that is in conflict, and it is the writing that this is selecting
  * for.
  */
-export function seniorImplementer(
+export function highestTierImplementer(
   rows: readonly StoredEvent[],
   nodes: readonly string[],
   crew: Readonly<Record<string, CrewMember>>,
@@ -136,7 +136,7 @@ export interface CrewConflictFixerOptions {
 }
 
 /**
- * The fixer a composed run uses: `defaults` as the floor, the senior
+ * The fixer a composed run uses: `defaults` as the floor, the highest-tier
  * implementing member on top of it whenever the roster can name one.
  *
  * With no adapter at all the fixer is a no-op and the merge exhausts its rounds
@@ -151,15 +151,14 @@ export function createCrewConflictFixer(options: CrewConflictFixerOptions): Conf
     adapter: fallback,
     model: options.defaults.model,
     staff: (request: ConflictRequest) => {
-      const senior = seniorImplementer(options.crewAssignments(), request.nodes, options.crew)
-      if (senior === null) return null
+      const top = highestTierImplementer(options.crewAssignments(), request.nodes, options.crew)
+      if (top === null) return null
       // A member's `harness` override only holds if the run actually built that
       // adapter. It falls back rather than refusing: the member's *model* is
       // the half of the decision that matters, and a run that was handed one
-      // injected adapter should still get the senior member's model through it.
-      const adapter =
-        senior.harness === null ? fallback : (options.adapters[senior.harness] ?? fallback)
-      return { adapter, model: senior.model, implemented: senior.implemented }
+      // injected adapter should still get that member's model through it.
+      const adapter = top.harness === null ? fallback : (options.adapters[top.harness] ?? fallback)
+      return { adapter, model: top.model, implemented: top.implemented }
     },
   })
 }

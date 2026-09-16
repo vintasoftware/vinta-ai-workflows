@@ -46,7 +46,7 @@ function repoWithLanes(runIds: readonly string[]): {
   mkdirSync(summaryDir, { recursive: true })
 
   for (const runId of runIds) {
-    const name = `${runId}-crew-1-junior`
+    const name = `${runId}-crew-1-tier1`
     git(repo, 'worktree', 'add', '-q', '-b', `plan/p/phase-${runId}`, join(laneRoot, name))
     writeFileSync(join(summaryDir, `${name}.yaml`), `name: ${name}\n`, 'utf8')
   }
@@ -112,7 +112,7 @@ describe('finding what a run left behind', () => {
    */
   it('keeps a branch carrying its own commits, and reports it', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
-    const lane = join(laneRoot, 'runa-crew-1-junior')
+    const lane = join(laneRoot, 'runa-crew-1-tier1')
     writeFileSync(join(lane, 'work.txt'), 'the phase wrote this\n', 'utf8')
     git(lane, 'add', '.')
     git(lane, 'commit', '-qm', 'phase work')
@@ -178,7 +178,7 @@ describe('a lane is a child of the lane root that is really a worktree', () => {
 
     const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
 
-    expect(found.lanes.map((lane) => lane.path)).toEqual([join(laneRoot, 'runa-crew-1-junior')])
+    expect(found.lanes.map((lane) => lane.path)).toEqual([join(laneRoot, 'runa-crew-1-tier1')])
   })
 
   it('finds the lane at the path it was created at', async () => {
@@ -186,7 +186,7 @@ describe('a lane is a child of the lane root that is really a worktree', () => {
 
     const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
 
-    expect(found.lanes[0]?.path).toBe(join(laneRoot, 'runa-crew-1-junior'))
+    expect(found.lanes[0]?.path).toBe(join(laneRoot, 'runa-crew-1-tier1'))
   })
 })
 
@@ -198,7 +198,7 @@ describe('work left in the worktree', () => {
    */
   it('keeps a lane whose worktree has uncommitted changes', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
-    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'seed.txt'), 'edited\n', 'utf8')
+    writeFileSync(join(laneRoot, 'runa-crew-1-tier1', 'seed.txt'), 'edited\n', 'utf8')
 
     const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
 
@@ -213,7 +213,7 @@ describe('work left in the worktree', () => {
    */
   it('counts an untracked file as work', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
-    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+    writeFileSync(join(laneRoot, 'runa-crew-1-tier1', 'brand-new.py'), 'x = 1\n', 'utf8')
 
     const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
 
@@ -223,7 +223,7 @@ describe('work left in the worktree', () => {
   /** A kept lane keeps its summary: the pool needs it to reset or tear down. */
   it('keeps the summary of a lane it is keeping', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
-    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+    writeFileSync(join(laneRoot, 'runa-crew-1-tier1', 'brand-new.py'), 'x = 1\n', 'utf8')
 
     const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
 
@@ -237,7 +237,7 @@ describe('work left in the worktree', () => {
    */
   it('does not offer the branch of a lane it is keeping', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
-    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+    writeFileSync(join(laneRoot, 'runa-crew-1-tier1', 'brand-new.py'), 'x = 1\n', 'utf8')
 
     const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
 
@@ -247,13 +247,13 @@ describe('work left in the worktree', () => {
 
   it('leaves a dirty lane on disk when it reaps', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa', 'runb'])
-    writeFileSync(join(laneRoot, 'runa-crew-1-junior', 'brand-new.py'), 'x = 1\n', 'utf8')
+    writeFileSync(join(laneRoot, 'runa-crew-1-tier1', 'brand-new.py'), 'x = 1\n', 'utf8')
     const found = await findReapable({ repoPath: repo, laneRoot, summaryDir, includeBranches: true })
 
     await reap(repo, found, { branches: true })
 
-    expect(existsSync(join(laneRoot, 'runa-crew-1-junior'))).toBe(true)
-    expect(existsSync(join(laneRoot, 'runb-crew-1-junior'))).toBe(false)
+    expect(existsSync(join(laneRoot, 'runa-crew-1-tier1'))).toBe(true)
+    expect(existsSync(join(laneRoot, 'runb-crew-1-tier1'))).toBe(false)
   })
 })
 
@@ -286,7 +286,7 @@ describe('reaping', () => {
     const failures = await reap(repo, found, { branches: true })
 
     expect(failures).toEqual([])
-    expect(existsSync(join(laneRoot, 'runa-crew-1-junior'))).toBe(false)
+    expect(existsSync(join(laneRoot, 'runa-crew-1-tier1'))).toBe(false)
     // The point of the exercise: the next run can cut this branch again.
     expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain('plan/p/phase-runa')
     expect(git(repo, 'branch', '--list', 'plan/p/phase-runa').trim()).toBe('')
@@ -302,13 +302,13 @@ describe('reaping', () => {
 
     await reap(repo, found, { branches: false })
 
-    expect(existsSync(join(laneRoot, 'runa-crew-1-junior'))).toBe(false)
+    expect(existsSync(join(laneRoot, 'runa-crew-1-tier1'))).toBe(false)
     expect(git(repo, 'branch', '--list', 'plan/p/phase-runa').trim()).toContain('plan/p/phase-runa')
   })
 
   it('does not delete a branch carrying commits, even when branches were asked for', async () => {
     const { repo, laneRoot, summaryDir } = repoWithLanes(['runa'])
-    const lane = join(laneRoot, 'runa-crew-1-junior')
+    const lane = join(laneRoot, 'runa-crew-1-tier1')
     writeFileSync(join(lane, 'work.txt'), 'the phase wrote this\n', 'utf8')
     git(lane, 'add', '.')
     git(lane, 'commit', '-qm', 'phase work')

@@ -234,7 +234,7 @@ export class AgentLeaseBroker {
    * restart, or a reaped wait, leaves a client holding one — so the caller
    * simply starts a fresh wait. The resources and holder are checked because a
    * token is a place in the queue for *one* request: honouring it for a
-   * different one would let a node inherit someone else's seniority.
+   * different one would let a node inherit someone else's place in line.
    */
   #resume(
     token: string | undefined,

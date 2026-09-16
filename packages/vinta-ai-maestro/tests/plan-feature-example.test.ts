@@ -45,9 +45,32 @@ const EXECUTION_GRAPH: readonly { wave: number; phases: string[]; dependsOn: str
 const nodeId = (phase: string): string => `p${phase.replace(/^Phase /, '').toLowerCase()}`
 
 describe('plan-feature worked example', () => {
+  /**
+   * The id carries the plan's date, and it is the same date.
+   *
+   * `ai-plans/` holds every feature this repo has ever planned, and the three
+   * files of one feature only sit together if they share that prefix — which
+   * they only do if the id is derived from the plan rather than written
+   * separately. A literal assertion on the id would not notice the two drifting
+   * apart, because both would still be perfectly legal strings.
+   *
+   * The case difference is deliberate and is asserted too: the markdown
+   * convention is `UPPERCASE_WITH_UNDERSCORES` and the id must be lowercase
+   * kebab-case, so they share the prefix and nothing else.
+   */
+  it('prefixes the id with its plan’s date, so the three files sort together', () => {
+    const workflow = parsed()
+    const date = /^(\d{4}-\d{2}-\d{2})-/.exec(workflow.id)?.[1]
+    expect(date).toBeDefined()
+    expect(workflow.plan_ref).toContain(`ai-plans/${date as string}-`)
+    // The stem is the filename the daemon resolves, so the schema's id rule is
+    // also a filename rule: anything else is a workflow `serve` cannot list.
+    expect(workflow.id).toMatch(/^[a-z0-9][a-z0-9-]*$/)
+  })
+
   it('parses and cross-validates with no issues', () => {
     const workflow = parsed()
-    expect(workflow.id).toBe('bookmark-folders')
+    expect(workflow.id).toBe('2026-03-04-bookmark-folders')
     expect(workflow.nodes).toHaveLength(5)
   })
 
@@ -156,11 +179,11 @@ describe('plan-feature worked example', () => {
     // a second answer to "what runs this phase".
     expect(workflow.nodes.filter((node) => node.model !== undefined)).toEqual([])
     expect(workflow.nodes.map((node) => node.crew)).toEqual([
-      'junior',
-      'mid-1',
-      'mid-2',
-      'mid-2',
-      'junior',
+      'tier1',
+      'tier2-1',
+      'tier2-2',
+      'tier2-2',
+      'tier1',
     ])
     expect(workflow.defaults.pipeline).toBe('standard-phase')
   })
@@ -193,7 +216,7 @@ describe('plan-feature worked example', () => {
 
   /**
    * The check that caught this example the first time it was written. A wave of
-   * two Tier 2 phases needs *two members at Tier 2 or above* — a junior on the
+   * two Tier 2 phases needs *two members at Tier 2 or above* — a Tier 1 member on the
    * roster does not help, because the floor forbids handing them one. Sorting
    * both sides and comparing one for one is the whole rule.
    */
@@ -272,8 +295,8 @@ describe('plan-feature worked example', () => {
 
   /**
    * The Tier 1 phases are the ones with exact precedent, and they are the two
-   * the Crew table names for `junior`. A plan that staffed the migration to a
-   * mid would still parse — this asserts the example demonstrates the rubric it
+   * the Crew table names for `tier1`. A plan that staffed the migration to a
+   * Tier 2 member would still parse — this asserts the example demonstrates the rubric it
    * is printed next to.
    */
   it('gives the exact-precedent phases to the cheapest tier', () => {

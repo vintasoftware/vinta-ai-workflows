@@ -189,11 +189,11 @@ describe('the crew roster', () => {
   const staffed = (): Record<string, any> => {
     const doc = golden()
     doc.crew = {
-      junior: { tier: 1, model: 'cheap-1' },
-      'mid-a': { tier: 2, model: 'mid-1' },
-      senior: { tier: 4, model: 'dear-1' },
+      tier1: { tier: 1, model: 'cheap-1' },
+      tier2: { tier: 2, model: 'medium-1' },
+      tier4: { tier: 4, model: 'dear-1' },
     }
-    const assignments = ['junior', 'mid-a', 'mid-a', 'senior']
+    const assignments = ['tier1', 'tier2', 'tier2', 'tier4']
     doc.nodes.forEach((node: Record<string, unknown>, i: number) => {
       delete node['model']
       node['crew'] = assignments[i]
@@ -207,10 +207,10 @@ describe('the crew roster', () => {
 
     expect(Object.keys(result.workflow.crew)).toHaveLength(3)
     expect(result.workflow.nodes.map((node) => node.crew)).toEqual([
-      'junior',
-      'mid-a',
-      'mid-a',
-      'senior',
+      'tier1',
+      'tier2',
+      'tier2',
+      'tier4',
     ])
   })
 
@@ -236,7 +236,7 @@ describe('the crew roster', () => {
    */
   it('rejects a member who is assigned no node', () => {
     const doc = staffed()
-    doc.crew['spare'] = { tier: 3, model: 'mid-1' }
+    doc.crew['spare'] = { tier: 3, model: 'medium-1' }
 
     expect(expectInvalid(doc)).toContain('crew.spare: crew member "spare" is assigned no node')
   })
@@ -263,9 +263,9 @@ describe('the crew roster', () => {
 
   it('rejects a tier outside the rubric', () => {
     const doc = staffed()
-    doc.crew.senior.tier = 5
+    doc.crew.tier4.tier = 5
 
-    expect(expectInvalid(doc)).toContain('crew.senior.tier')
+    expect(expectInvalid(doc)).toContain('crew.tier4.tier')
   })
 })
 

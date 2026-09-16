@@ -34,16 +34,16 @@ describe('collectRunCrew', () => {
   it('counts what each member took, cheapest tier first', () => {
     const run = collectRunCrew(
       source([
-        claim('p1', { member: 'senior', tier: 4, substitute: false }),
-        claim('p2', { member: 'junior', tier: 1, substitute: false }),
-        claim('p3', { member: 'junior', tier: 1, substitute: false }),
+        claim('p1', { member: 'tier4', tier: 4, substitute: false }),
+        claim('p2', { member: 'tier1', tier: 1, substitute: false }),
+        claim('p3', { member: 'tier1', tier: 1, substitute: false }),
       ]),
       'r1',
     )
 
     expect(run.members).toEqual([
-      { member: 'junior', tier: 1, nodes: 2, coveredFor: 0, reviews: 0 },
-      { member: 'senior', tier: 4, nodes: 1, coveredFor: 0, reviews: 0 },
+      { member: 'tier1', tier: 1, nodes: 2, coveredFor: 0, reviews: 0 },
+      { member: 'tier4', tier: 4, nodes: 1, coveredFor: 0, reviews: 0 },
     ])
     expect(run.asPlanned).toBe(3)
     expect(run.substituted).toBe(0)
@@ -57,16 +57,16 @@ describe('collectRunCrew', () => {
   it('separates the phases a peer covered from the ones the plan assigned', () => {
     const run = collectRunCrew(
       source([
-        claim('p1', { member: 'mid-a', tier: 2, substitute: false }),
-        claim('p2', { member: 'mid-b', tier: 2, substitute: true, instead_of: 'mid-a' }),
-        claim('p3', { member: 'senior', tier: 4, substitute: true, instead_of: 'mid-a' }),
+        claim('p1', { member: 'tier2-1', tier: 2, substitute: false }),
+        claim('p2', { member: 'tier2-2', tier: 2, substitute: true, instead_of: 'tier2-1' }),
+        claim('p3', { member: 'tier4', tier: 4, substitute: true, instead_of: 'tier2-1' }),
       ]),
       'r1',
     )
 
     expect(run.asPlanned).toBe(1)
     expect(run.substituted).toBe(2)
-    expect(run.members.find((member) => member.member === 'senior')?.coveredFor).toBe(1)
+    expect(run.members.find((member) => member.member === 'tier4')?.coveredFor).toBe(1)
   })
 
   /**
@@ -80,9 +80,9 @@ describe('collectRunCrew', () => {
   it('counts warm promotions inside the substitutions, not beside them', () => {
     const run = collectRunCrew(
       source([
-        claim('p1', { member: 'mid-a', tier: 2, substitute: false }),
-        claim('p2', { member: 'mid-b', tier: 2, substitute: true, instead_of: 'mid-a', reason: 'peer_busy' }),
-        claim('p3', { member: 'senior', tier: 4, substitute: true, instead_of: 'mid-a', reason: 'warm_session' }),
+        claim('p1', { member: 'tier2-1', tier: 2, substitute: false }),
+        claim('p2', { member: 'tier2-2', tier: 2, substitute: true, instead_of: 'tier2-1', reason: 'peer_busy' }),
+        claim('p3', { member: 'tier4', tier: 4, substitute: true, instead_of: 'tier2-1', reason: 'warm_session' }),
       ]),
       'r1',
     )
@@ -98,7 +98,7 @@ describe('collectRunCrew', () => {
    */
   it('reads a substitution with no reason as a peer covering, not a promotion', () => {
     const run = collectRunCrew(
-      source([claim('p1', { member: 'senior', tier: 4, substitute: true, instead_of: 'mid-a' })]),
+      source([claim('p1', { member: 'tier4', tier: 4, substitute: true, instead_of: 'tier2-1' })]),
       'r1',
     )
 
@@ -108,22 +108,22 @@ describe('collectRunCrew', () => {
 
   it('names the declared members who took nothing', () => {
     const run = collectRunCrew(
-      source([claim('p1', { member: 'junior', tier: 1, substitute: false })]),
+      source([claim('p1', { member: 'tier1', tier: 1, substitute: false })]),
       'r1',
-      ['junior', 'senior', 'mid-a'],
+      ['tier1', 'tier4', 'tier2-1'],
     )
 
-    expect(run.idle).toEqual(['mid-a', 'senior'])
+    expect(run.idle).toEqual(['tier2-1', 'tier4'])
   })
 
   it('has nobody idle when the roster all worked', () => {
     const run = collectRunCrew(
       source([
-        claim('p1', { member: 'junior', tier: 1, substitute: false }),
-        claim('p2', { member: 'senior', tier: 4, substitute: false }),
+        claim('p1', { member: 'tier1', tier: 1, substitute: false }),
+        claim('p2', { member: 'tier4', tier: 4, substitute: false }),
       ]),
       'r1',
-      ['junior', 'senior'],
+      ['tier1', 'tier4'],
     )
 
     expect(run.idle).toEqual([])
@@ -148,10 +148,10 @@ describe('collectRunCrew', () => {
   it('skips a row it cannot read instead of guessing at it', () => {
     const run = collectRunCrew(
       source([
-        claim('p1', { member: 'junior', tier: 1, substitute: false }),
+        claim('p1', { member: 'tier1', tier: 1, substitute: false }),
         claim('p2', { member: '', tier: 1, substitute: true }),
         claim('p3', { tier: 2, substitute: true }),
-        claim('p4', { member: 'mid-a', tier: 'two', substitute: false }),
+        claim('p4', { member: 'tier2-1', tier: 'two', substitute: false }),
       ]),
       'r1',
     )
@@ -163,7 +163,7 @@ describe('collectRunCrew', () => {
 
   /** A missing `substitute` is planned work, not a third state. */
   it('treats an absent substitute flag as the plan’s own assignment', () => {
-    const run = collectRunCrew(source([claim('p1', { member: 'junior', tier: 1 })]), 'r1')
+    const run = collectRunCrew(source([claim('p1', { member: 'tier1', tier: 1 })]), 'r1')
 
     expect(run.asPlanned).toBe(1)
     expect(run.members[0]?.coveredFor).toBe(0)
@@ -253,10 +253,10 @@ describe('the two seats a member can fill', () => {
   it('keeps reviewer claims out of the plan-versus-outcome counts', () => {
     const run = collectRunCrew(
       source([
-        claim('p1', { member: 'mid-a', tier: 2, substitute: false }),
-        claim('p2', { member: 'senior', tier: 4, substitute: true, instead_of: 'mid-a' }),
-        claim('p1', { member: 'senior', tier: 4, substitute: false, role: 'reviewer' }),
-        claim('p2', { member: 'mid-a', tier: 2, substitute: false, role: 'reviewer' }),
+        claim('p1', { member: 'tier2-1', tier: 2, substitute: false }),
+        claim('p2', { member: 'tier4', tier: 4, substitute: true, instead_of: 'tier2-1' }),
+        claim('p1', { member: 'tier4', tier: 4, substitute: false, role: 'reviewer' }),
+        claim('p2', { member: 'tier2-1', tier: 2, substitute: false, role: 'reviewer' }),
       ]),
       'r1',
     )

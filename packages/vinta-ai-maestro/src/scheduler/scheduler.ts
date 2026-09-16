@@ -1003,7 +1003,7 @@ export class Scheduler {
       // Staffing before capacity, deliberately. A lane is disk; who is holding
       // it is what the phase costs and whether it is any good. A free lane with
       // nobody qualified to take the phase is an idle lane — cheaper than the
-      // same phase run by an agent the plan judged too junior for it.
+      // same phase run by an agent the plan judged too low a tier for it.
       // Guarded rather than awaited unconditionally: an unstaffed workflow must
       // reach `acquire` in the same turn it always did. An extra microtask here
       // is not a behaviour change but it *is* a schedule change, and the
@@ -1164,8 +1164,8 @@ export class Scheduler {
    * — so the one thing it must not be is optimistic. "Has run before" would be
    * optimistic: a member can hold a ledger entry that §15.2 will refuse on the
    * next turn for four separate reasons, and a promotion bought on a refusal
-   * pays the senior's rate *and* cold-starts anyway. Strictly worse than doing
-   * nothing, and invisible — the phase completes.
+   * pays the higher tier's rate *and* cold-starts anyway. Strictly worse than
+   * doing nothing, and invisible — the phase completes.
    *
    * So this does not re-implement the rules; it runs them. `planSession` is
    * called with the inputs the spawn will genuinely present, and `continuation`
