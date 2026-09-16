@@ -33,7 +33,10 @@ usage: vinta-ai-maestro <command> [options]
   simulate <workflow.json>   Project the schedule without running it: wall
                              clock, critical path and pool contention.
   serve                      Start the daemon and print the URL to open.
+                             Runs submitted to it outlive the terminal that
+                             submitted them.
   run <workflow.json>        Start the daemon and execute the workflow.
+  run --resume <run-id>      Pick an interrupted run back up where it stopped.
   purge [run-id]             Delete run state under .vinta-ai-maestro/ — transcripts
                              and gate logs hold repository contents verbatim.
   with <resource> -- <cmd>   Run a command while holding a live run's resource.

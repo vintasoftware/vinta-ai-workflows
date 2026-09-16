@@ -59,6 +59,12 @@ export function applyFrame(projection: Projection, frame: EventFrame): Projectio
     } else if (event.type === 'run_ended') {
       const payload = RunEndedPayloadSchema.safeParse(event.payload)
       if (payload.success) runStatus = payload.data.status
+    } else if (event.type === 'run_resumed') {
+      // The one event that moves a run *backwards* out of a settled status.
+      // Without it a resumed run keeps the badge of the attempt that was
+      // interrupted — the operator watches nodes go green under a header that
+      // still reads "failed", and the only way out is a reload.
+      runStatus = 'running'
     }
   }
 

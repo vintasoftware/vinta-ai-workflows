@@ -1,0 +1,325 @@
+/**
+ * The host composition: lanes, the integrator, and the executor over both.
+ *
+ * Split out of `cli/run.ts` when a run stopped being a thing a terminal owns.
+ * Everything here is the *inside* of a run — the worktrees it works in, the
+ * integration worktree its waves merge on, the adapters its phases dispatch to
+ * — and none of it knows whether the process that built it is a CLI awaiting a
+ * report or a daemon that will outlive the request that asked for the run.
+ *
+ * That ignorance is the point. `run` and `POST /api/runs` compose the identical
+ * thing through `startRun`, so a run submitted to a daemon cannot drift into
+ * being a second, subtly different kind of run.
+ */
+import { join } from 'node:path'
+
+import type { AmendRunner } from '../amend/amend.ts'
+import { createRebaser } from '../amend/rebase.ts'
+import type { AgentGatePort } from '../daemon/index.ts'
+import { referencedHarnesses } from '../doctor/index.ts'
+import { createRunExecutor } from '../executor/index.ts'
+import { GateCache } from '../gates/cache.ts'
+import type { HarnessAdapter } from '../harness/adapter.ts'
+import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
+import { CodexAdapter } from '../harness/codex.ts'
+import { OpencodeAdapter } from '../harness/opencode.ts'
+import type { AgentPermission } from '../harness/permissions.ts'
+import type { ConflictFixer } from '../integration/fixer.ts'
+import { gitLines } from '../integration/git.ts'
+import { Integrator, type WaveResult } from '../integration/integrator.ts'
+import { createCrewConflictFixer } from '../integration/staffing.ts'
+import type { StoredEvent } from '../journal/events.ts'
+import type { Journal } from '../journal/journal.ts'
+import { DiskProbeError } from '../lanes/disk.ts'
+import { LaneEnvFileError, LanePool, LaneSetupError } from '../lanes/pool.ts'
+import type { EffectExecutor } from '../pipeline/effects.ts'
+import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
+import type { ResourcePools } from '../resources/pools.ts'
+import { AgentGateBroker } from '../resources/agent-gates.ts'
+import { laneHolders } from '../scheduler/crew.ts'
+import type { Workflow } from '../types.ts'
+import { storeFor } from '../cli/paths.ts'
+import { projectSpec } from '../cli/project.ts'
+
+/** What the run needs from whoever owns the lanes — this file, or `RunDeps`. */
+export interface HostWiring {
+  readonly executor: EffectExecutor
+  /** Read after `run_ended`. Absent for an injected executor, which owns its own. */
+  readonly waveResults?: () => readonly IntegrationWaveRecord[]
+  /** `DaemonRun.amend`'s rebase. Absent means an amendment that needs one is refused. */
+  readonly rebase?: NonNullable<AmendRunner['rebase']>
+  /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
+  readonly recycleLane?: (name: string) => Promise<void>
+  /** One lane's environment, for the agent about to run in it. */
+  readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
+  readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
+  /**
+   * The `gate` verb's port, once the run's pools exist.
+   *
+   * A factory rather than a value because the two things it needs are owned on
+   * opposite sides of this seam: the lane pool and the gate cache are
+   * `provision`'s and stay private to it, and `ResourcePools` is built out
+   * there, after. Handing the pools in is cheaper than moving either of the
+   * others out, and it keeps the cache closed by the same `close` that opened
+   * it. Absent for an injected executor, which provisions no lanes to run a
+   * gate against.
+   */
+  readonly gatesFor?: (pools: ResourcePools) => AgentGatePort
+  /**
+   * Handles this process opened. Never the lanes: §8 leaves worktrees, branches
+   * and databases in place for the human who has to read what happened — and,
+   * since runs became resumable, for the attempt that picks the run back up.
+   */
+  close(): void
+}
+
+/**
+ * The `Integrator` the run uses, keeping what `mergeWave` returns.
+ *
+ * A wave's `ConflictRecord`s exist for the duration of that call and reach no
+ * event, so §13.6's `wave_conflicts` is either captured at the one moment it
+ * passes through or reported as unrecorded. Subclassed rather than wrapped
+ * because `Integrator` calls its own methods on `this`.
+ */
+class RecordingIntegrator extends Integrator {
+  readonly records: IntegrationWaveRecord[] = []
+
+  override async mergeWave(wave: number): Promise<WaveResult> {
+    const result = await super.mergeWave(wave)
+    // Identifiers only, as `ConflictRecord` already is: node ids, paths, rounds.
+    this.records.push({ wave: result.wave, conflicts: result.conflicts })
+    return result
+  }
+}
+
+export interface ProvisionOptions {
+  readonly workflow: Workflow
+  readonly runId: string
+  readonly journal: Journal
+  readonly repoPath: string
+  readonly laneRoot: string
+  readonly adapters: Readonly<Record<string, HarnessAdapter>>
+  readonly agentEnv: Readonly<Record<string, string>>
+  readonly perLaneBytes?: number
+  /**
+   * Reuse the lane worktrees already on disk instead of creating them.
+   *
+   * Set on a resume, and only there. The worktrees an interrupted run left
+   * behind hold the one thing the journal does not: whatever its agents had
+   * written and not committed. Provisioning over them is what `reap` exists to
+   * make possible *deliberately*, and doing it implicitly on every resume would
+   * silently eat the work the resume was meant to save.
+   */
+  readonly adopt?: boolean
+}
+
+/**
+ * Provisions the pool and builds the production executor over it.
+ *
+ * The order is the one §8 requires: the pool's disk probe runs first and
+ * throws before a single worktree exists, so a refusal costs nothing to
+ * recover from. Everything after it is pure wiring.
+ */
+export async function provision(options: ProvisionOptions): Promise<HostWiring> {
+  const { workflow, runId, journal, repoPath, laneRoot, adapters } = options
+
+  // A staffed run gives every *implementer* its own worktree for the whole run —
+  // the thing that lets a member's session outlive a phase, because a session is
+  // about a directory. Reviewers get none: a review runs in the lane it is
+  // reviewing, so that it reads the working tree before anything is committed.
+  // The names are derived from the roster here and in the scheduler, from the
+  // same function, so neither can drift from the other.
+  const crewLanes = laneHolders(workflow.crew).map(
+    (member, i) => `${runId}-crew-${i + 1}-${member.id}`,
+  )
+
+  const pool = await LanePool.provision({
+    repoPath,
+    poolRoot: laneRoot,
+    runId,
+    // The scheduler names its lane slots the same way, so a node's assigned
+    // lane is one of these worktrees rather than a directory nobody made.
+    laneCount: crewLanes.length > 0 ? crewLanes.length : (workflow.resources['lane']?.capacity ?? 1),
+    ...(crewLanes.length === 0 ? {} : { laneNames: crewLanes }),
+    baseRef: workflow.base_branch,
+    // With no `project` block a lane is a worktree and nothing else, and
+    // `migrateCmd` is never reached — templates are built per declared role.
+    project: projectSpec(workflow.project),
+    ...(options.adopt === true ? { adopt: true } : {}),
+    ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
+  })
+
+  const integrationPath = pool.integration.path
+  const integrator = new RecordingIntegrator({
+    // `Workflow` satisfies `IntegrationPlan` structurally.
+    plan: workflow,
+    integrationPath,
+    fixer: conflictFixer(workflow, adapters, () => journal.crewAssignments(runId)),
+  })
+
+  const cache = new GateCache(repoPath)
+  const executor = createRunExecutor({
+    workflow,
+    runId,
+    journal,
+    integrator,
+    integrationPath,
+    laneRoot,
+    lanes: pool.lanes.map(({ name, path, env }) => ({
+      name,
+      path,
+      env: { ...env, ...options.agentEnv },
+    })),
+    cache,
+  })
+
+  const rebase = createRebaser({
+    integrationPath,
+    // The base the run recorded, not the one the amended graph implies: it is
+    // the fork point the rebase replays from.
+    baseOf: (nodeId) =>
+      journal.nodes(runId).find((row) => row.node_id === nodeId)?.base_branch ?? null,
+    onRebased: (nodeId, base) => {
+      journal.append({
+        runId,
+        nodeId,
+        type: 'node_assigned',
+        payload: { branch: integrator.nodeBranch(nodeId), base_branch: base },
+      })
+    },
+  })
+
+  return {
+    executor,
+    waveResults: () => integrator.records,
+    rebase,
+    recycleLane: async (name: string) => {
+      await pool.recycle(name)
+    },
+    // Read through the pool rather than captured, because a recycle that had to
+    // re-provision hands back a different `Lane` object for the same slot.
+    laneEnv: (name: string) => ({ ...pool.lane(name).env, ...options.agentEnv }),
+    // The same cache the executor was given, so a gate an agent ran is a hit
+    // for the `gate` node afterwards. Two caches over one project would be two
+    // databases in one file's place and the hits would land in whichever one
+    // nobody asked.
+    gatesFor: (pools) =>
+      new AgentGateBroker({
+        workflow,
+        runId,
+        journal,
+        pools,
+        cache,
+        // Through the pool for `laneEnv`'s reason, and with the same agent
+        // environment overlaid: a gate run from inside a turn must see the
+        // lane's forked database and compose project, exactly as the gate node's
+        // run of it will.
+        lane: (name: string) => {
+          const lane = pool.lane(name)
+          return { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
+        },
+      }),
+    // What changed under a member while it was away: the files that differ
+    // between the phase it last worked on and what is checked out now. It is
+    // the whole safety argument for continuing a session across a phase, so a
+    // failure here is reported as "unknown" by the caller rather than swallowed
+    // into "nothing changed".
+    laneDelta: async (name: string, priorNodeId: string) => {
+      const lane = pool.lane(name)
+      return await gitLines(lane.path, [
+        'diff',
+        '--name-only',
+        integrator.nodeBranch(priorNodeId),
+        'HEAD',
+      ])
+    },
+    close: () => cache.close(),
+  }
+}
+
+/**
+ * The agent a conflicted merge is handed to, in the integration worktree.
+ *
+ * A run whose adapters were injected need not carry the default harness. The
+ * orchestrator never resolves a conflict itself, so with no agent to hand it
+ * to the merge exhausts its rounds and stops as the plan defect it is.
+ *
+ * On a staffed run the model comes off the roster rather than `defaults`, and
+ * the journal is read at conflict time to find whose work is in the conflict —
+ * both decided in `integration/staffing.ts`, which is also where the reason a
+ * member's *session* is left behind is written down.
+ */
+function conflictFixer(
+  workflow: Workflow,
+  adapters: Readonly<Record<string, HarnessAdapter>>,
+  crewAssignments: () => readonly StoredEvent[],
+): ConflictFixer {
+  return createCrewConflictFixer({
+    adapters,
+    defaults: { harness: workflow.defaults.harness, model: workflow.defaults.model },
+    crew: workflow.crew,
+    crewAssignments,
+  })
+}
+
+/**
+ * Why the pool refused. Byte counts and a path — never git's output, which
+ * carries repository content (§11).
+ */
+export function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
+  const lanes = workflow.resources['lane']?.capacity ?? 1
+  if (error instanceof DiskProbeError) {
+    const { requiredBytes, availableBytes } = error.probe
+    return (
+      `vinta-ai-maestro: refusing to provision ${lanes} lanes + 1 integration worktree — ` +
+      `${requiredBytes} bytes needed, ${availableBytes} available under ${laneRoot}. ` +
+      'Free space, or lower resources.lane.capacity.'
+    )
+  }
+  // The pool's own errors already say which lane and what went wrong; a generic
+  // line over the top of them is what made a failing `setup_cmd` take an
+  // afternoon to identify. Anything else stays generic, because anything else
+  // may be carrying repository content in its message.
+  if (error instanceof LaneSetupError || error instanceof LaneEnvFileError) {
+    return `vinta-ai-maestro: ${error.message}`
+  }
+  return `vinta-ai-maestro: could not provision the lane pool under ${laneRoot}.`
+}
+
+/**
+ * One real adapter per harness the workflow could dispatch to, each carrying
+ * the operator's permission policy.
+ *
+ * The policy reaches the adapters here and nowhere else: it is an argument to
+ * the command, not a field in the plan. A committed document that could say
+ * "run agents without approvals" would say it on every machine that ever runs
+ * it, including ones whose owner never agreed to that.
+ *
+ * The repository root goes with it, as the directory every agent may read.
+ * Lanes are worktrees of a branch, so whatever the operator has not committed
+ * is in their checkout and not in any lane — and a phase that reaches for it
+ * is refused with a message that reads like a question nobody can answer.
+ * Writing there stays impossible; `claude-code.ts` pairs the grant with the
+ * deny list that keeps it to reading.
+ */
+export function defaultAdapters(
+  workflow: Workflow,
+  permission: AgentPermission,
+  repoPath: string,
+): Record<string, HarnessAdapter> {
+  const adapters: Record<string, HarnessAdapter> = {}
+  for (const id of referencedHarnesses(workflow)) {
+    adapters[id] =
+      id === 'claude-code'
+        ? new ClaudeCodeAdapter({
+            permission,
+            readRoots: [repoPath],
+            settingsDir: join(storeFor(repoPath), 'harness'),
+          })
+        : id === 'codex'
+          ? new CodexAdapter({ permission })
+          : new OpencodeAdapter()
+  }
+  return adapters
+}
+

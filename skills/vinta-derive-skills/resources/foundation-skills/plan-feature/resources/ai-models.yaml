@@ -11,7 +11,7 @@
 # Tier *placement* is human/LLM judgement — the job flags drift and proposes
 # edits, it does not blindly reassign tiers. See scripts/check-ai-models.mjs.
 schema_version: 1
-last_verified: 2026-07-13
+last_verified: 2026-09-16
 
 # Drift is checked against a free, no-key community aggregator (models.dev,
 # vendor-keyed with release dates + pricing), cross-checked against LiteLLM's
@@ -56,7 +56,7 @@ tiers:
       openai:
         - id: gpt-5-mini
       google:
-        - id: gemini-3.5-flash
+        - id: gemini-3.8-flash
 
   - tier: 3
     label: multi-file orchestration, business logic, SQL views
@@ -82,10 +82,12 @@ tiers:
       tuning slow query against partitioned hot table, debugging heisenbug.
     models:
       anthropic:
-        - id: claude-opus-4-8
+        - id: claude-opus-5
       openai:
+        - id: gpt-6-astra
+          note: frontier model; roughly twice sol's price, so reserve it for tier 4
         - id: gpt-5.6-sol
-          note: Frontier model for complex professional work
+          note: cheaper frontier option when astra's step up is not warranted
       google:
         - id: gemini-3-pro
           note: with thinking

@@ -505,6 +505,15 @@ export class Journal {
           .prepare('UPDATE runs SET status = ?, ended_at = ? WHERE id = ?')
           .run(event.payload.status, event.ts, event.runId)
         return
+      case 'run_resumed':
+        // `started_at` is deliberately untouched — see the payload's docstring.
+        // `ended_at` back to NULL because the run is in flight again, and a row
+        // that kept the end of a previous attempt would read as a run that
+        // finished before it was running.
+        this.db
+          .prepare("UPDATE runs SET status = 'running', ended_at = NULL WHERE id = ?")
+          .run(event.runId)
+        return
       case 'node_registered':
         this.db
           .prepare(

@@ -25,6 +25,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A run no longer dies with the terminal that started it.** `vinta-ai-maestro
+  serve` accepts `POST /api/runs`, so a run can be submitted to a daemon that
+  was already listening and belongs to that daemon rather than to the shell that
+  asked for it; the request answers with the run id as soon as the run is
+  registered, not when it finishes. Previously `run` was the only way to start a
+  run and it hosted its own daemon, so closing the window killed the scheduler
+  and every agent under it — and left the journal claiming `running` for ever,
+  with nothing able to tell that row apart from a run still in flight.
+
+- **`vinta-ai-maestro run --resume <run-id>` picks an interrupted run back up.**
+  Phases already `done` stay done and are not dispatched again, their lane
+  worktrees are adopted rather than re-provisioned — so whatever an agent had
+  written and not committed is still there — and a phase that was mid-turn when
+  the process died runs again from the top of its pipeline, because the turn it
+  was in belonged to a process that is gone. The plan comes from the run's
+  frozen snapshot, never from the document it was written from, so editing that
+  file in the meantime cannot switch plans under a run already under way. A new
+  `run_resumed` event records each hand-over; it is deliberately not a second
+  `run_started`, which would have moved the run's `started_at` to whenever it
+  was last picked up and made every duration short by the length of the outage.
+
 - **`vinta-ai-maestro gate <gate-id>` runs a declared gate from inside an agent
   turn.** A phase used to run its full gate suite five or six times a round —
   implementer, reviewer, fixer, reviewer again, then the authoritative `gate`
@@ -453,6 +474,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recall.
 
 ### Fixed
+
+- **Closing a terminal on a run now records the interruption.** `run` and
+  `serve` handle SIGHUP as well as SIGINT and SIGTERM — SIGHUP is what a
+  terminal sends when its window closes, and with no handler Node's default was
+  to die on the spot, running no teardown and writing no `run_ended`. Both
+  commands now mark their live runs interrupted before exiting and print the
+  `--resume` line for each, so a closed window leaves something recoverable
+  instead of a row nothing will ever move again.
 
 - **A member's reviews were counted as phases they took.** `node_crew` is
   written for both seats — the reviewer's claim carries `role: 'reviewer'`, the

@@ -36,7 +36,12 @@ import { collectRunUsage } from '../usage/usage.ts'
 import { AgentGateRefusal } from '../resources/agent-gates.ts'
 import { parseWorkflow } from '../validate.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
-import { UnsupportedOperation, type DaemonRun } from './control.ts'
+import {
+  UnsupportedOperation,
+  type DaemonRun,
+  type RunStartPort,
+  type RunStartRefusal,
+} from './control.ts'
 import { harnessCapabilities } from './harnesses.ts'
 import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
@@ -48,6 +53,7 @@ import {
   MonitorAskSchema,
   NoArgsRequestSchema,
   RedirectRequestSchema,
+  StartRunRequestSchema,
   toIssues,
   toWireIssues,
   type AmendResponse,
@@ -62,6 +68,7 @@ import {
   type RunSummary,
   type RunUsageResponse,
   type SessionTurn,
+  type StartRunResponse,
   type WorkflowListResponse,
   type WorkflowResponse,
 } from './schemas.ts'
@@ -124,6 +131,12 @@ export interface ApiOptions {
    * without waiting fifteen real seconds for it.
    */
   readonly leaseWaitMs?: number
+  /**
+   * Starting a run on this daemon. Absent on a host that only serves history,
+   * and then `POST /api/runs` says so rather than accepting a run nobody will
+   * drive — see `RunStartPort`.
+   */
+  readonly runStarter?: RunStartPort | undefined
 }
 
 export function createApi(options: ApiOptions): Hono {
@@ -179,6 +192,49 @@ export function createApi(options: ApiOptions): Hono {
    */
   app.get('/api/runs', (c) => {
     return c.json({ runs: journal.runs().map(runSummary) satisfies RunSummary[] })
+  })
+
+  /**
+   * Start a run, or pick an interrupted one back up — the endpoint that makes a
+   * run outlive the thing that asked for it.
+   *
+   * Before this existed, `vinta-ai-maestro run` was the only way to start a run
+   * and it hosted the daemon itself, so the run's lifetime was the terminal's:
+   * closing the window killed the scheduler and every agent under it, and left
+   * the journal claiming `running` with nothing able to pick it up. Submitting
+   * to a daemon that was already listening breaks that coupling completely —
+   * the request returns as soon as the run is registered, and the run then
+   * belongs to the daemon.
+   *
+   * **It answers on registration, not on completion.** A run takes hours; a
+   * request held open for one would be a request no proxy, browser or laptop
+   * lid survives. What comes back is the id, and everything else in this API is
+   * addressed by it.
+   */
+  app.post('/api/runs', async (c) => {
+    const starter = options.runStarter
+    // `501`, in the sense the neighbouring monitor endpoint uses it: the
+    // request is fine and this host does not implement it.
+    if (starter === undefined) return fail(c, 501, 'runs_unsupported')
+
+    const body = await readBody(c, StartRunRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+
+    // Refused here rather than in the port, because the registry is the
+    // daemon's and only the daemon can see it: a resume of a run this process
+    // is already driving would put a second scheduler on one journal, and the
+    // two would fight over every node.
+    if (body.value.resume !== undefined && runs.has(body.value.resume)) {
+      return fail(c, 409, 'run_active')
+    }
+
+    const outcome = await starter.start(
+      body.value.resume === undefined
+        ? { kind: 'workflow', workflowId: body.value.workflow as string }
+        : { kind: 'resume', runId: body.value.resume },
+    )
+    if (!outcome.ok) return fail(c, STATUS_FOR[outcome.code], outcome.code)
+    return c.json({ runId: outcome.runId } satisfies StartRunResponse, 201)
   })
 
   app.get('/api/runs/:runId', (c) => {
@@ -975,6 +1031,26 @@ async function readBody<T>(
   }
   const parsed = schema.safeParse(raw)
   return parsed.success ? { value: parsed.data } : { issues: toIssues(parsed.error) }
+}
+
+/**
+ * A start refusal's HTTP status.
+ *
+ * Split the way the rest of this API splits them: `404` is a thing that is not
+ * there, `409` is a thing that is there and is in the wrong state for what was
+ * asked. A `409` is worth distinguishing from a `400` here because none of them
+ * are the caller's fault — the plan is invalid, the machine is short of disk,
+ * the run already finished — and a UI that showed "bad request" for any of them
+ * would send the operator looking in the wrong place.
+ */
+const STATUS_FOR: Readonly<Record<RunStartRefusal, 404 | 409>> = {
+  unknown_workflow: 404,
+  unknown_run: 404,
+  invalid_workflow: 409,
+  run_finished: 409,
+  run_active: 409,
+  environment: 409,
+  provision: 409,
 }
 
 /**

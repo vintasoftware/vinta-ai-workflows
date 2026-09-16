@@ -115,6 +115,55 @@ export interface AgentGatePort {
   run(gateId: string, holderNode: string): Promise<AgentGateResult>
 }
 
+/**
+ * Why a run could not be started, as a code the route maps to a status.
+ *
+ * A closed set rather than a message, because the caller is a UI that has to
+ * decide what to *do*: an `unknown_workflow` is a stale list to refresh, an
+ * `environment` is a machine to fix, a `run_active` is a tab to switch to.
+ */
+export type RunStartRefusal =
+  | 'unknown_workflow'
+  | 'invalid_workflow'
+  | 'unknown_run'
+  /** Every node settled. There is nothing to resume; run the plan again. */
+  | 'run_finished'
+  /** This daemon is already driving it — two schedulers on one run is a race. */
+  | 'run_active'
+  /** §13.5's preflight refused. This environment cannot run this workflow. */
+  | 'environment'
+  /** The lane pool refused: disk, a failing `setup_cmd`, a missing env file. */
+  | 'provision'
+
+export type RunStartRequest =
+  | { readonly kind: 'workflow'; readonly workflowId: string }
+  | { readonly kind: 'resume'; readonly runId: string }
+
+export type RunStartOutcome =
+  | { readonly ok: true; readonly runId: string }
+  | { readonly ok: false; readonly code: RunStartRefusal; readonly message: string }
+
+/**
+ * Starting a run on the daemon that is serving it (§10's `POST /api/runs`).
+ *
+ * The port exists so that the API stays a skin: composing a run means lanes, a
+ * preflight, a scheduler and a harness, none of which belong behind an HTTP
+ * handler. `src/cli/serve.ts` supplies the real one.
+ *
+ * **Absent means refused, not ignored.** A daemon started against a checkout it
+ * cannot run — no harness, no lanes — still serves every read in this API, and
+ * answering a start request with anything other than "this host does not do
+ * that" would leave the caller waiting for a run nobody is driving.
+ *
+ * Its `start` resolves as soon as the run is *registered*, never when the run
+ * finishes. That is the entire point of the endpoint: the request that submits
+ * a run returns in the time it takes to provision lanes, and the run then
+ * outlives it by hours.
+ */
+export interface RunStartPort {
+  start(request: RunStartRequest): Promise<RunStartOutcome>
+}
+
 /** One run the daemon serves. Registered when the run starts. */
 export interface DaemonRun {
   readonly runId: string

@@ -52,6 +52,12 @@
  * withdrawn with it. That is the whole reason an operator's terminal can never
  * reach a session that has already ended or a lane the node has handed on.
  *
+ * A run that is *picked up* rather than started enters through the same door:
+ * `resumeFrom` seeds the node states from the journal's own rows in the
+ * constructor, and nothing past it knows the difference — the loop, the
+ * precheck and the deadlock detector all see an ordinary graph that happens to
+ * have some nodes already `done`. Only `done` survives a kill (`#seed`).
+ *
  * **Never spinning is structural, not a timer.** The loop waits on a promise
  * that only a state change resolves; a capacity wait is one harness timer owned
  * by admission control. There is no poll interval anywhere in this file.
@@ -80,7 +86,7 @@ import type {
   OperatorDelivery,
   OperatorOp,
 } from '../journal/events.ts'
-import type { Journal } from '../journal/journal.ts'
+import type { Journal, NodeRow } from '../journal/journal.ts'
 import { attribute, type Attribution } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
@@ -122,6 +128,25 @@ export interface SchedulerOptions {
   readonly executor: EffectExecutor
   /** Where lane worktrees live — `LanePool`'s `poolRoot`. */
   readonly laneRoot: string
+  /**
+   * The journal's node rows for this run — `journal.nodes(runId)` — when the
+   * run is being **picked up** rather than started.
+   *
+   * A process that was killed (terminal closed, machine rebooted) leaves the
+   * journal complete and nothing else: its sessions, its leases and its
+   * pipeline positions died with it. So what this restores is the one fact that
+   * outlives the process — which phases finished — and every node that had not
+   * finished starts its pipeline again from the beginning, in whatever lane it
+   * is next given. `#seed` is where that reading is spelled out.
+   *
+   * The rows are passed in rather than read here so the constructor stays free
+   * of I/O, and because whoever decided to resume has already read them: the
+   * decision *is* that read.
+   *
+   * Absent for a fresh run, which seeds every node `pending` — what every run
+   * did before this existed.
+   */
+  readonly resumeFrom?: readonly NodeRow[]
   /**
    * One lane slot's environment, by slot name — `LanePool`'s `Lane.env`.
    *
@@ -462,7 +487,19 @@ export class Scheduler {
     this.#takeovers = options.takeovers ?? takeovers
     this.#staffed = Object.keys(workflow.crew).length > 0
 
-    for (const node of workflow.nodes) this.#states.set(node.id, this.#fresh(node))
+    const resumed =
+      options.resumeFrom === undefined
+        ? null
+        : new Map(options.resumeFrom.map((row) => [row.node_id, row]))
+    for (const node of workflow.nodes) {
+      const state = this.#fresh(node)
+      this.#states.set(node.id, state)
+      // A row the resume has no entry for is a node the journal never
+      // registered — the workflow gained it since — and there is nothing untrue
+      // in the projection to correct, so it stays `pending` silently, exactly
+      // as a fresh run's node does.
+      if (resumed !== null) this.#seed(state, resumed.get(node.id))
+    }
     this.#order = workflow.nodes.map((node) => node.id)
 
     // One name per lane slot, matching `LanePool`'s own naming so a real pool
@@ -557,6 +594,73 @@ export class Scheduler {
       resume: null,
       failure: null,
     }
+  }
+
+  /**
+   * What a killed process left behind, applied to a node that is otherwise
+   * `#fresh`.
+   *
+   * Only one field of the row is load-bearing, because only one of them
+   * describes something that outlived the process: `done`. A node the journal
+   * calls `running` has no session, no lease and no pipeline position behind it
+   * — whatever was holding those is gone — so the only honest reading of every
+   * status but `done` is `pending`, and the phase runs again from the start of
+   * its pipeline. Nothing here tries to restore a live session or a lane: see
+   * `resumeFrom` for why, and the `session_id` paragraph below for the one that
+   * looks restorable and is not.
+   *
+   * **A `done` node is seeded silently; every other status is journalled.** Its
+   * transition to `done` is already in the log, and appending a second one
+   * would put a duplicate in the history the post-mortem and the node view
+   * fold — a phase that ran once reading as a phase that finished twice. The
+   * rest are journalled because the projection is currently *claiming*
+   * something no process is backing, and that correction is the news: the row
+   * saying `running` is what an operator is looking at while nothing runs.
+   * `pending` is in that set too. It is already pending, so the row is a
+   * duplicate in the narrow sense — but it costs one event, it marks where the
+   * new host picked the run up, and the alternative is deciding case by case
+   * which of five untrue statuses deserve the correction, which is how one of
+   * them gets missed.
+   *
+   * **`session_id` is deliberately not carried into `resumeSessionId`**, even
+   * though the worktree is usually still on disk and the agent could in
+   * principle carry on. Three reasons, any one of them enough:
+   *
+   * - The column is COALESCE-updated by every `node_assigned`, so it holds
+   *   whichever role spawned *last*. Staging it would hand a reviewer's session
+   *   to the implementer restarting the phase — the exact confusion §15.8 keeps
+   *   ids filed per slot to prevent. The row cannot say which slot it belongs
+   *   to, because the projection was never keyed that way.
+   * - It arrives naked. `SessionEntry` carries the harness, the lane, the turn
+   *   count and the node that wrote it, and every §15.2 refusal is a comparison
+   *   against one of those; a bare id is a continuation that no rule can
+   *   decline. `#reorientation` is the one that matters most here — a resumed
+   *   session would be told nothing about what moved underneath it during the
+   *   outage, which is the single thing a session is reliably wrong about, and
+   *   an outage is exactly when things moved.
+   * - The phase re-drives from its pipeline's initial state regardless, so the
+   *   session would be handed the full brief for work it believes it has
+   *   already done. That is the same pairing `#spawnTurn` calls worse than not
+   *   reusing at all, and the same reason `#restartAttempt` starts every other
+   *   re-attempt cold.
+   *
+   * The cost of getting this wrong is not a wasted spawn: it is an agent
+   * confidently describing work it cannot see.
+   */
+  #seed(state: NodeState, row: NodeRow | undefined): void {
+    if (row === undefined) return
+    if (row.status === 'done') {
+      state.status = 'done'
+      return
+    }
+    // The two statuses that are already true need no correction, and writing
+    // one anyway is not free: a resume of a wide graph would put a `pending`
+    // row against every phase it has not reached yet, which is a transition
+    // that did not happen in a log whose whole value is that it only records
+    // ones that did. `run_resumed` is what marks where the new host picked the
+    // run up, so nothing is lost by staying quiet here.
+    if (row.status === 'pending') return
+    this.#setStatus(state, 'pending')
   }
 
   /**

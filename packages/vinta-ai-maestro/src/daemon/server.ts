@@ -31,7 +31,7 @@ import type { Journal } from '../journal/journal.ts'
 import type { Monitor } from '../monitor/monitor.ts'
 import { createApi } from './api.ts'
 import { createToken, isLoopback, presentedToken, tokenMatches } from './auth.ts'
-import type { DaemonRun } from './control.ts'
+import type { DaemonRun, RunStartPort } from './control.ts'
 import { DEFAULT_POLL_MS, EventStream } from './stream.ts'
 
 /** The only path that upgrades. Everything else is HTTP (§10). */
@@ -82,6 +82,18 @@ export interface Daemon {
   readonly token: string
   /** Makes a run reachable. Runs are registered as they start. */
   register(run: DaemonRun): void
+  /**
+   * Lets `POST /api/runs` start runs on this daemon. Until it is called — and
+   * on a host that never calls it — that endpoint refuses.
+   *
+   * After boot rather than in `DaemonOptions`, because of a genuine ordering
+   * knot: a run's agents are told where to reach the daemon through
+   * `MAESTRO_URL`/`MAESTRO_TOKEN`, so anything that can start a run needs the
+   * URL and the token — and both only exist once the listener has a port. The
+   * alternative was a factory taking a half-built daemon, which is a worse
+   * thing to have to reason about than one setter.
+   */
+  acceptRuns(starter: RunStartPort): void
   close(): Promise<void>
 }
 
@@ -89,6 +101,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const host = options.host ?? LOOPBACK
   const token = options.token ?? createToken()
   const runs = new Map<string, DaemonRun>()
+  // Read through a getter below, so `acceptRuns` after boot is visible to a
+  // request that arrives after it.
+  let starter: RunStartPort | undefined
 
   if (!isLoopback(host)) {
     const warn = options.warn ?? ((message: string) => console.warn(message))
@@ -103,6 +118,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     journal: options.journal,
     token,
     runs,
+    get runStarter(): RunStartPort | undefined {
+      return starter
+    },
     ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
     ...(options.monitorFor === undefined ? {} : { monitorFor: options.monitorFor }),
     ...(options.leaseWaitMs === undefined ? {} : { leaseWaitMs: options.leaseWaitMs }),
@@ -138,6 +156,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     token,
     register(run: DaemonRun): void {
       runs.set(run.runId, run)
+    },
+    acceptRuns(port: RunStartPort): void {
+      starter = port
     },
     async close(): Promise<void> {
       stream.close()
