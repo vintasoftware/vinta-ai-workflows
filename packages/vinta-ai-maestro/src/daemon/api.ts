@@ -33,7 +33,6 @@ import type { Workflow } from '../types.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
-import { AcquireAborted } from '../resources/pools.ts'
 import { parseWorkflow } from '../validate.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import { UnsupportedOperation, type DaemonRun } from './control.ts'
@@ -306,29 +305,32 @@ export function createApi(options: ApiOptions): Hono {
     // times out, and every intermediary has an opinion too. A client that timed
     // out got an error that read like "the lease mechanism is broken", and
     // agents did the reasonable thing with that: ran the command without a
-    // lease. The wait is the *client's* loop now; this answers "not yet"
-    // quickly and leaves the queue behind it, so nothing is granted to a
-    // request that has gone away.
-    const abort = new AbortController()
-    const hop = setTimeout(() => {
-      abort.abort()
-    }, options.leaseWaitMs ?? LEASE_WAIT_MS)
+    // lease. So the wait is the *client's* loop, and this answers "not yet".
+    //
+    // What that answer must not do is throw the wait away. It used to abort the
+    // acquire at the hop boundary, which left the pool queue; the next POST
+    // re-entered at the tail, behind every waiter that had arrived in between.
+    // Fifteen seconds of hop against gate runs that hold a semaphore for
+    // minutes meant an agent could be overtaken on every single hop, forever,
+    // while an in-process waiter on the same pool was not. `waitToken` is the
+    // queue position, handed out here and given back on the next ask.
     try {
-      const grant = await found.run.agentLeases.acquire(
+      const outcome = await found.run.agentLeases.hop(
         body.value.resources,
         body.value.holderNode,
-        { signal: abort.signal },
+        {
+          ...(body.value.waitToken === undefined ? {} : { waitToken: body.value.waitToken }),
+          withinMs: options.leaseWaitMs ?? LEASE_WAIT_MS,
+        },
       )
-      return c.json(grant satisfies AgentLeaseGrantResponse, 201)
-    } catch (error) {
       // Still queued behind someone, which is the ordinary case and not an
       // error: 202 is "come back", and the client does.
-      if (error instanceof AcquireAborted) {
-        return c.json({ waiting: true } satisfies AgentLeaseWaitingResponse, 202)
+      if ('waiting' in outcome) {
+        return c.json(outcome satisfies AgentLeaseWaitingResponse, 202)
       }
+      return c.json(outcome satisfies AgentLeaseGrantResponse, 201)
+    } catch {
       return fail(c, 409, 'lease_unavailable')
-    } finally {
-      clearTimeout(hop)
     }
   })
 

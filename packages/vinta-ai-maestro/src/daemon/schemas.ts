@@ -79,6 +79,11 @@ export const NoArgsRequestSchema = z.strictObject({})
 export const AgentLeaseRequestSchema = z.strictObject({
   resources: z.array(z.string().min(1)).min(1).max(32),
   holderNode: z.string().min(1),
+  /**
+   * The `waitToken` from this client's last `202`, if it has one. Absent on a
+   * first ask — and absent is not an error, it just starts a new wait.
+   */
+  waitToken: z.string().min(1).optional(),
 })
 
 /** §9.1 — the answer lands in the guard context as `human.answer`. */
@@ -106,7 +111,16 @@ export type AgentLeaseGrantResponse = z.infer<typeof AgentLeaseGrantSchema>
  * deserve opposite reactions and conflating them is what sent agents around
  * the lease entirely.
  */
-export const AgentLeaseWaitingSchema = z.strictObject({ waiting: z.literal(true) })
+export const AgentLeaseWaitingSchema = z.strictObject({
+  waiting: z.literal(true),
+  /**
+   * This client's place in the queue, to send back on the next ask. Without it
+   * the next POST is a *new* waiter at the tail, behind everyone who arrived
+   * during the hop — which is how an agent's wait used to be overtaken without
+   * bound while an in-process one was not.
+   */
+  waitToken: z.string().min(1),
+})
 
 export type AgentLeaseWaitingResponse = z.infer<typeof AgentLeaseWaitingSchema>
 

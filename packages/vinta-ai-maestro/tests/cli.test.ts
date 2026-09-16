@@ -473,6 +473,69 @@ describe('vinta-ai-maestro with', () => {
     })
   })
 
+  /**
+   * The client half of the queue-position fix. Each `202` names the wait, and
+   * the next POST has to give that name back — otherwise the daemon cannot tell
+   * a returning waiter from a new one, and re-queues it at the tail behind
+   * everything that arrived while this loop was sleeping.
+   */
+  it('hands the daemon back the wait token it was given', async () => {
+    await leaseEnv(async () => {
+      const sent: (string | undefined)[] = []
+      let attempts = 0
+      const request: typeof fetch = async (_input, init) => {
+        if (init?.method !== 'POST') return Response.json({ ok: true })
+        attempts += 1
+        const body = JSON.parse(String(init.body)) as { waitToken?: string }
+        sent.push(body.waitToken)
+        return attempts < 3
+          ? Response.json({ waiting: true, waitToken: 'ticket-7' }, { status: 202 })
+          : grant()
+      }
+      const io = recorder()
+
+      const code = await withCommand(['test-suite', '--', 'pnpm', 'test'], io.io, {
+        fetch: request,
+        sleep: async () => {},
+        run: async () => 0,
+      })
+
+      expect(code).toBe(0)
+      // Nothing to send on the first ask; the same ticket on every ask after.
+      expect(sent).toEqual([undefined, 'ticket-7', 'ticket-7'])
+    })
+  })
+
+  /**
+   * A daemon from before the token still answers a bare `{ waiting: true }`.
+   * That has to keep working — an agent whose CLI is newer than the daemon it
+   * is talking to should wait exactly as well as it used to, not fail.
+   */
+  it('keeps waiting against a daemon that issues no wait token', async () => {
+    await leaseEnv(async () => {
+      let attempts = 0
+      const request: typeof fetch = async (_input, init) => {
+        if (init?.method !== 'POST') return Response.json({ ok: true })
+        attempts += 1
+        return attempts < 3 ? Response.json({ waiting: true }, { status: 202 }) : grant()
+      }
+      const io = recorder()
+      const commands: string[] = []
+
+      const code = await withCommand(['test-suite', '--', 'pnpm', 'test'], io.io, {
+        fetch: request,
+        sleep: async () => {},
+        run: async (command) => {
+          commands.push(command)
+          return 0
+        },
+      })
+
+      expect(code).toBe(0)
+      expect(commands).toEqual(['pnpm test'])
+    })
+  })
+
   it('never runs the command when the lease is refused for good', async () => {
     // The refusals waiting cannot fix — a resource this run does not declare is
     // the one an agent is most likely to reach for.

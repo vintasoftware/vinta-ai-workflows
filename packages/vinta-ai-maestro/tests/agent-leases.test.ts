@@ -17,7 +17,12 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function rig() {
+/** Yields to the microtask queue so pending grants and releases settle. */
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+}
+
+function rig(options: { readonly parkedWaitTtlMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-agent-lease-'))
   dirs.push(dir)
   const journal = openJournal(dir)
@@ -41,6 +46,7 @@ function rig() {
   }
   const broker = new AgentLeaseBroker(pools, journal, RUN_ID, {
     ttlMs: 90,
+    ...(options.parkedWaitTtlMs === undefined ? {} : { parkedWaitTtlMs: options.parkedWaitTtlMs }),
     now: () => now,
     id: () => `lease-${++next}`,
     setTimer: (run, delay) => {
@@ -94,6 +100,142 @@ describe('agent-held resource leases', () => {
     expect(granted).toBe(true)
     expect(pools.held('test-suite')).toBe(1)
     broker.release(grant.leaseId)
+  })
+
+  /**
+   * The starvation this exists to prevent, at broker level: the hopping client
+   * asked first, and an in-process waiter that arrived during the hop must not
+   * inherit its place. Aging is off in this rig, so arrival order is the only
+   * thing deciding — which is exactly the property a dropped queue entry broke.
+   */
+  it('a rejoining hop keeps the place in line it took on its first ask', async () => {
+    const { broker, pools, tick } = rig()
+    const holder = await broker.acquire(['test-suite'], 'holder')
+
+    const first = broker.hop(['test-suite'], 'agent', { withinMs: 50 })
+    tick(50)
+    const queued = await first
+    expect(queued).toEqual({ waiting: true, waitToken: expect.any(String) })
+    if ('leaseId' in queued) throw new Error('unreachable')
+    // Answering "not yet" cost the client nothing: it is still in the queue.
+    expect(pools.waiting).toBe(1)
+
+    // An in-process waiter arrives *after* the agent did.
+    let inProcess = false
+    const later = pools.acquire(['test-suite']).then((lease) => {
+      inProcess = true
+      return lease
+    })
+    await settle()
+    expect(pools.waiting).toBe(2)
+
+    broker.release(holder.leaseId)
+    await settle()
+    expect(inProcess).toBe(false)
+
+    const rejoined = await broker.hop(['test-suite'], 'agent', {
+      waitToken: queued.waitToken,
+      withinMs: 50,
+    })
+    if (!('leaseId' in rejoined)) throw new Error('the rejoining hop was not granted')
+    // One wait, one slot: rejoining collects the grant its parked entry already
+    // won rather than booking a second one.
+    expect(pools.held('test-suite')).toBe(1)
+
+    // A token is spent once. Hopping on it again is a new wait at the back, not
+    // a second helping of the same one.
+    const stale = broker.hop(['test-suite'], 'agent', {
+      waitToken: queued.waitToken,
+      withinMs: 50,
+    })
+    tick(50)
+    expect(await stale).toEqual({ waiting: true, waitToken: expect.any(String) })
+    expect(pools.held('test-suite')).toBe(1)
+
+    broker.release(rejoined.leaseId)
+    await settle()
+    expect(inProcess).toBe(true)
+    ;(await later).release()
+  })
+
+  /**
+   * A client that retried without waiting for its answer has two hops on one
+   * token, both watching the same grant. The queue handed over one slot, so
+   * exactly one of them may come back with a lease.
+   */
+  it('grants once when two hops race on the same wait token', async () => {
+    const { broker, pools, tick } = rig()
+    const holder = await broker.acquire(['test-suite'], 'holder')
+
+    const first = broker.hop(['test-suite'], 'agent', { withinMs: 50 })
+    tick(50)
+    const queued = await first
+    if ('leaseId' in queued) throw new Error('unreachable')
+
+    const both = [
+      broker.hop(['test-suite'], 'agent', { waitToken: queued.waitToken, withinMs: 50 }),
+      broker.hop(['test-suite'], 'agent', { waitToken: queued.waitToken, withinMs: 50 }),
+    ]
+    broker.release(holder.leaseId)
+    await settle()
+    tick(50)
+    const outcomes = await Promise.all(both)
+
+    const granted = outcomes.filter((outcome) => 'leaseId' in outcome)
+    expect(granted).toHaveLength(1)
+    expect(pools.held('test-suite')).toBe(1)
+    // The loser is not refused, just still waiting — on a new place in the
+    // queue, since the one it was holding a token for has been spent.
+    const loser = outcomes.find((outcome) => !('leaseId' in outcome))
+    expect(loser).toEqual({ waiting: true, waitToken: expect.any(String) })
+    if (loser === undefined || 'leaseId' in loser) throw new Error('unreachable')
+    expect(loser.waitToken).not.toBe(queued.waitToken)
+
+    // Closing gives back both the granted lease and the still-parked wait.
+    broker.close()
+    await settle()
+    expect(pools.held('test-suite')).toBe(0)
+    expect(pools.waiting).toBe(0)
+  })
+
+  /**
+   * The other half of parking: a place held for a client that never comes back
+   * is capacity nobody can use, and a grant that lands on one is worse — a real
+   * slot held by no process. Both have to time out.
+   */
+  it('reaps a parked wait whose client stopped hopping, and gives back a grant it won', async () => {
+    const { broker, pools, tick } = rig({ parkedWaitTtlMs: 1_000 })
+    const holder = await broker.acquire(['test-suite'], 'holder')
+
+    const first = broker.hop(['test-suite'], 'agent', { withinMs: 50 })
+    tick(50)
+    await first
+    expect(pools.waiting).toBe(1)
+
+    // The client is gone, but the slot frees anyway and the parked wait — still
+    // first in line — takes it.
+    broker.release(holder.leaseId)
+    await settle()
+    expect(pools.held('test-suite')).toBe(1)
+    expect(pools.waiting).toBe(0)
+
+    tick(1_000)
+    await settle()
+    expect(pools.held('test-suite')).toBe(0)
+  })
+
+  it('reaps a parked wait that never reached the head of the queue', async () => {
+    const { broker, pools, tick } = rig({ parkedWaitTtlMs: 1_000 })
+    await broker.acquire(['test-suite'], 'holder')
+
+    const first = broker.hop(['test-suite'], 'agent', { withinMs: 50 })
+    tick(50)
+    await first
+    expect(pools.waiting).toBe(1)
+
+    tick(1_000)
+    await settle()
+    expect(pools.waiting).toBe(0)
   })
 
   it('renewal replaces the deadline and a stale timer cannot release it', async () => {
