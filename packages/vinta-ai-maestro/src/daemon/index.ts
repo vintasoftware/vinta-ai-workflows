@@ -27,6 +27,7 @@ export {
   AddContextRequestSchema,
   AgentLeaseGrantSchema,
   AgentLeaseRequestSchema,
+  AgentLeaseWaitingSchema,
   AmendResponseSchema,
   AnswerRequestSchema,
   ErrorResponseSchema,

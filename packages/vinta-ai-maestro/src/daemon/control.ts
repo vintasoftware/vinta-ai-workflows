@@ -25,7 +25,7 @@ import type { AmendRunner } from '../amend/amend.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion } from './schemas.ts'
-import type { AgentLeaseGrant } from '../resources/agent-leases.ts'
+import type { AgentLeaseGrant, AgentLeaseHop } from '../resources/agent-leases.ts'
 
 /** The five operations of §9, plus the two reads `Scheduler` already exposes. */
 export interface RunControl {
@@ -88,6 +88,16 @@ export interface AgentLeasePort {
     holderNode: string,
     options?: { readonly signal?: AbortSignal },
   ): Promise<AgentLeaseGrant>
+  /**
+   * One instalment of a client's wait, resumable through `waitToken`. This is
+   * what the endpoint uses: answering on a short cycle is only safe if the
+   * queue position survives the gap between two answers.
+   */
+  hop(
+    resources: readonly string[],
+    holderNode: string,
+    options: { readonly waitToken?: string; readonly withinMs: number },
+  ): Promise<AgentLeaseHop>
   renew(leaseId: string): AgentLeaseGrant | null
   release(leaseId: string): void
 }

@@ -31,6 +31,7 @@ import { AdmissionControl } from '../src/admission/admission.ts'
 import {
   AmendResponseSchema,
   AgentLeaseGrantSchema,
+  AgentLeaseWaitingSchema,
   ErrorResponseSchema,
   EventFrameSchema,
   FrameSchema,
@@ -627,10 +628,11 @@ describe('agent-held leases', () => {
 
   /**
    * A wait longer than one hop is answered rather than held. The client loops;
-   * what matters here is that the daemon lets go of its own queue slot, or the
-   * next grant goes to a request that has already gone away.
+   * what matters here is that answering costs `b` nothing. The queue entry
+   * stays, and the `waitToken` is how the next POST says "that one is mine"
+   * instead of arriving as a stranger at the back of the line.
    */
-  it('answers "still queued" instead of holding the request open', async () => {
+  it('answers "still queued" and parks the wait rather than dropping it', async () => {
     const r = await rig({ leaseWaitMs: 20 })
     const held = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
       method: 'POST',
@@ -644,11 +646,73 @@ describe('agent-held leases', () => {
     })
 
     expect(queued.status).toBe(202)
-    expect(queued.body).toEqual({ waiting: true })
-    // And nothing of `b`'s is left in the queue: the slot that frees next
-    // belongs to whoever is still asking for it.
-    expect(r.pools.waiting).toBe(0)
+    const ticket = AgentLeaseWaitingSchema.parse(queued.body)
+    expect(r.pools.waiting).toBe(1)
     expect(r.pools.held('test-suite')).toBe(1)
+
+    // Hopping again on the same token rejoins that one entry: still one waiter,
+    // and the same ticket back.
+    const again = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b', waitToken: ticket.waitToken },
+    })
+    expect(again.status).toBe(202)
+    expect(AgentLeaseWaitingSchema.parse(again.body).waitToken).toBe(ticket.waitToken)
+    expect(r.pools.waiting).toBe(1)
+  })
+
+  /**
+   * The regression that motivated `waitToken`, end to end over the API.
+   *
+   * `b` asks first but waits over HTTP, so its wait is served in hops; `c`
+   * asks second and waits in-process, the way the scheduler's gate does. When
+   * a hop meant leaving the pool queue and re-entering at the tail, `c` took
+   * the slot `b` had been queued for — and since a gate run holds a semaphore
+   * far longer than one hop, `b` could lose that race again on every hop with
+   * nothing bounding it. Aging is off in this rig, so this asserts plain
+   * arrival order: the thing that broke was position, not the aging clock.
+   */
+  it('does not let a later in-process waiter overtake an agent between hops', async () => {
+    const r = await rig({ leaseWaitMs: 20 })
+
+    const holder = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a' },
+    })
+    expect(holder.status).toBe(201)
+    const held = AgentLeaseGrantSchema.parse(holder.body)
+
+    // `b` asks first, over HTTP, and is told to come back.
+    const queued = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b' },
+    })
+    expect(queued.status).toBe(202)
+    const ticket = AgentLeaseWaitingSchema.parse(queued.body)
+
+    // `c` asks second, in-process, and stays. `acquire` queues synchronously,
+    // so there is nothing to wait for before the slot is released.
+    let overtook = false
+    const inProcess = r.pools.acquire(['test-suite']).then((lease) => {
+      overtook = true
+      return lease
+    })
+
+    await call(r.daemon, `/api/runs/${RUN_ID}/leases/${held.leaseId}`, { method: 'DELETE' })
+    await until(() => (r.pools.held('test-suite') === 1 ? true : undefined), 'the slot to be taken')
+
+    // The slot belongs to whoever asked first, and hopping is not asking again.
+    expect(overtook).toBe(false)
+
+    const rejoin = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b', waitToken: ticket.waitToken },
+    })
+    expect(rejoin.status).toBe(201)
+    const grant = AgentLeaseGrantSchema.parse(rejoin.body)
+
+    await call(r.daemon, `/api/runs/${RUN_ID}/leases/${grant.leaseId}`, { method: 'DELETE' })
+    ;(await inProcess).release()
   })
 
   it('renews a live lease and refuses lane self-deadlocks and unknown holders', async () => {

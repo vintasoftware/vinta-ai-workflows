@@ -362,6 +362,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An agent waiting for a semaphore could be overtaken without bound.** A
+  `vinta-ai-maestro with` wait is served in fifteen-second hops so no client
+  timeout has an opinion about it, and each hop used to abort the underlying
+  `pools.acquire`. Aborting leaves the pool queue, and the next POST re-entered
+  it — at the tail, behind every waiter that had arrived in the meantime. Since
+  a gate run holds a capacity-1 semaphore for minutes, an agent lost that race
+  on hop after hop while the scheduler's own in-process waiters, which never
+  leave the queue, did not. The pool's aging rule could not help: aging reserves
+  against waiters *behind* the aged one, and the waiters that overtook it are in
+  front of it. A `202` now carries a `waitToken` naming the wait, the client
+  sends it back, and the daemon keeps the one queue entry — one arrival time,
+  one place in line — across the whole wait. A parked wait whose client stops
+  hopping is reaped after a minute, releasing the slot if one was granted to it
+  while nobody was watching.
+
 - **The monitor's conversation could never be written on Windows.** It is kept
   under a reserved node id that becomes a directory, and that id was
   `monitor:conversation` — a colon, chosen because no phase id may contain one,

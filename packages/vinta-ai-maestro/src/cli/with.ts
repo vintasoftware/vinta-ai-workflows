@@ -1,6 +1,6 @@
 /** `vinta-ai-maestro with <resource> -- <cmd>` — an agent-held pool lease. */
 import { spawn } from 'node:child_process'
-import { AgentLeaseGrantSchema } from '../daemon/schemas.ts'
+import { AgentLeaseGrantSchema, AgentLeaseWaitingSchema } from '../daemon/schemas.ts'
 import { killTree, ownProcessGroup, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import {
   MAESTRO_NODE_ENV,
@@ -178,20 +178,30 @@ interface LeaseWait {
  * and what it did was run the command bare.
  *
  * So the wait belongs on this side. The daemon answers `202` for "still
- * queued", leaving its own queue behind it so nothing is granted to a request
- * that has gone away, and this loops. Only the answers that waiting cannot
- * change end it.
+ * queued" and this loops. Only the answers that waiting cannot change end it.
+ *
+ * Each `202` carries a `waitToken` — the daemon's name for this wait's place in
+ * the pool queue — and the next POST sends it back. Without it every hop was a
+ * brand-new waiter appended to the tail of that queue, so anything that arrived
+ * while this loop was sleeping got in front, and under real contention that
+ * happened on every hop with nothing bounding how long it could go on. The
+ * token costs a field and turns the loop back into one wait.
  */
 async function waitForLease(wait: LeaseWait): Promise<{ leaseId: string; ttlMs: number } | null> {
   const { request, endpoint, headers, resource, holderNode, io } = wait
   const sleep = wait.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)))
   const now = wait.now ?? (() => Date.now())
-  const body = JSON.stringify({ resources: [resource], holderNode })
 
   let transportFailures = 0
   let announcedAt: number | null = null
+  let waitToken: string | undefined
 
   for (;;) {
+    const body = JSON.stringify({
+      resources: [resource],
+      holderNode,
+      ...(waitToken === undefined ? {} : { waitToken }),
+    })
     let response: Response
     try {
       response = await request(endpoint, { method: 'POST', headers, body })
@@ -209,6 +219,12 @@ async function waitForLease(wait: LeaseWait): Promise<{ leaseId: string; ttlMs: 
     }
 
     if (response.status === 202) {
+      // A daemon too old to issue one, or a body that will not parse, simply
+      // leaves the token unset: the wait still works, it just loses its place
+      // the way it always used to.
+      const queued = AgentLeaseWaitingSchema.safeParse(await response.json().catch(() => null))
+      waitToken = queued.success ? queued.data.waitToken : undefined
+
       // Said once, then occasionally: a transcript should show a turn waiting
       // rather than a turn that stopped saying anything.
       if (announcedAt === null) {

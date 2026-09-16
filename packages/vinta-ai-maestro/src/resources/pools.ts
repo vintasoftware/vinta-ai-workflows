@@ -19,7 +19,10 @@
  *   because a node holds its lane while queued for a gate. So later holders
  *   may bypass a blocked one — but only until it has aged, at which point it
  *   reserves what it needs and nobody passes it again. Bypass is therefore
- *   bounded in time, which is what "not starved" actually means.
+ *   bounded in time, which is what "not starved" actually means. Note the
+ *   precondition: the bound is on a waiter that *stays queued*. One that leaves
+ *   and comes back is a new arrival at the tail, and re-arriving often enough
+ *   is unbounded bypass wearing the queue's clothes — see `PoolWait`.
  * - **Idempotent release.** A slot released twice must not widen the pool, and
  *   a slot never released narrows it permanently.
  */
@@ -39,6 +42,40 @@ export class AcquireAborted extends Error {
 /** Grant token. `release` is idempotent, so `finally { lease.release() }` is safe. */
 export interface Lease {
   release(): void
+}
+
+/**
+ * A place in the queue that outlives the caller currently watching it.
+ *
+ * `acquire`'s `signal` conflates two things a caller might mean by "stop
+ * waiting": *I no longer want this*, and *I have to go answer an HTTP request,
+ * but I am coming back*. It only ever implements the first — it splices the
+ * waiter out — and the agent-lease endpoint means the second. Re-entering
+ * afterwards is not the same wait: `#queue.push` appends, so a waiter that
+ * steps out for one hop returns behind everyone who arrived while it was gone,
+ * and under sustained contention it can be pushed back every hop forever.
+ * Aging does not save it, because aging only reserves pools against waiters
+ * *behind* it — the ones that overtook it are in front.
+ *
+ * So the position itself has to be holdable. A `PoolWait` keeps one queue entry
+ * — one `enqueuedAt`, one slot in arrival order — while any number of bounded
+ * waits look at it in turn.
+ */
+export interface PoolWait {
+  /**
+   * The grant, when the queue reaches this waiter. Awaiting it more than once,
+   * or not at all for a while, is the point: it settles on the queue's
+   * schedule, not the watcher's.
+   */
+  readonly granted: Promise<Lease>
+  /**
+   * Give up the place for good. Idempotent.
+   *
+   * A wait that was already granted releases the lease, because a grant nobody
+   * is coming back for is capacity held by no one — the leak you would trade
+   * the starvation for if parking had no way out.
+   */
+  abandon(): void
 }
 
 export interface ResourcePoolsOptions {
@@ -92,47 +129,63 @@ export class ResourcePools {
    * Resolves once every pool in `needs` has a free slot, all taken together.
    * The declared order is discarded in favour of the canonical one.
    *
-   * `signal` gives a caller a way *out of the queue*, which the agent lease
-   * endpoint needs: it answers a waiting client every few seconds rather than
-   * holding one HTTP request open for an hour, and a caller that walks away
-   * without leaving the queue would be granted a slot nobody is waiting for.
-   * Aborting after the grant is too late by construction — the waiter is off
-   * the queue and holding real capacity — so it is ignored there, and the lease
-   * is released by whoever owns it.
+   * `signal` means *I no longer want this*: it leaves the queue for good and
+   * takes nothing. Aborting after the grant is too late by construction — the
+   * waiter is off the queue and holding real capacity — so it is ignored there,
+   * and the lease is released by whoever owns it.
+   *
+   * A caller that intends to come back must not use this. Leaving and
+   * re-entering appends, which costs it every waiter that arrived meanwhile;
+   * `wait` exists so that a wait watched in instalments keeps one place in line.
    */
   acquire(needs: readonly string[], options: { readonly signal?: AbortSignal } = {}): Promise<Lease> {
-    const canonical = [...new Set(needs)].sort()
-    for (const name of canonical) this.#pool(name)
+    const canonical = this.#canonical(needs)
     const { signal } = options
+    if (signal?.aborted === true) return Promise.reject(new AcquireAborted())
+
+    const { waiter, granted } = this.#enqueue(canonical)
+    if (signal === undefined) return granted
 
     return new Promise<Lease>((resolve, reject) => {
-      if (signal?.aborted === true) {
-        reject(new AcquireAborted())
-        return
-      }
-
-      const waiter: Waiter = {
-        needs: canonical,
-        enqueuedAt: this.#now(),
-        grant: (lease) => {
-          signal?.removeEventListener('abort', leave)
-          resolve(lease)
-        },
-      }
       // Named, so the grant path can take it off again: a listener left on a
       // long-lived signal is a leak per acquisition, and this one runs once per
       // heavy command in every lane.
       const leave = (): void => {
-        const at = this.#queue.indexOf(waiter)
-        if (at === -1) return
-        this.#queue.splice(at, 1)
-        reject(new AcquireAborted())
+        if (this.#dequeue(waiter)) reject(new AcquireAborted())
       }
-      signal?.addEventListener('abort', leave, { once: true })
-
-      this.#queue.push(waiter)
-      this.#pump()
+      signal.addEventListener('abort', leave, { once: true })
+      void granted.then((lease) => {
+        signal.removeEventListener('abort', leave)
+        resolve(lease)
+      })
     })
+  }
+
+  /**
+   * Takes a place in the queue and hands back the handle to it, for a caller
+   * that will watch the wait in instalments rather than in one `await`.
+   *
+   * The queue entry is created once, here. Nothing short of `abandon` removes
+   * it, which is the whole difference from `acquire(needs, { signal })`.
+   */
+  wait(needs: readonly string[]): PoolWait {
+    const canonical = this.#canonical(needs)
+    const { waiter, granted } = this.#enqueue(canonical)
+    let abandoned = false
+
+    return {
+      granted,
+      abandon: (): void => {
+        if (abandoned) return
+        abandoned = true
+        if (this.#dequeue(waiter)) return
+        // Past the grant, so the place in the queue is already spent and what
+        // is left is real capacity. Give it back.
+        void granted.then((lease) => {
+          lease.release()
+        })
+      },
+    }
   }
 
   /** Slots currently taken in `name`. Never exceeds its capacity. */
@@ -147,6 +200,33 @@ export class ResourcePools {
   /** Holders enqueued and not yet granted. */
   get waiting(): number {
     return this.#queue.length
+  }
+
+  /** Deduplicated, sorted, and proven to name real pools before anyone queues. */
+  #canonical(needs: readonly string[]): readonly string[] {
+    const canonical = [...new Set(needs)].sort()
+    for (const name of canonical) this.#pool(name)
+    return canonical
+  }
+
+  /** Takes the place in line. The returned promise settles only on a grant. */
+  #enqueue(canonical: readonly string[]): { waiter: Waiter; granted: Promise<Lease> } {
+    let grant!: (lease: Lease) => void
+    const granted = new Promise<Lease>((resolve) => {
+      grant = resolve
+    })
+    const waiter: Waiter = { needs: canonical, enqueuedAt: this.#now(), grant }
+    this.#queue.push(waiter)
+    this.#pump()
+    return { waiter, granted }
+  }
+
+  /** Whether the waiter was still queued — false once it has been granted. */
+  #dequeue(waiter: Waiter): boolean {
+    const at = this.#queue.indexOf(waiter)
+    if (at === -1) return false
+    this.#queue.splice(at, 1)
+    return true
   }
 
   /**
