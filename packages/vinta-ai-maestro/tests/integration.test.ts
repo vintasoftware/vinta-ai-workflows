@@ -22,11 +22,12 @@ import {
   type ConflictFixer,
   type ConflictRequest,
 } from '../src/integration/fixer.ts'
+import type { TranscriptEntry } from '../src/journal/transcript.ts'
 import {
   Integrator,
   type IntegrationNode,
   type IntegrationPlan,
-  PlanDefectError,
+  UnresolvedConflictError,
 } from '../src/integration/integrator.ts'
 import { fakeCliFromSource } from './support/fake-cli.ts'
 import { FAKE_BIN_VIA_EXECFILE } from './support/platform.ts'
@@ -606,6 +607,45 @@ describe('merge conflicts', () => {
     expect(log).toContain('phase b: value')
   })
 
+  /**
+   * The fix round's turn is written down.
+   *
+   * The stream was always drained and every event dropped, so the one agent
+   * turn in a run that nobody could watch live was also the one nobody could
+   * read afterwards: a resolved merge, a row saying it took two rounds, and no
+   * record of what was decided. It lands in the incoming phase's own transcript
+   * — beside the implementer and reviewer turns that produced the branches now
+   * being merged — under a role that keeps it distinguishable from them.
+   */
+  it('records the fixer’s turn in the incoming phase’s transcript', async () => {
+    const repo = await conflictingPair()
+    const adapter = new MockAdapter()
+    const recorded: { nodeId: string; entry: TranscriptEntry }[] = []
+    const agent = createAgentConflictFixer({
+      adapter,
+      model: 'mock-model',
+      record: (nodeId, entry) => recorded.push({ nodeId, entry }),
+    })
+    const fixer = spyFixer(async (request) => {
+      await agent.fix(request)
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+
+    await integrator.mergeWave(1)
+
+    expect(recorded.length).toBeGreaterThan(0)
+    // Filed against the phase whose merge conflicted, not against the branch.
+    expect(new Set(recorded.map((line) => line.nodeId))).toEqual(new Set(['b']))
+    // Its own role: a phase transcript already interleaves an implementer, a
+    // reviewer and review fixers, and this is a fourth job, not a third again.
+    expect(recorded.every((line) => line.entry.by?.role === 'conflict-fixer')).toBe(true)
+  })
+
   it('sends a resolution that fails the gate back to the fixer', async () => {
     const repo = await conflictingPair()
     let attempt = 0
@@ -734,7 +774,7 @@ describe('merge conflicts', () => {
       maxFixRounds: 2,
     })
 
-    await expect(integrator.mergeWave(1)).rejects.toBeInstanceOf(PlanDefectError)
+    await expect(integrator.mergeWave(1)).rejects.toBeInstanceOf(UnresolvedConflictError)
     expect(fixer.calls.map((call) => call.round)).toEqual([1, 2])
   })
 
@@ -754,8 +794,8 @@ describe('merge conflicts', () => {
       (error: unknown) => error,
     )
 
-    expect(defect).toBeInstanceOf(PlanDefectError)
-    const error = defect as PlanDefectError
+    expect(defect).toBeInstanceOf(UnresolvedConflictError)
+    const error = defect as UnresolvedConflictError
     expect(error.nodes).toEqual(['a', 'b'])
     expect(error.paths).toEqual(['app.ts'])
     expect(error.rounds).toBe(2)

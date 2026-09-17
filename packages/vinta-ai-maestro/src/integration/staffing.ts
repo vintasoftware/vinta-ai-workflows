@@ -31,6 +31,7 @@
  */
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import type { StoredEvent } from '../journal/events.ts'
+import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { CrewMember } from '../types.ts'
 import { createAgentConflictFixer, type ConflictFixer, type ConflictRequest } from './fixer.ts'
 
@@ -141,6 +142,11 @@ export interface CrewConflictFixerOptions {
    * claimed and the answer would be "nobody" for every conflict in the run.
    */
   readonly crewAssignments: () => readonly StoredEvent[]
+  /**
+   * Where a fix round's turn is written down. Passed straight through: who is
+   * staffed changes nothing about where their turn is recorded.
+   */
+  readonly record?: (nodeId: string, entry: TranscriptEntry) => void
 }
 
 /**
@@ -157,6 +163,7 @@ export function createCrewConflictFixer(options: CrewConflictFixerOptions): Conf
 
   return createAgentConflictFixer({
     adapter: fallback,
+    ...(options.record === undefined ? {} : { record: options.record }),
     model: options.defaults.model,
     ...(options.env === undefined ? {} : { env: options.env }),
     staff: (request: ConflictRequest) => {

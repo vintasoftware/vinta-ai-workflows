@@ -14,6 +14,12 @@
  * in a log.
  */
 import type { AgentTask, HarnessAdapter } from '../harness/adapter.ts'
+import {
+  attribute,
+  CONFLICT_FIXER_ROLE,
+  type Attribution,
+  type TranscriptEntry,
+} from '../journal/transcript.ts'
 import { composeConflictPrompt } from '../prompts/index.ts'
 
 export interface ConflictRequest {
@@ -30,7 +36,7 @@ export interface ConflictRequest {
   readonly paths: readonly string[]
   /** Where each involved node's phase brief lives, for the fixer to read. */
   readonly promptRefs: readonly string[]
-  /** 1-based. Exhausting the rounds is a plan defect, not a harder retry. */
+  /** 1-based. Exhausting the rounds hands the conflict to a person, not to a harder retry. */
   readonly round: number
 }
 
@@ -76,6 +82,22 @@ export interface AgentConflictFixerOptions {
    * `adapter`/`model` above, which is the pre-roster path.
    */
   readonly staff?: (request: ConflictRequest) => FixerAgent | null
+  /**
+   * Where the fix round's turn is written down.
+   *
+   * The stream below has always been drained — an unread one never ends — and
+   * until now every event was dropped on the floor. So the one agent turn in a
+   * run that nobody could watch was also the one nobody could read afterwards:
+   * a phase spent minutes resolving a merge and left a resolved commit, a
+   * `node_conflict` row saying it took two rounds, and no record of what was
+   * actually decided or why.
+   *
+   * A callback rather than a `Journal`, because this module knows about
+   * adapters and prompts and deliberately not about storage — the comment in
+   * the drain loop has said persistence belongs to the caller since it was
+   * written, and this is the seam that finally lets the caller do it.
+   */
+  readonly record?: (nodeId: string, entry: TranscriptEntry) => void
 }
 
 /**
@@ -127,8 +149,20 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       // is deliberately not inspected: whether the conflict is actually
       // resolved is answered by the worktree, not by what the agent said. A
       // fixer that gave up costs a round rather than failing the run.
-      for await (const _event of outcome.session.events) {
-        // Transcript persistence belongs to the caller that owns the journal.
+      //
+      // Filed against the incoming node, which is the phase whose merge hit the
+      // conflict and the one an operator is looking at. Under its own role, so
+      // a phase transcript that already interleaves an implementer, a reviewer
+      // and review fixers does not quietly gain a fourth voice indistinguishable
+      // from the third: a conflict fixer works in the integration worktree on a
+      // merge, not in the lane on the phase, and reading it as the review fixer
+      // would be reading it as the wrong job.
+      const by: Attribution = { role: CONFLICT_FIXER_ROLE }
+      for await (const event of outcome.session.events) {
+        // `attribute` for §7's reason: the operator's steering arrives on this
+        // same stream, echoed back by the adapter, and must not be filed as the
+        // agent's words.
+        options.record?.(request.nodeId, { ...event, by: attribute(event, by) })
       }
     },
   }

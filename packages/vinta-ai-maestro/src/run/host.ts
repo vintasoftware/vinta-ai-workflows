@@ -29,6 +29,7 @@ import { gitLines } from '../integration/git.ts'
 import { Integrator, type WaveResult } from '../integration/integrator.ts'
 import { createCrewConflictFixer } from '../integration/staffing.ts'
 import type { StoredEvent } from '../journal/events.ts'
+import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { Journal } from '../journal/journal.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
 import { LaneEnvFileError, LanePool, LaneSetupError } from '../lanes/pool.ts'
@@ -174,6 +175,11 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       // the one agent turn in a run that cannot talk back to the daemon.
       { ...integration.env, ...options.agentEnv },
       () => journal.crewAssignments(runId),
+      // Into the incoming phase's own transcript, beside the implementer and
+      // reviewer turns that produced the branches now being merged — which is
+      // where somebody asking "why does the merge look like this" is already
+      // reading. Its `by.role` is what keeps it distinguishable from them.
+      (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
     ),
     // Filed against the incoming node — the last of `nodes`, which is the one
     // whose merge hit the conflict and the one an operator is watching. The
@@ -300,6 +306,7 @@ function conflictFixer(
   adapters: Readonly<Record<string, HarnessAdapter>>,
   env: Readonly<Record<string, string>>,
   crewAssignments: () => readonly StoredEvent[],
+  record: (nodeId: string, entry: TranscriptEntry) => void,
 ): ConflictFixer {
   return createCrewConflictFixer({
     adapters,
@@ -307,6 +314,7 @@ function conflictFixer(
     crew: workflow.crew,
     env,
     crewAssignments,
+    record,
   })
 }
 

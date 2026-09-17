@@ -22,11 +22,12 @@
  * this file does to the working tree is `merge`, `add` and `commit`: staging
  * someone else's resolution, never authoring one.
  *
- * **A conflict that survives `max_fix_rounds` is a plan defect.** Two nodes in
- * the same wave own the same code, which is a fact about the plan, not about
- * the code. Resolving it by taking a side would silently delete half of what
- * the plan asked for, so this stops and names both nodes and the contested
- * paths instead.
+ * **A conflict that survives `max_fix_rounds` stops and asks for a person.**
+ * Not because the plan is broken — two sibling phases editing one file is
+ * expected, which is why there is a fixer at all — but because resolving it by
+ * taking a side would silently delete half of what the plan asked for. So this
+ * names both nodes and the contested paths and leaves the conflicted merge
+ * standing, which is what somebody finishing it by hand needs.
  *
  * Every field in every error and result here is an identifier — a node id, a
  * branch name, a path. Diffs, hunks and file contents stay in the worktree.
@@ -76,21 +77,38 @@ export interface WaveResult {
 }
 
 /**
- * Two same-wave nodes own the same code. Not a merge to work around — a plan
- * to fix, by adding the dependency edge that serializes them.
+ * A conflict the fixer could not settle in its rounds. It needs a person.
+ *
+ * **It used to be called `PlanDefectError`**, and the name was a judgement the
+ * orchestrator is not entitled to make. Two same-wave phases touching one file
+ * is not a broken plan: the plan's file-overlap analysis is a guess made before
+ * a line was written, sibling phases legitimately edit a shared module, and the
+ * conflict fixer exists precisely because that is expected. Most of these are
+ * resolved and never reach here at all.
+ *
+ * What reaching here means is narrower and worth saying exactly: *this*
+ * conflict outlasted its fix rounds. Sometimes the plan really should have
+ * serialized the two phases, and the message still offers that — but it offers
+ * it as one option next to finishing the merge by hand, which is the more
+ * common answer and the one the worktree is left ready for.
+ *
+ * The merge is deliberately left in place, conflicted: it is the only copy of
+ * what the fixer tried, and since `prepareBase` began reusing a prepared base,
+ * a resolution finished by hand there survives into the retry.
  */
-export class PlanDefectError extends Error {
+export class UnresolvedConflictError extends Error {
   readonly nodes: readonly string[]
   readonly paths: readonly string[]
   readonly rounds: number
 
   constructor(nodes: readonly string[], paths: readonly string[], rounds: number) {
     super(
-      `plan defect: nodes ${nodes.join(', ')} both own ${paths.join(', ')} — ` +
-        `still conflicting after ${rounds} fix rounds. Serialize them by adding a ` +
-        `dependency edge, or resolve by hand.`,
+      `unresolved conflict: ${nodes.join(', ')} both changed ${paths.join(', ')}, ` +
+        `and it still conflicts after ${rounds} fix rounds. Finish the merge by ` +
+        `hand in the integration worktree — the retry will keep it — or serialize ` +
+        `the phases with a dependency edge.`,
     )
-    this.name = 'PlanDefectError'
+    this.name = 'UnresolvedConflictError'
     this.nodes = nodes
     this.paths = paths
     this.rounds = rounds
@@ -102,7 +120,7 @@ export interface IntegratorOptions {
   /** The dedicated integration worktree: every merge and every fix happens here. */
   readonly integrationPath: string
   readonly fixer: ConflictFixer
-  /** Rounds a conflict gets before it is a plan defect. */
+  /** Rounds the fixer gets before the conflict is handed to a person. */
   readonly maxFixRounds?: number
   /**
    * The outer gate, re-run in the integration worktree after every fix. Red
@@ -392,7 +410,7 @@ export class Integrator {
   /**
    * Merges one node branch into the branch checked out in the integration
    * worktree. Returns null when it merged cleanly, the record of the conflict
-   * when a fixer resolved it, and throws `PlanDefectError` when no fixer round
+   * when a fixer resolved it, and throws `UnresolvedConflictError` when no fixer round
    * did.
    */
   async #merge(
@@ -472,7 +490,7 @@ export class Integrator {
 
     // The conflicted merge is left in place deliberately: it is the only copy
     // of what the fixer tried, and it is what a human continuing by hand needs.
-    throw new PlanDefectError(nodes, paths, this.#maxFixRounds)
+    throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds)
   }
 
   /**

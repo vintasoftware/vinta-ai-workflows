@@ -562,6 +562,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   something to commit, and a fixer that discarded the merge instead of resolving
   it is refused rather than recorded as integrated.
 
+- **The conflict fixer's turn is in the transcript now.** Its event stream was
+  drained and every event dropped — an unread stream never ends — so the one
+  agent turn in a run nobody could watch live was also the one nobody could read
+  afterwards: a resolved merge, a row saying it took two rounds, and no record of
+  what was decided. It lands in the incoming phase's own transcript, beside the
+  implementer and reviewer turns that produced the branches being merged, under
+  a `conflict-fixer` role that keeps it distinguishable from the review fixer —
+  a different job, in a different worktree, on a different thing. The UI has had
+  a band for that role since transcripts learned to name their authors; it had
+  simply never been given one to draw.
+
+- **`PlanDefectError` is now `UnresolvedConflictError`.** The old name made a
+  judgement the orchestrator is not entitled to make. Two same-wave phases
+  touching one file is not a broken plan — the plan's file-overlap analysis is a
+  guess made before a line was written, and the fixer exists because of it. What
+  reaching that error means is narrower: *this* conflict outlasted its rounds and
+  needs a person. The message says so, and now leads with finishing the merge by
+  hand in the integration worktree — which, since a prepared base is reused,
+  survives into the retry — rather than with re-cutting the plan.
+
 - **A conflict was resolved again on every retry, and recorded nowhere.**
   Conflicts are an ordinary outcome — the plan's file-overlap analysis is a
   guess and two sibling phases legitimately edit one file — but `prepareBase`

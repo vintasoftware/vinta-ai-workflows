@@ -6,7 +6,7 @@ export {
   type IntegrationNode,
   type IntegrationPlan,
   type IntegratorOptions,
-  PlanDefectError,
+  UnresolvedConflictError,
   type WaveResult,
 } from './integrator.ts'
 export { openPullRequest, type OpenPrOptions, type PrResult } from './pr.ts'
