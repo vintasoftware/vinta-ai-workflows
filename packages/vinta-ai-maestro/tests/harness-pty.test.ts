@@ -63,7 +63,7 @@ import { EventFrameSchema } from '../src/daemon/schemas.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import { isWindows } from '../src/platform/platform.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
-import { fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
+import { fakeCliFromSource } from './support/fake-cli.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 
@@ -872,15 +872,29 @@ describe('a daemon killed mid-attach', () => {
     const ptyModule = pathToFileURL(
       join(import.meta.dirname, '..', 'src', 'harness', 'pty.ts'),
     ).href
-    // Declarative, because this fixture is not interactive: it says one word
-    // and stays up. The linger is what makes the kill below a kill rather than
-    // a race with an exit that was coming anyway.
-    const bin = fakeCli(dir, 'linger', { stdout: ['up'], lingerMs: 300_000 })
+    // Not interactive: it says one word and stays up. The linger is what makes
+    // the kill below a kill rather than a race with an exit that was coming
+    // anyway. It announces its *own* pid, which is the one thing a declarative
+    // spec cannot say — and the one this test cannot do without, because on
+    // Windows it is not the pid the handle reports. There the launcher is a
+    // `.cmd` shim, `cmd.exe` has no `exec`, and so the terminal's leader is the
+    // shim while this is its child. Both hold `dir` as their working directory.
+    const bin = fakeCliFromSource(
+      dir,
+      'linger',
+      [
+        `process.stdout.write('up ' + process.pid + '\\n')`,
+        `setTimeout(() => process.exit(0), 300000)`,
+      ].join('\n'),
+    )
     // The marker is *not* the terminal's bytes: the child reports a fixed word
-    // and a pid, never what the program said (§11). It reports them only once
-    // the program has actually spoken, because "mid-attach" means a terminal
-    // that is running — killing during node-pty's own spawn handshake is a
-    // race with a helper process, not with an attached shell.
+    // and two pids, never what the program said (§11). It reports them only
+    // once the program has actually spoken, because "mid-attach" means a
+    // terminal that is running — killing during node-pty's own spawn handshake
+    // is a race with a helper process, not with an attached shell. The bytes
+    // are accumulated rather than matched chunk by chunk, for the reason
+    // `reader` accumulates: a pty delivers a line in as many pieces as it
+    // likes, and a digit may land on either side of the seam.
     writeFileSync(
       script,
       [
@@ -888,10 +902,14 @@ describe('a daemon killed mid-attach', () => {
         `const handle = openPty({ sessionId: 's', file: ${JSON.stringify(bin)}, args: [],`,
         `  env: process.env, attach: { cwd: ${JSON.stringify(dir)} } })`,
         `let announced = false`,
+        `let seen = ''`,
         `handle.onData((data) => {`,
-        `  if (announced || !data.includes('up')) return`,
+        `  if (announced) return`,
+        `  seen += data`,
+        `  const said = /up (\\d+)/.exec(seen)`,
+        `  if (said === null) return`,
         `  announced = true`,
-        `  process.stdout.write('running ' + handle.pid + '\\n')`,
+        `  process.stdout.write('running ' + handle.pid + ' ' + said[1] + '\\n')`,
         `})`,
         `setInterval(() => {}, 1000)`,
       ].join('\n'),
@@ -925,8 +943,11 @@ describe('a daemon killed mid-attach', () => {
       () => out.includes('\n'),
       30_000,
     )
-    const pid = Number(/running (\d+)/.exec(out)?.[1] ?? 0)
+    const said = /running (\d+) (\d+)/.exec(out)
+    const pid = Number(said?.[1] ?? 0)
+    const inner = Number(said?.[2] ?? 0)
     expect(alive(pid)).toBe(true)
+    expect(alive(inner)).toBe(true)
 
     // SIGKILL, so no exit hook and no teardown code runs at all. What must
     // still hold is that the pty leader is gone: the master descriptor dies
@@ -939,12 +960,24 @@ describe('a daemon killed mid-attach', () => {
     // that console is asked to close and then terminated. That is a shutdown
     // with a timeout in it rather than a hangup, which is why the deadline
     // below is fifteen seconds and not one.
+    //
+    // Both pids, not just the leader's. On POSIX they are one process and the
+    // second wait costs nothing. On Windows they are `cmd.exe` and the Node it
+    // launched, and only the first of the two was ever waited for — so the
+    // suite went on to `rmSync` the directory both still had open as a working
+    // directory, and the Windows leg failed the file on `EBUSY: rmdir` while
+    // the shim's child was still on its way out. Waiting for it is not
+    // politeness towards teardown: an orphaned terminal child is precisely what
+    // this test is named for, and a pid nobody waits on is a claim nobody
+    // checks. If it ever stops exiting, this is a timeout naming the survivor
+    // rather than an `EBUSY` naming a directory.
     child.kill('SIGKILL')
     try {
       await until('the pty leader to go', () => !alive(pid), 15_000)
+      await until("the terminal's own child to go", () => !alive(inner), 15_000)
     } catch (error) {
       // Naming the survivor is the difference between "flaky" and a diagnosis.
-      throw new Error(`${String(error)} :: ${survivor(pid)}`)
+      throw new Error(`${String(error)} :: ${survivor(pid)} :: ${survivor(inner)}`)
     }
   }, 60_000)
 })
