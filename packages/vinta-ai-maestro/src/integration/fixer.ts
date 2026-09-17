@@ -14,6 +14,12 @@
  * in a log.
  */
 import type { AgentTask, HarnessAdapter } from '../harness/adapter.ts'
+import {
+  attribute,
+  CONFLICT_FIXER_ROLE,
+  type Attribution,
+  type TranscriptEntry,
+} from '../journal/transcript.ts'
 import { composeConflictPrompt } from '../prompts/index.ts'
 
 export interface ConflictRequest {
@@ -30,7 +36,7 @@ export interface ConflictRequest {
   readonly paths: readonly string[]
   /** Where each involved node's phase brief lives, for the fixer to read. */
   readonly promptRefs: readonly string[]
-  /** 1-based. Exhausting the rounds is a plan defect, not a harder retry. */
+  /** 1-based. Exhausting the rounds hands the conflict to a person, not to a harder retry. */
   readonly round: number
 }
 
@@ -52,12 +58,46 @@ export interface AgentConflictFixerOptions {
   readonly adapter: HarnessAdapter
   readonly model: string
   /**
+   * The integration worktree's environment, for the agent about to run in it.
+   *
+   * The integration worktree is a lane in every way that costs a port or a
+   * volume, and `AgentTask.env` says what happens to an agent that runs without
+   * its lane's: with the daemon's bare environment `COMPOSE_PROJECT_NAME` is
+   * unset, docker falls back to naming the project after the directory, and the
+   * stack comes up under a name nothing else in the run reserved. That is not
+   * hypothetical — a fix round brought a second stack up in the integration
+   * worktree and published 5432, 6379, 4566, 1025 and 8025 on the host, because
+   * `compose.publish: []` is delivered through the `COMPOSE_FILE` override that
+   * only this environment carries. It collided with the developer's own stack
+   * and outlived the run.
+   *
+   * Absent means "no project isolation to deliver" — an injected fixer in a
+   * test, or a workflow with no `project` block — never "run bare on purpose".
+   */
+  readonly env?: Readonly<Record<string, string>>
+  /**
    * Who this particular conflict goes to, resolved per call because staffing
    * depends on *which* nodes are in the conflict and that is only known once
    * the merge has failed (`integration/staffing.ts`). Returning null keeps the
    * `adapter`/`model` above, which is the pre-roster path.
    */
   readonly staff?: (request: ConflictRequest) => FixerAgent | null
+  /**
+   * Where the fix round's turn is written down.
+   *
+   * The stream below has always been drained — an unread one never ends — and
+   * until now every event was dropped on the floor. So the one agent turn in a
+   * run that nobody could watch was also the one nobody could read afterwards:
+   * a phase spent minutes resolving a merge and left a resolved commit, a
+   * `node_conflict` row saying it took two rounds, and no record of what was
+   * actually decided or why.
+   *
+   * A callback rather than a `Journal`, because this module knows about
+   * adapters and prompts and deliberately not about storage — the comment in
+   * the drain loop has said persistence belongs to the caller since it was
+   * written, and this is the seam that finally lets the caller do it.
+   */
+  readonly record?: (nodeId: string, entry: TranscriptEntry) => void
 }
 
 /**
@@ -88,6 +128,11 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         // to what an agent is told stays one edit (`src/prompts`).
         prompt: composeConflictPrompt(context),
         model: staffed?.model ?? options.model,
+        // Options, not `staff`: the environment belongs to the *worktree*, and
+        // every conflict in a run is fixed in the same one. Which member is
+        // holding the keyboard changes nothing about which compose project the
+        // commands they run must resolve to.
+        ...(options.env === undefined ? {} : { env: options.env }),
         // No `resumeSessionId`, deliberately, even when the staffed member has
         // a live session from the phase they just implemented. That session ran
         // in their lane; this runs in the integration worktree, where the files
@@ -104,8 +149,20 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       // is deliberately not inspected: whether the conflict is actually
       // resolved is answered by the worktree, not by what the agent said. A
       // fixer that gave up costs a round rather than failing the run.
-      for await (const _event of outcome.session.events) {
-        // Transcript persistence belongs to the caller that owns the journal.
+      //
+      // Filed against the incoming node, which is the phase whose merge hit the
+      // conflict and the one an operator is looking at. Under its own role, so
+      // a phase transcript that already interleaves an implementer, a reviewer
+      // and review fixers does not quietly gain a fourth voice indistinguishable
+      // from the third: a conflict fixer works in the integration worktree on a
+      // merge, not in the lane on the phase, and reading it as the review fixer
+      // would be reading it as the wrong job.
+      const by: Attribution = { role: CONFLICT_FIXER_ROLE }
+      for await (const event of outcome.session.events) {
+        // `attribute` for §7's reason: the operator's steering arrives on this
+        // same stream, echoed back by the adapter, and must not be filed as the
+        // agent's words.
+        options.record?.(request.nodeId, { ...event, by: attribute(event, by) })
       }
     },
   }

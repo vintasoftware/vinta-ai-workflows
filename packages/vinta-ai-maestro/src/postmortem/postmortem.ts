@@ -230,8 +230,9 @@ export interface PostMortemSource {
 
 /**
  * One wave's integration outcome. `WaveResult` from `src/integration/` satisfies
- * this structurally; a `PlanDefectError` — a conflict no fixer resolved, which
- * is the strongest split signal there is — converts into one conflict entry
+ * this structurally; an `UnresolvedConflictError` — a conflict no fixer round
+ * settled, which is the strongest split signal there is — converts into one
+ * conflict entry
  * with its `nodes`, `paths` and `rounds`.
  */
 export interface IntegrationWaveRecord {

@@ -88,6 +88,7 @@ import type {
 } from '../journal/events.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
 import { attribute, type Attribution } from '../journal/transcript.ts'
+import { GitCommandError } from '../integration/git.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
@@ -437,6 +438,10 @@ function failureReason(error: unknown): string {
   if (error instanceof PromptError || error instanceof SpawnFatal || error instanceof LaneUnusable) {
     return String(error.message)
   }
+  // A subcommand and an exit status, which is the same kind of thing every
+  // other branch here returns — and the difference between "Error" and
+  // "git commit exited 1" for the failures this package actually hits.
+  if (error instanceof GitCommandError) return error.message
   const named = error as { name?: unknown; code?: unknown }
   const name = typeof named.name === 'string' ? named.name : 'Error'
   return typeof named.code === 'string' ? `${name}: ${named.code}` : name
@@ -1126,6 +1131,7 @@ export class Scheduler {
         }
         else {
           const reason = `pipeline ended in state "${settled.state}"`
+          this.#recordAttemptFailure(state, reason)
           if (await this.#recover(state)) continue
           this.#fail(state, attempted(reason, state))
         }
@@ -1160,6 +1166,7 @@ export class Scheduler {
           continue
         }
         const reason = failureReason(error)
+        this.#recordAttemptFailure(state, reason, error)
         if (await this.#recover(state)) continue
         this.#fail(state, attempted(reason, state))
         return
@@ -1593,8 +1600,16 @@ export class Scheduler {
     state.retries += 1
     const effectId = `retry:${state.node.id}:${state.retries}`
     this.#ask(state, effectId, {
-      // The reason is already journalled by `#setStatus`; repeating it in the
-      // question would put a failure message in a notification body (§11).
+      // The reason is journalled as `node_error` before `#recover` is consulted
+      // — see `#recordAttemptFailure`; repeating it in the question would put a
+      // failure message in a notification body (§11).
+      //
+      // This used to say the reason was "already journalled by `#setStatus`",
+      // which was the one path that never runs when this question is asked:
+      // `#setStatus(…, 'failed', reason)` is `#fail`'s, and reaching here means
+      // `#recover` decided not to fail. The comment asserted an invariant the
+      // control flow did not provide, and the reason was lost for every phase
+      // that parked on this question.
       //
       // What the count *does* add is the one consequence the operator cannot
       // see: a retry hands the node its lane again, and a lane handed on is
@@ -1654,6 +1669,19 @@ export class Scheduler {
    * taken by a *member*, and the tier floor that decides who may take it is the
    * assigned member's own. Offering a model would be offering something the
    * plan cannot express and the scheduler would have to invent a holder for.
+   *
+   * **The member left out is the one that just ran, not the one the plan
+   * named.** A substitution makes those different — `assignCrew` hands the
+   * phase to a free peer when the named member is busy — and the menu used to
+   * exclude only the named one. A phase declared `mid` and substituted to
+   * `senior` therefore offered "retry with senior" as its escalation: the agent
+   * that had just failed, presented as the alternative to itself. One of three
+   * choices did nothing an operator could tell apart from plain `retry`.
+   *
+   * `assigned` still sets the *floor*, deliberately. Re-pointing it at the
+   * substitute would look like the same fix and quietly raise the bar for the
+   * retry — `assignCrew` derives its own floor from this same value — so only
+   * the exclusion widens.
    */
   #retryChoices(state: NodeState): readonly string[] {
     const assigned = state.retryMember ?? state.node.crew
@@ -1664,7 +1692,10 @@ export class Scheduler {
         : Object.entries(this.#workflow.crew)
             .filter(
               ([id, member]) =>
-                member.role === 'implementer' && member.tier >= floor && id !== assigned,
+                member.role === 'implementer' &&
+                member.tier >= floor &&
+                id !== assigned &&
+                id !== state.lastMember,
             )
             .map(([id]) => `${RETRY_WITH}${id}`)
     return [RETRY, ...others, STOP]
@@ -2228,6 +2259,53 @@ export class Scheduler {
       // Only nodes that have not started: one already in flight finishes.
       if (dependent?.status === 'pending') this.#setStatus(dependent, 'blocked', blockedBy)
     }
+  }
+
+  /**
+   * Why this *attempt* failed, recorded before anything decides what to do
+   * about it.
+   *
+   * **The gap this closes.** A failure's reason was computed at the two sites
+   * above and then handed to `#fail` — which journals it through `#setStatus`.
+   * But `#fail` is reached only when `#recover` returns false, and under the
+   * default `onFailure: retry` it usually does not: the node is auto-retried,
+   * or parked on "This phase failed. Try it again?". Both paths dropped the
+   * reason on the floor. `#offerRetry` even carried a comment asserting the
+   * opposite — "the reason is already journalled by `#setStatus`" — which was
+   * true only on the path that does not go through it.
+   *
+   * The cost was not theoretical. A phase that failed three times in
+   * provisioning, before any agent ran, left a journal containing a status, a
+   * lane, and a question offering a retry — and nowhere at all saying what went
+   * wrong. The only copy of the reason was a line of stderr in a terminal that
+   * had since scrolled away, and the only offered action was to try the same
+   * thing again.
+   *
+   * Journalled rather than only logged, and both rather than either: the log
+   * is where the detail belongs and the journal is what the UI reads, what the
+   * post-mortem folds, and what survives being copied off the machine. An
+   * attempt is not a status transition — the node is about to be `running`
+   * again — so it is its own event rather than a `node_status` the projections
+   * would have to learn to un-apply.
+   *
+   * §11 holds: `reason` is `failureReason`'s output, which is a kind and a
+   * classification, never a command's output. The full error goes to the log,
+   * where `--log-detail kind` is the switch for a checkout that cannot keep
+   * even that.
+   */
+  #recordAttemptFailure(state: NodeState, reason: string, error?: unknown): void {
+    this.#log.error('node.attempt_failed', {
+      node: state.node.id,
+      attempt: state.retries + state.autoRetries + 1,
+      reason,
+      ...(error === undefined ? {} : errorFields(error)),
+    })
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'node_error',
+      payload: { reason, attempt: state.retries + state.autoRetries + 1 },
+    })
   }
 
   #setStatus(state: NodeState, status: NodeStatus, reason?: string): void {

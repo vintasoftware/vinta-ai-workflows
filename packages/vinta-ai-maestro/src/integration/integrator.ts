@@ -22,11 +22,12 @@
  * this file does to the working tree is `merge`, `add` and `commit`: staging
  * someone else's resolution, never authoring one.
  *
- * **A conflict that survives `max_fix_rounds` is a plan defect.** Two nodes in
- * the same wave own the same code, which is a fact about the plan, not about
- * the code. Resolving it by taking a side would silently delete half of what
- * the plan asked for, so this stops and names both nodes and the contested
- * paths instead.
+ * **A conflict that survives `max_fix_rounds` stops and asks for a person.**
+ * Not because the plan is broken — two sibling phases editing one file is
+ * expected, which is why there is a fixer at all — but because resolving it by
+ * taking a side would silently delete half of what the plan asked for. So this
+ * names both nodes and the contested paths and leaves the conflicted merge
+ * standing, which is what somebody finishing it by hand needs.
  *
  * Every field in every error and result here is an identifier — a node id, a
  * branch name, a path. Diffs, hunks and file contents stay in the worktree.
@@ -76,21 +77,38 @@ export interface WaveResult {
 }
 
 /**
- * Two same-wave nodes own the same code. Not a merge to work around — a plan
- * to fix, by adding the dependency edge that serializes them.
+ * A conflict the fixer could not settle in its rounds. It needs a person.
+ *
+ * **It used to be called `PlanDefectError`**, and the name was a judgement the
+ * orchestrator is not entitled to make. Two same-wave phases touching one file
+ * is not a broken plan: the plan's file-overlap analysis is a guess made before
+ * a line was written, sibling phases legitimately edit a shared module, and the
+ * conflict fixer exists precisely because that is expected. Most of these are
+ * resolved and never reach here at all.
+ *
+ * What reaching here means is narrower and worth saying exactly: *this*
+ * conflict outlasted its fix rounds. Sometimes the plan really should have
+ * serialized the two phases, and the message still offers that — but it offers
+ * it as one option next to finishing the merge by hand, which is the more
+ * common answer and the one the worktree is left ready for.
+ *
+ * The merge is deliberately left in place, conflicted: it is the only copy of
+ * what the fixer tried, and since `prepareBase` began reusing a prepared base,
+ * a resolution finished by hand there survives into the retry.
  */
-export class PlanDefectError extends Error {
+export class UnresolvedConflictError extends Error {
   readonly nodes: readonly string[]
   readonly paths: readonly string[]
   readonly rounds: number
 
   constructor(nodes: readonly string[], paths: readonly string[], rounds: number) {
     super(
-      `plan defect: nodes ${nodes.join(', ')} both own ${paths.join(', ')} — ` +
-        `still conflicting after ${rounds} fix rounds. Serialize them by adding a ` +
-        `dependency edge, or resolve by hand.`,
+      `unresolved conflict: ${nodes.join(', ')} both changed ${paths.join(', ')}, ` +
+        `and it still conflicts after ${rounds} fix rounds. Finish the merge by ` +
+        `hand in the integration worktree — the retry will keep it — or serialize ` +
+        `the phases with a dependency edge.`,
     )
-    this.name = 'PlanDefectError'
+    this.name = 'UnresolvedConflictError'
     this.nodes = nodes
     this.paths = paths
     this.rounds = rounds
@@ -102,7 +120,7 @@ export interface IntegratorOptions {
   /** The dedicated integration worktree: every merge and every fix happens here. */
   readonly integrationPath: string
   readonly fixer: ConflictFixer
-  /** Rounds a conflict gets before it is a plan defect. */
+  /** Rounds the fixer gets before the conflict is handed to a person. */
   readonly maxFixRounds?: number
   /**
    * The outer gate, re-run in the integration worktree after every fix. Red
@@ -110,8 +128,35 @@ export interface IntegratorOptions {
    * not a resolution.
    */
   readonly verify?: (cwd: string) => Promise<boolean>
+  /**
+   * Every conflict a fixer settled, as it is settled.
+   *
+   * A conflict is a normal outcome, not an exception: the planner's file
+   * overlap analysis is a guess, two sibling phases legitimately touch one
+   * file, and the fixer exists because of it. But nothing recorded that it had
+   * happened. `mergeWave` returns its conflicts to whoever called it and
+   * `prepareBase` discarded its own, so an operator watching a phase sit in
+   * `running` for two minutes — while an agent resolved a merge in a worktree
+   * they cannot see — had nothing at all to read.
+   *
+   * Identifiers only, as `ConflictRecord` already is: node ids, paths, a round
+   * count and a branch name (§11).
+   */
+  readonly onConflict?: (conflict: ReportedConflict) => void
   /** Overridden in tests so `gh` is never invoked against a real remote. */
   readonly ghPath?: string
+}
+
+/** A settled conflict, plus which merge it came out of. */
+export interface ReportedConflict extends ConflictRecord {
+  /**
+   * `base` is a multi-dependency node's `integ-<id>`, built before the phase
+   * runs; `wave` is the spine merge after one finishes. Worth distinguishing:
+   * a base conflict blocks a phase that has not started, and a wave conflict
+   * lands after its work is already done.
+   */
+  readonly where: 'base' | 'wave'
+  readonly branch: string
 }
 
 const CONFLICT_MARKER = /^(<{7}|>{7}) /m
@@ -172,14 +217,68 @@ export class Integrator {
 
     const [first, ...rest] = base.nodes as string[]
     const cwd = this.#options.integrationPath
+
+    // **A base that is already correct is kept, conflicts and all.**
+    //
+    // This used to reset and re-merge unconditionally, which is right exactly
+    // once. A phase that fails after its base was built — and failing *after*
+    // is the common shape, since the base is built before the agent runs —
+    // comes back through here on every retry, and rebuilding threw away a
+    // resolution that had already been made. Where the merge was clean that is
+    // wasted seconds; where it conflicted it is a fresh fixer agent redoing
+    // identical work, minutes and real money per attempt. One observed run
+    // paid for it three times over.
+    //
+    // Worse than the cost: a conflict this fixer could not settle is meant to
+    // be finishable by hand, in this worktree, and the reset silently discarded
+    // whatever the human had done before the next attempt looked at it.
+    //
+    // "Correct" is deliberately about *reachability of the current tips* rather
+    // than about the branch merely existing. A dependency that was retried and
+    // re-implemented has a new tip this base has never seen, and reusing a base
+    // built on the old one would hand the phase work that is no longer there.
+    if (await this.#basePrepared(cwd, base.branch, base.nodes)) {
+      await git(cwd, ['checkout', base.branch])
+      return base.branch
+    }
+
     await git(cwd, ['checkout', '-B', base.branch, this.nodeBranch(first as string)])
 
     const merged = [first as string]
     for (const dep of rest) {
-      await this.#merge(base.branch, dep, merged)
+      const conflict = await this.#merge(base.branch, dep, merged)
+      // Reported wherever the host wants it. Without this a conflict resolved
+      // while *preparing a base* was recorded nowhere at all — `mergeWave`'s
+      // conflicts reach the post-mortem through its return value, and this
+      // loop discarded its own. The multi-dependency merge is the one most
+      // likely to conflict, since it is the only place two sibling phases meet.
+      if (conflict) this.#options.onConflict?.({ ...conflict, where: 'base', branch: base.branch })
       merged.push(dep)
     }
     return base.branch
+  }
+
+  /**
+   * Whether `branch` already integrates every dependency's *current* tip.
+   *
+   * A missing branch answers false, as does one built before a dependency
+   * moved. Both are read-only questions — nothing here creates or resets a ref,
+   * so a base judged stale costs only the rebuild it was going to do anyway.
+   */
+  async #basePrepared(
+    cwd: string,
+    branch: string,
+    nodes: readonly string[],
+  ): Promise<boolean> {
+    if (!(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]))) {
+      return false
+    }
+    for (const node of nodes) {
+      if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', this.nodeBranch(node), branch]))) {
+        return false
+      }
+    }
+    return true
   }
 
   /**
@@ -266,7 +365,13 @@ export class Integrator {
     const conflicts: ConflictRecord[] = []
     for (const nodeId of this.nodesAt(wave)) {
       const conflict = await this.#merge(branch, nodeId, merged)
-      if (conflict) conflicts.push(conflict)
+      if (conflict) {
+        conflicts.push(conflict)
+        // Reported as it happens as well as returned at the end: the return
+        // value reaches the post-mortem once the wave is over, and an operator
+        // watching the run needs to know now.
+        this.#options.onConflict?.({ ...conflict, where: 'wave', branch })
+      }
       merged.push(nodeId)
     }
     return { wave, branch, merged, conflicts }
@@ -305,7 +410,7 @@ export class Integrator {
   /**
    * Merges one node branch into the branch checked out in the integration
    * worktree. Returns null when it merged cleanly, the record of the conflict
-   * when a fixer resolved it, and throws `PlanDefectError` when no fixer round
+   * when a fixer resolved it, and throws `UnresolvedConflictError` when no fixer round
    * did.
    */
   async #merge(
@@ -335,17 +440,87 @@ export class Integrator {
       await this.#options.fixer.fix({ ...request, round })
       if (await this.#unresolved(paths)) continue
 
+      // **A fixer that committed its own resolution is the ordinary case, not a
+      // deviation.** An agent told to resolve a conflict reaches for the
+      // sequence a person would — `git merge --abort`, merge again, resolve,
+      // `git commit` — and the last step is the one that broke this.
+      //
+      // The code below used to commit unconditionally, which is right only
+      // while a merge is still in progress. Against an agent that had already
+      // committed, `git add --all` is a no-op that exits 0 and `git commit
+      // --no-edit` exits 1 with "nothing to commit" — and `git` throws on a
+      // non-zero exit, so the *successful* resolution was reported as a failed
+      // phase. It surfaced as a node that failed before its branch was cut,
+      // with a resolved merge commit sitting in the integration worktree and
+      // nothing in the journal saying why: every wave after a parallel one,
+      // deterministically, because a multi-dependency node is the only thing
+      // that merges here and two sibling phases touching one file is the
+      // common case rather than the rare one.
+      //
+      // So the commit is now conditional on there being something to commit,
+      // and "the fixer already did it" is accepted on the same evidence a
+      // human would use: the incoming branch is an ancestor of HEAD.
       // Staging someone else's resolution. The orchestrator authored none of it.
       await git(cwd, ['add', '--all'])
+      // Before anything is committed, whichever shape the resolution arrived
+      // in: a fixer must not be able to dodge the gate by committing its own
+      // work, which is the one thing committing early would otherwise buy it.
       if (this.#options.verify && !(await this.#options.verify(cwd))) continue
 
-      await git(cwd, ['commit', '--no-edit'])
+      if (await this.#merging(cwd)) {
+        // The merge is still git's to conclude, so `--no-edit` takes the
+        // message it already prepared. This is the path that always worked.
+        await git(cwd, ['commit', '--no-edit'])
+      } else if (await this.#staged(cwd)) {
+        // A fixer that committed and then refined — round 2 after a `verify`
+        // refusal, typically. There is no prepared message to take, so this
+        // one is written here: branch names and a round number, which are
+        // identifiers (§11).
+        await git(cwd, ['commit', '-m', `Resolve ${incoming} conflict (round ${round})`])
+      } else if (!(await this.#contains(cwd, incoming))) {
+        // Nothing in progress, nothing to commit, and the incoming phase is
+        // not in this history: the fixer cleared the conflict by throwing the
+        // merge away. Another round rather than a success — recording the
+        // phase as integrated when its commits are nowhere here would surface
+        // much later, as a phase built on work that is not there.
+        continue
+      }
       return { nodes, paths, rounds: round }
     }
 
     // The conflicted merge is left in place deliberately: it is the only copy
     // of what the fixer tried, and it is what a human continuing by hand needs.
-    throw new PlanDefectError(nodes, paths, this.#maxFixRounds)
+    throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds)
+  }
+
+  /**
+   * Whether a merge is still in progress — `MERGE_HEAD` exists.
+   *
+   * This is git's own record that a merge was started and not concluded, and
+   * it is what distinguishes "the fixer resolved the files and left the commit
+   * to us" from "the fixer committed". Asking the working tree instead would
+   * not separate them: both leave it clean.
+   */
+  async #merging(cwd: string): Promise<boolean> {
+    return await gitOk(cwd, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])
+  }
+
+  /** Whether the index holds anything the last commit does not. */
+  async #staged(cwd: string): Promise<boolean> {
+    return !(await gitOk(cwd, ['diff', '--cached', '--quiet']))
+  }
+
+  /**
+   * Whether the incoming branch is already in this branch's history.
+   *
+   * The test for a fixer that committed the merge itself, and it is deliberately
+   * about *reachability* rather than about the shape of the last commit: a
+   * resolution squashed onto one commit, or committed as a merge, or rebased,
+   * all satisfy the only thing the wave spine needs — that this phase's work is
+   * in the branch the next phase will build on.
+   */
+  async #contains(cwd: string, branch: string): Promise<boolean> {
+    return await gitOk(cwd, ['merge-base', '--is-ancestor', branch, 'HEAD'])
   }
 
   async #conflictedPaths(): Promise<string[]> {

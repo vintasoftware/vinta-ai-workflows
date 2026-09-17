@@ -278,6 +278,60 @@ interface NodePayloads {
    * is exactly the place repository content leaks into one.
    */
   node_status: { readonly status: NodeStatus; readonly reason?: string }
+  /**
+   * Why one *attempt* at a node failed — written whatever happens next.
+   *
+   * Distinct from `node_status: 'failed'`, which records the node giving up.
+   * Most failures never reach that: under the default `onFailure: retry` an
+   * attempt is retried automatically or parked on a question, and the node is
+   * `running` again moments later. Those attempts used to leave no trace at
+   * all, so a phase that failed three times in provisioning — before any agent
+   * ran, so with no transcript and no gate log either — was undiagnosable
+   * after the fact, and the only offered action was to repeat it.
+   *
+   * Not projected, deliberately. `nodes` is folded out of `node_registered`,
+   * `node_status` and `node_assigned`, and this must not disturb any of them:
+   * the node's status is whatever the attempt after this one makes it. It is
+   * the audit trail beside them, in §5.3's sense — drop every projection,
+   * replay the log, and the same rows come back.
+   *
+   * `reason` is a classification, never a command's output (§11). The error
+   * itself, message included, goes to the daemon log.
+   */
+  node_error: {
+    readonly reason: string
+    /** 1 for the first attempt at this node, and one more for each after it. */
+    readonly attempt: number
+  }
+  /**
+   * A merge conflict an agent settled, filed against the node whose merge hit
+   * it.
+   *
+   * Conflicts are an ordinary outcome here, not an exception: the plan's file
+   * overlap analysis is a guess, two sibling phases legitimately edit one file,
+   * and the conflict fixer exists because of it. What was missing is any record
+   * that one happened. A phase would sit in `running` for minutes while an
+   * agent merged in a worktree nobody was looking at, and the only trace
+   * afterwards was a reflog entry in the integration checkout.
+   *
+   * `where` separates the two merges that can produce one. `base` is a
+   * multi-dependency node's `integ-<id>`, built *before* the phase runs — so a
+   * conflict there delays work that has not started. `wave` is the spine merge
+   * after a phase finishes, where the work is already done.
+   *
+   * Identifiers, paths and a count (§11) — never the conflicted hunks, which
+   * are repository content and stay in the worktree.
+   */
+  node_conflict: {
+    readonly where: 'base' | 'wave'
+    /** The branch the merge was made on. */
+    readonly branch: string
+    /** Every node whose work is in the conflict, not only the incoming one. */
+    readonly nodes: readonly string[]
+    readonly paths: readonly string[]
+    /** Fix rounds the agent needed. 1 is first-try. */
+    readonly rounds: number
+  }
   node_assigned: {
     readonly lane?: string
     readonly branch?: string

@@ -67,6 +67,16 @@ export type TranscriptEntry = (AgentEvent | GateRunEvent) & { readonly by?: Attr
 /** The roles the daemon itself writes, for the ones no workflow declares. */
 export const GATE_ROLE = 'gate'
 export const MONITOR_ROLE = 'monitor'
+/**
+ * The agent that resolves a merge conflict.
+ *
+ * Distinct from the pipeline's `fixer`, which answers a reviewer's findings in
+ * the phase's own lane. This one works in the integration worktree on a merge
+ * of two phases' branches, and its turn lands in the incoming phase's
+ * transcript alongside them — so filing it as `fixer` would put two different
+ * jobs under one name in the file whose whole purpose is saying who did what.
+ */
+export const CONFLICT_FIXER_ROLE = 'conflict-fixer'
 
 /**
  * The operator, and the one attribution that is not the turn's.
