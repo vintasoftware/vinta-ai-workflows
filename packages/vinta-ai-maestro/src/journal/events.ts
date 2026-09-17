@@ -303,6 +303,35 @@ interface NodePayloads {
     /** 1 for the first attempt at this node, and one more for each after it. */
     readonly attempt: number
   }
+  /**
+   * A merge conflict an agent settled, filed against the node whose merge hit
+   * it.
+   *
+   * Conflicts are an ordinary outcome here, not an exception: the plan's file
+   * overlap analysis is a guess, two sibling phases legitimately edit one file,
+   * and the conflict fixer exists because of it. What was missing is any record
+   * that one happened. A phase would sit in `running` for minutes while an
+   * agent merged in a worktree nobody was looking at, and the only trace
+   * afterwards was a reflog entry in the integration checkout.
+   *
+   * `where` separates the two merges that can produce one. `base` is a
+   * multi-dependency node's `integ-<id>`, built *before* the phase runs — so a
+   * conflict there delays work that has not started. `wave` is the spine merge
+   * after a phase finishes, where the work is already done.
+   *
+   * Identifiers, paths and a count (§11) — never the conflicted hunks, which
+   * are repository content and stay in the worktree.
+   */
+  node_conflict: {
+    readonly where: 'base' | 'wave'
+    /** The branch the merge was made on. */
+    readonly branch: string
+    /** Every node whose work is in the conflict, not only the incoming one. */
+    readonly nodes: readonly string[]
+    readonly paths: readonly string[]
+    /** Fix rounds the agent needed. 1 is first-try. */
+    readonly rounds: number
+  }
   node_assigned: {
     readonly lane?: string
     readonly branch?: string

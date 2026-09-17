@@ -175,6 +175,25 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       { ...integration.env, ...options.agentEnv },
       () => journal.crewAssignments(runId),
     ),
+    // Filed against the incoming node — the last of `nodes`, which is the one
+    // whose merge hit the conflict and the one an operator is watching. The
+    // other participants are in the payload, because a conflict is never one
+    // phase's alone and a report naming only the second arrival reads as a
+    // verdict on it.
+    onConflict: (conflict) => {
+      journal.append({
+        runId,
+        nodeId: conflict.nodes[conflict.nodes.length - 1] ?? conflict.branch,
+        type: 'node_conflict',
+        payload: {
+          where: conflict.where,
+          branch: conflict.branch,
+          nodes: conflict.nodes,
+          paths: conflict.paths,
+          rounds: conflict.rounds,
+        },
+      })
+    },
   })
 
   const cache = new GateCache(repoPath)

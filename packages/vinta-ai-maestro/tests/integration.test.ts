@@ -356,6 +356,163 @@ describe('dependency-derived bases', () => {
 // Waves
 // ---------------------------------------------------------------------------
 
+describe('a base that was already prepared', () => {
+  /**
+   * The cost this avoids. A phase whose base conflicted fails *after* the base
+   * was built — building it is what happens first — so every retry came back
+   * through `prepareBase`, which reset and re-merged unconditionally and spawned
+   * a fresh fixer to redo work that was already done. One observed run paid for
+   * the same resolution three times, minutes and real money each.
+   */
+  it('does not merge again, and does not call the fixer again', async () => {
+    const repo = await conflictingPair()
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+
+    const first = await integrator.prepareBase('c')
+    expect(fixer.calls).toHaveLength(1)
+    const built = run(repo.integ, 'rev-parse', first)
+
+    // The retry. Same base, untouched, and no second fix round bought.
+    const second = await integrator.prepareBase('c')
+    expect(second).toBe(first)
+    expect(fixer.calls).toHaveLength(1)
+    expect(run(repo.integ, 'rev-parse', second)).toBe(built)
+  })
+
+  /**
+   * The resolution a person finished by hand is the thing most worth keeping:
+   * a conflict no fixer could settle is meant to be completable in this
+   * worktree, and the rebuild used to discard it before the next attempt looked.
+   */
+  it('keeps a resolution that was finished by hand', async () => {
+    const repo = await conflictingPair()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'app.ts'), 'const value = "fixer"\n')
+      }),
+    })
+
+    await integrator.prepareBase('c')
+    // Somebody improves on it, in the integration worktree, by hand.
+    await writeFile(join(repo.integ, 'app.ts'), 'const value = "by hand"\n')
+    run(repo.integ, 'add', '--all')
+    run(repo.integ, 'commit', '-m', 'resolve by hand')
+
+    await integrator.prepareBase('c')
+
+    expect(run(repo.integ, 'show', 'plan/wf/integ-c:app.ts').trim()).toBe('const value = "by hand"')
+  })
+
+  /**
+   * Reuse is about the dependencies' *current* tips, not about the branch
+   * existing. A dependency that was retried and re-implemented has a tip this
+   * base has never seen, and handing the phase a base built on the old one
+   * would give it work that is no longer there.
+   */
+  it('rebuilds when a dependency has moved since', async () => {
+    const repo = await conflictingPair()
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+
+    await integrator.prepareBase('c')
+    expect(fixer.calls).toHaveLength(1)
+
+    // `b` is retried and lands a new commit. `conflictingPair` already cut this
+    // worktree, so it is reused rather than added again.
+    const two = join(repo.root, 'lane-2')
+    run(two, 'checkout', 'plan/wf/phase-b')
+    await repo.commit(two, { 'extra.ts': 'export const extra = 1\n' }, 'phase b: again')
+
+    await integrator.prepareBase('c')
+
+    expect(fixer.calls).toHaveLength(2)
+    expect(isAncestor(repo.integ, 'plan/wf/phase-b', 'plan/wf/integ-c')).toBe(true)
+  })
+})
+
+describe('reporting a conflict as it is settled', () => {
+  /**
+   * A conflict is an ordinary outcome — the plan's file-overlap analysis is a
+   * guess and two sibling phases legitimately edit one file — but nothing
+   * recorded that one had happened. `mergeWave` returned its conflicts to its
+   * caller and `prepareBase` discarded its own, so a phase sat in `running` for
+   * minutes while an agent merged in a worktree nobody could see.
+   */
+  it('reports the conflict from a base merge, which was recorded nowhere at all', async () => {
+    const repo = await conflictingPair()
+    const seen: { where: string; branch: string; nodes: readonly string[]; paths: readonly string[] }[] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+      }),
+      onConflict: (conflict) => seen.push(conflict),
+    })
+
+    await integrator.prepareBase('c')
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.where).toBe('base')
+    expect(seen[0]?.branch).toBe('plan/wf/integ-c')
+    expect(seen[0]?.paths).toEqual(['app.ts'])
+    // Both participants, not only the one whose merge happened to be second.
+    expect(seen[0]?.nodes).toEqual(['a', 'b'])
+  })
+
+  it('reports a wave conflict too, as it happens rather than at the end', async () => {
+    const repo = await conflictingPair()
+    const seen: { where: string; branch: string }[] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+      }),
+      onConflict: (conflict) => seen.push(conflict),
+    })
+
+    const wave = await integrator.mergeWave(1)
+
+    expect(seen.map((entry) => entry.where)).toEqual(['wave'])
+    expect(seen[0]?.branch).toBe(wave.branch)
+    // Still returned as well: the post-mortem reads the return value.
+    expect(wave.conflicts).toHaveLength(1)
+  })
+
+  it('says nothing when a merge is clean', async () => {
+    const repo = await makeRepo()
+    const seen: unknown[] = []
+    const one = await repo.lane('lane-1')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'export const a = 1\n' }, 'phase a')
+    const integrator = new Integrator({
+      plan: plan([node('a')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+      onConflict: (conflict) => seen.push(conflict),
+    })
+
+    await integrator.mergeWave(1)
+    expect(seen).toEqual([])
+  })
+})
+
 describe('wave merges', () => {
   it('merges every wave node with --no-ff, keeping the unit commits', async () => {
     const repo = await makeRepo()

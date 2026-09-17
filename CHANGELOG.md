@@ -562,6 +562,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   something to commit, and a fixer that discarded the merge instead of resolving
   it is refused rather than recorded as integrated.
 
+- **A conflict was resolved again on every retry, and recorded nowhere.**
+  Conflicts are an ordinary outcome — the plan's file-overlap analysis is a
+  guess and two sibling phases legitimately edit one file — but `prepareBase`
+  reset and re-merged its `integ-<id>` branch unconditionally, so each retry
+  spawned a fresh fixer agent to redo work already done, and discarded any
+  resolution a person had finished by hand in that worktree. One observed run
+  paid for the same resolution three times. A base that already integrates every
+  dependency's current tip is now kept; one built before a dependency moved is
+  still rebuilt, because reuse is about reachability of the tips rather than
+  about the branch existing. Every settled conflict is also journalled as a
+  `node_conflict` event naming both participants, the paths and the rounds it
+  took — previously a wave conflict reached only the post-mortem and a *base*
+  conflict was discarded entirely, so a phase could sit in `running` for minutes
+  while an agent merged in a worktree nobody could see.
+
 - **A failed attempt now says why, wherever it goes next.** The reason was
   computed at the failure site and handed to the path that gives up — which the
   default `onFailure: retry` does not take: it retries automatically, then parks
