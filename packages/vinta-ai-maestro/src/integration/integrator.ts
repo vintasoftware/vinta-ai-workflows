@@ -335,17 +335,87 @@ export class Integrator {
       await this.#options.fixer.fix({ ...request, round })
       if (await this.#unresolved(paths)) continue
 
+      // **A fixer that committed its own resolution is the ordinary case, not a
+      // deviation.** An agent told to resolve a conflict reaches for the
+      // sequence a person would — `git merge --abort`, merge again, resolve,
+      // `git commit` — and the last step is the one that broke this.
+      //
+      // The code below used to commit unconditionally, which is right only
+      // while a merge is still in progress. Against an agent that had already
+      // committed, `git add --all` is a no-op that exits 0 and `git commit
+      // --no-edit` exits 1 with "nothing to commit" — and `git` throws on a
+      // non-zero exit, so the *successful* resolution was reported as a failed
+      // phase. It surfaced as a node that failed before its branch was cut,
+      // with a resolved merge commit sitting in the integration worktree and
+      // nothing in the journal saying why: every wave after a parallel one,
+      // deterministically, because a multi-dependency node is the only thing
+      // that merges here and two sibling phases touching one file is the
+      // common case rather than the rare one.
+      //
+      // So the commit is now conditional on there being something to commit,
+      // and "the fixer already did it" is accepted on the same evidence a
+      // human would use: the incoming branch is an ancestor of HEAD.
       // Staging someone else's resolution. The orchestrator authored none of it.
       await git(cwd, ['add', '--all'])
+      // Before anything is committed, whichever shape the resolution arrived
+      // in: a fixer must not be able to dodge the gate by committing its own
+      // work, which is the one thing committing early would otherwise buy it.
       if (this.#options.verify && !(await this.#options.verify(cwd))) continue
 
-      await git(cwd, ['commit', '--no-edit'])
+      if (await this.#merging(cwd)) {
+        // The merge is still git's to conclude, so `--no-edit` takes the
+        // message it already prepared. This is the path that always worked.
+        await git(cwd, ['commit', '--no-edit'])
+      } else if (await this.#staged(cwd)) {
+        // A fixer that committed and then refined — round 2 after a `verify`
+        // refusal, typically. There is no prepared message to take, so this
+        // one is written here: branch names and a round number, which are
+        // identifiers (§11).
+        await git(cwd, ['commit', '-m', `Resolve ${incoming} conflict (round ${round})`])
+      } else if (!(await this.#contains(cwd, incoming))) {
+        // Nothing in progress, nothing to commit, and the incoming phase is
+        // not in this history: the fixer cleared the conflict by throwing the
+        // merge away. Another round rather than a success — recording the
+        // phase as integrated when its commits are nowhere here would surface
+        // much later, as a phase built on work that is not there.
+        continue
+      }
       return { nodes, paths, rounds: round }
     }
 
     // The conflicted merge is left in place deliberately: it is the only copy
     // of what the fixer tried, and it is what a human continuing by hand needs.
     throw new PlanDefectError(nodes, paths, this.#maxFixRounds)
+  }
+
+  /**
+   * Whether a merge is still in progress — `MERGE_HEAD` exists.
+   *
+   * This is git's own record that a merge was started and not concluded, and
+   * it is what distinguishes "the fixer resolved the files and left the commit
+   * to us" from "the fixer committed". Asking the working tree instead would
+   * not separate them: both leave it clean.
+   */
+  async #merging(cwd: string): Promise<boolean> {
+    return await gitOk(cwd, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])
+  }
+
+  /** Whether the index holds anything the last commit does not. */
+  async #staged(cwd: string): Promise<boolean> {
+    return !(await gitOk(cwd, ['diff', '--cached', '--quiet']))
+  }
+
+  /**
+   * Whether the incoming branch is already in this branch's history.
+   *
+   * The test for a fixer that committed the merge itself, and it is deliberately
+   * about *reachability* rather than about the shape of the last commit: a
+   * resolution squashed onto one commit, or committed as a merge, or rebased,
+   * all satisfy the only thing the wave spine needs — that this phase's work is
+   * in the branch the next phase will build on.
+   */
+  async #contains(cwd: string, branch: string): Promise<boolean> {
+    return await gitOk(cwd, ['merge-base', '--is-ancestor', branch, 'HEAD'])
   }
 
   async #conflictedPaths(): Promise<string[]> {

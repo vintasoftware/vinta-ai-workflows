@@ -278,6 +278,31 @@ interface NodePayloads {
    * is exactly the place repository content leaks into one.
    */
   node_status: { readonly status: NodeStatus; readonly reason?: string }
+  /**
+   * Why one *attempt* at a node failed — written whatever happens next.
+   *
+   * Distinct from `node_status: 'failed'`, which records the node giving up.
+   * Most failures never reach that: under the default `onFailure: retry` an
+   * attempt is retried automatically or parked on a question, and the node is
+   * `running` again moments later. Those attempts used to leave no trace at
+   * all, so a phase that failed three times in provisioning — before any agent
+   * ran, so with no transcript and no gate log either — was undiagnosable
+   * after the fact, and the only offered action was to repeat it.
+   *
+   * Not projected, deliberately. `nodes` is folded out of `node_registered`,
+   * `node_status` and `node_assigned`, and this must not disturb any of them:
+   * the node's status is whatever the attempt after this one makes it. It is
+   * the audit trail beside them, in §5.3's sense — drop every projection,
+   * replay the log, and the same rows come back.
+   *
+   * `reason` is a classification, never a command's output (§11). The error
+   * itself, message included, goes to the daemon log.
+   */
+  node_error: {
+    readonly reason: string
+    /** 1 for the first attempt at this node, and one more for each after it. */
+    readonly attempt: number
+  }
   node_assigned: {
     readonly lane?: string
     readonly branch?: string

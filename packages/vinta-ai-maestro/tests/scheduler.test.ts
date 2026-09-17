@@ -2682,6 +2682,39 @@ describe('a failed phase the operator can retry', () => {
     expectDrained(r)
   })
 
+  /**
+   * The gap a real run fell into: a phase failed three times in provisioning —
+   * before any agent ran, so with no transcript and no gate log either — and
+   * the journal held a status, a lane and a question offering a retry, with
+   * nothing anywhere saying what went wrong. The reason was computed at the
+   * failure site and then handed to `#fail`, which is reached only when
+   * `#recover` declines to recover; under the default policy it does not.
+   */
+  it('journals why every attempt failed, including the ones it recovers from', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+      onFailure: 'retry',
+      retries: 1,
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+
+    // Both attempts are on the record *before* the operator is asked anything —
+    // which is the point: the question offers a retry, and answering it is the
+    // only thing that used to be possible without knowing why.
+    const errors = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_error')
+    expect(errors.map((event) => (event.payload as { attempt: number }).attempt)).toEqual([1, 2])
+    for (const event of errors) {
+      expect((event.payload as { reason: string }).reason).toBeTruthy()
+    }
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+    expectDrained(r)
+  })
+
   it('spends its whole budget before asking', async () => {
     const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
       onFailure: 'retry',
@@ -2872,6 +2905,52 @@ describe('a failed phase the operator can retry', () => {
 
     // `tier1` took the first attempt and `tier4` the second.
     expect(modelsOf(r)).toEqual(['cheap', 'dear'])
+    expectDrained(r)
+  })
+
+  /**
+   * The member that actually ran is never offered as the alternative to itself.
+   *
+   * Both phases are assigned `tier1`, so one of them is covered by `tier4` —
+   * and it is that substituted phase whose failure is offered here. The menu
+   * used to exclude only the member the *plan* named, so it offered "retry with
+   * tier4" to a phase `tier4` had just failed: an escalation that had already
+   * happened, and a third of the menu doing nothing.
+   */
+  it('does not offer the member that just failed the phase', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { crew: 'tier1' }), node('b', [], { crew: 'tier1' })], {
+        pipeline: 'explode',
+        lanes: 2,
+        crew: { tier1: ROSTER.tier1, tier4: ROSTER.tier4 },
+      }),
+      { onFailure: 'ask' },
+    )
+
+    const running = r.scheduler.run()
+    await until(
+      () => r.scheduler.statuses['a'] === 'awaiting_human' && r.scheduler.statuses['b'] === 'awaiting_human',
+      'both offers',
+    )
+
+    // Whichever phase `tier4` covered: its menu names neither the member the
+    // plan asked for nor the one that ran, so nothing is left to escalate to.
+    const covered = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_crew')
+      .find((event) => (event.payload as Record<string, unknown>)['substitute'] === true)
+    expect(covered).toBeDefined()
+    const substituted = String(covered?.nodeId)
+    const offered = r.journal.pendingQuestion('run-1', substituted)?.question.choices ?? []
+    expect(offered).not.toContain('retry with tier4')
+    // And the phase that ran on the member the plan named still gets the
+    // escalation, because there really is a higher tier that could take it.
+    const other = substituted === 'a' ? 'b' : 'a'
+    expect(r.journal.pendingQuestion('run-1', other)?.question.choices).toContain('retry with tier4')
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    r.scheduler.answer('b', { human: { answer: 'stop' } })
+    await running
     expectDrained(r)
   })
 

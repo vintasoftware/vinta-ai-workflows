@@ -261,6 +261,63 @@ describe('the crew conflict fixer', () => {
   })
 
   /**
+   * The fixer is an agent standing in a worktree, and an agent without its
+   * tree's environment resolves `docker compose` to whatever the daemon's shell
+   * says. With `COMPOSE_PROJECT_NAME` unset docker names the project after the
+   * directory, and the `compose.publish: []` override that lives in
+   * `COMPOSE_FILE` is not read at all — so a fix round brought a second stack
+   * up and published the project's fixed ports on the host, where they collided
+   * with the developer's own and outlived the run.
+   *
+   * Asserted on the spawned task rather than through the compose files, because
+   * the task is where the wiring either happened or did not.
+   */
+  it('spawns with the integration worktree’s environment', async () => {
+    const adapter = new MockAdapter({ id: 'claude' })
+    const env = {
+      COMPOSE_PROJECT_NAME: 'r1-integ',
+      COMPOSE_FILE: 'compose.yaml:/lanes/r1-integ/.maestro-compose.yaml',
+      DATABASE_URL: 'postgres://localhost/r1_integ',
+      MAESTRO_RUN: 'r1',
+    }
+    const fixer = createCrewConflictFixer({
+      adapters: { claude: adapter },
+      defaults: { harness: 'claude', model: 'default-model' },
+      crew: ROSTER,
+      env,
+      crewAssignments: () => [claim('a', { member: 'tier4', tier: 4, substitute: false })],
+    })
+
+    await fixer.fix(request(['a']))
+
+    expect((adapter.spawned[0] as AgentTask).env).toEqual(env)
+  })
+
+  /**
+   * The environment belongs to the worktree, not to whoever is spawned into it,
+   * so the staffed path and the `defaults` path must carry the identical one. A
+   * fixer that only got its environment when the roster could name a member
+   * would leave every pre-roster plan publishing ports on the host.
+   */
+  it('carries the same environment on the unstaffed fallback', async () => {
+    const adapter = new MockAdapter({ id: 'claude' })
+    const env = { COMPOSE_PROJECT_NAME: 'r1-integ' }
+    const fixer = createCrewConflictFixer({
+      adapters: { claude: adapter },
+      defaults: { harness: 'claude', model: 'default-model' },
+      crew: {},
+      env,
+      crewAssignments: () => [],
+    })
+
+    await fixer.fix(request(['a', 'b']))
+
+    const task = adapter.spawned[0] as AgentTask
+    expect(task.model).toBe('default-model')
+    expect(task.env).toEqual(env)
+  })
+
+  /**
    * No adapter at all: the merge exhausts its rounds and stops as the plan
    * defect it is. The orchestrator resolves nothing itself.
    */

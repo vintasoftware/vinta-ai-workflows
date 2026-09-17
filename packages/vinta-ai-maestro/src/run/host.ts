@@ -149,12 +149,32 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
   })
 
-  const integrationPath = pool.integration.path
+  // Read once, as one object, rather than through `pool.integration` twice.
+  // `laneEnv` below goes through the pool on every call because a *lane* slot
+  // can be handed back as a different `Lane` after a recycle re-provisions it —
+  // but nothing recycles the integration worktree. `LanePool.recycle` is
+  // reachable only through `HostWiring.recycleLane`, which the scheduler calls
+  // with a node's lane slot, never `${runId}-integ`. So the object is stable
+  // for the pool's life, and taking the path and the environment from the same
+  // read is what keeps them describing the same tree: a fixer pointed at one
+  // directory while carrying another one's compose project would be a worse
+  // failure than a stale pair, and harder to see.
+  const integration = pool.integration
+  const integrationPath = integration.path
   const integrator = new RecordingIntegrator({
     // `Workflow` satisfies `IntegrationPlan` structurally.
     plan: workflow,
     integrationPath,
-    fixer: conflictFixer(workflow, adapters, () => journal.crewAssignments(runId)),
+    fixer: conflictFixer(
+      workflow,
+      adapters,
+      // The same overlay every lane's agent gets. The fixer is an agent: it
+      // reports progress and asks for gates over the same `MAESTRO_URL` /
+      // `MAESTRO_TOKEN` / `MAESTRO_RUN` triple, and without it a fix round is
+      // the one agent turn in a run that cannot talk back to the daemon.
+      { ...integration.env, ...options.agentEnv },
+      () => journal.crewAssignments(runId),
+    ),
   })
 
   const cache = new GateCache(repoPath)
@@ -248,16 +268,25 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
  * the journal is read at conflict time to find whose work is in the conflict —
  * both decided in `integration/staffing.ts`, which is also where the reason a
  * member's *session* is left behind is written down.
+ *
+ * `env` is the integration worktree's own, agent overlay included, and it is
+ * not optional in practice: it was the one agent spawn in the run that did not
+ * get its tree's environment, and the missing `COMPOSE_PROJECT_NAME` and
+ * `COMPOSE_FILE` let a fix round publish the project's ports on the host under
+ * a compose project nobody had reserved. `AgentTask.env` describes the failure
+ * class; this was the last instance of it.
  */
 function conflictFixer(
   workflow: Workflow,
   adapters: Readonly<Record<string, HarnessAdapter>>,
+  env: Readonly<Record<string, string>>,
   crewAssignments: () => readonly StoredEvent[],
 ): ConflictFixer {
   return createCrewConflictFixer({
     adapters,
     defaults: { harness: workflow.defaults.harness, model: workflow.defaults.model },
     crew: workflow.crew,
+    env,
     crewAssignments,
   })
 }

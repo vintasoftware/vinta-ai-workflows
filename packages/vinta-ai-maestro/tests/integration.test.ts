@@ -491,6 +491,96 @@ describe('merge conflicts', () => {
     }
   })
 
+  /**
+   * The failure this whole branch exists for.
+   *
+   * An agent told to resolve a conflict reaches for the sequence a person
+   * would — abort, merge again, resolve, **commit**. That last step used to
+   * break the run: the orchestrator committed unconditionally, so against an
+   * already-committed resolution `git add --all` was a no-op exiting 0 and
+   * `git commit --no-edit` exited 1 with "nothing to commit", which `git()`
+   * turns into a throw. A successful resolution was reported as a failed
+   * phase, deterministically, on every wave after a parallel one.
+   */
+  it('accepts a resolution the fixer committed itself', async () => {
+    const repo = await conflictingPair()
+    const resolved = 'const value = "a" + "b"\n'
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), resolved)
+      // Exactly what the agent did in the run this was found in.
+      run(request.cwd, 'add', '--all')
+      run(request.cwd, 'commit', '--no-edit')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+
+    const wave = await integrator.mergeWave(1)
+
+    expect(wave.conflicts).toEqual([{ nodes: ['a', 'b'], paths: ['app.ts'], rounds: 1 }])
+    expect(run(repo.integ, 'show', `${wave.branch}:app.ts`).trim()).toBe(resolved.trim())
+    // The incoming phase is in the history — which is the only thing the wave
+    // spine needs, and the thing a fixer that threw the merge away would lack.
+    const log = subjects(repo.integ, wave.branch)
+    expect(log).toContain('phase a: value')
+    expect(log).toContain('phase b: value')
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+
+  it('still sends a committed resolution back when it fails the gate', async () => {
+    const repo = await conflictingPair()
+    let attempt = 0
+    const fixer = spyFixer(async (request) => {
+      attempt += 1
+      await writeFile(join(request.cwd, 'app.ts'), `const value = "${attempt}"\n`)
+      run(request.cwd, 'add', '--all')
+      // Round 1 commits; round 2 leaves it for the orchestrator. Both shapes
+      // have to reach `verify`, or a fixer could dodge the gate by committing.
+      if (attempt === 1) run(request.cwd, 'commit', '--no-edit')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer,
+      verify: async () => attempt > 1,
+    })
+
+    const wave = await integrator.mergeWave(1)
+    expect(fixer.calls.map((call) => call.round)).toEqual([1, 2])
+    expect(run(repo.integ, 'show', `${wave.branch}:app.ts`).trim()).toBe('const value = "2"')
+  })
+
+  /**
+   * A fixer that "resolves" by discarding the merge leaves no conflict markers
+   * and a clean tree — indistinguishable from success by those tests alone.
+   * Accepting it would record the incoming phase as integrated while its
+   * commits are nowhere in the branch, and the defect would surface later as a
+   * phase built on work that is not there.
+   */
+  it('refuses a resolution that threw the merge away', async () => {
+    const repo = await conflictingPair()
+    const fixer = spyFixer(async (request) => {
+      // Tolerant: round 2 is entered with the merge already gone, which is the
+      // very state this test is about.
+      try {
+        run(request.cwd, 'merge', '--abort')
+      } catch {
+        // Nothing in progress to abort.
+      }
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer,
+      maxFixRounds: 2,
+    })
+
+    await expect(integrator.mergeWave(1)).rejects.toBeInstanceOf(PlanDefectError)
+    expect(fixer.calls.map((call) => call.round)).toEqual([1, 2])
+  })
+
   it('reports a conflict surviving max_fix_rounds as a plan defect naming both nodes', async () => {
     const repo = await conflictingPair()
     // A fixer that returns without resolving anything — conflict markers stay.

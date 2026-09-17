@@ -52,6 +52,24 @@ export interface AgentConflictFixerOptions {
   readonly adapter: HarnessAdapter
   readonly model: string
   /**
+   * The integration worktree's environment, for the agent about to run in it.
+   *
+   * The integration worktree is a lane in every way that costs a port or a
+   * volume, and `AgentTask.env` says what happens to an agent that runs without
+   * its lane's: with the daemon's bare environment `COMPOSE_PROJECT_NAME` is
+   * unset, docker falls back to naming the project after the directory, and the
+   * stack comes up under a name nothing else in the run reserved. That is not
+   * hypothetical — a fix round brought a second stack up in the integration
+   * worktree and published 5432, 6379, 4566, 1025 and 8025 on the host, because
+   * `compose.publish: []` is delivered through the `COMPOSE_FILE` override that
+   * only this environment carries. It collided with the developer's own stack
+   * and outlived the run.
+   *
+   * Absent means "no project isolation to deliver" — an injected fixer in a
+   * test, or a workflow with no `project` block — never "run bare on purpose".
+   */
+  readonly env?: Readonly<Record<string, string>>
+  /**
    * Who this particular conflict goes to, resolved per call because staffing
    * depends on *which* nodes are in the conflict and that is only known once
    * the merge has failed (`integration/staffing.ts`). Returning null keeps the
@@ -88,6 +106,11 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         // to what an agent is told stays one edit (`src/prompts`).
         prompt: composeConflictPrompt(context),
         model: staffed?.model ?? options.model,
+        // Options, not `staff`: the environment belongs to the *worktree*, and
+        // every conflict in a run is fixed in the same one. Which member is
+        // holding the keyboard changes nothing about which compose project the
+        // commands they run must resolve to.
+        ...(options.env === undefined ? {} : { env: options.env }),
         // No `resumeSessionId`, deliberately, even when the staffed member has
         // a live session from the phase they just implemented. That session ran
         // in their lane; this runs in the integration worktree, where the files

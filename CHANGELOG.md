@@ -547,6 +547,53 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A conflict fixer that committed its own resolution failed the phase.** An
+  agent told to resolve a merge conflict reaches for the sequence a person
+  would — abort, merge again, resolve, commit — and the orchestrator then
+  committed unconditionally on top of it. Against an already-committed
+  resolution `git add --all` is a no-op that exits 0 and `git commit --no-edit`
+  exits 1 with "nothing to commit", which is a throw. A successful resolution
+  was reported as a failed phase, deterministically, on **every wave after a
+  parallel one**: a multi-dependency node is the only thing that merges here,
+  and two sibling phases both creating one file is the common case rather than
+  the rare one. The phase died before its branch was cut, so it left no
+  transcript, no gate log and no branch — only a resolved merge commit sitting
+  in the integration worktree. The commit is now conditional on there being
+  something to commit, and a fixer that discarded the merge instead of resolving
+  it is refused rather than recorded as integrated.
+
+- **A failed attempt now says why, wherever it goes next.** The reason was
+  computed at the failure site and handed to the path that gives up — which the
+  default `onFailure: retry` does not take: it retries automatically, then parks
+  on "This phase failed. Try it again?". Both paths dropped the reason, and
+  `#offerRetry` carried a comment asserting the opposite. A phase that failed
+  three times before any agent ran was undiagnosable after the fact, and the
+  only offered action was to repeat it. Every attempt now writes a `node_error`
+  event carrying its reason and attempt number, and a `node.attempt_failed`
+  record to the daemon log.
+
+- **A git command that exited non-zero was persisted as the word "Error".**
+  `failureReason` reports an unrecognised error by its name plus a *string*
+  `code`, and an `execFile` rejection carries `name: 'Error'` with a *numeric*
+  one — so the most common real failure in this package said nothing at all.
+  Git failures now carry their subcommand and exit status (`git commit exited
+  1`), which is a command name and an exit code rather than anything §11 keeps
+  out of the journal.
+
+- **The conflict fixer ran without its worktree's environment.** It was the one
+  agent spawn not given `AgentTask.env`, whose own docstring records this exact
+  bug class. With the daemon's bare environment its `docker compose` resolved to
+  a project named after the directory rather than the isolated one, ignored the
+  `compose.publish: []` override that rides in `COMPOSE_FILE`, and published the
+  project's fixed ports on the host — colliding with the developer's own stack
+  and outliving the run.
+
+- **"Retry with <member>" offered the member that had just failed.** The menu
+  excluded the member the *plan* named, but a substitution means the member that
+  actually ran is someone else — so a phase declared for one tier and covered by
+  a higher one offered that higher one as its escalation, and a third of the
+  menu did nothing distinguishable from plain retry.
+
 - **Closing a terminal on a run now records the interruption.** `run` and
   `serve` handle SIGHUP as well as SIGINT and SIGTERM — SIGHUP is what a
   terminal sends when its window closes, and with no handler Node's default was
