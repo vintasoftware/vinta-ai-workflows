@@ -88,6 +88,7 @@ import type {
 } from '../journal/events.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
 import { attribute, type Attribution } from '../journal/transcript.ts'
+import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
@@ -214,6 +215,19 @@ export interface SchedulerOptions {
    * production wiring is a composition rather than a flag.
    */
   readonly takeovers?: PtyRegistry
+  /**
+   * The daemon's own log. Absent in tests, and then nothing is written.
+   *
+   * It records the loop's *decisions*, which the journal deliberately does
+   * not. The journal holds what a run did — a node's statuses, its crew, its
+   * gates — because those are facts about the run and are folded into the
+   * projections the UI reads. Why the loop chose to do it is not a fact about
+   * the run; it is a fact about this process, and the two questions an
+   * operator asks — "why has nothing started for six minutes" and "what was
+   * the scheduler doing when it died" — are not answerable from either the
+   * projections or a transcript.
+   */
+  readonly logger?: Logger
 }
 
 /** Why a run stopped short. Node, pool and harness ids only. */
@@ -437,6 +451,8 @@ function recycleStage(error: unknown): string {
 
 export class Scheduler {
   readonly #options: SchedulerOptions
+  /** Stamped with this run's id, so every record the loop writes is addressed. */
+  readonly #log: Logger
   readonly #states = new Map<string, NodeState>()
   readonly #order: string[]
   /**
@@ -482,6 +498,7 @@ export class Scheduler {
 
   constructor(options: SchedulerOptions) {
     this.#options = options
+    this.#log = (options.logger ?? nullLogger()).child({ runId: options.runId })
     const { workflow } = options
     this.#workflow = workflow
     this.#takeovers = options.takeovers ?? takeovers
@@ -727,9 +744,20 @@ export class Scheduler {
    */
   async run(): Promise<RunReport> {
     const unrunnable = this.#precheck()
-    if (unrunnable) return this.#report(unrunnable)
+    if (unrunnable) {
+      // A run that stops here never starts a node, so it never writes a
+      // transcript and its post-mortem has nothing to describe. The reason has
+      // to be recorded at the moment it is known or it is not recorded at all.
+      this.#log.error('scheduler.unrunnable', { stop: unrunnable.kind })
+      return this.#report(unrunnable)
+    }
 
     this.#waves = computeWaves(this.#workflow.nodes)
+    this.#log.info('scheduler.started', {
+      nodes: this.#workflow.nodes.length,
+      waves: this.#waves.size,
+      staffed: this.#staffed,
+    })
 
     let stop: RunStop | null = null
     while (true) {
@@ -739,16 +767,31 @@ export class Scheduler {
 
       const deadlocked = this.#deadlock()
       if (deadlocked) {
+        // §6's "never spin" rule, as a record. This is the failure that looks
+        // like nothing at all from outside — the DAG simply stops, with every
+        // node in a legitimate-looking state — so the pending set is named
+        // here rather than left to be inferred from a snapshot.
+        const pending = deadlocked.kind === 'deadlock' ? deadlocked.pending : []
+        this.#log.error('scheduler.deadlock', {
+          pending: pending.length,
+          nodes: pending.join(','),
+        })
         stop = deadlocked
         break
       }
       await this.#changed()
     }
 
+    const status = stop === null && this.#failures().length === 0 ? 'done' : 'failed'
     this.#options.journal.append({
       runId: this.#options.runId,
       type: 'run_ended',
-      payload: { status: stop === null && this.#failures().length === 0 ? 'done' : 'failed' },
+      payload: { status },
+    })
+    this.#log.info('scheduler.ended', {
+      status,
+      failures: this.#failures().length,
+      iterations: this.#iterations,
     })
     return this.#report(stop)
   }
@@ -944,10 +987,47 @@ export class Scheduler {
         (dep) => this.#states.get(dep.node)?.status === 'done',
       )
       if (!ready) continue
+      this.#log.info('scheduler.dispatch', {
+        node: state.node.id,
+        wave: this.#waves.get(state.node.id) ?? -1,
+        harness: this.#harnessOf(state),
+      })
       // Synchronously, before the first await inside `#runNode`, so the loop
       // never sees a dispatched node as idle.
       this.#setStatus(state, 'running')
-      void this.#runNode(state)
+      // -----------------------------------------------------------------
+      // The catch that keeps one node's bug from being the run's obituary.
+      //
+      // `#runNode` catches broadly *around the work*; what it does not catch
+      // is itself. A throw from `#release`, `#fail`, `#setStatus` or a journal
+      // write escapes into this promise, which nobody holds — and an
+      // unhandled rejection terminates the process. That is hours of agent
+      // turns and a real amount of money ending with no journal row, no
+      // transcript entry and nothing on disk saying why, because the thing
+      // that would have said it is the thing that died.
+      //
+      // So it is contained instead, by the rule §6 already states for
+      // failures: this node fails, its transitive dependents are blocked, and
+      // everything independent of it keeps going. The record is written first,
+      // because `#fail` is one of the things that might have thrown.
+      // -----------------------------------------------------------------
+      void this.#runNode(state).catch((error: unknown) => {
+        this.#log.error('scheduler.node_threw', {
+          node: state.node.id,
+          ...errorFields(error),
+        })
+        try {
+          this.#fail(state, `scheduler error: ${errorKind(error)}`)
+        } catch (second: unknown) {
+          // Containment failed too. Nothing here can fix the run, and the
+          // process-level handler in `log/crash.ts` is what catches whatever
+          // comes next — but this line is why it will be explicable.
+          this.#log.error('scheduler.containment_failed', {
+            node: state.node.id,
+            ...errorFields(second),
+          })
+        }
+      })
     }
   }
 
@@ -2151,6 +2231,18 @@ export class Scheduler {
   }
 
   #setStatus(state: NodeState, status: NodeStatus, reason?: string): void {
+    // Every node transition, in one line each, beside the daemon's own records
+    // and on the same clock. The journal has these too and the UI projects
+    // them — what it cannot do is interleave them with the HTTP refusal, the
+    // spawn that was throttled and the exception thirty seconds earlier, which
+    // is the sequence somebody reading a failure is actually trying to
+    // reconstruct.
+    this.#log[status === 'failed' ? 'warn' : 'info']('scheduler.node_status', {
+      node: state.node.id,
+      status,
+      ...(reason === undefined ? {} : { reason }),
+      ...(state.lane === null ? {} : { lane: state.lane }),
+    })
     state.status = status
     this.#options.journal.append({
       runId: this.#options.runId,

@@ -44,6 +44,14 @@ import {
 } from '../daemon/index.ts'
 import type { Journal } from '../journal/journal.ts'
 import { openJournal } from '../journal/journal.ts'
+import {
+  errorFields,
+  installCrashHandlers,
+  nullLogger,
+  redactValue,
+  type Logger,
+} from '../log/index.ts'
+import { reportLogFailures, toLogSetup } from './logging.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import {
   AGENT_PERMISSIONS,
@@ -61,6 +69,8 @@ import { FAILED, OK, USAGE, type Io } from './io.ts'
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
                               [--permission <ask|auto|full>]
                               [--on-failure <stop|retry|ask>] [--retries <n>]
+                              [--log-level <debug|info|warn|error>] [--log-stderr]
+                              [--log-detail <kind|message>]
 
   --repo <dir>   The project whose .vinta-ai-maestro/ store is served, and whose
                  ai-plans/*.workflow.json the editor opens.
@@ -92,6 +102,25 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  than findings: a first review raising four blockers can use it
                  up while every round makes progress. A phase that keeps
                  arriving here usually wants that raised, not this.
+  --log-level    How much the daemon records about itself, in
+                 .vinta-ai-maestro/logs/daemon.ndjson and in the UI's Logs view.
+                 Defaults to info: what it bound, what it refused, every node
+                 transition, and anything that threw. debug adds one line per
+                 HTTP request and per socket, which is what you want when the
+                 question is "did the browser even reach it". The file rotates
+                 at 8 MiB and five rotations are kept, so this is bounded
+                 whatever you set it to.
+  --log-stderr   Also print each record to stderr, one line each, for watching
+                 the daemon in the terminal it is running in. The file is
+                 written either way.
+  --log-detail   How much of an error is recorded. Defaults to message: the
+                 error's kind and its own words, plus stack frames on a crash.
+                 kind drops the message and keeps the name and the frames, for
+                 a checkout under a data-handling obligation stricter than this
+                 store's own — a message is composed by whoever threw it, so it
+                 can carry a git diagnostic or a line of a source file. That is
+                 not the default because runs/ already holds every transcript
+                 and gate log verbatim, in this same directory.
   --permission   How much an agent may do without being asked. Defaults to
                  auto — it works in its own lane unattended, which is what a
                  lane is for. ask makes every tool use need approval, and
@@ -201,6 +230,9 @@ export async function serveCommand(
         permission: { type: 'string' },
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
+        'log-level': { type: 'string' },
+        'log-stderr': { type: 'boolean' },
+        'log-detail': { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -249,11 +281,20 @@ export async function serveCommand(
   const bind = toBind(parsed.values, io)
   if (bind === null) return USAGE
 
+  // The token is minted inside `startDaemon`, so it cannot be registered as a
+  // secret before the logger exists — which is why the log is built first and
+  // the registration happens at the bind below, before any record naming a URL
+  // could be written.
+  const logging = toLogSetup(parsed.values, bind.repoPath, io)
+  if (logging === null) return USAGE
+  const log = logging.logger
+
   const journal = openJournal(bind.repoPath)
   let daemon: Daemon
   try {
     daemon = await startDaemon({
       journal,
+      logger: log,
       // The daemon's own `--host` warning (§11). Routed to stderr; it names the
       // host and, by contract, never the token.
       warn: (message) => io.err(message),
@@ -261,12 +302,22 @@ export async function serveCommand(
       ...(bind.host === undefined ? {} : { host: bind.host }),
       ...(bind.port === undefined ? {} : { port: bind.port }),
     })
-  } catch {
+  } catch (error) {
+    log.error('serve.bind_failed', {
+      host: bind.host ?? '127.0.0.1',
+      port: bind.port ?? 0,
+      ...errorFields(error),
+    })
+    reportLogFailures(logging.sink, io)
     journal.close()
     // Identifiers only: the host and port the operator asked for, no internals.
     io.err(`vinta-ai-maestro: could not bind ${bind.host ?? '127.0.0.1'}:${bind.port ?? 0}`)
     return FAILED
   }
+
+  // From here on the token is a registered secret: a field that somehow
+  // carried it is written as `<redacted>` rather than as access to the run.
+  redactValue(daemon.token)
 
   // What turns this from a window onto the journal into a host for runs. Until
   // this line the daemon serves history and refuses `POST /api/runs`.
@@ -275,6 +326,7 @@ export async function serveCommand(
       daemon,
       repoPath: bind.repoPath,
       permission,
+      logger: log,
       warn: (message) => io.err(message),
       ...(onFailure === undefined ? {} : { onFailure }),
       ...(retries === undefined ? {} : { retries }),
@@ -282,11 +334,35 @@ export async function serveCommand(
   })
   daemon.acceptRuns(host)
 
+  /**
+   * The handlers that make a crash explicable, installed once the daemon can
+   * actually host runs and removed again on the way out.
+   *
+   * `onFatal` is the important half. A process dying on an uncaught exception
+   * leaves every run it was driving marked `running` in the journal for ever —
+   * the exact zombie a closed terminal used to produce, and the reason
+   * `--resume` exists. The `finally` below does this for an orderly shutdown;
+   * this does it for the disorderly one, synchronously, because there is no
+   * second chance after it.
+   */
+  const uninstallCrashHandlers = installCrashHandlers({
+    logger: log,
+    detail: logging.detail,
+    inFlight: () => host.inFlight(),
+    onFatal: () => {
+      for (const runId of host.inFlight()) {
+        journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
+      }
+    },
+  })
+
   announce(daemon, io)
+  io.out(`Daemon log: ${logging.path}`)
 
   try {
     await (deps.wait ?? (() => untilSignalled().signalled))(daemon)
   } finally {
+    uninstallCrashHandlers()
     await daemon.close()
     // **The runs this daemon was driving are ending with it**, and each one is
     // recorded as interrupted before anything is closed. Without this they stay
@@ -299,9 +375,12 @@ export async function serveCommand(
     const interrupted = host.inFlight()
     for (const runId of interrupted) {
       journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
+      log.warn('serve.run_interrupted', { run: runId })
       io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
       io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
     }
+    log.info('serve.stopped', { interrupted: interrupted.length })
+    reportLogFailures(logging.sink, io)
     // Closed only when nothing is still holding it. A daemon-hosted run is
     // awaited by nobody, and closing under a live scheduler turns every
     // in-flight lease release into "the database connection is not open" —
@@ -328,6 +407,16 @@ interface StarterOptions {
   /** Where a preflight warning goes. A daemon-hosted run has no stdout of its own. */
   readonly warn: (message: string) => void
   readonly doctor?: DoctorOverrides
+  /**
+   * The daemon's log, passed down to every run this host starts.
+   *
+   * It is the only channel a daemon-hosted run has. `run` prints its progress
+   * to a terminal; a run submitted over HTTP has no terminal, and `warn` above
+   * goes to the stderr of a `serve` process nobody is watching. Without this,
+   * a preflight warning or a provisioning refusal on a daemon-hosted run went
+   * to a stream that scrolled past hours ago.
+   */
+  readonly logger?: Logger
 }
 
 /**
@@ -364,6 +453,7 @@ export interface RunHost extends RunStartPort {
 
 export function runStarter(options: StarterOptions): RunHost {
   const { journal, daemon, repoPath, permission } = options
+  const log = options.logger ?? nullLogger()
   // The same directory the API lists workflows from, derived the same way, so
   // an id the editor offered is an id this can start.
   const store = createWorkflowStore(plansDirFor(repoPath))
@@ -423,8 +513,18 @@ export function runStarter(options: StarterOptions): RunHost {
         repoPath,
         ...(options.doctor === undefined ? {} : { doctor: options.doctor }),
       })
-      if (!preflight.ok) return { ok: false, code: 'environment', message: preflight.message }
-      for (const warning of preflight.warnings) options.warn(warning)
+      if (!preflight.ok) {
+        // A preflight refusal is the most common way a run does not happen,
+        // and the message is built from identifiers — a harness id and the
+        // command the *user* runs to log in (§8's "hard gate"), never a
+        // credential and never repository content.
+        log.warn('run.preflight_refused', { run: runId, reason: preflight.message })
+        return { ok: false, code: 'environment', message: preflight.message }
+      }
+      for (const warning of preflight.warnings) {
+        log.warn('run.preflight_warning', { run: runId, warning })
+        options.warn(warning)
+      }
 
       const started = await startRun({
         workflow,
@@ -433,25 +533,41 @@ export function runStarter(options: StarterOptions): RunHost {
         daemon,
         repoPath,
         permission,
+        logger: log,
         ...(request.kind === 'resume' ? { resume: true } : {}),
         ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
         ...(options.retries === undefined ? {} : { retries: options.retries }),
       })
       if (!started.ok) {
+        log.error('run.provision_failed', { run: runId, reason: started.message })
         options.warn(started.message)
         return { ok: false, code: 'provision', message: started.message }
       }
 
       live.add(started.runId)
       // Deliberately not awaited — see the docstring. The run outlives this call.
-      void started.finished.then(({ postMortem }) => {
-        live.delete(started.runId)
-        options.warn(
-          postMortem === null
-            ? `vinta-ai-maestro: run ${started.runId} ended; no post-mortem could be written.`
-            : `vinta-ai-maestro: run ${started.runId} ended; post-mortem at ${postMortem}`,
-        )
-      })
+      void started.finished
+        .then(({ postMortem }) => {
+          live.delete(started.runId)
+          log.info('run.finished', {
+            run: started.runId,
+            post_mortem: postMortem === null ? 'none' : postMortem,
+          })
+          options.warn(
+            postMortem === null
+              ? `vinta-ai-maestro: run ${started.runId} ended; no post-mortem could be written.`
+              : `vinta-ai-maestro: run ${started.runId} ended; post-mortem at ${postMortem}`,
+          )
+        })
+        .catch((error: unknown) => {
+          // Previously this promise had no rejection handler at all, which made
+          // a throw anywhere in a run's teardown an unhandled rejection — and
+          // an unhandled rejection ends the daemon, taking every *other* run
+          // with it. The run is left in `live` on purpose: shutdown then
+          // records it as interrupted, which is the truth, and `--resume` can
+          // pick it up.
+          log.error('run.settle_threw', { run: started.runId, ...errorFields(error) })
+        })
 
       return { ok: true, runId: started.runId }
     },

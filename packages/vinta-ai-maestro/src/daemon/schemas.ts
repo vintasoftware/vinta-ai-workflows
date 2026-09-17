@@ -650,6 +650,65 @@ export const EventPageSchema = z.strictObject({
   events: z.array(JournalEventSchema),
 })
 
+// ---------------------------------------------------------------------------
+// The daemon's own log
+// ---------------------------------------------------------------------------
+
+/**
+ * One record of the daemon log on the wire.
+ *
+ * The one schema here that is a *narrowing* rather than a description. `fields`
+ * is `Record<string, string | number | boolean | null>` because `log/record.ts`
+ * admits nothing else, and restating that here means a record which somehow
+ * acquired a nested object is rejected at the boundary instead of reaching a
+ * browser. Serving the daemon's own diagnostics is the endpoint most likely to
+ * be pointed at an unfamiliar file — the log directory is a directory, and
+ * anything could be sitting in it — so this parses what it reads rather than
+ * trusting that this process wrote it.
+ *
+ * Nullable rather than optional, like every other response here: `run` and
+ * `node` are absent from most records, and a client should not have to tell
+ * "missing key" from "null" to render a table.
+ */
+export const LogRecordSchema = z.strictObject({
+  ts: z.number().int(),
+  /** Per-process, monotonic. Orders records written in the same millisecond. */
+  seq: z.number().int(),
+  pid: z.number().int(),
+  level: z.enum(['debug', 'info', 'warn', 'error']),
+  /** A dotted identifier: `daemon.listening`, `scheduler.node_status`. */
+  event: z.string(),
+  runId: z.string().nullable(),
+  nodeId: z.string().nullable(),
+  fields: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])),
+})
+
+/**
+ * A window onto the log, and where to continue from.
+ *
+ * `cursor` is a position in the *file*, not in this result set, so a filtered
+ * follow advances past records it did not return — narrowing to `error` costs
+ * the client nothing per poll. It is opaque: the browser stores it and hands
+ * it back.
+ */
+export const LogPageSchema = z.strictObject({
+  records: z.array(LogRecordSchema),
+  cursor: z.string(),
+  /**
+   * Retention pruned the file this client's cursor pointed into. There is a
+   * gap between what it last saw and this page, and the view says so rather
+   * than joining the two ends into a stream that looks continuous.
+   */
+  reset: z.boolean(),
+  /** More is already waiting — poll again immediately rather than on the timer. */
+  more: z.boolean(),
+  /** Where the log is on disk, so the operator can open it in an editor. */
+  path: z.string(),
+})
+
+export type LogRecordResponse = z.infer<typeof LogRecordSchema>
+export type LogPage = z.infer<typeof LogPageSchema>
+
 export type AmendResponse = z.infer<typeof AmendResponseSchema>
 export type HumanQuestion = z.infer<typeof HumanQuestionSchema>
 export type RunSummary = z.infer<typeof RunSummarySchema>

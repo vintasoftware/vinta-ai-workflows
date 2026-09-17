@@ -28,6 +28,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { Duplex } from 'node:stream'
 import { WebSocketServer } from 'ws'
 import type { Journal } from '../journal/journal.ts'
+import { errorFields, nullLogger, type Logger } from '../log/index.ts'
 import type { Monitor } from '../monitor/monitor.ts'
 import { createApi } from './api.ts'
 import { createToken, isLoopback, presentedToken, tokenMatches } from './auth.ts'
@@ -71,6 +72,17 @@ export interface DaemonOptions {
   readonly monitorFor?: (runId: string) => Monitor | null
   /** Passed through to the API: how long a lease request waits before `202`. */
   readonly leaseWaitMs?: number
+  /**
+   * The daemon's own log. Absent in tests and on a host that wired none, and
+   * then nothing is written.
+   *
+   * It never receives the token. `announce` in `serve.ts` is the one writer of
+   * that string, and `redactValue` is what holds this to it: the token is
+   * registered as a secret before this function is called, so a field which
+   * somehow carried it would come back `<redacted>` rather than as the access
+   * to the run.
+   */
+  readonly logger?: Logger
 }
 
 export interface Daemon {
@@ -100,12 +112,14 @@ export interface Daemon {
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const host = options.host ?? LOOPBACK
   const token = options.token ?? createToken()
+  const log = options.logger ?? nullLogger()
   const runs = new Map<string, DaemonRun>()
   // Read through a getter below, so `acceptRuns` after boot is visible to a
   // request that arrives after it.
   let starter: RunStartPort | undefined
 
   if (!isLoopback(host)) {
+    log.warn('daemon.non_loopback_bind', { host })
     const warn = options.warn ?? ((message: string) => console.warn(message))
     warn(
       `vinta-ai-maestro: binding to non-loopback host "${host}". The API and its runs are ` +
@@ -124,15 +138,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
     ...(options.monitorFor === undefined ? {} : { monitorFor: options.monitorFor }),
     ...(options.leaseWaitMs === undefined ? {} : { leaseWaitMs: options.leaseWaitMs }),
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
   })
   const stream = new EventStream(options.journal, options.pollMs ?? DEFAULT_POLL_MS)
   const sockets = new WebSocketServer({ noServer: true })
 
   const server = createServer((req, res) => {
-    void respond(app, req, res)
+    void respond(app, req, res, log)
   })
   server.on('upgrade', (req, socket, head) => {
-    upgrade({ req, socket, head, token, runs, sockets, stream })
+    upgrade({ req, socket, head, token, runs, sockets, stream, log })
+  })
+
+  /**
+   * A listener error after `listen` succeeded — the port going away under a
+   * sleeping laptop, an `EMFILE` under load. Node emits it and, with no
+   * handler, terminates the process: the daemon and every run it hosts, on an
+   * event with no other trace anywhere.
+   */
+  server.on('error', (error) => {
+    log.error('daemon.server_error', { ...errorFields(error) })
   })
 
   await new Promise<void>((resolve, reject) => {
@@ -145,9 +170,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const address = server.address()
   if (address === null || typeof address === 'string') {
+    log.error('daemon.no_port')
     server.close()
     throw new Error('daemon: listener did not report a port')
   }
+
+  // The host and the port, never the token (§11) — `redactValue` enforces it
+  // rather than this remembering to.
+  log.info('daemon.listening', { host: address.address, port: address.port })
 
   return {
     url: `http://${address.address.includes(':') ? `[${address.address}]` : address.address}:${address.port}`,
@@ -156,11 +186,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     token,
     register(run: DaemonRun): void {
       runs.set(run.runId, run)
+      log.info('daemon.run_registered', { run: run.runId })
     },
     acceptRuns(port: RunStartPort): void {
       starter = port
+      log.info('daemon.accepting_runs')
     },
     async close(): Promise<void> {
+      log.info('daemon.closing', { sockets: sockets.clients.size, runs: runs.size })
       stream.close()
       for (const socket of sockets.clients) socket.terminate()
       await new Promise<void>((resolve) => sockets.close(() => resolve()))
@@ -182,25 +215,49 @@ interface UpgradeContext {
   readonly runs: ReadonlyMap<string, DaemonRun>
   readonly sockets: WebSocketServer
   readonly stream: EventStream
+  readonly log: Logger
 }
 
-/** Auth first, then the run, then the protocol switch. Never the other way round. */
+/**
+ * Auth first, then the run, then the protocol switch. Never the other way round.
+ *
+ * Every refusal is recorded with its *reason*, because from the browser they
+ * are one symptom: the socket closes and the run view stops updating. A bad
+ * token, an unknown run and a malformed cursor need three different fixes, and
+ * this is the only place that can still tell them apart — after `refuse` the
+ * socket is gone and the client was handed a bare status line.
+ */
 function upgrade(context: UpgradeContext): void {
-  const { req, socket, head } = context
+  const { req, socket, head, log } = context
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? LOOPBACK}`)
 
   if (!tokenMatches(context.token, presentedToken(req.headers.authorization, url))) {
+    log.warn('ws.refused', { reason: 'unauthorized' })
     return refuse(socket, 401, 'Unauthorized')
   }
-  if (url.pathname !== WS_PATH) return refuse(socket, 404, 'Not Found')
+  if (url.pathname !== WS_PATH) {
+    log.warn('ws.refused', { reason: 'not_found', path: url.pathname })
+    return refuse(socket, 404, 'Not Found')
+  }
 
   const runId = url.searchParams.get('run') ?? ''
-  if (!context.runs.has(runId)) return refuse(socket, 404, 'Not Found')
+  if (!context.runs.has(runId)) {
+    // The commonest of the three, and the most confusing: a run the journal
+    // holds but this process is not driving — a reload after a restart — looks
+    // exactly like a typo in the fragment.
+    log.warn('ws.refused', { reason: 'unknown_run', run: runId })
+    return refuse(socket, 404, 'Not Found')
+  }
 
   const since = Number(url.searchParams.get('since') ?? '0')
-  if (!Number.isInteger(since) || since < 0) return refuse(socket, 400, 'Bad Request')
+  if (!Number.isInteger(since) || since < 0) {
+    log.warn('ws.refused', { reason: 'bad_cursor', run: runId })
+    return refuse(socket, 400, 'Bad Request')
+  }
 
   context.sockets.handleUpgrade(req, socket, head, (ws) => {
+    log.debug('ws.attached', { run: runId, since })
+    ws.once('close', () => log.debug('ws.detached', { run: runId }))
     context.stream.attach(ws, runId, since)
   })
 }
@@ -219,15 +276,27 @@ async function respond(
   app: ReturnType<typeof createApi>,
   req: IncomingMessage,
   res: ServerResponse,
+  log: Logger,
 ): Promise<void> {
   try {
     const response = await app.fetch(await toRequest(req))
     const body = Buffer.from(await response.arrayBuffer())
     res.writeHead(response.status, Object.fromEntries(response.headers))
     res.end(body)
-  } catch {
-    // Identifiers only, and here there are none worth carrying: the failure is
-    // in the bridge, and the caller gets a status rather than an internal.
+  } catch (error) {
+    // The client still gets a status and no internals — that part of the
+    // contract is unchanged. What changed is that the failure is no longer
+    // *only* a status: this used to be a bare `catch {}`, so a bridge that
+    // broke on every request produced a UI showing 500s and a daemon with
+    // nothing at all to say about them.
+    //
+    // The error's kind, never its message (`errorKind`): a body that failed to
+    // parse is a body, and this is the handler that was holding it.
+    log.error('bridge.threw', {
+      method: req.method ?? 'GET',
+      path: new URL(req.url ?? '/', `http://${req.headers.host ?? LOOPBACK}`).pathname,
+      ...errorFields(error),
+    })
     res.writeHead(500, { 'content-type': 'application/json' })
     res.end('{"error":"internal","issues":null}')
   }
