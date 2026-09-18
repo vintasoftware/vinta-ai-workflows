@@ -603,6 +603,9 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `resources.lane` | `{"capacity": N, "kind": "worktree"}`. **Required** — a lane pool is where phases are dispatched, and a workflow without one has nowhere to run. `N` = the number of **implementers** on the roster, because each keeps one worktree for the whole run. Reviewers add nothing: they read the lane under review. How many run *at once* is still capped by the graph and by the project's parallel-lane budget (3 when unstated); an implementer idle in wave 1 still has a desk. |
 | `resources.<pool>` | One `{"kind": "semaphore"}` pool per expensive shared thing a gate contends for — the test database, the e2e browser grid, a staging deploy slot. `capacity: 1` when only one can run at a time. |
 | `gates.<id>` | The checks a phase must pass, as **shell commands run in the phase's lane** — the project's real typecheck / test / lint invocations, not an agent and not prose. Give the slow ones `requires` naming the pool they contend for, and a `timeout_s` that is generous rather than tight. |
+| `chores.<id>` | Agent turns a phase runs beside its gates, for work that changes the diff rather than judging it. **Always emit the `deslop` chore below** — it is the comment-hygiene pass, and without it a maestro run has none. Add another only when the plan genuinely needs one (a changelog entry, a translation extraction); a chore is a model turn per phase, so each one has to earn it. |
+| `defaults.chores` | `["deslop"]`. The chores every phase runs unless it names its own. |
+| `nodes[].chores` | **Omit** on almost every phase — absent means the run-wide default. Name a list only to give one phase a different set, and `[]` to opt one out. A list *replaces* the default rather than adding to it. |
 | `nodes[]` | One per phase, in plan order. |
 | `nodes[].id` | `p` + the phase number, lowercased: `Phase 1` → `p1`, `Phase 4a` → `p4a`, `Phase 1b` → `p1b`. |
 | `nodes[].name` | The phase title without its `Phase N —` prefix. |
@@ -622,6 +625,7 @@ Rules the mapping depends on:
 - **`touches` is what the same-wave overlap check reads.** Executors *warn* on two same-wave nodes declaring the same path rather than refusing, so an incomplete Touch List doesn't fail loudly — it fails at merge. Transcribe every file the phase creates or edits, including tests.
 - **Never invent a model id.** Pick the tier from the rubric under "Staff the plan", then read the id out of [resources/ai-models.yaml](resources/ai-models.yaml). Ids drift; tiers don't.
 - **The roster is the same decision as the Crew table.** `crew` transcribes it: one entry per row, `tier` from the Tier column, `model` from that tier in `ai-models.yaml`. A member the table does not list, or a table row with no `crew` entry, means the two were edited separately.
+- **A gate is a command; a chore is an agent.** Both run per phase and that is where the resemblance stops. A gate is a shell line that says pass or fail and decides whether the phase merges. A chore is a turn that *changes* the diff — the comment pass, a changelog entry — and it is never what stands between a phase and its merge: one that fails is recorded and the phase carries on to its gates. Anything you can express as a command belongs in `gates`, where it is cached and queued and costs no model time.
 - **Gate commands must be commands the repo actually runs today.** Read them out of the project's task runner (`package.json` scripts, `Makefile`, `pyproject.toml`, CI config) rather than guessing a conventional one. A gate that doesn't exist fails every phase identically, and looks like a code problem.
 - **The graph must agree with the Execution graph table.** Same nodes, same edges, same waves — they are two renderings of one set of `**Depends on**:` lines, so derive both from the lines rather than transcribing one from the other. A disagreement means one was hand-edited, and the executor flags it.
 - **`plan_context_refs` is anchors, never prose.** It names sections of the plan; it never restates them. A summary written into the JSON is a second copy that drifts the first time someone edits the plan, and the whole point of the field is that the implementer reads what the plan actually says.
@@ -815,7 +819,10 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
   "defaults": {
     "harness": "claude-code",
     "model": "claude-sonnet-5",
-    "pipeline": "standard-phase"
+    "pipeline": "standard-phase",
+    "chores": [
+      "deslop"
+    ]
   },
   "resources": {
     "lane": {
@@ -840,6 +847,13 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
         "test-suite"
       ],
       "timeout_s": 1800
+    }
+  },
+  "chores": {
+    "deslop": {
+      "skill": "deslop-comments",
+      "prompt": "Rewrite the comments and doc blocks this phase wrote into Simple English, and delete the ones that should not be there. Comment-only: no renames, no logic changes.",
+      "description": "The comment-hygiene pass, on the diff that is about to merge."
     }
   },
   "nodes": [
@@ -1041,4 +1055,5 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] **`project` decided, not defaulted** — asked via `AskUserQuestion`, then either written (roles `dev` / `test`, each naming its own database, engine fields filled from the project, `migrate_cmd` read out of its task runner) or deliberately omitted because lanes share the main checkout's database. No `reset_cmd`, no compose project name, no seed command, no env-file strategy — those are the worktree's, not the plan's.
 - [ ] No credential anywhere in the workflow file: `connection_url_var` is a variable name, and `server_url` is a host and port.
 - [ ] Model ids come from [resources/ai-models.yaml](resources/ai-models.yaml) and appear **only** in the `crew` block — no node carries a `model`, and `crew` transcribes the Crew table row for row.
+- [ ] `chores` declares `deslop` and `defaults.chores` names it, so every phase's diff gets the comment pass before it is gated. No node carries its own `chores` unless that phase genuinely needs a different set.
 - [ ] `pipelines` is omitted — `defaults.pipeline: standard-phase` is enough, and the executor supplies it.

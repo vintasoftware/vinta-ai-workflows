@@ -155,6 +155,51 @@ id — the gate invalidates itself every time and nothing is ever cached. Add
 those paths to `.gitignore`: ignored files are deliberately outside the key,
 and that is the whole fix.
 
+## Chores — the other thing a phase runs
+
+A gate judges a phase. A chore *changes* it: rewrite the comments this phase
+wrote, add the changelog entry, extract the strings that need translating. It is
+an agent turn rather than a shell command, and it runs on the implementer's own
+session, so the agent that wrote the diff is the one asked to act on it — it
+still holds the brief and its reasons for every line.
+
+Declare them per workflow and pick them per phase:
+
+```jsonc
+"defaults": { "chores": ["deslop"] },       // what every phase runs
+"chores": {
+  "deslop": {
+    "prompt_ref": "ai-plans/PLAN.md#deslop", // or `prompt`, inline
+    "skill": "deslop-comments",              // named in the prompt, not a CLI flag
+    "session": "main"                        // the implementer's, by default
+  }
+},
+"nodes": [
+  { "id": "p1" },                            // runs defaults.chores
+  { "id": "p2", "chores": ["deslop", "changelog"] },
+  { "id": "p3", "chores": [] }               // opts out
+]
+```
+
+A node's list **replaces** the run-wide default rather than adding to it, which
+is what makes `[]` an opt-out.
+
+In `standard-phase` they run in the `polish` state, between a passing review and
+the gate. That position is the design: a chore edits the tree, so running it
+after the gate would merge a diff the gates never saw, and running it before the
+review would have the fixer rewrite what it just did. Here it runs on the diff
+that actually merges, and the gates behind it check what it did — which also
+means the gate cache misses, correctly, because the tree changed.
+
+A chore that fails is journalled and the phase goes on to its gates; a chore is
+polish, and losing an implemented phase to one that timed out is the worse
+trade. Set `on_failure: "fail"` on a chore the phase is not correct without. A
+chore the harness had no capacity for is skipped for the same reason, rather
+than re-driving a finished phase to fit the turn in.
+
+Each turn lands in the phase transcript attributed to `chore` and its id, beside
+a `chore_result` event saying whether it ran, failed or was skipped.
+
 ## Walkthrough — two phases in parallel
 
 A repository with two phases that depend on nothing, so both belong to wave 1 and both run at once.

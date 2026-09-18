@@ -48,6 +48,22 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   naming the gates, because a gate reported as free is the number a planner
   would act on hardest.
 
+- **Phases can run chores: declared agent turns that change the diff rather than
+  judge it.** A gate is a shell command that says pass or fail; a chore is an
+  agent asked to do something to the work — rewrite the comments this phase
+  wrote, add the changelog entry, extract the strings that need translating. It
+  runs on the implementer's own session, so the agent that wrote the diff is the
+  one asked to act on it. Declare them in `chores.<id>` (a `prompt` or a
+  `prompt_ref` into the plan, plus an optional `skill` the prompt names) and
+  pick them with `defaults.chores` for the run or `nodes[].chores` for one
+  phase — a node's list replaces the default rather than adding to it, so `[]`
+  opts a phase out. In `standard-phase` they run in a new `polish` state,
+  between a passing review and the gate: a chore edits the tree, so running it
+  later would merge a diff the gates never ran against, and running it earlier
+  would have the fixer rewrite what it just did. A chore that fails, or that the
+  harness had no capacity for, is journalled and the phase continues to its
+  gates — `on_failure: "fail"` is for one the phase is not correct without.
+
 - **The post-mortem now reports what the schedule cost.** Two findings, both
   derived from events the journal already carried. `critical_path` is the
   dependency chain that decided the wall clock — each phase's span, the total,

@@ -56,7 +56,10 @@
   "defaults": {
     "harness": "claude-code",
     "model": "claude-sonnet-5",
-    "pipeline": "standard-phase"
+    "pipeline": "standard-phase",
+    "chores": [
+      "deslop"
+    ]
   },
   "resources": {
     "lane": {
@@ -81,6 +84,13 @@
         "test-suite"
       ],
       "timeout_s": 1800
+    }
+  },
+  "chores": {
+    "deslop": {
+      "skill": "deslop-comments",
+      "prompt": "Rewrite the comments and doc blocks this phase wrote into Simple English, and delete the ones that should not be there. Comment-only: no renames, no logic changes.",
+      "description": "The comment-hygiene pass, on the diff that is about to merge."
     }
   },
   "nodes": [
