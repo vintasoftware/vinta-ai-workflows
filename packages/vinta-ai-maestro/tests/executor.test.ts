@@ -906,6 +906,20 @@ describe('the git verbs', () => {
     await expect(rig.invoke('p1', 'open_pr', { draft: true })).resolves.toEqual({})
     // And no remote: pushing is a documented no-op rather than a failure.
     await expect(rig.invoke('p1', 'git_push')).resolves.toEqual({})
+
+    // **The refusal is on the record.** `openPullRequest` never throws — a
+    // missing `gh` must not fail a finished run — but the result used to be
+    // discarded, which turned "never fails" into "never tells you": a phase in
+    // a real run completed with no pull request and the only way to notice was
+    // a gap in a list on the forge.
+    const prs = rig.journal
+      .events(RUN_ID)
+      .filter((event) => event.type === 'node_pr' && event.nodeId === 'p1')
+    expect(prs).toHaveLength(1)
+    expect((prs[0]?.payload as { opened: boolean }).opened).toBe(false)
+    expect((prs[0]?.payload as { reason?: string }).reason).toBeDefined()
+    // Identifiers only: `gh`'s own words are composed from its output (§11).
+    expect(JSON.stringify(prs[0]?.payload)).not.toContain('no-such-gh')
   })
 
   /**

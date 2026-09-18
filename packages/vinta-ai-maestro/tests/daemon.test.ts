@@ -55,6 +55,7 @@ import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { CodexAdapter } from '../src/harness/codex.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
 import { EventPageSchema, StartRunResponseSchema } from '../src/daemon/schemas.ts'
+import { PtyServerFrameSchema } from '../src/daemon/pty-frames.ts'
 import type {
   RunStartOutcome,
   RunStartPort,
@@ -1120,9 +1121,122 @@ describe('event stream', () => {
     expect(Math.min(...ids)).toBeGreaterThan(cursor)
   })
 
-  it('refuses an upgrade for a run it does not serve', async () => {
+  /**
+   * The `serve` bug, as a test.
+   *
+   * `serve` starts no runs, so the registry it holds is *empty* — and the
+   * upgrade used to ask the registry whether the run existed. Every run it
+   * served was therefore "unknown" to the socket while every HTTP read of that
+   * same run answered 200, because those go to the journal. One morning's
+   * `serve` logged 472 identical `ws.refused` / `unknown_run` warnings for a
+   * run that was on disk and `done`, one per reconnect, for as long as the tab
+   * was open.
+   *
+   * So the run here is deliberately one nothing registered *and* one that has
+   * ended: the exact state the operator's was in.
+   */
+  it('opens a socket for a run the journal has and this process never started', async () => {
     const r = await rig()
+    const other = 'run-from-a-previous-process'
+    r.journal.createRun(other, makeWorkflow())
+    const ended = r.journal.append({
+      runId: other,
+      type: 'run_ended',
+      payload: { status: 'done' },
+    })
+
+    const connection = await connect(r.daemon, `?run=${other}&token=${r.daemon.token}`)
+    if (!('socket' in connection)) throw new Error(`handshake refused with ${connection.status}`)
+
+    const frame = EventFrameSchema.parse(
+      await until(() => connection.frames[0], 'the backlog frame'),
+    )
+    expect(frame.runId).toBe(other)
+    expect(frame.events.map((event) => event.type)).toEqual([
+      'run_started',
+      'node_registered',
+      'node_registered',
+      'run_ended',
+    ])
+    expect(frame.cursor).toBe(ended)
+
+    // And then it goes quiet, which is all a finished run's socket owes
+    // anybody: the journal has no more, so the tail has nothing to send. That
+    // is the same thing a live run between turns does.
+    await sleep(40)
+    expect(connection.frames).toHaveLength(1)
+  })
+
+  /**
+   * The other half of the same fix: a run still `running` on disk that this
+   * process is not driving — a daemon restarted under a run, or a second
+   * `serve` opened on the same store. The socket is a reader, and the journal
+   * keeps being written, so it keeps delivering.
+   */
+  it('tails a journal-only run that is still being written', async () => {
+    const r = await rig()
+    const other = 'run-nobody-here-drives'
+    r.journal.createRun(other, makeWorkflow())
+
+    const connection = await connect(r.daemon, `?run=${other}&token=${r.daemon.token}`)
+    if (!('socket' in connection)) throw new Error(`handshake refused with ${connection.status}`)
+    const backlog = await until(() => connection.frames[0], 'the backlog frame')
+
+    const late = r.journal.append({
+      runId: other,
+      nodeId: 'a',
+      type: 'node_status',
+      payload: { status: 'running' },
+    })
+    const live = EventFrameSchema.parse(
+      await until(() => connection.frames.find((frame) => frame !== backlog), 'a live frame'),
+    )
+    expect(live.events.map((event) => event.id)).toEqual([late])
+  })
+
+  it('still refuses an upgrade for a run neither the journal nor the registry has', async () => {
+    const r = await rig()
+    // Widening the lookup is not the same as removing it. This one really is a
+    // typo in the fragment, and handing it a socket that could never carry a
+    // frame would be a worse answer than a 404.
     expect(await connect(r.daemon, `?run=nope&token=${r.daemon.token}`)).toEqual({ status: 404 })
+  })
+
+  /**
+   * Degrade, do not pretend. The socket now opens on a run with no scheduler,
+   * so the channel that needs one has to say so — and say *which* thing is
+   * missing. `unknown_node` would send the operator hunting through a node
+   * list; the run is what has nothing to take over, anywhere in it.
+   */
+  it('refuses a terminal takeover on a run this daemon is not driving', async () => {
+    const r = await rig()
+    const other = 'run-with-no-scheduler'
+    r.journal.createRun(other, makeWorkflow())
+
+    const connection = await connect(r.daemon, `?run=${other}&token=${r.daemon.token}`)
+    if (!('socket' in connection)) throw new Error(`handshake refused with ${connection.status}`)
+
+    connection.socket.send(
+      JSON.stringify({ channel: 'pty', type: 'attach', nodeId: 'a', cols: 80, rows: 24 }),
+    )
+    const refusal = await until(
+      () =>
+        connection.frames.find(
+          (frame) => PtyServerFrameSchema.safeParse(frame).data?.type === 'error',
+        ),
+      'the pty refusal',
+    )
+    expect(PtyServerFrameSchema.parse(refusal)).toEqual({
+      channel: 'pty',
+      type: 'error',
+      reason: 'unknown_run',
+    })
+
+    // The events half of the same socket is untouched by that refusal.
+    const events = EventFrameSchema.parse(
+      await until(() => connection.frames.find((frame) => frame.channel === 'events'), 'events'),
+    )
+    expect(events.events.map((event) => event.type)).toContain('run_started')
   })
 })
 

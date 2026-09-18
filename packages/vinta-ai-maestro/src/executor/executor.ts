@@ -83,6 +83,7 @@ import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipelin
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readVerdict } from '../prompts/index.ts'
 import type { Node, Workflow } from '../types.ts'
+import { composePrBody, readPrContext, type PrText } from '../integration/pr-body.ts'
 import { createOsNotifier, notifyReason, type Notifier } from './notify.ts'
 import {
   renderPhase,
@@ -449,8 +450,111 @@ export class RunEffectExecutor implements EffectExecutor {
 
   /** One PR per node, on that node's own base. Never throws — see `pr.ts`. */
   async #openPr(nodeId: string, params: Readonly<Record<string, unknown>>): Promise<EffectOutcome> {
-    await this.#options.integrator.openPr(nodeId, { draft: params['draft'] === true })
+    const { integrator, journal, runId } = this.#options
+    const base = integrator.base(nodeId)
+
+    // **A base nothing pushed is a PR nobody can open.** `git_push` pushes the
+    // node's own branch and only that, so a phase based on an `integ-<id>`
+    // branch — which is every phase with more than one dependency — asked the
+    // forge to open against a ref it had never seen. `gh` refused, the refusal
+    // was swallowed (see below), and the phase completed with no pull request
+    // and nothing anywhere saying so. Exactly one node in the run that
+    // surfaced this had two dependencies, and it was exactly the one with no PR.
+    //
+    // Only the integration branch: a `base_branch` is the operator's own and a
+    // single-dependency base is another phase's branch, which that phase
+    // pushed when it integrated — before this one could start, because it is a
+    // dependency.
+    if (base.kind === 'integration') await this.#pushBranch(nodeId, base.branch)
+
+    const result = await integrator.openPr(nodeId, {
+      draft: params['draft'] === true,
+      text: this.#prText(nodeId),
+    })
+
+    // **Recorded rather than discarded.** `openPullRequest` never throws by
+    // design — reporting a finished run is not the work the run did, and a
+    // missing `gh` must not turn hours of completed phases into a failure — but
+    // the result was then dropped on the floor, which turned "never fails" into
+    // "never tells you". A PR that did not open is now as visible as one that
+    // did, and the body's provenance with it: an operator reading a thin PR
+    // should be able to see it was composed rather than written.
+    journal.append({
+      runId,
+      nodeId,
+      type: 'node_pr',
+      payload: {
+        opened: result.opened,
+        base: result.base,
+        head: result.head,
+        ...(result.url === undefined ? {} : { url: result.url }),
+        ...(result.reason === undefined ? {} : { reason: result.reason }),
+      },
+    })
     return {}
+  }
+
+  /** Pushes one branch to the lane's remote. Silent where there is no remote. */
+  async #pushBranch(nodeId: string, branch: string): Promise<void> {
+    const lane = this.#lane(nodeId)
+    const remotes = await gitLines(lane.path, ['remote'])
+    const remote = remotes[0]
+    if (remote === undefined) return
+    await gitOk(lane.path, ['push', remote, branch])
+  }
+
+  /**
+   * What this phase's pull request says: the agent's own context file when
+   * there is one, else a body composed from the run's record.
+   *
+   * Read from the lane rather than the integration worktree, because the lane
+   * is where the phase worked and where an agent writing about its own change
+   * would have put the file.
+   */
+  #prText(nodeId: string): PrText {
+    const node = this.#nodes.get(nodeId)
+    const planId = this.#options.workflow.id
+    const written = readPrContext(this.#lane(nodeId).path, planId, nodeId)
+    if (written !== null) return written
+    if (node === undefined) throw new Error(`unknown node "${nodeId}"`)
+
+    const events = this.#options.journal.events(this.#options.runId)
+
+    // Last result per gate, in the order the node declared them: an early red
+    // that a later round fixed is history, and the PR is about what landed.
+    const finals = new Map<string, number>()
+    for (const event of events) {
+      if (event.type === 'gate_result' && event.nodeId === nodeId) {
+        finals.set(event.payload.gate, event.payload.exit_code)
+      }
+    }
+    // Counted in one pass rather than three filters, because `filter` does not
+    // narrow the payload union for the `map` that follows it.
+    let attempts = 1
+    const conflicts: { paths: readonly string[]; rounds: number }[] = []
+    for (const event of events) {
+      if (event.type === 'node_error' && event.nodeId === nodeId) attempts += 1
+      if (event.type === 'node_conflict' && event.nodeId === nodeId) {
+        conflicts.push({ paths: event.payload.paths, rounds: event.payload.rounds })
+      }
+    }
+
+    return composePrBody({
+      nodeId,
+      name: node.name,
+      promptRef: node.prompt_ref,
+      branch: this.#options.integrator.nodeBranch(nodeId),
+      base: this.#options.integrator.base(nodeId).branch,
+      dependsOn: node.depends_on.map((dep) => dep.node),
+      gates: node.gates
+        .filter((gate) => finals.has(gate))
+        .map((gate) => ({ gate, exitCode: finals.get(gate) as number })),
+      // One more than the failures recorded: an attempt that never failed
+      // journals no `node_error`, so a clean phase counts 1.
+      attempts,
+      conflicts,
+      touches: node.touches,
+    })
   }
 
   // -------------------------------------------------------------------------

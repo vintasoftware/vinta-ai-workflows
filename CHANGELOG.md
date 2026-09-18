@@ -548,6 +548,38 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A pull request said nothing but the plan anchor.** The daemon opened PRs
+  with `title: node.name` and `body: node.prompt_ref` — one line, a link to a
+  heading. It had no idea the `prs-context` mechanism existed: there was not a
+  single reference to it in the package, so the rich path the skills use
+  (`open-pr-from-context`, the project's own PR template, inline review
+  comments) was never reached from a run. `open_pr` now reads the phase's
+  `.vinta-ai-workflows/prs-context/<plan>/phase-<node>.md` when the agent wrote
+  one, and the implementer is asked to write it — the 5–15 line summary it
+  already produces, put where a human will read it instead of only the
+  transcript. With no context file the body is composed from the run's own
+  record: the brief, what the phase is based on and why that is not the default
+  branch, its declared surface, its gates, how many attempts it took, and any
+  merge conflicts an agent resolved on the way in — which nobody reviews.
+
+- **A phase with two dependencies could never open a pull request.** Its base is
+  an `integ-<id>` branch and `git_push` pushes only the node's own branch, so
+  `gh` was asked to open against a ref the forge had never seen. It refused, the
+  refusal was discarded, and the phase completed with no PR and nothing saying
+  so — in one observed run, the single node with two dependencies was the single
+  node with no PR. The integration base is pushed before the PR is opened, and
+  every outcome is journalled as `node_pr`, so a PR that did not open is now as
+  visible as one that did.
+
+- **A conflict resolution was never gated.** `IntegratorOptions.verify` has
+  existed as long as the conflict loop, documented as "a resolution that does
+  not build is not a resolution", and nothing ever supplied it. Six merges in
+  one run were resolved by an agent and went straight in — ungated — to become
+  the base the next phase built on, while the phases either side were gated to
+  the hilt. The union of the conflicting nodes' declared gates now runs in the
+  integration worktree, with that worktree's environment, and a red gate spends
+  a fix round instead of shipping.
+
 - **A conflict fixer that committed its own resolution failed the phase.** An
   agent told to resolve a merge conflict reaches for the sequence a person
   would — abort, merge again, resolve, commit — and the orchestrator then

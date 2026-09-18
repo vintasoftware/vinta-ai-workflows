@@ -1385,6 +1385,144 @@ describe('standard-phase under the scheduler', () => {
     expect(slotFor('review')).toEqual(new Set())
     expect(slotFor('reviewer')).toEqual(new Set(['review']))
   })
+
+  /**
+   * The complaint a real 14-hour run produced: three `node_error` events, all
+   * three reading `pipeline ended in state "failed"`, which is the name of a
+   * state and not a cause. `standard-phase` has two edges into `failed` — a red
+   * gate with the budget spent, and a reviewer that kept saying no — and from
+   * the state id alone they are the same sentence. An operator learned that a
+   * phase failed twice and nothing about why, which is the complaint the event
+   * was added to answer one level out.
+   *
+   * Both shapes are driven here in one test, because what is being asserted is
+   * that they *differ*: either reason alone would have passed against the old
+   * text too.
+   */
+  it('says which of the two ways a phase reached `failed` it took', async () => {
+    const reasonsFor = (r: Rig, nodeId: string): string[] =>
+      r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'node_error' && event.nodeId === nodeId)
+        .map((event) => String((event.payload as { reason: unknown }).reason))
+
+    // A gate that stays red under a reviewer that keeps passing: review → gate
+    // → fix, twice, and then `t-gate-exhausted`.
+    const red = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { id: 'unit', exit_code: 2 } } },
+      },
+    })
+    expect((await red.scheduler.run()).statuses).toEqual({ a: 'failed' })
+
+    // A reviewer that never passes: review → fix, twice, and then
+    // `t-review-exhausted`. The gate never runs, so there is no gate to name.
+    const rejected = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
+    })
+    expect((await rejected.scheduler.run()).statuses).toEqual({ a: 'failed' })
+
+    expect(reasonsFor(red, 'a')).toEqual([
+      'pipeline ended in state "failed" via "t-gate-exhausted"; gate "unit" exited 2; ' +
+        '2 of 2 fix rounds spent',
+    ])
+    expect(reasonsFor(rejected, 'a')).toEqual([
+      'pipeline ended in state "failed" via "t-review-exhausted"; review verdict "fail"; ' +
+        '2 of 2 fix rounds spent',
+    ])
+
+    // §11: a gate id and an exit code, never what the gate printed. The
+    // reviewer's own words are in the transcript and reach nothing here — the
+    // verdict is one of two fixed strings.
+    for (const reason of [...reasonsFor(red, 'a'), ...reasonsFor(rejected, 'a')]) {
+      expect(reason).not.toContain('log_ref')
+      expect(reason).not.toContain(red.laneRoot)
+    }
+
+    expectDrained(red)
+    expectDrained(rejected)
+  })
+
+  /**
+   * A gate that ran out of time exits `TIMEOUT_EXIT` (124), which is the gate
+   * runner's own convention and means nothing to the person reading the
+   * journal. "exited 124" and "exited 2" send them to the same place; "timed
+   * out" and "exited 2" do not.
+   */
+  it('says a gate timed out rather than quoting the runner’s exit convention', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { id: 'unit', exit_code: 124, status: 'timed_out' } } },
+      },
+    })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'failed' })
+    expect(
+      r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'node_error')
+        .map((event) => String((event.payload as { reason: unknown }).reason)),
+    ).toEqual([
+      'pipeline ended in state "failed" via "t-gate-exhausted"; gate "unit" timed out; ' +
+        '2 of 2 fix rounds spent',
+    ])
+    expectDrained(r)
+  })
+
+  /**
+   * The stale-fact guard, on a pipeline of its own because `standard-phase`
+   * cannot reach the shape: a green gate there goes straight to `integrate`
+   * and the phase is done. Any pipeline that keeps going after a gate passes
+   * can reach it, and there the last gate that ran is a gate that had nothing
+   * to do with the failure — naming it would read as evidence.
+   */
+  it('leaves a gate that passed out of the reason', async () => {
+    const workflow = makeWorkflow([node('a', [], { gates: ['unit'] })], {
+      resources: {
+        lane: { capacity: 2, kind: 'worktree' },
+        'test-suite': { capacity: 1, kind: 'semaphore' },
+      },
+      gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+      pipelines: {
+        'green-gate-then-fail': {
+          states: [
+            {
+              id: 'gate',
+              name: 'Gate',
+              position: { x: 0, y: 0 },
+              onEnter: [{ id: 'e-gate', definitionId: 'run_gate', params: {} }],
+            },
+            {
+              id: 'failed',
+              name: 'Failed',
+              position: { x: 200, y: 0 },
+              data: { outcome: 'failed' },
+            },
+          ],
+          transitions: [{ id: 't-gave-up', from: 'gate', to: 'failed' }],
+          initialStateIds: ['gate'],
+          finalStateIds: ['failed'],
+        },
+      },
+      pipeline: 'green-gate-then-fail',
+    })
+    const r = rig(workflow, { outcomes: { 'e-gate': { facts: { gate: { id: 'unit', exit_code: 0 } } } } })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'failed' })
+    expect(r.calls.some((call) => call.effect === 'e-gate')).toBe(true)
+
+    // The gate ran and it is not in the sentence. The fix-round count is,
+    // because `0 of 2` is itself the news: nothing was even tried.
+    expect(
+      r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'node_error')
+        .map((event) => String((event.payload as { reason: unknown }).reason)),
+    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 2 fix rounds spent'])
+    expectDrained(r)
+  })
 })
 
 // ---------------------------------------------------------------------------

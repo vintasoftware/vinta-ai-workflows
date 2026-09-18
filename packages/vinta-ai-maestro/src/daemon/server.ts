@@ -147,7 +147,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     void respond(app, req, res, log)
   })
   server.on('upgrade', (req, socket, head) => {
-    upgrade({ req, socket, head, token, runs, sockets, stream, log })
+    upgrade({ req, socket, head, token, journal: options.journal, runs, sockets, stream, log })
   })
 
   /**
@@ -212,6 +212,8 @@ interface UpgradeContext {
   readonly socket: Duplex
   readonly head: Buffer
   readonly token: string
+  /** What says a run *exists*. The registry below only says whether it is live. */
+  readonly journal: Journal
   readonly runs: ReadonlyMap<string, DaemonRun>
   readonly sockets: WebSocketServer
   readonly stream: EventStream
@@ -220,6 +222,11 @@ interface UpgradeContext {
 
 /**
  * Auth first, then the run, then the protocol switch. Never the other way round.
+ *
+ * "Then the run" means *the journal has it*, not *this process is driving it*.
+ * A socket is how a run is read live, and a run stays readable long after the
+ * scheduler that drove it is gone (§5.3). What a finished run no longer has is
+ * anything to steer, which is the PTY channel's problem and is handled there.
  *
  * Every refusal is recorded with its *reason*, because from the browser they
  * are one symptom: the socket closes and the run view stops updating. A bad
@@ -241,10 +248,26 @@ function upgrade(context: UpgradeContext): void {
   }
 
   const runId = url.searchParams.get('run') ?? ''
-  if (!context.runs.has(runId)) {
-    // The commonest of the three, and the most confusing: a run the journal
-    // holds but this process is not driving — a reload after a restart — looks
-    // exactly like a typo in the fragment.
+  // The journal says whether a run *exists*; the registry only says whether it
+  // is *live*. This is `resolveRead`'s sibling in `api.ts`, and it is here for
+  // the same reason: that one used to demand a registry entry as well as a
+  // journal row, so every finished run answered 404 to every read.
+  //
+  // This half was worse, because it was not only finished runs. `serve`
+  // registers no runs of its own, so the registry it holds is *empty* and
+  // every run it served was "unknown" to this check — while every HTTP read of
+  // that same run worked, because those resolve against the journal. One
+  // morning's `serve` logged 472 identical `ws.refused` / `unknown_run`
+  // warnings for a run that was on disk and `done`: the operator had the
+  // transcripts in front of them and a socket that would not open, and the
+  // browser's reconnect timer kept asking for as long as the tab was up.
+  //
+  // A run the journal does not have is still refused — that one really is a
+  // typo in the fragment, and answering it with a socket that would never
+  // carry a frame would be worse than a 404. What changed is only which
+  // question is asked.
+  const live = context.runs.has(runId)
+  if (!live && context.journal.run(runId) === undefined) {
     log.warn('ws.refused', { reason: 'unknown_run', run: runId })
     return refuse(socket, 404, 'Not Found')
   }
@@ -256,9 +279,12 @@ function upgrade(context: UpgradeContext): void {
   }
 
   context.sockets.handleUpgrade(req, socket, head, (ws) => {
-    log.debug('ws.attached', { run: runId, since })
+    log.debug('ws.attached', { run: runId, since, live })
     ws.once('close', () => log.debug('ws.detached', { run: runId }))
-    context.stream.attach(ws, runId, since)
+    // Read through the map rather than closed over `live`, so a run resumed on
+    // this daemon after the tab was already open becomes steerable on the
+    // socket it already holds instead of after a reconnect.
+    context.stream.attach(ws, runId, since, () => context.runs.has(runId))
   })
 }
 

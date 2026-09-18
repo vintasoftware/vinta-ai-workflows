@@ -322,6 +322,27 @@ interface NodePayloads {
    * Identifiers, paths and a count (§11) — never the conflicted hunks, which
    * are repository content and stay in the worktree.
    */
+  /**
+   * The pull request a finished phase opened, or did not.
+   *
+   * `openPullRequest` never throws — reporting a finished run is not the work
+   * the run did, and a missing or unauthenticated `gh` must not turn hours of
+   * completed phases into a failed run. But its result was discarded, so
+   * "never fails" had quietly become "never tells you": one phase in an
+   * observed run completed with no pull request, and the only way to find out
+   * was to notice the gap in a list on the forge.
+   *
+   * A URL, a branch pair and a refusal code. The refusal's own `message` is
+   * deliberately not carried: it is composed from whatever `gh` said, and this
+   * row is served over the API.
+   */
+  node_pr: {
+    readonly opened: boolean
+    readonly base: string
+    readonly head: string
+    readonly url?: string
+    readonly reason?: 'unavailable' | 'failed'
+  }
   node_conflict: {
     readonly where: 'base' | 'wave'
     /** The branch the merge was made on. */

@@ -70,15 +70,31 @@ export class EventStream {
    * Tails `runId` onto `socket`, starting after `since`. The backlog is
    * flushed before this returns, so a reconnecting client is caught up in one
    * frame rather than after a poll interval.
+   *
+   * The events half asks nothing about the run beyond its id: the journal
+   * holds every event a finished run ever produced, so a socket opened on one
+   * replays it and then simply goes quiet, which is the same thing a live run
+   * that is between turns does.
+   *
+   * `isLive` is for the other half. It says whether the daemon is driving this
+   * run *right now*, and `PtyChannel` uses it only to name the refusal an
+   * absent takeover target already earns. It defaults to "live" because it can
+   * only ever change an error token, never whether an attach is allowed — the
+   * registry decides that, and it is the one thing that can.
    */
-  attach(socket: WebSocket, runId: string, since: number): void {
+  attach(
+    socket: WebSocket,
+    runId: string,
+    since: number,
+    isLive: () => boolean = () => true,
+  ): void {
     const subscription: Subscription = { socket, runId, cursor: since }
     this.#subscriptions.add(subscription)
     // The PTY half of the same socket. This is the one place a `PtyChannel` is
     // ever built, and it is downstream of the upgrade's token check — which is
     // what makes "no shell without the token" a property of the code path
     // rather than a policy someone has to remember.
-    const terminal = new PtyChannel(socket, runId, this.#takeovers)
+    const terminal = new PtyChannel(socket, runId, this.#takeovers, isLive)
     this.#terminals.add(terminal)
     socket.on('close', () => {
       this.#subscriptions.delete(subscription)
