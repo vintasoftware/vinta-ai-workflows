@@ -548,6 +548,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A pipeline that could not progress was journalled as the word "Error".** The
+  interpreter composes an id-safe reason for exactly this case — which state it
+  could not leave, and which trigger failed to match — and the scheduler threw
+  it as a bare `Error`. `failureReason` reports an unrecognised error by its
+  name, so the sentence was discarded at the one moment it was worth keeping.
+  It is a `PipelineStuckError` now, carrying the state, and the reason survives
+  into the journal. The same shape as the non-zero git exit, fixed the same way.
+
 - **A pull request said nothing but the plan anchor.** The daemon opened PRs
   with `title: node.name` and `body: node.prompt_ref` — one line, a link to a
   heading. It had no idea the `prs-context` mechanism existed: there was not a

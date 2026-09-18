@@ -92,7 +92,12 @@ import { GitCommandError } from '../integration/git.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
+import {
+  createPipelineRun,
+  PipelineStuckError,
+  type PipelineRun,
+  type StepResult,
+} from '../pipeline/interpreter.ts'
 import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
@@ -528,7 +533,13 @@ interface NodeState {
  * error message.
  */
 function failureReason(error: unknown): string {
-  if (error instanceof PromptError || error instanceof SpawnFatal || error instanceof LaneUnusable) {
+  if (
+    error instanceof PromptError ||
+    error instanceof SpawnFatal ||
+    error instanceof LaneUnusable ||
+    // The interpreter composed this one out of a state id and a trigger id.
+    error instanceof PipelineStuckError
+  ) {
     return String(error.message)
   }
   // A subcommand and an exit status, which is the same kind of thing every
@@ -1638,7 +1649,10 @@ export class Scheduler {
           ...(result.via === undefined ? {} : { via: result.via }),
         }
       }
-      if (result.kind === 'stuck') throw new Error(result.reason)
+      // Named rather than bare, so the reason reaches the journal: this used to
+      // be reported as the word "Error" and nothing else. See
+      // `PipelineStuckError`.
+      if (result.kind === 'stuck') throw new PipelineStuckError(result.state, result.reason)
 
       // §9's pause, taken between turns: the lane stays, the gate pools are
       // already back, and the node waits on the same promise a human gate does.

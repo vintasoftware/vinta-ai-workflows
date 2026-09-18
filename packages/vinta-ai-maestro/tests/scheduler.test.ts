@@ -427,6 +427,21 @@ const SOLO = {
 }
 
 /** Reaches a final state the host marked as failure. */
+/**
+ * A pipeline with nowhere to go: `work` has one outgoing transition and a guard
+ * that can never hold, so the interpreter gets stuck rather than reaching a
+ * final state. The shape a plan defect takes at runtime.
+ */
+const STUCK = {
+  states: [
+    { id: 'work', name: 'Work', position: { x: 0, y: 0 }, onEnter: [spawn('e-work', 'implementer')] },
+    { id: 'done', name: 'Done', position: { x: 200, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [{ id: 't-never', from: 'work', to: 'done', guard: "review.verdict == 'nope'" }],
+  initialStateIds: ['work'],
+  finalStateIds: ['done'],
+}
+
 const EXPLODE = {
   states: [
     { id: 'work', name: 'Work', position: { x: 0, y: 0 }, onEnter: [spawn('e-work', 'implementer')] },
@@ -625,6 +640,7 @@ function makeWorkflow(
     pipelines: options.pipelines ?? {
       solo: SOLO,
       explode: EXPLODE,
+      stuck: STUCK,
       long: LONG,
       gated: GATED,
       'gate-work': GATE_WORK,
@@ -2850,6 +2866,38 @@ describe('a failed phase the operator can retry', () => {
 
     r.scheduler.answer('a', { human: { answer: 'stop' } })
     await running
+    expectDrained(r)
+  })
+
+  /**
+   * A pipeline that cannot progress said `"Error"` and nothing else.
+   *
+   * The interpreter composes an id-safe sentence for exactly this — which state,
+   * and which trigger failed to match — and the scheduler threw it as a bare
+   * `Error`. `failureReason` reports an unrecognised error by its *name*, so the
+   * sentence was discarded at the one moment it was worth keeping. The same
+   * shape as the non-zero git exit `GitCommandError` was added for.
+   */
+  it('journals which state a stuck pipeline could not leave', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'stuck' }), { onFailure: 'stop' })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    const reason = String(report.failures['a'])
+    expect(reason).toContain('work')
+    expect(reason).not.toBe('Error')
+
+    const errors = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_error' && event.nodeId === 'a')
+    expect(errors).toHaveLength(1)
+    const journalled = String((errors[0]?.payload as { reason: string }).reason)
+    // The state it could not leave, rather than the word "Error".
+    expect(journalled).toContain('work')
+    expect(journalled).not.toBe('Error')
+    // §11: a state id, never the guard expression or anything it read.
+    expect(journalled).not.toContain('verdict ==')
     expectDrained(r)
   })
 
