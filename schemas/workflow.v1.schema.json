@@ -368,6 +368,16 @@
           "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9-]*$"
         },
+        "chores": {
+          "default": [],
+          "description": "The chores every phase runs unless it names its own. Most chores are run-wide — a comment pass, a changelog entry — and repeating them on every node is how one phase ends up quietly missing one.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
         "max_session_turns": {
           "default": 12,
           "description": "Turns one reused session slot may take before the next spawn starts fresh (§15.5). A shared session only ever grows; without a ceiling a long node eventually dies on a context-window error that reads as a broken harness.",
@@ -514,6 +524,60 @@
         "additionalProperties": false
       }
     },
+    "chores": {
+      "default": {},
+      "description": "Agent turns a phase runs beside its gates, by id. A gate judges and a chore changes the tree, so they are separate registries — see ChoreSchema.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "description": "The instruction, inline. Exactly one of `prompt` and `prompt_ref` is required.",
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt_ref": {
+            "description": "Where the instruction lives, in `prompt_ref` form (`ai-plans/PLAN.md#deslop`), resolved by the same resolver as a phase brief. Prefer it over `prompt` for anything longer than a sentence: it keeps the text reviewable in the plan rather than in a JSON string.",
+            "type": "string",
+            "minLength": 1
+          },
+          "skill": {
+            "description": "A skill the agent should use, named in the prompt rather than passed as a harness flag — codex and opencode have no skills, and a chore that only works on one harness is a chore that silently does nothing on the other two.",
+            "type": "string",
+            "minLength": 1
+          },
+          "session": {
+            "default": "main",
+            "description": "The session slot this turn continues (§15). `main` — the default — is the implementer’s: the agent that wrote the phase already holds the brief, the diff and its own reasons, and that is most of what makes a chore cheap. A slot no other effect names starts a fresh session every time and pays for a cold context.",
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "description": "Overrides the model the phase’s implementer would otherwise run at. A mechanical pass does not need the tier the phase was staffed at.",
+            "type": "string",
+            "minLength": 1
+          },
+          "on_failure": {
+            "default": "continue",
+            "description": "`continue` — the default — journals a failed chore and moves on to the gates. A chore is polish, and losing an implemented phase to one that timed out is the worse trade. `fail` is for a chore whose output the phase is not correct without.",
+            "type": "string",
+            "enum": [
+              "continue",
+              "fail"
+            ]
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "nodes": {
       "minItems": 1,
       "type": "array",
@@ -576,6 +640,15 @@
           },
           "gates": {
             "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "chores": {
+            "description": "The chores this phase runs, in order. Optional rather than defaulted, and that is the whole of its override rule: absent takes `defaults.chores`, and a list — `[]` included — replaces it. Merging instead would leave no way to skip a run-wide chore on the one phase it makes no sense for.",
             "type": "array",
             "items": {
               "type": "string",
@@ -680,6 +753,7 @@
                         "enum": [
                           "spawn_agent",
                           "run_gate",
+                          "run_chore",
                           "git_branch",
                           "git_merge",
                           "git_push",
@@ -744,6 +818,7 @@
                         "enum": [
                           "spawn_agent",
                           "run_gate",
+                          "run_chore",
                           "git_branch",
                           "git_merge",
                           "git_push",
@@ -864,6 +939,7 @@
                         "enum": [
                           "spawn_agent",
                           "run_gate",
+                          "run_chore",
                           "git_branch",
                           "git_merge",
                           "git_push",

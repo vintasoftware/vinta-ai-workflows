@@ -137,6 +137,35 @@ describe('cross-reference validation', () => {
     expect(expectInvalid(doc)).toContain('nodes[0].gates[1]: unknown gate "smoke"')
   })
 
+  it('locates an unknown chore on a node', () => {
+    const doc = golden()
+    doc.chores = { deslop: { prompt: 'Rewrite the comments.' } }
+    doc.nodes[0].chores = ['deslop', 'changelog']
+
+    expect(expectInvalid(doc)).toContain('nodes[0].chores[1]: unknown chore "changelog"')
+  })
+
+  it('locates an unknown chore in the run-wide defaults', () => {
+    const doc = golden()
+    doc.defaults.chores = ['deslop']
+
+    expect(expectInvalid(doc)).toContain('defaults.chores[0]: unknown chore "deslop"')
+  })
+
+  it('refuses a chore with no instruction at all', () => {
+    const doc = golden()
+    doc.chores = { deslop: { skill: 'deslop-comments' } }
+
+    expect(expectInvalid(doc)).toContain('declares neither `prompt` nor `prompt_ref`')
+  })
+
+  it('refuses a chore that declares both instructions, since nothing says which wins', () => {
+    const doc = golden()
+    doc.chores = { deslop: { prompt: 'Rewrite them.', prompt_ref: 'ai-plans/PLAN.md#deslop' } }
+
+    expect(expectInvalid(doc)).toContain('declares both `prompt` and `prompt_ref`')
+  })
+
   it('locates a gate requiring an undeclared resource pool', () => {
     const doc = golden()
     doc.gates.unit.requires = ['gpu']

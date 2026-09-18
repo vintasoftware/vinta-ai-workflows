@@ -167,6 +167,13 @@ export class RunEffectExecutor implements EffectExecutor {
         return this.#reviewed(nodeId, params)
       case 'run_gate':
         return await this.#runGate(nodeId, params)
+      case 'run_chore':
+        // The scheduler ran the turns — it owns spawning, exactly as it does
+        // for `spawn_agent` — and a chore states no fact a guard reads. There
+        // is deliberately nothing here rather than nothing at all: the verb is
+        // in the catalog, so an injected executor that never hears of chores
+        // still answers for one.
+        return {}
       case 'git_branch':
         return await this.#branch(nodeId, params)
       case 'git_merge':
