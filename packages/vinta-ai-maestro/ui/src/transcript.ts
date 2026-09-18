@@ -121,12 +121,24 @@ export const TRANSCRIPT_KINDS: readonly TranscriptEntry['type'][] = [...AGENT_KI
  * for why it is stored that way. Absent on every line written before this
  * existed, which is the case this has to survive rather than reject.
  */
-const BySchema = z.object({ role: z.string(), slot: z.string().optional() })
+const BySchema = z.object({
+  role: z.string(),
+  slot: z.string().optional(),
+  chore: z.string().optional(),
+})
 
-function attribution(raw: unknown): { role: string; slot: string | null } | null {
+function attribution(
+  raw: unknown,
+): { role: string; slot: string | null; chore: string | null } | null {
   if (typeof raw !== 'object' || raw === null || !('by' in raw)) return null
   const parsed = BySchema.safeParse(raw.by)
-  return parsed.success ? { role: parsed.data.role, slot: parsed.data.slot ?? null } : null
+  return parsed.success
+    ? {
+        role: parsed.data.role,
+        slot: parsed.data.slot ?? null,
+        chore: parsed.data.chore ?? null,
+      }
+    : null
 }
 
 /** Who said it. The operator's own steering is never attributed to the agent. */
@@ -171,6 +183,14 @@ export interface EntryView {
   readonly role: string | null
   /** The session slot (§15), where the turn ran on one. */
   readonly slot: string | null
+  /**
+   * Which chore this turn was running, on a `chore` role and nowhere else.
+   *
+   * The role alone is not enough to band by here: a phase runs its chores one
+   * after another on the same slot, so without the id three of them read as one
+   * long turn by somebody called Chore.
+   */
+  readonly chore: string | null
 }
 
 const AUTHOR_LABELS: Readonly<Record<Author, string>> = {
@@ -184,7 +204,13 @@ export function present(raw: unknown): EntryView {
   const view = build(raw)
   const by = attribution(raw)
   if (by === null) return view
-  return { ...view, role: by.role, slot: by.slot, label: ATTRIBUTED[view.kind] ?? view.label }
+  return {
+    ...view,
+    role: by.role,
+    slot: by.slot,
+    chore: by.chore,
+    label: ATTRIBUTED[view.kind] ?? view.label,
+  }
 }
 
 /**
@@ -218,6 +244,7 @@ function build(raw: unknown): EntryView {
       shape: 'prose',
       role: null,
       slot: null,
+      chore: null,
     }
   }
   const entry = parsed.data
@@ -314,6 +341,7 @@ function row(
     shape: options.shape ?? 'prose',
     role: null,
     slot: null,
+    chore: null,
   }
 }
 
@@ -351,11 +379,22 @@ export function fold(entries: readonly unknown[], offset: number): readonly Row[
     const last = rows.at(-1)
     // Same kind *and* same author. Two agents thinking in sequence is two
     // thoughts, and merging them would attribute half of one to the other.
-    if (GROUPED.has(view.kind) && last?.views.at(-1)?.kind === view.kind && last.role === view.role) {
+    if (
+      GROUPED.has(view.kind) &&
+      last?.views.at(-1)?.kind === view.kind &&
+      last.role === view.role &&
+      last.chore === view.chore
+    ) {
       last.views.push(view)
       continue
     }
-    rows.push({ at: offset + index, shape: view.shape, role: view.role, views: [view] })
+    rows.push({
+      at: offset + index,
+      shape: view.shape,
+      role: view.role,
+      chore: view.chore,
+      views: [view],
+    })
   }
   return rows
 }
@@ -367,6 +406,8 @@ export interface Row {
   readonly shape: Shape
   /** Whose row it is, so the list can say when the author changes. */
   readonly role: string | null
+  /** Which chore, where the author is one — two chores are two turns. */
+  readonly chore: string | null
   readonly views: EntryView[]
 }
 

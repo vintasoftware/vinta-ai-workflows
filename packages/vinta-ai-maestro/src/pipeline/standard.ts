@@ -3,12 +3,28 @@
  * names when a workflow does not author its own (§5.2).
  *
  * ```
- * implement ──▶ review ──┬─ verdict=pass ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
- *                        │                          ├─ exit≠0, rounds left ──▶ fix
- *                        │                          └─ exit≠0, none left ──▶ failed
+ * implement ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
+ *                        │                                     ├─ exit≠0, rounds left ──▶ fix
+ *                        │                                     └─ exit≠0, none left ──▶ failed
  *                        ├─ verdict=fail, rounds left ──▶ fix ──▶ review
  *                        └─ verdict=fail, none left ──▶ failed
  * ```
+ *
+ * **Why `polish` sits between the review and the gate**, rather than after the
+ * gate or before the review. A chore edits the tree, so anywhere after the gate
+ * is a diff that merges having never been gated — comment-only edits are
+ * usually harmless, and `# type: ignore`, doctests and lint rules about comment
+ * shape are exactly the cases where "usually" is not a guarantee. Before the
+ * review is worse in the other direction: the fixer would rewrite what the
+ * chore just tidied, round after round. Here it runs once, on the diff that is
+ * actually going to merge, and the gates behind it check what it did. The tree
+ * hash it changes is what makes those gates a real run rather than a cache hit
+ * on the pre-chore tree, which is the point rather than a cost.
+ *
+ * A red gate sends the node to `fix` and back through `review` and `polish`, so
+ * a phase that needs fixing runs its chores again. That is the price of having
+ * them run on the final diff, and it is why a chore is expected to be
+ * idempotent — a second pass over an already-tidied diff should change nothing.
  *
  * **The budget is spent on the way *into* a fix, not on the way out of one.**
  * It used to be the other way round: `fix` went straight to `failed` once the
@@ -112,6 +128,18 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       ],
     },
     {
+      id: 'polish',
+      name: 'Polish',
+      position: { x: 300, y: -140 },
+      onEnter: [
+        {
+          id: 'e-chores',
+          definitionId: 'run_chore',
+          description: 'The chores this node runs, in order. None is a no-op.',
+        },
+      ],
+    },
+    {
       id: 'gate',
       name: 'Gate',
       position: { x: 400, y: 0 },
@@ -161,7 +189,11 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
   ],
   transitions: [
     { id: 't-implemented', from: 'implement', to: 'review' },
-    { id: 't-review-pass', from: 'review', to: 'gate', guard: "review.verdict == 'pass'" },
+    { id: 't-review-pass', from: 'review', to: 'polish', guard: "review.verdict == 'pass'" },
+    // Unconditional, and the chores state nothing a guard could branch on: a
+    // chore is not allowed to be the thing standing between a phase and its
+    // merge, which is what the gates after it are for.
+    { id: 't-polished', from: 'polish', to: 'gate' },
     // The budget is checked here, in front of the fixer, so that every fixer
     // that does run is also reviewed. `max_fix_rounds: 2` allows two fixers:
     // the count is of fixers already spent, so the third failing review is the

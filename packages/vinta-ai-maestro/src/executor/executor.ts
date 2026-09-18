@@ -168,11 +168,11 @@ export class RunEffectExecutor implements EffectExecutor {
       case 'run_gate':
         return await this.#runGate(nodeId, params)
       case 'run_chore':
-        // The scheduler ran the turns — it owns spawning, exactly as it does
-        // for `spawn_agent` — and a chore states no fact a guard reads. There
-        // is deliberately nothing here rather than nothing at all: the verb is
-        // in the catalog, so an injected executor that never hears of chores
-        // still answers for one.
+        // The turns are already run: the scheduler owns spawning, exactly as it
+        // does for `spawn_agent`, and reaches here on the way out. What a chore
+        // did is in the diff, the transcript and its `chore_result` row, and
+        // none of it is a fact a guard branches on — which is the difference
+        // between a chore and both the other things a phase runs.
         return {}
       case 'git_branch':
         return await this.#branch(nodeId, params)

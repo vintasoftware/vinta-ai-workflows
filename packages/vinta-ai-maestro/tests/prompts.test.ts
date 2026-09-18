@@ -36,10 +36,11 @@ import {
   readVerdict,
   resolveBrief,
   VERDICT_MARKER,
+  type ChorePrompt,
   type PromptJournal,
   type Reorientation,
 } from '../src/prompts/index.ts'
-import { SideEffectSchema, WorkflowSchema, type Workflow } from '../src/types.ts'
+import { ChoreSchema, SideEffectSchema, WorkflowSchema, type Workflow } from '../src/types.ts'
 
 const RUN_ID = 'run-1'
 
@@ -180,6 +181,8 @@ function compose(
     readonly continuation?: boolean
     /** §15.2: that session last ran on a different node. */
     readonly reorientation?: Reorientation
+    /** The chore a `chore`-template turn is running. */
+    readonly chore?: ChorePrompt
   } = {},
 ): string {
   const workflow = options.workflow ?? diamond()
@@ -198,8 +201,15 @@ function compose(
     facts: options.facts ?? {},
     ...(options.continuation === undefined ? {} : { continuation: options.continuation }),
     ...(options.reorientation === undefined ? {} : { reorientation: options.reorientation }),
+    ...(options.chore === undefined ? {} : { chore: options.chore }),
   })
 }
+
+/** A chore as the scheduler resolves one, with the schema's own defaults on it. */
+const chore = (chore: Record<string, unknown>, id = 'deslop'): ChorePrompt => ({
+  id,
+  chore: ChoreSchema.parse(chore),
+})
 
 // ---------------------------------------------------------------------------
 // 1. The implementer gets the brief itself
@@ -1003,6 +1013,116 @@ describe('the fixer prompt', () => {
 
   it('carries the phase body, so a fix is checked against what was asked for', () => {
     expect(compose('api-layer', 'fixer')).toContain('Add REST endpoints for folders.')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5b. The chore prompt: a general slot that must not widen into a second
+// implementation round
+// ---------------------------------------------------------------------------
+
+describe('the chore prompt', () => {
+  it('carries the chore’s own instruction, inline', () => {
+    const prompt = compose('api-layer', 'chore', {
+      chore: chore({ prompt: 'Rewrite the comments this phase wrote in Simple English.' }),
+    })
+
+    expect(prompt).toContain('Rewrite the comments this phase wrote in Simple English.')
+    expect(prompt).toContain('You are running the `deslop` chore over api-layer')
+  })
+
+  it('resolves an instruction that lives in the plan, like a phase brief', () => {
+    const dir = workspace({ deslop: 'Delete the comments that restate the code.' })
+    const prompt = compose('api-layer', 'chore', {
+      dir,
+      chore: chore({ prompt_ref: 'plan.md#deslop' }),
+    })
+
+    expect(prompt).toContain('Delete the comments that restate the code.')
+    expect(prompt).not.toContain('plan.md#deslop')
+  })
+
+  it('names the file and the field when the instruction does not resolve', () => {
+    expect(() =>
+      compose('api-layer', 'chore', { chore: chore({ prompt_ref: 'missing.md#nope' }) }),
+    ).toThrow(/chores\.deslop\.prompt_ref/)
+  })
+
+  it('bounds the scope to this phase’s diff and forbids widening it', () => {
+    const dir = workspace()
+    const prompt = compose('api-layer', 'chore', {
+      dir,
+      chore: chore({ prompt: 'Rewrite the comments.' }),
+      rows: [
+        {
+          node_id: 'api-layer',
+          branch: 'plan/bookmarks/phase-api-layer',
+          base_branch: 'plan/bookmarks/phase-db-schema',
+        },
+      ],
+    })
+
+    expect(prompt).toContain(
+      'git diff plan/bookmarks/phase-db-schema...plan/bookmarks/phase-api-layer',
+    )
+    expect(prompt).toContain('Do what the chore says and nothing else')
+    expect(prompt).toContain('This is not another implementation')
+  })
+
+  it('tells the chore not to run the gates the phase is about to run anyway', () => {
+    const prompt = compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })
+
+    expect(prompt).toContain("Do not run this phase's gates")
+  })
+
+  it('names a skill when the chore declares one, with a fallback for harnesses that have none', () => {
+    const prompt = compose('api-layer', 'chore', {
+      chore: chore({ prompt: 'Tidy up.', skill: 'deslop-comments' }),
+    })
+
+    expect(prompt).toContain('`deslop-comments` skill')
+    expect(prompt).toContain('If your harness has no such skill')
+  })
+
+  it('says nothing about a skill when the chore declares none', () => {
+    expect(compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })).not.toContain(
+      'skill',
+    )
+  })
+
+  it('carries the phase brief on a cold turn, as context rather than as work', () => {
+    const prompt = compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })
+
+    expect(prompt).toContain('Add REST endpoints for folders.')
+    expect(prompt).toContain('It is not a list of work to do')
+  })
+
+  it('drops the brief on a continuation but keeps the instruction', () => {
+    // §15.3's rule cuts one way and not the other: the session holds the phase
+    // and has never been told to do the chore.
+    const prompt = compose('api-layer', 'chore', {
+      continuation: true,
+      chore: chore({ prompt: 'Rewrite the comments.' }),
+    })
+
+    expect(prompt).toContain('Rewrite the comments.')
+    expect(prompt).toContain('same session — but a')
+    expect(prompt).not.toContain('Add REST endpoints for folders.')
+  })
+
+  it('still demands a commit: a chore’s work merges from the branch like any other', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', {
+        continuation,
+        chore: chore({ prompt: 'Tidy up.' }),
+      })
+      expect(prompt).toContain('Committing is part of the work')
+    }
+  })
+
+  it('fails loudly when a chore template is spawned with no chore', () => {
+    expect(() => compose('api-layer', 'chore')).toThrow(PromptError)
+    expect(() => compose('api-layer', 'chore')).toThrow(/needs a chore/)
   })
 })
 

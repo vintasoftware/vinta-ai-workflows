@@ -619,12 +619,43 @@ const FIX_THEN_FAIL = {
   ),
 }
 
+/**
+ * An implementer, then the node's chores, on the implementer's own slot —
+ * `standard-phase`'s `implement → polish` with the review taken out, since a
+ * chore's behaviour has nothing to do with a verdict.
+ */
+const CHORES = {
+  states: [
+    {
+      id: 'implement',
+      name: 'Implement',
+      position: { x: 0, y: 0 },
+      onEnter: [slotSpawn('e-implement', 'implementer', 'main')],
+    },
+    {
+      id: 'polish',
+      name: 'Polish',
+      position: { x: 200, y: 0 },
+      onEnter: [{ id: 'e-chores', definitionId: 'run_chore', params: {} }],
+    },
+    { id: 'done', name: 'Done', position: { x: 400, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [
+    { id: 't-polish', from: 'implement', to: 'polish' },
+    { id: 't-done', from: 'polish', to: 'done' },
+  ],
+  initialStateIds: ['implement'],
+  finalStateIds: ['done'],
+}
+
 function makeWorkflow(
   nodes: readonly Record<string, unknown>[],
   options: {
     readonly lanes?: number
     readonly resources?: Record<string, unknown>
     readonly gates?: Record<string, unknown>
+    readonly chores?: Record<string, unknown>
+    readonly defaultChores?: readonly string[]
     readonly pipelines?: Record<string, unknown>
     readonly pipeline?: string
     readonly crew?: Record<string, unknown>
@@ -635,9 +666,15 @@ function makeWorkflow(
     id: 'test-flow',
     base_branch: 'main',
     ...(options.crew === undefined ? {} : { crew: options.crew }),
-    defaults: { harness: HARNESS, model: 'opus', pipeline: options.pipeline ?? 'solo' },
+    defaults: {
+      harness: HARNESS,
+      model: 'opus',
+      pipeline: options.pipeline ?? 'solo',
+      ...(options.defaultChores === undefined ? {} : { chores: options.defaultChores }),
+    },
     resources: options.resources ?? { lane: { capacity: options.lanes ?? 4, kind: 'worktree' } },
     gates: options.gates ?? {},
+    ...(options.chores === undefined ? {} : { chores: options.chores }),
     nodes,
     pipelines: options.pipelines ?? {
       solo: SOLO,
@@ -650,6 +687,7 @@ function makeWorkflow(
       slots: SLOTS,
       fixes: FIXES,
       'fix-then-fail': FIX_THEN_FAIL,
+      chores: CHORES,
     },
   })
 }
@@ -1318,7 +1356,7 @@ const standardWorkflow = (nodes: readonly Record<string, unknown>[]): Workflow =
   })
 
 describe('standard-phase under the scheduler', () => {
-  it('runs implement → review → gate → integrate → done', async () => {
+  it('runs implement → review → polish → gate → integrate → done', async () => {
     const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
       outcomes: {
         'e-review': { facts: { review: { verdict: 'pass' } } },
@@ -1333,6 +1371,10 @@ describe('standard-phase under the scheduler', () => {
       'git_branch',
       'spawn_agent',
       'spawn_agent',
+      // Between the passing review and the gate: a chore edits the tree, so
+      // the gates after it are what check what it did — and a node that
+      // declares none passes through here having spawned nothing.
+      'run_chore',
       'run_gate',
       // Tracking before the merge: the phase record has to be in the commit
       // the wave branch merges — see the `integrate` state in `standard.ts`.
@@ -1340,6 +1382,40 @@ describe('standard-phase under the scheduler', () => {
       'git_merge',
       'git_push',
       'open_pr',
+    ])
+    expectDrained(r)
+  })
+
+  it('runs its chores on the diff that merges, after the review and before the gate', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { gates: ['unit'], chores: ['deslop'] })], {
+        resources: {
+          lane: { capacity: 2, kind: 'worktree' },
+          'test-suite': { capacity: 1, kind: 'semaphore' },
+        },
+        gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+        chores: { deslop: { prompt: 'Rewrite the comments.' } },
+        pipelines: { 'standard-phase': STANDARD_PHASE },
+        pipeline: 'standard-phase',
+      }),
+      {
+        outcomes: {
+          'e-review': { facts: { review: { verdict: 'pass' } } },
+          'e-gate': { facts: { gate: { exit_code: 0 } } },
+        },
+      },
+    )
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // Implementer, reviewer, then the chore — and the gate after all three, so
+    // what the chore wrote is what the gate ran against.
+    expect(r.adapter.spawned).toHaveLength(3)
+    const verbs = r.calls.map((call) => call.verb)
+    expect(verbs.indexOf('run_chore')).toBeLessThan(verbs.indexOf('run_gate'))
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
     ])
     expectDrained(r)
   })
@@ -2133,6 +2209,176 @@ describe('session slots', () => {
     expect(r.adapter.spawned.map((task) => task.resumeSessionId)).toEqual([undefined])
     expect(sessionsOf(r, 'a')).toEqual([])
     expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Chores: the agent turns a phase runs beside its gates
+// ---------------------------------------------------------------------------
+
+/** Every chore outcome for a node, in order. */
+const choresOf = (rig_: Rig, nodeId: string): unknown[] =>
+  rig_.journal
+    .events('run-1')
+    .filter((event) => event.type === 'chore_result' && event.nodeId === nodeId)
+    .map((event) => event.payload)
+
+/** A chore registry with the two shapes every test below draws from. */
+const CHORE_SET = {
+  deslop: { prompt: 'Rewrite the comments.' },
+  changelog: { prompt: 'Add a CHANGELOG entry.' },
+}
+
+describe('chores', () => {
+  it('runs the node’s chores in order, each one its own turn', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop', 'changelog'] })], {
+        chores: CHORE_SET,
+      }),
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // The implementer, then one turn per chore.
+    expect(r.adapter.spawned).toHaveLength(3)
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
+      { chore: 'changelog', status: 'ran', duration_ms: expect.any(Number) },
+    ])
+    expectDrained(r)
+  })
+
+  it('continues the implementer’s session rather than paying for a cold one', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop'] })], {
+        chores: CHORE_SET,
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
+    ])
+    expectDrained(r)
+  })
+
+  it('attributes each turn to the chore that ran it', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop', 'changelog'] })], {
+        chores: CHORE_SET,
+      }),
+    )
+    await r.scheduler.run()
+
+    // Two chores on one slot are one undifferentiated stretch without the id.
+    const attributed = transcriptOf(r, 'a')
+      .map((entry) => entry.by as { role: string; chore?: string } | undefined)
+      .filter((by) => by?.role === 'chore')
+      .map((by) => by?.chore)
+    expect(new Set(attributed)).toEqual(new Set(['deslop', 'changelog']))
+  })
+
+  it('takes the run-wide default when the node names none', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores' })], {
+        chores: CHORE_SET,
+        defaultChores: ['deslop'],
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
+    ])
+  })
+
+  it('lets an empty list opt one phase out of the run-wide default', async () => {
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { pipeline: 'chores', chores: [] }), node('b', [], { pipeline: 'chores' })],
+        { chores: CHORE_SET, defaultChores: ['deslop'] },
+      ),
+    )
+    await r.scheduler.run()
+
+    expect(choresOf(r, 'a')).toEqual([])
+    expect(choresOf(r, 'b')).toHaveLength(1)
+  })
+
+  it('runs nothing, and passes, when no chore is declared anywhere', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'chores' })]))
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(1)
+    expect(choresOf(r, 'a')).toEqual([])
+    expectDrained(r)
+  })
+
+  it('does not fail the phase when a chore turn fails', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop', 'changelog'] })], {
+        chores: CHORE_SET,
+      }),
+      // The implementer, then the first chore — refused twice, because a turn
+      // that carried a resume token gets §15.4's one cold retry before it is
+      // allowed to be a failure. Then the second chore's turn.
+      { spawns: ['ok', 'fatal', 'fatal', 'ok'] },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // And the chore after the failed one still runs: one bad chore is not a
+    // reason to skip the rest of them.
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'failed', duration_ms: expect.any(Number) },
+      { chore: 'changelog', status: 'ran', duration_ms: expect.any(Number) },
+    ])
+    expectDrained(r)
+  })
+
+  it('fails the phase when the chore that failed said to', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['required'] })], {
+        chores: { required: { prompt: 'Do the thing.', on_failure: 'fail' } },
+      }),
+      { spawns: ['ok', 'fatal', 'fatal'] },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expectDrained(r)
+  })
+
+  it('skips a chore the harness had no capacity for, rather than re-driving the phase', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop'] })], {
+        chores: CHORE_SET,
+      }),
+      { spawns: ['ok', 'rate_limit'] },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'skipped', duration_ms: expect.any(Number) },
+    ])
+    // The implementer ran once and was never asked to do it again: a capacity
+    // refusal on a chore must not throw away a finished phase.
+    expect(r.adapter.spawned).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('runs a chore at its own model rather than the phase’s', async () => {
+    const r = rig(
+      makeWorkflow([node('a', [], { pipeline: 'chores', chores: ['deslop'] })], {
+        chores: { deslop: { prompt: 'Rewrite the comments.', model: 'haiku' } },
+      }),
+    )
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned.map((task) => task.model)).toEqual(['opus', 'haiku'])
   })
 })
 

@@ -597,6 +597,7 @@ export class Journal {
       case 'gate_pool':
       case 'gate_started':
       case 'gate_result':
+      case 'chore_result':
       case 'agent_lease':
         // History, deliberately not a projection. `leases` is the *current*
         // holder set and must not survive a restart, so folding these into it

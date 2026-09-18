@@ -67,10 +67,16 @@ export function Entries({
         // *boundary* — where one agent stopped and the next started — which a
         // label repeated on ninety consecutive rows states ninety times and
         // shows once.
-        const turn = row.role !== null && row.role !== rows[index - 1]?.role
+        const previous = rows[index - 1]
+        // A new band on a new author — or on a new chore by the same one, since a
+        // phase runs its chores back to back on one slot.
+        const turn =
+          row.role !== null && (row.role !== previous?.role || row.chore !== previous?.chore)
         return (
           <Fragment key={row.at}>
-            {turn && <Author role={row.role as string} first={index === 0} />}
+            {turn && (
+              <Author role={row.role as string} chore={row.chore} first={index === 0} />
+            )}
             {shape === 'prose' ? (
               <Entry row={row} open />
             ) : (
@@ -303,7 +309,15 @@ const ROW = 'flex flex-col gap-0.5 py-2.5 first:pt-0 last:pb-0'
  * padding is the other half of that — it is the gap rows pass through, so it is
  * wider than the flow layout strictly needed.
  */
-function Author({ role, first }: { readonly role: string; readonly first: boolean }) {
+function Author({
+  role,
+  chore,
+  first,
+}: {
+  readonly role: string
+  readonly chore: string | null
+  readonly first: boolean
+}) {
   return (
     <li
       data-turn={role}
@@ -313,7 +327,7 @@ function Author({ role, first }: { readonly role: string; readonly first: boolea
       )}
     >
       <span className="h-px flex-none basis-3 bg-border" aria-hidden="true" />
-      {ROLE_NAMES[role] ?? role}
+      {(ROLE_NAMES[role] ?? role) + (chore === null ? '' : ` · ${chore}`)}
       <span className="h-px min-w-0 flex-1 bg-border" aria-hidden="true" />
     </li>
   )
@@ -328,6 +342,7 @@ const ROLE_NAMES: Readonly<Record<string, string>> = {
   implementer: 'Implementer',
   reviewer: 'Reviewer',
   fixer: 'Fixer',
+  chore: 'Chore',
   'conflict-fixer': 'Conflict fixer',
   gate: 'Gate',
   monitor: 'Monitor',
