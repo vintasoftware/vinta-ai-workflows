@@ -28,6 +28,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`--retry-after <15m>`: an unanswered failure question eventually answers
+  itself.** An observed fourteen-hour run spent 4h07m — 29% of its wall clock —
+  parked on "This phase failed. Try it again?" with nobody at the keyboard; the
+  answer, when it came, was `retry`, and it worked. Unset by default, so a run
+  behaves exactly as it did. Accepts minutes bare or a unit (`15`, `15m`, `90s`,
+  `2h`) on both `run` and `serve`. It is deliberately unbounded and fires again
+  on each new question: a version capped by `--retries` would stall at the cap
+  and idle for the rest of the night, which is the failure it exists for. Every
+  firing is a full phase attempt, so the interval is the throttle. It reaches
+  the failure question and nothing else — a plan's own `await_human` gate asked
+  for a person, and both park through the same code, so answering those would be
+  the orchestrator overruling the plan. An unattended answer is journalled with
+  `unattended: true`, because "a human said try again" and "nobody was here" are
+  the same answer with very different meanings.
+
 - **The daemon now has a log of its own, and a Logs view to read it in.**
   Transcripts said what the agents did; nothing said what the *daemon* did, so
   "the run stopped and I don't know why" had no evidence behind it at all.

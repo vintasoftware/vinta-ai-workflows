@@ -381,7 +381,21 @@ interface NodePayloads {
    */
   human_question: HumanQuestion & { readonly effect_id: string }
   /** The answer. It re-enters the guard context as `human.answer` (§9.1). */
-  human_answered: { readonly effect_id: string; readonly answer: HumanAnswer }
+  /**
+   * `unattended` marks an answer the scheduler gave itself because nobody did
+   * — the `retry_after` timer expiring on a failure question. Absent means a
+   * person chose it.
+   *
+   * On the row rather than inferred, because the two are the same answer with
+   * very different meanings: "a human looked at this and said try again" and
+   * "nobody was here, so it tried again". A post-mortem that cannot tell them
+   * apart reports an operator decision that was never made.
+   */
+  human_answered: {
+    readonly effect_id: string
+    readonly answer: HumanAnswer
+    readonly unattended?: true
+  }
   /**
    * One §9 operation. `text` is the operator's own steering message: it is
    * payload, exactly as a transcript entry is, and it never reaches a log line

@@ -75,6 +75,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl } from '../admission/admission.ts'
+import { systemClock, type Clock } from '../admission/clock.ts'
 import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import { gitLines } from '../integration/git.ts'
@@ -193,6 +194,40 @@ export interface SchedulerOptions {
    * not. Raising it multiplies the cost of a phase that is simply broken.
    */
   readonly retries?: number
+  /**
+   * How long an unanswered **failure** question waits before answering itself
+   * `retry`. Unset — the default — waits for a person indefinitely.
+   *
+   * A run in an observed fourteen-hour build spent **four hours and seven
+   * minutes**, 29% of its whole wall clock, parked on "This phase failed. Try
+   * it again?" while nobody was at the keyboard. The answer, when it came, was
+   * `retry`, and it worked. Nothing about that wait bought anything.
+   *
+   * **It applies to the failure question and to nothing else.** A plan-authored
+   * `await_human` gate is a question the plan wanted a person to answer — "is
+   * this schema change safe to deploy" — and a timer that answered those would
+   * be the orchestrator overruling the plan on the operator's behalf. Those
+   * park through the same `#park`, which is why the timer lives in
+   * `#offerRetry` rather than there.
+   *
+   * **Deliberately unbounded.** It fires again on each new question, for as
+   * long as nobody answers — because the failure it exists for is a run that
+   * stops making progress overnight, and a capped version would stall at the
+   * cap for the remaining seven hours. Setting the flag is the opt-in: it is
+   * unset by default, and unset is exactly today's "wait for a person".
+   *
+   * The cost is real and worth stating where the flag is read rather than
+   * buried in a guide: every unattended retry is a **full phase attempt** —
+   * a fresh agent session, its gates, its review. A phase that is broken rather
+   * than flaky will retry all night at the cost of one attempt per interval, so
+   * the interval is the throttle, and a short one on an expensive plan is the
+   * way to spend a lot of money on the same failure. `retries` is untouched:
+   * it still bounds the *automatic* attempts that happen before anyone is
+   * asked, which is the budget for a failure nobody has seen yet.
+   */
+  readonly retryAfterMs?: number
+  /** Drives `retryAfterMs`. Injected in tests; the real one is `systemClock`. */
+  readonly clock?: Clock
   /**
    * Returns a lane slot to a clean state before another node is given it —
    * `LanePool.recycle`, which resets what it can and re-provisions what it
@@ -456,6 +491,13 @@ interface NodeState {
   retries: number
   /** Automatic attempts already spent on this node, under `onFailure: retry`. */
   autoRetries: number
+  /**
+   * Failure questions this node answered for itself because nobody did. Its own
+   * counter rather than `autoRetries`: the two are spent in different places
+   * and reading one for the other would let a node that had already used its
+   * automatic budget retry unattended for ever.
+   */
+  unattended: number
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -716,6 +758,7 @@ export class Scheduler {
       retryMember: null,
       retries: 0,
       autoRetries: 0,
+      unattended: 0,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -973,6 +1016,9 @@ export class Scheduler {
       payload: {
         effect_id: state.parkedEffectId ?? '',
         answer: answer === undefined ? null : answer,
+        // Set only by `#armUnattendedRetry`. An operator's answer never carries
+        // it, so its absence is what says a person decided.
+        ...(facts.human?.['unattended'] === true ? { unattended: true as const } : {}),
       },
     })
     state.parkedEffectId = null
@@ -1749,7 +1795,9 @@ export class Scheduler {
     })
     state.parkedEffectId = effectId
 
+    const cancel = this.#armUnattendedRetry(state)
     const facts = await this.#park(state)
+    cancel()
     if (state.aborted) return false
 
     const answer = facts.human?.['answer']
@@ -2462,6 +2510,42 @@ export class Scheduler {
       nodeId: state.node.id,
       type: 'node_error',
       payload: { reason, attempt: state.retries + state.autoRetries + 1 },
+    })
+  }
+
+  /**
+   * Starts the clock on an unanswered failure question, and hands back the way
+   * to stop it.
+   *
+   * Answered through `answer` rather than by resolving the park directly, so an
+   * unattended retry takes the identical path an operator's click takes: the
+   * question is cleared, `human_answered` is journalled, and everything
+   * downstream — `#restartAttempt`, the lane recycle, the cold session — is the
+   * same code. A second implementation of "the answer arrived" is how the two
+   * drift apart.
+   *
+   * The cancel is not optional. A question the operator *does* answer leaves a
+   * timer that would otherwise fire against a node that has moved on, and
+   * `answer` throws for a node that is not awaiting one — so the stray timer
+   * would surface as an exception from a node nobody was looking at.
+   */
+  #armUnattendedRetry(state: NodeState): () => void {
+    const after = this.#options.retryAfterMs
+    if (after === undefined || after <= 0) return () => {}
+
+    const clock = this.#options.clock ?? systemClock
+    return clock.at(clock.now() + after, () => {
+      // Between the timer firing and this running, the operator may have
+      // answered: `resume` is nulled by `answer`, and asking again here is
+      // cheaper than reasoning about whether that can happen.
+      if (state.resume === null || state.aborted) return
+      state.unattended += 1
+      this.#log.info('node.unattended_retry', {
+        node: state.node.id,
+        after_ms: after,
+        unattended: state.unattended,
+      })
+      this.answer(state.node.id, { human: { answer: RETRY, unattended: true } })
     })
   }
 

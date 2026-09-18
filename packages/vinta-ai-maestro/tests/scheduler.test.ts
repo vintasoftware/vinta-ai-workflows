@@ -238,6 +238,7 @@ function rig(
     readonly onFailure?: 'stop' | 'retry' | 'ask' | null
     /** Automatic attempts under `retry`. */
     readonly retries?: number
+  readonly retryAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
     readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
     /**
@@ -315,6 +316,7 @@ function rig(
     // two together, is how a mode gets asserted by name instead of behaviour.
     ...(options.onFailure === null ? {} : { onFailure: options.onFailure ?? 'stop' }),
     ...(options.retries === undefined ? {} : { retries: options.retries }),
+    ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs, clock }),
   })
 
   cleanups.push(() => {
@@ -2899,6 +2901,116 @@ describe('a failed phase the operator can retry', () => {
     // §11: a state id, never the guard expression or anything it read.
     expect(journalled).not.toContain('verdict ==')
     expectDrained(r)
+  })
+
+  /**
+   * The four hours this exists for.
+   *
+   * An observed fourteen-hour run spent 4h07m — 29% of its wall clock — parked
+   * on "This phase failed. Try it again?" with nobody at the keyboard. The
+   * answer, when it finally came, was `retry`, and it worked.
+   */
+  describe('an unanswered failure question', () => {
+    it('answers itself after the interval, and says so on the record', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 900_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+      // Nothing happens before the interval is up: the operator still owns the
+      // decision for as long as they were given.
+      await r.advance(899_000)
+      expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+
+      await r.advance(2_000)
+      await until(() => r.adapter.spawned.length === 2, 'the unattended second attempt')
+
+      const answered = r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'human_answered')
+      expect(answered).toHaveLength(1)
+      const payload = answered[0]?.payload as { answer: string; unattended?: true }
+      expect(payload.answer).toBe('retry')
+      // The flag that separates "a human said try again" from "nobody was here":
+      // a post-mortem without it reports a decision that was never made.
+      expect(payload.unattended).toBe(true)
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expectDrained(r)
+    })
+
+    it('keeps going rather than stalling at a cap', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      // Three unattended retries off one `retries: 0` budget. A version bounded
+      // by that budget would stall after the first and idle for the rest of the
+      // night, which is the failure this is for.
+      for (let attempt = 2; attempt <= 4; attempt += 1) {
+        await until(() => r.scheduler.statuses['a'] === 'awaiting_human', `offer ${attempt}`)
+        await r.advance(61_000)
+        await until(() => r.adapter.spawned.length === attempt, `attempt ${attempt}`)
+      }
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expectDrained(r)
+    })
+
+    it('does not fire once the operator has answered', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      const report = await running
+
+      // A timer left armed would fire against a node that has settled, and
+      // `answer` throws for a node that is not awaiting one.
+      await r.advance(600_000)
+      expect(report.statuses).toEqual({ a: 'failed' })
+      expect(r.journal.events('run-1').filter((e) => e.type === 'human_answered')).toHaveLength(1)
+      expectDrained(r)
+    })
+
+    /**
+     * The line this must not cross. A plan-authored `await_human` is a question
+     * the plan wanted a person to answer — "is this migration safe to deploy" —
+     * and both it and the failure offer park through the same `#park`. A timer
+     * there would be the orchestrator overruling the plan on the operator's
+     * behalf, so it lives in `#offerRetry` instead.
+     */
+    it('never answers a plan’s own await_human gate', async () => {
+      const r = rig(makeWorkflow([node('a', [], { pipeline: 'gated' })]), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the plan’s own gate')
+
+      await r.advance(3_600_000)
+      // An hour later it is still waiting, because a person has to decide.
+      expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+      expect(r.journal.events('run-1').filter((e) => e.type === 'human_answered')).toEqual([])
+
+      r.scheduler.answer('a', { human: { answer: 'ship' } })
+      await running
+      expectDrained(r)
+    })
   })
 
   it('spends its whole budget before asking', async () => {
