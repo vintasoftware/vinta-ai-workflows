@@ -61,24 +61,38 @@ interface NodeSpec {
   readonly deps?: readonly string[]
   readonly prompt?: string
   readonly model?: string
+  readonly gates?: readonly string[]
 }
 
-function workflow(nodes: readonly NodeSpec[], pipeline = 'solo'): Workflow {
+function workflow(
+  nodes: readonly NodeSpec[],
+  pipeline = 'solo',
+  gates: Readonly<Record<string, { cmd: string }>> = {},
+): Workflow {
   return WorkflowSchema.parse({
     schema_version: 1,
     id: 'wf',
     base_branch: 'main',
     defaults: { harness: HARNESS, model: 'opus', pipeline },
     resources: { lane: { capacity: 2, kind: 'worktree' } },
-    gates: {},
+    gates,
     nodes: nodes.map((node) => ({
       id: node.id,
       name: `Phase ${node.id}`,
       prompt_ref: node.prompt ?? `plan.md#${node.id}`,
       ...(node.model === undefined ? {} : { model: node.model }),
+      ...(node.gates === undefined ? {} : { gates: [...node.gates] }),
       depends_on: (node.deps ?? []).map((dep) => ({ node: dep, artifact: `${dep}'s output` })),
     })),
     pipelines: pipeline === 'solo' ? { solo: SOLO } : {},
+  })
+}
+
+/** Replaces one gate's command, leaving every node's declared list alone. */
+function retune(base: Workflow, gateId: string, cmd: string): Workflow {
+  return WorkflowSchema.parse({
+    ...base,
+    gates: { ...base.gates, [gateId]: { ...base.gates[gateId], cmd } },
   })
 }
 
@@ -336,6 +350,48 @@ function gitRig(): GitRig {
 // ---------------------------------------------------------------------------
 
 describe('classifying an amendment', () => {
+  it('holds a retuned gate command back from the blocking set, but not the affected one', () => {
+    const before = workflow(
+      [
+        { id: 'a', gates: ['unit'] },
+        { id: 'b', deps: ['a'], gates: ['unit'] },
+        { id: 'c', deps: ['b'] },
+      ],
+      'solo',
+      { unit: { cmd: 'pytest' } },
+    )
+    const after = retune(before, 'unit', 'pytest --reuse-db')
+
+    const diff = diffWorkflows(before, after)
+    expect(diff.changes).toEqual([
+      { node: 'a', kind: 'gates_changed' },
+      { node: 'b', kind: 'gates_changed' },
+    ])
+    // `affected` is the audit answer and still closes over dependents: `c`
+    // declares no gate, and an amendment that reached `b` reached `c`'s record.
+    expect(diff.affected).toEqual(['a', 'b', 'c'])
+    // Nothing is rebased — a command moves no base — and therefore nothing is
+    // blocked. This is the whole point: the phase that is dragging is running,
+    // and it is the one that needs the new command.
+    expect(diff.rebaseable).toEqual([])
+    expect(diff.blocking).toEqual([])
+  })
+
+  it('treats a node’s declared gate list as its body, which does block', () => {
+    // The distinction `gates_changed` could not previously express. A phase
+    // that *gains* a gate mid-flight would finish without ever running it and
+    // end `done` against a definition it never satisfied, so this one blocks.
+    const before = workflow([{ id: 'a', gates: ['unit'] }], 'solo', {
+      unit: { cmd: 'pytest' },
+      lint: { cmd: 'ruff check' },
+    })
+    const after = edit(before, 'a', { gates: ['unit', 'lint'] })
+
+    const diff = diffWorkflows(before, after)
+    expect(diff.changes.map((change) => change.kind)).toContain('body_changed')
+    expect(diff.blocking).toEqual(['a'])
+  })
+
   it('names what moved per node, and closes over both graphs', () => {
     const before = workflow([{ id: 'a' }, { id: 'b', deps: ['a'] }, { id: 'c', deps: ['b'] }])
     const after = WorkflowSchema.parse({
@@ -483,6 +539,68 @@ describe('amending a live run', () => {
     rig.stall.release()
     await rig.finished
     expect(rig.adapter.spawned.find((task) => task.nodeId === 'b')?.prompt).toBe('plan.md#b-amended')
+  })
+
+  it('retunes a gate command while the node that declares it is running', async () => {
+    // The case the whole narrowing exists for. A phase is dragging because its
+    // gate is mis-tuned; the phase is `running`, which is precisely why anyone
+    // is looking. Under the old rule the fix was refused until the run was
+    // over, by which point the cost had already been paid.
+    const wf = workflow([{ id: 'a', gates: ['unit'] }, { id: 'b', deps: ['a'], gates: ['unit'] }], 'solo', {
+      unit: { cmd: 'pytest' },
+    })
+    const rig = schedulerRig(wf)
+    await until(() => rig.stall.live(), 'node a to be running')
+
+    const result = await amendRun({
+      journal: rig.journal,
+      runId: RUN_ID,
+      proposed: retune(wf, 'unit', 'pytest --reuse-db'),
+      runner: rig.runner,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('refused')
+    expect(result.changes).toEqual([
+      { node: 'a', kind: 'gates_changed' },
+      { node: 'b', kind: 'gates_changed' },
+    ])
+    // `a` is running, so it is not in `applied` — `applied` is the unstarted
+    // nodes that took a new *node* definition. What `a` takes is the gate
+    // table, which it resolves per gate run rather than at its spawn.
+    expect(result.applied).toEqual(['b'])
+    // The durable side moved, which is what a resume and every later gate read.
+    expect(rig.journal.readWorkflow(RUN_ID).gates['unit']?.cmd).toBe('pytest --reuse-db')
+
+    rig.stall.release()
+    await rig.finished
+  })
+
+  it('still refuses to add a gate to a running node’s declared list', async () => {
+    // The other half of the same distinction: the table may move under a
+    // running phase, the phase's own list may not. A phase that gained `lint`
+    // here would finish without ever running it.
+    const wf = workflow([{ id: 'a', gates: ['unit'] }], 'solo', {
+      unit: { cmd: 'pytest' },
+      lint: { cmd: 'ruff check' },
+    })
+    const rig = schedulerRig(wf)
+    await until(() => rig.stall.live(), 'node a to be running')
+
+    const result = await amendRun({
+      journal: rig.journal,
+      runId: RUN_ID,
+      proposed: edit(wf, 'a', { gates: ['unit', 'lint'] }),
+      runner: rig.runner,
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('applied')
+    expect(result.code).toBe('nodes_in_flight')
+    expect(rig.journal.readWorkflow(RUN_ID).nodes[0]?.gates).toEqual(['unit'])
+
+    rig.stall.release()
+    await rig.finished
   })
 
   it('refuses for a node parked on capacity or on a human, and says which', async () => {
@@ -736,6 +854,10 @@ describe('journalling an amendment', () => {
         applied: [],
         rebased: ['c', 'd', 'e'],
         superseded: join('amendments', '1.json'),
+        // Every amendment says who made it. A save from the editor or the API
+        // is an operator's; a run tuning itself writes `monitor` and the
+        // targets its ledger is folded from (`src/intervention/`).
+        author: 'operator',
       },
     ])
 

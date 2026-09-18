@@ -112,6 +112,50 @@ export const ResourceSchema = z.strictObject({
   description: z.string().optional(),
 })
 
+// ---------------------------------------------------------------------------
+// Gates, and the one part of a gate a run may retune by itself
+//
+// The monitor can amend a live run (§9, `src/intervention/`), and a gate's
+// command is the field worth amending: a suite run without `--reuse-db`
+// re-creates its test database on every gate run, in every lane, for the whole
+// run. Nothing is broken in that run and nobody has to be woken up — it is
+// simply mis-tuned, and the evidence is in the gate log.
+//
+// The hazard is that `--reuse-db` and `-k slow` are one keystroke apart. A
+// timeout or a fix budget that is set wrongly costs time; a gate command that
+// is narrowed wrongly turns a red gate green and *looks like success in every
+// log there is*. So an autonomous edit of a command is not allowed by default
+// and is not bounded by the model's judgement. It is bounded by `tuning`: a
+// list of flags the plan's author wrote down, in the committed document, under
+// review, before the run started.
+//
+// A gate with no `tuning` block cannot be retuned at all. That is the default,
+// and it is the right one — the capability has to be granted deliberately, for
+// the same reason `harness/permissions.ts` gives for keeping the agent
+// permission level out of this document entirely: a file in a repository may
+// say which model writes a phase, and may not say how much of somebody else's
+// machine that model gets. What it may say, here, is a closed list of flags.
+// ---------------------------------------------------------------------------
+
+export const GateTuningSchema = z
+  .strictObject({
+    allowed_flags: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe(
+        'Flags the monitor may ADD to this gate’s command, verbatim and whole. Matched as ' +
+          'exact argv tokens, so `--reuse-db` permits `--reuse-db` and nothing else — not ' +
+          '`--reuse-db-and-more`, and not a flag that merely starts the same way. A flag ' +
+          'taking a separate value (`-n auto`) is written as the two tokens it is. ' +
+          'Removing or rewriting an existing token is never permitted, whatever is listed ' +
+          'here: the proposed command must be this one’s tokens, in order, plus additions.',
+      ),
+  })
+  .describe(
+    'What an autonomous retune of this gate may do. Absent — the default — means the command ' +
+      'is not the monitor’s to touch.',
+  )
+
 export const GateSchema = z.strictObject({
   cmd: z.string().min(1).describe('Shell command run in the node’s lane. Not an agent.'),
   requires: z
@@ -119,6 +163,7 @@ export const GateSchema = z.strictObject({
     .default([])
     .describe('Resource pool ids acquired before the gate runs, in canonical order.'),
   timeout_s: z.number().int().min(1).default(1800),
+  tuning: GateTuningSchema.optional(),
   description: z.string().optional(),
 })
 
@@ -555,6 +600,7 @@ export type WorkflowInput = z.input<typeof WorkflowSchema>
 export type Node = z.infer<typeof NodeSchema>
 export type Dependency = z.infer<typeof DependencySchema>
 export type Gate = z.infer<typeof GateSchema>
+export type GateTuning = z.infer<typeof GateTuningSchema>
 export type Project = z.infer<typeof ProjectSchema>
 export type ProjectService = z.infer<typeof ServiceSchema>
 export type ProjectCommands = z.infer<typeof CommandsSchema>

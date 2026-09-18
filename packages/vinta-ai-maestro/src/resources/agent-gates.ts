@@ -125,6 +125,8 @@ export interface AgentGateHopOptions {
 
 export class AgentGateBroker {
   readonly #options: AgentGateBrokerOptions
+  /** The run's definition as it stands now. Replaced by `adopt` — see below. */
+  #workflow: Workflow
   readonly #setTimer: (callback: () => void, delayMs: number) => NodeJS.Timeout
   readonly #clearTimer: (timer: NodeJS.Timeout) => void
   /** Keyed by `(holderNode, gateId)` — see `AgentGateWaiting` for why that is the key. */
@@ -132,8 +134,27 @@ export class AgentGateBroker {
 
   constructor(options: AgentGateBrokerOptions) {
     this.#options = options
+    this.#workflow = options.workflow
     this.#setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs))
     this.#clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer))
+  }
+
+  /**
+   * Take an amended workflow (§9), exactly as the scheduler, the executor and
+   * the integrator do. The broker is a reader of `gates[id].cmd` in its own
+   * right: a gate an agent asks for comes through here rather than through
+   * `run_gate`. An amendment that reached the others and not this one would
+   * leave a run whose gate node runs the new command and whose agents run the
+   * old one — the same gate id, two commands, and a cache keyed on both.
+   *
+   * A flight already in `#inFlight` is deliberately left alone. It is a gate
+   * that is *running*, with the old command, and its result is the answer to
+   * the question that was asked; replacing the command underneath it would
+   * report one gate's verdict under another's definition. The next hop after
+   * it retires starts from the amended table.
+   */
+  adopt(workflow: Workflow): void {
+    this.#workflow = workflow
   }
 
   /**
@@ -204,9 +225,9 @@ export class AgentGateBroker {
    * GATE band a record of only some of them.
    */
   async run(gateId: string, holderNode: string): Promise<AgentGateResult> {
-    const { workflow, runId, journal } = this.#options
+    const { runId, journal } = this.#options
 
-    const gate = workflow.gates[gateId]
+    const gate = this.#workflow.gates[gateId]
     if (gate === undefined) throw new AgentGateRefusal('unknown_gate')
 
     // The node holds `lane` from its first admission to its last turn

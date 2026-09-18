@@ -122,6 +122,7 @@ export async function runCommand(
         'log-level': { type: 'string' },
         'log-stderr': { type: 'boolean' },
         'log-detail': { type: 'string' },
+        'no-intervene': { type: 'boolean' },
       },
       allowPositionals: true,
     })
@@ -318,6 +319,11 @@ export async function runCommand(
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
       ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
       ...(deps.waveResults === undefined ? {} : { waveResults: deps.waveResults }),
+      // The watchdog that lets a run tune itself (`intervention/`). The factory
+      // is the same one the monitor endpoint uses, so an intervention turn is
+      // the same agent on the same model as the one an operator can ask.
+      monitorFor: monitorFactory(journal, bind.repoPath, permission),
+      ...(parsed.values['no-intervene'] === true ? { intervene: false } : {}),
     })
     if (!result.ok) {
       log.error('run.provision_failed', { run: runId, reason: result.message })

@@ -702,6 +702,65 @@ describe('gate caching', () => {
     // The gate command ran exactly once: the hit skipped the runner entirely.
     expect(readFileSync(join(rig.root, counter), 'utf8').trim().split('\n')).toHaveLength(1)
   })
+
+  /**
+   * A gate that leaves one named marker behind and nothing else.
+   *
+   * `node -e` rather than a shell line, for `tests/support/gate-script.ts`'s
+   * reason: the two shells share no redirection syntax, and what this fixture
+   * has to say is only *which* command ran.
+   */
+  const marker = (path: string): string =>
+    `node -e "require('fs').writeFileSync(${JSON.stringify(path).replaceAll('"', "'")}, 'ran')"`
+
+  it('runs the amended command after adopt, and does not serve the old verdict', async () => {
+    // §9's amend can move `gates[id].cmd` under a live run. Three objects read
+    // that command and the executor is the one that runs it, so an amendment
+    // that stopped at the scheduler moved the snapshot, the journal and the
+    // pool reservations while the gate went on running the old line.
+    const before = 'ran-before'
+    const after = 'ran-after'
+    const rig = setup(
+      (root) =>
+        WorkflowSchema.parse({
+          schema_version: 1,
+          id: 'adopted',
+          base_branch: 'main',
+          defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+          resources: { lane: { capacity: 1, kind: 'worktree' } },
+          // The marker lands outside the lane, so it cannot move the tree hash
+          // and turn this into a test about the tree rather than the command.
+          gates: { unit: { cmd: marker(join(root, before)), timeout_s: 30 } },
+          nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['unit'] }],
+        }),
+      { cache: true },
+    )
+
+    const lane = rig.lanes[0] as ExecutorLane
+    rig.journal.append({
+      runId: RUN_ID,
+      nodeId: 'p1',
+      type: 'node_assigned',
+      payload: { lane: lane.name },
+    })
+
+    expect((await rig.invoke('p1', 'run_gate')).facts?.gate?.['cached']).toBe(false)
+    expect(existsSync(join(rig.root, before))).toBe(true)
+    expect(existsSync(join(rig.root, after))).toBe(false)
+
+    rig.executor.adopt(
+      WorkflowSchema.parse({
+        ...rig.workflow,
+        gates: { unit: { cmd: marker(join(rig.root, after)), timeout_s: 30 } },
+      }),
+    )
+
+    const amended = await rig.invoke('p1', 'run_gate')
+    // Not a hit. The tree has not moved, so a cache keyed on the tree alone
+    // would have answered from a command that no longer exists.
+    expect(amended.facts?.gate?.['cached']).toBe(false)
+    expect(existsSync(join(rig.root, after))).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -176,7 +176,7 @@ describe('gate result caching', () => {
     const first = await run({ gate: slow })
     expect(first.status).toBe('timed_out')
     expect(first.cached).toBe(false)
-    expect(cache.lookup('suite', laneTreeHash(repo))).toBeUndefined()
+    expect(cache.lookup('suite', laneTreeHash(repo), slow.cmd)).toBeUndefined()
 
     // A timeout says the gate did not finish, not that the tree is bad: the
     // second attempt must actually run.
@@ -184,6 +184,30 @@ describe('gate result caching', () => {
     expect(second.cached).toBe(false)
     expect(await runs()).toBe(2)
   }, 20_000)
+
+  it('misses when the gate id is unchanged but its command is not', async () => {
+    // §9's amend can move `gates[id].cmd` under a live run, and the id it moves
+    // under does not. A key of `(gate id, tree hash)` would serve the old
+    // command's verdict against an unchanged tree — so the one amendment whose
+    // whole purpose is to change what the gate does would change nothing.
+    const before = gate()
+    expect((await run({ gate: before })).cached).toBe(false)
+    expect((await run({ gate: before })).cached).toBe(true)
+    expect(await runs()).toBe(1)
+
+    const tuned = gate({ stdout: ['tuned'] })
+    expect(tuned.cmd).not.toBe(before.cmd)
+
+    const amended = await run({ gate: tuned })
+    expect(amended.cached).toBe(false)
+    expect(await runs()).toBe(2)
+
+    // Both entries stand: the key gained a component rather than being
+    // overwritten, so reverting the amendment is a hit and not a third run.
+    expect((await run({ gate: tuned })).cached).toBe(true)
+    expect((await run({ gate: before })).cached).toBe(true)
+    expect(await runs()).toBe(2)
+  })
 
   it('caches a failing result and returns it as a hit', async () => {
     const failing = gate({ exit: 3 })

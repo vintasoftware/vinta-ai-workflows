@@ -80,6 +80,20 @@ export interface HostWiring {
    */
   readonly gatesFor?: (pools: ResourcePools) => AgentGatePort
   /**
+   * Hand an amended workflow (§9) to everything on this side of the seam.
+   *
+   * The scheduler has always taken one; nothing else did, and the run's
+   * definition is read by three objects rather than one. The executor resolves
+   * `gates[id].cmd` per gate run and the gate broker resolves it for a gate an
+   * agent asks for, so an amendment that stopped at the scheduler moved the
+   * snapshot, the journal and the pool reservations while leaving the command
+   * that actually runs exactly as it was.
+   *
+   * Absent for an injected executor, which owns whatever definition it was
+   * built with.
+   */
+  readonly adopt?: (workflow: Workflow) => void
+  /**
    * Handles this process opened. Never the lanes: §8 leaves worktrees, branches
    * and databases in place for the human who has to read what happened — and,
    * since runs became resumable, for the attempt that picks the run back up.
@@ -259,6 +273,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   })
 
   const cache = new GateCache(repoPath)
+  // Every gate broker `gatesFor` hands out, so `adopt` can reach all of them.
+  const brokers: AgentGateBroker[] = []
   const executor = createRunExecutor({
     workflow,
     runId,
@@ -294,6 +310,10 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     executor,
     waveResults: () => integrator.records,
     rebase,
+    adopt: (amended: Workflow) => {
+      executor.adopt(amended)
+      for (const broker of brokers) broker.adopt(amended)
+    },
     recycleLane: async (name: string) => {
       await pool.recycle(name)
     },
@@ -304,8 +324,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // for the `gate` node afterwards. Two caches over one project would be two
     // databases in one file's place and the hits would land in whichever one
     // nobody asked.
-    gatesFor: (pools) =>
-      new AgentGateBroker({
+    gatesFor: (pools) => {
+      const broker = new AgentGateBroker({
         workflow,
         runId,
         journal,
@@ -319,7 +339,13 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
           const lane = pool.lane(name)
           return { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
         },
-      }),
+      })
+      // Kept so an amendment reaches it. `gatesFor` is called once per run
+      // today, but a broker this function forgot would be a broker running
+      // last week's gate command with nothing anywhere saying so.
+      brokers.push(broker)
+      return broker
+    },
     // What changed under a member while it was away: the files that differ
     // between the phase it last worked on and what is checked out now. It is
     // the whole safety argument for continuing a session across a phase, so a

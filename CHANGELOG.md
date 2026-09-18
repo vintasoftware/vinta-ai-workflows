@@ -127,6 +127,46 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is already a copy of the repository, and excluding it cost the one string that
   most often explains a failure. `--log-detail kind` narrows to the kind and the
   stack frames for a checkout under a stricter obligation than this store's own.
+- **A run that is dragging can now tune itself, within bounds somebody wrote
+  down.** A run can be mis-*configured* rather than broken — every phase doing
+  what it was asked, every gate reporting honestly, and the whole thing paying
+  for a test database it rebuilds on every gate run in every lane. Nobody needs
+  waking for that, and the post-mortem found it out an afternoon too late to
+  help. Now a watchdog wakes the run's monitor when a phase passes an hour or a
+  gate's uncached cost passes thirty minutes, the monitor reads the gate logs
+  and the durations, and it answers with a **proposal** that the daemon
+  validates and applies through the existing amend path. `--no-intervene` turns
+  it off.
+
+  It proposes; it never writes. Its authority is four verbs — a gate's command,
+  a gate's timeout, a phase's fix budget, a phase's model — and the line they
+  draw is that it may change **how** the run executes and never **what** it
+  builds. There is no way to express a change to a dependency, a phase brief, a
+  touch list, the base branch, or the set of phases: not refused at runtime,
+  unrepresentable.
+
+  The one field that can do real damage is a gate's command, because
+  `--reuse-db` and `-k not_slow` are the same edit to the same string, and a
+  gate narrowed wrongly goes green and looks like success in every log there
+  is. So a command may only be changed when the gate itself declares
+  `tuning.allowed_flags` — a list a person wrote in the committed plan, under
+  review, before the run started — and the proposed command must be the current
+  one's argv tokens, in order, plus additions from that list. A gate that
+  declares no `tuning` block is not tunable, which is the default.
+
+  A run gets three of these in its life, at most one per gate and per phase.
+  What it changed is journalled as identifiers; why it changed it is the
+  monitor's prose and goes in `runs/<run-id>/interventions.jsonl` beside the
+  run, including every attempt that was refused — an agent trying to do
+  something it may not do, with nobody in the room, is the record most worth
+  keeping. See `packages/vinta-ai-maestro/docs/monitor-intervention.md`.
+
+- **`schemas/intervention.v1.schema.json`** — the document the monitor answers
+  with, generated from `src/intervention/intervention.ts` the way the workflow
+  and post-mortem schemas are generated from theirs. It is the odd one in
+  `schemas/`: it validates something a *model* writes rather than a skill or a
+  person, and it is the boundary deciding what an unattended run may change
+  about itself.
 
 - **A run no longer dies with the terminal that started it.** `vinta-ai-maestro
   serve` accepts `POST /api/runs`, so a run can be submitted to a daemon that
@@ -514,6 +554,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which the schema requires to be lowercase kebab-case, so the date prefix is
   the only part the three can share. Existing dateless workflows are unaffected
   — this is the emitter's convention, not a schema rule.
+- **A gate's command can be retuned while the phase that runs it is still
+  running.** §9's amend refused any change reaching a node in flight, which is
+  exactly the node anyone is looking at when a run is dragging: a `unit` gate
+  missing `--reuse-db` could not be fixed until the run it was costing hours
+  had finished. The refusal now reads a narrower set. A node's harness, model,
+  pipeline, body and base are each read at a moment that has already passed, so
+  changing them is refused as before; a gate's *command* is resolved per gate
+  run by every reader of it, so a running phase simply runs the new command at
+  its next gate. Nothing downstream is blocked either, because a command moves
+  no branch's base. Changing **which** gates a node declares is still refused
+  mid-flight — a phase that gained a gate would finish without ever running it —
+  so that now counts as part of the phase body.
+
+- **A gate result is cached against the command that produced it.** The key was
+  `(gate id, tree hash)`, on the assumption that a gate id names a command.
+  Amending a live run makes that false, and an unchanged tree would have been
+  served the old command's verdict. The command is now part of the key, hashed
+  rather than stored — a command line is repository content. A cache database
+  written before this is dropped when it is opened: its rows cannot say which
+  command produced them, and one re-run per stale entry is the price a lost row
+  already costs.
 
 - **A session cannot inherit a machine's decision to stop compacting.** All
   three harnesses compact automatically when their context fills — there was
@@ -772,6 +833,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   actually ran is someone else — so a phase declared for one tier and covered by
   a higher one offered that higher one as its escalation, and a third of the
   menu did nothing distinguishable from plain retry.
+- **An amended workflow now reaches the code that runs the gate.** `adopt`
+  replaced the scheduler's copy of the run's definition and nothing else, while
+  the effect executor and the agent-gate broker each held the snapshot they were
+  constructed with — and the command a gate actually runs is read from the
+  executor's. So an operator who edited a gate command mid-run moved the
+  snapshot, the journal and the pool reservations, watched the amendment be
+  accepted, and went on getting the old command. All three take the amendment
+  now, fanned out from one place, host side before the scheduler so that no
+  phase is dispatched against a definition half the system has not seen yet.
 
 - **Closing a terminal on a run now records the interruption.** `run` and
   `serve` handle SIGHUP as well as SIGINT and SIGTERM — SIGHUP is what a

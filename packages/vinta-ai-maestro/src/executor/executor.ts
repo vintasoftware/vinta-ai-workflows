@@ -136,8 +136,20 @@ const TRANSCRIPT_WINDOW = 50
 
 export class RunEffectExecutor implements EffectExecutor {
   readonly #options: RunExecutorOptions
-  readonly #nodes: ReadonlyMap<string, Node>
-  readonly #waves: ReadonlyMap<string, number>
+  /**
+   * The run's definition as it stands *now*, not as it was wired.
+   *
+   * A field rather than `#options.workflow`, because §9's amend replaces a
+   * live run's workflow and this is the object that reads the part an
+   * amendment is most often about. `#runGate` looks the gate's command up
+   * here, per gate run; an executor holding the snapshot it was constructed
+   * with would keep running the old command after the run's own definition,
+   * its journal and its scheduler had all moved on — the amendment would
+   * appear to land everywhere except the one place it does anything.
+   */
+  #workflow: Workflow
+  #nodes: ReadonlyMap<string, Node>
+  #waves: ReadonlyMap<string, number>
   readonly #lanes: ReadonlyMap<string, ExecutorLane>
   readonly #notifier: Notifier
   /** Which nodes of each wave have reached their `git_merge`. See `#lastOfWave`. */
@@ -152,10 +164,33 @@ export class RunEffectExecutor implements EffectExecutor {
 
   constructor(options: RunExecutorOptions) {
     this.#options = options
+    this.#workflow = options.workflow
     this.#nodes = new Map(options.workflow.nodes.map((node) => [node.id, node]))
     this.#waves = computeWaves(options.workflow.nodes)
     this.#lanes = new Map((options.lanes ?? []).map((lane) => [lane.name, lane]))
     this.#notifier = options.notifier ?? createOsNotifier()
+  }
+
+  /**
+   * Take an amended workflow (§9). The scheduler's `adopt` has the same name
+   * and the same contract, and both are called by the one `AmendRunner` the
+   * host builds — because an amendment that reaches only one of them is worse
+   * than one that reaches neither.
+   *
+   * Everything derived from the workflow is rebuilt, not patched: the node map
+   * so a node the amendment *added* is dispatchable here as well as in the
+   * scheduler, and the wave index because adding a node moves the waves under
+   * the `git_merge` that counts a wave's members.
+   *
+   * Nothing in flight is disturbed. The queued integration turn is a promise
+   * chain and is untouched; the next gate run, the next merge and the next
+   * tracking write read the new definition, which is exactly the "safe point"
+   * `src/amend/` already refuses to violate for the kinds that need one.
+   */
+  adopt(workflow: Workflow): void {
+    this.#workflow = workflow
+    this.#nodes = new Map(workflow.nodes.map((node) => [node.id, node]))
+    this.#waves = computeWaves(workflow.nodes)
   }
 
   async execute(invocation: EffectInvocation): Promise<EffectOutcome> {
@@ -249,7 +284,7 @@ export class RunEffectExecutor implements EffectExecutor {
     const lane = this.#lane(nodeId)
     let last: Record<string, ContextValue> = { exit_code: 0, status: 'passed' }
     for (const gateId of gateIds) {
-      const gate = this.#options.workflow.gates[gateId]
+      const gate = this.#workflow.gates[gateId]
       if (gate === undefined) continue
 
       const { result, cached } = await this.#gate(gateId, lane, {
@@ -275,6 +310,11 @@ export class RunEffectExecutor implements EffectExecutor {
       // missing-dependency finding needs to know that *this* gate failed and
       // later passed, which is a fact about ids and an exit code — the lines
       // the gate printed stay in `log_ref`'s file, and nothing here reads them.
+      // The duration rides along for the same reason and is the same kind of
+      // fact: a number the runner measured, about the gate and not about what
+      // it printed. A cached hit reports the duration of the run that filled
+      // the cache, which is what makes a cheap hit distinguishable from a
+      // cheap gate.
       this.#options.journal.append({
         runId: this.#options.runId,
         nodeId,
@@ -331,11 +371,11 @@ export class RunEffectExecutor implements EffectExecutor {
 
     const treeHash = laneTreeHash(lane.path)
     if (this.#options.noCache !== true) {
-      const hit = cache.lookup(gateId, treeHash)
+      const hit = cache.lookup(gateId, treeHash, options.gate.cmd)
       if (hit !== undefined) return { result: hit, cached: true }
     }
     const result = await executeGate(options)
-    cache.store(treeHash, result)
+    cache.store(treeHash, options.gate.cmd, result)
     return { result, cached: false }
   }
 
@@ -439,7 +479,7 @@ export class RunEffectExecutor implements EffectExecutor {
     const arrived = this.#arrived.get(wave) ?? new Set<string>()
     arrived.add(nodeId)
     this.#arrived.set(wave, arrived)
-    const size = this.#options.workflow.nodes.filter(
+    const size = this.#workflow.nodes.filter(
       (node) => this.#waves.get(node.id) === wave,
     ).length
     return arrived.size >= size
@@ -591,7 +631,7 @@ export class RunEffectExecutor implements EffectExecutor {
         // `trackingPath`, never `join`: every one of these is a *git* path, and
         // `node:path`'s join puts a backslash in it on Windows (see
         // `tracking.ts`). The file was written and then never committed.
-        relPath: trackingPath(this.#options.workflow, `phase-${nodeId}.md`),
+        relPath: trackingPath(this.#workflow, `phase-${nodeId}.md`),
         body: renderPhase(this.#phaseFacts(nodeId)),
         message: `tracking: phase ${nodeId}`,
       })
@@ -599,7 +639,8 @@ export class RunEffectExecutor implements EffectExecutor {
     }
 
     // The conductor's two files, both in the integration worktree.
-    const { workflow, runId, integrator, integrationPath } = this.#options
+    const { runId, integrator, integrationPath } = this.#options
+    const workflow = this.#workflow
     if (scope === 'run') {
       await this.#integration(() =>
         writeTrackingFile({
@@ -643,7 +684,7 @@ export class RunEffectExecutor implements EffectExecutor {
       nodeId,
       wave: this.#waves.get(nodeId) ?? row?.wave ?? 1,
       status: row?.status ?? 'running',
-      harness: node?.harness ?? this.#options.workflow.defaults.harness,
+      harness: node?.harness ?? this.#workflow.defaults.harness,
       lane: row?.lane ?? null,
       branch: this.#options.integrator.nodeBranch(nodeId),
       base: this.#options.integrator.base(nodeId).branch,
