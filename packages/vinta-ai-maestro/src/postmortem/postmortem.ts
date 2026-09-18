@@ -146,6 +146,7 @@ export const DurationDivergenceSchema = z
   )
 
 export const GAP_KINDS = [
+  'blocking_cause_unrecorded',
   'dependency_use_unrecorded',
   'gate_result_unrecorded',
   'integration_record_unavailable',
@@ -162,6 +163,48 @@ export const PostMortemGapSchema = z
     'A finding this run could not produce, and why. Carried in the artifact rather than ' +
       'thrown or defaulted to an empty list: a reader that treats an empty finding as ' +
       '“nothing happened” has to reach past an explicit statement that nothing was recorded.',
+  )
+
+export const CriticalPathSchema = z
+  .strictObject({
+    nodes: z
+      .array(
+        z.strictObject({
+          node: Id,
+          wave: z.number().int(),
+          span_ms: z.number().int().min(0),
+        }),
+      )
+      .describe('The chain in the order it ran, each with the time it was running.'),
+    span_ms: z.number().int().min(0).describe('The chain’s total. The floor this graph could reach.'),
+    share_of_elapsed: z
+      .number()
+      .min(0)
+      .max(1)
+      .describe('How much of the run’s wall clock this one chain accounts for.'),
+  })
+  .describe(
+    'The dependency chain that decided how long the run took. A plan is re-drawn against ' +
+      'this: shortening any other phase changes nothing, and the only way to a faster run ' +
+      'is a shallower graph or a cheaper phase on this list.',
+  )
+
+export const IdleCapacitySchema = z
+  .strictObject({
+    lane_capacity: z.number().int().min(1).describe('Lanes the plan asked to be provisioned.'),
+    peak_concurrency: z
+      .number()
+      .int()
+      .min(0)
+      .describe('The most phases that were ever running at once. The width the graph reached.'),
+    lane_ms_provisioned: z.number().int().min(0),
+    lane_ms_used: z.number().int().min(0).describe('Summed phase spans — one lane each, while running.'),
+    idle_share: z.number().min(0).max(1).describe('Provisioned lane time no phase occupied.'),
+  })
+  .describe(
+    'What the run paid for and did not use. A lane is a worktree, a forked database and a ' +
+      'desk for a crew member, and a plan that is never as wide as its lane count bought ' +
+      'all three for nothing — which is a fact about the graph, not about the machine.',
   )
 
 export const PostMortemSchema = z
@@ -197,6 +240,13 @@ export const PostMortemSchema = z
       missing_dependencies: z.array(MissingDependencySchema),
       wave_conflicts: z.array(WaveConflictSchema),
       duration_divergences: z.array(DurationDivergenceSchema),
+      /**
+       * Null on a run whose nodes never recorded a span — a run that stopped
+       * before anything was dispatched. Null rather than an empty object,
+       * because "no chain" and "a chain of length zero" are different claims.
+       */
+      critical_path: CriticalPathSchema.nullable(),
+      idle_capacity: IdleCapacitySchema.nullable(),
     }),
     gaps: z.array(PostMortemGapSchema),
   })
@@ -212,6 +262,8 @@ export type Edge = z.infer<typeof EdgeSchema>
 export type MissingDependency = z.infer<typeof MissingDependencySchema>
 export type WaveConflict = z.infer<typeof WaveConflictSchema>
 export type DurationDivergence = z.infer<typeof DurationDivergenceSchema>
+export type CriticalPath = z.infer<typeof CriticalPathSchema>
+export type IdleCapacity = z.infer<typeof IdleCapacitySchema>
 export type PostMortemGap = z.infer<typeof PostMortemGapSchema>
 export type GapKind = (typeof GAP_KINDS)[number]
 
@@ -398,6 +450,8 @@ export function postMortem(
       missing_dependencies: missingDependencies(workflow, traces),
       wave_conflicts: waveConflicts(options.integration),
       duration_divergences: durationDivergences(workflow, traces, waveOf, options),
+      critical_path: criticalPath(workflow, traces, waveOf, endedAtMs - startedAtMs),
+      idle_capacity: idleCapacity(workflow, traces, endedAtMs - startedAtMs),
     },
     gaps: gaps(workflow, traces, options),
   } satisfies PostMortem)
@@ -406,6 +460,134 @@ export function postMortem(
 // ---------------------------------------------------------------------------
 // Findings
 // ---------------------------------------------------------------------------
+
+/**
+ * The dependency chain that decided how long the run took.
+ *
+ * Walked backwards from whichever phase settled last, each step taking the
+ * dependency that settled latest — the one that step was waiting for. What
+ * comes out is the chain that has to get shorter for the run to get shorter:
+ * every phase *off* it could be made instant and the wall clock would not move.
+ *
+ * Reported because nothing else says it and the planner needs it.
+ * `plan-feature` reads these artifacts before it draws the next set of
+ * dependency lines, and a run whose graph was six deep and two wide — holding
+ * three lanes, one of them idle for most of a day — produced an artifact that
+ * mentioned neither depth nor width. The schedule was the dominant cost of that
+ * run and the only part of it a plan controls.
+ *
+ * **It measures the chain, not the blame.** A phase can start late because a
+ * crew member was busy rather than because its dependency had not landed, and
+ * that wait is invisible from here. The `blocking_cause_unrecorded` gap says so
+ * out loud rather than this quietly reporting a chain shorter than the run's.
+ */
+function criticalPath(
+  workflow: Workflow,
+  traces: ReadonlyMap<string, Trace>,
+  waveOf: (id: string) => number,
+  elapsedMs: number,
+): CriticalPath | null {
+  const spanOf = (id: string): number | null => {
+    const trace = traces.get(id)
+    if (trace?.startedAtMs == null || trace.settledAtMs == null) return null
+    return Math.max(0, trace.settledAtMs - trace.startedAtMs)
+  }
+  const settledAt = (id: string): number | null => traces.get(id)?.settledAtMs ?? null
+
+  const ran = workflow.nodes.filter((node) => spanOf(node.id) !== null)
+  if (ran.length === 0) return null
+
+  const depsOf = new Map(workflow.nodes.map((node) => [node.id, node.depends_on.map((d) => d.node)]))
+  // The last phase to settle is what the run was waiting for at the end.
+  let cursor = ran.reduce((latest, node) =>
+    (settledAt(node.id) as number) > (settledAt(latest.id) as number) ? node : latest,
+  ).id
+
+  const chain: string[] = []
+  const seen = new Set<string>()
+  while (!seen.has(cursor)) {
+    seen.add(cursor)
+    chain.push(cursor)
+    // Of this phase's dependencies, the one that settled last is the one it
+    // waited on; the others had already landed and cost it nothing.
+    const blocking = (depsOf.get(cursor) ?? [])
+      .filter((id) => settledAt(id) !== null)
+      .reduce<string | null>(
+        (latest, id) =>
+          latest === null || (settledAt(id) as number) > (settledAt(latest) as number) ? id : latest,
+        null,
+      )
+    if (blocking === null) break
+    cursor = blocking
+  }
+  chain.reverse()
+
+  const nodes = chain.map((id) => ({ node: id, wave: waveOf(id), span_ms: spanOf(id) as number }))
+  const spanMs = nodes.reduce((sum, entry) => sum + entry.span_ms, 0)
+  return {
+    nodes,
+    span_ms: spanMs,
+    // Guarded rather than trusted: a run reporting zero elapsed would divide by
+    // it, and the schema's 0..1 bound would reject the NaN — turning a clock
+    // oddity into a failure to write the artifact at all.
+    share_of_elapsed: elapsedMs <= 0 ? 0 : Math.min(1, spanMs / elapsedMs),
+  }
+}
+
+/**
+ * Lane time bought and not used, and the width the graph actually reached.
+ *
+ * `peak_concurrency` is the honest answer to "was this plan parallel". A plan
+ * declaring three lanes that never ran more than two phases at once paid for a
+ * third worktree, a third forked database and a third desk for the length of
+ * the run and got none of them back — a fact about the graph rather than about
+ * the machine, which is why it belongs in what the planner reads.
+ *
+ * Swept from the phase spans rather than counted off lane assignments: a lane
+ * is held for a phase's whole span, and `node_assigned` records which lane
+ * rather than for how long.
+ */
+function idleCapacity(
+  workflow: Workflow,
+  traces: ReadonlyMap<string, Trace>,
+  elapsedMs: number,
+): IdleCapacity | null {
+  const spans: { from: number; to: number }[] = []
+  for (const node of workflow.nodes) {
+    const trace = traces.get(node.id)
+    if (trace?.startedAtMs == null || trace.settledAtMs == null) continue
+    spans.push({ from: trace.startedAtMs, to: Math.max(trace.startedAtMs, trace.settledAtMs) })
+  }
+  if (spans.length === 0) return null
+
+  // A sweep over the edges: +1 where a phase starts, -1 where one settles, and
+  // the running maximum is the most lanes ever occupied at once. Ties settle
+  // before they start (`a.delta - b.delta`), so a phase handed a lane the
+  // instant another released it does not read as two.
+  const edges = [
+    ...spans.map((span) => ({ at: span.from, delta: 1 })),
+    ...spans.map((span) => ({ at: span.to, delta: -1 })),
+  ].sort((a, b) => a.at - b.at || a.delta - b.delta)
+  let live = 0
+  let peak = 0
+  for (const edge of edges) {
+    live += edge.delta
+    peak = Math.max(peak, live)
+  }
+
+  const capacity = workflow.resources['lane']?.capacity ?? 1
+  const provisioned = capacity * Math.max(0, elapsedMs)
+  const used = spans.reduce((sum, span) => sum + (span.to - span.from), 0)
+  return {
+    lane_capacity: capacity,
+    peak_concurrency: peak,
+    lane_ms_provisioned: provisioned,
+    lane_ms_used: used,
+    // Clamped at both ends: a phase whose span outlives the run's own
+    // `run_ended` would otherwise produce a negative share and fail the parse.
+    idle_share: provisioned <= 0 ? 0 : Math.min(1, Math.max(0, (provisioned - used) / provisioned)),
+  }
+}
 
 /**
  * The window a phase spent broken: when it first went red, and when the same
@@ -598,6 +780,25 @@ function gaps(
   const edges: Edge[] = workflow.nodes.flatMap((node) =>
     node.depends_on.map((dep) => ({ node: node.id, depends_on: dep.node })),
   )
+
+  // Only where there is a chain to misattribute. `critical_path` is the finding
+  // a reader is most likely to over-trust — it looks like an explanation of the
+  // wall clock and is only an explanation of the *graph* — but a plan with no
+  // edges has no ordering for this to be wrong about.
+  if (edges.length > 0 && [...traces.values()].some((trace) => trace.startedAtMs !== null)) {
+    found.push({
+      kind: 'blocking_cause_unrecorded',
+      needs:
+        'an event recording why a ready phase was not dispatched — the resource it was ' +
+        'queued on, or the crew member it was waiting for. The journal records when a ' +
+        'phase started and when it settled, so a gap between a dependency landing and the ' +
+        'dependent starting is visible but unattributed: a busy lane, a busy crew member ' +
+        'and an operator who had not answered a question all look identical. So ' +
+        '`critical_path` is the chain the *graph* forced, and a run can be longer than it ' +
+        'for reasons this artifact cannot name.',
+    })
+  }
+
   if (edges.length > 0) {
     found.push({
       kind: 'dependency_use_unrecorded',

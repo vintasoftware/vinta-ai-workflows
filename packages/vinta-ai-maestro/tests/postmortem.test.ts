@@ -158,6 +158,59 @@ const gapOf = (report: PostMortem, kind: string) =>
 const report_ = (tape: Tape): PostMortem => postMortem(tape, RUN, { integration: [] })
 
 // ---------------------------------------------------------------------------
+// 0. What the schedule cost
+// ---------------------------------------------------------------------------
+
+describe('the chain that decided the wall clock', () => {
+  /**
+   * The diamond: p1 → (p2 ‖ p3) → p4, with p3 the slower arm. The chain is the
+   * one through p3, and p2 is nowhere in it — making p2 instant would not move
+   * the run by a second, which is the whole point of reporting this.
+   */
+  it('walks the slow arm of a diamond, not the fast one', () => {
+    const report = postMortem(cleanTape(), RUN, { integration: [] })
+    const path = report.findings.critical_path
+
+    expect(path?.nodes.map((entry) => entry.node)).toEqual(['p1', 'p3', 'p4'])
+    // 10 + 12 + 10 minutes of a 36-minute run.
+    expect(path?.span_ms).toBe(32 * MIN)
+    expect(path?.share_of_elapsed).toBeCloseTo(32 / 36, 3)
+  })
+
+  it('reports the width the graph reached, against the lanes it asked for', () => {
+    const report = postMortem(cleanTape(), RUN, { integration: [] })
+    const idle = report.findings.idle_capacity
+
+    // p2 and p3 overlap and nothing else does: two wide, never three.
+    expect(idle?.peak_concurrency).toBe(2)
+    expect(idle?.lane_ms_used).toBe(42 * MIN)
+    expect(idle?.idle_share).toBeGreaterThanOrEqual(0)
+    expect(idle?.idle_share).toBeLessThanOrEqual(1)
+  })
+
+  /**
+   * The finding is about the *graph*, and a reader who takes it for an
+   * explanation of the wall clock will be wrong whenever a phase waited on a
+   * busy lane or an unanswered question. The gap is what stops that reading.
+   */
+  it('says out loud that it cannot see why a ready phase waited', () => {
+    const report = postMortem(cleanTape(), RUN, { integration: [] })
+
+    expect(gapOf(report, 'blocking_cause_unrecorded')?.needs).toContain('not dispatched')
+  })
+
+  it('reports neither for a run that dispatched nothing', () => {
+    const tape = new Tape(chain()).begin()
+    const report = postMortem(tape.end(T0 + MIN), RUN, { integration: [] })
+
+    // Null rather than an empty shape: "no chain" and "a chain of nothing" are
+    // different claims, and a planner acts on them differently.
+    expect(report.findings.critical_path).toBeNull()
+    expect(report.findings.idle_capacity).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 1. Dependencies declared but never used
 // ---------------------------------------------------------------------------
 
@@ -423,12 +476,10 @@ describe('a run with nothing to report', () => {
   it('emits a valid, empty post-mortem rather than nothing', () => {
     const report = postMortem(cleanTape(), RUN, { integration: [] })
 
-    expect(report.findings).toEqual({
-      unused_dependencies: [],
-      missing_dependencies: [],
-      wave_conflicts: [],
-      duration_divergences: [],
-    })
+    expect(report.findings.unused_dependencies).toEqual([])
+    expect(report.findings.missing_dependencies).toEqual([])
+    expect(report.findings.wave_conflicts).toEqual([])
+    expect(report.findings.duration_divergences).toEqual([])
     expect(report.run).toEqual({
       status: 'done',
       started_at_ms: T0,
@@ -438,8 +489,11 @@ describe('a run with nothing to report', () => {
       wave_count: 3,
     })
     expect(report.plan_ref).toBe('ai-plans/2026-03-04-BOOKMARK_FOLDERS_IMPLEMENTATION_PLAN.md')
-    // The only thing it has to say is what it could not see.
-    expect(report.gaps.map((gap) => gap.kind)).toEqual(['dependency_use_unrecorded'])
+    // The only things it has to say are what it could not see.
+    expect(report.gaps.map((gap) => gap.kind).sort()).toEqual([
+      'blocking_cause_unrecorded',
+      'dependency_use_unrecorded',
+    ])
     expect(parsePostMortem(report).ok).toBe(true)
   })
 
@@ -529,6 +583,21 @@ describe('the artifact', () => {
             direction: 'longer',
           },
         ],
+        critical_path: {
+          nodes: [
+            { node: 'p1', wave: 1, span_ms: 10 * MIN },
+            { node: 'p3', wave: 2, span_ms: 80 * MIN },
+          ],
+          span_ms: 90 * MIN,
+          share_of_elapsed: 0.75,
+        },
+        idle_capacity: {
+          lane_capacity: 2,
+          peak_concurrency: 2,
+          lane_ms_provisioned: 240 * MIN,
+          lane_ms_used: 100 * MIN,
+          idle_share: 0.5,
+        },
       },
       gaps: [
         {

@@ -28,6 +28,23 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The post-mortem now reports what the schedule cost.** Two findings, both
+  derived from events the journal already carried. `critical_path` is the
+  dependency chain that decided the wall clock — each phase's span, the total,
+  and its share of elapsed — because every phase *off* that chain could be made
+  instant without moving the run, and nothing said which phases those were.
+  `idle_capacity` reports the width the graph actually reached against the lanes
+  it asked for: a plan declaring three lanes that never runs more than two
+  phases at once pays for a third worktree, a third forked database and a third
+  desk, and gets none of them back. Run against a real fourteen-hour build, the
+  two say its critical path was **99% of elapsed time** — six phases, effectively
+  serial — with peak concurrency 2 against 3 lanes and **55% of lane time idle**.
+  `plan-feature` already reads these artifacts before drawing the next set of
+  dependency lines; until now neither depth nor width was in them. A
+  `blocking_cause_unrecorded` gap ships alongside, because the chain is what the
+  *graph* forced and a phase can also wait on a busy lane or an unanswered
+  question — which the journal cannot currently tell apart.
+
 - **`--retry-after <15m>`: an unanswered failure question eventually answers
   itself.** An observed fourteen-hour run spent 4h07m — 29% of its wall clock —
   parked on "This phase failed. Try it again?" with nobody at the keyboard; the
