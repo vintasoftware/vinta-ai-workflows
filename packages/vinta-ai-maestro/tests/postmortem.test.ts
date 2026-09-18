@@ -47,7 +47,10 @@ const RUN = 'bookmark-folders-run-1'
 const T0 = 1_700_000_000_000
 const MIN = 60_000
 
-const workflow = (nodes: WorkflowInput['nodes']): Workflow => {
+const workflow = (
+  nodes: WorkflowInput['nodes'],
+  gates: WorkflowInput['gates'] = {},
+): Workflow => {
   const result = parseWorkflow({
     schema_version: 1,
     id: 'bookmark-folders',
@@ -55,6 +58,7 @@ const workflow = (nodes: WorkflowInput['nodes']): Workflow => {
     base_branch: 'main',
     defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
     resources: { lane: { capacity: 4, kind: 'worktree' } },
+    gates,
     nodes,
   } satisfies WorkflowInput)
   if (!result.ok) throw new Error('test workflow fixture is invalid')
@@ -120,13 +124,33 @@ class Tape implements PostMortemSource {
     return this.push(ts, { runId: RUN, nodeId, type: 'node_status', payload: { status } })
   }
 
-  /** One journalled gate verdict. Ids and an exit code — never the gate's output. */
-  gate(ts: number, nodeId: string, gate: string, status: GateStatus): this {
+  /**
+   * One journalled gate verdict. Ids, an exit code and a runtime — never the
+   * gate's output. `durationMs: null` writes the row *without* `duration_ms`,
+   * which is what a journal from before the runner measured itself holds: the
+   * payload type says `number`, and this module reads disk rather than
+   * TypeScript, so the difference has to be expressible here.
+   */
+  gate(
+    ts: number,
+    nodeId: string,
+    gate: string,
+    status: GateStatus,
+    measurement: { readonly durationMs?: number | null; readonly cached?: boolean } = {},
+  ): this {
+    const durationMs = measurement.durationMs === undefined ? 1000 : measurement.durationMs
+    const payload = {
+      gate,
+      exit_code: status === 'passed' ? 0 : 1,
+      status,
+      cached: measurement.cached ?? false,
+      ...(durationMs === null ? {} : { duration_ms: durationMs }),
+    }
     return this.push(ts, {
       runId: RUN,
       nodeId,
       type: 'gate_result',
-      payload: { gate, exit_code: status === 'passed' ? 0 : 1, status, duration_ms: 1000, cached: false },
+      payload: payload as Extract<NewEvent, { type: 'gate_result' }>['payload'],
     })
   }
 
@@ -472,6 +496,133 @@ describe('duration divergence', () => {
 // 5. A clean run
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 5. What the gates cost
+// ---------------------------------------------------------------------------
+
+describe('what the gates cost', () => {
+  /** Declaration order, deliberately not alphabetical — see the ordering test. */
+  const GATES = {
+    tests: { cmd: 'pnpm test', requires: [], timeout_s: 600 },
+    lint: { cmd: 'pnpm lint', requires: [], timeout_s: 60 },
+  } as const satisfies WorkflowInput['gates']
+
+  const gated = () =>
+    workflow([phase('p1'), phase('p2', ['p1']), phase('p3', ['p1']), phase('p4', ['p2', 'p3'])], GATES)
+
+  const costOf = (report: PostMortem, gate: string) => {
+    const found = report.findings.gate_costs.find((one) => one.gate === gate)
+    if (!found) throw new Error(`gate ${gate} missing from the post-mortem`)
+    return found
+  }
+
+  /**
+   * `p1` fails its suite, is fixed and passes; `p2` passes first time. The
+   * totals are sums over the *recorded* runtimes, which is the whole reason
+   * `duration_ms` is read instead of subtracting one journal row from another:
+   * a restart between a gate's start and its result would destroy the
+   * subtraction and leaves the measurement untouched.
+   */
+  const withGates = (): Tape => {
+    const tape = new Tape(gated()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 21 * MIN)
+    tape.ran('p2', T0 + 22 * MIN, T0 + 32 * MIN)
+    tape.gate(T0 + 6 * MIN, 'p1', 'tests', 'failed', { durationMs: 5 * MIN })
+    tape.gate(T0 + 20 * MIN, 'p1', 'tests', 'passed', { durationMs: 8 * MIN })
+    tape.gate(T0 + 30 * MIN, 'p2', 'tests', 'passed', { durationMs: 4 * MIN })
+    tape.gate(T0 + 31 * MIN, 'p2', 'lint', 'passed', { durationMs: 20_000 })
+    return tape.end(T0 + 36 * MIN)
+  }
+
+  it('sums each gate’s recorded runtime across phases and fix rounds', () => {
+    const report = report_(withGates())
+
+    expect(costOf(report, 'tests')).toEqual({
+      gate: 'tests',
+      runs: 3,
+      cached_runs: 0,
+      ran_ms: 17 * MIN,
+      slowest_ms: 8 * MIN,
+      cache_saved_ms: 0,
+      failed_runs: 1,
+      timed_out_runs: 0,
+    })
+  })
+
+  /**
+   * Declaration order, and only gates the run recorded. A declared gate that
+   * never ran is absent rather than a row of zeros — the claim a planner would
+   * act on hardest is the one this artifact must not fabricate.
+   */
+  it('lists the gates that ran, in declaration order', () => {
+    expect(report_(withGates()).findings.gate_costs.map((one) => one.gate)).toEqual([
+      'tests',
+      'lint',
+    ])
+
+    const tape = new Tape(gated()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.gate(T0 + 5 * MIN, 'p1', 'lint', 'passed')
+    expect(report_(tape.end(T0 + 12 * MIN)).findings.gate_costs.map((one) => one.gate)).toEqual([
+      'lint',
+    ])
+  })
+
+  /**
+   * A cache hit's runtime is what the gate cost the last time it really ran.
+   * Billing the run for it would report time the run specifically did not
+   * spend — and would hide the saving in the same stroke.
+   */
+  it('keeps cache hits out of the runtime and reports what they saved', () => {
+    const tape = new Tape(gated()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.gate(T0 + 3 * MIN, 'p1', 'tests', 'passed', { durationMs: 6 * MIN, cached: true })
+    tape.gate(T0 + 9 * MIN, 'p1', 'tests', 'passed', { durationMs: 2 * MIN })
+
+    expect(costOf(report_(tape.end(T0 + 12 * MIN)), 'tests')).toMatchObject({
+      runs: 2,
+      cached_runs: 1,
+      ran_ms: 2 * MIN,
+      slowest_ms: 2 * MIN,
+      cache_saved_ms: 6 * MIN,
+    })
+  })
+
+  /** A timeout is a verdict with a runtime: the gate ran its whole budget. */
+  it('counts a timed-out run as runtime the run paid', () => {
+    const tape = new Tape(gated()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 12 * MIN, 'failed')
+    tape.gate(T0 + 11 * MIN, 'p1', 'tests', 'timed_out', { durationMs: 10 * MIN })
+
+    expect(costOf(report_(tape.end(T0 + 13 * MIN)), 'tests')).toMatchObject({
+      runs: 1,
+      failed_runs: 0,
+      timed_out_runs: 1,
+      ran_ms: 10 * MIN,
+    })
+  })
+
+  /**
+   * A journal from before the runner measured itself. The verdict is counted
+   * and the milliseconds are not — and the artifact says so, because a gate
+   * reported as free is the number a planner would size the next plan against.
+   */
+  it('reports a gap rather than zero when a verdict carries no runtime', () => {
+    const tape = new Tape(gated()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.gate(T0 + 5 * MIN, 'p1', 'tests', 'passed', { durationMs: null })
+    const report = report_(tape.end(T0 + 12 * MIN))
+
+    expect(costOf(report, 'tests')).toMatchObject({ runs: 1, ran_ms: 0, slowest_ms: 0 })
+    expect(gapOf(report, 'gate_durations_unrecorded')?.gates).toEqual(['tests'])
+  })
+
+  /** Every verdict measured: nothing to declare. */
+  it('emits no duration gap when every verdict carried a runtime', () => {
+    expect(gapOf(report_(withGates()), 'gate_durations_unrecorded')).toBeUndefined()
+  })
+})
+
 describe('a run with nothing to report', () => {
   it('emits a valid, empty post-mortem rather than nothing', () => {
     const report = postMortem(cleanTape(), RUN, { integration: [] })
@@ -480,6 +631,8 @@ describe('a run with nothing to report', () => {
     expect(report.findings.missing_dependencies).toEqual([])
     expect(report.findings.wave_conflicts).toEqual([])
     expect(report.findings.duration_divergences).toEqual([])
+    // No gate ever ran, so there is nothing to cost — not a row of zeros.
+    expect(report.findings.gate_costs).toEqual([])
     expect(report.run).toEqual({
       status: 'done',
       started_at_ms: T0,
@@ -581,6 +734,18 @@ describe('the artifact', () => {
             wave_baseline_ms: 10 * MIN,
             ratio: 8,
             direction: 'longer',
+          },
+        ],
+        gate_costs: [
+          {
+            gate: 'tests',
+            runs: 7,
+            cached_runs: 2,
+            ran_ms: 25 * MIN,
+            slowest_ms: 8 * MIN,
+            cache_saved_ms: 9 * MIN,
+            failed_runs: 2,
+            timed_out_runs: 0,
           },
         ],
         critical_path: {

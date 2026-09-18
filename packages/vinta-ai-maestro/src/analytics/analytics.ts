@@ -27,7 +27,7 @@
  * queued for exactly four minutes". It also means this module survives the
  * journal growing methods.
  *
- * **What the log attributes.** All five ways a node spends time are recorded
+ * **What the log attributes.** All six ways a node spends time are recorded
  * and are reported exactly:
  *
  * | bucket          | derived from                                            |
@@ -37,11 +37,20 @@
  * | capacity wait   | `node_status: waiting_on_capacity` → the next `running`  |
  * | suspended       | `node_status: awaiting_human` → the next `running`       |
  * | gate-pool queue | `gate_pool: requested` → the matching `granted`          |
+ * | gate runtime    | `gate_result: duration_ms`, cache hits excluded           |
  *
- * The fifth is a *subset* of `workingMs`, not a sixth share of the span: the
- * node holds its lane throughout the wait (§6), so counting it separately
- * would break the reconciliation below. It is reported alongside the split
- * rather than carved out of it.
+ * The last two are *subsets* of `workingMs`, not further shares of the span:
+ * the node holds its lane through a gate's queue and through the gate itself
+ * (§6), so counting either separately would break the reconciliation below.
+ * They are reported alongside the split rather than carved out of it.
+ *
+ * Gate runtime is the runner's own measurement rather than the distance
+ * between `gate_started` and `gate_result`, which is what lets it survive a
+ * restart between the two and a verdict the cache served with no start at all.
+ * Cache hits are counted as verdicts and excluded from the time: a hit's
+ * duration is what the gate cost *when it last ran*, so billing this run for
+ * it would report time the run specifically did not spend. What the cache
+ * avoided is its own figure, on the per-gate rollup.
  *
  * Gate-pool occupancy comes from the same three edges: `granted` → `released`
  * is one hold, and sweeping the holds gives every gate pool the peak, busy and
@@ -117,6 +126,25 @@ export interface TimeSplit {
    * 0 means "never waited", not "not recorded".
    */
   readonly gatePoolQueueMs: number
+  /**
+   * Time inside `workingMs` this node's gates actually spent running, summed
+   * over every verdict it paid for. The runner's own measurement, off
+   * `gate_result.duration_ms` — not the distance between two journal rows —
+   * so it survives a restart between a gate's start and its result.
+   *
+   * Cache hits are excluded. A hit's recorded duration is what the gate cost
+   * *when it last ran*, which is time some earlier run spent; adding it here
+   * would bill this node for work it skipped. `cacheSavedMs` on the run's
+   * `gates` rollup is where that figure lives instead.
+   *
+   * Reported beside `workingMs` rather than carved out of it, like
+   * `gatePoolQueueMs`: the lane is held throughout a gate run, so the
+   * reconciliation identity is untouched. It is not clamped to `workingMs`
+   * either — a gate whose result landed after the node parked would exceed
+   * it, and a measured number quietly trimmed to fit a bucket is the kind of
+   * figure this module exists not to produce.
+   */
+  readonly gateRunMs: number
 }
 
 export interface NodeAnalytics {
@@ -175,6 +203,52 @@ export type PoolContention =
     }
 
 /**
+ * What one gate cost the run — §13.3's "how long each spent queued on
+ * `test-suite` versus actually running", with the second half finally read
+ * back.
+ *
+ * The journal has carried `duration_ms` on every `gate_result` since gates
+ * were journalled at all, and nothing until now read it: the figure was
+ * written once, shown on a live panel, and afterwards reachable only by
+ * hand-parsing event payloads. It is the measurement that answers "is the
+ * suite why this run took an hour" — the question §6's queue exists to manage
+ * and §13.4's cache exists to relieve — so it is rolled up here, beside the
+ * pool contention it explains.
+ *
+ * Verdict counts sit next to the durations on purpose. A gate with ninety
+ * seconds of runtime over one run and one with ninety seconds over thirty
+ * cached hits are opposite findings, and a bare total cannot tell them apart.
+ */
+export interface GateAnalytics {
+  readonly gate: string
+  /** Verdicts recorded for this gate, over every node and every fix round. */
+  readonly runs: number
+  /** Of those, the ones §13.4's cache served. They cost this run nothing. */
+  readonly cachedRuns: number
+  /**
+   * Summed runtime of the verdicts this run actually paid for. Cache hits are
+   * not in it — see `cacheSavedMs`.
+   */
+  readonly ranMs: number
+  /**
+   * The slowest single paid run. The number a `timeout_s` is set against, and
+   * the one a total hides.
+   */
+  readonly slowestMs: number
+  /**
+   * What the cache avoided: the summed recorded runtime of the hits, which is
+   * what those gates cost the last time they really ran. An estimate of saved
+   * time rather than a measurement of this run, kept as its own figure so it
+   * can never be added into `ranMs` by accident.
+   */
+  readonly cacheSavedMs: number
+  /** Verdicts by kind. The three sum to `runs`. */
+  readonly passed: number
+  readonly failed: number
+  readonly timedOut: number
+}
+
+/**
  * The number that says whether the graph or the pool is the constraint.
  *
  * A free lane is a lane nobody could use: the pool grants on arrival, so a node
@@ -205,8 +279,14 @@ export interface LaneIdleness {
  * does a pool taken by something other than the scheduler. Reporting zero
  * occupancy for such a pool would be the same lie the old gaps existed to
  * prevent, pointed the other way.
+ *
+ * `gate_durations_unrecorded` is the same shape of statement about the gate
+ * rollup. A `gate_result` written before the runner measured itself carries no
+ * `duration_ms`, so the verdict is counted and the milliseconds are not — and
+ * a gate reported as having cost zero is worse than a gate reported as
+ * unmeasured, because zero is a number somebody will believe.
  */
-export type AttributionGapKind = 'gate_pool_events_missing'
+export type AttributionGapKind = 'gate_pool_events_missing' | 'gate_durations_unrecorded'
 
 /**
  * A figure the journal cannot supply. Carried in the report rather than thrown
@@ -217,8 +297,14 @@ export type AttributionGapKind = 'gate_pool_events_missing'
  */
 export interface AttributionGap {
   readonly kind: AttributionGapKind
-  /** The pools it applies to. */
+  /** The pools it applies to. Empty on a gap that is not about a pool. */
   readonly resources: readonly string[]
+  /**
+   * The gates it applies to. Omitted on a gap that is not about a gate —
+   * rather than spent as an empty array, so a reader cannot mistake "this gap
+   * names no gates" for "this gap is about no gates".
+   */
+  readonly gates?: readonly string[]
   /** What the event log would have to carry for the figure to exist. */
   readonly needs: string
 }
@@ -245,6 +331,13 @@ export interface RunAnalytics {
   readonly criticalPathMs: number
   /** Declaration order of `workflow.resources`, `lane` first. */
   readonly pools: readonly PoolContention[]
+  /**
+   * What each gate cost, in `workflow.gates` declaration order. Only gates
+   * this run recorded a verdict for: a gate that never ran has nothing to
+   * report, and a row of zeros beside the gates that did run reads as a
+   * finding rather than as an absence.
+   */
+  readonly gates: readonly GateAnalytics[]
   readonly laneIdleness: LaneIdleness
   /** Empty when every figure in the report is attributable. */
   readonly gaps: readonly AttributionGap[]
@@ -279,6 +372,8 @@ interface Trace {
   /** Lane-queue intervals, for the `lane` pool's `queuedMs`. */
   queues: Interval[]
   gatePoolQueueMs: number
+  /** Summed runtime of the gate verdicts this node paid for. Cache hits excluded. */
+  gateRunMs: number
   /** An acquisition requested and not yet granted. */
   gateWait: { readonly from: number; readonly resources: readonly string[] } | null
   /** An acquisition granted and not yet released. */
@@ -300,8 +395,35 @@ const newTrace = (): Trace => ({
   holds: [],
   queues: [],
   gatePoolQueueMs: 0,
+  gateRunMs: 0,
   gateWait: null,
   gateHold: null,
+})
+
+/** One gate's running totals, folded across every node and every fix round. */
+interface GateTally {
+  runs: number
+  cachedRuns: number
+  ranMs: number
+  slowestMs: number
+  cacheSavedMs: number
+  passed: number
+  failed: number
+  timedOut: number
+  /** A verdict this gate recorded with no `duration_ms` — see `AttributionGapKind`. */
+  unmeasured: boolean
+}
+
+const newGateTally = (): GateTally => ({
+  runs: 0,
+  cachedRuns: 0,
+  ranMs: 0,
+  slowestMs: 0,
+  cacheSavedMs: 0,
+  passed: 0,
+  failed: 0,
+  timedOut: 0,
+  unmeasured: false,
 })
 
 /** Statuses at which the node has settled and given everything back. */
@@ -371,6 +493,8 @@ export function analyzeRun(
   /** Pools any `gate_pool` event named, and gates any `gate_result` reported. */
   const poolsSeen = new Set<string>()
   const gatesRun = new Set<string>()
+  /** Keyed by gate id; insertion order is discarded for the workflow's own. */
+  const gateTallies = new Map<string, GateTally>()
 
   const traceOf = (nodeId: string): Trace => {
     const existing = traces.get(nodeId)
@@ -493,11 +617,36 @@ export function analyzeRun(
         }
         continue
       }
-      case 'gate_result':
-        // Read only to tell "this pool was never busy" from "this journal
-        // never recorded the pool" — see `attributionGaps`.
+      case 'gate_result': {
+        // Read for two things: to tell "this pool was never busy" from "this
+        // journal never recorded the pool" (see `attributionGaps`), and for
+        // the gate's own runtime.
         gatesRun.add(event.payload.gate)
+        const { gate, status, duration_ms: durationMs, cached } = event.payload
+        const tally = gateTallies.get(gate) ?? newGateTally()
+        gateTallies.set(gate, tally)
+        tally.runs += 1
+        if (status === 'passed') tally.passed += 1
+        else if (status === 'failed') tally.failed += 1
+        else tally.timedOut += 1
+        // Typed as required, absent in practice: a journal written before the
+        // runner measured itself has the field missing, and this module reads
+        // whatever is on disk. Counted as a verdict, not as zero milliseconds.
+        if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
+          tally.unmeasured = true
+          continue
+        }
+        const ms = Math.max(0, Math.round(durationMs))
+        if (cached === true) {
+          tally.cachedRuns += 1
+          tally.cacheSavedMs += ms
+          continue
+        }
+        tally.ranMs += ms
+        tally.slowestMs = Math.max(tally.slowestMs, ms)
+        traceOf(event.nodeId).gateRunMs += ms
         continue
+      }
       default:
         // `human_question`, `human_answered` and `node_operation` are recorded
         // for other readers; the time they describe is already in the status
@@ -547,6 +696,7 @@ export function analyzeRun(
         capacityWaitMs: trace.capacityWaitMs,
         suspendedMs: trace.suspendedMs,
         gatePoolQueueMs: trace.gatePoolQueueMs,
+        gateRunMs: trace.gateRunMs,
       },
     })
   }
@@ -577,7 +727,8 @@ export function analyzeRun(
     criticalPathMs,
     pools: poolContention(workflow, poolHolds, poolQueuedMs, unrecorded, startedAtMs, observedAsOfMs),
     laneIdleness: laneIdleness(laneCapacity, laneSegments, elapsedMs),
-    gaps: attributionGaps(unrecorded),
+    gates: gateAnalytics(workflow, gateTallies),
+    gaps: attributionGaps(unrecorded, unmeasuredGates(gateTallies)),
   }
 }
 
@@ -834,6 +985,50 @@ function laneIdleness(
 }
 
 /**
+ * The gate rollup, in the workflow's own declaration order so a report reads
+ * the way the plan does — the ordering rule `nodes` and `pools` already follow.
+ *
+ * A gate the run recorded but the workflow does not declare is still reported,
+ * sorted after the declared ones. The executor skips an unknown gate id, so
+ * this should be unreachable from a run of *this* workflow; it becomes
+ * reachable the moment a run is amended (§9) and a gate is dropped from the
+ * frozen copy underneath verdicts already on the tape. Dropping those rows
+ * would silently unspend time the run really paid.
+ */
+function gateAnalytics(
+  workflow: Workflow,
+  tallies: ReadonlyMap<string, GateTally>,
+): GateAnalytics[] {
+  const declared = Object.keys(workflow.gates)
+  const rest = [...tallies.keys()].filter((gate) => !declared.includes(gate)).sort()
+  const report: GateAnalytics[] = []
+  for (const gate of [...declared, ...rest]) {
+    const tally = tallies.get(gate)
+    if (tally === undefined) continue
+    report.push({
+      gate,
+      runs: tally.runs,
+      cachedRuns: tally.cachedRuns,
+      ranMs: tally.ranMs,
+      slowestMs: tally.slowestMs,
+      cacheSavedMs: tally.cacheSavedMs,
+      passed: tally.passed,
+      failed: tally.failed,
+      timedOut: tally.timedOut,
+    })
+  }
+  return report
+}
+
+/** Gates that recorded a verdict carrying no runtime. */
+function unmeasuredGates(tallies: ReadonlyMap<string, GateTally>): string[] {
+  return [...tallies]
+    .filter(([, tally]) => tally.unmeasured)
+    .map(([gate]) => gate)
+    .sort()
+}
+
+/**
  * Pools this run demonstrably used and demonstrably did not record.
  *
  * The evidence has to be positive in both directions, which is why it is a
@@ -867,10 +1062,13 @@ function unrecordedPools(
  * used to emit unconditionally are closed by the `gate_pool` edges, and a gap
  * left standing after its cause is fixed is a lie in the other direction.
  */
-function attributionGaps(unrecorded: ReadonlySet<string>): AttributionGap[] {
-  if (unrecorded.size === 0) return []
-  return [
-    {
+function attributionGaps(
+  unrecorded: ReadonlySet<string>,
+  unmeasured: readonly string[],
+): AttributionGap[] {
+  const gaps: AttributionGap[] = []
+  if (unrecorded.size > 0) {
+    gaps.push({
       kind: 'gate_pool_events_missing',
       resources: [...unrecorded].sort(),
       needs:
@@ -880,6 +1078,20 @@ function attributionGaps(unrecorded: ReadonlySet<string>): AttributionGap[] {
         'written before those events existed looks like, and what a pool taken ' +
         'outside the scheduler looks like. Queue time and occupancy for them are ' +
         'unknown rather than zero.',
-    },
-  ]
+    })
+  }
+  if (unmeasured.length > 0) {
+    gaps.push({
+      kind: 'gate_durations_unrecorded',
+      resources: [],
+      gates: [...unmeasured],
+      needs:
+        '`duration_ms` on the `gate_result` events the executor writes, which is the ' +
+        "runner's own measurement of the gate. This run recorded a verdict for these " +
+        'gates without one — what a journal written before the runner measured itself ' +
+        'looks like. Their verdict counts are complete; their runtime is short by ' +
+        'however long those runs took, which is unknown rather than zero.',
+    })
+  }
+  return gaps
 }

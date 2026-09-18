@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import {
   analyzeRun,
   type AnalyticsSource,
+  type GateAnalytics,
   type NodeAnalytics,
   type PoolContention,
   type RunAnalytics,
@@ -141,12 +142,32 @@ class Tape implements AnalyticsSource {
     return this.gatePool(to, nodeId, 'released', resources)
   }
 
-  gateResult(ts: number, nodeId: string, gate: string, status: GateStatus = 'passed'): this {
+  /**
+   * One gate verdict. `durationMs: null` writes the row *without* the field,
+   * which is what a journal from before the runner measured itself holds —
+   * the payload type says `number`, and the fold reads disk rather than
+   * TypeScript, so the difference has to be expressible here.
+   */
+  gateResult(
+    ts: number,
+    nodeId: string,
+    gate: string,
+    status: GateStatus = 'passed',
+    measurement: { readonly durationMs?: number | null; readonly cached?: boolean } = {},
+  ): this {
+    const durationMs = measurement.durationMs === undefined ? 1000 : measurement.durationMs
+    const payload = {
+      gate,
+      exit_code: status === 'passed' ? 0 : 1,
+      status,
+      cached: measurement.cached ?? false,
+      ...(durationMs === null ? {} : { duration_ms: durationMs }),
+    }
     return this.push(ts, {
       runId: RUN,
       nodeId,
       type: 'gate_result',
-      payload: { gate, exit_code: status === 'passed' ? 0 : 1, status, duration_ms: 1000, cached: false },
+      payload: payload as Extract<NewEvent, { type: 'gate_result' }>['payload'],
     })
   }
 
@@ -392,6 +413,7 @@ describe('queue-wait attribution', () => {
       laneQueueMs: 0,
       capacityWaitMs: 0,
       gatePoolQueueMs: 0,
+      gateRunMs: 0,
     })
     // §6: the lane is held across a pause, so the pool stays busy through it.
     expect(poolOf(report, 'lane')).toMatchObject({ busyMs: 500 })
@@ -551,6 +573,176 @@ describe('gate pools', () => {
       .end(400)
 
     expect(analyzeRun(tape, RUN).gaps).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Gate durations — the other half of §13.3's question: how long did each gate
+// spend *running*, as against queued for its pool.
+// ---------------------------------------------------------------------------
+
+describe('gate durations', () => {
+  const RESOURCES = {
+    lane: { capacity: 2, kind: 'worktree' },
+    'test-suite': { capacity: 1, kind: 'semaphore' },
+  } as const satisfies WorkflowInput['resources']
+
+  const GATES = {
+    // Declaration order, deliberately not alphabetical: the rollup is supposed
+    // to read the way the plan does, and `tests` before `lint` is the only way
+    // to tell that apart from a sort.
+    tests: { cmd: 'pnpm test', requires: ['test-suite'], timeout_s: 600 },
+    lint: { cmd: 'pnpm lint', requires: [], timeout_s: 60 },
+  } as const satisfies WorkflowInput['gates']
+
+  const gateOf = (report: RunAnalytics, gate: string): GateAnalytics => {
+    const found = report.gates.find((one) => one.gate === gate)
+    if (!found) throw new Error(`gate ${gate} missing from the report`)
+    return found
+  }
+
+  /**
+   * Two nodes, a fix round on one of them. `a` fails `tests` at 5s, is fixed,
+   * passes at 9s; `b` passes once at 3s. Every figure below is a sum over
+   * those recorded runtimes and not over the distance between journal rows —
+   * which is the whole point of reading `duration_ms` instead of subtracting
+   * timestamps.
+   */
+  const withGates = (): Tape => {
+    const wf = workflow([phase('a'), phase('b')], RESOURCES, GATES)
+    return new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 20_000)
+      .ran('b', 0, 10_000, 0)
+      .gated('a', ['test-suite'], 1000, 1000, 6000)
+      .gateResult(6000, 'a', 'tests', 'failed', { durationMs: 5000 })
+      .gated('a', ['test-suite'], 10_000, 10_000, 19_000)
+      .gateResult(19_000, 'a', 'tests', 'passed', { durationMs: 9000 })
+      .gated('b', ['test-suite'], 6000, 6000, 9000)
+      .gateResult(9000, 'b', 'tests', 'passed', { durationMs: 3000 })
+      .end(20_000)
+  }
+
+  it('sums each gate’s recorded runtime across nodes and fix rounds', () => {
+    const report = analyzeRun(withGates(), RUN)
+
+    expect(gateOf(report, 'tests')).toEqual({
+      gate: 'tests',
+      runs: 3,
+      cachedRuns: 0,
+      ranMs: 17_000,
+      slowestMs: 9000,
+      cacheSavedMs: 0,
+      passed: 2,
+      failed: 1,
+      timedOut: 0,
+    })
+  })
+
+  /**
+   * The rollup lists gates the run recorded, in the workflow's declaration
+   * order. `lint` is declared and never ran, so it is absent rather than a row
+   * of zeros — an absence and a measured zero are different claims.
+   */
+  it('lists only the gates that ran, in declaration order', () => {
+    const wf = workflow([phase('a')], RESOURCES, GATES)
+    const tape = new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 5000)
+      .gated('a', ['test-suite'], 100, 100, 1100)
+      .gateResult(1100, 'a', 'tests')
+      .end(5000)
+
+    expect(analyzeRun(tape, RUN).gates.map((one) => one.gate)).toEqual(['tests'])
+  })
+
+  /**
+   * §13.4's cache. A hit's `duration_ms` is what the gate cost the last time
+   * it really ran, so counting it as time *this* run spent would bill the run
+   * for the work the cache let it skip — and would make the saving invisible
+   * at the same time.
+   */
+  it('keeps cache hits out of the runtime and reports what they saved', () => {
+    const wf = workflow([phase('a')], RESOURCES, GATES)
+    const tape = new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 5000)
+      .gateResult(1000, 'a', 'tests', 'passed', { durationMs: 4000, cached: true })
+      .gated('a', ['test-suite'], 2000, 2000, 3000)
+      .gateResult(3000, 'a', 'tests', 'passed', { durationMs: 1000 })
+      .end(5000)
+
+    const report = analyzeRun(tape, RUN)
+
+    expect(gateOf(report, 'tests')).toMatchObject({
+      runs: 2,
+      cachedRuns: 1,
+      ranMs: 1000,
+      slowestMs: 1000,
+      cacheSavedMs: 4000,
+    })
+    // And the node is billed only for the run it paid for.
+    expect(nodeOf(report, 'a').split.gateRunMs).toBe(1000)
+  })
+
+  /**
+   * A timeout is a verdict with a runtime: the gate ran for its whole
+   * `timeout_s` and was killed. Dropping it would understate the most
+   * expensive kind of run there is.
+   */
+  it('counts a timed-out run as runtime the node paid', () => {
+    const wf = workflow([phase('a')], RESOURCES, GATES)
+    const tape = new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 5000)
+      .gated('a', ['test-suite'], 100, 100, 600)
+      .gateResult(600, 'a', 'tests', 'timed_out', { durationMs: 500 })
+      .end(5000)
+
+    const report = analyzeRun(tape, RUN)
+
+    expect(gateOf(report, 'tests')).toMatchObject({ runs: 1, timedOut: 1, ranMs: 500 })
+    expect(nodeOf(report, 'a').split.gateRunMs).toBe(500)
+  })
+
+  /**
+   * `gateRunMs` is a subset of `workingMs` reported beside it, exactly as
+   * `gatePoolQueueMs` is — the lane is held while a gate runs. The partition
+   * of the span must be untouched by it.
+   */
+  it('reconciles exactly with gate runtime inside the span', () => {
+    const report = analyzeRun(withGates(), RUN)
+
+    expect(nodeOf(report, 'a').split.gateRunMs).toBe(14_000)
+    expect(nodeOf(report, 'b').split.gateRunMs).toBe(3000)
+    expectReconciles(report)
+  })
+
+  /**
+   * A journal from before the runner measured itself. The verdict is counted
+   * and the milliseconds are not — and the report says so, because a gate
+   * reported as having cost nothing is a number somebody will act on.
+   */
+  it('reports a gap rather than zero when a verdict carries no runtime', () => {
+    const wf = workflow([phase('a')], RESOURCES, GATES)
+    const tape = new Tape(wf)
+      .begin(0)
+      .ran('a', 0, 5000)
+      .gated('a', ['test-suite'], 100, 100, 1100)
+      .gateResult(1100, 'a', 'tests', 'passed', { durationMs: null })
+      .end(5000)
+
+    const report = analyzeRun(tape, RUN)
+
+    expect(gateOf(report, 'tests')).toMatchObject({ runs: 1, passed: 1, ranMs: 0 })
+    expect(report.gaps.map((gap) => gap.kind)).toEqual(['gate_durations_unrecorded'])
+    expect(report.gaps[0]?.gates).toEqual(['tests'])
+    expect(nodeOf(report, 'a').split.gateRunMs).toBe(0)
+  })
+
+  /** Every verdict measured: nothing to declare. */
+  it('emits no gap when every verdict carried a runtime', () => {
+    expect(analyzeRun(withGates(), RUN).gaps).toEqual([])
   })
 })
 
