@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GateCache } from '../src/gates/cache.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
@@ -234,4 +234,116 @@ describe('a gate run on an agent’s behalf', () => {
       expect(r.runs()).toBe(0)
     })
   })
+})
+
+/**
+ * The wait, which is the half of this that HTTP made necessary.
+ *
+ * `run` is the whole gate in one promise, and nothing over a socket can await
+ * one: Node's own `fetch` abandons a response after five minutes, and a gate
+ * that queues for a capacity-1 semaphore and then runs a test suite is
+ * routinely slower than that. The observed cost was not a slow gate but a
+ * *lying* one — the CLI reported a daemon it could not reach about a gate that
+ * was running fine, agents wrote polling loops to work around the lie, and a
+ * measured phase spent a quarter of its wall clock inside them.
+ *
+ * So the wait is hops, and these are the two properties that make hopping safe:
+ * a hop that gives up leaves the gate running, and the next ask finds it.
+ */
+describe('a gate waited for in hops', () => {
+  /** A gate that finishes when the test says so, and not before. */
+  const held = (): { path: string; release: () => void } => {
+    const path = join(mkdtempSync(join(tmpdir(), 'vinta-agent-gate-hold-')), 'go')
+    cleanups.push(() => rmSync(dirname(path), { recursive: true, force: true }))
+    return { path, release: () => writeFileSync(path, 'go\n') }
+  }
+
+  it('answers "still running" without disturbing the gate, then answers with it', async () => {
+    const gate = held()
+    const r = rig({ script: { until: { path: gate.path } } })
+
+    // Nothing can finish inside zero milliseconds, so this reaches the queued
+    // answer without the test having to guess at a duration.
+    const first = await r.broker.hop('unit', NODE, { withinMs: 0 })
+    expect(first).toEqual({ waiting: true, gateId: 'unit' })
+
+    // Still running: giving up on a hop must not cancel the work behind it.
+    // Cancelled here, a client's ceiling would become the gate's, and the
+    // suite would restart from nothing every time the harness reached for its
+    // timer.
+    const second = await r.broker.hop('unit', NODE, { withinMs: 0 })
+    expect(second).toEqual({ waiting: true, gateId: 'unit' })
+
+    gate.release()
+    const done = await r.broker.hop('unit', NODE, { withinMs: 30_000 })
+    expect(done).toMatchObject({ gateId: 'unit', status: 'passed', exitCode: 0, cached: false })
+
+    // One gate ran, though it was asked for three times.
+    expect(r.runs()).toBe(1)
+  }, 30_000)
+
+  /**
+   * The property the whole re-invocation design rests on.
+   *
+   * An agent harness kills a command at its own ceiling, and a gate may exceed
+   * any such ceiling — a plan that declares `timeout_s: 2400` for its suite is
+   * declaring forty minutes against a harness budget of ten. So being killed
+   * partway is the *ordinary* ending, and what the agent does next is run the
+   * command again. That has to attach, not start a second suite beside the
+   * first — which is what it did when the only way in was `run`, and it did it
+   * behind the very semaphore its own predecessor was still holding.
+   */
+  it('attaches a second ask to the gate already running rather than starting another', async () => {
+    const gate = held()
+    const r = rig({ script: { until: { path: gate.path } } })
+    const acquire = vi.spyOn(r.pools, 'acquire')
+
+    // Two asks with nothing carried between them — the client was killed and
+    // re-invoked, so it has no token and needs none. `(node, gate)` is the
+    // whole of the gate's identity.
+    expect(await r.broker.hop('unit', NODE, { withinMs: 0 })).toMatchObject({ waiting: true })
+    expect(await r.broker.hop('unit', NODE, { withinMs: 0 })).toMatchObject({ waiting: true })
+
+    gate.release()
+    const done = await r.broker.hop('unit', NODE, { withinMs: 30_000 })
+
+    expect(done).toMatchObject({ status: 'passed', cached: false })
+    expect(r.runs()).toBe(1)
+    // And the pool was taken once. Two runs would have been two acquires, the
+    // second queued behind the first on a capacity-1 semaphore.
+    expect(acquire).toHaveBeenCalledTimes(1)
+  }, 30_000)
+
+  it('refuses on the hop that asked, and does not leave the refusal behind it', async () => {
+    const r = rig()
+
+    // A refusal rejects before anything is acquired, so it lands inside the
+    // hop's own window however short that is — the route needs it there to
+    // turn it into a status.
+    await expect(r.broker.hop('nope', NODE, { withinMs: 0 })).rejects.toMatchObject({
+      code: 'unknown_gate',
+    })
+    // And asking again is refused the same way rather than inheriting a dead
+    // flight, or worse, waiting forever on one.
+    await expect(r.broker.hop('nope', NODE, { withinMs: 0 })).rejects.toMatchObject({
+      code: 'unknown_gate',
+    })
+  })
+
+  /**
+   * A gate that finished while nobody was watching is not a special case: the
+   * flight retires on settling and the next ask runs the gate again, which for
+   * a tree that has not moved is a `GateCache` hit. Nothing has to decide how
+   * long to hold a finished answer, because the cache already is that decision.
+   */
+  it('answers from the cache once the flight it was watching has retired', async () => {
+    const r = rig()
+
+    const first = await r.broker.hop('unit', NODE, { withinMs: 30_000 })
+    expect(first).toMatchObject({ status: 'passed', cached: false })
+
+    const again = await r.broker.hop('unit', NODE, { withinMs: 30_000 })
+    expect(again).toMatchObject({ status: 'passed', cached: true })
+    expect(r.runs()).toBe(1)
+  }, 30_000)
 })

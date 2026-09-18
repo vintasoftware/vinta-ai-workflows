@@ -580,6 +580,35 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro gate` gave up on the slowest gate after five minutes and
+  called it a daemon it could not reach.** The command awaited one `fetch`, on
+  the stated reasoning that a gate is slow for reasons the client cannot shorten
+  and so the client should simply wait — while its own comment claimed it
+  imposed no deadline of its own. It imposed 300 seconds, because that is where
+  Node's `fetch` abandons a response whose headers have not arrived, and a gate
+  that queues for a capacity-1 semaphore and then runs a test suite is routinely
+  slower. In a measured fourteen-hour run this fired **33 times, every one of
+  them on the `unit` gate and none on any other** — a perfect correlation with
+  duration, not a flaky daemon. The gates were running fine and cached green
+  results minutes later; only the answer was lost. Told a transport lie about
+  work in progress, agents wrote polling loops around a command documented as
+  needing none: in one phase, **24 of 108 shell turns were pure waiting, six of
+  them burning a full ten-minute ceiling — 60 minutes, 31% of that phase.** The
+  wait is a `202` hop loop now, which is what `with` already does, having found
+  the same bug the same way and fixed it first.
+
+- **A gate command cut short by the harness started the suite over.** An agent
+  harness caps how long one command may run, and a gate may exceed any such cap
+  — a plan declaring `timeout_s: 2400` is asking for forty minutes against a
+  ten-minute budget. So being killed partway is the *ordinary* ending, and what
+  an agent does next is run the command again. That used to start a second full
+  suite beside the first, queued behind the very semaphore its own predecessor
+  was still holding. The daemon now keys a running gate on `(phase, gate id)`
+  and the re-invocation attaches to it, which makes re-running the command the
+  correct move rather than a wasteful one — worth having, because it is the move
+  an agent makes anyway. There is no token to carry, deliberately: a client that
+  was killed has nothing in hand, and needing something would defeat the point.
+
 - **A pipeline that could not progress was journalled as the word "Error".** The
   interpreter composes an id-safe reason for exactly this case — which state it
   could not leave, and which trigger failed to match — and the scheduler threw

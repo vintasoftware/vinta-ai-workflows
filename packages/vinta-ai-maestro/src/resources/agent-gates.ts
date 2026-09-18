@@ -85,13 +85,112 @@ export interface AgentGateBrokerOptions {
   readonly cache: GateCache
   /** The lane behind a slot name, read through the pool: a recycled slot is a new object. */
   readonly lane: (name: string) => GateLane
+  /**
+   * Injected so a test of the hop does not pay for the hop. Real sleeping is
+   * the slowest thing about a wait loop, and a test that spends it asleep is
+   * one that flakes on a loaded machine for reasons unrelated to what it
+   * asserts. `agent-leases.ts` takes the same pair for the same reason.
+   */
+  readonly setTimer?: (callback: () => void, delayMs: number) => NodeJS.Timeout
+  readonly clearTimer?: (timer: NodeJS.Timeout) => void
+}
+
+/**
+ * Still running — come back. The gate's half of `POST /leases`' `202`.
+ *
+ * It carries no wait token, and the difference from a lease is the reason. A
+ * lease wait is a *place in a queue*: two hops that lose it are two positions
+ * lost, so the token is what the client must hand back to keep the one it
+ * bought. A gate run is a single job, identified by who asked and for what —
+ * so `(holderNode, gateId)` is the whole of its identity, and attaching by
+ * that alone is precisely the property wanted here. A client killed
+ * mid-wait — which is the ordinary case, because agent harnesses cap how long
+ * one command may run — re-invokes with nothing in hand and still finds its
+ * own gate rather than starting a second one beside it.
+ */
+export interface AgentGateWaiting {
+  readonly waiting: true
+  readonly gateId: string
+}
+
+/** One gate, running, with whoever is watching it sharing the one promise. */
+interface GateFlight {
+  readonly settled: Promise<AgentGateResult>
+}
+
+export interface AgentGateHopOptions {
+  /** How long this hop may hold the request open before answering "not yet". */
+  readonly withinMs: number
 }
 
 export class AgentGateBroker {
   readonly #options: AgentGateBrokerOptions
+  readonly #setTimer: (callback: () => void, delayMs: number) => NodeJS.Timeout
+  readonly #clearTimer: (timer: NodeJS.Timeout) => void
+  /** Keyed by `(holderNode, gateId)` — see `AgentGateWaiting` for why that is the key. */
+  readonly #inFlight = new Map<string, GateFlight>()
 
   constructor(options: AgentGateBrokerOptions) {
     this.#options = options
+    this.#setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs))
+    this.#clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer))
+  }
+
+  /**
+   * Waits up to `withinMs` for `gateId` in `holderNode`'s lane, starting it if
+   * it is not already running, and answers either the result or "not yet".
+   *
+   * This exists because `run` could not be awaited over HTTP. One held request
+   * is the obvious shape and it is the wrong one: Node's own `fetch` stops
+   * waiting for a response header after five minutes, and a gate that acquires
+   * a capacity-1 semaphore and then runs a test suite is routinely slower than
+   * that. The client's error said the daemon could not be reached, about a
+   * gate that was running perfectly well and would cache a green result
+   * minutes later — and agents did the reasonable thing with an error that
+   * names no alternative, which was to invent polling loops around a command
+   * documented as having none. `with` learned this first and the `202` here is
+   * its lesson, arrived at a second time.
+   *
+   * The second property is the one `with` does not need. A hop that never
+   * comes back is the *expected* ending, not a failure: an agent harness kills
+   * a command at its own ceiling regardless of what the daemon is doing. So
+   * the flight outlives its watcher, and the re-invocation that follows
+   * attaches to it. Without that, every kill started another full suite
+   * against the same unchanged tree, behind the semaphore its own predecessor
+   * was still holding.
+   */
+  async hop(
+    gateId: string,
+    holderNode: string,
+    options: AgentGateHopOptions,
+  ): Promise<AgentGateWaiting | AgentGateResult> {
+    const key = `${holderNode} ${gateId}`
+    let flight = this.#inFlight.get(key)
+
+    if (flight === undefined) {
+      // A refusal — `unknown_gate`, `no_lane`, `gate_needs_lane` — rejects
+      // before anything is acquired, so it lands inside `withinMs` and reaches
+      // the hop that asked, which is the one whose route can turn it into a
+      // status. The retirement below means a later hop re-asks and is refused
+      // the same way rather than inheriting a dead flight.
+      const started = this.run(gateId, holderNode)
+      flight = { settled: started }
+      this.#inFlight.set(key, flight)
+
+      // Retired the moment it settles, however it settles. A later invocation
+      // then finds no flight and starts one — which, for a tree that has not
+      // moved, is a `GateCache` hit and returns at once. Nothing has to decide
+      // how long to keep a finished answer, because the cache already is that
+      // decision. The handler is also what keeps a rejection nobody is
+      // watching from surfacing as an unhandled one between hops.
+      const retire = (): void => {
+        if (this.#inFlight.get(key) === flight) this.#inFlight.delete(key)
+      }
+      started.then(retire, retire)
+    }
+
+    const result = await this.#within(flight.settled, options.withinMs)
+    return result ?? { waiting: true, gateId }
   }
 
   /**
@@ -154,6 +253,39 @@ export class AgentGateBroker {
       cached: result.cached,
       logRef: result.logPath,
     }
+  }
+
+  /**
+   * The result if it lands inside `ms`, else `null` — the run itself untouched.
+   *
+   * Untouched is the whole point: a hop that gives up must leave a running
+   * gate running. Cancelling it at the hop boundary would make a client's
+   * ceiling into the gate's, and the suite would restart from nothing every
+   * time the harness reached for its timer.
+   */
+  #within(settled: Promise<AgentGateResult>, ms: number): Promise<AgentGateResult | null> {
+    return new Promise<AgentGateResult | null>((resolve, reject) => {
+      let done = false
+      const timer = this.#setTimer(() => {
+        if (done) return
+        done = true
+        resolve(null)
+      }, ms)
+      settled.then(
+        (result) => {
+          if (done) return
+          done = true
+          this.#clearTimer(timer)
+          resolve(result)
+        },
+        (error: unknown) => {
+          if (done) return
+          done = true
+          this.#clearTimer(timer)
+          reject(error instanceof Error ? error : new Error('gate failed to start'))
+        },
+      )
+    })
   }
 }
 

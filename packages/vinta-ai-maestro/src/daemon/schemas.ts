@@ -180,6 +180,22 @@ export const AgentGateResultSchema = z.strictObject({
 
 export type AgentGateResultResponse = z.infer<typeof AgentGateResultSchema>
 
+/**
+ * The gate's `202`: still running, ask again.
+ *
+ * Distinct from every failure shape for `AgentLeaseWaitingSchema`'s reason —
+ * "wait" and "no" deserve opposite reactions, and a client that conflates them
+ * goes around the mechanism. There is no `waitToken` here: a gate is found
+ * again by `(holderNode, gateId)`, so a client that was killed mid-wait needs
+ * nothing in hand to attach to its own run.
+ */
+export const AgentGateWaitingSchema = z.strictObject({
+  waiting: z.literal(true),
+  gateId: z.string().min(1),
+})
+
+export type AgentGateWaitingResponse = z.infer<typeof AgentGateWaitingSchema>
+
 export const RunSummarySchema = z.strictObject({
   runId: z.string(),
   workflowId: z.string(),

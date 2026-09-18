@@ -738,6 +738,112 @@ describe('vinta-ai-maestro gate', () => {
     })
   })
 
+  /**
+   * The bug this loop exists for, asserted as the behaviour that would have
+   * caught it.
+   *
+   * One awaited `fetch` is the obvious shape and it is wrong: Node abandons a
+   * response whose headers have not arrived in five minutes, and a gate that
+   * queues for a capacity-1 semaphore and then runs a suite is regularly
+   * slower. In a measured fourteen-hour run this fired thirty-three times,
+   * every one of them on the slowest gate and none on any other — and what the
+   * agent read was that the daemon could not be reached, about gates that were
+   * running fine and cached green results minutes later.
+   */
+  it('keeps asking while the gate is still running, rather than holding one request open', async () => {
+    await gateEnv(async () => {
+      let asks = 0
+      const request: typeof fetch = async () => {
+        asks += 1
+        // Two "still running" answers, then the verdict.
+        if (asks < 3) return Response.json({ waiting: true, gateId: 'unit' }, { status: 202 })
+        return Response.json({
+          gateId: 'unit',
+          status: 'passed',
+          exitCode: 0,
+          cached: false,
+          logRef: '/runs/run-1/nodes/phase-a/gates/unit.log',
+        })
+      }
+      const io = recorder()
+
+      expect(await gateCommand(['unit'], io.io, { fetch: request, sleep: async () => {} })).toBe(0)
+      expect(asks).toBe(3)
+
+      // A waiting turn says it is waiting. A turn that went silent is what
+      // made agents start checking whether anything was alive.
+      const said = io.all().join('\n')
+      expect(said).toContain('gate unit is running')
+      // And it says the one thing that makes being killed here harmless —
+      // because being killed here is the ordinary ending, and the agent's next
+      // move either attaches to this gate or starts a second suite beside it.
+      expect(said).toContain('run it again')
+      expect(said).toContain('gate unit passed (exit 0)')
+    })
+  })
+
+  it('does not read a “still running” answer as a verdict of its own', async () => {
+    // `202` is the one 2xx that is not an answer. Treated as one, its body
+    // does not parse as a result and the command reports a failure of its own
+    // — the gate's real verdict never arrives, and a red suite and a broken
+    // daemon become the same exit code.
+    //
+    // The gate's code here is deliberately neither `0` nor `FAILED`: those are
+    // the two values this could return by accident and still look right.
+    await gateEnv(async () => {
+      let asks = 0
+      const request: typeof fetch = async () => {
+        asks += 1
+        if (asks === 1) return Response.json({ waiting: true, gateId: 'unit' }, { status: 202 })
+        return Response.json({
+          gateId: 'unit',
+          status: 'failed',
+          exitCode: 4,
+          cached: false,
+          logRef: '/runs/run-1/nodes/phase-a/gates/unit.log',
+        })
+      }
+      const io = recorder()
+
+      expect(await gateCommand(['unit'], io.io, { fetch: request, sleep: async () => {} })).toBe(4)
+      expect(asks).toBe(2)
+      expect(io.all().join('\n')).toContain('gate unit failed (exit 4)')
+      expect(io.all().join('\n')).not.toContain('unreadable')
+    })
+  })
+
+  it('waits through a daemon that is restarting, and gives up on one that is gone', async () => {
+    await gateEnv(async () => {
+      // A transport failure is not a refusal: a daemon between two ticks of a
+      // restart is worth waiting through. What must not happen is an unbounded
+      // retry against one that will never answer, which would hang the turn.
+      let asks = 0
+      const flaky: typeof fetch = async () => {
+        asks += 1
+        if (asks <= 3) throw new Error('ECONNREFUSED')
+        return Response.json({
+          gateId: 'unit',
+          status: 'passed',
+          exitCode: 0,
+          cached: false,
+          logRef: '/runs/run-1/nodes/phase-a/gates/unit.log',
+        })
+      }
+      const io = recorder()
+      expect(await gateCommand(['unit'], io.io, { fetch: flaky, sleep: async () => {} })).toBe(0)
+
+      const gone = recorder()
+      const dead: typeof fetch = async () => {
+        throw new Error('ECONNREFUSED')
+      }
+      expect(await gateCommand(['unit'], gone.io, { fetch: dead, sleep: async () => {} })).toBe(
+        FAILED,
+      )
+      expect(gone.err.join('\n')).toContain('could not reach the daemon')
+      expect(gone.err.join('\n')).toContain('Do not run the gate command yourself')
+    })
+  })
+
   it('never suggests running the command by hand, whatever the refusal', async () => {
     // The lesson `with` had to learn the hard way: an error with no alternative
     // in it reads as permission to improvise one, and the improvised gate is

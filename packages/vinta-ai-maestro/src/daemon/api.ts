@@ -69,6 +69,7 @@ import {
   toWireIssues,
   type AmendResponse,
   type AgentGateResultResponse,
+  type AgentGateWaitingResponse,
   type AgentLeaseGrantResponse,
   type AgentLeaseWaitingResponse,
   type EventPage,
@@ -94,6 +95,15 @@ import { createWorkflowStore, isWorkflowId, plansDirFor } from './workflows.ts'
  * usually answered on the first hop.
  */
 const LEASE_WAIT_MS = 15_000
+
+/**
+ * How long one gate request waits before answering "not yet".
+ *
+ * `LEASE_WAIT_MS`'s reasoning, and deliberately the same number: both are
+ * bounded by the shortest opinion anything between client and daemon has
+ * about an idle response, not by how long the work behind them takes.
+ */
+const GATE_WAIT_MS = 15_000
 
 /** The last 64 KiB of a gate log. Enough for a failure tail, bounded by design. */
 const GATE_LOG_TAIL_BYTES = 64 * 1024
@@ -163,6 +173,12 @@ export interface ApiOptions {
    * without waiting fifteen real seconds for it.
    */
   readonly leaseWaitMs?: number
+  /**
+   * How long one gate request waits before answering "not yet" (`202`).
+   * Defaults to `GATE_WAIT_MS`; a test shortens it to reach the queued answer
+   * without waiting fifteen real seconds for it.
+   */
+  readonly gateWaitMs?: number
   /**
    * Starting a run on this daemon. Absent on a host that only serves history,
    * and then `POST /api/runs` says so rather than accepting a run nobody will
@@ -535,9 +551,17 @@ export function createApi(options: ApiOptions): Hono {
    * and it is given a gate *id*, so the command is the workflow's rather than
    * whatever the agent recalled of it.
    *
-   * It does not wait in hops the way `POST /leases` does. A gate acquires its
-   * pools and then runs a test suite, so the response is slow for reasons the
-   * client cannot shorten, and the CLI is built to wait for it.
+   * It waits in hops the way `POST /leases` does, and for the same reason it
+   * once did not. A gate acquires its pools and then runs a test suite, which
+   * is routinely slower than the five minutes Node's own `fetch` gives a
+   * response — so one held request answered "could not reach the daemon" about
+   * a gate that was running fine, and agents met that with polling loops of
+   * their own invention. `202` is "come back", and the client does.
+   *
+   * Unlike a lease there is no token to carry: the gate is found again by
+   * `(holderNode, gateId)`. That is what makes the *killed* client — the
+   * ordinary one, since harnesses cap a command's life — attach to its own run
+   * instead of starting a second suite beside it.
    */
   app.post('/api/runs/:runId/gates', async (c) => {
     const found = resolveGateRun(c)
@@ -553,8 +577,14 @@ export function createApi(options: ApiOptions): Hono {
     }
 
     try {
-      const result = await found.run.agentGates.run(body.value.gate, body.value.holderNode)
-      return c.json(result satisfies AgentGateResultResponse)
+      const outcome = await found.run.agentGates.hop(body.value.gate, body.value.holderNode, {
+        withinMs: options.gateWaitMs ?? GATE_WAIT_MS,
+      })
+      // Still running, which is the ordinary case and not an error.
+      if ('waiting' in outcome) {
+        return c.json(outcome satisfies AgentGateWaitingResponse, 202)
+      }
+      return c.json(outcome satisfies AgentGateResultResponse)
     } catch (error) {
       // Codes only, and the code is the broker's own where it had one. A gate
       // that failed is a `200` with a non-zero `exitCode`; reaching here means
