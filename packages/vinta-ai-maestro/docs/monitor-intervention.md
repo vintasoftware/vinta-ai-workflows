@@ -192,13 +192,40 @@ The executor and the broker now take an amendment, fanned out from one
 `AmendRunner.adopt` in `run/start.ts`, host side first so no node is dispatched
 against a definition half the system has not seen.
 
-**The integrator still captures its plan, and is left that way on purpose.** It
-reads node topology — branch names, wave membership, merge order — not the gate
-table, so nothing in this step or in the monitor's verb set reaches it. What
-*would* reach it is an amendment that adds a node or moves a dependency, which
-is a pre-existing staleness that predates this work and is not made worse by
-it. Fixing it means reconciling the integrator's wave index with a rebase queue
-that is mid-flight, which is its own change with its own tests.
+**The integrator was left out of the fan-out at first, and that was wrong.**
+The argument was that it reads node topology rather than the gate table, and
+that every amendment kind reaching topology is refused while a node it blocks is
+in flight. That holds for the nodes an amendment *touches* and fails for the
+wave they sit in: adding a phase is refused only while something it blocks is
+running, and nothing is blocked by a phase nobody depends on — so it lands
+freely beside its future wave-mates.
+
+Worse, teaching the executor to adopt without teaching the integrator to adopt
+is what made it reachable. `#lastOfWave` decides a wave is complete by counting
+the executor's node set, and `mergeWave` decided what to merge by reading the
+integrator's. While both were stale they agreed with each other and the bug was
+invisible; one fresh and one stale is a wave whose merge silently omits the
+branch of a phase that ran.
+
+So the integrator adopts too, and the wave merge no longer derives its
+membership at all. The executor computes the wave's members once,
+synchronously, in the same breath as deciding the wave is complete, and hands
+that list to `mergeWave`. A wave merge is queued behind the integration
+worktree and an amendment can land between the decision and the execution;
+deriving membership at execution time would let the wave that was declared
+complete and the wave that is built be different sets.
+
+Two things that turned out already to be right, and one that was not:
+
+- **`createRebaser` builds a fresh `Integrator` per request** from the amended
+  workflow, so the rebase path never read the stale plan. Nothing to fix.
+- **Branch names are safe either way.** They are built from the plan id, and an
+  amendment that changes the id is refused as `id_mismatch`.
+- **The rebase and the wave merges write in the same worktree and nothing
+  sequenced them.** An amendment is accepted whenever the nodes it blocks are
+  idle, which says nothing about whether some other wave's merge is in flight in
+  that directory — and both run `checkout -B`. The rebase now goes through the
+  executor's integration queue, which is the only queue over that worktree.
 
 Paired with it: the gate cache is keyed `(gate id, tree hash)`, not the command,
 so an amended gate with an unchanged tree was served the old result. The cache

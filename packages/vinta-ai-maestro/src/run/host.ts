@@ -89,6 +89,12 @@ export interface HostWiring {
    * snapshot, the journal and the pool reservations while leaving the command
    * that actually runs exactly as it was.
    *
+   * The integrator takes one too. It was left out at first on the argument
+   * that topology amendments are refused while the nodes they reach are in
+   * flight — which holds for those nodes and not for the *wave* they sit in, so
+   * a phase nobody depends on lands freely beside running wave-mates. See
+   * `Integrator.adopt`.
+   *
    * Absent for an injected executor, which owns whatever definition it was
    * built with.
    */
@@ -290,7 +296,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     cache,
   })
 
-  const rebase = createRebaser({
+  const rebasePlan = createRebaser({
     integrationPath,
     // The base the run recorded, not the one the amended graph implies: it is
     // the fork point the rebase replays from.
@@ -309,9 +315,14 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   return {
     executor,
     waveResults: () => integrator.records,
-    rebase,
+    // Through the executor's queue: the rebase and the wave merges write in
+    // the same worktree, and an amendment lands whenever the nodes it blocks
+    // are idle — which says nothing about whether another wave's merge is in
+    // flight in that directory.
+    rebase: async (request) => await executor.integration(() => rebasePlan(request)),
     adopt: (amended: Workflow) => {
       executor.adopt(amended)
+      integrator.adopt(amended)
       for (const broker of brokers) broker.adopt(amended)
     },
     recycleLane: async (name: string) => {

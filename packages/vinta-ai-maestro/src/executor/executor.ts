@@ -458,9 +458,23 @@ export class RunEffectExecutor implements EffectExecutor {
     }
 
     const wave = this.#waves.get(nodeId)
-    if (wave === undefined || !this.#lastOfWave(nodeId, wave)) return {}
-    await this.#integration(() => this.#options.integrator.mergeWave(wave))
+    if (wave === undefined) return {}
+    // Both answers from one reading of the plan, taken synchronously: whether
+    // the wave is complete, and which branches make it up. The merge itself is
+    // queued behind the integration worktree and an amendment can land before
+    // it runs, so deriving the membership later would let the wave that was
+    // declared complete and the wave that is merged be different sets.
+    const members = this.#waveMembers(wave)
+    if (!this.#lastOfWave(nodeId, members)) return {}
+    await this.#integration(() => this.#options.integrator.mergeWave(wave, members))
     return {}
+  }
+
+  /** The wave's phases, in plan order — the tie-break every merge order uses. */
+  #waveMembers(wave: number): string[] {
+    return this.#workflow.nodes
+      .filter((node) => this.#waves.get(node.id) === wave)
+      .map((node) => node.id)
   }
 
   /**
@@ -474,15 +488,22 @@ export class RunEffectExecutor implements EffectExecutor {
    * of one wave finishing together would each see the other unfinished and
    * neither would build the wave branch. The count is taken synchronously,
    * before any await, so the two cannot interleave.
+   *
+   * `members` is handed in rather than derived, so that the set this counts
+   * against is exactly the set the merge will merge. A node an amendment adds
+   * to this wave between the two readings would otherwise raise the bar here
+   * and never be merged, and one it removes would lower the bar and then be
+   * merged from a branch that was never cut.
    */
-  #lastOfWave(nodeId: string, wave: number): boolean {
+  #lastOfWave(nodeId: string, members: readonly string[]): boolean {
+    const wave = this.#waves.get(nodeId) as number
     const arrived = this.#arrived.get(wave) ?? new Set<string>()
     arrived.add(nodeId)
     this.#arrived.set(wave, arrived)
-    const size = this.#workflow.nodes.filter(
-      (node) => this.#waves.get(node.id) === wave,
-    ).length
-    return arrived.size >= size
+    // Counted against the same list the merge will use, rather than against a
+    // size read separately: an amendment between the two readings would make
+    // the wave "complete" at a count that no longer matches what is merged.
+    return members.every((member) => arrived.has(member))
   }
 
   /**
@@ -751,6 +772,24 @@ export class RunEffectExecutor implements EffectExecutor {
     // Swallowed on the chain only: the caller still sees the rejection.
     this.#integrationTurn = turn.catch(() => undefined)
     return await turn
+  }
+
+  /**
+   * The integration worktree's queue, for the one other thing that writes in
+   * it: §9's rebase.
+   *
+   * There is one integration worktree and two writers. This executor merges
+   * waves and prepares `integ-` bases in it; `amend/rebase.ts` moves `done`
+   * branches in it while an amendment is being applied. Both run `checkout -B`,
+   * and until now nothing sequenced them — an amendment is accepted whenever
+   * the nodes it *blocks* are idle, which says nothing about whether some other
+   * wave's merge is in flight in the same directory.
+   *
+   * Exposed rather than given a second queue of its own, because two queues
+   * over one worktree serialize nothing.
+   */
+  async integration<T>(work: () => Promise<T>): Promise<T> {
+    return await this.#integration(work)
   }
 }
 

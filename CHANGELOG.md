@@ -855,6 +855,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   actually ran is someone else — so a phase declared for one tier and covered by
   a higher one offered that higher one as its escalation, and a third of the
   menu did nothing distinguishable from plain retry.
+- **An amended workflow now reaches the integrator too, and a wave merge is
+  pinned to the membership it was decided with.** Fixing the executor without
+  fixing the integrator is what made this reachable: `#lastOfWave` decides a
+  wave is complete by counting the executor's node set and `mergeWave` decided
+  what to merge by reading the integrator's, so while both were stale they
+  agreed with each other and nothing showed. One fresh and one stale is a wave
+  whose merge silently omits the branch of a phase that ran.
+
+  The case that gets there is a phase nobody depends on. An amendment is
+  refused while a node it *blocks* is in flight, and such a phase blocks
+  nothing, so it lands freely beside the wave-mates it will be merged with.
+
+  A wave's membership is now computed once, synchronously, by the code that
+  decides the wave is complete, and handed to the merge — a wave merge runs
+  behind the integration worktree's queue and an amendment can land in between,
+  so a merge that re-derived its own membership would merge a phase that never
+  ran. §9's rebase goes through that same queue now, since "the nodes this
+  amendment blocks are idle" says nothing about whether another wave's merge is
+  writing in that directory.
+
 - **An amended workflow now reaches the code that runs the gate.** `adopt`
   replaced the scheduler's copy of the run's definition and nothing else, while
   the effect executor and the agent-gate broker each held the snapshot they were
