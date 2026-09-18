@@ -472,13 +472,85 @@ describe('snapshots', () => {
         { type: 'text', index: 3 },
       ],
     })
-    expect(detail.gates).toEqual([{ gateId: 'unit', log: 'FAIL tests/x\n' }])
+    // No journal row for this gate, only a log: the panel still lists it, and
+    // says the only honest thing about a gate whose verdict nothing recorded.
+    expect(detail.gates).toEqual([
+      {
+        gateId: 'unit',
+        log: 'FAIL tests/x\n',
+        status: 'running',
+        startedAt: null,
+        finishedAt: null,
+        durationMs: null,
+        cached: false,
+        runs: 0,
+      },
+    ])
     expect(detail.diff).toEqual({ branch: 'phase/a', baseBranch: 'main', lane: 'run-1-lane-1' })
     expect(detail.question).toEqual({
       question: 'Ship it?',
       kind: 'confirm',
       context: { diffRef: 'phase/a' },
     })
+  })
+
+  it('folds a gate’s journal rows to its latest attempt, and reads a live one as running', async () => {
+    const r = await rig()
+    writeFileSync(r.journal.gateLogPath(RUN_ID, 'a', 'unit'), 'FAIL tests/x\n')
+
+    // Two closed attempts and a third still open — the fix-loop shape. The
+    // panel must report the third, and count all three.
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'gate_started',
+      payload: { gate: 'unit' },
+    })
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'gate_result',
+      payload: { gate: 'unit', exit_code: 1, status: 'failed', duration_ms: 4_000, cached: false },
+    })
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'gate_started',
+      payload: { gate: 'unit' },
+    })
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'gate_result',
+      payload: { gate: 'unit', exit_code: 0, status: 'passed', duration_ms: 9_000, cached: true },
+    })
+
+    const settled = NodeDetailSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body,
+    ).gates[0]
+    expect(settled?.status).toBe('passed')
+    expect(settled?.durationMs).toBe(9_000)
+    expect(settled?.cached).toBe(true)
+    expect(settled?.runs).toBe(2)
+    expect(settled?.finishedAt).not.toBe(null)
+
+    // A start with nothing after it is the running state, and it drops the
+    // settled attempt's duration rather than showing a finished number beside
+    // a live clock.
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'gate_started',
+      payload: { gate: 'unit' },
+    })
+    const live = NodeDetailSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body,
+    ).gates[0]
+    expect(live?.status).toBe('running')
+    expect(live?.durationMs).toBe(null)
+    expect(live?.finishedAt).toBe(null)
+    expect(live?.startedAt).not.toBe(null)
+    expect(live?.runs).toBe(2)
   })
 
   it('serves §15’s session decisions for the node, and only for that node', async () => {

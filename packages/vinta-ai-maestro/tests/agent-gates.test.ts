@@ -172,8 +172,17 @@ describe('a gate run on an agent’s behalf', () => {
     const results = r.journal
       .events(RUN_ID)
       .filter((event) => event.type === 'gate_result')
-      .map((event) => event.payload)
-    expect(results).toEqual([{ gate: 'unit', exit_code: 2, status: 'failed' }])
+      .map((event) => event.payload as Record<string, unknown>)
+    expect(results).toMatchObject([{ gate: 'unit', exit_code: 2, status: 'failed', cached: false }])
+
+    // And bracketed by a start, so a gate an agent asked for reads as running
+    // in the node view while it runs — the same pair `run_gate` writes.
+    expect(
+      r.journal
+        .events(RUN_ID)
+        .filter((event) => event.type === 'gate_started')
+        .map((event) => event.payload),
+    ).toEqual([{ gate: 'unit' }])
 
     // And in the phase's own transcript, attributed to `gate` rather than to
     // the agent whose turn happened to ask for it.
@@ -191,6 +200,17 @@ describe('a gate run on an agent’s behalf', () => {
       false,
       true,
     ])
+    // The verdict rows say it too, and the second run announces no start:
+    // nothing ran, so the node view must not show it as having begun.
+    expect(
+      r.journal
+        .events(RUN_ID)
+        .filter((event) => event.type === 'gate_result')
+        .map((event) => (event.payload as { cached: boolean }).cached),
+    ).toEqual([false, true])
+    expect(r.journal.events(RUN_ID).filter((event) => event.type === 'gate_started')).toHaveLength(
+      1,
+    )
   })
 
   it('reports a timeout as a non-zero exit rather than as a pass', async () => {

@@ -129,6 +129,17 @@ export class AgentGateBroker {
       logPath: journal.gateLogPath(runId, holderNode, gateId),
       pools: this.#options.pools,
       cache: this.#options.cache,
+      // Fires at the spawn, after the pools are granted — so the distance to
+      // the result below is the gate's runtime and not the queue in front of
+      // it, which for an agent-run gate can be the larger of the two.
+      onStart: () => {
+        journal.append({
+          runId,
+          nodeId: holderNode,
+          type: 'gate_started',
+          payload: { gate: gateId },
+        })
+      },
     })
 
     const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
@@ -136,7 +147,13 @@ export class AgentGateBroker {
       runId,
       nodeId: holderNode,
       type: 'gate_result',
-      payload: { gate: gateId, exit_code: exitCode, status: result.status },
+      payload: {
+        gate: gateId,
+        exit_code: exitCode,
+        status: result.status,
+        duration_ms: result.durationMs,
+        cached: result.cached,
+      },
     })
     journal.appendTranscript(runId, holderNode, {
       type: 'gate_run',

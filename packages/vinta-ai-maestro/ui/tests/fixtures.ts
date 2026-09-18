@@ -166,6 +166,27 @@ export function runUsage(parts: Partial<RunUsageResponse> = {}): RunUsageRespons
   }
 }
 
+/**
+ * One gate on the node detail. Passed in `0.4s` unless told otherwise, which
+ * is the row a test that is about something else wants to say nothing about.
+ */
+export function gate(
+  gateId: string,
+  parts: Partial<NodeDetail['gates'][number]> = {},
+): NodeDetail['gates'][number] {
+  return {
+    gateId,
+    log: '',
+    status: 'passed',
+    startedAt: null,
+    finishedAt: 1_700_000_000_400,
+    durationMs: 400,
+    cached: false,
+    runs: 1,
+    ...parts,
+  }
+}
+
 export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {
   return {
     runId: RUN_ID,

@@ -749,11 +749,19 @@ describe('journalled gate results', () => {
     })
   }
 
+  /** The three identifier fields of each verdict. Timings are asserted apart. */
   const gateResults = (rig: Rig): { gate: string; exit_code: number; status: string }[] =>
     rig.journal
       .events(RUN_ID)
       .filter((event) => event.type === 'gate_result')
-      .map((event) => event.payload as { gate: string; exit_code: number; status: string })
+      .map((event) => {
+        const { gate, exit_code, status } = event.payload as {
+          gate: string
+          exit_code: number
+          status: string
+        }
+        return { gate, exit_code, status }
+      })
 
   it('records the gate id, its exit code and its status', async () => {
     const rig = setup(() => noisy(3))
@@ -831,13 +839,48 @@ describe('journalled gate results', () => {
     expect(payloads).not.toContain('on-stderr')
     // Not even the gate's command, which is repository text of its own.
     expect(payloads).not.toContain('echo')
-    // Identifiers, an exit code and a status — the whole payload.
+    // Identifiers, an exit code, a status and two measurements — the whole
+    // payload. Neither measurement is content: one is a millisecond count and
+    // the other a flag.
     expect(
       rig.journal
         .events(RUN_ID)
         .filter((event) => event.type === 'gate_result')
         .map((event) => Object.keys(event.payload).sort()),
-    ).toEqual([['exit_code', 'gate', 'status']])
+    ).toEqual([['cached', 'duration_ms', 'exit_code', 'gate', 'status']])
+    // And the start, which carries the gate id alone.
+    expect(
+      rig.journal
+        .events(RUN_ID)
+        .filter((event) => event.type === 'gate_started')
+        .map((event) => Object.keys(event.payload).sort()),
+    ).toEqual([['gate']])
+  })
+
+  /**
+   * The pair the node view's live clock reads. The start is written at the
+   * spawn rather than at the call, so the distance between the two rows is the
+   * gate's own runtime — and `duration_ms` is the runner's measurement of the
+   * same interval, which is what makes the two agree.
+   */
+  it('brackets the gate with a start event and reports what it measured', async () => {
+    const rig = setup(() => noisy(0))
+    assign(rig)
+
+    await rig.invoke('p1', 'run_gate')
+
+    const gateEvents = rig.journal
+      .events(RUN_ID)
+      .filter((event) => event.type === 'gate_started' || event.type === 'gate_result')
+    expect(gateEvents.map((event) => event.type)).toEqual(['gate_started', 'gate_result'])
+    expect(gateEvents[0]?.payload).toEqual({ gate: 'unit' })
+
+    const verdict = gateEvents[1]?.payload as { duration_ms: number; cached: boolean }
+    expect(verdict.cached).toBe(false)
+    expect(verdict.duration_ms).toBeGreaterThanOrEqual(0)
+    // The measurement cannot exceed the wall time between the two rows.
+    const bracket = (gateEvents[1]?.ts ?? 0) - (gateEvents[0]?.ts ?? 0)
+    expect(verdict.duration_ms).toBeLessThanOrEqual(bracket + 1)
   })
 })
 

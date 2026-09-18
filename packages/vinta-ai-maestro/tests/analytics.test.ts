@@ -146,7 +146,7 @@ class Tape implements AnalyticsSource {
       runId: RUN,
       nodeId,
       type: 'gate_result',
-      payload: { gate, exit_code: status === 'passed' ? 0 : 1, status },
+      payload: { gate, exit_code: status === 'passed' ? 0 : 1, status, duration_ms: 1000, cached: false },
     })
   }
 

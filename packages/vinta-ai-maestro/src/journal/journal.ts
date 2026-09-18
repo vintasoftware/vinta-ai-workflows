@@ -279,6 +279,28 @@ export class Journal {
   }
 
   /**
+   * Every gate edge for one node, oldest first: the `gate_started` rows and
+   * the `gate_result` rows interleaved in commit order.
+   *
+   * A narrow read for the same reason `sessionHistory` is one — the node view
+   * asks on every refresh and on every frame, and folding a whole run's log
+   * to find four rows would make the panel cost grow with the run.
+   *
+   * Both types in one query rather than two reads, because the pairing is the
+   * point: a `gate_started` with no `gate_result` after it is what "running"
+   * means, and that is only visible in their order.
+   */
+  gateHistory(runId: string, nodeId: string): StoredEvent[] {
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM events WHERE run_id = ? AND node_id = ?' +
+          " AND type IN ('gate_started', 'gate_result') ORDER BY id",
+      )
+      .all(runId, nodeId) as EventRow[]
+    return rows.map(toStoredEvent)
+  }
+
+  /**
    * §15's session decisions for a whole run, oldest first — the run-level
    * rollup's input (`usage/reuse.ts`).
    *
@@ -573,6 +595,7 @@ export class Journal {
         // "is reuse working" with the last turn rather than the run (§15).
         return
       case 'gate_pool':
+      case 'gate_started':
       case 'gate_result':
       case 'agent_lease':
         // History, deliberately not a projection. `leases` is the *current*

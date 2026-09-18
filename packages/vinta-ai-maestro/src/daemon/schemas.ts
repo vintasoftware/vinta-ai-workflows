@@ -413,8 +413,39 @@ export const NodeDetailSchema = z.strictObject({
     /** The last `limit` entries. Transcripts are tailed, never paged backwards. */
     entries: z.array(z.unknown()),
   }),
-  /** One entry per declared gate that has produced a log, tail-truncated. */
-  gates: z.array(z.strictObject({ gateId: z.string(), log: z.string() })),
+  /**
+   * One entry per declared gate the journal has seen run, newest verdict
+   * first-class, with the log tail-truncated.
+   *
+   * The verdict used to be absent, and the node view could only name the one
+   * gate §9.1's question happened to point at — so a phase whose lint gate
+   * passed and whose unit gate failed showed two identical rows unless a
+   * human gate had been raised about one of them. `status` comes off the
+   * journal's own `gate_result`, which is the same fact the guard read.
+   *
+   * `running` is the pair that has not closed: a `gate_started` with no
+   * result after it. It is the state the panel's live clock is for, and the
+   * reason `startedAt` is on the wire at all — the elapsed time has to be
+   * measured from the daemon's clock, not from when the browser first saw
+   * the row.
+   */
+  gates: z.array(
+    z.strictObject({
+      gateId: z.string(),
+      log: z.string(),
+      status: z.enum(['running', 'passed', 'failed', 'timed_out']),
+      /** Epoch ms the latest attempt began, or null where only a result is on record. */
+      startedAt: z.number().int().nullable(),
+      /** Epoch ms the latest verdict landed. Null while it is still running. */
+      finishedAt: z.number().int().nullable(),
+      /** The runner's measurement of the latest run. Null while it is still running. */
+      durationMs: z.number().int().nullable(),
+      /** The latest verdict was served from the cache — `durationMs` is what it cost then. */
+      cached: z.boolean(),
+      /** How many verdicts this gate has produced on this node, cached ones included. */
+      runs: z.number().int(),
+    }),
+  ),
   /** Every agent turn's session decision, oldest first (§15). */
   sessions: z.array(SessionTurnSchema),
   question: HumanQuestionSchema.nullable(),

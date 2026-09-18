@@ -65,6 +65,19 @@ export interface RunGateOptions {
   /** Supplied by the caller — the journal's `gateLogPath`. */
   readonly logPath: string
   readonly pools: ResourcePools
+  /**
+   * Called once the gate is actually starting, with the same clock reading
+   * `durationMs` is measured from.
+   *
+   * It exists so a caller can journal a *start* whose distance from the
+   * result is the gate's own runtime and nothing else. Emitting that event
+   * from the call site instead would fold in the pool wait — `runGate` and
+   * `runGateCached` both block on `acquire` first — and a gate reported as
+   * having taken nine minutes when it ran for forty seconds behind a busy
+   * `test-suite` is a measurement that points at the wrong problem. A cache
+   * hit never reaches the runner, so it never fires: nothing ran.
+   */
+  readonly onStart?: (startedAtMs: number) => void
 }
 
 /**
@@ -95,6 +108,7 @@ export async function runGate(options: RunGateOptions): Promise<GateResult> {
  */
 export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promise<GateResult> {
   const startedAt = Date.now()
+  options.onStart?.(startedAt)
   const log = createWriteStream(options.logPath)
 
   const shell = shellInvocation(options.gate.cmd)

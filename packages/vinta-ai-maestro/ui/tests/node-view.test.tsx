@@ -8,13 +8,14 @@
  * the daemon would have accepted the request.
  */
 import { cleanup, fireEvent, waitFor, type RenderResult } from '@testing-library/react'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { ENTRY_KINDS_COVERED, TRANSCRIPT_KINDS } from '../src/transcript.ts'
 import { TRANSCRIPT_WINDOW } from '../src/Transcript.tsx'
 import {
   CLAUDE_CODE_CAPABILITIES,
   CODEX_CAPABILITIES,
   entry,
+  gate,
   harness,
   node,
   nodeDetail,
@@ -357,7 +358,7 @@ test('a pending question renders with its context and is answerable in all three
   })
 })
 
-test('gate logs and the diff ref render, and the gate a question points at reads as failing', async () => {
+test('the gate panel names each verdict, and opens one log at a time', async () => {
   const parked = node('impl', 'awaiting_human')
   const stub = await startStubDaemon({
     runs: [runSummary()],
@@ -367,8 +368,13 @@ test('gate logs and the diff ref render, and the gate a question points at reads
         node: parked,
         diff: { branch: 'phase/impl', baseBranch: 'wave-0', lane: 'lane-2' },
         gates: [
-          { gateId: 'lint', log: 'lint: 0 problems\n' },
-          { gateId: 'unit', log: '2 failing\n  invoices › totals\n' },
+          gate('lint', { log: 'lint: 0 problems\n', durationMs: 2_400 }),
+          gate('unit', {
+            log: '2 failing\n  invoices › totals\n',
+            status: 'failed',
+            durationMs: 96_000,
+            runs: 3,
+          }),
         ],
         question: {
           question: 'Unit gate failed. Retry or stop?',
@@ -383,15 +389,29 @@ test('gate logs and the diff ref render, and the gate a question points at reads
   const { container } = open(stub, 'impl')
 
   await waitFor(() => expect(container.querySelector('[data-gate="unit"]')).not.toBe(null))
-  expect(textOf(container, '[data-gate-log="unit"]')).toContain('invoices › totals')
-  expect(textOf(container, '[data-gate-log="lint"]')).toContain('0 problems')
 
-  // The failing one is named by the question's context, which is the only
-  // verdict the API carries: `NodeDetailSchema` has no exit code.
-  expect(container.querySelector('[data-gate="unit"] .chip')?.getAttribute('data-tone')).toBe(
-    'error',
-  )
-  expect(container.querySelector('[data-gate="lint"] .chip')).toBe(null)
+  // The verdict is on the wire, so every row says what happened — not only
+  // the one §9.1's question happens to point at.
+  expect(toneOfGate(container, 'lint')).toBe('ok')
+  expect(toneOfGate(container, 'unit')).toBe('error')
+  expect(textOf(container, '[data-gate="lint"]')).toContain('passed')
+  expect(textOf(container, '[data-gate="unit"]')).toContain('failed')
+
+  // What each one cost: the live-clock shape past a minute, one decimal under
+  // it, and the re-run count where a gate ran more than once.
+  expect(textOf(container, '[data-gate="lint"] .gate-time')).toBe('2.4s')
+  expect(textOf(container, '[data-gate="unit"] .gate-time')).toBe('1m 36s×3')
+
+  // The panel opens on the gate the question asks about, and only that log is
+  // mounted — the point of the accordion is that the other two are not there
+  // to be scrolled past.
+  expect(textOf(container, '[data-gate-log="unit"]')).toContain('invoices › totals')
+  expect(container.querySelector('[data-gate-log="lint"]')).toBe(null)
+
+  fireEvent.click(container.querySelector('[data-gate="lint"] [data-slot="accordion-trigger"]')!)
+  await waitFor(() => expect(container.querySelector('[data-gate-log="lint"]')).not.toBe(null))
+  expect(textOf(container, '[data-gate-log="lint"]')).toContain('0 problems')
+  expect(container.querySelector('[data-gate-log="unit"]')).toBe(null)
 
   // The diff is a *ref* — branch, base, lane — because that is what §10 serves.
   expect(textOf(container, '[data-diff-branch]')).toBe('phase/impl')
@@ -399,6 +419,54 @@ test('gate logs and the diff ref render, and the gate a question points at reads
   expect(textOf(container, '[data-diff-lane]')).toBe('lane-2')
   expect(textOf(container, '[data-diff]')).toContain('git diff wave-0...phase/impl')
 })
+
+test('a running gate counts up from the daemon’s clock, and a cached verdict says so', async () => {
+  // Opened 70 seconds after the gate started: the row must show the elapsed
+  // time the daemon would report, not start from zero because this tab just
+  // arrived. Fake timers keep `useNow`'s tick deterministic.
+  vi.useFakeTimers()
+  vi.setSystemTime(1_700_000_070_000)
+  try {
+    const stub = await startStubDaemon({
+      runs: [runSummary()],
+      snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+      details: {
+        [`${RUN_ID}/impl`]: nodeDetail({
+          gates: [
+            gate('unit', {
+              status: 'running',
+              startedAt: 1_700_000_000_000,
+              finishedAt: null,
+              durationMs: null,
+              runs: 0,
+            }),
+            gate('lint', { cached: true, durationMs: 31_000 }),
+          ],
+        }),
+      },
+    })
+    daemon = stub
+    const { container } = open(stub, 'impl')
+
+    await vi.waitFor(() => expect(container.querySelector('[data-gate="unit"]')).not.toBe(null))
+    expect(toneOfGate(container, 'unit')).toBe('active')
+    expect(textOf(container, '[data-gate="unit"] .gate-time')).toBe('1m 10s')
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(textOf(container, '[data-gate="unit"] .gate-time')).toBe('1m 15s')
+
+    // A cached verdict reports what the gate cost when it last ran, and says
+    // `cached` so the figure is not read as time this run spent.
+    expect(textOf(container, '[data-gate="lint"] .gate-time')).toBe('31.0scached')
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+/** The first chip in a gate's row — its verdict. `data-tone` is the meaning. */
+function toneOfGate(container: HTMLElement, gateId: string): string | null | undefined {
+  return container.querySelector(`[data-gate="${gateId}"] .chip`)?.getAttribute('data-tone')
+}
 
 test('a node with no transcript, no gates and no question renders', async () => {
   const fresh = { ...node('impl', 'pending'), lane: null, branch: null, baseBranch: null }

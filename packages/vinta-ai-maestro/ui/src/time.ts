@@ -24,3 +24,17 @@ export function elapsed(fromMs: number, toMs: number): string {
 function pad(value: number): string {
   return String(value).padStart(2, '0')
 }
+
+/**
+ * A measured duration, in the same vocabulary `elapsed` uses.
+ *
+ * Sub-minute durations keep one decimal — `0s` and `1s` are the two readings
+ * a gate panel produces most often and they are not the same answer, and
+ * "did the cache serve this" is exactly the question a bare `0s` leaves open.
+ * Past a minute the tenth is noise and the shape matches the live clock
+ * ticking beside it.
+ */
+export function duration(ms: number): string {
+  if (ms < 60_000) return `${(Math.max(0, ms) / 1000).toFixed(1)}s`
+  return elapsed(0, ms)
+}

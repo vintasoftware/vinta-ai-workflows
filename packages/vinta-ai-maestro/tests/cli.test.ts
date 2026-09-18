@@ -1460,7 +1460,7 @@ describe('vinta-ai-maestro run, composed', () => {
         .events('db')
         .filter((event) => event.type === 'gate_result')
         .map((event) => event.payload)
-      expect(results).toEqual([
+      expect(results).toMatchObject([
         { gate: 'seed', exit_code: 0, status: 'passed' },
         { gate: 'check', exit_code: 0, status: 'passed' },
       ])
