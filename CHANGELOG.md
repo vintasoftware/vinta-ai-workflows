@@ -28,6 +28,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Gate durations are now kept, not just displayed.** Every `gate_result` has
+  carried the runner's own `duration_ms` since gates were journalled, and
+  nothing read it back: the figure went to a live panel and was afterwards
+  reachable only by hand-parsing event payloads, so the one measurement that
+  answers "is the suite why this run took an hour" could not be asked of a
+  finished run. `analyzeRun` now rolls it up per gate — runs, cache hits,
+  summed runtime, the slowest single run, verdicts by kind — and each phase's
+  time split carries `gateRunMs` beside `gatePoolQueueMs`, so a run says how
+  much of its working time was the gate queue and how much was the gate. The
+  post-mortem carries the same as a `gate_costs` finding, which is what makes
+  it durable: `plan-feature` reads these artifacts when sizing the next plan,
+  and a gate pool's capacity and `max_parallel_lanes` are one decision made
+  with half the numbers. Cache hits are counted and their time kept in its own
+  `cache_saved_ms` column — a hit's duration is what the gate cost when it last
+  ran, and adding it to the runtime would report time the run specifically did
+  not spend. A verdict written before the runner measured itself is counted and
+  its milliseconds are not: both reports emit a `gate_durations_unrecorded` gap
+  naming the gates, because a gate reported as free is the number a planner
+  would act on hardest.
+
 - **The post-mortem now reports what the schedule cost.** Two findings, both
   derived from events the journal already carried. `critical_path` is the
   dependency chain that decided the wall clock — each phase's span, the total,

@@ -145,10 +145,58 @@ export const DurationDivergenceSchema = z
       'exactly what makes the next plan’s parallelism estimate wrong.',
   )
 
+export const GateCostSchema = z
+  .strictObject({
+    gate: Id,
+    runs: z
+      .number()
+      .int()
+      .min(1)
+      .describe('Verdicts recorded for this gate, over every phase and every fix round.'),
+    cached_runs: z
+      .number()
+      .int()
+      .min(0)
+      .describe('Of those, the ones the result cache served. They cost this run nothing.'),
+    ran_ms: z
+      .number()
+      .int()
+      .min(0)
+      .describe(
+        'Summed runtime of the verdicts the run actually paid for — the runner’s own ' +
+          'measurement, not the distance between two journal rows. Cache hits are excluded.',
+      ),
+    slowest_ms: z
+      .number()
+      .int()
+      .min(0)
+      .describe('The slowest single paid run. What a `timeout_s` is set against.'),
+    cache_saved_ms: z
+      .number()
+      .int()
+      .min(0)
+      .describe(
+        'Summed runtime of the cache hits: what those gates cost the last time they really ' +
+          'ran. An estimate of time saved, never additive with `ran_ms`.',
+      ),
+    failed_runs: z.number().int().min(0).describe('Verdicts that came back red.'),
+    timed_out_runs: z
+      .number()
+      .int()
+      .min(0)
+      .describe('Verdicts killed at `timeout_s`. The most expensive kind of run there is.'),
+  })
+  .describe(
+    'What one gate cost the run. A plan is sized against this: the gate that dominates ' +
+      '`ran_ms` is the one whose pool capacity decides the wall clock, and a gate whose ' +
+      '`runs` far exceeds its phases is a fix loop re-paying for the same suite.',
+  )
+
 export const GAP_KINDS = [
   'blocking_cause_unrecorded',
   'dependency_use_unrecorded',
   'gate_result_unrecorded',
+  'gate_durations_unrecorded',
   'integration_record_unavailable',
 ] as const
 
@@ -158,6 +206,7 @@ export const PostMortemGapSchema = z
     needs: z.string().describe('What would have to be recorded for the finding to exist.'),
     edges: z.array(EdgeSchema).optional().describe('The edges the gap applies to.'),
     nodes: z.array(Id).optional().describe('The phases the gap applies to.'),
+    gates: z.array(Id).optional().describe('The gates the gap applies to.'),
   })
   .describe(
     'A finding this run could not produce, and why. Carried in the artifact rather than ' +
@@ -239,6 +288,13 @@ export const PostMortemSchema = z
         ),
       missing_dependencies: z.array(MissingDependencySchema),
       wave_conflicts: z.array(WaveConflictSchema),
+      /**
+       * Only gates the run recorded a verdict for, in the workflow's own
+       * declaration order. A declared gate that never ran is absent rather
+       * than a row of zeros: an absence and a measured zero are different
+       * claims, and the second is the one a planner would act on.
+       */
+      gate_costs: z.array(GateCostSchema),
       duration_divergences: z.array(DurationDivergenceSchema),
       /**
        * Null on a run whose nodes never recorded a span — a run that stopped
@@ -253,14 +309,15 @@ export const PostMortemSchema = z
   .describe(
     'What one finished `vinta-ai-maestro` run learned about the plan that produced it: dependencies ' +
       'that were never used, dependencies discovered missing, same-wave phases that conflicted, ' +
-      'and phases whose duration diverged from their wave. Ids, waves, paths, durations and ' +
-      'counts only.',
+      'phases whose duration diverged from their wave, and what each gate cost. Ids, waves, ' +
+      'paths, durations and counts only.',
   )
 
 export type PostMortem = z.infer<typeof PostMortemSchema>
 export type Edge = z.infer<typeof EdgeSchema>
 export type MissingDependency = z.infer<typeof MissingDependencySchema>
 export type WaveConflict = z.infer<typeof WaveConflictSchema>
+export type GateCost = z.infer<typeof GateCostSchema>
 export type DurationDivergence = z.infer<typeof DurationDivergenceSchema>
 export type CriticalPath = z.infer<typeof CriticalPathSchema>
 export type IdleCapacity = z.infer<typeof IdleCapacitySchema>
@@ -334,11 +391,20 @@ export class RunNotFinishedError extends Error {
 
 const SETTLED: ReadonlySet<NodeStatus> = new Set<NodeStatus>(['done', 'failed', 'blocked'])
 
-/** One journalled gate verdict. Gate id, when, and whether it was green. */
+/** One journalled gate verdict: gate id, when, how it went, and what it cost. */
 interface GateRun {
   readonly gate: string
   readonly ts: number
   readonly passed: boolean
+  readonly timedOut: boolean
+  /**
+   * The runner's own measurement, or `null` for a verdict written before the
+   * runner measured itself. `null` rather than 0, so a gate whose runtime was
+   * never recorded is reported as a gap instead of as free.
+   */
+  readonly durationMs: number | null
+  /** Served from the result cache: `durationMs` is what it cost when it last ran. */
+  readonly cached: boolean
 }
 
 interface Trace {
@@ -412,8 +478,20 @@ export function postMortem(
         continue
       }
       case 'gate_result': {
-        const { gate, status } = event.payload
-        traceOf(event.nodeId).gates.push({ gate, ts: event.ts, passed: status === 'passed' })
+        const { gate, status, duration_ms: durationMs, cached } = event.payload
+        traceOf(event.nodeId).gates.push({
+          gate,
+          ts: event.ts,
+          passed: status === 'passed',
+          timedOut: status === 'timed_out',
+          // Typed as required, absent in practice on an older journal — this
+          // module reads what is on disk, not what the type promises.
+          durationMs:
+            typeof durationMs === 'number' && Number.isFinite(durationMs)
+              ? Math.max(0, Math.round(durationMs))
+              : null,
+          cached: cached === true,
+        })
         continue
       }
       default:
@@ -450,6 +528,7 @@ export function postMortem(
       missing_dependencies: missingDependencies(workflow, traces),
       wave_conflicts: waveConflicts(options.integration),
       duration_divergences: durationDivergences(workflow, traces, waveOf, options),
+      gate_costs: gateCosts(workflow, traces),
       critical_path: criticalPath(workflow, traces, waveOf, endedAtMs - startedAtMs),
       idle_capacity: idleCapacity(workflow, traces, endedAtMs - startedAtMs),
     },
@@ -770,6 +849,86 @@ function median(values: readonly number[]): number {
 // What the run could not tell you
 // ---------------------------------------------------------------------------
 
+/**
+ * What each gate cost the run, folded over every phase and every fix round.
+ *
+ * This is the figure the *next* plan is sized against, and the only one in the
+ * artifact that speaks about the gates rather than the phases. A plan chooses
+ * `max_parallel_lanes` and a gate pool's capacity together; without the gate's
+ * own runtime, the second half of that choice is made by feel. `runs` is what
+ * makes the total legible — the same twenty minutes is a slow suite when it is
+ * one run and a fix loop re-paying for the same suite when it is twelve.
+ *
+ * Cache hits are counted and their time is kept in its own column. Adding
+ * `cache_saved_ms` to `ran_ms` would report a run as having spent time it
+ * specifically did not spend, and reading them as one number is exactly the
+ * mistake an agent consuming this file would make if they shared a field.
+ *
+ * Declaration order, and only gates the run recorded — the ordering and
+ * presence rules `critical_path` and `duration_divergences` already follow.
+ */
+function gateCosts(workflow: Workflow, traces: ReadonlyMap<string, Trace>): GateCost[] {
+  interface Tally {
+    runs: number
+    cachedRuns: number
+    ranMs: number
+    slowestMs: number
+    cacheSavedMs: number
+    failedRuns: number
+    timedOutRuns: number
+  }
+
+  const tallies = new Map<string, Tally>()
+  for (const trace of traces.values()) {
+    for (const run of trace.gates) {
+      const tally = tallies.get(run.gate) ?? {
+        runs: 0,
+        cachedRuns: 0,
+        ranMs: 0,
+        slowestMs: 0,
+        cacheSavedMs: 0,
+        failedRuns: 0,
+        timedOutRuns: 0,
+      }
+      tallies.set(run.gate, tally)
+      tally.runs += 1
+      if (!run.passed && !run.timedOut) tally.failedRuns += 1
+      if (run.timedOut) tally.timedOutRuns += 1
+      if (run.durationMs === null) continue
+      if (run.cached) {
+        tally.cachedRuns += 1
+        tally.cacheSavedMs += run.durationMs
+        continue
+      }
+      tally.ranMs += run.durationMs
+      tally.slowestMs = Math.max(tally.slowestMs, run.durationMs)
+    }
+  }
+
+  // A gate the run recorded but the frozen workflow no longer declares is
+  // still reported, after the declared ones. An amendment (§9) can drop a gate
+  // from under verdicts already on the tape, and dropping those rows would
+  // unspend time the run really paid.
+  const declared = Object.keys(workflow.gates)
+  const rest = [...tallies.keys()].filter((gate) => !declared.includes(gate)).sort()
+  const costs: GateCost[] = []
+  for (const gate of [...declared, ...rest]) {
+    const tally = tallies.get(gate)
+    if (tally === undefined) continue
+    costs.push({
+      gate,
+      runs: tally.runs,
+      cached_runs: tally.cachedRuns,
+      ran_ms: tally.ranMs,
+      slowest_ms: tally.slowestMs,
+      cache_saved_ms: tally.cacheSavedMs,
+      failed_runs: tally.failedRuns,
+      timed_out_runs: tally.timedOutRuns,
+    })
+  }
+  return costs
+}
+
 function gaps(
   workflow: Workflow,
   traces: ReadonlyMap<string, Trace>,
@@ -838,6 +997,29 @@ function gaps(
         '`missing_dependencies` entry naming them is ordering evidence (failed, then an ' +
         'undeclared phase landed, then passed) rather than a failure of one identified ' +
         'gate; confirm the edge against the plan before adding it.',
+    })
+  }
+
+  // Verdicts whose runtime the journal never carried. Their counts in
+  // `gate_costs` are complete and their milliseconds are short by however long
+  // those runs took — which is unknown, not zero, and a gate reported as free
+  // is the one number here a planner would act on hardest.
+  const unmeasured = [
+    ...new Set(
+      [...traces.values()].flatMap((trace) =>
+        trace.gates.filter((run) => run.durationMs === null).map((run) => run.gate),
+      ),
+    ),
+  ].sort()
+  if (unmeasured.length > 0) {
+    found.push({
+      kind: 'gate_durations_unrecorded',
+      gates: unmeasured,
+      needs:
+        '`duration_ms` on the `gate_result` events the executor writes — the runner’s own ' +
+        'measurement of the gate. This run recorded a verdict for these gates without one, ' +
+        'which is what a journal written before the runner measured itself looks like. ' +
+        'Their `gate_costs` durations are a floor: the missing runs are unmeasured, not free.',
     })
   }
 
