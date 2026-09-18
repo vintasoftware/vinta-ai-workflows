@@ -258,6 +258,17 @@ export class RunEffectExecutor implements EffectExecutor {
         cwd: lane.path,
         env: lane.env,
         logPath: this.#options.journal.gateLogPath(this.#options.runId, nodeId, gateId),
+        // At the spawn, not here: the scheduler already holds this gate's
+        // pools, but the cache sits in between and a hit must not announce a
+        // start it never made.
+        onStart: () => {
+          this.#options.journal.append({
+            runId: this.#options.runId,
+            nodeId,
+            type: 'gate_started',
+            payload: { gate: gateId },
+          })
+        },
       })
       const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
       // The result reaches the journal; the output does not. §13.6's
@@ -268,7 +279,13 @@ export class RunEffectExecutor implements EffectExecutor {
         runId: this.#options.runId,
         nodeId,
         type: 'gate_result',
-        payload: { gate: gateId, exit_code: exitCode, status: result.status },
+        payload: {
+          gate: gateId,
+          exit_code: exitCode,
+          status: result.status,
+          duration_ms: result.durationMs,
+          cached,
+        },
       })
       // And again in the node's transcript, which is where somebody reading
       // what happened to this phase actually looks. The gates were the one

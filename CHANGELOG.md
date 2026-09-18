@@ -434,6 +434,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The node view's gate panel is a list of verdicts you can open, not a stack
+  of scrolling boxes.** Every gate used to render its whole log at once, each
+  in its own fixed-height box with its own scrollbar — so three gates in a
+  third of a grid row was a column of letterbox slots, and a wheel gesture
+  over one of them was swallowed by that box instead of scrolling the page.
+  Gates are now an accordion: one row per gate, only one open at a time, and
+  the open log has no scroller of its own (it is tail-truncated at 64 KiB
+  already, and long lines wrap the way the diff panel's do). The panel opens
+  on the gate a human question points at, or on the first that is not passing.
+
+- **Each gate row says what happened and what it cost.** The verdict —
+  `running`, `passed`, `failed`, `timed out` — is on the wire now, so a phase
+  whose lint gate passed and whose unit gate failed reads as that instead of
+  as two identical rows; previously the UI could only name the single gate
+  §9.1's question happened to point at, because `NodeDetail` carried an id and
+  a log and nothing else. A running gate shows a clock counting from the
+  daemon's own start time, so a tab opened halfway through a slow suite shows
+  the true elapsed figure rather than starting from zero; a finished one shows
+  the runner's measurement of its latest attempt, with `cached` where the
+  cache served the verdict and a `×N` count where the gate has run more than
+  once.
+
 - **Crew members are named after their tier, not after a seniority.** A roster
   reads `tier1`, `tier2-1`, `tier2-2`, `tier4` and `reviewer` where it used to
   read `junior`, `mid-1`, `mid-2` and `senior`. Nothing about the data model

@@ -35,7 +35,7 @@
  * sessions. On a narrow window the columns stack in that order.
  */
 import { ChevronLeftIcon, TerminalIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   DescriptionDetails,
   DescriptionList,
@@ -47,6 +47,12 @@ import {
   PageHeaderMeta,
   PageHeaderTitle,
 } from 'vinta-design-system/layout'
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from 'vinta-design-system/ui/accordion'
 import { Button } from 'vinta-design-system/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'vinta-design-system/ui/card'
 import { Textarea } from 'vinta-design-system/ui/textarea'
@@ -58,7 +64,7 @@ import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import type { NodeStatus } from './projection.ts'
 import { nodeLabel, nodeTone, type Tone } from './status.ts'
 import { TerminalView } from './Terminal.tsx'
-import { useNow } from './time.ts'
+import { duration, elapsed, useNow } from './time.ts'
 import { Transcript } from './Transcript.tsx'
 import { useRun } from './useRun.ts'
 
@@ -551,12 +557,36 @@ function Diff({ diff }: { readonly diff: NodeDetail['diff'] }) {
 }
 
 /**
- * Gate logs, tail-truncated by the daemon.
+ * The phase's gates: one disclosure row each, with its verdict and what it
+ * cost, and the log of whichever one is open.
  *
- * A gate's *verdict* is not on the wire — `NodeDetailSchema` carries an id and
- * a log and no exit code — so the one gate this view can name as failing is
- * the one §9.1's question points at with `context.gateLogRef`. That is also
- * the case that matters: a node parked on a human gate because a gate failed.
+ * **It is a list of headlines, not a wall of logs.** The panel used to render
+ * every gate's log at once, each in its own 13rem box with its own scrollbar.
+ * Three of those in a third of a grid row is a column of letterbox slots, and
+ * a wheel event inside one of them is swallowed by that box rather than
+ * scrolling the page — so the page appeared to freeze wherever the pointer
+ * happened to be. Collapsed rows fix both at once: nothing scrolls inside the
+ * panel, and the panel itself is short enough to read.
+ *
+ * **One open at a time** (`type="single"`). Gate logs are the kind of content
+ * you compare against the transcript beside them rather than against each
+ * other, and two open at once puts the second one below a screen of the
+ * first, which is the state the old panel was permanently in.
+ *
+ * **The open log does not scroll, on either axis.** It is tail-truncated by
+ * the daemon at 64 KiB, so its height is bounded already, and a scroller
+ * inside a panel inside a page is the trap this rewrite exists to remove.
+ * Long lines wrap rather than overflow, which is the same call the diff
+ * panel above it makes and for the same reason: a stack trace that runs off
+ * the edge of a third-of-a-row panel is one nobody can read without
+ * selecting blind.
+ *
+ * **The verdict is off the wire now.** `NodeDetailSchema` carries each gate's
+ * status, its duration and whether the cache served it, so the row says what
+ * happened rather than leaving it to §9.1's question to name the one failing
+ * gate. `failing` survives as what it always was — the gate the question
+ * points at — and is what the panel opens on, because it is the reason the
+ * operator is on this page.
  */
 function Gates({
   gates,
@@ -565,31 +595,119 @@ function Gates({
   readonly gates: NodeDetail['gates']
   readonly failing: string | null
 }) {
+  // Whichever gate wants reading: the one the question names, else the first
+  // that is not passing, else nothing open. `useState` and not a derived
+  // value — once the operator has opened a row, a refresh must not move it.
+  const [open, setOpen] = useState(() => initialGate(gates, failing))
+
   return (
-    <Panel title="Gate logs" data-gates expandable>
+    <Panel title="Gates" data-gates expandable>
       {gates.length === 0 ? (
         <EmptyNote>No gate has run yet.</EmptyNote>
       ) : (
-        <ul className="gates flex flex-col gap-3">
+        <Accordion
+          type="single"
+          collapsible
+          value={open}
+          onValueChange={setOpen}
+          className="gates -my-1"
+        >
           {gates.map((gate) => (
-            <li key={gate.gateId} data-gate={gate.gateId} className="flex flex-col gap-1.5">
-              <p className="entry-head flex items-center gap-2">
-                <span className="font-mono text-[13px] font-medium">{gate.gateId}</span>
-                {gate.gateId === failing && <Chip tone="error">failing</Chip>}
-              </p>
-              <pre
-                className="gate-log m-0 max-h-[var(--panel-scroll,13rem)] overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-xs"
-                data-gate-log={gate.gateId}
-              >
-                {gate.log}
-              </pre>
-            </li>
+            <AccordionItem key={gate.gateId} value={gate.gateId} data-gate={gate.gateId}>
+              <AccordionTrigger className="hover:no-underline">
+                <span className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="truncate font-mono text-[13px] font-medium">{gate.gateId}</span>
+                  <Chip tone={gateTone(gate.status)}>{GATE_LABELS[gate.status]}</Chip>
+                  {gate.gateId === failing && <Chip tone="attention">asked about</Chip>}
+                </span>
+                <GateTiming gate={gate} />
+              </AccordionTrigger>
+              <AccordionContent>
+                {gate.log === '' ? (
+                  <EmptyNote>This gate has written nothing yet.</EmptyNote>
+                ) : (
+                  <pre
+                    className="gate-log m-0 whitespace-pre-wrap break-words rounded-md bg-muted px-3 py-2 font-mono text-xs"
+                    data-gate-log={gate.gateId}
+                  >
+                    {gate.log}
+                  </pre>
+                )}
+              </AccordionContent>
+            </AccordionItem>
           ))}
-        </ul>
+        </Accordion>
       )}
     </Panel>
   )
 }
+
+/** The gate the panel opens on, or `''` for none — the accordion's "closed". */
+function initialGate(gates: NodeDetail['gates'], failing: string | null): string {
+  if (failing !== null && gates.some((gate) => gate.gateId === failing)) return failing
+  return gates.find((gate) => gate.status !== 'passed')?.gateId ?? ''
+}
+
+const GATE_LABELS: Readonly<Record<NodeDetail['gates'][number]['status'], string>> = {
+  running: 'running',
+  passed: 'passed',
+  failed: 'failed',
+  timed_out: 'timed out',
+}
+
+/**
+ * A timed-out gate is `error` and not `wait` on purpose. §6.1's patience is
+ * about capacity the system will get back on its own; a gate the runner had
+ * to kill is a result, and a human decides what happens next.
+ */
+function gateTone(status: NodeDetail['gates'][number]['status']): Tone {
+  if (status === 'running') return 'active'
+  return status === 'passed' ? 'ok' : 'error'
+}
+
+/**
+ * How long the gate has been going, or how long it took.
+ *
+ * The live case ticks off `useNow` against the daemon's `startedAt`, so a tab
+ * left open on a slow suite keeps counting and a tab opened halfway through
+ * shows the true figure rather than starting from zero. The finished case is
+ * the runner's own measurement, which is why a cached verdict can report a
+ * duration at all — it is what the gate cost when it last ran, and the row
+ * says `cached` beside it so the number is not read as time this run spent.
+ */
+function GateTiming({ gate }: { readonly gate: NodeDetail['gates'][number] }) {
+  if (gate.status === 'running') {
+    // A component of its own, so the second-by-second clock exists only where
+    // something is actually moving. Inlining the hook here would give every
+    // settled row its own interval for a number that will never change again.
+    return gate.startedAt === null ? (
+      <GateTime>running</GateTime>
+    ) : (
+      <RunningFor since={gate.startedAt} />
+    )
+  }
+  return (
+    <GateTime>
+      {gate.durationMs !== null && <span>{duration(gate.durationMs)}</span>}
+      {gate.cached && <span>cached</span>}
+      {gate.runs > 1 && <span>×{gate.runs}</span>}
+    </GateTime>
+  )
+}
+
+function RunningFor({ since }: { readonly since: number }) {
+  return <GateTime>{elapsed(since, useNow(1000))}</GateTime>
+}
+
+/** The right-hand end of a gate's row. Tabular figures, so it does not jitter. */
+function GateTime({ children }: { readonly children: ReactNode }) {
+  return (
+    <span className="gate-time flex shrink-0 items-baseline gap-1.5 font-mono text-xs tabular-nums text-muted-foreground">
+      {children}
+    </span>
+  )
+}
+
 
 /**
  * §15's session reuse, as the operator sees it: one row per agent turn, saying

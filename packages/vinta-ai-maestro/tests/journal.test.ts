@@ -335,7 +335,7 @@ describe('journal', () => {
       runId: 'r1',
       nodeId: 'p1',
       type: 'gate_result',
-      payload: { gate: 'tests', exit_code: 1, status: 'failed' },
+      payload: { gate: 'tests', exit_code: 1, status: 'failed', duration_ms: 1000, cached: false },
     })
     journal.append({
       runId: 'r1',
@@ -363,11 +363,15 @@ describe('journal', () => {
     ])
     expect(journal.events('r1').at(-2)).toMatchObject({
       nodeId: 'p1',
-      payload: { gate: 'tests', exit_code: 1, status: 'failed' },
+      payload: { gate: 'tests', exit_code: 1, status: 'failed', duration_ms: 1000, cached: false },
     })
-    // §5.3: identifiers, an exit code and a status. Whatever the gate printed
-    // is in `gates/tests.log` and has no field here it could have reached.
+    // §5.3: identifiers, an exit code, a status, and two measurements of the
+    // run itself. Whatever the gate printed is in `gates/tests.log` and has no
+    // field here it could have reached — the set is closed, which is the point
+    // of asserting it rather than the fields one at a time.
     expect(Object.keys(journal.events('r1').at(-2)?.payload ?? {}).sort()).toEqual([
+      'cached',
+      'duration_ms',
       'exit_code',
       'gate',
       'status',

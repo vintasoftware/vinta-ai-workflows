@@ -574,10 +574,27 @@ export function createApi(options: ApiOptions): Hono {
     const { runId, node } = found
     const { limit, stream } = query.data
     const declared = workflow(runId).nodes.find((candidate) => candidate.id === node.node_id)
-    const gates: { gateId: string; log: string }[] = []
+    const history = latestGateRuns(journal.gateHistory(runId, node.node_id))
+    const gates: NodeDetail['gates'] = []
     for (const gateId of declared?.gates ?? []) {
+      const state = history.get(gateId)
       const log = tailFile(journal.gateLogPath(runId, node.node_id, gateId), GATE_LOG_TAIL_BYTES)
-      if (log !== null) gates.push({ gateId, log })
+      // A gate with neither a log nor a journal row has not run — the panel
+      // is a record of what happened, not of what was declared. Either one
+      // alone is enough: a gate that has just started has an empty log file
+      // and no verdict, and a journal restored beside a purged log directory
+      // has the verdict and no file.
+      if (log === null && state === undefined) continue
+      gates.push({
+        gateId,
+        log: log ?? '',
+        status: state?.status ?? 'running',
+        startedAt: state?.startedAt ?? null,
+        finishedAt: state?.finishedAt ?? null,
+        durationMs: state?.durationMs ?? null,
+        cached: state?.cached ?? false,
+        runs: state?.runs ?? 0,
+      })
     }
 
     const detail: NodeDetail = {
@@ -1169,6 +1186,83 @@ const SessionPayloadSchema = z.object({
   disposition: z.enum(['reused', 'fresh']),
   session_id: z.string().optional(),
   reason: z.string().optional(),
+})
+
+/** What one gate's rows fold down to, for the node view's panel. */
+interface GateRun {
+  status: 'running' | 'passed' | 'failed' | 'timed_out'
+  startedAt: number | null
+  finishedAt: number | null
+  durationMs: number | null
+  cached: boolean
+  runs: number
+}
+
+/**
+ * The latest attempt per gate, folded from the node's `gate_started` /
+ * `gate_result` rows in commit order.
+ *
+ * Latest rather than all of them, because a gate re-runs on every fix round
+ * and a panel listing four verdicts for `unit` answers "how is this phase
+ * doing" with a history nobody asked for. `runs` keeps the count, which is
+ * the part of the history that is worth a line.
+ *
+ * A `gate_started` resets the entry rather than merging into it: the previous
+ * verdict belongs to the previous attempt, and carrying its duration into a
+ * row now labelled running would put a finished number next to a live clock.
+ *
+ * Payloads are parsed, not cast. They were written by an older build as often
+ * as by this one, and `duration_ms` and `cached` are exactly the fields a
+ * journal from before they existed does not carry — so both degrade to "not
+ * recorded" instead of to `undefined` reaching the wire schema.
+ */
+function latestGateRuns(
+  events: readonly { type: string; ts: number; payload: unknown }[],
+): Map<string, GateRun> {
+  const runs = new Map<string, GateRun>()
+  for (const event of events) {
+    if (event.type === 'gate_result') {
+      const payload = GateResultPayloadSchema.safeParse(event.payload)
+      if (!payload.success) continue
+      const previous = runs.get(payload.data.gate)
+      runs.set(payload.data.gate, {
+        status: payload.data.status,
+        startedAt: previous?.startedAt ?? null,
+        finishedAt: event.ts,
+        durationMs: payload.data.duration_ms ?? null,
+        cached: payload.data.cached ?? false,
+        runs: (previous?.runs ?? 0) + 1,
+      })
+      continue
+    }
+    const payload = GatePayloadSchema.safeParse(event.payload)
+    if (!payload.success) continue
+    const previous = runs.get(payload.data.gate)
+    runs.set(payload.data.gate, {
+      status: 'running',
+      startedAt: event.ts,
+      finishedAt: null,
+      durationMs: null,
+      cached: false,
+      runs: previous?.runs ?? 0,
+    })
+  }
+  return runs
+}
+
+/**
+ * Both gate payloads, read back off disk. Which one a row is comes from its
+ * `type`, not from which schema happens to accept it — `gate_started`'s
+ * payload is a subset of `gate_result`'s, so shape alone cannot tell them
+ * apart and a fold that tried would read every verdict as a second start.
+ */
+const GatePayloadSchema = z.object({ gate: z.string() })
+
+const GateResultPayloadSchema = z.object({
+  gate: z.string(),
+  status: z.enum(['passed', 'failed', 'timed_out']),
+  duration_ms: z.number().int().optional(),
+  cached: z.boolean().optional(),
 })
 
 /** An absent body reads as `{}` so a no-argument POST needs no payload. */

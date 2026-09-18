@@ -474,14 +474,36 @@ interface NodePayloads {
    */
   gate_pool: { readonly phase: GatePoolPhase; readonly resources: readonly string[] }
   /**
+   * One gate began running, at this event's `ts`.
+   *
+   * Its own event rather than a field on the result, because the question it
+   * answers — "what is this phase doing right now, and for how long" — can
+   * only be asked while there is no result yet. The node view reads the pair
+   * and shows a gate as running with a live clock until the result lands.
+   *
+   * Written by the runner's `onStart`, so the gap to the matching
+   * `gate_result` is the gate's runtime and not its queue time. A gate served
+   * from the cache never emits one: nothing started.
+   */
+  gate_started: { readonly gate: string }
+  /**
    * What one gate returned. Identifiers, an exit code and a status — the
    * gate's *output* is repository content and stays in `gates/<id>.log`
    * (§5.3, §11), which is why there is no field here it could reach.
+   *
+   * `duration_ms` and `cached` are the two facts a reader cannot reconstruct
+   * from the surrounding events. Duration is the runner's own measurement
+   * rather than the distance between two journal rows, so it survives a
+   * cached verdict (where it is what the gate cost *when it last ran*) and a
+   * restart between the start and the result. `cached` is what stops the
+   * figure being read as time this run spent.
    */
   gate_result: {
     readonly gate: string
     readonly exit_code: number
     readonly status: GateStatus
+    readonly duration_ms: number
+    readonly cached: boolean
   }
   /**
    * One edge of a lease an *agent* holds — a command it runs inside its own
