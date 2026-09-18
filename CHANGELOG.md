@@ -161,6 +161,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   something it may not do, with nobody in the room, is the record most worth
   keeping. See `packages/vinta-ai-maestro/docs/monitor-intervention.md`.
 
+- **The post-mortem says what a run changed about itself, and whether it
+  helped.** `postmortem.v1` gains an `interventions[]` finding: one entry per
+  amendment the run made to itself, with the effect on the thing it changed. A
+  gate is scored against its own uncached durations either side of the
+  amendment — mean before, mean after, `cheaper` / `dearer` / `unchanged`
+  outside a ten-per-cent band. Cached hits are excluded, because a hit reports
+  the duration of the run that filled the cache and would drag the mean toward
+  whichever side of the boundary that run fell on.
+
+  It is a comparison and not a claim of cause, and the schema says so: a gate
+  that got cheaper did so while phases were finishing and caches warming. It is
+  worth carrying anyway, because without it an autonomous editor is one nobody
+  can tell is making runs worse — and because `plan-feature` now reads it, so a
+  project whose `unit` gate wants `--reuse-db` pays to find that out once
+  instead of every run.
+
+  A phase-level change (a fix budget, a model) is reported `unmeasured` rather
+  than estimated: a phase runs once, so there is no before to compare an after
+  against, and the only candidate baseline is a different phase doing different
+  work. An operator's amendment is not scored at all — a person deciding
+  something is not the run choosing it.
+
 - **`schemas/intervention.v1.schema.json`** — the document the monitor answers
   with, generated from `src/intervention/intervention.ts` the way the workflow
   and post-mortem schemas are generated from theirs. It is the odd one in

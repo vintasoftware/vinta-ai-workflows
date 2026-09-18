@@ -1,14 +1,24 @@
 /**
  * The plan post-mortem (§13.6).
  *
- * A run knows four things the plan's author could not: which declared
+ * A run knows five things the plan's author could not: which declared
  * dependencies never mattered, which undeclared ones turned up at gate time,
- * which same-wave phases actually collided, and which phases took a wildly
- * different amount of time than their wave placement assumed. This module folds
- * a finished run's journal against its own frozen workflow and emits that as a
- * schema-versioned artifact `plan-feature` reads when planning the next feature
- * in the same repo. It is the only thing that makes the planner and the
- * executor compound rather than merely coexist.
+ * which same-wave phases actually collided, which phases took a wildly
+ * different amount of time than their wave placement assumed — and, since runs
+ * began tuning themselves, what the run changed about its own plan and whether
+ * doing so helped. This module folds a finished run's journal against its own
+ * frozen workflow and emits that as a schema-versioned artifact `plan-feature`
+ * reads when planning the next feature in the same repo. It is the only thing
+ * that makes the planner and the executor compound rather than merely coexist.
+ *
+ * **The fifth finding closes a loop that was otherwise open.** A run can amend
+ * itself now (§9.2): a watchdog wakes the monitor, and the monitor may retune a
+ * gate's command, its timeout, a phase's fix budget or a phase's model. Nobody
+ * is watching when it happens. Without this finding there is no way to learn
+ * that the feature is making runs *worse*, and no way for the next plan to
+ * start out already carrying the change this run had to discover — which is the
+ * whole point: a project whose `unit` gate wants `--reuse-db` should pay for
+ * finding that out once.
  *
  * **The source is structural, like `analytics.ts`'s and `usage.ts`'s.**
  * `Journal` satisfies `PostMortemSource` and so does a fake, which is what lets
@@ -71,6 +81,14 @@ export const POSTMORTEM_SCHEMA_URL =
 
 /** Written into the run directory, beside the frozen `workflow.json`. */
 export const POSTMORTEM_FILENAME = 'postmortem.json'
+
+/**
+ * Where the monitor's own account of each self-amendment lives, in the same
+ * directory. Named here because this artifact points at it and must not
+ * duplicate it: the reasoning, the evidence and the gate command are prose
+ * about a repository, and this file is read by an agent in another session.
+ */
+export const INTERVENTION_RECORD_FILENAME = 'interventions.jsonl'
 
 const Id = z
   .string()
@@ -192,12 +210,63 @@ export const GateCostSchema = z
       '`runs` far exceeds its phases is a fix loop re-paying for the same suite.',
   )
 
+/**
+ * How much cheaper a gate has to get before the change is called an
+ * improvement. Ten per cent either way, so ordinary run-to-run variance is
+ * `unchanged` rather than a verdict.
+ */
+export const INTERVENTION_EFFECT_BAND = 0.1
+
+export const INTERVENTION_EFFECTS = ['cheaper', 'dearer', 'unchanged', 'unmeasured'] as const
+
+export const InterventionFindingSchema = z
+  .strictObject({
+    amendment: z
+      .number()
+      .int()
+      .min(1)
+      .describe('The amendment ordinal, matching the run’s `workflow_amended` history.'),
+    at_ms: z.number().int().describe('When the run amended itself.'),
+    target: z
+      .string()
+      .min(1)
+      .describe('What it changed, as the ledger keys it — `gate:<id>` or `node:<id>`.'),
+    effect: z
+      .enum(INTERVENTION_EFFECTS)
+      .describe(
+        '`cheaper` / `dearer` / `unchanged` compare the gate’s mean uncached duration before ' +
+          'and after. `unmeasured` means the journal cannot answer — a phase-level change, ' +
+          'or a gate with no runs on one side of the amendment.',
+      ),
+    before_ms: z
+      .number()
+      .int()
+      .optional()
+      .describe('Mean uncached duration of this gate before the amendment. Absent when unmeasured.'),
+    after_ms: z.number().int().optional().describe('The same, after. Absent when unmeasured.'),
+    runs_before: z.number().int().min(0).optional(),
+    runs_after: z.number().int().min(0).optional(),
+    record_ref: z
+      .string()
+      .describe(
+        'Where the monitor’s own account of this change lives, relative to the run directory. ' +
+          'The reasoning, the evidence and the command are prose about a repository and stay ' +
+          'there; this artifact carries what can be counted.',
+      ),
+  })
+  .describe(
+    'One amendment a run made to itself, and what happened to the thing it changed. The ' +
+      'effect is a comparison of measured durations, not a claim of cause: a gate that got ' +
+      'cheaper across an amendment did so while other things were also changing.',
+  )
+
 export const GAP_KINDS = [
   'blocking_cause_unrecorded',
   'dependency_use_unrecorded',
   'gate_result_unrecorded',
   'gate_durations_unrecorded',
   'integration_record_unavailable',
+  'intervention_effect_unmeasured',
 ] as const
 
 export const PostMortemGapSchema = z
@@ -303,14 +372,24 @@ export const PostMortemSchema = z
        */
       critical_path: CriticalPathSchema.nullable(),
       idle_capacity: IdleCapacitySchema.nullable(),
+      /**
+       * Empty means the run never amended itself, which is derivable and
+       * true — unlike `unused_dependencies`, whose emptiness is a gap.
+       */
+      interventions: z
+        .array(InterventionFindingSchema)
+        .describe(
+          'Amendments the run made to itself (§9.2), oldest first. Empty means it made none, ' +
+            'which is a fact rather than a gap: `workflow_amended` rows say who wrote them.',
+        ),
     }),
     gaps: z.array(PostMortemGapSchema),
   })
   .describe(
     'What one finished `vinta-ai-maestro` run learned about the plan that produced it: dependencies ' +
       'that were never used, dependencies discovered missing, same-wave phases that conflicted, ' +
-      'phases whose duration diverged from their wave, and what each gate cost. Ids, waves, ' +
-      'paths, durations and counts only.',
+      'phases whose duration diverged from their wave, what each gate cost, and changes the ' +
+      'run made to its own plan while it ran. Ids, waves, paths, durations and counts only.',
   )
 
 export type PostMortem = z.infer<typeof PostMortemSchema>
@@ -321,6 +400,8 @@ export type GateCost = z.infer<typeof GateCostSchema>
 export type DurationDivergence = z.infer<typeof DurationDivergenceSchema>
 export type CriticalPath = z.infer<typeof CriticalPathSchema>
 export type IdleCapacity = z.infer<typeof IdleCapacitySchema>
+export type InterventionFinding = z.infer<typeof InterventionFindingSchema>
+export type InterventionEffect = (typeof INTERVENTION_EFFECTS)[number]
 export type PostMortemGap = z.infer<typeof PostMortemGapSchema>
 export type GapKind = (typeof GAP_KINDS)[number]
 
@@ -407,6 +488,13 @@ interface GateRun {
   readonly cached: boolean
 }
 
+/** One amendment the run made to itself (§9.2), as the journal records it. */
+interface SelfAmendment {
+  readonly amendment: number
+  readonly ts: number
+  readonly targets: readonly string[]
+}
+
 interface Trace {
   wave: number | null
   startedAtMs: number | null
@@ -445,6 +533,7 @@ export function postMortem(
   let endedAtMs: number | null = null
   let status: 'done' | 'failed' = 'done'
   const traces = new Map<string, Trace>()
+  const selfAmendments: SelfAmendment[] = []
 
   const traceOf = (nodeId: string): Trace => {
     const existing = traces.get(nodeId)
@@ -494,6 +583,15 @@ export function postMortem(
         })
         continue
       }
+      case 'workflow_amended': {
+        // Only the run's own. An operator's edit is a person deciding
+        // something, and scoring it as though the run had chosen it would
+        // credit or blame the wrong party.
+        const { author, targets, amendment } = event.payload
+        if (author !== 'monitor') continue
+        selfAmendments.push({ amendment, ts: event.ts, targets: targets ?? [] })
+        continue
+      }
       default:
         // Lane assignments, questions and steering describe how a node spent
         // its time, which is `analytics.ts`'s subject and not this module's.
@@ -506,6 +604,9 @@ export function postMortem(
 
   const waves = computeWaves(workflow.nodes)
   const waveOf = (id: string): number => traces.get(id)?.wave ?? waves.get(id) ?? 1
+  // Computed once: `gaps` reports the entries this could not score, so the
+  // two must be looking at the same list.
+  const selfChanges = interventions(selfAmendments, traces, endedAtMs)
 
   return PostMortemSchema.parse({
     $schema: POSTMORTEM_SCHEMA_URL,
@@ -531,8 +632,9 @@ export function postMortem(
       gate_costs: gateCosts(workflow, traces),
       critical_path: criticalPath(workflow, traces, waveOf, endedAtMs - startedAtMs),
       idle_capacity: idleCapacity(workflow, traces, endedAtMs - startedAtMs),
+      interventions: selfChanges,
     },
-    gaps: gaps(workflow, traces, options),
+    gaps: gaps(workflow, traces, options, selfChanges),
   } satisfies PostMortem)
 }
 
@@ -929,12 +1031,157 @@ function gateCosts(workflow: Workflow, traces: ReadonlyMap<string, Trace>): Gate
   return costs
 }
 
+/**
+ * What the run changed about itself, and what happened to the thing it changed.
+ *
+ * ## What "what happened" can honestly mean here
+ *
+ * The only measurable target is a gate, and the only measurement is its
+ * duration. So the comparison is: the mean of every *uncached* run of that
+ * gate before the amendment, against the mean of every uncached run after it.
+ * Cached hits are excluded because a hit reports the duration of the run that
+ * filled the cache — it would drag the mean toward whichever side of the
+ * amendment that run happened to fall on, which is the one number that must
+ * not be borrowed across the boundary being measured.
+ *
+ * **It is a comparison, not a claim of cause, and the schema says so.** A gate
+ * that got cheaper across an amendment did so while phases were also finishing,
+ * lanes recycling and caches warming. The finding is worth carrying anyway
+ * because the alternative is carrying nothing: an autonomous editor whose
+ * changes are never measured is one nobody can tell is making runs worse. What
+ * makes it safe to carry is that a planner reading `cheaper` is reading a
+ * measured before and after, both present in the record, rather than a verdict.
+ *
+ * ## Windows
+ *
+ * Each amendment's "before" runs from the previous amendment of the *same
+ * target* (or the start of the run) and its "after" runs to the next one (or
+ * the end). The ledger forbids a second change to one target, so in practice
+ * every window is the whole run; the bound is here because a fold that silently
+ * mixed two changes' effects would be wrong in exactly the case somebody
+ * loosened the ledger to investigate.
+ *
+ * ## Why a phase-level change is `unmeasured` rather than guessed
+ *
+ * `rebudget_fixes` and `retier_phase` change what a phase costs, and a phase
+ * runs once. There is no before to compare an after against — the only
+ * candidate baseline is other phases, which are different work. Reporting a
+ * number here would be reporting the difference between two phases as though it
+ * were the effect of the change, and the reader has no way to tell that from a
+ * real measurement. So it is `unmeasured`, and `gaps` says what would fix it.
+ */
+function interventions(
+  amendments: readonly SelfAmendment[],
+  traces: ReadonlyMap<string, Trace>,
+  endedAtMs: number,
+): InterventionFinding[] {
+  if (amendments.length === 0) return []
+
+  // Every uncached, measured run of every gate, in time order. One pass, then
+  // sliced per window — the alternative walks the traces once per amendment.
+  const samples = new Map<string, { ts: number; durationMs: number }[]>()
+  for (const trace of traces.values()) {
+    for (const run of trace.gates) {
+      if (run.cached || run.durationMs === null) continue
+      const list = samples.get(run.gate) ?? []
+      list.push({ ts: run.ts, durationMs: run.durationMs })
+      samples.set(run.gate, list)
+    }
+  }
+  for (const list of samples.values()) list.sort((a, b) => a.ts - b.ts)
+
+  const ordered = [...amendments].sort((a, b) => a.ts - b.ts)
+
+  return ordered.flatMap((amendment) =>
+    amendment.targets.map((target): InterventionFinding => {
+      const base = {
+        amendment: amendment.amendment,
+        at_ms: amendment.ts,
+        target,
+        record_ref: INTERVENTION_RECORD_FILENAME,
+      }
+
+      const gate = target.startsWith('gate:') ? target.slice('gate:'.length) : null
+      if (gate === null) return { ...base, effect: 'unmeasured' as const }
+
+      const window = boundsFor(ordered, target, amendment)
+      const runs = samples.get(gate) ?? []
+      const before = runs.filter((run) => run.ts >= window.from && run.ts < amendment.ts)
+      const after = runs.filter((run) => run.ts > amendment.ts && run.ts <= window.to)
+
+      if (before.length === 0 || after.length === 0) {
+        return {
+          ...base,
+          effect: 'unmeasured' as const,
+          runs_before: before.length,
+          runs_after: after.length,
+        }
+      }
+
+      const beforeMs = mean(before.map((run) => run.durationMs))
+      const afterMs = mean(after.map((run) => run.durationMs))
+      return {
+        ...base,
+        effect: effectOf(beforeMs, afterMs),
+        before_ms: Math.round(beforeMs),
+        after_ms: Math.round(afterMs),
+        runs_before: before.length,
+        runs_after: after.length,
+      }
+    }),
+  )
+
+  /** The window this amendment owns for `target`: to the neighbouring ones. */
+  function boundsFor(
+    all: readonly SelfAmendment[],
+    target: string,
+    self: SelfAmendment,
+  ): { from: number; to: number } {
+    const touching = all.filter((entry) => entry.targets.includes(target))
+    const previous = touching.filter((entry) => entry.ts < self.ts).at(-1)
+    const next = touching.find((entry) => entry.ts > self.ts)
+    return { from: previous?.ts ?? 0, to: next?.ts ?? endedAtMs }
+  }
+}
+
+function mean(values: readonly number[]): number {
+  return values.reduce((total, value) => total + value, 0) / values.length
+}
+
+function effectOf(beforeMs: number, afterMs: number): InterventionEffect {
+  if (beforeMs === 0) return 'unchanged'
+  const change = (afterMs - beforeMs) / beforeMs
+  if (change <= -INTERVENTION_EFFECT_BAND) return 'cheaper'
+  if (change >= INTERVENTION_EFFECT_BAND) return 'dearer'
+  return 'unchanged'
+}
+
 function gaps(
   workflow: Workflow,
   traces: ReadonlyMap<string, Trace>,
   options: PostMortemOptions,
+  interventionFindings: readonly InterventionFinding[],
 ): PostMortemGap[] {
   const found: PostMortemGap[] = []
+
+  const unscored = interventionFindings.filter((finding) => finding.effect === 'unmeasured')
+  if (unscored.length > 0) {
+    found.push({
+      kind: 'intervention_effect_unmeasured',
+      nodes: unscored
+        .filter((finding) => finding.target.startsWith('node:'))
+        .map((finding) => finding.target.slice('node:'.length)),
+      needs:
+        'a measurement that survives the change. A gate is scored by comparing its own ' +
+        'uncached durations either side of the amendment, and that needs runs on both ' +
+        'sides — an amendment made near the end of a run has none after it. A phase-level ' +
+        'change (a fix budget, a model) has no before at all: the phase runs once, and the ' +
+        'only candidate baseline is a different phase doing different work. Scoring these ' +
+        'would mean reporting the difference between two phases as though it were the ' +
+        'effect of the change, which a reader could not tell from a real measurement.',
+    })
+  }
+
 
   const edges: Edge[] = workflow.nodes.flatMap((node) =>
     node.depends_on.map((dep) => ({ node: node.id, depends_on: dep.node })),

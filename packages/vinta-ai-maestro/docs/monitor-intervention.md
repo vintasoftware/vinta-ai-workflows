@@ -1,6 +1,6 @@
 # Monitor intervention: letting the run tune itself
 
-Status: implemented. The post-mortem half of "closing the loop" is not built.
+Status: implemented.
 
 ## The failure this comes from
 
@@ -118,18 +118,42 @@ all foldable from events the journal already carries:
 - **No self-reversal.** The monitor may not undo an amendment it authored. Same
   fold.
 
-## Closing the loop — not built
+## Closing the loop
 
-`postmortem.v1` should gain an `interventions[]` finding: what changed, on what
-evidence, and whether the gate actually got cheaper afterwards. Without it there
-is no way to learn that the feature is making runs worse, and `plan-feature`
-never finds out that this project's `unit` gate wants `--reuse-db` *before* the
-next run starts paying for it again.
+`postmortem.v1` carries an `interventions[]` finding: one entry per amendment
+the run made to itself, with what happened to the thing it changed. Without it
+there is no way to learn that the feature is making runs *worse*, and
+`plan-feature` never finds out that this project's `unit` gate wants
+`--reuse-db` before the next run starts paying for it again.
 
-Everything it needs is now recorded — `workflow_amended` rows carry `author` and
-`targets`, `gate_result` rows carry `duration_ms` and `cached`, and
-`runs/<id>/interventions.jsonl` holds every attempt including the refused ones
-— so this is a fold and a schema addition rather than new plumbing.
+**The score is a comparison, not a claim of cause.** A gate is scored against
+its own uncached durations either side of the amendment: mean before, mean
+after, `cheaper` / `dearer` / `unchanged` outside a ten-per-cent band. A gate
+that got cheaper across an amendment did so while phases were finishing, lanes
+recycling and caches warming, and the schema says as much. It is worth carrying
+anyway, because the alternative is carrying nothing — and what makes it safe to
+carry is that the reader gets a measured before and after rather than a verdict.
+
+**Cached hits are excluded, and that is the one exclusion that matters.** A hit
+reports the duration of the run that filled the cache. Counting it would drag
+the mean toward whichever side of the amendment that original run happened to
+fall on, which is precisely the number that must not cross the boundary being
+measured.
+
+**A phase-level change is `unmeasured`, not estimated.** `rebudget_fixes` and
+`retier_phase` change what a phase costs, and a phase runs once. There is no
+before to compare an after against; the only candidate baseline is a different
+phase doing different work. Reporting that difference as though it were the
+effect of the change would give a reader a number they could not distinguish
+from a real measurement. The gap says so in as many words.
+
+**An operator's amendment is not scored.** A person deciding something is not
+the run choosing it, and crediting or blaming the run for it would be the wrong
+party. `workflow_amended.author` is what tells them apart.
+
+`plan-feature` reads the finding: a `cheaper` gate entry means the workflow this
+project keeps emitting has the wrong command in it, and the gate block for the
+next feature should already carry the fix.
 
 ## Where the record lives
 
