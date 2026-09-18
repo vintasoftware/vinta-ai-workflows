@@ -322,6 +322,27 @@ interface NodePayloads {
    * Identifiers, paths and a count (§11) — never the conflicted hunks, which
    * are repository content and stay in the worktree.
    */
+  /**
+   * The pull request a finished phase opened, or did not.
+   *
+   * `openPullRequest` never throws — reporting a finished run is not the work
+   * the run did, and a missing or unauthenticated `gh` must not turn hours of
+   * completed phases into a failed run. But its result was discarded, so
+   * "never fails" had quietly become "never tells you": one phase in an
+   * observed run completed with no pull request, and the only way to find out
+   * was to notice the gap in a list on the forge.
+   *
+   * A URL, a branch pair and a refusal code. The refusal's own `message` is
+   * deliberately not carried: it is composed from whatever `gh` said, and this
+   * row is served over the API.
+   */
+  node_pr: {
+    readonly opened: boolean
+    readonly base: string
+    readonly head: string
+    readonly url?: string
+    readonly reason?: 'unavailable' | 'failed'
+  }
   node_conflict: {
     readonly where: 'base' | 'wave'
     /** The branch the merge was made on. */
@@ -360,7 +381,21 @@ interface NodePayloads {
    */
   human_question: HumanQuestion & { readonly effect_id: string }
   /** The answer. It re-enters the guard context as `human.answer` (§9.1). */
-  human_answered: { readonly effect_id: string; readonly answer: HumanAnswer }
+  /**
+   * `unattended` marks an answer the scheduler gave itself because nobody did
+   * — the `retry_after` timer expiring on a failure question. Absent means a
+   * person chose it.
+   *
+   * On the row rather than inferred, because the two are the same answer with
+   * very different meanings: "a human looked at this and said try again" and
+   * "nobody was here, so it tried again". A post-mortem that cannot tell them
+   * apart reports an operator decision that was never made.
+   */
+  human_answered: {
+    readonly effect_id: string
+    readonly answer: HumanAnswer
+    readonly unattended?: true
+  }
   /**
    * One §9 operation. `text` is the operator's own steering message: it is
    * payload, exactly as a transcript entry is, and it never reaches a log line

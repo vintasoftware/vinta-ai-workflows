@@ -28,6 +28,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`--retry-after <15m>`: an unanswered failure question eventually answers
+  itself.** An observed fourteen-hour run spent 4h07m — 29% of its wall clock —
+  parked on "This phase failed. Try it again?" with nobody at the keyboard; the
+  answer, when it came, was `retry`, and it worked. Unset by default, so a run
+  behaves exactly as it did. Accepts minutes bare or a unit (`15`, `15m`, `90s`,
+  `2h`) on both `run` and `serve`. It is deliberately unbounded and fires again
+  on each new question: a version capped by `--retries` would stall at the cap
+  and idle for the rest of the night, which is the failure it exists for. Every
+  firing is a full phase attempt, so the interval is the throttle. It reaches
+  the failure question and nothing else — a plan's own `await_human` gate asked
+  for a person, and both park through the same code, so answering those would be
+  the orchestrator overruling the plan. An unattended answer is journalled with
+  `unattended: true`, because "a human said try again" and "nobody was here" are
+  the same answer with very different meanings.
+
 - **The daemon now has a log of its own, and a Logs view to read it in.**
   Transcripts said what the agents did; nothing said what the *daemon* did, so
   "the run stopped and I don't know why" had no evidence behind it at all.
@@ -547,6 +562,46 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recall.
 
 ### Fixed
+
+- **A pipeline that could not progress was journalled as the word "Error".** The
+  interpreter composes an id-safe reason for exactly this case — which state it
+  could not leave, and which trigger failed to match — and the scheduler threw
+  it as a bare `Error`. `failureReason` reports an unrecognised error by its
+  name, so the sentence was discarded at the one moment it was worth keeping.
+  It is a `PipelineStuckError` now, carrying the state, and the reason survives
+  into the journal. The same shape as the non-zero git exit, fixed the same way.
+
+- **A pull request said nothing but the plan anchor.** The daemon opened PRs
+  with `title: node.name` and `body: node.prompt_ref` — one line, a link to a
+  heading. It had no idea the `prs-context` mechanism existed: there was not a
+  single reference to it in the package, so the rich path the skills use
+  (`open-pr-from-context`, the project's own PR template, inline review
+  comments) was never reached from a run. `open_pr` now reads the phase's
+  `.vinta-ai-workflows/prs-context/<plan>/phase-<node>.md` when the agent wrote
+  one, and the implementer is asked to write it — the 5–15 line summary it
+  already produces, put where a human will read it instead of only the
+  transcript. With no context file the body is composed from the run's own
+  record: the brief, what the phase is based on and why that is not the default
+  branch, its declared surface, its gates, how many attempts it took, and any
+  merge conflicts an agent resolved on the way in — which nobody reviews.
+
+- **A phase with two dependencies could never open a pull request.** Its base is
+  an `integ-<id>` branch and `git_push` pushes only the node's own branch, so
+  `gh` was asked to open against a ref the forge had never seen. It refused, the
+  refusal was discarded, and the phase completed with no PR and nothing saying
+  so — in one observed run, the single node with two dependencies was the single
+  node with no PR. The integration base is pushed before the PR is opened, and
+  every outcome is journalled as `node_pr`, so a PR that did not open is now as
+  visible as one that did.
+
+- **A conflict resolution was never gated.** `IntegratorOptions.verify` has
+  existed as long as the conflict loop, documented as "a resolution that does
+  not build is not a resolution", and nothing ever supplied it. Six merges in
+  one run were resolved by an agent and went straight in — ungated — to become
+  the base the next phase built on, while the phases either side were gated to
+  the hilt. The union of the conflicting nodes' declared gates now runs in the
+  integration worktree, with that worktree's environment, and a red gate spends
+  a fix round instead of shipping.
 
 - **A conflict fixer that committed its own resolution failed the phase.** An
   agent told to resolve a merge conflict reaches for the sequence a person

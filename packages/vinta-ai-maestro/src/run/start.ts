@@ -71,6 +71,11 @@ export interface StartRunOptions {
   readonly onFailure?: 'stop' | 'retry' | 'ask'
   readonly retries?: number
   /**
+   * Milliseconds an unanswered *failure* question waits before retrying itself.
+   * Absent waits for a person, which is what every run did before the flag.
+   */
+  readonly retryAfterMs?: number
+  /**
    * Pick up a run the journal already holds instead of creating one.
    *
    * The caller has already established that the run exists and read its frozen
@@ -263,6 +268,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     laneRoot,
     ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
     ...(options.retries === undefined ? {} : { retries: options.retries }),
+    ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
     // §9's take over, wired: the scheduler offers each live turn here and the
     // daemon's PTY channel resolves an `attach` against the same registry.
     takeovers,

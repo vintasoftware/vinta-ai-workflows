@@ -238,6 +238,7 @@ function rig(
     readonly onFailure?: 'stop' | 'retry' | 'ask' | null
     /** Automatic attempts under `retry`. */
     readonly retries?: number
+  readonly retryAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
     readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
     /**
@@ -315,6 +316,7 @@ function rig(
     // two together, is how a mode gets asserted by name instead of behaviour.
     ...(options.onFailure === null ? {} : { onFailure: options.onFailure ?? 'stop' }),
     ...(options.retries === undefined ? {} : { retries: options.retries }),
+    ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs, clock }),
   })
 
   cleanups.push(() => {
@@ -427,6 +429,21 @@ const SOLO = {
 }
 
 /** Reaches a final state the host marked as failure. */
+/**
+ * A pipeline with nowhere to go: `work` has one outgoing transition and a guard
+ * that can never hold, so the interpreter gets stuck rather than reaching a
+ * final state. The shape a plan defect takes at runtime.
+ */
+const STUCK = {
+  states: [
+    { id: 'work', name: 'Work', position: { x: 0, y: 0 }, onEnter: [spawn('e-work', 'implementer')] },
+    { id: 'done', name: 'Done', position: { x: 200, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [{ id: 't-never', from: 'work', to: 'done', guard: "review.verdict == 'nope'" }],
+  initialStateIds: ['work'],
+  finalStateIds: ['done'],
+}
+
 const EXPLODE = {
   states: [
     { id: 'work', name: 'Work', position: { x: 0, y: 0 }, onEnter: [spawn('e-work', 'implementer')] },
@@ -625,6 +642,7 @@ function makeWorkflow(
     pipelines: options.pipelines ?? {
       solo: SOLO,
       explode: EXPLODE,
+      stuck: STUCK,
       long: LONG,
       gated: GATED,
       'gate-work': GATE_WORK,
@@ -1384,6 +1402,144 @@ describe('standard-phase under the scheduler', () => {
     expect(slotFor('fixer')).toEqual(new Set(['main']))
     expect(slotFor('review')).toEqual(new Set())
     expect(slotFor('reviewer')).toEqual(new Set(['review']))
+  })
+
+  /**
+   * The complaint a real 14-hour run produced: three `node_error` events, all
+   * three reading `pipeline ended in state "failed"`, which is the name of a
+   * state and not a cause. `standard-phase` has two edges into `failed` — a red
+   * gate with the budget spent, and a reviewer that kept saying no — and from
+   * the state id alone they are the same sentence. An operator learned that a
+   * phase failed twice and nothing about why, which is the complaint the event
+   * was added to answer one level out.
+   *
+   * Both shapes are driven here in one test, because what is being asserted is
+   * that they *differ*: either reason alone would have passed against the old
+   * text too.
+   */
+  it('says which of the two ways a phase reached `failed` it took', async () => {
+    const reasonsFor = (r: Rig, nodeId: string): string[] =>
+      r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'node_error' && event.nodeId === nodeId)
+        .map((event) => String((event.payload as { reason: unknown }).reason))
+
+    // A gate that stays red under a reviewer that keeps passing: review → gate
+    // → fix, twice, and then `t-gate-exhausted`.
+    const red = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { id: 'unit', exit_code: 2 } } },
+      },
+    })
+    expect((await red.scheduler.run()).statuses).toEqual({ a: 'failed' })
+
+    // A reviewer that never passes: review → fix, twice, and then
+    // `t-review-exhausted`. The gate never runs, so there is no gate to name.
+    const rejected = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
+    })
+    expect((await rejected.scheduler.run()).statuses).toEqual({ a: 'failed' })
+
+    expect(reasonsFor(red, 'a')).toEqual([
+      'pipeline ended in state "failed" via "t-gate-exhausted"; gate "unit" exited 2; ' +
+        '2 of 2 fix rounds spent',
+    ])
+    expect(reasonsFor(rejected, 'a')).toEqual([
+      'pipeline ended in state "failed" via "t-review-exhausted"; review verdict "fail"; ' +
+        '2 of 2 fix rounds spent',
+    ])
+
+    // §11: a gate id and an exit code, never what the gate printed. The
+    // reviewer's own words are in the transcript and reach nothing here — the
+    // verdict is one of two fixed strings.
+    for (const reason of [...reasonsFor(red, 'a'), ...reasonsFor(rejected, 'a')]) {
+      expect(reason).not.toContain('log_ref')
+      expect(reason).not.toContain(red.laneRoot)
+    }
+
+    expectDrained(red)
+    expectDrained(rejected)
+  })
+
+  /**
+   * A gate that ran out of time exits `TIMEOUT_EXIT` (124), which is the gate
+   * runner's own convention and means nothing to the person reading the
+   * journal. "exited 124" and "exited 2" send them to the same place; "timed
+   * out" and "exited 2" do not.
+   */
+  it('says a gate timed out rather than quoting the runner’s exit convention', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { id: 'unit', exit_code: 124, status: 'timed_out' } } },
+      },
+    })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'failed' })
+    expect(
+      r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'node_error')
+        .map((event) => String((event.payload as { reason: unknown }).reason)),
+    ).toEqual([
+      'pipeline ended in state "failed" via "t-gate-exhausted"; gate "unit" timed out; ' +
+        '2 of 2 fix rounds spent',
+    ])
+    expectDrained(r)
+  })
+
+  /**
+   * The stale-fact guard, on a pipeline of its own because `standard-phase`
+   * cannot reach the shape: a green gate there goes straight to `integrate`
+   * and the phase is done. Any pipeline that keeps going after a gate passes
+   * can reach it, and there the last gate that ran is a gate that had nothing
+   * to do with the failure — naming it would read as evidence.
+   */
+  it('leaves a gate that passed out of the reason', async () => {
+    const workflow = makeWorkflow([node('a', [], { gates: ['unit'] })], {
+      resources: {
+        lane: { capacity: 2, kind: 'worktree' },
+        'test-suite': { capacity: 1, kind: 'semaphore' },
+      },
+      gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+      pipelines: {
+        'green-gate-then-fail': {
+          states: [
+            {
+              id: 'gate',
+              name: 'Gate',
+              position: { x: 0, y: 0 },
+              onEnter: [{ id: 'e-gate', definitionId: 'run_gate', params: {} }],
+            },
+            {
+              id: 'failed',
+              name: 'Failed',
+              position: { x: 200, y: 0 },
+              data: { outcome: 'failed' },
+            },
+          ],
+          transitions: [{ id: 't-gave-up', from: 'gate', to: 'failed' }],
+          initialStateIds: ['gate'],
+          finalStateIds: ['failed'],
+        },
+      },
+      pipeline: 'green-gate-then-fail',
+    })
+    const r = rig(workflow, { outcomes: { 'e-gate': { facts: { gate: { id: 'unit', exit_code: 0 } } } } })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'failed' })
+    expect(r.calls.some((call) => call.effect === 'e-gate')).toBe(true)
+
+    // The gate ran and it is not in the sentence. The fix-round count is,
+    // because `0 of 2` is itself the news: nothing was even tried.
+    expect(
+      r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'node_error')
+        .map((event) => String((event.payload as { reason: unknown }).reason)),
+    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 2 fix rounds spent'])
+    expectDrained(r)
   })
 })
 
@@ -2713,6 +2869,148 @@ describe('a failed phase the operator can retry', () => {
     r.scheduler.answer('a', { human: { answer: 'stop' } })
     await running
     expectDrained(r)
+  })
+
+  /**
+   * A pipeline that cannot progress said `"Error"` and nothing else.
+   *
+   * The interpreter composes an id-safe sentence for exactly this — which state,
+   * and which trigger failed to match — and the scheduler threw it as a bare
+   * `Error`. `failureReason` reports an unrecognised error by its *name*, so the
+   * sentence was discarded at the one moment it was worth keeping. The same
+   * shape as the non-zero git exit `GitCommandError` was added for.
+   */
+  it('journals which state a stuck pipeline could not leave', async () => {
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'stuck' }), { onFailure: 'stop' })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    const reason = String(report.failures['a'])
+    expect(reason).toContain('work')
+    expect(reason).not.toBe('Error')
+
+    const errors = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_error' && event.nodeId === 'a')
+    expect(errors).toHaveLength(1)
+    const journalled = String((errors[0]?.payload as { reason: string }).reason)
+    // The state it could not leave, rather than the word "Error".
+    expect(journalled).toContain('work')
+    expect(journalled).not.toBe('Error')
+    // §11: a state id, never the guard expression or anything it read.
+    expect(journalled).not.toContain('verdict ==')
+    expectDrained(r)
+  })
+
+  /**
+   * The four hours this exists for.
+   *
+   * An observed fourteen-hour run spent 4h07m — 29% of its wall clock — parked
+   * on "This phase failed. Try it again?" with nobody at the keyboard. The
+   * answer, when it finally came, was `retry`, and it worked.
+   */
+  describe('an unanswered failure question', () => {
+    it('answers itself after the interval, and says so on the record', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 900_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+      // Nothing happens before the interval is up: the operator still owns the
+      // decision for as long as they were given.
+      await r.advance(899_000)
+      expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+
+      await r.advance(2_000)
+      await until(() => r.adapter.spawned.length === 2, 'the unattended second attempt')
+
+      const answered = r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'human_answered')
+      expect(answered).toHaveLength(1)
+      const payload = answered[0]?.payload as { answer: string; unattended?: true }
+      expect(payload.answer).toBe('retry')
+      // The flag that separates "a human said try again" from "nobody was here":
+      // a post-mortem without it reports a decision that was never made.
+      expect(payload.unattended).toBe(true)
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expectDrained(r)
+    })
+
+    it('keeps going rather than stalling at a cap', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      // Three unattended retries off one `retries: 0` budget. A version bounded
+      // by that budget would stall after the first and idle for the rest of the
+      // night, which is the failure this is for.
+      for (let attempt = 2; attempt <= 4; attempt += 1) {
+        await until(() => r.scheduler.statuses['a'] === 'awaiting_human', `offer ${attempt}`)
+        await r.advance(61_000)
+        await until(() => r.adapter.spawned.length === attempt, `attempt ${attempt}`)
+      }
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expectDrained(r)
+    })
+
+    it('does not fire once the operator has answered', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      const report = await running
+
+      // A timer left armed would fire against a node that has settled, and
+      // `answer` throws for a node that is not awaiting one.
+      await r.advance(600_000)
+      expect(report.statuses).toEqual({ a: 'failed' })
+      expect(r.journal.events('run-1').filter((e) => e.type === 'human_answered')).toHaveLength(1)
+      expectDrained(r)
+    })
+
+    /**
+     * The line this must not cross. A plan-authored `await_human` is a question
+     * the plan wanted a person to answer — "is this migration safe to deploy" —
+     * and both it and the failure offer park through the same `#park`. A timer
+     * there would be the orchestrator overruling the plan on the operator's
+     * behalf, so it lives in `#offerRetry` instead.
+     */
+    it('never answers a plan’s own await_human gate', async () => {
+      const r = rig(makeWorkflow([node('a', [], { pipeline: 'gated' })]), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the plan’s own gate')
+
+      await r.advance(3_600_000)
+      // An hour later it is still waiting, because a person has to decide.
+      expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+      expect(r.journal.events('run-1').filter((e) => e.type === 'human_answered')).toEqual([])
+
+      r.scheduler.answer('a', { human: { answer: 'ship' } })
+      await running
+      expectDrained(r)
+    })
   })
 
   it('spends its whole budget before asking', async () => {

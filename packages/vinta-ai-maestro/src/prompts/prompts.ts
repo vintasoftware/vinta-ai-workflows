@@ -584,6 +584,7 @@ function renderImplementer(materials: Materials): string {
     '   work. It is not a reason to leave the work uncommitted — see below.',
     ...foreground(),
     ...commitProtocol(materials),
+    ...prContext(materials),
     '',
     '## Required output (a single final report)',
     '- Status: SUCCESS or FAILURE, and why.',
@@ -835,6 +836,55 @@ const hasCommands = (materials: Continuation): boolean => commandBlock(materials
  * what the verb does and why it is not the same as typing the line, and this is
  * the list every step points at.
  */
+/**
+ * The file the phase's pull request is written from.
+ *
+ * The summary this agent already writes in its final report is the best
+ * description of the change that will ever exist — it is written by whoever
+ * made it, while they still remember why. It used to live only in the
+ * transcript, and the pull request went out carrying the plan anchor and
+ * nothing else: seven PRs from one run each said
+ * `ai-plans/…_IMPLEMENTATION_PLAN.md#phase-7` and no more.
+ *
+ * So it is asked for as a file, at the path the rest of this toolchain already
+ * uses (`open-pr-from-context`), and `open_pr` reads it. Absent, the
+ * orchestrator composes a body from the run's record — gates, attempts,
+ * conflicts — which is better than the anchor and still not what a reviewer
+ * wants most, because none of it says what the change *does*.
+ *
+ * Deliberately **not** committed. It is about the change rather than part of
+ * it, and a phase whose diff contains a file describing its own diff is a
+ * phase whose review starts with a question about that.
+ */
+function prContext(materials: Continuation): string[] {
+  const path = `.vinta-ai-workflows/prs-context/${materials.workflow.id}/phase-${materials.node.id}.md`
+  return [
+    '',
+    '## Write the pull request description',
+    `Before your final report, write \`${path}\`
+(create the directories). **Do not commit it** — it describes the change rather
+than being part of it.`,
+    'Two sections, exactly these headings:',
+    '',
+    '```markdown',
+    '# Title',
+    '',
+    '<one line, imperative, under 72 characters>',
+    '',
+    '# Description',
+    '',
+    '<what this phase changed and why, in Simple English. Lead with the change a',
+    'reviewer is about to read. Name the decisions you took and anything you',
+    'deliberately left out. Say what you could not do. No preamble, no restating',
+    'the phase brief — it is linked from the PR already.>',
+    '```',
+    '',
+    'This is what a human reads on the pull request, so write it for them rather',
+    'than for the orchestrator. If you leave the placeholders in, it is discarded',
+    'and the PR falls back to a summary built from gate results.',
+  ]
+}
+
 function gateList(materials: Continuation): string[] {
   const gates = materials.node.gates.filter((id) => materials.workflow.gates[id] !== undefined)
   return gates.length === 0

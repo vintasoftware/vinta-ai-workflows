@@ -47,7 +47,14 @@ import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 import { errorFields, installCrashHandlers, redactValue } from '../log/index.ts'
 import { reportLogFailures, toLogSetup } from './logging.ts'
-import { SERVE_USAGE, announce, monitorFactory, toBind, untilSignalled } from './serve.ts'
+import {
+  SERVE_USAGE,
+  announce,
+  monitorFactory,
+  toBind,
+  toRetryAfterMs,
+  untilSignalled,
+} from './serve.ts'
 
 export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]
        vinta-ai-maestro run --resume <runId> [--repo <dir>] [--host <host>] [--port <n>]
@@ -110,6 +117,7 @@ export async function runCommand(
         permission: { type: 'string' },
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
+        'retry-after': { type: 'string' },
         resume: { type: 'string' },
         'log-level': { type: 'string' },
         'log-stderr': { type: 'boolean' },
@@ -163,6 +171,9 @@ export async function runCommand(
   // A budget, so it is bounded and finite. Zero is meaningful — it is `ask`
   // spelled through this flag — and anything unparseable is a typo worth
   // catching rather than a silent fallback to the default.
+  const retryAfterMs = toRetryAfterMs(parsed.values['retry-after'], io)
+  if (retryAfterMs === null) return USAGE
+
   const rawRetries = parsed.values['retries']
   const retries = rawRetries === undefined ? undefined : Number(rawRetries)
   if (retries !== undefined && (!Number.isInteger(retries) || retries < 0 || retries > 5)) {
@@ -302,6 +313,7 @@ export async function runCommand(
       ...(resumeId === undefined ? {} : { resume: true }),
       ...(onFailure === undefined ? {} : { onFailure }),
       ...(retries === undefined ? {} : { retries }),
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       ...(deps.executor === undefined ? {} : { executor: deps.executor }),
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
       ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),

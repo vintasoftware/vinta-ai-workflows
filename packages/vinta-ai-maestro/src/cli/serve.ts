@@ -69,6 +69,7 @@ import { FAILED, OK, USAGE, type Io } from './io.ts'
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
                               [--permission <ask|auto|full>]
                               [--on-failure <stop|retry|ask>] [--retries <n>]
+                              [--retry-after <15m>]
                               [--log-level <debug|info|warn|error>] [--log-stderr]
                               [--log-detail <kind|message>]
 
@@ -102,6 +103,19 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  than findings: a first review raising four blockers can use it
                  up while every round makes progress. A phase that keeps
                  arriving here usually wants that raised, not this.
+  --retry-after  How long an unanswered failure question waits before it
+                 answers itself "retry". Unset — the default — waits for a
+                 person, which is what a run did before this existed. Accepts
+                 minutes bare or a unit: 15, 15m, 90s, 2h.
+                 It reaches only the *failure* question, never a plan's own
+                 await_human gate: a plan that stops to ask whether a migration
+                 is safe wants a person, and answering that on their behalf is
+                 not this flag's business.
+                 Deliberately unbounded — it fires again on each new question,
+                 because the thing it exists for is a run that stopped making
+                 progress at 7pm and was still stopped at 11. Every firing is a
+                 full phase attempt, so the interval is the throttle: a short
+                 one on an expensive plan retries a broken phase all night.
   --log-level    How much the daemon records about itself, in
                  .vinta-ai-maestro/logs/daemon.ndjson and in the UI's Logs view.
                  Defaults to info: what it bound, what it refused, every node
@@ -141,6 +155,33 @@ export interface BindValues {
   readonly repo?: string | undefined
   readonly host?: string | undefined
   readonly port?: string | undefined
+}
+
+/**
+ * `--retry-after`, in milliseconds. `null` is a refusal the caller reports.
+ *
+ * Accepts a bare number of minutes or an explicit unit — `15`, `15m`, `90s`,
+ * `2h` — because the flag is written by a person choosing how long they are
+ * willing to be away, and every one of those spellings is what somebody
+ * reaches for. Minutes is the bare unit for the same reason: nobody sets this
+ * to fifteen seconds, and reading `--retry-after 15` as a quarter of a minute
+ * would be a surprise that costs an overnight run.
+ */
+export function toRetryAfterMs(raw: string | undefined, io: Io): number | null | undefined {
+  if (raw === undefined) return undefined
+  const match = /^(\d+)(s|m|h)?$/.exec(raw.trim())
+  if (match === null) {
+    io.err('vinta-ai-maestro: --retry-after must be a whole number of minutes, or 30s / 15m / 2h')
+    return null
+  }
+  const value = Number(match[1])
+  const unit = match[2] ?? 'm'
+  const ms = value * (unit === 's' ? 1_000 : unit === 'h' ? 3_600_000 : 60_000)
+  // Zero is meaningful and is *off*, not "immediately": an unattended retry
+  // with no delay would spend a phase attempt the instant the question appears,
+  // which is the automatic budget's job and not this one's.
+  if (ms === 0) return undefined
+  return ms
 }
 
 /** `null` on a bad `--port`; the message names the flag, never a file. */
@@ -230,6 +271,7 @@ export async function serveCommand(
         permission: { type: 'string' },
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
+        'retry-after': { type: 'string' },
         'log-level': { type: 'string' },
         'log-stderr': { type: 'boolean' },
         'log-detail': { type: 'string' },
@@ -270,6 +312,9 @@ export async function serveCommand(
     io.err('vinta-ai-maestro: --on-failure must be one of stop, retry, ask')
     return USAGE
   }
+
+  const retryAfterMs = toRetryAfterMs(parsed.values['retry-after'], io)
+  if (retryAfterMs === null) return USAGE
 
   const rawRetries = parsed.values['retries']
   const retries = rawRetries === undefined ? undefined : Number(rawRetries)
@@ -330,6 +375,7 @@ export async function serveCommand(
       warn: (message) => io.err(message),
       ...(onFailure === undefined ? {} : { onFailure }),
       ...(retries === undefined ? {} : { retries }),
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       ...(deps.doctor === undefined ? {} : { doctor: deps.doctor }),
   })
   daemon.acceptRuns(host)
@@ -404,6 +450,7 @@ interface StarterOptions {
   readonly permission: AgentPermission
   readonly onFailure?: 'stop' | 'retry' | 'ask'
   readonly retries?: number
+  readonly retryAfterMs?: number
   /** Where a preflight warning goes. A daemon-hosted run has no stdout of its own. */
   readonly warn: (message: string) => void
   readonly doctor?: DoctorOverrides
@@ -537,6 +584,7 @@ export function runStarter(options: StarterOptions): RunHost {
         ...(request.kind === 'resume' ? { resume: true } : {}),
         ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
         ...(options.retries === undefined ? {} : { retries: options.retries }),
+        ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
       })
       if (!started.ok) {
         log.error('run.provision_failed', { run: runId, reason: started.message })

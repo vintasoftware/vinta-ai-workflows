@@ -75,6 +75,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl } from '../admission/admission.ts'
+import { systemClock, type Clock } from '../admission/clock.ts'
 import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import { gitLines } from '../integration/git.ts'
@@ -92,7 +93,12 @@ import { GitCommandError } from '../integration/git.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import { createPipelineRun, type PipelineRun, type StepResult } from '../pipeline/interpreter.ts'
+import {
+  createPipelineRun,
+  PipelineStuckError,
+  type PipelineRun,
+  type StepResult,
+} from '../pipeline/interpreter.ts'
 import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
@@ -189,6 +195,40 @@ export interface SchedulerOptions {
    */
   readonly retries?: number
   /**
+   * How long an unanswered **failure** question waits before answering itself
+   * `retry`. Unset — the default — waits for a person indefinitely.
+   *
+   * A run in an observed fourteen-hour build spent **four hours and seven
+   * minutes**, 29% of its whole wall clock, parked on "This phase failed. Try
+   * it again?" while nobody was at the keyboard. The answer, when it came, was
+   * `retry`, and it worked. Nothing about that wait bought anything.
+   *
+   * **It applies to the failure question and to nothing else.** A plan-authored
+   * `await_human` gate is a question the plan wanted a person to answer — "is
+   * this schema change safe to deploy" — and a timer that answered those would
+   * be the orchestrator overruling the plan on the operator's behalf. Those
+   * park through the same `#park`, which is why the timer lives in
+   * `#offerRetry` rather than there.
+   *
+   * **Deliberately unbounded.** It fires again on each new question, for as
+   * long as nobody answers — because the failure it exists for is a run that
+   * stops making progress overnight, and a capped version would stall at the
+   * cap for the remaining seven hours. Setting the flag is the opt-in: it is
+   * unset by default, and unset is exactly today's "wait for a person".
+   *
+   * The cost is real and worth stating where the flag is read rather than
+   * buried in a guide: every unattended retry is a **full phase attempt** —
+   * a fresh agent session, its gates, its review. A phase that is broken rather
+   * than flaky will retry all night at the cost of one attempt per interval, so
+   * the interval is the throttle, and a short one on an expensive plan is the
+   * way to spend a lot of money on the same failure. `retries` is untouched:
+   * it still bounds the *automatic* attempts that happen before anyone is
+   * asked, which is the budget for a failure nobody has seen yet.
+   */
+  readonly retryAfterMs?: number
+  /** Drives `retryAfterMs`. Injected in tests; the real one is `systemClock`. */
+  readonly clock?: Clock
+  /**
    * Returns a lane slot to a clean state before another node is given it —
    * `LanePool.recycle`, which resets what it can and re-provisions what it
    * cannot (§8). Absent for a host that injected its own executor: such a host
@@ -260,6 +300,68 @@ export interface RunReport {
  */
 function attempted(reason: string, state: NodeState): string {
   return state.autoRetries === 0 ? reason : `${reason} (after ${state.autoRetries + 1} attempts)`
+}
+
+/** Where a node's pipeline stopped, and by which edge. `via` is absent on a start-state final. */
+interface Settled {
+  readonly outcome: 'done' | 'failed'
+  readonly state: string
+  readonly via?: string
+}
+
+/**
+ * Why a pipeline that settled badly settled badly, in identifiers.
+ *
+ * **What this replaces.** The whole reason used to be `pipeline ended in state
+ * "failed"` — the name of a state, and nothing else. A real 14-hour run wrote
+ * that same sentence three times, and it answered none of the questions an
+ * operator has at that point: was a gate red, did the reviewer keep saying no,
+ * was the fix budget spent. The event this fills in was itself added to close
+ * the same complaint one level out — a failed attempt used to leave no record
+ * at all — so leaving it saying only *that* a phase failed would have moved
+ * the hole rather than closed it.
+ *
+ * The clauses are the facts the scheduler is holding at that moment and no
+ * more. Each is omitted when it is absent, and two are omitted when they are
+ * *stale* rather than absent, which is the distinction that matters:
+ *
+ * - **A green gate is not reported.** `lastGate` is the last gate that ran this
+ *   attempt, which in a phase that failed its review is a gate from two rounds
+ *   ago that passed. Printing "gate lint exited 0" beside a failure invites the
+ *   reading that the gate had anything to do with it.
+ * - **A gate that timed out says so** rather than "exited 124". 124 is the
+ *   runner's own convention (`TIMEOUT_EXIT`) and nothing tells an operator
+ *   that; a gate that ran out of time and one that failed in two seconds send
+ *   them to different places.
+ * - **A `pass` verdict is not reported**, for the same reason: the review that
+ *   passed is not the one that ended the phase.
+ * - **The fix budget is always reported when the node has one**, red or not,
+ *   because `0 of 2` and `2 of 2` are different phases. The first died before
+ *   any fixer ran; the second spent everything it had. Those were the two
+ *   failures that read identically, and separating them is most of the point.
+ *
+ * §11: a gate id, an exit code, a transition id, a state id, a verdict word and
+ * two counts. Nothing here has ever held a line of gate output, a diff, or a
+ * reviewer's prose — `src/integration/git.ts`'s `GitCommandError` names a
+ * command and a status by the same rule.
+ */
+function settledReason(settled: Settled, state: NodeState): string {
+  const clauses: string[] = [`pipeline ended in state "${settled.state}"`]
+  if (settled.via !== undefined) clauses[0] += ` via "${settled.via}"`
+
+  const gate = state.lastGate
+  if (gate !== null && gate.exitCode !== 0) {
+    // Unnamed only where the host reported a result without an id; the phrase
+    // stays readable rather than growing a `gate "null"`.
+    const named = gate.id === null ? 'gate' : `gate "${gate.id}"`
+    clauses.push(
+      gate.status === 'timed_out' ? `${named} timed out` : `${named} exited ${gate.exitCode}`,
+    )
+  }
+  if (state.lastVerdict === 'fail') clauses.push('review verdict "fail"')
+  clauses.push(`${state.fixRounds} of ${state.node.max_fix_rounds} fix rounds spent`)
+
+  return clauses.join('; ')
 }
 
 /** A refusal that is backpressure: unwinds the attempt so the lane is freed first. */
@@ -347,6 +449,37 @@ interface NodeState {
   parkedEffectId: string | null
   /** Fixer runs taken so far. The `fix_rounds` fact the interpreter reads. */
   fixRounds: number
+  /**
+   * The last gate this attempt ran — the three fields of `run_gate`'s facts
+   * that §11 lets out of the lane, and none of the fourth.
+   *
+   * Kept because the guard context does not survive the pipeline: `#drive`
+   * drops the `PipelineRun` on the way out, and by the time a failure is being
+   * written down the only thing left is the name of the state it stopped in.
+   * A red gate is the commonest way a phase ends, and it was the one fact an
+   * operator needed and could not get from anything but the gate log — which
+   * they have to know *which* gate to open before they can read.
+   *
+   * `id` is null when the host reported a gate result without naming one — the
+   * vacuous pass a node that declared no gates gets. Nulled rather than left at
+   * the previous gate, because a stale name is worse than no name.
+   *
+   * Never `log_ref`, which is a path into the lane, and never anything the gate
+   * printed. An id, a number, and one of `GateStatus`'s three fixed words.
+   */
+  lastGate: {
+    readonly id: string | null
+    readonly exitCode: number
+    readonly status: string | null
+  } | null
+  /**
+   * The last verdict a reviewer stated this attempt (`pass` | `fail`).
+   *
+   * A closed vocabulary of two words, decided by `readVerdict` from the
+   * transcript and handed here as a fact — so it carries none of the reviewer's
+   * prose, which is what §11 keeps in the transcript file.
+   */
+  lastVerdict: 'pass' | 'fail' | null
   lane: string | null
   /**
    * A member the operator picked for the next attempt, in place of the one the
@@ -358,6 +491,13 @@ interface NodeState {
   retries: number
   /** Automatic attempts already spent on this node, under `onFailure: retry`. */
   autoRetries: number
+  /**
+   * Failure questions this node answered for itself because nobody did. Its own
+   * counter rather than `autoRetries`: the two are spent in different places
+   * and reading one for the other would let a node that had already used its
+   * automatic budget retry unattended for ever.
+   */
+  unattended: number
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -435,7 +575,13 @@ interface NodeState {
  * error message.
  */
 function failureReason(error: unknown): string {
-  if (error instanceof PromptError || error instanceof SpawnFatal || error instanceof LaneUnusable) {
+  if (
+    error instanceof PromptError ||
+    error instanceof SpawnFatal ||
+    error instanceof LaneUnusable ||
+    // The interpreter composed this one out of a state id and a trigger id.
+    error instanceof PipelineStuckError
+  ) {
     return String(error.message)
   }
   // A subcommand and an exit status, which is the same kind of thing every
@@ -606,10 +752,13 @@ export class Scheduler {
       aborted: false,
       parkedEffectId: null,
       fixRounds: 0,
+      lastGate: null,
+      lastVerdict: null,
       lane: null,
       retryMember: null,
       retries: 0,
       autoRetries: 0,
+      unattended: 0,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -867,6 +1016,9 @@ export class Scheduler {
       payload: {
         effect_id: state.parkedEffectId ?? '',
         answer: answer === undefined ? null : answer,
+        // Set only by `#armUnattendedRetry`. An operator's answer never carries
+        // it, so its absence is what says a person decided.
+        ...(facts.human?.['unattended'] === true ? { unattended: true as const } : {}),
       },
     })
     state.parkedEffectId = null
@@ -1130,7 +1282,7 @@ export class Scheduler {
           this.#setStatus(state, 'done')
         }
         else {
-          const reason = `pipeline ended in state "${settled.state}"`
+          const reason = settledReason(settled, state)
           this.#recordAttemptFailure(state, reason)
           if (await this.#recover(state)) continue
           this.#fail(state, attempted(reason, state))
@@ -1430,6 +1582,13 @@ export class Scheduler {
    */
   #restartAttempt(state: NodeState): void {
     state.fixRounds = 0
+    // For the same reason the budget goes: the next attempt re-drives the
+    // pipeline from its initial state, so the gate that was red and the verdict
+    // that was `fail` belong to a run that no longer exists. Carried over, they
+    // would describe attempt 1's gate in attempt 2's failure — the one kind of
+    // wrong answer worse than no answer, because it reads as evidence.
+    state.lastGate = null
+    state.lastVerdict = null
     if (state.crew === null) state.sessions.clear()
     else this.#ledgerFor(state.crew.member).clear()
   }
@@ -1496,7 +1655,7 @@ export class Scheduler {
    * Drives one node's pipeline from `start` to a final state, parking it on
    * `await_human` and feeding `fix_rounds` back in on every step.
    */
-  async #drive(state: NodeState): Promise<{ outcome: 'done' | 'failed'; state: string }> {
+  async #drive(state: NodeState): Promise<Settled> {
     const { workflow, runId } = this.#options
     const run = createPipelineRun({
       pipeline: state.pipeline,
@@ -1525,9 +1684,21 @@ export class Scheduler {
         continue
       }
       if (result.kind === 'final') {
-        return { outcome: this.#outcomeOf(state, result.state), state: result.state }
+        return {
+          outcome: this.#outcomeOf(state, result.state),
+          state: result.state,
+          // The interpreter's own name for the edge that ended the run. An
+          // author-chosen id, which is what §11 allows and what tells
+          // `t-gate-exhausted` from `t-review-exhausted` — two ways a
+          // `standard-phase` node reaches `failed` that read identically
+          // from the state id alone.
+          ...(result.via === undefined ? {} : { via: result.via }),
+        }
       }
-      if (result.kind === 'stuck') throw new Error(result.reason)
+      // Named rather than bare, so the reason reaches the journal: this used to
+      // be reported as the word "Error" and nothing else. See
+      // `PipelineStuckError`.
+      if (result.kind === 'stuck') throw new PipelineStuckError(result.state, result.reason)
 
       // §9's pause, taken between turns: the lane stays, the gate pools are
       // already back, and the node waits on the same promise a human gate does.
@@ -1624,7 +1795,9 @@ export class Scheduler {
     })
     state.parkedEffectId = effectId
 
+    const cancel = this.#armUnattendedRetry(state)
     const facts = await this.#park(state)
+    cancel()
     if (state.aborted) return false
 
     const answer = facts.human?.['answer']
@@ -1788,7 +1961,7 @@ export class Scheduler {
       execute: async (invocation: EffectInvocation): Promise<EffectOutcome> => {
         if (state.aborted) throw new Aborted()
         const verb = invocation.effect.definitionId
-        if (verb === 'spawn_agent') return await this.#spawn(state, invocation)
+        if (verb === 'spawn_agent') return this.#observe(state, await this.#spawn(state, invocation))
         if (verb === 'run_gate') await this.#acquireGate(state, invocation)
         // The question is journalled before the host executor runs, because
         // the host executor is what raises the notification: the record of the
@@ -1796,9 +1969,41 @@ export class Scheduler {
         if (verb === 'await_human') {
           this.#ask(state, invocation.effect.id, questionOf(invocation.effect.params))
         }
-        return await this.#options.executor.execute(invocation)
+        return this.#observe(state, await this.#options.executor.execute(invocation))
       },
     }
+  }
+
+  /**
+   * Keeps the two facts a failure has to be able to name, and passes the
+   * outcome straight through.
+   *
+   * A tap rather than a step: the interpreter merges these facts into the guard
+   * context, the guards branch on them, and then the pipeline settles and the
+   * context goes out of scope with the `PipelineRun`. The scheduler is the only
+   * thing that outlives both, so this is the only place the gate that was red
+   * and the verdict that was `fail` can be caught on their way past.
+   *
+   * Read defensively for the same reason `questionOf` is: §5.2 keeps facts as
+   * host data, and a host that returns a gate without an id — a node that
+   * declared no gates passes the gate state vacuously — must not make a phase
+   * fail with `gate "undefined"` written against it.
+   */
+  #observe(state: NodeState, outcome: EffectOutcome): EffectOutcome {
+    const gate = outcome.facts?.gate
+    const exitCode = gate?.['exit_code']
+    if (typeof exitCode === 'number') {
+      const id = gate?.['id']
+      const status = gate?.['status']
+      state.lastGate = {
+        id: typeof id === 'string' ? id : null,
+        exitCode,
+        status: typeof status === 'string' ? status : null,
+      }
+    }
+    const verdict = outcome.facts?.review?.['verdict']
+    if (verdict === 'pass' || verdict === 'fail') state.lastVerdict = verdict
+    return outcome
   }
 
   /**
@@ -2305,6 +2510,42 @@ export class Scheduler {
       nodeId: state.node.id,
       type: 'node_error',
       payload: { reason, attempt: state.retries + state.autoRetries + 1 },
+    })
+  }
+
+  /**
+   * Starts the clock on an unanswered failure question, and hands back the way
+   * to stop it.
+   *
+   * Answered through `answer` rather than by resolving the park directly, so an
+   * unattended retry takes the identical path an operator's click takes: the
+   * question is cleared, `human_answered` is journalled, and everything
+   * downstream — `#restartAttempt`, the lane recycle, the cold session — is the
+   * same code. A second implementation of "the answer arrived" is how the two
+   * drift apart.
+   *
+   * The cancel is not optional. A question the operator *does* answer leaves a
+   * timer that would otherwise fire against a node that has moved on, and
+   * `answer` throws for a node that is not awaiting one — so the stray timer
+   * would surface as an exception from a node nobody was looking at.
+   */
+  #armUnattendedRetry(state: NodeState): () => void {
+    const after = this.#options.retryAfterMs
+    if (after === undefined || after <= 0) return () => {}
+
+    const clock = this.#options.clock ?? systemClock
+    return clock.at(clock.now() + after, () => {
+      // Between the timer firing and this running, the operator may have
+      // answered: `resume` is nulled by `answer`, and asking again here is
+      // cheaper than reasoning about whether that can happen.
+      if (state.resume === null || state.aborted) return
+      state.unattended += 1
+      this.#log.info('node.unattended_retry', {
+        node: state.node.id,
+        after_ms: after,
+        unattended: state.unattended,
+      })
+      this.answer(state.node.id, { human: { answer: RETRY, unattended: true } })
     })
   }
 

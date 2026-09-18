@@ -37,6 +37,7 @@ import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { ConflictFixer, ConflictRequest } from './fixer.ts'
 import { git, gitLines, gitOk } from './git.ts'
+import type { PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
 
 /** What integration reads from a node. `Node` satisfies it structurally. */
@@ -389,15 +390,22 @@ export class Integrator {
    * Never throws: opening a PR is reporting, not the work. A missing `gh` is
    * a degraded result the caller shows the operator.
    */
-  async openPr(nodeId: string, options: { readonly draft?: boolean } = {}): Promise<PrResult> {
+  async openPr(
+    nodeId: string,
+    options: { readonly draft?: boolean; readonly text?: PrText } = {},
+  ): Promise<PrResult> {
     const node = this.#node(nodeId)
+    // Composed by the caller, which is where the journal is: what a phase cost
+    // — gates, attempts, conflicts — is the run's record and not the graph's,
+    // and this class deliberately holds only the graph. Absent, the PR falls
+    // back to what this file can say by itself.
     return await openPullRequest({
       cwd: this.#options.integrationPath,
       nodeId,
       base: this.base(nodeId).branch,
       head: this.nodeBranch(nodeId),
-      title: node.name,
-      body: node.prompt_ref,
+      title: options.text?.title ?? node.name,
+      body: options.text?.body ?? node.prompt_ref,
       draft: options.draft ?? false,
       ...(this.#options.ghPath === undefined ? {} : { ghPath: this.#options.ghPath }),
     })

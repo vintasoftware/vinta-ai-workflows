@@ -21,7 +21,11 @@
  *    spawned to be closed afterwards, because none was ever spawned.
  * 3. **The registry.** A `PtyChannel` can only attach to a node some host has
  *    explicitly offered as a takeover target. Nothing is reachable by default:
- *    an attach for a run or node with no offer is a fixed `unknown_node`.
+ *    an attach for a run or node with no offer is refused with a fixed token
+ *    (`unknown_node`, or `unknown_run` when the daemon is driving no part of
+ *    that run at all). This is the only gate on an attach, and it does not
+ *    care that the socket's own upgrade now admits finished runs: a run with
+ *    no scheduler offers nothing, so it reaches no terminal.
  * 4. **The client names a node, never a command.** `attach` carries a node id
  *    and a terminal size. *What* runs is `adapter.attachPty`'s decision, the
  *    session id is the registry's, and the cwd is the lane's — none of the
@@ -140,6 +144,11 @@ export class PtyChannel {
     private readonly socket: WebSocket,
     private readonly runId: string,
     private readonly registry: PtyRegistry,
+    /**
+     * Whether the daemon is driving this run right now. Used to *name* a
+     * refusal, never to grant one — see `#attach`.
+     */
+    private readonly isLive: () => boolean = () => true,
   ) {
     socket.on('message', (raw: unknown) => {
       void this.#receive(raw)
@@ -180,7 +189,25 @@ export class PtyChannel {
   async #attach(nodeId: string, cols: number, rows: number): Promise<void> {
     if (this.#handle !== null || this.#attaching) return this.#fail('already_attached')
     const target = this.registry.find(this.runId, nodeId)
-    if (target === undefined) return this.#fail('unknown_node')
+    if (target === undefined) {
+      // The registry is still the only thing that grants an attach (rule 3
+      // above): this branch is already the refusal, and `isLive` only picks
+      // which word for it. Nothing here can turn a "no" into a "yes".
+      //
+      // It needs picking because the socket now opens on any run the journal
+      // has, finished ones included — `upgrade` used to refuse those at the
+      // handshake, so "no target" could only ever mean "that node of this live
+      // run is not offered". On a run this daemon is not driving, *every* node
+      // is unoffered, and telling the operator their node has no live session
+      // sends them looking at the node when the answer is the run: nothing is
+      // driving it, so there is nothing to take over anywhere in it.
+      //
+      // `unknown_run` was declared in `pty-frames.ts` and produced by nothing,
+      // for exactly this case, which the handshake refusal made unreachable.
+      // The UI's text for it already reads "This run is not one the daemon is
+      // serving."
+      return this.#fail(this.isLive() ? 'unknown_node' : 'unknown_run')
+    }
     if (!target.adapter.capabilities.pty || target.adapter.attachPty === undefined) {
       return this.#fail('not_supported')
     }

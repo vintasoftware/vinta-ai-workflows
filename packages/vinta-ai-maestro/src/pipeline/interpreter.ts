@@ -49,6 +49,34 @@ export type StepResult =
   /** The run cannot progress. `reason` says why, in author-supplied ids only. */
   | { readonly kind: 'stuck'; readonly state: string; readonly reason: string }
 
+/**
+ * A pipeline that cannot progress: nothing leaves the state it is in.
+ *
+ * Its own class so that the reason survives being thrown. The scheduler used to
+ * raise a bare `Error(result.reason)`, and `failureReason` reports an
+ * unrecognised error by its *name* — so the id-safe sentence this file had just
+ * composed was discarded, and the journal recorded the single word "Error"
+ * where it could have named the state and the trigger. The same shape as the
+ * non-zero git exit that `GitCommandError` exists for, and the same fix: a
+ * named error is what makes a reason survivable.
+ *
+ * Everything it carries is author-supplied identifiers — a state id, a trigger
+ * id — which is what §11 allows onto a durable, API-served record. Notably
+ * absent is the guard *expression* and anything it read: a guard evaluates
+ * against the run's own context, and a context value is whatever a phase
+ * produced.
+ */
+export class PipelineStuckError extends Error {
+  constructor(
+    /** The state it could not leave. */
+    readonly state: string,
+    reason: string,
+  ) {
+    super(reason)
+    this.name = 'PipelineStuckError'
+  }
+}
+
 export interface PipelineRunOptions {
   readonly pipeline: Pipeline
   readonly executor: EffectExecutor

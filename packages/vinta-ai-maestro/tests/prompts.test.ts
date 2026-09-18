@@ -640,9 +640,14 @@ describe('plan-level context', () => {
 })
 
 /**
- * The implementer prompt as it stood before `plan_context_refs` existed, with
- * the lane path left as a parameter. Pinned here rather than described, because
- * "composes exactly as before" is a claim about every character.
+ * The implementer prompt with no `plan_context_refs`, lane path parameterised.
+ * Pinned rather than described, because "composes exactly as before" is a claim
+ * about every character.
+ *
+ * It is a golden of the *plan-context* feature's blast radius, not a freeze on
+ * the prompt: a deliberate change elsewhere in the implementer brief updates
+ * this fixture, and what the test still guarantees is that adding or omitting
+ * plan-level context moves nothing else.
  */
 const IMPLEMENTER_WITHOUT_PLAN_CONTEXT = (dir: string): string =>
   `You are implementing db-schema: Schema of plan bookmarks.
@@ -707,6 +712,29 @@ acts on their findings, and for the next turn on this branch. The alternative
 is not "a clean branch": it is a phase that is reviewed as though you had
 written nothing, fixed by someone writing it a second time, and then deleted
 with the lane.
+
+## Write the pull request description
+Before your final report, write \`.vinta-ai-workflows/prs-context/bookmarks/phase-db-schema.md\`
+(create the directories). **Do not commit it** — it describes the change rather
+than being part of it.
+Two sections, exactly these headings:
+
+\`\`\`markdown
+# Title
+
+<one line, imperative, under 72 characters>
+
+# Description
+
+<what this phase changed and why, in Simple English. Lead with the change a
+reviewer is about to read. Name the decisions you took and anything you
+deliberately left out. Say what you could not do. No preamble, no restating
+the phase brief — it is linked from the PR already.>
+\`\`\`
+
+This is what a human reads on the pull request, so write it for them rather
+than for the orchestrator. If you leave the placeholders in, it is discarded
+and the PR falls back to a summary built from gate results.
 
 ## Required output (a single final report)
 - Status: SUCCESS or FAILURE, and why.

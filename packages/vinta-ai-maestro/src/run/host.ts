@@ -19,6 +19,7 @@ import type { AgentGatePort } from '../daemon/index.ts'
 import { referencedHarnesses } from '../doctor/index.ts'
 import { createRunExecutor } from '../executor/index.ts'
 import { GateCache } from '../gates/cache.ts'
+import { executeGate } from '../gates/runner.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
@@ -38,9 +39,21 @@ import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
 import type { ResourcePools } from '../resources/pools.ts'
 import { AgentGateBroker } from '../resources/agent-gates.ts'
 import { laneHolders } from '../scheduler/crew.ts'
-import type { Workflow } from '../types.ts'
+import type { Gate, Workflow } from '../types.ts'
 import { storeFor } from '../cli/paths.ts'
 import { projectSpec } from '../cli/project.ts'
+
+/**
+ * Where a merge gate's log is filed.
+ *
+ * Its own pseudo-node rather than the incoming phase's, so a gate run against
+ * the *merge* never overwrites that phase's own log for the same gate id — two
+ * different trees, two different answers, and the phase's is the one its review
+ * was based on. Leading underscore for `MONITOR_NODE`'s reason: it must not
+ * collide with a node id a workflow could declare, and it must be a legal path
+ * segment on Windows.
+ */
+const INTEGRATION_NODE = '_integration'
 
 /** What the run needs from whoever owns the lanes — this file, or `RunDeps`. */
 export interface HostWiring {
@@ -181,6 +194,49 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       // reading. Its `by.role` is what keeps it distinguishable from them.
       (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
     ),
+    /**
+     * The gate a conflict resolution has to pass before it is committed.
+     *
+     * This seam has existed since the conflict loop did, documented as "a
+     * resolution that does not build is not a resolution" — and nothing ever
+     * supplied it. So every merge an agent resolved went in ungated: six of
+     * them in one observed run, all in the same two files, none of them run
+     * past a linter or a test before they became the base the next phase built
+     * on. The phases either side were gated to the hilt; the merge between them
+     * was not.
+     *
+     * Runs the *union* of the conflicting nodes' declared gates, in the
+     * integration worktree, with that worktree's own environment — the same
+     * environment the fixer agent gets, for the same reason: without it the
+     * commands resolve to the wrong compose project and the wrong database.
+     *
+     * Deliberately not cached. `GateCache` keys on the lane's tree hash, and a
+     * merge produces a tree nothing has ever gated, so a lookup could only ever
+     * miss — and asking would put an entry under the integration worktree's
+     * hash that no lane will ever match.
+     *
+     * A red gate returns false, which spends another fix round rather than
+     * failing the phase: the fixer gets told, and the round budget is what
+     * bounds it.
+     */
+    verify: async (cwd: string): Promise<boolean> => {
+      const gates = [...new Set(workflow.nodes.flatMap((node) => node.gates))].filter(
+        (id) => workflow.gates[id] !== undefined,
+      )
+      for (const id of gates) {
+        const result = await executeGate({
+          gateId: id,
+          gate: workflow.gates[id] as Gate,
+          cwd,
+          env: { ...integration.env, ...options.agentEnv },
+          // Filed under the integration worktree's own pseudo-node, so a merge
+          // gate's log never overwrites a phase's log for the same gate id.
+          logPath: journal.gateLogPath(runId, INTEGRATION_NODE, id),
+        })
+        if (result.exitCode !== 0) return false
+      }
+      return true
+    },
     // Filed against the incoming node — the last of `nodes`, which is the one
     // whose merge hit the conflict and the one an operator is watching. The
     // other participants are in the payload, because a conflict is never one
