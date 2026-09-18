@@ -902,13 +902,18 @@ describe('agent-held leases', () => {
  * pools, the lane — is `agent-gates.test.ts`'s.
  */
 describe('gates run for an agent', () => {
-  /** Records what it was asked for; the broker's own behaviour is tested elsewhere. */
-  const recordingGates = () => {
+  /**
+   * Records what it was asked for; the broker's own behaviour is tested
+   * elsewhere. `waiting` makes it answer "still running" instead, which is the
+   * one thing about the door that only the door can be asked.
+   */
+  const recordingGates = (options: { readonly waiting?: boolean } = {}) => {
     const calls: { gateId: string; holderNode: string }[] = []
     return {
       calls,
-      run: async (gateId: string, holderNode: string) => {
+      hop: async (gateId: string, holderNode: string) => {
         calls.push({ gateId, holderNode })
+        if (options.waiting === true) return { waiting: true as const, gateId }
         return {
           gateId,
           status: 'failed',
@@ -943,6 +948,36 @@ describe('gates run for an agent', () => {
     expect(result.status).toBe(200)
     expect(result.body).toMatchObject({ gateId: 'unit', exitCode: 1, cached: false })
     expect(gates.calls).toEqual([{ gateId: 'unit', holderNode: 'a' }])
+  })
+
+  it('answers 202 rather than holding the request open while the gate runs', async () => {
+    // The distinction the whole wait rests on. A gate that is still going is
+    // not an error and not a verdict: it is "come back", and it must be
+    // spelled so that no client can read it as either. Held open instead, this
+    // request outlived Node's own five-minute ceiling on a response header and
+    // the CLI reported a daemon it could not reach — about a gate that was
+    // running perfectly well.
+    const r = await rig()
+    const gates = recordingGates({ waiting: true })
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      agentLeases: r.agentLeases,
+      agentGates: gates,
+    })
+
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'a' },
+    })
+
+    expect(result.status).toBe(202)
+    expect(result.body).toEqual({ waiting: true, gateId: 'unit' })
+    // No exit code anywhere in it: a waiting answer that carried one would be
+    // a verdict on a gate that has not finished.
+    expect(result.body).not.toHaveProperty('exitCode')
   })
 
   it('refuses an undeclared gate, a node that is not the run’s, and a body carrying a command', async () => {

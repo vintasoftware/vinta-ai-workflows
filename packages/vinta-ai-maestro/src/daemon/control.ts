@@ -25,7 +25,11 @@ import type { AmendRunner } from '../amend/amend.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion } from './schemas.ts'
-import type { AgentGateResult } from '../resources/agent-gates.ts'
+import type {
+  AgentGateHopOptions,
+  AgentGateResult,
+  AgentGateWaiting,
+} from '../resources/agent-gates.ts'
 import type { AgentLeaseGrant, AgentLeaseHop } from '../resources/agent-leases.ts'
 
 /** The five operations of §9, plus the two reads `Scheduler` already exposes. */
@@ -112,7 +116,17 @@ export interface AgentLeasePort {
  * command the authoritative `gate` node will run and nothing else.
  */
 export interface AgentGatePort {
-  run(gateId: string, holderNode: string): Promise<AgentGateResult>
+  /**
+   * One hop of a wait, not the whole of it — see `AgentGateBroker.hop`. The
+   * route cannot hold a request for the length of a test suite, so the client
+   * asks again and this answers "still running" until it can answer with a
+   * result.
+   */
+  hop(
+    gateId: string,
+    holderNode: string,
+    options: AgentGateHopOptions,
+  ): Promise<AgentGateWaiting | AgentGateResult>
 }
 
 /**

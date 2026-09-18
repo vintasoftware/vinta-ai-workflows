@@ -75,6 +75,16 @@ export interface GateScript {
    * leaves this running, so the test can ask whether the pid is gone.
    */
   readonly background?: { readonly seconds: number; readonly pidFile: string }
+  /**
+   * Block until a file appears — the fixture behind "the gate is still running".
+   *
+   * A gate made slow by sleeping makes the *test* slow, and flaky besides: the
+   * assertion becomes a bet that the machine did not stall for longer than the
+   * sleep. This one is slow for exactly as long as the test keeps it so, which
+   * is what asserting on a wait needs — the hop answers "not yet" because the
+   * gate genuinely has not finished, not because a timer was raced.
+   */
+  readonly until?: { readonly path: string }
   /** Exit code. Omitted means the shell's own, which is 0 after an echo. */
   readonly exit?: number
 }
@@ -119,6 +129,18 @@ export function renderGate(script: GateScript, platform: Platform = process.plat
     )
   }
 
+  if (script.until !== undefined) {
+    // Polled rather than watched: `fs.watch` needs a directory that exists and
+    // reports differently on each platform, and the thing being waited for is
+    // a file a test creates when it is ready. Ten milliseconds is below the
+    // resolution of anything asserting on it.
+    steps.push(
+      nodeProgram(
+        `const fs = require('fs'); const p = ${JSON.stringify(script.until.path)};` +
+          `const t = () => (fs.existsSync(p) ? process.exit(0) : setTimeout(t, 10)); t()`,
+      ),
+    )
+  }
   if (script.background !== undefined) steps.push(...backgroundSteps(script.background, platform))
   if (script.exit !== undefined) steps.push(windows ? `exit /b ${script.exit}` : `exit ${script.exit}`)
 

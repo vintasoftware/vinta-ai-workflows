@@ -254,13 +254,126 @@
             "additionalProperties": false,
             "description": "A phase whose real duration was wildly out of line with its wave placement — which is exactly what makes the next plan’s parallelism estimate wrong."
           }
+        },
+        "critical_path": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "nodes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$"
+                      },
+                      "wave": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "span_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "node",
+                      "wave",
+                      "span_ms"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": "The chain in the order it ran, each with the time it was running."
+                },
+                "span_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "The chain’s total. The floor this graph could reach."
+                },
+                "share_of_elapsed": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "How much of the run’s wall clock this one chain accounts for."
+                }
+              },
+              "required": [
+                "nodes",
+                "span_ms",
+                "share_of_elapsed"
+              ],
+              "additionalProperties": false,
+              "description": "The dependency chain that decided how long the run took. A plan is re-drawn against this: shortening any other phase changes nothing, and the only way to a faster run is a shallower graph or a cheaper phase on this list."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idle_capacity": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "lane_capacity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991,
+                  "description": "Lanes the plan asked to be provisioned."
+                },
+                "peak_concurrency": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "The most phases that were ever running at once. The width the graph reached."
+                },
+                "lane_ms_provisioned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "lane_ms_used": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "Summed phase spans — one lane each, while running."
+                },
+                "idle_share": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Provisioned lane time no phase occupied."
+                }
+              },
+              "required": [
+                "lane_capacity",
+                "peak_concurrency",
+                "lane_ms_provisioned",
+                "lane_ms_used",
+                "idle_share"
+              ],
+              "additionalProperties": false,
+              "description": "What the run paid for and did not use. A lane is a worktree, a forked database and a desk for a crew member, and a plan that is never as wide as its lane count bought all three for nothing — which is a fact about the graph, not about the machine."
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "unused_dependencies",
         "missing_dependencies",
         "wave_conflicts",
-        "duration_divergences"
+        "duration_divergences",
+        "critical_path",
+        "idle_capacity"
       ],
       "additionalProperties": false
     },
@@ -272,6 +385,7 @@
           "kind": {
             "type": "string",
             "enum": [
+              "blocking_cause_unrecorded",
               "dependency_use_unrecorded",
               "gate_result_unrecorded",
               "integration_record_unavailable"
