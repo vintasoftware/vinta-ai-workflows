@@ -161,6 +161,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   something it may not do, with nobody in the room, is the record most worth
   keeping. See `packages/vinta-ai-maestro/docs/monitor-intervention.md`.
 
+- **`plan-feature` is told what the newer post-mortem findings mean.** The
+  skill documents each finding and what to *do* about it, and three had been
+  added to the artifact without reaching it: `gate_costs`, `critical_path` and
+  `idle_capacity`. A finding a planning agent cannot interpret is a finding
+  that changes no plan, which is the whole return on emitting it — and the
+  three are among the most actionable there are. `gate_costs` sizes the gate
+  pool capacities a plan declares, and separates a slow suite from a fix loop
+  re-paying for the same one. `critical_path` is the chain to re-draw the graph
+  against: shortening a phase that is not on it changes nothing, so a plan that
+  parallelises harder without touching that chain buys nothing at all.
+  `idle_capacity` says the graph never got as wide as the lanes it asked for,
+  which is a fact about the plan rather than about the machine. Each now has a
+  row beside the findings that already had one.
+
 - **The post-mortem says what a run changed about itself, and whether it
   helped.** `postmortem.v1` gains an `interventions[]` finding: one entry per
   amendment the run made to itself, with the effect on the thing it changed. A
