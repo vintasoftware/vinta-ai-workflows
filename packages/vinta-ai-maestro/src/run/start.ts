@@ -58,6 +58,8 @@ import type { Workflow } from '../types.ts'
 import { laneRootFor } from '../cli/paths.ts'
 import { projectSpec } from '../cli/project.ts'
 import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
+import { startSupervisor, type Supervisor } from '../intervention/supervisor.ts'
+import type { Monitor } from '../monitor/monitor.ts'
 
 export interface StartRunOptions {
   /** The frozen snapshot to execute. On a resume, read back from the journal. */
@@ -95,6 +97,25 @@ export interface StartRunOptions {
    * host that wired none, and then nothing is written.
    */
   readonly logger?: Logger
+  /**
+   * Builds the run's monitor, for the watchdog that lets a run tune itself
+   * (`intervention/`).
+   *
+   * Passed in rather than imported, because the factory lives in `cli/serve.ts`
+   * and that module imports this one. It is also what makes the feature
+   * optional in one place: a caller that supplies no monitor gets no watchdog,
+   * which is what every test host and every out-of-tree host wants.
+   */
+  readonly monitorFor?: (runId: string) => Monitor | null
+  /**
+   * `--no-intervene`. The kill switch for a run that must execute exactly the
+   * plan it was given, whatever it costs.
+   */
+  readonly intervene?: boolean
+  /** Overrides the watchdog's thresholds. Tests, and an operator who wants a tighter leash. */
+  readonly watchdog?: { readonly phaseThresholdMs?: number; readonly gateCostCeilingMs?: number }
+  /** Autonomous amendments this run may make in total. */
+  readonly interventionBudget?: number
 }
 
 /**
@@ -290,10 +311,29 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   // §9's amend needs two things this composition owns: the integration worktree
   // a `done` node's branch is moved in, and the live scheduler that hands an
   // amended definition to its unstarted nodes.
+  // The run's definition as it stands, which is not `workflow` after the first
+  // amendment. The watchdog proposes against this: a supervisor holding the
+  // snapshot the run started with would offer its second intervention against
+  // a document its first one already replaced.
+  let current = workflow
+
   const amend: AmendRunner | undefined =
     host.rebase === undefined
       ? undefined
-      : { rebase: host.rebase, adopt: (amended: Workflow) => scheduler.adopt(amended) }
+      : {
+          rebase: host.rebase,
+          adopt: (amended: Workflow) => {
+            current = amended
+            // The host side first, deliberately. `Scheduler.adopt` ends by
+            // waking the dispatch loop, and a node it dispatches on that wake
+            // reaches the executor immediately — so an executor still holding
+            // the old definition would serve the very first node the amendment
+            // made runnable. Doing the passive side first costs nothing: no
+            // work starts because the executor learned something.
+            host.adopt?.(amended)
+            scheduler.adopt(amended)
+          },
+        }
 
   const registered: DaemonRun = {
     runId,
@@ -308,6 +348,26 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   }
   daemon.register(registered)
 
+  // The watchdog (`intervention/`). Off unless a monitor was supplied and the
+  // operator did not say no, and off outright for a host that cannot amend —
+  // a supervisor with no `AmendRunner` would spend model turns producing
+  // proposals that `amendRun` refuses for want of somewhere to rebase.
+  const monitor = options.intervene === false ? null : (options.monitorFor?.(runId) ?? null)
+  const supervisor: Supervisor | null =
+    monitor === null || amend === undefined
+      ? null
+      : startSupervisor({
+          journal,
+          runId,
+          workflow: () => current,
+          monitor,
+          runner: amend,
+          ...(options.watchdog === undefined ? {} : { watchdog: options.watchdog }),
+          ...(options.interventionBudget === undefined
+            ? {}
+            : { budget: options.interventionBudget }),
+        })
+
   // Started, not awaited. The promise carries its own teardown so that the one
   // caller who never looks at it — the daemon — still gets it.
   const finished = (async (): Promise<RunOutcome> => {
@@ -321,6 +381,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     } finally {
       // Everything closed here is a handle this run opened. The lanes are
       // deliberately absent — see `HostWiring.close`.
+      supervisor?.stop()
       admission.close()
       agentLeases.close()
       host.close()

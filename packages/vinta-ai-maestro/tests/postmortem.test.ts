@@ -154,6 +154,46 @@ class Tape implements PostMortemSource {
     })
   }
 
+  /** A gate that took a measured amount of time, which is what scoring reads. */
+  gateCost(
+    ts: number,
+    nodeId: string,
+    gate: string,
+    durationMs: number,
+    cached = false,
+  ): this {
+    return this.push(ts, {
+      runId: RUN,
+      nodeId,
+      type: 'gate_result',
+      payload: {
+        gate,
+        exit_code: 0,
+        status: 'passed',
+        duration_ms: durationMs,
+        cached,
+      },
+    })
+  }
+
+  /** One amendment, by the run itself or by a person. */
+  amended(ts: number, amendment: number, targets: readonly string[], author = 'monitor'): this {
+    return this.push(ts, {
+      runId: RUN,
+      type: 'workflow_amended',
+      payload: {
+        amendment,
+        changes: [],
+        affected: [],
+        applied: [],
+        rebased: [],
+        superseded: `amendments/${amendment}.json`,
+        author: author as 'monitor' | 'operator',
+        targets: [...targets],
+      },
+    })
+  }
+
   /** Dispatched and settled, with nothing interesting in between. */
   ran(nodeId: string, from: number, to: number, settle: NodeStatus = 'done'): this {
     this.status(from, nodeId, 'running')
@@ -623,6 +663,147 @@ describe('what the gates cost', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// 6. What the run changed about itself
+// ---------------------------------------------------------------------------
+
+describe('what the run changed about itself', () => {
+  /**
+   * The `--reuse-db` shape: a gate costing eleven minutes a run, amended a
+   * third of the way in, costing three afterwards.
+   */
+  const retuned = (): Tape => {
+    const tape = new Tape(chain()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.gateCost(T0 + 2 * MIN, 'p1', 'unit', 11 * MIN)
+    tape.gateCost(T0 + 8 * MIN, 'p1', 'unit', 11 * MIN)
+
+    tape.amended(T0 + 12 * MIN, 1, ['gate:unit'])
+
+    tape.ran('p2', T0 + 13 * MIN, T0 + 20 * MIN)
+    tape.gateCost(T0 + 15 * MIN, 'p2', 'unit', 3 * MIN)
+    tape.gateCost(T0 + 18 * MIN, 'p2', 'unit', 3 * MIN)
+    return tape.end(T0 + 30 * MIN)
+  }
+
+  it('scores a retuned gate against its own durations either side', () => {
+    const report = postMortem(retuned(), RUN, { integration: [] })
+
+    expect(report.findings.interventions).toEqual([
+      {
+        amendment: 1,
+        at_ms: T0 + 12 * MIN,
+        target: 'gate:unit',
+        effect: 'cheaper',
+        before_ms: 11 * MIN,
+        after_ms: 3 * MIN,
+        runs_before: 2,
+        runs_after: 2,
+        record_ref: 'interventions.jsonl',
+      },
+    ])
+  })
+
+  it('says `dearer` when the change made the gate cost more', () => {
+    // The finding that justifies the whole loop. An autonomous editor whose
+    // changes are never measured is one nobody can tell is making runs worse.
+    const tape = new Tape(chain()).begin()
+    tape.gateCost(T0 + 2 * MIN, 'p1', 'unit', 3 * MIN)
+    tape.amended(T0 + 5 * MIN, 1, ['gate:unit'])
+    tape.gateCost(T0 + 8 * MIN, 'p2', 'unit', 9 * MIN)
+    tape.end(T0 + 30 * MIN)
+
+    expect(report(tape)[0]).toMatchObject({ effect: 'dearer', before_ms: 3 * MIN, after_ms: 9 * MIN })
+  })
+
+  it('calls ordinary variance unchanged rather than a verdict', () => {
+    const tape = new Tape(chain()).begin()
+    tape.gateCost(T0 + 2 * MIN, 'p1', 'unit', 600_000)
+    tape.amended(T0 + 5 * MIN, 1, ['gate:unit'])
+    tape.gateCost(T0 + 8 * MIN, 'p2', 'unit', 630_000)
+    tape.end(T0 + 30 * MIN)
+
+    expect(report(tape)[0]).toMatchObject({ effect: 'unchanged' })
+  })
+
+  it('never borrows a cached duration across the boundary it is measuring', () => {
+    // A hit reports the duration of the run that filled the cache. Counting it
+    // would drag the mean toward whichever side that run fell on, which is the
+    // one number that must not cross the amendment.
+    const tape = new Tape(chain()).begin()
+    tape.gateCost(T0 + 2 * MIN, 'p1', 'unit', 11 * MIN)
+    tape.amended(T0 + 5 * MIN, 1, ['gate:unit'])
+    tape.gateCost(T0 + 8 * MIN, 'p2', 'unit', 11 * MIN, true)
+    tape.gateCost(T0 + 9 * MIN, 'p3', 'unit', 3 * MIN)
+    tape.end(T0 + 30 * MIN)
+
+    expect(report(tape)[0]).toMatchObject({ after_ms: 3 * MIN, runs_after: 1 })
+  })
+
+  it('reports a phase-level change as unmeasured, and says why in a gap', () => {
+    // A phase runs once. There is no before to compare an after against, and
+    // the only candidate baseline is a different phase doing different work.
+    const tape = new Tape(chain()).begin()
+    tape.amended(T0 + 5 * MIN, 1, ['node:p3'])
+    tape.ran('p3', T0 + 6 * MIN, T0 + 20 * MIN)
+    tape.end(T0 + 30 * MIN)
+
+    const full = postMortem(tape, RUN, { integration: [] })
+    expect(full.findings.interventions).toEqual([
+      {
+        amendment: 1,
+        at_ms: T0 + 5 * MIN,
+        target: 'node:p3',
+        effect: 'unmeasured',
+        record_ref: 'interventions.jsonl',
+      },
+    ])
+    const gap = full.gaps.find((entry) => entry.kind === 'intervention_effect_unmeasured')
+    expect(gap?.nodes).toEqual(['p3'])
+    expect(gap?.needs).toContain('the phase runs once')
+  })
+
+  it('reports a gate with no runs after the amendment as unmeasured', () => {
+    // An amendment made near the end of a run has nothing to be scored against,
+    // and a one-sided comparison is not a measurement.
+    const tape = new Tape(chain()).begin()
+    tape.gateCost(T0 + 2 * MIN, 'p1', 'unit', 11 * MIN)
+    tape.amended(T0 + 25 * MIN, 1, ['gate:unit'])
+    tape.end(T0 + 30 * MIN)
+
+    expect(report(tape)[0]).toMatchObject({
+      effect: 'unmeasured',
+      runs_before: 1,
+      runs_after: 0,
+    })
+  })
+
+  it('ignores an operator’s amendment', () => {
+    // A person deciding something is not the run choosing it, and scoring it
+    // here would credit or blame the wrong party.
+    const tape = new Tape(chain()).begin()
+    tape.gateCost(T0 + 2 * MIN, 'p1', 'unit', 11 * MIN)
+    tape.amended(T0 + 5 * MIN, 1, ['gate:unit'], 'operator')
+    tape.gateCost(T0 + 8 * MIN, 'p2', 'unit', 3 * MIN)
+    tape.end(T0 + 30 * MIN)
+
+    expect(report(tape)).toEqual([])
+  })
+
+  it('keeps the monitor’s reasoning out of the artifact and points at it instead', () => {
+    // §11. The artifact is read by an agent in another session that cannot
+    // cross-check it, so it carries what can be counted and a path to the rest.
+    const serialized = serializePostMortem(postMortem(retuned(), RUN, { integration: [] }))
+    expect(serialized).toContain('interventions.jsonl')
+    expect(serialized).not.toContain('pytest')
+    expect(serialized).not.toContain('evidence')
+  })
+
+  const report = (tape: Tape) => postMortem(tape, RUN, { integration: [] }).findings.interventions
+})
+
+// ---------------------------------------------------------------------------
+
 describe('a run with nothing to report', () => {
   it('emits a valid, empty post-mortem rather than nothing', () => {
     const report = postMortem(cleanTape(), RUN, { integration: [] })
@@ -633,6 +814,9 @@ describe('a run with nothing to report', () => {
     expect(report.findings.duration_divergences).toEqual([])
     // No gate ever ran, so there is nothing to cost — not a row of zeros.
     expect(report.findings.gate_costs).toEqual([])
+    // Never amended itself. Derivable and true, unlike an empty
+    // `unused_dependencies`, whose emptiness is a gap.
+    expect(report.findings.interventions).toEqual([])
     expect(report.run).toEqual({
       status: 'done',
       started_at_ms: T0,
@@ -763,6 +947,9 @@ describe('the artifact', () => {
           lane_ms_used: 100 * MIN,
           idle_share: 0.5,
         },
+        // This run never amended itself, which is a fact the fold derives
+        // rather than a gap: `workflow_amended` rows say who wrote them.
+        interventions: [],
       },
       gaps: [
         {

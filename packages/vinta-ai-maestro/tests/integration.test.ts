@@ -557,6 +557,108 @@ describe('wave merges', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Amendments
+// ---------------------------------------------------------------------------
+
+describe('an amended plan', () => {
+  it('puts a phase added mid-run into the right wave’s merge', async () => {
+    // §9 refuses an amendment while a node it *blocks* is in flight. Nothing is
+    // blocked by a phase nobody depends on, so `c` lands freely beside `a` and
+    // `b` — and an integrator still holding the old plan would build wave 1 out
+    // of two branches while the run believed it had three.
+    const repo = await makeRepo()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+    })
+
+    const one = await repo.lane('lane-1')
+    await integrator.startNode('a', one)
+    await repo.commit(one, { 'a1.ts': '1\n' }, 'phase a: unit 1')
+
+    integrator.adopt(plan([node('a'), node('b'), node('c')]))
+
+    // The added phase is dispatchable through the same object that was built
+    // without it — before, this threw `unknown node "c"`.
+    const two = await repo.lane('lane-2')
+    await integrator.startNode('b', two)
+    await repo.commit(two, { 'b1.ts': '1\n' }, 'phase b: unit 1')
+    const three = await repo.lane('lane-3')
+    await integrator.startNode('c', three)
+    await repo.commit(three, { 'c1.ts': '1\n' }, 'phase c: unit 1')
+
+    const wave1 = await integrator.mergeWave(1)
+    expect(wave1.merged).toEqual(['a', 'b', 'c'])
+    const log = subjects(repo.integ, wave1.branch)
+    expect(log).toContain('phase c: unit 1')
+  })
+
+  it('derives an added phase’s base from the amended graph', async () => {
+    // A phase that gains a dependency is cut from that dependency's branch, not
+    // from `base_branch` — the whole topology rule has to move with the plan.
+    const repo = await makeRepo()
+    const integrator = new Integrator({
+      plan: plan([node('a')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+    })
+
+    const one = await repo.lane('lane-1')
+    await integrator.startNode('a', one)
+    await repo.commit(one, { 'a1.ts': '1\n' }, 'phase a: unit 1')
+
+    integrator.adopt(plan([node('a'), node('d', ['a'])]))
+    expect(integrator.base('d')).toEqual({
+      kind: 'dependency',
+      branch: 'plan/wf/phase-a',
+      node: 'a',
+    })
+
+    const two = await repo.lane('lane-2')
+    await integrator.startNode('d', two)
+    // Asserted against git, not against the name the code picked.
+    expect(isAncestor(repo.integ, 'plan/wf/phase-a', 'plan/wf/phase-d')).toBe(true)
+  })
+
+  it('does not change a queued merge’s membership underneath it', async () => {
+    // The hazard the `members` argument exists for. A wave merge is decided the
+    // moment its last phase arrives and executed later, behind the integration
+    // worktree's queue; an amendment can land in that window. The set that was
+    // declared complete and the set that is merged must be the same one, or a
+    // phase that never ran is merged from a branch that was never cut.
+    const repo = await makeRepo()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+    })
+
+    const one = await repo.lane('lane-1')
+    await integrator.startNode('a', one)
+    await repo.commit(one, { 'a1.ts': '1\n' }, 'phase a: unit 1')
+    const two = await repo.lane('lane-2')
+    await integrator.startNode('b', two)
+    await repo.commit(two, { 'b1.ts': '1\n' }, 'phase b: unit 1')
+
+    // Decided now, against the plan as it stands.
+    const members = ['a', 'b']
+    // …and the plan moves before the merge runs. `e` is in wave 1 and has no
+    // branch: deriving membership at execution time would try to merge it.
+    integrator.adopt(plan([node('a'), node('b'), node('e')]))
+
+    const wave1 = await integrator.mergeWave(1, members)
+    expect(wave1.merged).toEqual(['a', 'b'])
+
+    // The proof that this is not a coincidence of ordering: the amended plan
+    // really does put `e` in this wave, and the same call without the pinned
+    // membership is exactly the failure being prevented.
+    expect(integrator.nodesAt(1)).toEqual(['a', 'b', 'e'])
+    await expect(integrator.mergeWave(1)).rejects.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Conflicts
 // ---------------------------------------------------------------------------
 

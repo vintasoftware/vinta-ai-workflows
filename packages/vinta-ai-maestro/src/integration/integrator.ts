@@ -164,15 +164,55 @@ const CONFLICT_MARKER = /^(<{7}|>{7}) /m
 
 export class Integrator {
   readonly #options: IntegratorOptions
-  readonly #nodes: Map<string, IntegrationNode>
-  readonly #waves: Map<string, number>
+  /**
+   * The plan as it stands *now*. §9's amend can replace it mid-run; see
+   * `adopt`.
+   */
+  #plan: IntegrationPlan
+  #nodes: Map<string, IntegrationNode>
+  #waves: Map<string, number>
   readonly #maxFixRounds: number
 
   constructor(options: IntegratorOptions) {
     this.#options = options
+    this.#plan = options.plan
     this.#nodes = new Map(options.plan.nodes.map((node) => [node.id, node]))
     this.#waves = computeWaves(options.plan.nodes)
     this.#maxFixRounds = options.maxFixRounds ?? 2
+  }
+
+  /**
+   * Take an amended plan (§9), as the scheduler, the executor and the gate
+   * broker do.
+   *
+   * **This one was left out of that fan-out on purpose, and the reasoning was
+   * wrong.** The argument was that an integrator reads node topology rather
+   * than the gate table, and that every amendment kind reaching topology is
+   * refused while a node it blocks is in flight — so a stale plan here could
+   * never be *read* while it was stale. That is true of the nodes an amendment
+   * touches and false of the wave they sit in. Adding a phase is refused only
+   * while something it blocks is running; nothing is blocked by a phase nobody
+   * depends on, so it lands freely while its future wave-mates are mid-flight,
+   * and this object went on believing that wave had one fewer member.
+   *
+   * What made it reachable was fixing the executor. `#lastOfWave` decides a
+   * wave is complete by counting the executor's node set, and `mergeWave` used
+   * to decide what to merge by reading this one; while *both* were stale they
+   * agreed with each other, and the bug was invisible. Teaching the executor to
+   * adopt without teaching this to adopt is what turned two consistent stale
+   * readings into one fresh and one stale — a wave whose merge silently omits
+   * the branch of a phase that ran.
+   *
+   * `mergeWave` no longer derives membership at all (see its note), so this is
+   * about the rest: `base` and `prepareBase` for a node whose dependencies
+   * moved, and `openPr` for a phase whose name or brief did. Branch *names* are
+   * safe either way — they are built from the plan id, and an amendment that
+   * changes the id is refused as `id_mismatch`.
+   */
+  adopt(plan: IntegrationPlan): void {
+    this.#plan = plan
+    this.#nodes = new Map(plan.nodes.map((node) => [node.id, node]))
+    this.#waves = computeWaves(plan.nodes)
   }
 
   // -------------------------------------------------------------------------
@@ -180,16 +220,16 @@ export class Integrator {
   // -------------------------------------------------------------------------
 
   nodeBranch(id: string): string {
-    return `plan/${this.#options.plan.id}/phase-${id}`
+    return `plan/${this.#plan.id}/phase-${id}`
   }
 
   integBranch(id: string): string {
-    return `plan/${this.#options.plan.id}/integ-${id}`
+    return `plan/${this.#plan.id}/integ-${id}`
   }
 
   /** `wave-0` is `base_branch` itself: the spine starts at what the run branched from. */
   waveBranch(wave: number): string {
-    return wave === 0 ? this.#options.plan.base_branch : `plan/${this.#options.plan.id}/wave-${wave}`
+    return wave === 0 ? this.#plan.base_branch : `plan/${this.#plan.id}/wave-${wave}`
   }
 
   // -------------------------------------------------------------------------
@@ -200,7 +240,7 @@ export class Integrator {
   base(nodeId: string): BaseRef {
     const deps = this.#node(nodeId).depends_on.map((dep) => dep.node)
     const [first] = deps
-    if (first === undefined) return { kind: 'base_branch', branch: this.#options.plan.base_branch }
+    if (first === undefined) return { kind: 'base_branch', branch: this.#plan.base_branch }
     if (deps.length === 1) {
       return { kind: 'dependency', branch: this.nodeBranch(first), node: first }
     }
@@ -348,7 +388,7 @@ export class Integrator {
 
   /** The nodes at a wave, in plan order — which is what breaks merge-order ties. */
   nodesAt(wave: number): string[] {
-    return this.#options.plan.nodes
+    return this.#plan.nodes
       .filter((node) => this.#waves.get(node.id) === wave)
       .map((node) => node.id)
   }
@@ -356,15 +396,30 @@ export class Integrator {
   /**
    * Builds `wave-<N>` by merging every wave-N node branch into `wave-<N-1>`,
    * `--no-ff`, in plan order.
+   *
+   * **`members` is the membership as the caller counted it, and passing it is
+   * how a queued merge survives an amendment.** A wave merge is decided the
+   * moment its last phase arrives and *executed* later, behind the integration
+   * worktree's queue; §9's amend can land in between. Deriving the membership
+   * here would derive it from whatever plan had arrived by execution time,
+   * which is not the plan the caller used to decide the wave was complete — so
+   * a phase added to this wave in that window would be merged though it had
+   * never run, and one removed would be counted as arrived and then not
+   * merged.
+   *
+   * The caller is the only one that can get this right: it holds the count that
+   * decides completeness, and the two answers have to come from one reading.
+   * Omitting it falls back to this object's own plan, which is correct for
+   * `createRebaser` and for any caller with no such window.
    */
-  async mergeWave(wave: number): Promise<WaveResult> {
+  async mergeWave(wave: number, members?: readonly string[]): Promise<WaveResult> {
     const cwd = this.#options.integrationPath
     const branch = this.waveBranch(wave)
     await git(cwd, ['checkout', '-B', branch, this.waveBranch(wave - 1)])
 
     const merged: string[] = []
     const conflicts: ConflictRecord[] = []
-    for (const nodeId of this.nodesAt(wave)) {
+    for (const nodeId of members ?? this.nodesAt(wave)) {
       const conflict = await this.#merge(branch, nodeId, merged)
       if (conflict) {
         conflicts.push(conflict)
@@ -576,7 +631,7 @@ export class Integrator {
       const touched = await gitLines(this.#options.integrationPath, [
         'diff',
         '--name-only',
-        `${this.#options.plan.base_branch}...${this.nodeBranch(candidate)}`,
+        `${this.#plan.base_branch}...${this.nodeBranch(candidate)}`,
       ])
       if (touched.some((path) => contested.has(path))) owners.push(candidate)
     }

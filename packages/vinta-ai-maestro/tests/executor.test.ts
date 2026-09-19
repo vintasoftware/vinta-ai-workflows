@@ -167,6 +167,8 @@ interface Rig {
   readonly workflow: Workflow
   readonly journal: Journal
   readonly executor: RunEffectExecutor
+  /** The one the executor was given — amended in the §9 tests, as the host does. */
+  readonly integrator: Integrator
   readonly pools: ResourcePools
   readonly adapters: Readonly<Record<string, ScriptedAdapter>>
   readonly notifications: Notification[]
@@ -297,6 +299,7 @@ function setup(
   const pools = new ResourcePools(workflow.resources)
 
   return {
+    integrator,
     root,
     repo,
     integ,
@@ -702,6 +705,65 @@ describe('gate caching', () => {
     // The gate command ran exactly once: the hit skipped the runner entirely.
     expect(readFileSync(join(rig.root, counter), 'utf8').trim().split('\n')).toHaveLength(1)
   })
+
+  /**
+   * A gate that leaves one named marker behind and nothing else.
+   *
+   * `node -e` rather than a shell line, for `tests/support/gate-script.ts`'s
+   * reason: the two shells share no redirection syntax, and what this fixture
+   * has to say is only *which* command ran.
+   */
+  const marker = (path: string): string =>
+    `node -e "require('fs').writeFileSync(${JSON.stringify(path).replaceAll('"', "'")}, 'ran')"`
+
+  it('runs the amended command after adopt, and does not serve the old verdict', async () => {
+    // §9's amend can move `gates[id].cmd` under a live run. Three objects read
+    // that command and the executor is the one that runs it, so an amendment
+    // that stopped at the scheduler moved the snapshot, the journal and the
+    // pool reservations while the gate went on running the old line.
+    const before = 'ran-before'
+    const after = 'ran-after'
+    const rig = setup(
+      (root) =>
+        WorkflowSchema.parse({
+          schema_version: 1,
+          id: 'adopted',
+          base_branch: 'main',
+          defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+          resources: { lane: { capacity: 1, kind: 'worktree' } },
+          // The marker lands outside the lane, so it cannot move the tree hash
+          // and turn this into a test about the tree rather than the command.
+          gates: { unit: { cmd: marker(join(root, before)), timeout_s: 30 } },
+          nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['unit'] }],
+        }),
+      { cache: true },
+    )
+
+    const lane = rig.lanes[0] as ExecutorLane
+    rig.journal.append({
+      runId: RUN_ID,
+      nodeId: 'p1',
+      type: 'node_assigned',
+      payload: { lane: lane.name },
+    })
+
+    expect((await rig.invoke('p1', 'run_gate')).facts?.gate?.['cached']).toBe(false)
+    expect(existsSync(join(rig.root, before))).toBe(true)
+    expect(existsSync(join(rig.root, after))).toBe(false)
+
+    rig.executor.adopt(
+      WorkflowSchema.parse({
+        ...rig.workflow,
+        gates: { unit: { cmd: marker(join(rig.root, after)), timeout_s: 30 } },
+      }),
+    )
+
+    const amended = await rig.invoke('p1', 'run_gate')
+    // Not a hit. The tree has not moved, so a cache keyed on the tree alone
+    // would have answered from a command that no longer exists.
+    expect(amended.facts?.gate?.['cached']).toBe(false)
+    expect(existsSync(join(rig.root, after))).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -906,6 +968,109 @@ describe('the git verbs', () => {
         },
       ],
     })
+
+  /**
+   * A wave of two with a spare lane, so the completeness decision is a real one
+   * rather than a single node standing in for its own wave.
+   */
+  const twoPeers = (): Workflow =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'peers',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 3, kind: 'worktree' } },
+      nodes: [
+        { id: 'p1', name: 'One', prompt_ref: 'plan.md#1' },
+        { id: 'p2', name: 'Two', prompt_ref: 'plan.md#2' },
+      ],
+    })
+
+  /** Branch and commit one file, in the lane this node is assigned. */
+  const work = async (rig: Rig, nodeId: string, index: number): Promise<void> => {
+    const lane = rig.lanes[index] as ExecutorLane
+    // What `amendRun`'s `registerNodes` emits for a node the run gains: a
+    // phase with no row has no lane, and the executor refuses it. Replay-safe
+    // for the nodes `createRun` already registered.
+    rig.journal.append({
+      runId: RUN_ID,
+      nodeId,
+      type: 'node_registered',
+      payload: { wave: 1, harness: 'claude-code' },
+    })
+    rig.journal.append({
+      runId: RUN_ID,
+      nodeId,
+      type: 'node_assigned',
+      payload: { lane: lane.name },
+    })
+    await rig.invoke(nodeId, 'git_branch')
+    writeFileSync(join(lane.path, `${nodeId}.txt`), `${nodeId}\n`)
+    g(lane.path, 'add', '--all')
+    g(lane.path, 'commit', '-m', `${nodeId} work`)
+  }
+
+  const hasBranch = (cwd: string, ref: string): boolean => {
+    try {
+      g(cwd, 'rev-parse', '--verify', '--quiet', `refs/heads/${ref}`)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** The amended plan, with one more phase alone in wave 1. */
+  const plus = (workflow: Workflow, id: string): Workflow =>
+    WorkflowSchema.parse({
+      ...workflow,
+      nodes: [...workflow.nodes, { id, name: id, prompt_ref: `plan.md#${id}` }],
+    })
+
+  it('does not build a wave until every phase an amendment added has arrived', async () => {
+    // §9 refuses an amendment while a node it *blocks* is in flight, and a
+    // phase nobody depends on blocks nothing — so it lands beside running
+    // wave-mates. The wave must not close without it.
+    const rig = setup(twoPeers)
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+
+    const amended = plus(rig.workflow, 'p3')
+    rig.executor.adopt(amended)
+    rig.integrator.adopt(amended)
+
+    // Both original phases arrive, and the wave is no longer complete: `p3` is
+    // in it now and has not run.
+    await rig.invoke('p1', 'git_merge')
+    await rig.invoke('p2', 'git_merge')
+    expect(hasBranch(rig.repo, waveBranch(amended, 1))).toBe(false)
+
+    // Once it does arrive, the merge includes it.
+    await work(rig, 'p3', 2)
+    await rig.invoke('p3', 'git_merge')
+    for (const nodeId of ['p1', 'p2', 'p3']) {
+      expect(isAncestor(rig.repo, branchOf(amended, nodeId), waveBranch(amended, 1))).toBe(true)
+    }
+  })
+
+  it('merges the membership it counted, not the plan that arrived later', async () => {
+    // The decision and the merge are separated by the integration worktree's
+    // queue, and an amendment can land in between. A phase added to this wave
+    // in that window has no branch: merging it would fail on a missing ref, and
+    // the wave that was declared complete would not be the wave that was built.
+    const rig = setup(twoPeers)
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    await rig.invoke('p1', 'git_merge')
+
+    // The integrator takes the amendment; the executor has already counted.
+    // That is the window, from the queued merge's point of view.
+    rig.integrator.adopt(plus(rig.workflow, 'p9'))
+
+    await expect(rig.invoke('p2', 'git_merge')).resolves.toEqual({})
+    const wave1 = waveBranch(rig.workflow, 1)
+    expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p1'), wave1)).toBe(true)
+    expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p2'), wave1)).toBe(true)
+  })
 
   it('produces the expected ancestry, and degrades cleanly with no gh', async () => {
     const rig = setup(twoNodes)

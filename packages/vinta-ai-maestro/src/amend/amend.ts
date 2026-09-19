@@ -55,7 +55,7 @@
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
-import type { AmendmentChange, NodeStatus } from '../journal/events.ts'
+import type { AmendmentAuthor, AmendmentChange, NodeStatus } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
 import { parseWorkflow, type ValidationIssue } from '../validate.ts'
@@ -136,6 +136,13 @@ export interface AmendOptions {
   /** The proposed workflow, unparsed: this path is the validation boundary. */
   readonly proposed: unknown
   readonly runner?: AmendRunner
+  /**
+   * Who is amending. Defaults to `operator`, which is every caller that
+   * predates the run being able to amend itself.
+   */
+  readonly author?: AmendmentAuthor
+  /** What an autonomous amendment changed, as `gate:<id>` / `node:<id>` tokens. */
+  readonly targets?: readonly string[]
 }
 
 /**
@@ -205,6 +212,8 @@ export async function amendRun(options: AmendOptions): Promise<AmendResult> {
       applied,
       rebased: rebase,
       superseded,
+      author: options.author ?? 'operator',
+      ...(options.targets === undefined ? {} : { targets: [...options.targets] }),
     },
   })
   registerNodes(journal, runId, proposed, status, diff)
@@ -261,7 +270,19 @@ function refuse(
   // §9's headline rule, checked before every other refusal so that an operator
   // amending a live run is told the one thing that makes the answer "not yet"
   // rather than "not like this".
-  const inFlight = diff.affected.filter((id) => IN_FLIGHT.has(status(id) as NodeStatus))
+  //
+  // `blocking` rather than `affected`, which is the narrowing §9's rule always
+  // implied and did not express. The rule protects a node from having its
+  // definition moved after the moment it read it; a gate's *command* has no
+  // such moment — every reader of it resolves it per gate run and takes an
+  // amendment (`adopt`) — so a node running now runs the new command at its
+  // next gate and no work already done is invalidated. Nothing downstream is
+  // reached at all, because no base moved.
+  //
+  // This is not an exception carved out for one caller: an operator retuning a
+  // slow gate in the editor mid-run gets exactly the same relief, and it is
+  // what makes a mis-tuned run fixable without throwing the run away.
+  const inFlight = diff.blocking.filter((id) => IN_FLIGHT.has(status(id) as NodeStatus))
   if (inFlight.length > 0) {
     return {
       ok: false,

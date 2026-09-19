@@ -212,6 +212,22 @@ export type AmendmentKind =
   /** Name, `prompt_ref`, `touches` or `max_fix_rounds` — the phase body. */
   | 'body_changed'
 
+/**
+ * Who amended a run.
+ *
+ * `operator` covers every amendment that came from a person — the editor's
+ * save, the API — and is the absence of the field on rows written before the
+ * monitor could amend anything.
+ *
+ * `monitor` is the run tuning itself (`src/intervention/`). It is a separate
+ * token rather than a flag because almost everything about an autonomous
+ * amendment is answered by folding for it: whether the budget is spent,
+ * whether this gate has already been retuned, whether a change about to be
+ * made would undo one the monitor made itself. A `boolean` would answer all
+ * three and read like an afterthought in the one place the history is audited.
+ */
+export type AmendmentAuthor = 'operator' | 'monitor'
+
 /** One node and one way it moved. Both fields are identifiers. */
 export interface AmendmentChange {
   readonly node: string
@@ -263,6 +279,23 @@ interface RunPayloads {
     /** Already-`done` nodes rebased, in the order they were rebased. */
     readonly rebased: readonly string[]
     readonly superseded: string
+    /**
+     * Who made it. Absent on rows written before a run could amend itself,
+     * which read as `operator` because that is what they all were.
+     */
+    readonly author?: AmendmentAuthor
+    /**
+     * What an autonomous amendment changed, as `gate:<id>` / `node:<id>`
+     * tokens. Present only on a `monitor` row.
+     *
+     * The cooldown is keyed on these, so they are journalled rather than
+     * recomputed: the proposal that produced them is a file on disk beside the
+     * run, and a policy that could only be enforced by reading it would stop
+     * being enforced the moment that file was missing. Identifiers only — the
+     * monitor's reasoning stays in the intervention record, where prose
+     * belongs (§11).
+     */
+    readonly targets?: readonly string[]
   }
 }
 

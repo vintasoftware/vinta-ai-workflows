@@ -25,10 +25,21 @@
  * refusals, one trimmed last word per phase. A one-hour run and a one-day run
  * produce digests of about the same size.
  *
- * **It has no authority.** It can be asked to explain a pause; it cannot answer
- * one. §9.1's question is resolved by the operator through the endpoint it has
- * always used. An agent that could quietly approve its colleagues' work would
- * turn a checkpoint into a formality, and the checkpoint is the point.
+ * **Its authority is a closed vocabulary, not a file handle.** It cannot answer
+ * §9.1's question — that is resolved by the operator through the endpoint it
+ * has always used, because an agent that could quietly approve its colleagues'
+ * work would turn a checkpoint into a formality, and the checkpoint is the
+ * point.
+ *
+ * What it *can* do, since runs began tuning themselves, is propose a change to
+ * how the run executes: a gate's command, a gate's timeout, a phase's fix
+ * budget, a phase's model (`intervention/`). It proposes; it never writes. The
+ * proposal is a document validated against a schema and applied by host code
+ * through §9's amend path, so the set of things the monitor may change is the
+ * set of verbs that exist rather than whatever a model with an editor decides
+ * to try. It still cannot touch what a phase *builds* — no dependency, no
+ * brief, no phase added or removed — and there is no verb through which it
+ * could.
  *
  * It needs no lane — it writes nothing and runs in the repository — and it is
  * built on demand, including for a run that finished days ago, which is when
@@ -283,6 +294,100 @@ export function brief(digest: RunDigest): string {
 }
 
 /**
+ * The brief for an intervention turn, which is a different job from a question.
+ *
+ * The conversational monitor is asked something and answers it. This one is
+ * woken by a threshold, with nobody waiting, and has to decide whether the run
+ * is mis-*configured* or merely doing hard work slowly. Three things are
+ * therefore said here that `brief` does not say.
+ *
+ * **What it may change, in full, including what it may not.** A model told
+ * only what it can do will find a way to want it. The list of what has no verb
+ * is as load-bearing as the list of verbs: without it, a monitor that decides
+ * the real problem is phase 4's dependency on phase 2 will propose *something*
+ * in the space it does have, and the something will be a gate command.
+ *
+ * **That proposing nothing is the expected outcome.** A model woken up and
+ * shown a threshold will infer that it is supposed to act, and that inference
+ * is wrong most of the time: most slow phases are slow because the work is
+ * hard. This is why `changes` may be empty and why the brief says so twice.
+ *
+ * **Where to look, in order of what actually answers the question.** The gate
+ * log is first because that is where a mis-tuned gate announces itself — a
+ * suite re-creating its database says so, every run, in the first lines it
+ * prints.
+ *
+ * The read-only rule from `brief` is repeated verbatim rather than referenced,
+ * and matters more here: this turn runs while lanes are live, and a monitor
+ * that ran the project's own test command to "check" a gate would contend with
+ * the very phases it was woken up about.
+ */
+export function interveneBrief(digest: RunDigest, triggerLines: string, allowed: string): string {
+  return [
+    'You are the technical project manager for a parallel implementation run, and this',
+    'is not a question from a person — a threshold fired and nobody is waiting for you.',
+    'Your job is to decide whether this run is *mis-configured* or simply doing hard',
+    'work slowly, and to propose a change only in the first case.',
+    '',
+    '--- what crossed a threshold ---',
+    triggerLines,
+    '',
+    '**Most of the time the right answer is to change nothing.** A phase that has been',
+    'running for an hour is usually a phase whose work takes an hour. You are looking',
+    'for a specific and narrower thing: a cost the run is paying that the *plan* could',
+    'stop it paying. The example this exists for is a test suite whose command omits a',
+    'reuse-database flag, so every gate run in every lane rebuilds the database before',
+    'the first assertion. That is visible in the gate log, it repeats identically, and',
+    'it has nothing to do with the code any phase is writing.',
+    '',
+    '--- what you may change ---',
+    allowed,
+    '',
+    'You may change **how the run executes**. You may never change **what it builds**:',
+    'there is no way to express a change to a phase’s dependencies, its brief, its',
+    'touch list, the base branch, its pipeline, or the set of phases. If you conclude',
+    'the plan itself is wrong, say so in `summary` and propose no changes — that',
+    'sentence reaches a person, and it is the useful output in that case.',
+    '',
+    '--- where to look ---',
+    `- **Gate logs** — \`${digest.storePath}/runs/<run>/nodes/<node>/gates/<gate>.log\`.`,
+    '  Start here. A mis-tuned gate repeats the same wasted work in its first lines,',
+    '  every single run, in every lane.',
+    '- **The journal** — SQLite at `flow.db`. `gate_result` rows carry each gate’s',
+    '  duration and whether it was a cache hit, so "this gate costs the same twelve',
+    '  minutes every time" is a query rather than an impression.',
+    '- **Transcripts** — JSONL under `runs/<run>/nodes/<node>/`. What the agent was',
+    '  actually doing with the hour, which is how you tell hard work from a loop.',
+    `- **The plan** — ${digest.planRef ?? 'named in the workflow document under ai-plans/'}.`,
+    '  What the phase was asked for, before you judge how long it should take.',
+    '',
+    '**Read, never run.** Git commands, the journal and the logs are yours. The',
+    'project’s own commands are not: do not run its tests, its gates, its linters, or',
+    '`docker compose` anything. Each lane holds its own compose project, its own',
+    'database and its own ports, and that isolation lives in an environment your',
+    'shell does not have — so the project’s commands run from here contend with the',
+    'lanes instead of observing them. That matters more on this turn than on any',
+    'other: the phases you were woken about are running right now, and timing a gate',
+    'by running it yourself would slow the thing you are measuring.',
+    '',
+    '--- how to answer ---',
+    'Reply with a single JSON object and nothing else — no prose around it, no code',
+    'fence. It must match this shape:',
+    '',
+    '  {"schema_version": 1,',
+    '   "summary": "<one paragraph: what you found, changing anything or not>",',
+    '   "changes": [ <zero or more of the verbs listed above> ]}',
+    '',
+    'Every change needs an `evidence` field naming what you actually read — the log',
+    'line, the durations, the command you ran. It is the only account of this decision',
+    'that anyone will see, because nobody is watching it being made.',
+    '',
+    '--- run state ---',
+    describe(digest),
+  ].join('\n')
+}
+
+/**
  * Where the conversation is kept.
  *
  * A reserved node id, so the exchange lands in the same transcript store every
@@ -416,6 +521,52 @@ export class Monitor {
     const said: string[] = []
     for await (const event of outcome.session.events) {
       if (event.type === 'session_started') this.#session = event.sessionId
+      if (event.type !== 'thinking' && event.type !== 'assistant_text') continue
+      if (event.type === 'assistant_text') said.push(event.text)
+      if (event.text.trim() === '') continue
+      this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
+        type: event.type,
+        text: event.text,
+        by: { role: MONITOR_ROLE },
+      })
+    }
+    return said.join('\n').trim()
+  }
+
+  /**
+   * One intervention turn: a threshold fired, and this is what came back.
+   *
+   * **Always a cold session, never the conversation’s.** Two reasons, and both
+   * are about the answer rather than the cost. The operator’s conversation is
+   * prose and this turn must reply with one JSON object, and a session that has
+   * been answering in paragraphs for an hour is being asked to do something it
+   * has spent that hour not doing. And an intervention has to be a reading of
+   * the run *now* — a session carrying its own earlier conclusions about why
+   * phase 3 is slow will re-reach them, which is precisely the thrash the
+   * ledger exists to prevent, arrived at inside one context instead of across
+   * two.
+   *
+   * Returns the raw text. Parsing is the caller’s, because the caller is what
+   * owns the schema and what has somewhere to put a malformed answer — a
+   * monitor that threw on bad JSON would lose the summary along with it.
+   */
+  async intervene(digest: RunDigest, triggerLines: string, allowed: string): Promise<string> {
+    const outcome = await this.#options.adapter.spawn({
+      nodeId: `monitor:${digest.runId}`,
+      cwd: this.#options.cwd,
+      prompt: interveneBrief(digest, triggerLines, allowed),
+      model: this.#options.model,
+    })
+
+    if (!outcome.ok) throw new MonitorUnavailable(outcome.kind)
+
+    // Journalled into the same conversation the operator reads, so a change
+    // the run made to itself is visible where a person is already looking
+    // rather than only in a file beside the run. `thinking` is kept for the
+    // reason it is kept everywhere else here: it is most of what there is to
+    // see while a model works.
+    const said: string[] = []
+    for await (const event of outcome.session.events) {
       if (event.type !== 'thinking' && event.type !== 'assistant_text') continue
       if (event.type === 'assistant_text') said.push(event.text)
       if (event.text.trim() === '') continue

@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/intervention.v1.schema.json",
+  "title": "vinta-ai-maestro monitor intervention",
+  "description": "The monitor’s proposal for a run it was woken up about: a closed set of execution-tuning verbs, applied by the host through §9’s amend path. It cannot express a change to what a phase builds — only to how the run executes it. Written by the run monitor when a watchdog wakes it about a phase that has outrun its threshold, and applied by `vinta-ai-maestro` through §9’s amend path. GENERATED from packages/vinta-ai-maestro/src/intervention/intervention.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional URL of this schema, for editor validation. Ignored at runtime.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "number",
+      "const": 1,
+      "description": "Schema major version. Bumped only on breaking changes."
+    },
+    "changes": {
+      "maxItems": 4,
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "verb": {
+                "type": "string",
+                "const": "retune_gate"
+              },
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The gate id, as the workflow declares it."
+              },
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The proposed command. Must be the current command’s argv tokens, in order, plus tokens drawn from this gate’s `tuning.allowed_flags`. Nothing may be removed or rewritten."
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                "description": "What was observed and where — the gate log line, the durations, the transcript. Unverifiable by construction and required regardless: it is what an intervention is audited and scored against, and a change made with nobody watching that cannot say why it was made is not auditable at all."
+              }
+            },
+            "required": [
+              "verb",
+              "gate",
+              "cmd",
+              "evidence"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "verb": {
+                "type": "string",
+                "const": "retime_gate"
+              },
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "timeout_s": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "The proposed timeout, in seconds."
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                "description": "What was observed and where — the gate log line, the durations, the transcript. Unverifiable by construction and required regardless: it is what an intervention is audited and scored against, and a change made with nobody watching that cannot say why it was made is not auditable at all."
+              }
+            },
+            "required": [
+              "verb",
+              "gate",
+              "timeout_s",
+              "evidence"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "verb": {
+                "type": "string",
+                "const": "rebudget_fixes"
+              },
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "description": "The phase id."
+              },
+              "max_fix_rounds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                "description": "What was observed and where — the gate log line, the durations, the transcript. Unverifiable by construction and required regardless: it is what an intervention is audited and scored against, and a change made with nobody watching that cannot say why it was made is not auditable at all."
+              }
+            },
+            "required": [
+              "verb",
+              "node",
+              "max_fix_rounds",
+              "evidence"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "verb": {
+                "type": "string",
+                "const": "retier_phase"
+              },
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The model to hand this phase. Must already be on the run’s roster — a monitor that could name any string could spend money on a model the plan never staffed, and could name one that does not exist."
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                "description": "What was observed and where — the gate log line, the durations, the transcript. Unverifiable by construction and required regardless: it is what an intervention is audited and scored against, and a change made with nobody watching that cannot say why it was made is not auditable at all."
+              }
+            },
+            "required": [
+              "verb",
+              "node",
+              "model",
+              "evidence"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "description": "What to change, or nothing. Empty is a real and expected answer: a phase that is slow because its work is hard needs no amendment, and a monitor that cannot say so will invent one."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "description": "One paragraph on what was found, whether or not anything is being changed."
+    }
+  },
+  "required": [
+    "schema_version",
+    "changes",
+    "summary"
+  ],
+  "additionalProperties": false
+}

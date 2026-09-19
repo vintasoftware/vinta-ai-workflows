@@ -514,6 +514,25 @@
             "minimum": 1,
             "maximum": 9007199254740991
           },
+          "tuning": {
+            "type": "object",
+            "properties": {
+              "allowed_flags": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Flags the monitor may ADD to this gate’s command, verbatim and whole. Matched as exact argv tokens, so `--reuse-db` permits `--reuse-db` and nothing else — not `--reuse-db-and-more`, and not a flag that merely starts the same way. A flag taking a separate value (`-n auto`) is written as the two tokens it is. Removing or rewriting an existing token is never permitted, whatever is listed here: the proposed command must be this one’s tokens, in order, plus additions."
+              }
+            },
+            "required": [
+              "allowed_flags"
+            ],
+            "additionalProperties": false,
+            "description": "What an autonomous retune of this gate may do. Absent — the default — means the command is not the monitor’s to touch."
+          },
           "description": {
             "type": "string"
           }
