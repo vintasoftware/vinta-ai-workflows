@@ -1,6 +1,6 @@
 /**
  * Gate result caching (§13.4). A gate result is keyed on
- * `(gate id, git tree hash of the lane)`.
+ * `(gate id, git tree hash of the lane, the command that produced it)`.
  *
  * Fix loops re-run the same suite against an unchanged tree constantly: a
  * review round that changes nothing, a retry after a merge that was a no-op, a
@@ -47,11 +47,26 @@
  *   clock. The key is the tree, per §13.4, so a gate that is a pure function of
  *   its tree caches correctly and one that is not can be told not to.
  *
+ * ## Why the command is in the key
+ *
+ * The key was `(gate id, tree hash)`, on the reading that a gate id names a
+ * command. §9's amend makes that false: a live run's `gates[id].cmd` can move,
+ * and the id it moves under does not. An unchanged tree would then be served
+ * the previous command's verdict — so the one amendment whose entire purpose
+ * is to change what a gate *does* would change nothing observable until
+ * something else happened to touch the tree.
+ *
+ * Hashed rather than stored, because a command line is repository content: it
+ * is authored in the plan and can name paths, hosts and flags. The rows here
+ * carry gate ids, two hashes and an exit code, and nothing that reads them can
+ * recover the command from one.
+ *
  * Gate *output* is repository content and never leaves the log file; the rows
- * here carry gate ids, a tree hash and an exit code only.
+ * here carry gate ids, hashes and an exit code only.
  */
 import Database from 'better-sqlite3'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -77,14 +92,20 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS gate_results (
   gate_id TEXT NOT NULL,
   tree_hash TEXT NOT NULL,
+  cmd_hash TEXT NOT NULL,
   status TEXT NOT NULL,
   exit_code INTEGER,
   duration_ms INTEGER NOT NULL,
   log_path TEXT NOT NULL,
   cached_at INTEGER NOT NULL,
-  PRIMARY KEY (gate_id, tree_hash)
+  PRIMARY KEY (gate_id, tree_hash, cmd_hash)
 );
 `
+
+/** The command, as a key component. Never stored, never reversible — see above. */
+function commandKey(cmd: string): string {
+  return createHash('sha256').update(cmd).digest('hex').slice(0, 16)
+}
 
 /**
  * SQLite beside the journal's store, so a daemon restart keeps the hits — the
@@ -105,13 +126,28 @@ export class GateCache {
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('synchronous = FULL')
     this.db.pragma('busy_timeout = 5000')
+    // A cache from before the command joined the key cannot answer the
+    // question this one asks, and there is no honest way to backfill it: the
+    // rows do not record which command produced them. Dropping it costs one
+    // re-run per stale entry, which is the same price `store` already accepts
+    // for a lost row — and is plainly cheaper than serving a verdict from a
+    // command nobody can name.
+    if (this.#legacy()) this.db.exec('DROP TABLE gate_results')
     this.db.exec(SCHEMA)
   }
 
-  lookup(gateId: string, treeHash: string): GateResult | undefined {
+  /** A `gate_results` table predating `cmd_hash`. Absent or current reads as false. */
+  #legacy(): boolean {
+    const columns = this.db.pragma('table_info(gate_results)') as { readonly name: string }[]
+    return columns.length > 0 && !columns.some((column) => column.name === 'cmd_hash')
+  }
+
+  lookup(gateId: string, treeHash: string, cmd: string): GateResult | undefined {
     const row = this.db
-      .prepare('SELECT * FROM gate_results WHERE gate_id = ? AND tree_hash = ?')
-      .get(gateId, treeHash) as CacheRow | undefined
+      .prepare(
+        'SELECT * FROM gate_results WHERE gate_id = ? AND tree_hash = ? AND cmd_hash = ?',
+      )
+      .get(gateId, treeHash, commandKey(cmd)) as CacheRow | undefined
     if (row === undefined) return undefined
     return {
       gateId,
@@ -128,17 +164,18 @@ export class GateCache {
    * into a permanent verdict on that tree, and the retry that would have proved
    * it transient never runs.
    */
-  store(treeHash: string, result: GateResult): void {
+  store(treeHash: string, cmd: string, result: GateResult): void {
     if (result.status === 'timed_out') return
     this.db
       .prepare(
         'INSERT OR REPLACE INTO gate_results' +
-          ' (gate_id, tree_hash, status, exit_code, duration_ms, log_path, cached_at)' +
-          ' VALUES (?, ?, ?, ?, ?, ?, ?)',
+          ' (gate_id, tree_hash, cmd_hash, status, exit_code, duration_ms, log_path, cached_at)' +
+          ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       )
       .run(
         result.gateId,
         treeHash,
+        commandKey(cmd),
         result.status,
         result.exitCode,
         result.durationMs,
@@ -166,14 +203,14 @@ export async function runGateCached(options: RunGateCachedOptions): Promise<Cach
   const treeHash = laneTreeHash(options.cwd)
 
   if (options.noCache !== true) {
-    const hit = options.cache.lookup(options.gateId, treeHash)
+    const hit = options.cache.lookup(options.gateId, treeHash, options.gate.cmd)
     // Returning here is what keeps the gate's pools untouched: `runGate` is the
     // only thing that acquires them, and it is never called.
     if (hit !== undefined) return { ...hit, cached: true }
   }
 
   const result = await runGate(options)
-  options.cache.store(treeHash, result)
+  options.cache.store(treeHash, options.gate.cmd, result)
   return { ...result, cached: false }
 }
 

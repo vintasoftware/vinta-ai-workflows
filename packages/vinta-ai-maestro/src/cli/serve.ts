@@ -141,6 +141,13 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  nothing answers those in a headless run. full removes the
                  checks entirely; both CLIs recommend that only for a sandbox
                  with no network, which a lane is not.
+  --no-intervene Execute the plan exactly as written, whatever it costs.
+                 By default a run that is dragging wakes its monitor, which
+                 reads the gate logs and may amend how the run *executes* — a
+                 gate's command or timeout, a phase's fix budget or model. It
+                 can never change what a phase builds, it is bounded by each
+                 gate's own tuning.allowed_flags, and a run gets three such
+                 amendments in its life. Pass this to turn it off entirely.
                  The operator sets this, never the workflow document.`
 
 /** The bind and store settings `serve` and `run` share. */
@@ -464,6 +471,8 @@ interface StarterOptions {
    * to a stream that scrolled past hours ago.
    */
   readonly logger?: Logger
+  /** `--no-intervene`: runs this daemon hosts execute the plan exactly as given. */
+  readonly intervene?: boolean
 }
 
 /**
@@ -585,6 +594,10 @@ export function runStarter(options: StarterOptions): RunHost {
         ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
         ...(options.retries === undefined ? {} : { retries: options.retries }),
         ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
+        // Same factory the monitor endpoint is built from, so a run the daemon
+        // hosts can tune itself exactly as one `run` hosts can.
+        monitorFor: monitorFactory(journal, repoPath, permission),
+        ...(options.intervene === false ? { intervene: false } : {}),
       })
       if (!started.ok) {
         log.error('run.provision_failed', { run: runId, reason: started.message })

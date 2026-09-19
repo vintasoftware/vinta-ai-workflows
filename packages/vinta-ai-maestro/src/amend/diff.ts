@@ -7,8 +7,8 @@
  * this answers "what moved and who does it reach", and `amend.ts` answers
  * "may it move, and what does moving it cost".
  *
- * Three decisions worth stating, because each one changes which nodes end up
- * in the affected set:
+ * Four decisions worth stating, because each one changes which nodes end up
+ * in one of the sets below:
  *
  * - **Nodes are compared by their *effective* definition, not their literal
  *   one.** `defaults.harness`, `defaults.model`, `defaults.pipeline` and the
@@ -24,6 +24,12 @@
  *   removed only exists in the snapshot and an edge that was added only exists
  *   in the proposal; walking either graph alone would miss half the nodes a
  *   rebase has to reach.
+ * - **"Who does this reach" and "who cannot take it now" are different
+ *   questions.** `affected` answers the first and closes over dependents for
+ *   every kind, because it is the audit record. `blocking` answers the second
+ *   and closes over dependents only where a base moved — see `LIVE_SAFE_KINDS`.
+ *   Conflating them is what made a gate command, which moves no base at all,
+ *   un-amendable for the entire downstream half of a plan.
  *
  * Every value produced here is an id or a member of a closed union. Node
  * names, `prompt_ref`s and gate commands are read to *detect* a change and
@@ -43,6 +49,33 @@ const TOPOLOGY_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>([
   'base_branch_changed',
 ])
 
+/**
+ * Kinds a node may take **while it is in flight**.
+ *
+ * §9 refuses an amendment that reaches a running node, and the reason is
+ * sound for almost everything: a node's harness, model and pipeline are read
+ * at its spawn, its body is what its agent was briefed with, and its base is
+ * what its branch was cut from. None of those can move under a turn that has
+ * already started, and `Scheduler.adopt` deliberately does not try — it
+ * replaces `state.node` only for a node that has not started.
+ *
+ * The gate *table* is the exception, and it is the one that matters. A gate's
+ * command is not captured by anything: the scheduler resolves `requires` from
+ * the run's current workflow, the executor resolves the command per gate run,
+ * and the broker resolves it per agent request. All three now take an
+ * amendment (`adopt`), so a running node's *next* gate runs the new command —
+ * there is no window in which a stale definition is used, and no work already
+ * done that the change invalidates.
+ *
+ * That distinction is why `gates_changed` here means the *table* moved and not
+ * that the node's declared gate list did: a phase that gains a gate mid-flight
+ * would finish without ever running it, and end `done` against a definition it
+ * never satisfied. Which gates a phase must pass is part of what the phase
+ * *is*, so it is folded into `body` below and blocks exactly as the rest of the
+ * body does.
+ */
+const LIVE_SAFE_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>(['gates_changed'])
+
 export interface WorkflowDiff {
   /** One entry per node per way it moved, in the proposal's node order. */
   readonly changes: readonly AmendmentChange[]
@@ -54,6 +87,17 @@ export interface WorkflowDiff {
   readonly added: readonly string[]
   /** Affected nodes whose *base* moved — the ones a rebase has to reach. */
   readonly rebaseable: readonly string[]
+  /**
+   * Nodes whose in-flight status must refuse this amendment.
+   *
+   * Narrower than `affected`, and deliberately so. `affected` answers "who does
+   * this reach", which is the audit question and closes over dependents for
+   * every kind; this answers "who cannot take it right now", which closes over
+   * dependents only where a *base* moved. A gate command that changed reaches
+   * every node declaring that gate and moves nobody's base, so nothing
+   * downstream is blocked by it and the nodes declaring it take it live.
+   */
+  readonly blocking: readonly string[]
   /** Changed nodes whose branch *content* would have to be rebuilt by an agent. */
   readonly contentChanged: readonly string[]
 }
@@ -61,6 +105,7 @@ export interface WorkflowDiff {
 /** A node's definition with every workflow-level default already resolved. */
 interface Effective {
   readonly deps: string
+  /** The definitions of the gates this node declares — not which ones it declares. */
   readonly gates: string
   readonly harness: string
   readonly model: string
@@ -115,12 +160,18 @@ export function diffWorkflows(before: Workflow, after: Workflow): WorkflowDiff {
     ),
   ]
 
+  const blocking = new Set(rebaseable)
+  for (const change of changes) {
+    if (!LIVE_SAFE_KINDS.has(change.kind)) blocking.add(change.node)
+  }
+
   return {
     changes,
     affected: sortBy(affected, order),
     removed,
     added,
     rebaseable: sortBy(rebaseable, order),
+    blocking: sortBy([...blocking], order),
     contentChanged: sortBy(contentChanged, order),
   }
 }
@@ -184,11 +235,19 @@ function effective(workflow: Workflow, node: Node): Effective {
     deps: JSON.stringify(node.depends_on.map((dependency) => dependency.node)),
     // The gate *definitions*, not their ids: a gate whose `cmd`, `requires` or
     // `timeout_s` changed is a different gate to every node that declares it.
-    gates: JSON.stringify(node.gates.map((id) => [id, workflow.gates[id] ?? null])),
+    // Which ids the node declares is `body`'s, one line down — see
+    // `LIVE_SAFE_KINDS` for why the two have to be told apart.
+    gates: JSON.stringify(node.gates.map((id) => workflow.gates[id] ?? null)),
     harness: node.harness ?? workflow.defaults.harness,
     model: node.model ?? workflow.defaults.model,
     pipeline: node.pipeline ?? workflow.defaults.pipeline,
-    body: JSON.stringify([node.name, node.prompt_ref, node.touches, node.max_fix_rounds]),
+    body: JSON.stringify([
+      node.name,
+      node.prompt_ref,
+      node.touches,
+      node.max_fix_rounds,
+      node.gates,
+    ]),
   }
 }
 
