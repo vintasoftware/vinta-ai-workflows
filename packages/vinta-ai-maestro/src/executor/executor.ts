@@ -202,6 +202,13 @@ export class RunEffectExecutor implements EffectExecutor {
         return this.#reviewed(nodeId, params)
       case 'run_gate':
         return await this.#runGate(nodeId, params)
+      case 'run_chore':
+        // The turns are already run: the scheduler owns spawning, exactly as it
+        // does for `spawn_agent`, and reaches here on the way out. What a chore
+        // did is in the diff, the transcript and its `chore_result` row, and
+        // none of it is a fact a guard branches on — which is the difference
+        // between a chore and both the other things a phase runs.
+        return {}
       case 'git_branch':
         return await this.#branch(nodeId, params)
       case 'git_merge':

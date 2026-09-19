@@ -17,6 +17,7 @@ export const HARNESS_IDS = ['claude-code', 'codex', 'opencode'] as const
 export const EFFECT_IDS = [
   'spawn_agent',
   'run_gate',
+  'run_chore',
   'git_branch',
   'git_merge',
   'git_push',
@@ -26,7 +27,7 @@ export const EFFECT_IDS = [
   'notify',
 ] as const
 
-export const AGENT_ROLES = ['implementer', 'reviewer', 'fixer', 'conflict-fixer'] as const
+export const AGENT_ROLES = ['implementer', 'reviewer', 'fixer', 'chore', 'conflict-fixer'] as const
 
 const Id = z
   .string()
@@ -167,6 +168,83 @@ export const GateSchema = z.strictObject({
   description: z.string().optional(),
 })
 
+// ---------------------------------------------------------------------------
+// Chores — a declared agent turn inside a phase, for work that is neither
+// implementing the brief nor judging it
+//
+// A gate is a shell command that says pass or fail. A chore is an agent that
+// *changes* the tree: rewrite the comments this phase wrote, add the changelog
+// entry, extract the strings that need translating. Both are per-phase
+// machinery, and that is where the resemblance stops — which is why this is a
+// separate registry rather than a second kind of gate.
+//
+// Three things would break if they shared one. A gate result is cached on the
+// lane's tree hash, and a step that edits the tree invalidates its own key by
+// running. A gate queues on a `test-suite`-style pool, while an agent turn
+// contends for a harness slot and a model quota, which admission control
+// already manages. And a gate is the thing standing between a phase and its
+// merge; a chore is not allowed to be, which is what `on_failure` defaults to
+// `continue` for.
+//
+// The chore says what to do; the prompt renderer says everything else — which
+// phase this is, the diff as the scope, the project's commands, the commit
+// protocol, and the one bound that keeps a general slot from turning into a
+// second implementer: do what the chore says and nothing more.
+// ---------------------------------------------------------------------------
+
+export const ChoreSchema = z.strictObject({
+  prompt: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('The instruction, inline. Exactly one of `prompt` and `prompt_ref` is required.'),
+  prompt_ref: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Where the instruction lives, in `prompt_ref` form (`ai-plans/PLAN.md#deslop`), resolved ' +
+        'by the same resolver as a phase brief. Prefer it over `prompt` for anything longer ' +
+        'than a sentence: it keeps the text reviewable in the plan rather than in a JSON string.',
+    ),
+  skill: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'A skill the agent should use, named in the prompt rather than passed as a harness flag — ' +
+        'codex and opencode have no skills, and a chore that only works on one harness is a ' +
+        'chore that silently does nothing on the other two.',
+    ),
+  session: z
+    .string()
+    .min(1)
+    .default('main')
+    .describe(
+      'The session slot this turn continues (§15). `main` — the default — is the implementer’s: ' +
+        'the agent that wrote the phase already holds the brief, the diff and its own reasons, ' +
+        'and that is most of what makes a chore cheap. A slot no other effect names starts a ' +
+        'fresh session every time and pays for a cold context.',
+    ),
+  model: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Overrides the model the phase’s implementer would otherwise run at. A mechanical pass ' +
+        'does not need the tier the phase was staffed at.',
+    ),
+  on_failure: z
+    .enum(['continue', 'fail'])
+    .default('continue')
+    .describe(
+      '`continue` — the default — journals a failed chore and moves on to the gates. A chore is ' +
+        'polish, and losing an implemented phase to one that timed out is the worse trade. ' +
+        '`fail` is for a chore whose output the phase is not correct without.',
+    ),
+  description: z.string().optional(),
+})
+
 export const DependencySchema = z.strictObject({
   node: Id.describe('The upstream node id.'),
   artifact: z
@@ -243,6 +321,15 @@ export const NodeSchema = z.strictObject({
     .describe('Touch List. Same-wave overlap is warned about, never refused.'),
   pipeline: Id.optional().describe('Overrides defaults.pipeline.'),
   gates: z.array(Id).default([]),
+  chores: z
+    .array(Id)
+    .optional()
+    .describe(
+      'The chores this phase runs, in order. Optional rather than defaulted, and that is the ' +
+        'whole of its override rule: absent takes `defaults.chores`, and a list — `[]` included ' +
+        '— replaces it. Merging instead would leave no way to skip a run-wide chore on the one ' +
+        'phase it makes no sense for.',
+    ),
   harness: z.enum(HARNESS_IDS).optional().describe('Overrides defaults.harness.'),
   model: z
     .string()
@@ -527,6 +614,14 @@ export const DefaultsSchema = z.strictObject({
   harness: z.enum(HARNESS_IDS),
   model: z.string().min(1),
   pipeline: Id,
+  chores: z
+    .array(Id)
+    .default([])
+    .describe(
+      'The chores every phase runs unless it names its own. Most chores are run-wide — a ' +
+        'comment pass, a changelog entry — and repeating them on every node is how one phase ' +
+        'ends up quietly missing one.',
+    ),
   max_session_turns: z
     .number()
     .int()
@@ -577,6 +672,13 @@ export const WorkflowSchema = z
       ),
     resources: z.record(Id, ResourceSchema).describe('Named capacity pools. `lane` is required.'),
     gates: z.record(Id, GateSchema).default({}),
+    chores: z
+      .record(Id, ChoreSchema)
+      .default({})
+      .describe(
+        'Agent turns a phase runs beside its gates, by id. A gate judges and a chore changes ' +
+          'the tree, so they are separate registries — see ChoreSchema.',
+      ),
     nodes: z.array(NodeSchema).min(1),
     pipelines: z
       .record(Id, PipelineSchema)
@@ -600,6 +702,7 @@ export type WorkflowInput = z.input<typeof WorkflowSchema>
 export type Node = z.infer<typeof NodeSchema>
 export type Dependency = z.infer<typeof DependencySchema>
 export type Gate = z.infer<typeof GateSchema>
+export type Chore = z.infer<typeof ChoreSchema>
 export type GateTuning = z.infer<typeof GateTuningSchema>
 export type Project = z.infer<typeof ProjectSchema>
 export type ProjectService = z.infer<typeof ServiceSchema>

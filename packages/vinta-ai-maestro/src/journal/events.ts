@@ -73,6 +73,17 @@ export type AgentLeasePhase = 'acquired' | 'released'
 /** The gate runner's verdict, as journalled. Mirrors `GateStatus` in `gates/runner.ts`. */
 export type GateStatus = 'passed' | 'failed' | 'timed_out'
 
+/**
+ * What became of one chore turn.
+ *
+ * `failed` and `skipped` are deliberately different words for two things a
+ * reader has to be able to tell apart. A `failed` chore took a turn and the
+ * turn went wrong; a `skipped` one never ran, because the harness had no
+ * capacity for it and the chore was not worth re-driving the phase over. Only
+ * the first is a reason to go and read a transcript.
+ */
+export type ChoreStatus = 'ran' | 'failed' | 'skipped'
+
 /** Whether a spawn continued its slot's session or started a new one (§15). */
 export type SessionDisposition = 'reused' | 'fresh'
 
@@ -537,6 +548,23 @@ interface NodePayloads {
     readonly status: GateStatus
     readonly duration_ms: number
     readonly cached: boolean
+  }
+  /**
+   * What became of one chore turn (`run_chore`).
+   *
+   * The turn itself is in the transcript, attributed to the `chore` role, which
+   * is where somebody reading what the agent did looks. This row is the other
+   * question — did the phase's declared chores actually run — and it is the
+   * only place a chore that *didn't* leaves a mark at all: a skipped one writes
+   * no transcript line, because no session was ever opened to write one.
+   *
+   * Identifiers and a duration. What the chore changed is in the diff and in
+   * the transcript; nothing it wrote reaches this payload (§11).
+   */
+  chore_result: {
+    readonly chore: string
+    readonly status: ChoreStatus
+    readonly duration_ms: number
   }
   /**
    * One edge of a lease an *agent* holds — a command it runs inside its own

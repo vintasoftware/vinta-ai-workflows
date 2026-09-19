@@ -426,6 +426,64 @@ describe('virtual time', () => {
     expect(elapsedMs).toBeLessThan(min(720))
     expect(elapsedMs).toBeLessThan(10_000)
   })
+
+  /**
+   * A chore is a model turn, and a plan running two of them per phase buys two
+   * more turns per phase. A projection that charged them nothing would answer
+   * the one question it exists for — how long will this take — leaving out work
+   * the run will certainly do.
+   *
+   * It needs no rate of its own, and this is what says so: the scheduler runs
+   * each chore through the same `spawn_agent` invocation every other turn takes,
+   * so the executor above charges it the node's agent-turn estimate without
+   * knowing a chore from an implementer. This test is the guard on that — a
+   * `run_chore` that stopped going through the seam would silently start
+   * projecting runs shorter than they are.
+   */
+  it('charges a chore turn like any other agent turn', async () => {
+    const workflow = WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'sim-chores',
+      base_branch: 'main',
+      defaults: { harness: HARNESS, model: 'opus', pipeline: 'polish', chores: ['a', 'b'] },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      chores: { a: { prompt: 'One.' }, b: { prompt: 'Two.' } },
+      nodes: [node('n1')],
+      pipelines: {
+        polish: {
+          ...SOLO,
+          states: [
+            SOLO.states[0],
+            {
+              id: 'polish',
+              name: 'Polish',
+              position: { x: 200, y: 0 },
+              onEnter: [{ id: 'e-chores', definitionId: 'run_chore', params: {} }],
+            },
+            { id: 'done', name: 'Done', position: { x: 400, y: 0 }, data: { outcome: 'done' } },
+          ],
+          transitions: [
+            { id: 't-polish', from: 'work', to: 'polish' },
+            { id: 't-done', from: 'polish', to: 'done' },
+          ],
+        },
+      },
+    })
+
+    const report = await simulate({ workflow, estimates: { defaultAgentTurnMs: min(10) } })
+
+    // The implementer, then one turn per chore: three turns of ten minutes.
+    expect(report.projectedMs).toBe(min(30))
+  })
+
+  it('charges nothing for a phase that runs no chores', async () => {
+    const report = await simulate({
+      workflow: makeWorkflow([node('n1')]),
+      estimates: { defaultAgentTurnMs: min(10) },
+    })
+
+    expect(report.projectedMs).toBe(min(10))
+  })
 })
 
 // ---------------------------------------------------------------------------

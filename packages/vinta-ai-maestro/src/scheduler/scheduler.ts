@@ -81,6 +81,7 @@ import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import { gitLines } from '../integration/git.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
+  ChoreStatus,
   GatePoolPhase,
   HumanQuestion,
   NodeStatus,
@@ -111,7 +112,13 @@ import {
   type ReviewDecision,
 } from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
-import { composeSpawnPrompt, PromptError, type Reorientation } from '../prompts/index.ts'
+import {
+  composeSpawnPrompt,
+  PromptError,
+  type ChorePrompt,
+  type Reorientation,
+} from '../prompts/index.ts'
+import { choresFor } from '../chores.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { Node, Pipeline, SideEffect, Workflow } from '../types.ts'
 
@@ -1962,6 +1969,7 @@ export class Scheduler {
         if (state.aborted) throw new Aborted()
         const verb = invocation.effect.definitionId
         if (verb === 'spawn_agent') return this.#observe(state, await this.#spawn(state, invocation))
+        if (verb === 'run_chore') return await this.#chores(state, invocation)
         if (verb === 'run_gate') await this.#acquireGate(state, invocation)
         // The question is journalled before the host executor runs, because
         // the host executor is what raises the notification: the record of the
@@ -2014,6 +2022,92 @@ export class Scheduler {
    * §5.3 puts agent output. The host executor is left with the question the
    * scheduler cannot answer: what the turn *meant*, as facts.
    */
+  /**
+   * The node's chores, one agent turn each, in declaration order.
+   *
+   * Every one of them is an ordinary spawn — same admission control, same
+   * session ledger, same transcript — so this composes `#spawnTurn` rather than
+   * doing anything of its own. What it owns is the two questions a chore raises
+   * that a role in the pipeline does not: which chores this node runs, and what
+   * happens when one of them cannot.
+   *
+   * **A chore that fails does not fail the phase**, unless it says to. The
+   * default exists because of what the alternative costs: the phase is written,
+   * reviewed and about to be gated, and throwing that away because a comment
+   * pass timed out is a far worse trade than merging comments nobody tidied.
+   *
+   * **A capacity refusal is the same answer, and this is the surprising half.**
+   * Everywhere else a `CapacityRetry` re-drives the node from its initial state
+   * — correct for a fixer, since the alternative is losing the fix — but here
+   * it would re-implement an entire finished phase to get a polish turn in. So
+   * an `on_failure: 'continue'` chore is skipped when the harness is full, and
+   * only a chore the phase is declared incorrect without is worth the re-drive.
+   *
+   * `Aborted` is never swallowed by either: the run is being torn down, and
+   * there is nothing left for the next chore to run in.
+   */
+  async #chores(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
+    const named = invocation.effect.params['chore']
+    const declared = this.#workflow.chores[typeof named === 'string' ? named : '']
+    // A named chore is run whatever the node declared — that is what naming one
+    // in the pipeline is for. Everything else takes the node's own list.
+    const chores =
+      typeof named === 'string'
+        ? declared === undefined
+          ? []
+          : [{ id: named, chore: declared }]
+        : choresFor(this.#workflow, state.node)
+
+    for (const entry of chores) {
+      const startedAt = Date.now()
+      const spawn: EffectInvocation = {
+        ...invocation,
+        effect: {
+          ...invocation.effect,
+          // Distinct per chore, because the interpreter and the operator's
+          // pause both key on it and three chores under one id are one.
+          id: `${invocation.effect.id}:${entry.id}`,
+          definitionId: 'spawn_agent',
+          params: {
+            role: 'chore',
+            prompt_template: 'chore',
+            session: entry.chore.session,
+            ...(entry.chore.model === undefined ? {} : { model: entry.chore.model }),
+          },
+        },
+      }
+
+      try {
+        await this.#spawnTurn(state, spawn, entry)
+        this.#choreResult(state, entry.id, 'ran', startedAt)
+      } catch (error) {
+        if (error instanceof Aborted) throw error
+        if (entry.chore.on_failure === 'fail') throw error
+        if (error instanceof CapacityRetry) {
+          this.#choreResult(state, entry.id, 'skipped', startedAt)
+          continue
+        }
+        this.#choreResult(state, entry.id, 'failed', startedAt)
+      }
+    }
+
+    // Through the host seam on the way out, exactly as `run_gate` is: the
+    // scheduler owns spawning and the catalog is the host's (§5.2), so a host
+    // that wants to know its chores ran is told by the verb rather than by
+    // inspecting the turns. It states no facts of its own — a chore is not
+    // something a guard branches on.
+    return await this.#options.executor.execute(invocation)
+  }
+
+  #choreResult(state: NodeState, chore: string, status: ChoreStatus, startedAt: number): void {
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'chore_result',
+      payload: { chore, status, duration_ms: Date.now() - startedAt },
+    })
+  }
+
   async #spawn(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
     const { params } = invocation.effect
     if (params['role'] === 'reviewer') {
@@ -2032,7 +2126,11 @@ export class Scheduler {
     return await this.#spawnTurn(state, invocation)
   }
 
-  async #spawnTurn(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
+  async #spawnTurn(
+    state: NodeState,
+    invocation: EffectInvocation,
+    chore?: ChorePrompt,
+  ): Promise<EffectOutcome> {
     const { params } = invocation.effect
     const { workflow, runId, journal, admission } = this.#options
     const adapter = this.#adapter(this.#harnessOf(state, params['harness'], params['role']))
@@ -2086,6 +2184,10 @@ export class Scheduler {
         workspace: existsSync(cwd) ? cwd : null,
         facts: invocation.context,
         continuation: plan.continuation,
+        // The instruction this turn exists to carry out, on a chore turn and
+        // nowhere else. Unlike everything above it, it is passed on a
+        // continuation too: the session holds the phase, never the chore.
+        ...(chore === undefined ? {} : { chore }),
         // Only on a cross-phase continuation. A same-phase one is a delta and
         // has nothing to be re-oriented about; a cold one has no memory to
         // correct.
@@ -2170,6 +2272,8 @@ export class Scheduler {
     const by: Attribution = {
       role: typeof params['role'] === 'string' ? params['role'] : 'agent',
       ...(plan.slot === null ? {} : { slot: plan.slot }),
+      // Three chores on one slot are one stretch of transcript without it.
+      ...(chore === undefined ? {} : { chore: chore.id }),
     }
     try {
       for await (const event of outcome.session.events) {

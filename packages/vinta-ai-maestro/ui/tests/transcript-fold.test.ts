@@ -163,6 +163,38 @@ test('one author’s consecutive thinking still folds', () => {
 })
 
 /**
+ * A phase runs its chores one after another, on the same slot, as the same
+ * role. Banded on the role alone they would read as one long turn by somebody
+ * called Chore — which is the problem attribution was added to solve, one level
+ * down.
+ */
+test('a chore turn says which chore it was', () => {
+  const view = present({
+    type: 'assistant_text',
+    text: 'rewrote four comments',
+    by: { role: 'chore', slot: 'main', chore: 'deslop' },
+  })
+
+  expect(view.role).toBe('chore')
+  expect(view.chore).toBe('deslop')
+})
+
+test('a change of chore breaks a thinking group, even under one role', () => {
+  const chore = (id: string, entry: unknown): unknown => ({
+    ...(entry as object),
+    by: { role: 'chore', slot: 'main', chore: id },
+  })
+  const rows = fold([chore('deslop', thinking('a')), chore('changelog', thinking('b'))], 0)
+
+  expect(rows).toHaveLength(2)
+  expect(rows.map((row) => row.chore)).toEqual(['deslop', 'changelog'])
+})
+
+test('every other role carries no chore', () => {
+  expect(present(by('reviewer', said('VERDICT: pass'))).chore).toBeNull()
+})
+
+/**
  * Gates were the one thing missing from a phase's transcript entirely: four
  * agents' output in order, and no sign of the thing that judged them.
  */

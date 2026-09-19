@@ -56,7 +56,7 @@ import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import { AGENT_ROLES, type AgentRole, type Node, type Workflow } from '../types.ts'
+import { AGENT_ROLES, type AgentRole, type Chore, type Node, type Workflow } from '../types.ts'
 
 /** The line the reviewer is asked to end on, and the one `executor.ts` reads. */
 export const VERDICT_MARKER = 'VERDICT:'
@@ -158,6 +158,22 @@ export interface SpawnPromptRequest {
    * already changed, or codes against a model it believes it already wrote.
    */
   readonly reorientation?: Reorientation
+  /**
+   * The chore this turn runs, for `prompt_template: 'chore'` and nothing else.
+   *
+   * A chore's instruction is the *point* of its turn, so unlike a phase brief
+   * it is resolved for a continuation too. §15.3's rule is that a delta must
+   * not re-send what the session already holds; this is not that — the session
+   * has never been told to do this, and a chore turn without its instruction is
+   * an agent asked to do nothing in particular to a diff.
+   */
+  readonly chore?: ChorePrompt
+}
+
+/** The chore a `run_chore` turn is running, as the scheduler resolved it. */
+export interface ChorePrompt {
+  readonly id: string
+  readonly chore: Chore
 }
 
 export interface Reorientation {
@@ -201,6 +217,20 @@ export function composeSpawnPrompt(request: SpawnPromptRequest): string {
     )
   }
   if (request.workspace === null) return node.prompt_ref
+
+  // A chore is dispatched on its own instruction rather than on the phase's, so
+  // it branches before the delta rule below — both its forms carry that
+  // instruction, and only the framing around it differs.
+  if (role === 'chore') {
+    const chore = choreMaterials(request, request.workspace)
+    if (request.continuation === true && request.reorientation === undefined) {
+      return renderChoreContinuation(resume(request, request.workspace), chore)
+    }
+    const cold = gather(request, request.workspace)
+    const preamble =
+      request.reorientation === undefined ? '' : renderReorientation(request.reorientation, cold)
+    return preamble + renderChore(cold, chore)
+  }
 
   // A continued turn is a delta (§15.3). It is composed from the journal alone:
   // the brief and the plan-level sections are deliberately not resolved, since
@@ -1149,6 +1179,158 @@ function gateStopCondition(): string[] {
     'commit what you have and report FAILURE naming the gate and what it said. Green',
     'is what you are aiming at, not the condition for finishing.',
   ]
+}
+
+// ---------------------------------------------------------------------------
+// Chores
+// ---------------------------------------------------------------------------
+
+/** A chore's own text, resolved, plus the identifiers the prompt names it by. */
+interface ChoreMaterials {
+  readonly id: string
+  /** The instruction, from `prompt` verbatim or `prompt_ref` off the lane. */
+  readonly instruction: string
+  readonly skill: string | null
+}
+
+/**
+ * The chore's instruction, wherever it was declared.
+ *
+ * A chore reaching here without one is a wiring mistake rather than an
+ * authoring one — `validate.ts` refuses a chore with neither instruction, so
+ * the only way to arrive empty is a caller that set `prompt_template: 'chore'`
+ * and passed no chore. It fails loudly for the same reason an unknown template
+ * does: the alternative is an agent turn that runs, costs a model call, and
+ * does nothing anybody asked for.
+ */
+function choreMaterials(request: SpawnPromptRequest, workspace: string): ChoreMaterials {
+  const entry = request.chore
+  if (entry === undefined) {
+    throw new PromptError(
+      `node "${request.node.id}": prompt_template "chore" needs a chore, and none was passed`,
+    )
+  }
+
+  const { id, chore } = entry
+  const instruction =
+    chore.prompt ??
+    (chore.prompt_ref === undefined
+      ? undefined
+      : resolveBrief(workspace, request.node.id, chore.prompt_ref, `chores.${id}.prompt_ref`))
+  if (instruction === undefined) {
+    throw new PromptError(`node "${request.node.id}": chore "${id}" declares no instruction`)
+  }
+
+  return { id, instruction, skill: chore.skill ?? null }
+}
+
+/**
+ * What every chore turn is told besides its own instruction.
+ *
+ * Three things, and each one is a mistake a general slot would otherwise make.
+ *
+ * **The scope is this phase's diff.** A chore is handed a whole worktree, and
+ * an instruction like "rewrite the comments" reads as an invitation to rewrite
+ * the repository's. The diff is the only bound that is true for every chore
+ * anybody would write, so it is stated once here rather than in each one.
+ *
+ * **The instruction is the whole job.** The session this usually continues is
+ * the implementer's, which still holds the phase brief and its own unfinished
+ * opinions about the code. Without this line a comment pass turns into a second
+ * implementation round — which no reviewer asked for and no fix round paid for.
+ *
+ * **The gates are not this turn's.** `polish` sits immediately in front of the
+ * gate state, so a chore that runs the suite makes the phase pay for it twice.
+ * Saying so is what keeps this cheap; the gate right after is what catches a
+ * chore that broke something.
+ */
+function choreRules(materials: Continuation, chore: ChoreMaterials): string[] {
+  return [
+    '',
+    '## What this turn is, and is not',
+    `Your scope is this phase's own diff — \`git diff ${materials.baseBranch}...${materials.branch}\`,`,
+    'plus anything still uncommitted in this worktree. A file this phase did not',
+    'touch is out of scope however much it might benefit; reading one to understand',
+    'what you are changing is fine, editing it is not.',
+    '',
+    'Do what the chore says and nothing else. This is not another implementation',
+    'round: the phase has already been written and reviewed, and a change that goes',
+    'beyond the instruction is one nobody reviewed and nobody asked for. If the',
+    'chore turns out not to apply to this diff, change nothing and say so — that is',
+    'a complete and correct outcome, not a failure.',
+    '',
+    "Do not run this phase's gates. They run on their own immediately after this",
+    'turn, against what you commit, so running them here costs the most contended',
+    'capacity on the machine to learn something the run is about to learn anyway.',
+    ...(chore.skill === null
+      ? []
+      : [
+          '',
+          `Use the \`${chore.skill}\` skill for this. If your harness has no such skill,`,
+          'say so in your report and do the work by the instruction below.',
+        ]),
+  ]
+}
+
+/** What a chore turn has to report back. Short: it is a small job. */
+function choreOutput(chore: ChoreMaterials): string[] {
+  return [
+    '',
+    '## Required output',
+    `- Status: SUCCESS or FAILURE, and why. "Nothing to do for ${chore.id}" is SUCCESS.`,
+    '- Files modified, paths only.',
+    '- Anything you deliberately left alone, and why.',
+  ]
+}
+
+/** The chore, in a session that has never seen this phase. */
+function renderChore(materials: Materials, chore: ChoreMaterials): string {
+  const { node, workflow } = materials
+  return section([
+    `You are running the \`${chore.id}\` chore over ${node.id}: ${node.name} of plan ${workflow.id}.`,
+    `Work entirely inside \`${materials.workspace}\`, on branch \`${materials.branch}\`, which was`,
+    `cut from \`${materials.baseBranch}\`. Never read or write a path outside it: sibling`,
+    'phases of this plan may be running in worktrees beside yours.',
+    ...commandBlock(materials),
+    ...leaseBlock(materials),
+    ...choreRules(materials, chore),
+    '',
+    '## The chore',
+    chore.instruction,
+    '',
+    '## The phase this diff was implementing',
+    'Context for judging what the diff is for. It is not a list of work to do —',
+    'the phase is already written and reviewed.',
+    '',
+    materials.brief,
+    ...foreground(),
+    ...commitProtocol(materials),
+    ...choreOutput(chore),
+  ])
+}
+
+/**
+ * The chore, continuing the session that wrote the phase.
+ *
+ * The usual form by some distance: `session: 'main'` is the default, and the
+ * agent that wrote this diff already knows what every line of it was for, which
+ * is most of what makes a chore cheap enough to run on every phase.
+ */
+function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials): string {
+  const { node } = materials
+  return section([
+    `Still ${node.id}: ${node.name}, same branch \`${materials.branch}\`, same session — but a`,
+    `different job. This turn is the \`${chore.id}\` chore over the diff you have already`,
+    'written. The phase brief and your own work are above; none of it is repeated',
+    'here and none of it has changed.',
+    ...choreRules(materials, chore),
+    '',
+    '## The chore',
+    chore.instruction,
+    ...foreground(),
+    ...commitProtocol(materials),
+    ...choreOutput(chore),
+  ])
 }
 
 // ---------------------------------------------------------------------------

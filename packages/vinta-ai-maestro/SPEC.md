@@ -213,8 +213,9 @@ The editor's design says hosts inject the side-effect catalog and treat guards a
 
 | Effect | Params | Notes |
 |---|---|---|
-| `spawn_agent` | `role`, `prompt_template`, `harness?`, `model?` | `role` ∈ implementer, reviewer, fixer, conflict-fixer |
+| `spawn_agent` | `role`, `prompt_template`, `harness?`, `model?` | `role` ∈ implementer, reviewer, fixer, chore, conflict-fixer |
 | `run_gate` | `gate` | Acquires the gate's resources first |
+| `run_chore` | `chore?` | One agent turn per chore the node runs; no `chore` takes the node's own list |
 | `git_branch` | `from` | `from` resolves via the dependency-derived base rule |
 | `git_merge` | `branch`, `strategy` | `--no-ff` for lane merges; never squash |
 | `git_push` | — | |
@@ -230,11 +231,13 @@ Guards are expressions over a small documented context: `review.verdict`, `gate.
 The default `standard-phase` pipeline ships with the package:
 
 ```
-implement ──▶ review ──┬─ verdict=pass ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
-                       │                          └─ exit≠0 ──▶ fix ──▶ review
+implement ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
+                       │                                     └─ exit≠0 ──▶ fix ──▶ review
                        └─ verdict=fail ──▶ fix ──▶ review
 fix ── guard: fix_rounds >= node.max_fix_rounds ──▶ failed
 ```
+
+`polish` runs the phase's **chores** (§8). It sits between the passing review and the gate on purpose: a chore edits the tree, so anywhere after the gate merges a diff the gates never ran against, and anywhere before the review has the fixer rewriting what the chore just did.
 
 ### 5.3 Journal and on-disk layout
 
@@ -413,6 +416,10 @@ For `claude-code` and `opencode`, the common case — "add context", "go a diffe
 Sandbox denies the whole pool root and allows back only the running lane, so an agent cannot write into a sibling lane that is mid-implementation.
 
 **Gate runner.** Gates are declarative (`cmd`, `requires`, `timeout_s`), run in the node's lane, stream output to `gates/<id>.log`, and report an exit code. A gate is not an agent — no LLM is involved — which is exactly why it can be queued behind a capacity limit without wasting a model turn.
+
+**Chores.** The other thing a phase runs, and the inverse of a gate in every respect that matters: an agent turn rather than a shell command, one that *changes* the tree rather than judging it, and one that is never allowed to decide whether a phase merges. Declared per workflow (`chores.<id>`) and selected per phase — `defaults.chores` for the run, `node.chores` for the exception, where a list replaces the default rather than adding to it and `[]` is how one phase opts out. Each runs as its own turn on the session slot it names, `main` by default, so the agent that wrote the diff is the one asked to act on it.
+
+They are a separate registry rather than a second kind of gate because sharing one would be wrong three ways: a chore invalidates the gate cache key (§13.4) by running, it contends for a harness slot rather than a `test-suite` pool, and it must not be the thing standing between a phase and its merge. A chore that fails is journalled and the phase continues to its gates; `on_failure: 'fail'` is for one the phase is not correct without. A capacity refusal skips it for the same reason — re-driving a finished phase to fit in a polish turn costs more than the polish is worth.
 
 **Integration.** Branch topology follows dependencies, not plan order: no dependencies cuts from `base_branch`; exactly one cuts from that node's branch; several cut from an `integ-<id>` merge of them, merged in `depends_on` declaration order so the result is deterministic and derivable from the node alone. `wave-0` *is* `base_branch`; each later wave merges into `wave-<N>`. Merge conflicts are handed to a conflict-fixer agent in the dedicated integration worktree and re-enter the gate.
 

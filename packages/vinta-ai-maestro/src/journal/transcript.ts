@@ -41,6 +41,16 @@ export interface Attribution {
   readonly role: string
   /** The session slot the turn ran on (§15). Absent where a turn has none. */
   readonly slot?: string
+  /**
+   * The chore a `chore`-role turn was running. Absent on every other role.
+   *
+   * `role` alone is not enough here in the way it is for the others: a phase
+   * runs one implementer and one reviewer, but it may run three chores, on the
+   * same slot, one after another. Without the id they are one undifferentiated
+   * stretch of the same file — which is the exact problem `Attribution` was
+   * added to fix, one level further down.
+   */
+  readonly chore?: string
 }
 
 /**

@@ -41,6 +41,14 @@ export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
     params: ['gate'],
     description: 'Runs a gate command, acquiring the gate’s resource pools first.',
   },
+  run_chore: {
+    id: 'run_chore',
+    params: ['chore'],
+    description:
+      'Runs the node’s declared chores as agent turns, in order — `defaults.chores` unless the ' +
+      'node named its own. `chore` runs exactly one instead, whatever the node declared. Each ' +
+      'turn continues the slot its chore names, so the default is the implementer’s session.',
+  },
   git_branch: {
     id: 'git_branch',
     params: ['from'],

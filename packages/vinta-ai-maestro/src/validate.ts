@@ -30,6 +30,7 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
     ...Object.keys(BUILT_IN_PIPELINES),
   ])
   const gateIds = new Set(Object.keys(workflow.gates))
+  const choreIds = new Set(Object.keys(workflow.chores))
   const resourceIds = new Set(Object.keys(workflow.resources))
   const crewIds = new Set(Object.keys(workflow.crew))
   const staffed = crewIds.size > 0
@@ -68,6 +69,30 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
     })
   }
 
+  // A chore with neither instruction is an agent turn with nothing to do, and a
+  // chore with both leaves nothing to say which one the agent is handed. Both
+  // are shape rules in spirit; they live here because expressing "exactly one
+  // of these two" in zod means a refinement, and a refinement is not something
+  // `z.toJSONSchema` can put in the generated document.
+  for (const [choreId, chore] of Object.entries(workflow.chores)) {
+    const declared = [chore.prompt, chore.prompt_ref].filter((text) => text !== undefined).length
+    if (declared !== 1) {
+      issues.push({
+        path: ['chores', choreId],
+        message:
+          declared === 0
+            ? `chore "${choreId}" declares neither \`prompt\` nor \`prompt_ref\``
+            : `chore "${choreId}" declares both \`prompt\` and \`prompt_ref\` — keep one`,
+      })
+    }
+  }
+
+  workflow.defaults.chores.forEach((chore, i) => {
+    if (!choreIds.has(chore)) {
+      issues.push({ path: ['defaults', 'chores', i], message: `unknown chore "${chore}"` })
+    }
+  })
+
   workflow.nodes.forEach((node, i) => {
     if (nodeIds.has(node.id)) {
       issues.push({ path: ['nodes', i, 'id'], message: `duplicate node id "${node.id}"` })
@@ -81,6 +106,15 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
     node.gates.forEach((gate, j) => {
       if (!gateIds.has(gate)) {
         issues.push({ path: ['nodes', i, 'gates', j], message: `unknown gate "${gate}"` })
+      }
+    })
+
+    // Only what the node itself named: a bad id in `defaults.chores` is already
+    // reported once above, and reporting it again per node would bury the one
+    // line that says where to fix it under one line per phase on the plan.
+    node.chores?.forEach((chore, j) => {
+      if (!choreIds.has(chore)) {
+        issues.push({ path: ['nodes', i, 'chores', j], message: `unknown chore "${chore}"` })
       }
     })
 

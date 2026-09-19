@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { choreIdsFor } from '../src/chores.ts'
 import { computeWaves } from '../src/graph.ts'
 import { formatIssues, parseWorkflow } from '../src/validate.ts'
 
@@ -307,5 +308,20 @@ describe('plan-feature worked example', () => {
     expect(tierOf('p1')).toBe(1)
     expect(tierOf('p5')).toBe(1)
     expect(tierOf('p2')).toBe(2)
+  })
+
+  /**
+   * The comment pass reaches every phase through the run-wide default rather
+   * than through a `chores` line repeated on each node — which is what the
+   * default is for, and what stops one phase quietly missing it.
+   */
+  it('runs the comment chore on every phase, from the run-wide default', () => {
+    const workflow = parsed()
+
+    expect(workflow.defaults.chores).toEqual(['deslop'])
+    expect(workflow.chores['deslop']?.skill).toBe('deslop-comments')
+    for (const node of workflow.nodes) {
+      expect(choreIdsFor(workflow, node)).toEqual(['deslop'])
+    }
   })
 })
