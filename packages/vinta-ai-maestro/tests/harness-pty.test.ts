@@ -84,11 +84,19 @@ afterEach(async () => {
  * This is teardown, not a subject: an orphaned process is caught by the
  * assertions in the tests themselves, which is why waiting here is allowed to
  * be patient rather than exact.
+ *
+ * The budget is the same fifteen seconds the ConPTY shutdown below is given,
+ * and for its reason: what a terminated process still holds is released by the
+ * console host on a timeout rather than by a hangup, and that host is a
+ * process no test here spawned or can wait on. Two seconds was the old budget
+ * and a loaded runner spent it. Nothing is slower when the first `rmdir`
+ * succeeds, which is every run on every other platform and most runs on this
+ * one.
  */
 const makeTemp = (): string => {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-pty-'))
   cleanups.push(() =>
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }),
+    rmSync(dir, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 }),
   )
   return dir
 }
@@ -971,8 +979,28 @@ describe('a daemon killed mid-attach', () => {
     // this test is named for, and a pid nobody waits on is a claim nobody
     // checks. If it ever stops exiting, this is a timeout naming the survivor
     // rather than an `EBUSY` naming a directory.
+    //
+    // **And the helper itself, which is the third process here and was the one
+    // nobody waited for.** It is the process that called `openPty`, so it owns
+    // the master descriptor — on Windows the pseudoconsole and the conhost
+    // behind it. This test killed it and went straight to asking about the two
+    // pids *it* had reported, so teardown could reach `rmSync` while the
+    // handles of the process this test had just killed were still being
+    // released, and the Windows leg failed on `EBUSY: rmdir` again, in the file
+    // that had already been fixed once for the same shape of reason. Waited for
+    // first, because it is first causally: the leader goes when the master
+    // descriptor closes, and the descriptor closes when this process does.
+    //
+    // The `exit` event rather than `alive()`: this one is a direct child of the
+    // test process, so between its death and Node reaping it, `kill(pid, 0)`
+    // still succeeds on POSIX and the wait would never end.
+    let helperExited = child.exitCode !== null || child.signalCode !== null
+    child.once('exit', () => {
+      helperExited = true
+    })
     child.kill('SIGKILL')
     try {
+      await until('the helper that opened the terminal to go', () => helperExited, 15_000)
       await until('the pty leader to go', () => !alive(pid), 15_000)
       await until("the terminal's own child to go", () => !alive(inner), 15_000)
     } catch (error) {
