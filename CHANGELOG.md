@@ -767,6 +767,39 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The monitor's conversation was mostly unformatted JSON.** Not its answers —
+  its *watchdog's*. An intervention turn must reply with one document matching
+  `intervention.v1.schema.json`, which is what makes the monitor's authority
+  over a live run a closed set of verbs rather than an editor over
+  `workflow.json`; and that turn is journalled into the conversation a person
+  reads, because a run that retuned itself should say so where somebody is
+  already looking. Both of those are right. Rendering the document verbatim was
+  not, and the summary paragraph the operator wanted arrived a thousand
+  characters into one unwrapped line of braces. A proposal now renders as what
+  it says: the summary, then one line per proposed change with its evidence
+  under it, and a tone dot only when something was actually proposed — a turn
+  that looked and changed nothing is the expected outcome and should not shout.
+  The verb table is keyed on the daemon's own union, so a fifth verb fails the
+  UI build rather than shipping as a bare identifier. The journal still holds
+  the bytes the model wrote — only the row changed, so conversations already on
+  disk read as well as new ones. Any other whole-JSON answer is at least
+  indented.
+
+- **The monitor's conversation opened at its oldest entry and never scrolled.**
+  It followed the newest row *only while a turn was running*, on the reasoning
+  that the list is short and the operator is watching the answer they just
+  asked for. Neither half held: the conversation is the journal's, so it holds
+  every question ever asked about the run plus every proposal the run's own
+  watchdog made with nobody asking anything — a hundred entries is ordinary.
+  Opening the panel therefore put the reader at the oldest of them. It now
+  follows the way a phase's transcript does: stuck to the newest row, letting
+  go the moment the reader scrolls up to read, with a "Jump to latest" as the
+  way back. That rule is one module now rather than a well-tested copy in the
+  transcript and none in the monitor, which is how the panel came to be missing
+  three of its parts — including the one that survives a panel being expanded
+  to full page, where the portal hands the view a brand new list scrolled to
+  the top.
+
 - **Hitting the plan's session or weekly limit failed the node instead of
   waiting for the window to end.** `claude-code`'s refusal table recognised
   "usage limit reached" and nothing else, and the classifier's default is
