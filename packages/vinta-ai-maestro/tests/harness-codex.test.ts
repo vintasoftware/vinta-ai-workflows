@@ -389,7 +389,11 @@ describe('spawn refusal classification', () => {
  * event, so the prose is read here, matched, and dropped.
  */
 describe('a window that closes mid-turn', () => {
-  const now = new Date('2026-01-01T10:00:00')
+  // `Z`, like every other clock in this file. Without it the string is parsed
+  // in the *runner's* zone, and an absolute expectation beside it then asserts
+  // the author's offset rather than the parser's arithmetic — green on a
+  // machine at -03:00 and red on a UTC runner.
+  const now = new Date('2026-01-01T10:00:00.000Z')
 
   it('reads a failed turn, a stream error and an error item alike', () => {
     const prose = "You've hit your usage limit. Try again in 2 hours."
@@ -401,7 +405,7 @@ describe('a window that closes mid-turn', () => {
     ]) {
       const refused = turnRefusal(frame, now)
       expect(refused?.kind).toBe('quota')
-      expect(refused?.retryAfter?.toISOString()).toBe('2026-01-01T15:00:00.000Z')
+      expect(refused?.retryAfter?.toISOString()).toBe('2026-01-01T12:00:00.000Z')
     }
   })
 
