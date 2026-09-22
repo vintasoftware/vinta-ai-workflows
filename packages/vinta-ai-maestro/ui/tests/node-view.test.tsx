@@ -191,12 +191,31 @@ test('each of the five operations posts to its own endpoint with a body the daem
       target: { value: text },
     })
   }
-  const press = (op: string): void => {
-    fireEvent.click(container.querySelector(`[data-op="${op}"]`) as HTMLElement)
+  /**
+   * The next operation, pressed once the view can take one.
+   *
+   * Every control is `disabled={busy || …}`, and `busy` clears in the `finally`
+   * of the operation before it — when the *response* resolves. `stub.posts`
+   * records a request when it **arrives**, so waiting on it proves the server
+   * saw the last operation and says nothing about whether this view has
+   * finished with it. A press in that window lands on a disabled button and is
+   * dropped silently, and the wait that follows then times out on a post that
+   * was never sent: `expected [ … ] to have a length of 2 but got 1`, on the
+   * slowest runner in the matrix and nowhere else.
+   *
+   * Waiting on the control is waiting on the thing the press actually depends
+   * on, which is why this is the readiness check and not a longer timeout.
+   */
+  const pressControl = async (selector: string, root: HTMLElement = container): Promise<void> => {
+    await waitFor(() =>
+      expect((root.querySelector(selector) as HTMLButtonElement | null)?.disabled).toBe(false),
+    )
+    fireEvent.click(root.querySelector(selector) as HTMLElement)
   }
+  const press = (op: string): Promise<void> => pressControl(`[data-op="${op}"]`)
 
   type('check the invoice serializer')
-  press('context')
+  await press('context')
   await waitFor(() => expect(stub.posts).toHaveLength(1))
   expect(stub.posts[0]).toEqual({
     runId: RUN_ID,
@@ -206,7 +225,7 @@ test('each of the five operations posts to its own endpoint with a body the daem
   })
 
   type('drop the cache layer instead')
-  press('redirect')
+  await press('redirect')
   await waitFor(() => expect(stub.posts).toHaveLength(2))
   expect(stub.posts[1]).toEqual({
     runId: RUN_ID,
@@ -215,20 +234,22 @@ test('each of the five operations posts to its own endpoint with a body the daem
     body: { instruction: 'drop the cache layer instead' },
   })
 
-  press('pause')
+  await press('pause')
   await waitFor(() => expect(stub.posts).toHaveLength(3))
   expect(stub.posts[2]).toEqual({ runId: RUN_ID, nodeId: 'impl', operation: 'pause', body: {} })
 
-  press('abort')
+  await press('abort')
   await waitFor(() => expect(stub.posts).toHaveLength(4))
   expect(stub.posts[3]).toEqual({ runId: RUN_ID, nodeId: 'impl', operation: 'abort', body: {} })
 
   // The fifth is §9.1's answer, which only a parked node can be asked.
   const answering = open(stub, 'review')
   await waitFor(() => expect(answering.container.querySelector('[data-question]')).not.toBe(null))
-  fireEvent.click(
-    answering.container.querySelector('[data-answer="true"]') as HTMLElement,
-  )
+  // Its own view, so its `busy` starts false — but through the same readiness
+  // check as the four above, because "the button is enabled" is what every one
+  // of these presses needs and a second way of pressing is a second way to be
+  // wrong.
+  await pressControl('[data-answer="true"]', answering.container)
   await waitFor(() => expect(stub.posts).toHaveLength(5))
   expect(stub.posts[4]).toEqual({
     runId: RUN_ID,
