@@ -564,6 +564,29 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Notifications have an inbox, and are heard from every view.** The UI's
+  notifications used to be a row of banners in the top bar, shown only when
+  browser notifications were refused. They piled up there and could be read
+  only one at a time, by dismissing whichever was in front. Every notification
+  now lands in an inbox behind a bell with an unread count: newest first,
+  filterable by unread and by still-waiting pauses, marked read one at a time
+  or all at once, dismissed singly or cleared. A pause that gets answered stays
+  listed and says *Answered*. The inbox is kept in `localStorage` and shared by
+  every tab, so a reload no longer loses it. It stores what a notification
+  body already carries — a run id, a node id, a reason and the journal's
+  timestamp — and no question text, output or diff. Browser notifications also
+  reach the operator more often now. They used to fire only for the run open
+  on screen; the UI now follows every running run in the background, and a run
+  view takes over that run's stream instead of opening a second one. They also
+  depended on a permission prompt raised by the first pause, which Firefox and
+  Safari ignore when no click raised it, so on those browsers they could never
+  turn on. An *Enable notifications* button now sits in the top bar until the
+  browser has been asked (and in the inbox too), and confirms with one test
+  notification. It also says why the channel is off
+  when it is: blocked in the browser's site settings, or served over plain
+  HTTP on a remote `--host`, which browsers do not allow notifications from.
+  The reminder interval moved into the inbox.
+
 - **The run view's Nodes table names a lane by what distinguishes it.**
   Every lane in a run is named `${runId}-...`, so the column spelled them in
   full as `2026-09-11-graphql-aggregations-mubou9ar-crew-3-tier4` on every

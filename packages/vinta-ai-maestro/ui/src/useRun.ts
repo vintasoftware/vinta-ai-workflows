@@ -44,6 +44,7 @@ import type { Client, Stream } from './client.ts'
 import { notifier } from './notifications.ts'
 import { applyFrame, EMPTY_PROJECTION, type Projection } from './projection.ts'
 import { createPtyLink, type PtyLink } from './pty-link.ts'
+import { claimRun } from './watch.ts'
 
 const RECONNECT_MS = 300
 const CURSOR_KEY = 'vinta-ai-maestro:cursor:'
@@ -75,6 +76,9 @@ export function useRun(client: Client, runId: string): RunView {
     let opened = false
     let socket: Stream | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
+    // This view streams the run itself, so the app-wide watcher stands back
+    // until it unmounts — one socket per run, and the cursor handed over.
+    const release = claimRun(client, runId)
 
     const refresh = (): void => {
       client.snapshot(runId).then(
@@ -143,6 +147,7 @@ export function useRun(client: Client, runId: string): RunView {
       if (retry !== null) clearTimeout(retry)
       socket?.close()
       pty.closed()
+      release(cursor)
     }
   }, [client, runId, pty])
 

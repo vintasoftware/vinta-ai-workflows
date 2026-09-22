@@ -11,7 +11,7 @@
  * to be sure neither can happen.
  *
  * The chrome is the design system’s shell: one sticky bar — brand, the three
- * sections, the reminder control, the theme — and one bounded column under it.
+ * sections, the notification inbox, the theme — and one bounded column under it.
  * Nothing decorative; this is a tool, and the bar's whole job is to say where
  * you are and get out of the way.
  */
@@ -37,6 +37,7 @@ import { pageReplayClient, type ReplayClient } from './replay-client.ts'
 import { Run } from './Run.tsx'
 import { Runs } from './Runs.tsx'
 import { ThemeProvider, ThemeToggle } from './theme.tsx'
+import { useRunWatch } from './watch.ts'
 
 // A run id is one segment — `encodeURIComponent` guarantees it — so the node
 // route cannot be swallowed by the run route.
@@ -82,6 +83,8 @@ export function App({
   const workflowClient = useMemo(() => workflows ?? pageWorkflowClient(), [workflows])
   const replayClient = useMemo(() => replay ?? pageReplayClient(), [replay])
   const logsClient = useMemo(() => logs ?? pageLogsClient(), [logs])
+  // §9.1: a pause is announced whatever is on screen, not only on its run.
+  useRunWatch(client)
 
   useEffect(() => {
     const onHashChange = (): void => setRoute(routeOf(location.hash))
@@ -112,7 +115,7 @@ export function App({
             </AppNavLink>
           </AppNav>
           <AppTopbarActions>
-            {/* §9.1's browser channel: its opt-in, and its degrade when refused. */}
+            {/* §9.1's browser channel: the inbox, the opt-in and the reminders. */}
             <Notifications />
             <ThemeToggle />
           </AppTopbarActions>
