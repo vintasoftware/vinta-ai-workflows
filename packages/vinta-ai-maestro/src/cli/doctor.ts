@@ -14,10 +14,13 @@ import { laneRootFor } from './paths.ts'
 import { projectSpec } from './project.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 
-export const DOCTOR_USAGE = `usage: vinta-ai-maestro doctor <workflow.json> [--repo <dir>]
+export const DOCTOR_USAGE = `usage: vinta-ai-maestro doctor <workflow.json> [--repo <dir>] [--resume <run-id>]
 
-  --repo <dir>   The project checkout the lanes will be worktrees of.
-                 Defaults to the current directory.`
+  --repo <dir>     The project checkout the lanes will be worktrees of.
+                   Defaults to the current directory.
+  --resume <id>    Check the environment for \`run --resume <id>\` rather than
+                   for a fresh run: that run's own lanes are holding its phase
+                   branches on purpose, and are not leftovers to clear.`
 
 /**
  * Overrides merged into the assembled options — the injected binaries and disk
@@ -36,7 +39,7 @@ export async function doctorCommand(
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { repo: { type: 'string' } },
+      options: { repo: { type: 'string' }, resume: { type: 'string' } },
       allowPositionals: true,
     })
   } catch {
@@ -54,6 +57,7 @@ export async function doctorCommand(
   if (workflow === null) return FAILED
 
   const repoPath = resolve(parsed.values.repo ?? process.cwd())
+  const resumeRunId = parsed.values['resume']
   const report = await runDoctor({
     workflow,
     repoPath,
@@ -64,6 +68,7 @@ export async function doctorCommand(
     // by compose. A check nothing can reach is worse than an absent one: it
     // reads as a pass.
     project: projectSpec(workflow.project),
+    ...(resumeRunId === undefined ? {} : { resumeRunId }),
     ...overrides,
   })
 

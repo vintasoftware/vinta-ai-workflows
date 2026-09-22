@@ -54,6 +54,7 @@ import {
   type PtyHandle,
   type SpawnOutcome,
   type SpawnRefusalKind,
+  type TurnRefusal,
 } from './adapter.ts'
 import {
   type AgentPermission,
@@ -351,6 +352,34 @@ const reasonFor = (output: string): string => REFUSALS.reasonFor(output)
  */
 export const classifySpawnFailure = REFUSALS.classify
 
+/**
+ * A capacity refusal announced by a frame of a turn that had already started,
+ * or nothing.
+ *
+ * Its own function rather than part of `mapCliEvent` for the reason
+ * `failureEvent` exists: codex states a failure as prose, frequently a whole
+ * upstream JSON body, and only the classifier's fixed token may reach an event.
+ * So the prose is read here, matched, and dropped — what comes back is a kind,
+ * a token and a reset time.
+ *
+ * Every frame that carries failure prose is read, not only the terminal one: a
+ * window can close on a `turn.failed`, on a stream-level `error`, or on an
+ * error item inside the turn, and codex uses all three.
+ */
+export function turnRefusal(raw: unknown, now?: Date): TurnRefusal | undefined {
+  const value = asRecord(raw)
+  if (!value) return undefined
+  const prose =
+    value['type'] === 'turn.failed'
+      ? asString(asRecord(value['error'])?.['message'])
+      : value['type'] === 'error'
+        ? asString(value['message'])
+        : asRecord(value['item'])?.['type'] === 'error'
+          ? asString(asRecord(value['item'])?.['message'])
+          : undefined
+  return prose === undefined ? undefined : REFUSALS.capacity(prose, now)
+}
+
 // ---------------------------------------------------------------------------
 // Process plumbing
 // ---------------------------------------------------------------------------
@@ -361,6 +390,7 @@ class CodexSession implements AgentSession {
   #taken = false
   #ended = false
   #stopping = false
+  #refusal: TurnRefusal | undefined
 
   constructor(
     readonly id: string,
@@ -380,6 +410,26 @@ class CodexSession implements AgentSession {
         return this.#queue.iterate()
       },
     }
+  }
+
+
+  get refusal(): TurnRefusal | undefined {
+    return this.#refusal
+  }
+
+  /**
+   * The vendor's window closed under this turn (§6.1, `TurnRefusal`).
+   *
+   * Recorded for the caller and announced in the stream as one fixed token:
+   * without the stream line, the transcript of a turn that stopped for a
+   * window shows an unexplained error and a run that then waits for hours.
+   * First one wins — a limit announced twice is one closed window, and the
+   * first report is the one whose reset time was stated.
+   */
+  noteRefusal(refusal: TurnRefusal): void {
+    if (this.#ended || this.#refusal !== undefined) return
+    this.#refusal = refusal
+    this.#queue.push({ type: 'error', message: `codex refused mid-turn: ${refusal.reason}` })
   }
 
   /** One mapped event from the CLI. Terminal events close the stream exactly once. */
@@ -623,6 +673,11 @@ export class CodexAdapter implements HarnessAdapter {
 
       child.stdout?.on('data', (chunk: string) => {
         for (const frame of lines.push(chunk)) {
+          // Before the frame is mapped, because mapping it can end the session:
+          // `ingest` sees this frame's `session_ended` and closes the queue,
+          // after which `noteRefusal` is a no-op.
+          const refused = turnRefusal(frame)
+          if (refused !== undefined) session?.noteRefusal(refused)
           for (const event of mapCliEvent(frame)) {
             if (event.type === 'session_started') {
               if (session !== undefined) continue
@@ -653,7 +708,14 @@ export class CodexAdapter implements HarnessAdapter {
       })
 
       child.on('close', (code) => {
-        if (session !== undefined) return session.settleOnExit()
+        if (session !== undefined) {
+          // The other shape of the same event: the window is printed to stderr
+          // and the process exits without a terminal frame, so `diagnostics`
+          // is the only place that sentence exists.
+          const refused = REFUSALS.capacity(diagnostics)
+          if (refused !== undefined) session.noteRefusal(refused)
+          return session.settleOnExit()
+        }
         settle(classifySpawnFailure(diagnostics, code, task.nodeId, resumeContext(task)))
       })
     })

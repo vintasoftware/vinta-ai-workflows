@@ -28,6 +28,7 @@ import type {
   SpawnRefusalKind,
 } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
+import type { TurnRefusal } from '../src/harness/adapter.ts'
 import type { NodeStatus } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
@@ -231,6 +232,11 @@ function rig(
     /** Session ids this harness has forgotten (§15.4). */
     readonly staleSessions?: readonly string[]
     /**
+     * A window the vendor closes *inside* the first turn (§6.1's
+     * `TurnRefusal`), rather than refusing the spawn.
+     */
+    readonly midTurnRefusal?: TurnRefusal
+    /**
      * What a failed node does. Defaults to `stop` here; production defaults to
      * `retry`. `null` passes nothing, which is how one test exercises the real
      * default rather than the rig's.
@@ -276,6 +282,7 @@ function rig(
     ...(options.spawns === undefined ? {} : { spawns: options.spawns }),
     ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
     ...(options.staleSessions === undefined ? {} : { staleSessions: options.staleSessions }),
+    ...(options.midTurnRefusal === undefined ? {} : { midTurnRefusal: options.midTurnRefusal }),
   })
   const stall = stalling(adapter)
   const admission = new AdmissionControl({
@@ -773,6 +780,40 @@ describe('continuous DAG dispatch', () => {
 // ---------------------------------------------------------------------------
 
 describe('capacity', () => {
+  /**
+   * §6.1 for the refusal that arrives *after* the spawn succeeded: the plan
+   * window that closes while an agent is twenty minutes into a phase.
+   *
+   * Before this the turn was an ordinary failure. The node burnt its retries
+   * against a closed window and then failed, and every node downstream of it
+   * blocked — which is the exact outcome §6.1 exists to prevent, reached by the
+   * one path that did not go through admission control.
+   */
+  it('unwinds a node whose window closed mid-turn and re-drives it after the wait', async () => {
+    const r = rig(makeWorkflow([node('a')], { lanes: 1 }), {
+      midTurnRefusal: { kind: 'quota', reason: 'plan-limit-reached' },
+    })
+
+    const running = r.scheduler.run()
+    await flush()
+
+    // Waiting, not failed: the turn stopped because the vendor's window closed,
+    // and that is backpressure.
+    expect(r.scheduler.statuses).toEqual({ a: 'waiting_on_capacity' })
+    // And the lane went back *before* the wait. A lane held across a shared
+    // window starves the pool to do no work.
+    expect(r.pools.held('lane')).toBe(0)
+
+    await r.advance(5_000)
+    const report = await running
+
+    expect(report.status).toBe('completed')
+    expect(report.statuses).toEqual({ a: 'done' })
+    // Two spawns: the turn the window closed under, and the one after the wait.
+    expect(r.adapter.spawned).toHaveLength(2)
+    expectDrained(r)
+  })
+
   it('never exceeds capacity("lane"), and keeps it saturated', async () => {
     const nodes = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => node(id))
     // Sampling has to happen where the lane is held, which is inside an effect.

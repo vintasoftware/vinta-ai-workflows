@@ -27,6 +27,7 @@ import {
 import { runAdapterContract } from '../src/harness/contract.ts'
 import { commandInvocation } from '../src/platform/platform.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
+import { turnRefusal } from '../src/harness/claude-code.ts'
 import { type FakeCliSpec, fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
 
 const temps: string[] = []
@@ -397,6 +398,54 @@ describe('spawn refusal classification', () => {
     expect(kindOf('Credit balance is too low')).toBe('quota')
   })
 
+  /**
+   * The refusal that used to fail the node.
+   *
+   * None of these say "usage limit", so every one of them fell past the whole
+   * table to the default — `fatal`, which fails the node and blocks its
+   * subtree, for a window that ends by itself in a few hours. They are the
+   * plan's own windows and the same condition as `usage-window-exhausted`:
+   * park the harness until the stated reset, and the run continues.
+   */
+  it('calls a plan window quota, in each wording this CLI uses for one', () => {
+    expect(kindOf("You've hit your session limit. Your limit resets at 4pm.")).toBe('quota')
+    expect(kindOf('Session limit reached · resets 3am')).toBe('quota')
+    expect(kindOf('5-hour limit reached · resets 3pm')).toBe('quota')
+    expect(kindOf("You've reached your weekly limit. Your limit resets on Monday at 12am.")).toBe(
+      'quota',
+    )
+    expect(kindOf('Your limit resets at 15:00')).toBe('quota')
+  })
+
+  it('does not read a warning that a limit is near as a refusal', () => {
+    // "Approaching session limit" is the CLI saying it is still working. Read
+    // as a quota refusal it would park a healthy harness on a window that has
+    // not started.
+    expect(kindOf('Approaching session limit')).not.toBe('quota')
+  })
+
+  it('leaves a concurrent-session cap to the concurrency row', () => {
+    // The plan-limit pattern would match this sentence, and the kinds are not
+    // interchangeable: `concurrency` halves the AIMD ceiling and `quota` must
+    // not, because a plan window says nothing about how many may run at once.
+    expect(kindOf('concurrent session limit reached for this account')).toBe('concurrency')
+  })
+
+  it('carries the reset a plan window stated, so the wait ends when it does', () => {
+    const now = new Date('2026-01-01T10:00:00')
+    const refusal = classifySpawnFailure(
+      "You've hit your session limit · resets 4pm",
+      1,
+      'phase-1',
+      { now },
+    )
+
+    expect(refusal.kind).toBe('quota')
+    expect(refusal.retryAfter?.getHours()).toBe(16)
+    // And still nothing of what the vendor said (§11).
+    expect(refusal.message.toLowerCase().includes('session limit')).toBe(false)
+  })
+
   it('calls a rate limit a rate limit', () => {
     expect(kindOf('API Error: 429 rate_limit_error')).toBe('rate_limit')
     expect(kindOf('Too many requests, slow down')).toBe('rate_limit')
@@ -479,6 +528,59 @@ describe('spawn refusal classification', () => {
   })
 })
 
+/**
+ * §6.1's other half. A plan window can close while an agent is twenty minutes
+ * into a phase, and then there is no spawn to refuse — the session started, the
+ * turn ends, and what the node used to do was burn its retries against a closed
+ * window and fail, taking its dependent subtree with it.
+ *
+ * `mapResult` cannot answer this: it carries the `result` frame's *subtype* and
+ * drops its `result` string, because the string is agent output (§11) — and the
+ * sentence about the window is in the string. So `turnRefusal` reads the prose,
+ * matches it, and returns a kind, a fixed token and a reset.
+ */
+describe('a window that closes mid-turn', () => {
+  const now = new Date('2026-01-01T10:00:00')
+
+  it('reads the terminal frame as a capacity refusal, with its reset', () => {
+    const refused = turnRefusal(
+      {
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        result: "You've hit your session limit. Your limit resets at 4pm.",
+      },
+      now,
+    )
+
+    expect(refused?.kind).toBe('quota')
+    expect(refused?.reason).toBe('plan-limit-reached')
+    expect(refused?.retryAfter?.getHours()).toBe(16)
+  })
+
+  it('reports nothing for a turn that finished, or that failed on its own work', () => {
+    expect(turnRefusal({ type: 'result', subtype: 'success', result: 'done' }, now)).toBe(undefined)
+    expect(
+      turnRefusal({ type: 'result', is_error: true, result: 'the tests still fail' }, now),
+    ).toBe(undefined)
+    // Not a terminal frame at all.
+    expect(turnRefusal({ type: 'assistant', message: { content: [] } }, now)).toBe(undefined)
+    expect(turnRefusal('not a frame', now)).toBe(undefined)
+  })
+
+  it('reports nothing for a fatal signal: a broken harness is not a wait', () => {
+    // The kinds that are not waits must not come back from this. Parking on a
+    // logged-out CLI would stall the run for a window that never opens, and
+    // `stale_session` cannot happen to a session that is running.
+    expect(
+      turnRefusal(
+        { type: 'result', is_error: true, result: 'Invalid API key · Please run /login' },
+        now,
+      ),
+    ).toBe(undefined)
+  })
+})
+
 describe('reported reset times', () => {
   const now = new Date('2026-01-01T10:00:00.000Z')
 
@@ -503,6 +605,40 @@ describe('reported reset times', () => {
 
     const late = new Date('2026-01-01T16:00:00')
     expect(parseRetryAfter('Your limit will reset at 3pm', late)?.getDate()).toBe(2)
+  })
+
+  it('reads a 24-hour reset', () => {
+    const local = new Date('2026-01-01T10:00:00')
+    const at = parseRetryAfter('Your limit resets at 15:00', local)
+    expect(at?.getHours()).toBe(15)
+    expect(at?.getMinutes()).toBe(0)
+  })
+
+  it('reads the day a reset names, not just the hour', () => {
+    // The weekly window's phrasing. Resolved rather than dropped because its
+    // reset is six days out as often as one, and an unresolved reset falls
+    // back to a five-minute re-probe — two thousand of them across a week.
+    const local = new Date('2026-01-01T10:00:00')
+
+    const tomorrow = parseRetryAfter('Your limit resets tomorrow at 2am', local)
+    expect(tomorrow?.getDate()).toBe(2)
+    expect(tomorrow?.getHours()).toBe(2)
+
+    // 2026-01-01 is a Thursday, so Monday is the 5th.
+    const monday = parseRetryAfter('Your limit resets on Monday at 12am', local)
+    expect(monday?.getDay()).toBe(1)
+    expect(monday?.getDate()).toBe(5)
+    expect(monday?.getHours()).toBe(0)
+  })
+
+  it('reports nothing for a reset it cannot resolve, rather than a guess', () => {
+    // A month name with no year, and an hour that is as likely to be a version
+    // or a retry count as a time. Everything this returns becomes a wait, so
+    // the re-probe interval is the better answer than a confident wrong one.
+    expect(parseRetryAfter('Weekly limit reached · resets Nov 3 at 9am', now)).toBe(undefined)
+    expect(parseRetryAfter('reset 3', now)).toBe(undefined)
+    expect(parseRetryAfter('resets at 25:00', now)).toBe(undefined)
+    expect(parseRetryAfter('resets at 13pm', now)).toBe(undefined)
   })
 
   it('reports nothing when the vendor said nothing', () => {

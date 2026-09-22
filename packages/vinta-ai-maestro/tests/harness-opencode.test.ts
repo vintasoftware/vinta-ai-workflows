@@ -482,6 +482,47 @@ describe('server event mapping', () => {
     expect(map(mapper, idle())).toEqual([{ type: 'session_ended', result: 'error' }])
   })
 
+  /**
+   * §6.1's other half: the server's window closing under a running turn, which
+   * is a wait rather than a failed phase. Read from `data`, because that is
+   * where the sentence is — matched against the refusal table and dropped,
+   * never carried, which the assertion on the `error` event below re-checks.
+   */
+  it('reports a closed window as a capacity refusal, and still carries only the name', () => {
+    const mapper = new OpencodeEventMapper(SESSION)
+
+    const events = map(mapper, {
+      type: 'session.error',
+      properties: {
+        sessionID: SESSION,
+        error: {
+          name: 'ApiError',
+          data: { message: 'usage limit reached; resets at 2026-01-01T15:30:00Z' },
+        },
+      },
+    })
+
+    expect(events).toEqual([{ type: 'error', message: 'opencode session error: ApiError' }])
+    expect(mapper.refusal?.kind).toBe('quota')
+    expect(mapper.refusal?.retryAfter?.toISOString()).toBe('2026-01-01T15:30:00.000Z')
+  })
+
+  it('reports no refusal for a fatal error, which is not a wait', () => {
+    const mapper = new OpencodeEventMapper(SESSION)
+
+    map(mapper, {
+      type: 'session.error',
+      properties: {
+        sessionID: SESSION,
+        error: { name: 'ProviderAuthError', data: { message: 'unauthorized' } },
+      },
+    })
+
+    // `fatal` is not a wait: parking on a logged-out server would stall the run
+    // for a window that never opens.
+    expect(mapper.refusal).toBe(undefined)
+  })
+
   it('reports a message-level error once and only once', () => {
     const mapper = new OpencodeEventMapper(SESSION)
     const failed = {

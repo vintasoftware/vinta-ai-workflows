@@ -33,7 +33,8 @@ import type { StoredEvent } from '../journal/events.ts'
 import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { Journal } from '../journal/journal.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
-import { LaneEnvFileError, LanePool, LaneSetupError } from '../lanes/pool.ts'
+import { LaneAdoptError, LaneEnvFileError, LanePool, LaneSetupError } from '../lanes/pool.ts'
+import { errorKind, sanitize } from '../log/index.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
 import type { ResourcePools } from '../resources/pools.ts'
@@ -412,8 +413,43 @@ function conflictFixer(
 }
 
 /**
- * Why the pool refused. Byte counts and a path — never git's output, which
- * carries repository content (§11).
+ * How much of an unenumerated error's own message a refusal repeats. The bound
+ * `LaneSetupError` chose for a failing command's stderr, for its reason:
+ * enough to name a cause, not enough to become the log.
+ */
+const REFUSAL_DETAIL_CHARS = 500
+
+/**
+ * What an error says about itself, if anything, made safe to print.
+ *
+ * Through the log's own `sanitize`, so the sentence handed back is bounded and
+ * checked against the process's redaction set by exactly the rules the daemon
+ * log would apply to it afterwards — a refusal is printed to a terminal as well
+ * as logged, and a terminal has no sink to clean it on the way out.
+ */
+function detailOf(error: unknown): string | null {
+  const message = sanitize({ message: (error as { message?: unknown })?.message })['message']
+  if (typeof message !== 'string' || message.length === 0) return null
+  const bounded =
+    message.length <= REFUSAL_DETAIL_CHARS ? message : `${message.slice(0, REFUSAL_DETAIL_CHARS)}…`
+  return `${errorKind(error)}: ${bounded}`
+}
+
+/**
+ * Why the pool refused, in the one line the operator gets.
+ *
+ * Byte counts, paths, lane names — and, for an error this function does not
+ * enumerate, that error's own message, capped and redacted.
+ *
+ * That last part used to be excluded, on a §11 reading `LaneSetupError` had
+ * already revised for the same reason: §11 keeps repository *contents* out of
+ * the record — diffs, file bodies, gate output — and an error's own complaint
+ * about a lock file or a ref is not that. Excluded, a `git config` lock
+ * collision that made every resume of a `hooks: false` project impossible
+ * reached both the operator and `run.provision_failed` as "could not provision
+ * the lane pool under …", while the error itself had said `could not lock
+ * config file`. A line that names no cause can be read all afternoon without
+ * anything being learned from it.
  */
 export function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
   const lanes = workflow.resources['lane']?.capacity ?? 1
@@ -427,12 +463,23 @@ export function refusal(error: unknown, workflow: Workflow, laneRoot: string): s
   }
   // The pool's own errors already say which lane and what went wrong; a generic
   // line over the top of them is what made a failing `setup_cmd` take an
-  // afternoon to identify. Anything else stays generic, because anything else
-  // may be carrying repository content in its message.
-  if (error instanceof LaneSetupError || error instanceof LaneEnvFileError) {
+  // afternoon to identify. `LaneAdoptError` belongs here too: it names the
+  // directory and what is wrong with it, and prefixing it with a sentence about
+  // the pool buries the one decision the operator has to make.
+  if (
+    error instanceof LaneSetupError ||
+    error instanceof LaneEnvFileError ||
+    error instanceof LaneAdoptError
+  ) {
     return `vinta-ai-maestro: ${error.message}`
   }
-  return `vinta-ai-maestro: could not provision the lane pool under ${laneRoot}.`
+  // Everything else: the generic line, plus whatever the error itself said.
+  // Nothing means nothing — a thrown non-error carries no sentence to repeat,
+  // and inventing one would be worse than the generic line.
+  const detail = detailOf(error)
+  return detail === null
+    ? `vinta-ai-maestro: could not provision the lane pool under ${laneRoot}.`
+    : `vinta-ai-maestro: could not provision the lane pool under ${laneRoot} — ${detail}`
 }
 
 /**

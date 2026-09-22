@@ -165,6 +165,88 @@ describe('admission control', () => {
     })
   }
 
+  /**
+   * The same condition, arriving after the spawn succeeded (`TurnRefusal`).
+   *
+   * A plan window that closes mid-phase used to be an ordinary turn failure:
+   * the node burnt its retries against a closed window and then failed, and its
+   * dependent subtree blocked — the outcome §6.1 exists to prevent. It gets
+   * everything a refused spawn gets, because it is the same fact arriving
+   * later.
+   */
+  describe('a window that closed under a running turn', () => {
+    const closed = { kind: 'quota' as const, reason: 'plan-limit-reached' }
+
+    it('parks the harness until the stated reset and journals the wait', async () => {
+      const admission = control()
+      const resetAt = new Date(clock.now() + 3 * 60 * 60 * 1_000)
+
+      const outcome = admission.refusedMidTurn('mock', 'p1', { ...closed, retryAfter: resetAt })
+
+      expect(outcome.status).toBe('retry')
+      if (outcome.status !== 'retry') return
+      expect(outcome.kind).toBe('quota')
+      // The vendor's fact, not a guessed backoff.
+      expect(outcome.wakeAt).toBe(resetAt.getTime())
+      expect(admission.wakeAt('mock')).toBe(resetAt.getTime())
+      expect(statuses('p1')).toEqual(['waiting_on_capacity'])
+      expect(statuses('p1')).not.toContain('failed')
+
+      let woke = false
+      const waiting = outcome.wait().then(() => {
+        woke = true
+      })
+      await settle()
+      expect(woke).toBe(false)
+
+      clock.advance(resetAt.getTime() - clock.now())
+      await waiting
+      expect(woke).toBe(true)
+    })
+
+    it('makes every later node join that one wait instead of spawning', async () => {
+      // Why the harness is parked and not the node: fifty nodes behind this one
+      // must not each spend a spawn to be told what this turn already learned.
+      const adapter = new MockAdapter()
+      const admission = control()
+
+      admission.refusedMidTurn('mock', 'p1', closed)
+      const second = await admission.admit(adapter, task('p2'))
+
+      expect(second.status).toBe('retry')
+      expect(adapter.spawned).toHaveLength(0)
+      expect(statuses('p2')).toEqual(['waiting_on_capacity'])
+    })
+
+    it('leaves the ceiling alone for a quota, and halves it for a concurrency cap', () => {
+      // The AIMD rule does not change because the refusal arrived later: a plan
+      // window says nothing about how many agents may run at once, and a
+      // concurrency cap says exactly that.
+      const quota = control()
+      quota.refusedMidTurn('mock', 'p1', closed)
+      expect(quota.ceiling('mock')).toBe(4)
+
+      const concurrency = control()
+      concurrency.refusedMidTurn('mock', 'p1', {
+        kind: 'concurrency',
+        reason: 'account-concurrency-cap',
+      })
+      expect(concurrency.ceiling('mock')).toBe(2)
+    })
+
+    it('falls back to backoff when the vendor stated no reset', () => {
+      const admission = control()
+
+      const outcome = admission.refusedMidTurn('mock', 'p1', closed)
+
+      expect(outcome.status).toBe('retry')
+      if (outcome.status !== 'retry') return
+      // The re-probe interval rather than a wait with no end: a window with no
+      // stated reset is discovered by trying again.
+      expect(outcome.wakeAt).toBeGreaterThan(clock.now())
+    })
+  })
+
   it('fails a fatal refusal immediately, with no wait', async () => {
     const adapter = new MockAdapter({ spawns: ['fatal'] })
     const admission = control()

@@ -100,7 +100,7 @@ export function installCrashHandlers(options: CrashOptions): () => void {
       options.logger.error(`daemon.${event}`, {
         ...errorFields(error, options.detail),
         ...runs(options.inFlight),
-        ...frameFields(error),
+        ...stackFields(error),
       })
     } catch {
       // Nothing left to report it to.
@@ -165,8 +165,13 @@ function runs(inFlight: (() => readonly string[]) | undefined): Fields {
  * Numbered scalar fields rather than one joined string because `Field` admits
  * scalars only (`record.ts`) and a joined stack would be cut off by the field
  * cap at the second frame — which is the least useful place to cut a stack.
+ *
+ * Exported because a crash is not the only failure whose *location* is the
+ * whole question: a lane pool that throws leaves the operator a one-line
+ * refusal by design, and then the frames are the only record of where it came
+ * from.
  */
-function frameFields(error: unknown): Fields {
+export function stackFields(error: unknown): Fields {
   const out: Record<string, string> = {}
   for (const [index, frame] of frames(error).entries()) out[`stack_${index}`] = frame
   return out

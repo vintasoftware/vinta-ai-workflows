@@ -84,7 +84,7 @@ Every command runs against a project checkout — your project, not this one. `-
 
 | Command | What it does |
 |---|---|
-| `doctor <workflow.json> [--repo <dir>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. |
+| `doctor <workflow.json> [--repo <dir>] [--resume <run-id>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
 | `serve [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon and prints the URL to open. Its editor edits `<repo>/ai-plans/*.workflow.json`. |
 | `run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon *and* executes the workflow. Exits when the run ends. |

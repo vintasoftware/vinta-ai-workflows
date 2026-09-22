@@ -47,6 +47,7 @@ export {
 } from './logger.ts'
 export {
   installCrashHandlers,
+  stackFields,
   type CrashDetail,
   type CrashOptions,
   type CrashTarget,

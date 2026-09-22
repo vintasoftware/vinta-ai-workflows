@@ -45,6 +45,7 @@ import {
   type PtyHandle,
   type SpawnOutcome,
   type SpawnRefusalKind,
+  type TurnRefusal,
 } from './adapter.ts'
 import {
   CLAUDE_CODE_COMPACTION_ENV,
@@ -387,6 +388,31 @@ const SIGNATURES: readonly RefusalSignature[] = [
     pattern: /rate[ _-]?limit|too many requests|\b429\b/,
   },
   {
+    // The plan's own windows, which the row above does not describe and which
+    // this CLI announces in its own words: "You've hit your session limit",
+    // "Session limit reached · resets 3am", "5-hour limit reached",
+    // "You've reached your weekly limit". None of those say "usage limit", so
+    // every one of them fell past this whole table to the default — `fatal`,
+    // which fails the node and blocks its subtree for a window that ends by
+    // itself in a few hours. It is the same condition as
+    // `usage-window-exhausted` and gets the same kind; the reason token is
+    // separate so the log says which wording was seen.
+    //
+    // **Below `concurrency` and `rate_limit`, not above.** "concurrent session
+    // limit reached" is a concurrency signal that this pattern would otherwise
+    // swallow, and the two are not interchangeable: a concurrency refusal
+    // halves the AIMD ceiling and a quota refusal must not, because a plan
+    // window says nothing about how many agents may run at once.
+    //
+    // "approaching" is deliberately not matched. A warning that a limit is
+    // near is not a refusal, and reading it as one would park a harness that
+    // is still working.
+    kind: 'quota',
+    reason: 'plan-limit-reached',
+    pattern:
+      /(?:you|we)(?:'ve| have)? (?:hit|reached|used up) [^\n]{0,40}\blimit\b|\b(?:session|weekly|monthly|daily|\d+[- ]hour) limit\b[^\n]{0,24}?\b(?:reached|exceeded|resets?)\b|\byour limit (?:will )?resets?\b/,
+  },
+  {
     kind: 'transient',
     reason: 'upstream-unavailable',
     pattern:
@@ -402,6 +428,32 @@ const REFUSALS = classifier('claude-code', SIGNATURES)
  */
 export const classifySpawnFailure = REFUSALS.classify
 
+/**
+ * A capacity refusal announced by the terminal `result` frame of a turn that
+ * had already started, or nothing.
+ *
+ * Its own function because `mapResult` cannot answer it: that mapping carries
+ * the *subtype* and deliberately drops the `result` string, since the string
+ * is agent output (§11) — and the sentence about the window is in the string.
+ * So the prose is read here, matched against the table, and thrown away; what
+ * comes back is a kind, a fixed token and a reset time.
+ *
+ * The subtype is matched alongside it: a window that closes mid-turn is
+ * reported by some releases as prose and by others only as the subtype, and
+ * neither is worth missing.
+ */
+export function turnRefusal(raw: unknown, now?: Date): TurnRefusal | undefined {
+  const value = asRecord(raw)
+  if (!value || value['type'] !== 'result') return undefined
+  const subtype = asString(value['subtype'])
+  const failed = value['is_error'] === true || (subtype !== undefined && subtype !== 'success')
+  if (!failed) return undefined
+  const prose = [asString(value['result']), asString(value['error']), subtype]
+    .filter((part): part is string => part !== undefined)
+    .join(' ')
+  return REFUSALS.capacity(prose, now)
+}
+
 // ---------------------------------------------------------------------------
 // Process plumbing
 // ---------------------------------------------------------------------------
@@ -414,10 +466,34 @@ class ClaudeCodeSession implements AgentSession {
   #stopping = false
   /** An error was reported during this turn. See `ingest`. */
   #errored = false
+  #refusal: TurnRefusal | undefined
 
   constructor(readonly id: string, child: ChildProcess, queue: EventQueue) {
     this.#child = child
     this.#queue = queue
+  }
+
+  get refusal(): TurnRefusal | undefined {
+    return this.#refusal
+  }
+
+  /**
+   * The vendor's window closed under this turn (§6.1, `TurnRefusal`).
+   *
+   * Recorded for the caller *and* announced in the stream, as one fixed token.
+   * Without the stream line the transcript of a turn that stopped for a window
+   * shows an unexplained error and a run that then quietly waits for hours —
+   * the same unreadable record a bare "could not provision the lane pool" left
+   * behind, and the same fix: the token, never the prose.
+   *
+   * First one wins. A limit announced twice is one closed window, and the
+   * earlier report is the one whose reset time was stated.
+   */
+  noteRefusal(refusal: TurnRefusal): void {
+    if (this.#ended || this.#refusal !== undefined) return
+    this.#refusal = refusal
+    this.#errored = true
+    this.#queue.push({ type: 'error', message: `claude-code refused mid-turn: ${refusal.reason}` })
   }
 
   get events(): AsyncIterable<AgentEvent> {
@@ -867,6 +943,11 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
 
       child.stdout?.on('data', (chunk: string) => {
         for (const frame of lines.push(chunk)) {
+          // Before the frame is mapped, because mapping it ends the session:
+          // `ingest` sees the `session_ended` this same frame produces and
+          // closes the queue, after which `noteRefusal` is a no-op.
+          const refused = turnRefusal(frame)
+          if (refused !== undefined) session?.noteRefusal(refused)
           for (const event of mapCliEvent(frame)) {
             if (event.type === 'session_started') {
               if (session !== undefined) continue
@@ -898,7 +979,15 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       })
 
       child.on('close', (code) => {
-        if (session !== undefined) return session.settleOnExit()
+        if (session !== undefined) {
+          // The other shape of the same event: the CLI prints the window to
+          // stderr and exits without a terminal frame. `diagnostics` is the
+          // only place that sentence exists, and a turn that ends this way is
+          // otherwise indistinguishable from a crash.
+          const refused = REFUSALS.capacity(diagnostics)
+          if (refused !== undefined) session.noteRefusal(refused)
+          return session.settleOnExit()
+        }
         settle(classifySpawnFailure(diagnostics, code, task.nodeId, resumeContext(task)))
       })
     })

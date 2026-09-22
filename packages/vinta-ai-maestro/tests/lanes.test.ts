@@ -953,6 +953,44 @@ describe('lane pool', () => {
       expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\nPHASE=1\n')
     })
 
+    /**
+     * The resume that could not start at all.
+     *
+     * `#configureHooks` enables `extensions.worktreeConfig`, and that key is
+     * repository-wide: the write lands in the *shared* `.git/config`, which git
+     * takes `.git/config.lock` to edit. Four lanes provisioning concurrently
+     * are four writers of one file. A fresh provision never saw it, because
+     * `worktree add` goes through the pool's serialized git turn and staggered
+     * the lanes apart; `adopt` skips `worktree add`, so every lane arrived at
+     * the shared config in the same tick and the pool refused with
+     * "could not lock config file …: File exists" — on every resume of a
+     * project with `hooks: false`.
+     *
+     * Three lanes plus the integration worktree, which is the smallest pool
+     * that has more than one concurrent writer.
+     */
+    it('adopts every lane when the project disables hooks', async () => {
+      const project = { ...sqliteProject(), hooks: false }
+      const killed = await provision(project, 3)
+      const lane = await abandoned(killed)
+
+      const resumed = await provision(project, 3, { adopt: true })
+
+      expect(resumed.lanes).toHaveLength(3)
+      // The work the resume exists for, still there.
+      expect(existsSync(join(lane.path, 'deliverable.ts'))).toBe(true)
+      // The same four worktrees, and the hooks still pointed away per lane —
+      // `#configureHooks` runs on an adopted lane and has to be idempotent.
+      expect(worktreePaths(repo)).toHaveLength(5)
+      for (const adopted of resumed.lanes) {
+        const configured = execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+          cwd: adopted.path,
+          encoding: 'utf8',
+        }).trim()
+        expect(configured).toBe(join(adopted.path, '.git-hooks-disabled'))
+      }
+    })
+
     it('describes an adopted lane exactly as provisioning described it', async () => {
       // A `Lane` is derived from `(name, kind, index, project, repoPath)` and
       // discovered from nothing, which is the property that lets resume exist

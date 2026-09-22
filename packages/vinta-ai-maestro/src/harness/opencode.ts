@@ -56,6 +56,7 @@ import {
   type SpawnOutcome,
   type SpawnRefusal,
   type SpawnRefusalKind,
+  type TurnRefusal,
 } from './adapter.ts'
 import {
   EventQueue,
@@ -225,6 +226,7 @@ export class OpencodeEventMapper {
     }
   >()
   readonly #failed = new Set<string>()
+  #refusal: TurnRefusal | undefined
   #errored = false
 
   constructor(private readonly sessionId: string) {}
@@ -271,6 +273,12 @@ export class OpencodeEventMapper {
         // terminates the turn either way.
         if (properties['sessionID'] !== this.sessionId) return []
         this.#errored = true
+        // §6.1: the server's window can close under a running turn, and that is
+        // a wait rather than a failed phase. Read from `data`, which is where
+        // the sentence is — matched against the table and dropped, never
+        // carried, exactly as `#errorName` refuses to carry it.
+        const refused = REFUSALS.capacity(this.#errorProse(properties['error']))
+        if (refused !== undefined) this.#noteRefusal(refused)
         return [{ type: 'error', message: `opencode session error: ${this.#errorName(properties['error'])}` }]
       }
       case 'session.idle': {
@@ -322,6 +330,45 @@ export class OpencodeEventMapper {
   #errorName(error: unknown): string {
     // The name is a fixed status token. `data` holds vendor prose and stays out.
     return asString(asRecord(error)?.['name']) ?? 'unknown'
+  }
+
+  /**
+   * The vendor prose inside an error, for pattern matching only.
+   *
+   * `#errorName` keeps `data` out of every event and log line, and that rule
+   * stands: what comes back here is read against the refusal table and then
+   * dropped. `name` is included because the server states some conditions in
+   * the token alone.
+   *
+   * `JSON.stringify` rather than a walk of known fields: `data` has no fixed
+   * shape, the sentence appears under `message` in some releases and deeper in
+   * others, and a missed match here is a node that fails instead of waiting.
+   */
+  #errorProse(error: unknown): string {
+    const record = asRecord(error)
+    if (record === undefined) return ''
+    try {
+      return `${asString(record['name']) ?? ''} ${JSON.stringify(record['data'] ?? '')}`
+    } catch {
+      // A cyclic or unserializable payload is no reason to lose the token.
+      return asString(record['name']) ?? ''
+    }
+  }
+
+  get refusal(): TurnRefusal | undefined {
+    return this.#refusal
+  }
+
+  /**
+   * The server's window closed under this turn (§6.1, `TurnRefusal`).
+   *
+   * Recorded for the caller; the `error` event this sits beside already says
+   * something happened, so nothing extra is pushed into the stream. First one
+   * wins — a limit announced twice is one closed window, and the first report
+   * is the one whose reset time was stated.
+   */
+  #noteRefusal(refusal: TurnRefusal): void {
+    this.#refusal ??= refusal
   }
 
   #mapMessage(properties: Record<string, unknown>): AgentEvent[] {
@@ -786,6 +833,15 @@ class OpencodeSession implements AgentSession {
         return this.#queue.iterate()
       },
     }
+  }
+
+  /**
+   * §6.1's mid-turn window (`TurnRefusal`), held by the mapper because the
+   * mapper is what reads the server's errors. Delegated rather than copied, so
+   * there is one answer and not two that can disagree.
+   */
+  get refusal(): TurnRefusal | undefined {
+    return this.#mapper.refusal
   }
 
   #url(suffix: string): string {

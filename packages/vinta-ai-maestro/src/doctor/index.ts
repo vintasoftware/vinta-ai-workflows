@@ -26,7 +26,8 @@
  */
 import { execFile } from 'node:child_process'
 import { connect } from 'node:net'
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
@@ -79,6 +80,15 @@ export interface DoctorOptions {
   readonly perLaneBytes?: number
   /** Present when the project's databases are known; decides whether compose is needed. */
   readonly project?: ProjectSpec
+  /**
+   * The run a resume is about to pick up, when this is a resume's preflight.
+   *
+   * It changes one answer: a phase branch checked out in *this* run's own lane
+   * is not a leftover blocking the run, it is the work the resume exists to
+   * carry on. Absent — a fresh run, or `doctor` asked about one — every held
+   * phase branch is somebody else's, which is the only correct reading there.
+   */
+  readonly resumeRunId?: string
   readonly bins?: DoctorBins
 }
 
@@ -513,11 +523,21 @@ async function checkLaneSummary(summaryDir: string, name: string): Promise<Check
  * run's directory — which is not a thing the tool should ask of anyone.
  *
  * A `fail`: the run cannot cut the branches it needs.
+ *
+ * **Except on a resume, where the holder may be the run being resumed.** The
+ * integrator puts a lane on `plan/<id>/phase-<n>` for the duration of a phase,
+ * so a run killed mid-phase — the kill a resume is for — leaves its own lanes
+ * holding exactly these branches. Read as clashes they turn the preflight of
+ * every `run --resume` into a wall of failures whose remedy,
+ * `worktree remove --force`, destroys the uncommitted work the resume was
+ * about to adopt. `adopted` is how those are told apart.
  */
 async function checkHeldBranches(
   bin: string,
   repoPath: string,
   workflow: Workflow,
+  /** Branch → lane name, for lanes belonging to the run a resume will adopt. */
+  adopted: ReadonlyMap<string, string>,
 ): Promise<readonly CheckResult[]> {
   const probe = await probeCommand(bin, ['worktree', 'list', '--porcelain'], repoPath)
   // `checkWorktrees` already reports an unusable checkout; saying it twice adds
@@ -537,9 +557,17 @@ async function checkHeldBranches(
   }
 
   const wanted = workflow.nodes.map((node) => `plan/${workflow.id}/phase-${node.id}`)
-  const clashes = wanted.filter((branch) => held.has(branch))
+  const clashes = wanted.filter((branch) => held.has(branch) && !adopted.has(branch))
   if (clashes.length === 0) {
-    return [pass('branches', `phase branches: none held by another worktree`)]
+    const mine = wanted.filter((branch) => adopted.has(branch))
+    return [
+      pass(
+        'branches',
+        mine.length === 0
+          ? `phase branches: none held by another worktree`
+          : `phase branches: ${mine.length} held by this run’s own lanes, which the resume adopts`,
+      ),
+    ]
   }
 
   // One line per clash, each naming the directory to remove. A single summary
@@ -553,6 +581,68 @@ async function checkHeldBranches(
       `git -C ${repoPath} worktree remove --force ${held.get(branch) as string}`,
     ),
   )
+}
+
+/**
+ * The lane directories of the run a resume will adopt, by the branch each one
+ * currently holds.
+ *
+ * Read from the lane root outwards, never by matching the paths `git worktree
+ * list` prints against the ones this process builds — the trap `reap` and
+ * `LanePool` both document: git prints posix paths on every platform while Node
+ * hands back the platform's, so on Windows the comparison loses to drive-letter
+ * case, separators and 8.3 short names. Silently, and in the direction that
+ * calls every lane somebody else's — which here would restore the whole bug.
+ *
+ * Going this way round there is no second spelling to reconcile. The children of
+ * the lane root named for this run are the candidates, the filesystem confirms
+ * each is a linked worktree, and each is then asked which branch *it* holds.
+ *
+ * Whether such a lane can really be adopted is `LanePool`'s question and it
+ * asks more (a `wt/<name>` the worktree agrees about); a lane it rejects
+ * refuses the resume naming that lane and the reason. That is a better answer
+ * than this check telling the operator to force-remove the directory the resume
+ * exists to reuse, so a `<run-id>-*` lane is excluded here either way.
+ */
+async function adoptedLaneBranches(
+  bin: string,
+  poolRoot: string,
+  runId: string,
+): Promise<ReadonlyMap<string, string>> {
+  let entries: readonly string[]
+  try {
+    entries = await readdir(poolRoot)
+  } catch {
+    // No lane root is not a resume with no lanes to adopt — it is a resume whose
+    // lanes are gone, and then nothing it holds can be held by one.
+    return new Map()
+  }
+
+  const found = await Promise.all(
+    entries
+      .filter((name) => name.startsWith(`${runId}-`))
+      .map(async (name): Promise<readonly [string, string] | null> => {
+        const path = join(poolRoot, name)
+        // A linked worktree carries a `.git` **file** where an ordinary checkout
+        // has a directory. The filesystem is asked rather than git, for the
+        // reason `reap` gives: the lane root can sit inside the repository, and
+        // a plain subdirectory of it answers every git question perfectly well
+        // while being no lane at all.
+        const linked = await stat(join(path, '.git')).then(
+          (entry) => entry.isFile(),
+          () => false,
+        )
+        if (!linked) return null
+
+        // Asked of the worktree itself, so the answer needs no path compared.
+        // A detached HEAD holds no branch and blocks nothing.
+        const head = await probeCommand(bin, ['symbolic-ref', '--quiet', '--short', 'HEAD'], path)
+        const branch = head.output.trim()
+        return head.ok && branch !== '' ? [branch, name] : null
+      }),
+  )
+
+  return new Map(found.filter((entry): entry is readonly [string, string] => entry !== null))
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +749,20 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const summaryDir = options.summaryDir ?? `${repoPath}/.vinta-ai-workflows/worktrees`
   const laneCount = workflow.resources['lane']?.capacity ?? 1
 
+  // Resolving the resume's own lanes is part of this one check rather than a
+  // step before the others: the checks are independent and run concurrently,
+  // and a readdir plus a `symbolic-ref` per lane has no business delaying the
+  // harness probes.
+  const heldBranches = async (): Promise<readonly CheckResult[]> =>
+    checkHeldBranches(
+      gitBin,
+      repoPath,
+      workflow,
+      options.resumeRunId === undefined
+        ? new Map()
+        : await adoptedLaneBranches(gitBin, options.poolRoot, options.resumeRunId),
+    )
+
   const [harnesses, git, worktrees, compose, servers, disk, lanes, briefs, branches] =
     await Promise.all([
       Promise.all(
@@ -671,7 +775,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       checkDisk(options, laneCount),
       checkLaneSummaries(summaryDir),
       checkBriefs(gitBin, repoPath, workflow),
-      checkHeldBranches(gitBin, repoPath, workflow),
+      heldBranches(),
     ])
 
   const checks = [
