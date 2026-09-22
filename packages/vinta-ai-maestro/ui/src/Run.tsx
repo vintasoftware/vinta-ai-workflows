@@ -160,6 +160,20 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
   )
 }
 
+/**
+ * A lane name with the run's own id taken off the front.
+ *
+ * Every lane in a run is named `${runId}-...` (`run/host.ts` derives crew lane
+ * names, `lanes/pool.ts` the numbered ones), so on this table the prefix is
+ * identical on every row: width, and nothing else. What distinguishes the
+ * lanes is the tail — `crew-3-tier4`, `lane-2`, `integ`. The full name stays
+ * in `title`, because that is what the worktree directory and the branch are
+ * actually called.
+ */
+function laneLabel(lane: string, runId: string): string {
+  return lane.startsWith(`${runId}-`) ? lane.slice(runId.length + 1) : lane
+}
+
 function Nodes({
   runId,
   nodes,
@@ -200,19 +214,31 @@ function Nodes({
                 aria-current={node.nodeId === selected}
                 className="aria-[current=true]:bg-muted"
               >
-                <TableCell className="pl-4">
-                  <button
-                    type="button"
-                    className="link cursor-pointer font-medium text-primary underline-offset-4 hover:underline"
-                    onClick={() => onSelect(node.nodeId)}
-                  >
-                    {node.nodeId}
-                  </button>
-                  <span className="ml-2 text-muted-foreground">{node.name}</span>
+                <TableCell className="whitespace-normal pl-4">
+                  {/* A phase description is a sentence, and the cell is
+                      `whitespace-nowrap` by default — so left alone one node's
+                      name sets the width of the whole table. Bounded and
+                      wrapping, it costs a row a second line instead. */}
+                  <div className="max-w-md">
+                    <button
+                      type="button"
+                      className="link cursor-pointer font-medium text-primary underline-offset-4 hover:underline"
+                      onClick={() => onSelect(node.nodeId)}
+                    >
+                      {node.nodeId}
+                    </button>
+                    <span className="ml-2 text-muted-foreground">{node.name}</span>
+                  </div>
                 </TableCell>
                 <TableCell>{node.wave}</TableCell>
                 <TableCell className="font-mono text-xs">{node.harness}</TableCell>
-                <TableCell className="font-mono text-xs">{node.lane ?? '—'}</TableCell>
+                <TableCell className="font-mono text-xs">
+                  {node.lane === null ? (
+                    '—'
+                  ) : (
+                    <span title={node.lane}>{laneLabel(node.lane, runId)}</span>
+                  )}
+                </TableCell>
                 <TableCell>
                   <Chip tone={nodeTone(node.status)}>{nodeLabel(node.status)}</Chip>
                 </TableCell>

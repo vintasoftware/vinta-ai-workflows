@@ -379,3 +379,34 @@ test('a daemon that cannot serve the rollup does not stop the run view drawing',
   // And no error banner: the rollup is not what this screen is for.
   expect(container.querySelector('.error')).toBe(null)
 })
+
+test('the lane column drops the run id every lane name repeats', async () => {
+  // Lane names are `${runId}-...`, so spelled in full the column is the same
+  // prefix on every row — width the table has to scroll for, carrying nothing
+  // the operator can tell two lanes apart by.
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: {
+      [RUN_ID]: snapshot({
+        nodes: [
+          { ...node('impl', 'running'), lane: `${RUN_ID}-crew-3-tier4` },
+          { ...node('review', 'pending', 1), lane: null },
+        ],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('tr[data-node="impl"]')).not.toBe(null))
+
+  const cell = 'tr[data-node="impl"] td:nth-child(4)'
+  expect(textOf(container, cell)).toBe('crew-3-tier4')
+  // The full name is still there to read and to copy: it is what the worktree
+  // directory and the branch are called.
+  expect(container.querySelector(`${cell} span`)?.getAttribute('title')).toBe(
+    `${RUN_ID}-crew-3-tier4`,
+  )
+  // A node the scheduler has not placed yet still reads as having no lane.
+  expect(textOf(container, 'tr[data-node="review"] td:nth-child(4)')).toBe('—')
+})
