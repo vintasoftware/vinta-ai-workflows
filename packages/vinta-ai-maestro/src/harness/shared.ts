@@ -27,7 +27,14 @@ import {
   type Platform,
   spawnOptionsFor,
 } from '../platform/platform.ts'
-import type { AgentEvent, AgentTask, SpawnRefusal, SpawnRefusalKind } from './adapter.ts'
+import type {
+  AgentEvent,
+  AgentTask,
+  CapacityKind,
+  SpawnRefusal,
+  SpawnRefusalKind,
+  TurnRefusal,
+} from './adapter.ts'
 
 // ---------------------------------------------------------------------------
 // Framing
@@ -114,7 +121,31 @@ const RELATIVE_RESET = /(?:try again|retry|resets?)\s+(?:in|after)\s+([0-9a-z ]{
 const RELATIVE_UNIT = /(\d+)\s*(hours?|minutes?|seconds?|hrs?|mins?|secs?|h|m|s)\b/g
 const ISO_RESET = /(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z?)/
 const EPOCH_RESET = /"?(?:resets?_?at|reset_time|x-ratelimit-reset)"?\s*[:=]\s*"?(\d{10,13})"?/
-const HOUR_RESET = /reset(?:s|ting)?(?: at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/
+/**
+ * A wall-clock reset, with the day when a day was named.
+ *
+ * One vendor sentence rendered five ways — "resets 3am", "resets at 3:30 pm",
+ * "will reset at 15:00", "resets tomorrow at 2am", "resets on Monday at 12am"
+ * — so everything but the hour is optional. Group 1 is the day word, 2 the
+ * hour, 3 the minutes, 4 the meridiem.
+ *
+ * A date rather than a day ("resets Nov 3 at 9am") does not match, on purpose:
+ * a month name with no year is a guess, and a reset nobody can resolve is
+ * better left to the re-probe interval `AdmissionControl` caps a guessed
+ * backoff at than turned into a wait that is wrong by a year.
+ */
+const CLOCK_RESET =
+  /reset(?:s|ting)?(?:\s+(?:at|on))?\s+(?:(today|tomorrow|mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/
+
+const WEEKDAY: Readonly<Record<string, number>> = {
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
+}
 
 const UNIT_SECONDS: Record<string, number> = { h: 3_600, m: 60, s: 1 }
 
@@ -165,17 +196,62 @@ export function parseRetryAfter(raw: string, now: Date = new Date()): Date | und
     if (!Number.isNaN(at.getTime())) return at
   }
 
-  const hour = HOUR_RESET.exec(text)
-  if (hour?.[1] !== undefined && hour[3] !== undefined) {
-    const base = Number(hour[1]) % 12
-    const at = new Date(now)
-    at.setHours(hour[3] === 'pm' ? base + 12 : base, Number(hour[2] ?? 0), 0, 0)
-    // "resets at 3pm" said at 4pm means tomorrow's 3pm.
-    if (at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1)
+  const clock = CLOCK_RESET.exec(text)
+  if (clock !== null) return clockReset(clock, now)
+
+  return undefined
+}
+
+/**
+ * `CLOCK_RESET`'s match, resolved against `now` in the **local** zone.
+ *
+ * Local because local is the zone the vendor printed it in: the wording is
+ * "resets at 4pm (America/Sao_Paulo)" — the operator's own zone, on the
+ * operator's own machine, which is where this process is.
+ *
+ * An hour with neither minutes nor a meridiem is rejected rather than read as
+ * 24-hour: "reset 3" is as likely to be part of a version, an error code or a
+ * retry count, and everything this function returns becomes a wait.
+ */
+function clockReset(match: RegExpExecArray, now: Date): Date | undefined {
+  const [, day, rawHour, rawMinute, meridiem] = match
+  if (rawHour === undefined) return undefined
+  if (meridiem === undefined && rawMinute === undefined) return undefined
+
+  const hour = Number(rawHour)
+  if (meridiem === undefined ? hour > 23 : hour < 1 || hour > 12) return undefined
+
+  const at = new Date(now)
+  at.setHours(
+    meridiem === undefined ? hour : meridiem === 'pm' ? (hour % 12) + 12 : hour % 12,
+    Number(rawMinute ?? 0),
+    0,
+    0,
+  )
+
+  if (day === 'tomorrow') {
+    at.setDate(at.getDate() + 1)
     return at
   }
 
-  return undefined
+  const weekday = day === undefined || day === 'today' ? undefined : WEEKDAY[day]
+  if (weekday !== undefined) {
+    // The next occurrence of that weekday — today only while the hour is still
+    // ahead. This is the weekly window's phrasing, and its reset is six days
+    // out as often as it is one, which is the difference between one wait and
+    // two thousand re-probes.
+    const ahead = (weekday - at.getDay() + 7) % 7
+    at.setDate(at.getDate() + (ahead === 0 && at.getTime() <= now.getTime() ? 7 : ahead))
+    return at
+  }
+
+  // No day named: the next time that hour comes round, so "resets at 3pm" said
+  // at 4pm is tomorrow's 3pm. A day the vendor *did* name is taken literally
+  // even when it is already past — `AdmissionControl` clamps a reset in the
+  // past to now, which costs one re-probe and is the right answer to a
+  // sentence that contradicts itself.
+  if (day === undefined && at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1)
+  return at
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +300,17 @@ export interface RefusalClassifier {
   ): SpawnRefusal
   /** The fixed label for whatever the vendor said, safe to put in a message field. */
   reasonFor(output: string): string
+  /**
+   * The same prose as a *capacity* signal, for a turn that had already started.
+   *
+   * `undefined` for anything that is not one — including `fatal` and
+   * `stale_session`, which are the two kinds that are not waits: a turn that
+   * died of a broken harness is a failed turn, and a forgotten session cannot
+   * be forgotten by a session that is running. So this answers exactly one
+   * question, "did the vendor's window close under this turn", and the caller
+   * has nothing to re-derive from a kind it must not act on.
+   */
+  capacity(output: string, now?: Date): TurnRefusal | undefined
   /** Whether the named signature matches — how preflight recognizes a logged-out CLI. */
   matches(reason: string, output: string): boolean
 }
@@ -307,6 +394,19 @@ export function classifier(
     // Labels prose from a turn that already started, which by definition is not
     // a spawn refusing a session id — so the stale rows stay out of it.
     reasonFor: (output) => find(output, false)?.reason ?? 'unclassified',
+    capacity(output, now) {
+      // Same table, same first-match order, and the stale rows excluded for the
+      // same reason `reasonFor` excludes them.
+      const matched = find(output.toLowerCase(), false)
+      if (matched === undefined) return undefined
+      if (matched.kind === 'fatal' || matched.kind === 'stale_session') return undefined
+      const retryAfter = parseRetryAfter(output.toLowerCase(), now ?? new Date())
+      return {
+        kind: matched.kind as CapacityKind,
+        reason: matched.reason,
+        ...(retryAfter === undefined ? {} : { retryAfter }),
+      }
+    },
     matches: (reason, output) => {
       const signature = signatures.find((entry) => entry.reason === reason)
       return signature?.pattern.test(output.toLowerCase()) ?? false

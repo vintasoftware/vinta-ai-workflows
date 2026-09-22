@@ -2295,6 +2295,24 @@ export class Scheduler {
     }
     if (state.aborted) throw new Aborted()
 
+    // §6.1 for the window that closed *under* the turn rather than refusing it
+    // (`TurnRefusal`). Read after the stream, because that is when it is known,
+    // and after `Aborted`, because a run being torn down has nothing to wait
+    // for.
+    //
+    // The same `CapacityRetry` a refused spawn raises, which means the same
+    // full re-drive: the lane is recycled and §15's ledger cleared, because the
+    // session this turn was using is gone and resuming from a memory of files
+    // that a recycle removed is the one thing worse than redoing the work.
+    // Nothing is destroyed by that — `recycle` sets aside whatever the turn
+    // left uncommitted as a WIP ref first. What it costs is the turn, and the
+    // alternative was the node.
+    const closed = outcome.session.refusal
+    if (closed !== undefined) {
+      const parked = admission.refusedMidTurn(adapter.id, state.node.id, closed)
+      if (parked.status === 'retry') throw new CapacityRetry(parked.wait)
+    }
+
     // A fix round is a fixer turn, not a state called `fix`.
     if (params['role'] === 'fixer') state.fixRounds += 1
 

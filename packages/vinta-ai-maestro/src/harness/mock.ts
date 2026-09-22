@@ -30,6 +30,7 @@ import {
   type PtyHandle,
   type SpawnOutcome,
   type SpawnRefusalKind,
+  type TurnRefusal,
 } from './adapter.ts'
 import { openPty } from './pty.ts'
 
@@ -66,6 +67,22 @@ export interface MockAdapterOptions {
    * next, which is what a retry with a fresh session looks like from here.
    */
   readonly staleSessions?: readonly string[]
+  /**
+   * A window the vendor closes *inside* the turn (`TurnRefusal`), reported by
+   * the **first** session this adapter hands out and no other.
+   *
+   * One-shot for the same reason `spawns` describes the opening moves rather
+   * than the whole run: what a caller does with one of these is park, wait and
+   * re-drive, and a double that reported it forever could only ever exercise
+   * the first half of that before looping.
+   *
+   * Reported whatever the script says, because the script is what the *agent*
+   * did and this is what the vendor did to the turn. A real adapter sets the
+   * field only on a turn that did not complete (`adapter.ts`); a double whose
+   * script also had to end in error could not drive the caller's second,
+   * successful attempt.
+   */
+  readonly midTurnRefusal?: TurnRefusal
 }
 
 const DEFAULT_CAPABILITIES: HarnessCapabilities = {
@@ -128,14 +145,30 @@ class MockSession implements AgentSession {
   #injected: AgentEvent[] = []
   #state: 'running' | 'stopped' | 'ended' = 'running'
   #iteratorTaken = false
+  /** How the stream actually ended, which `#state` cannot say once it is `ended`. */
+  #result: 'ok' | 'error' | 'interrupted' | null = null
 
   constructor(
     readonly id: string,
     private readonly harness: string,
     private readonly capabilities: HarnessCapabilities,
     private readonly script: MockScript,
+    private readonly midTurnRefusal?: TurnRefusal,
   ) {
     this.#remaining = [...script.events]
+  }
+
+  /**
+   * Reported once the turn is over, never while it runs — the field's contract
+   * (`adapter.ts`), and the thing a caller that read it early would get wrong.
+   * An interrupted turn reports nothing: the operator stopped that turn, not a
+   * closed window, and unwinding it as a capacity wait would re-drive a node
+   * somebody had just taken over.
+   */
+  get refusal(): TurnRefusal | undefined {
+    return this.#result === null || this.#result === 'interrupted'
+      ? undefined
+      : this.midTurnRefusal
   }
 
   get events(): AsyncIterable<AgentEvent> {
@@ -162,6 +195,7 @@ class MockSession implements AgentSession {
       yield next
     }
     const result = this.#state === 'stopped' ? 'interrupted' : this.script.result
+    this.#result = result
     this.#state = 'ended'
     yield { type: 'session_ended', result }
   }
@@ -200,12 +234,15 @@ export class MockAdapter implements HarnessAdapter {
   readonly #stale: ReadonlySet<string>
   #forced: SpawnRefusalKind | null = null
   #sessions = 0
+  /** Handed to the first session and then spent. See `midTurnRefusal`. */
+  #midTurn: TurnRefusal | undefined
 
   constructor(private readonly options: MockAdapterOptions = {}) {
     this.id = options.id ?? 'mock'
     this.capabilities = { ...DEFAULT_CAPABILITIES, ...options.capabilities }
     this.#plan = [...(options.spawns ?? [])]
     this.#stale = new Set(options.staleSessions ?? [])
+    this.#midTurn = options.midTurnRefusal
   }
 
   /** Refuse the next spawn with this kind, whatever the plan says. */
@@ -248,7 +285,9 @@ export class MockAdapter implements HarnessAdapter {
       this.id,
       this.capabilities,
       this.options.script ?? DEFAULT_SCRIPT,
+      this.#midTurn,
     )
+    this.#midTurn = undefined
     if (task.operatorText !== undefined) session.deliverOperatorText(task.operatorText)
     return { ok: true, session }
   }

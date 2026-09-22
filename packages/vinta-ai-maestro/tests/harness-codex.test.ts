@@ -31,6 +31,7 @@ import {
 import { CodexAdapter, classifySpawnFailure, mapCliEvent } from '../src/harness/codex.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
 import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
+import { turnRefusal } from '../src/harness/codex.ts'
 import { type FakeCliSpec, fakeCli } from './support/fake-cli.ts'
 
 const temps: string[] = []
@@ -378,6 +379,46 @@ describe('spawn refusal classification', () => {
     })
     expect(refusal.kind).toBe('fatal')
     expect(refusal.retryAfter).toBe(undefined)
+  })
+})
+
+/**
+ * §6.1's other half: the window that closes while a turn is running, where
+ * there is no spawn left to refuse. Codex states a failure as prose — often a
+ * whole upstream JSON body — and only the classifier's fixed token may reach an
+ * event, so the prose is read here, matched, and dropped.
+ */
+describe('a window that closes mid-turn', () => {
+  const now = new Date('2026-01-01T10:00:00')
+
+  it('reads a failed turn, a stream error and an error item alike', () => {
+    const prose = "You've hit your usage limit. Try again in 2 hours."
+
+    for (const frame of [
+      { type: 'turn.failed', error: { message: prose } },
+      { type: 'error', message: prose },
+      { type: 'item.completed', item: { type: 'error', message: prose } },
+    ]) {
+      const refused = turnRefusal(frame, now)
+      expect(refused?.kind).toBe('quota')
+      expect(refused?.retryAfter?.toISOString()).toBe('2026-01-01T15:00:00.000Z')
+    }
+  })
+
+  it('reports nothing for a turn that completed, or that failed on its own work', () => {
+    expect(turnRefusal({ type: 'turn.completed', usage: {} }, now)).toBe(undefined)
+    expect(turnRefusal({ type: 'turn.failed', error: { message: 'the tests fail' } }, now)).toBe(
+      undefined,
+    )
+    expect(turnRefusal({ type: 'item.completed', item: { type: 'agent_message' } }, now)).toBe(
+      undefined,
+    )
+  })
+
+  it('reports nothing for a fatal signal: a broken harness is not a wait', () => {
+    expect(turnRefusal({ type: 'error', message: 'not logged in; run codex login' }, now)).toBe(
+      undefined,
+    )
   })
 })
 

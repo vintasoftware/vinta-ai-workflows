@@ -736,6 +736,73 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Hitting the plan's session or weekly limit failed the node instead of
+  waiting for the window to end.** `claude-code`'s refusal table recognised
+  "usage limit reached" and nothing else, and the classifier's default is
+  `fatal` — correctly, since an unrecognised failure must not become an
+  unbounded wait. But the CLI announces a plan window in its own words:
+  "You've hit your session limit", "Session limit reached · resets 3am",
+  "5-hour limit reached", "You've reached your weekly limit". None of those
+  contain "usage limit", so every one of them fell past the table to `fatal`,
+  which fails the node and blocks its whole dependent subtree — for a window
+  that ends by itself in a few hours. The machinery to do the right thing was
+  already there and simply never reached: a `quota` refusal parks the harness,
+  not the node, so every later node joins one wait instead of discovering the
+  limit for itself; the wake time is journalled and survives a daemon restart;
+  and the AIMD ceiling is left alone, because a plan window says nothing about
+  how many agents may run at once. Those wordings are now `quota`. The new row
+  sits *below* `concurrency` and `rate_limit` so that "concurrent session limit
+  reached" keeps the kind that halves the ceiling, and "approaching session
+  limit" — a warning from a harness that is still working — matches nothing.
+
+- **A window that closed *under* a running turn was an ordinary turn failure.**
+  §6.1 is written about a spawn, because that is where a vendor usually says
+  "not right now" — and everything that follows from it, parking the harness so
+  every later node joins one wait, journalling the wake time so a daemon
+  restart does not forget it, leaving the AIMD ceiling alone for a window that
+  says nothing about concurrency, hung off `admit`. So the other arrival of the
+  same fact had none of it: a plan window that closes while an agent is twenty
+  minutes into a phase ends the turn, and the node then burnt its retries
+  against a closed window and failed, blocking its whole dependent subtree —
+  the exact outcome §6.1 exists to prevent, reached by the one path that did not
+  go through admission control. A session now reports a `TurnRefusal`, and the
+  caller answers it with the `CapacityRetry` a refused spawn raises: the lane
+  goes back, the harness parks until the stated reset, and the node re-drives
+  when the window opens.
+
+  Each adapter reads it where its own failure prose is, which is not where its
+  events are: `claude-code`'s terminal `result` frame carries the sentence in
+  the `result` string that `mapResult` deliberately drops (it is agent output,
+  §11), `codex` states a failure as prose on three different frames, and
+  `opencode`'s `session.error` carries it under `data`, which `#errorName`
+  refuses to put in an event. All three read that prose, match it against the
+  table they already had, and drop it — what reaches the caller is a kind, a
+  fixed reason token and a reset time, and what reaches the transcript is one
+  token-only line so the record says why the turn stopped. The stderr-and-exit
+  shape of the same event is read too, from the diagnostics buffer that is the
+  only place that sentence exists.
+
+  The re-drive is a full one, and that is deliberate: the session the turn was
+  using is gone, and resuming from a memory of files a recycle has removed is
+  worse than redoing the work. Nothing is destroyed by it — `recycle` sets
+  aside whatever the turn left uncommitted as a WIP ref first. What it costs is
+  the turn. What it used to cost was the node.
+
+- **A stated reset time was only read when it was an hour on the same day.**
+  `parseRetryAfter` prefers a reset the vendor reported over a guessed backoff,
+  and its wall-clock pattern wanted `am`/`pm` immediately after "reset", so
+  "resets at 15:00", "resets tomorrow at 2am" and the weekly window's "resets
+  on Monday at 12am" all reported nothing — falling back to the five-minute
+  re-probe interval, which across a week-long window is two thousand spawns to
+  discover what the first sentence said. It now reads 24-hour times, `today`,
+  `tomorrow` and a named weekday (the next occurrence of it, which is today
+  only while the hour is still ahead). A reset named by date, "resets Nov 3 at
+  9am", still reports nothing on purpose: a month with no year is a guess, and
+  the re-probe is a better answer than a wait that is wrong by a year. So are
+  "reset 3", "resets at 25:00" and "resets at 13pm" — an hour with neither
+  minutes nor a meridiem is as likely to be a version or a retry count, and
+  everything this function returns becomes a wait.
+
 - **`run --resume` could not provision a pool at all on a project that
   disables hooks.** `#configureHooks` enables `extensions.worktreeConfig`
   before it can set `core.hooksPath --worktree`, and that first key is

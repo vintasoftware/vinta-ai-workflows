@@ -250,6 +250,28 @@ export interface AgentSession {
   interrupt(): Promise<void>
   /** Idempotent: killing an already-dead session resolves and changes nothing. */
   kill(): Promise<void>
+  /**
+   * Set when this turn ended because the vendor's window closed under it
+   * (`TurnRefusal`), and read *after* the stream has finished.
+   *
+   * A getter rather than an event, for two reasons. The transcript is JSON on
+   * disk, and a `Date` that round-trips as a string is a type that lies on
+   * replay. And the caller's answer to this is to unwind the node and park the
+   * harness — a decision about the turn as a whole, taken once the turn is
+   * over, not a thing that happens at a point in the stream. The adapter still
+   * puts a fixed-token `error` event in the stream so the transcript says why
+   * the turn stopped.
+   *
+   * **An adapter sets it only when the turn did not complete.** The caller
+   * acts on it unconditionally, because a window that closed is a window that
+   * closed; reporting one on a turn that finished its work would throw that
+   * work away.
+   *
+   * Optional on the interface so an out-of-tree adapter or a double is not
+   * forced to carry a field it never sets — absent reads as "no refusal", the
+   * behaviour every adapter had before this existed.
+   */
+  readonly refusal?: TurnRefusal | undefined
 }
 
 /**
@@ -337,6 +359,38 @@ export type SpawnRefusalKind =
    */
   | 'stale_session'
   | 'fatal'
+
+/**
+ * The refusal kinds that mean "wait", which is every kind but the two that do
+ * not come back on their own.
+ *
+ * `AdmissionControl` names the same set `CapacityRefusalKind`; it is spelled
+ * here too because a *session* reports one now, and the harness boundary may
+ * not import from the module that consumes it.
+ */
+export type CapacityKind = Exclude<SpawnRefusalKind, 'fatal' | 'stale_session'>
+
+/**
+ * A capacity refusal the vendor announced **inside a turn that had already
+ * started** — the plan window that closes while an agent is twenty minutes
+ * into a phase, rather than one that refuses the spawn.
+ *
+ * It is the same condition as a `SpawnRefusal` of a capacity kind and gets the
+ * same answer: park the harness until the reset, unwind the node, let every
+ * other node for that harness join the one wait. What it is *not* is a spawn
+ * outcome — the session started, so there was nothing to return a refusal
+ * from, and the fact has to reach the caller some other way. That way is
+ * `AgentSession.refusal`.
+ *
+ * `reason` is the adapter's fixed token, exactly as on `SpawnRefusal`: vendor
+ * prose is read to be matched against a pattern and never carried (§11).
+ */
+export interface TurnRefusal {
+  readonly kind: CapacityKind
+  readonly reason: string
+  /** A reset the vendor actually stated. Preferred over guessed backoff. */
+  readonly retryAfter?: Date
+}
 
 export interface SpawnRefusal {
   readonly ok: false

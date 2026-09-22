@@ -51,7 +51,13 @@
  * messages come from the adapter, which is bound by the same rule; everything
  * this module adds is a run, node or harness identifier.
  */
-import type { AgentSession, AgentTask, HarnessAdapter, SpawnRefusalKind } from '../harness/adapter.ts'
+import type {
+  AgentSession,
+  AgentTask,
+  HarnessAdapter,
+  SpawnRefusalKind,
+  TurnRefusal,
+} from '../harness/adapter.ts'
 import type { Journal } from '../journal/journal.ts'
 import { type Clock, systemClock } from './clock.ts'
 import { CapacityWaitLog } from './waits.ts'
@@ -220,13 +226,13 @@ export class AdmissionControl {
 
     // The harness is already parked: park this node too rather than spending a
     // spawn to be told the same thing again.
-    if (this.#parked(state)) return this.#retry(state, task)
+    if (this.#parked(state)) return this.#retry(state, task.nodeId)
 
     await this.#acquireSlot(state)
     // Another node may have been refused while we queued for the slot.
     if (this.#parked(state)) {
       this.#releaseSlot(state)
-      return this.#retry(state, task)
+      return this.#retry(state, task.nodeId)
     }
 
     const outcome = await adapter.spawn(task)
@@ -256,7 +262,35 @@ export class AdmissionControl {
     }
 
     this.#park(adapter.id, state, outcome.kind, outcome.retryAfter)
-    return this.#retry(state, task)
+    return this.#retry(state, task.nodeId)
+  }
+
+  /**
+   * A capacity refusal the vendor announced *inside* a turn that had already
+   * started (`TurnRefusal`), parked exactly as a refused spawn is.
+   *
+   * §6.1 is written about a spawn because that is where a vendor usually says
+   * "not right now". It is the same condition either way: a plan window that
+   * closes twenty minutes into a phase has not broken anything, it has ended
+   * the turn, and the answer is the one this module already implements — park
+   * the *harness*, so the fifty nodes behind it join one wait instead of each
+   * spending a spawn to be told the same thing, and journal the wake time so a
+   * daemon restart does not forget it.
+   *
+   * Without this the turn was an ordinary failure: the node burnt its retries
+   * against a closed window and then failed, taking its dependent subtree with
+   * it, which is precisely the outcome §6.1 exists to prevent.
+   *
+   * Not `admit`'s business, and deliberately a separate entry point: nothing
+   * was spawned, so there is no slot to release and no AIMD signal to read
+   * about a ceiling that was never tested. What it shares with `admit` is
+   * everything after the refusal — the same `#park`, the same wait, the same
+   * `waiting_on_capacity` row.
+   */
+  refusedMidTurn(harness: string, nodeId: string, refusal: TurnRefusal): AdmissionOutcome {
+    const state = this.#state(harness)
+    this.#park(harness, state, refusal.kind, refusal.retryAfter)
+    return this.#retry(state, nodeId)
   }
 
   /** The effective ceiling — the discovered one, not the configured one. */
@@ -281,12 +315,12 @@ export class AdmissionControl {
   }
 
   /** Journals the node as waiting and hands back the deferred wait. */
-  #retry(state: HarnessState, task: AgentTask): AdmissionOutcome {
+  #retry(state: HarnessState, nodeId: string): AdmissionOutcome {
     // `waiting_on_capacity`, not an error: the UI renders it as a wait, and the
     // run is not failing.
     this.#options.journal.append({
       runId: this.#options.runId,
-      nodeId: task.nodeId,
+      nodeId,
       type: 'node_status',
       payload: { status: 'waiting_on_capacity' },
     })
