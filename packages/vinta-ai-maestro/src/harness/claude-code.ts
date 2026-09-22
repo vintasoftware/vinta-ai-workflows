@@ -202,7 +202,14 @@ const mapResult = (value: Record<string, unknown>): AgentEvent[] => {
   if (failed) {
     // The vendor's `result` string is agent output; the subtype is a fixed
     // status token. Only the token is safe to put in an error field.
-    events.push({ type: 'error', message: `claude-code result: ${subtype ?? 'error'}` })
+    //
+    // `is_error: true` beside `subtype: "success"` is how the CLI reports a
+    // turn it ended itself — a plan limit, for one: the subtype says the loop
+    // finished, the flag says the turn did not. Printing the subtype alone
+    // wrote `claude-code result: success` into the record as a failure reason,
+    // 189 times in one observed run, which reads as nothing having gone wrong.
+    const status = subtype === undefined || subtype === 'success' ? 'is_error' : subtype
+    events.push({ type: 'error', message: `claude-code result: ${status}` })
   }
   events.push({ type: 'session_ended', result: failed ? 'error' : 'ok' })
   return events

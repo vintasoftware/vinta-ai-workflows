@@ -790,6 +790,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failed Claude Code turn no longer reads as `claude-code result:
+  success`.** When the CLI ends a turn with `is_error: true` beside
+  `subtype: "success"` (how a plan limit arrives, for one), the recorded
+  error printed the subtype and said "success" — 189 times in one observed
+  run. It now reads `claude-code result: is_error`. Other subtypes
+  (`error_max_turns`, …) are unchanged.
+
 - **The monitor's conversation was mostly unformatted JSON.** Not its answers —
   its *watchdog's*. An intervention turn must reply with one document matching
   `intervention.v1.schema.json`, which is what makes the monitor's authority

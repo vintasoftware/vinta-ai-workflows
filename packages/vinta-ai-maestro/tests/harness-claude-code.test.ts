@@ -324,6 +324,19 @@ describe('CLI frame mapping', () => {
     ])
   })
 
+  it('never reports a failed turn as "success"', () => {
+    const events = mapCliEvent({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      result: "You've hit your session limit · resets 2pm",
+    })
+    expect(events).toEqual([
+      { type: 'error', message: 'claude-code result: is_error' },
+      { type: 'session_ended', result: 'error' },
+    ])
+  })
+
   it('maps a permission control request', () => {
     expect(
       mapCliEvent({
