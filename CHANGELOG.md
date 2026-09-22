@@ -564,6 +564,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The run view's Nodes table names a lane by what distinguishes it.**
+  Every lane in a run is named `${runId}-...`, so the column spelled them in
+  full as `2026-09-11-graphql-aggregations-mubou9ar-crew-3-tier4` on every
+  row, phase after phase — the same forty characters of prefix repeated down
+  the table, wide enough to push the whole table into a horizontal scroll for
+  the sake of a string that was identical everywhere it appeared. The cell now
+  shows the tail that actually differs (`crew-3-tier4`, `lane-2`, `integ`) and
+  keeps the full name in its `title`, because that is what the worktree
+  directory and the branch are called. The phase description beside the node
+  id is bounded and wraps for the same reason — table cells are
+  `whitespace-nowrap`, so one long phase name was setting the width of the
+  whole table.
+
 - **A dispatched phase agent does the work itself, instead of spawning an
   implementer under it.** claude-code sessions run by the orchestrator were
   handing their phase to a sub-agent and reporting its summary back, and the
