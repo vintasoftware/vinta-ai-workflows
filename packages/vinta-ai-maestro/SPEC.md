@@ -506,7 +506,7 @@ React + Vite, served by the daemon at `127.0.0.1` behind a random per-run token 
 
 The run view and the workflow editor are **the same component in two modes**, which is what keeps them from drifting into two different pictures of the same graph.
 
-Notification permission is requested on first run, not on page load, and the UI degrades to an in-page banner when it is refused — the OS-notification channel from the daemon is unaffected either way.
+Notification permission is requested on first run, not on page load, and from an explicit opt-in in the notification inbox, because some browsers only honour a prompt a click raised. Every notification also lands in that inbox — durable in the browser, shared across tabs, read and cleared by the operator — which is what the UI degrades to when permission is refused. The UI listens to every running run for this, not only the one on screen. The OS-notification channel from the daemon is unaffected either way.
 
 Transport: HTTP for commands and snapshots, one WebSocket for the event stream and PTY bytes. The UI holds no authoritative state — it renders a projection of the journal, so a reload mid-run is free and two browsers can watch the same run.
 

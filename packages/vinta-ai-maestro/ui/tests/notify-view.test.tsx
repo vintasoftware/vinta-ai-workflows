@@ -5,10 +5,11 @@
  * proves is the wiring the operator depends on: that a pause journalled by the
  * daemon and pushed down the run's stream reaches the notification API of the
  * page watching it, that the page had not asked for permission before there
- * was something to say, and that a refusal turns into something visible on
- * screen instead of silence.
+ * was something to say, that a refusal turns into something visible on
+ * screen instead of silence, and that a run is heard from whichever view is
+ * open — not only from its own.
  */
-import { cleanup, waitFor, type RenderResult } from '@testing-library/react'
+import { cleanup, fireEvent, waitFor, type RenderResult } from '@testing-library/react'
 import { afterEach, expect, test } from 'vitest'
 import { notifier } from '../src/notifications.ts'
 import {
@@ -83,15 +84,25 @@ test('a node entering awaiting_human notifies the browser, and the notification 
   expect(location.hash).toBe(`#/runs/${RUN_ID}/nodes/impl`)
 })
 
+/** The inbox is a sheet, portalled out of the app's container into the body. */
+async function openInbox(): Promise<HTMLElement> {
+  const bell = view?.container.querySelector('[data-op="inbox"]') as HTMLButtonElement
+  fireEvent.click(bell)
+  return await waitFor(() => {
+    const sheet = document.querySelector('[data-inbox]')
+    expect(sheet).not.toBeNull()
+    return sheet as HTMLElement
+  })
+}
+
 test('a refused permission puts the same words in the page instead', async () => {
   installNotifications('default', 'denied')
   const stub = await watching()
 
   stub.emit(PAUSE, PARKED)
+  // The bell counts it, so it is visible whatever the operator is looking at.
   await waitFor(() =>
-    expect(view?.container.querySelector('[data-banner]')?.textContent).toContain(
-      'node impl: waiting for the operator',
-    ),
+    expect(view?.container.querySelector('[data-unread]')?.textContent).toBe('1'),
   )
 
   // The OS channel is the daemon's and is unaffected; this one said nothing to
@@ -99,11 +110,86 @@ test('a refused permission puts the same words in the page instead', async () =>
   expect(FakeNotification.shown).toHaveLength(0)
   expect(view?.container.querySelector('[data-notifications]')).not.toBeNull()
 
-  // And the banner is dismissible, because an operator who has read it should
-  // not have to keep reading it.
-  const dismiss = view?.container.querySelector('[data-banner] [data-op="dismiss"]')
-  ;(dismiss as HTMLButtonElement).click()
-  await waitFor(() => expect(view?.container.querySelector('[data-banner]')).toBeNull())
+  const sheet = await openInbox()
+  const entry = sheet.querySelector(`[data-entry="${RUN_ID}|impl|e-ask"]`)
+  expect(entry?.textContent).toContain('node impl: waiting for the operator')
+  expect(entry?.textContent).toContain('Waiting for you')
+  expect(entry?.textContent).not.toContain('invoice')
+  // And the sheet says why nothing reached the desktop.
+  expect(sheet.querySelector('[data-channel="denied"]')).not.toBeNull()
+})
+
+test('notifications accumulate in the inbox, and none has to be dismissed to see another', async () => {
+  installNotifications('granted')
+  const stub = await watching()
+
+  stub.emit(
+    PAUSE,
+    { nodeId: 'impl', type: 'gate_result', payload: { gate: 'unit', exit_code: 1, status: 'failed' } },
+    { nodeId: null, type: 'run_ended', payload: { status: 'failed' } },
+  )
+  await waitFor(() =>
+    expect(view?.container.querySelector('[data-unread]')?.textContent).toBe('3'),
+  )
+
+  const sheet = await openInbox()
+  expect([...sheet.querySelectorAll('[data-entry]')].map((row) => row.querySelector('a')?.textContent)).toEqual([
+    `run ${RUN_ID}: run finished`,
+    'node impl: gate failed',
+    'node impl: waiting for the operator',
+  ])
+
+  fireEvent.click(sheet.querySelector('[data-filter="waiting"]') as HTMLButtonElement)
+  await waitFor(() => expect(sheet.querySelectorAll('[data-entry]')).toHaveLength(1))
+
+  fireEvent.click(sheet.querySelector('[data-filter="all"]') as HTMLButtonElement)
+  fireEvent.click(sheet.querySelector('[data-op="read-all"]') as HTMLButtonElement)
+  await waitFor(() => expect(view?.container.querySelector('[data-unread]')).toBeNull())
+  expect(sheet.querySelectorAll('[data-entry]')).toHaveLength(3)
+
+  // Dismissing one leaves the others where they were.
+  fireEvent.click(sheet.querySelector('[data-entry] [data-op="dismiss"]') as HTMLButtonElement)
+  await waitFor(() => expect(sheet.querySelectorAll('[data-entry]')).toHaveLength(2))
+})
+
+test('a run is heard from the runs list, not only from its own view', async () => {
+  installNotifications('granted')
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+  })
+  daemon = stub
+  view = renderApp(stub, '#/')
+  await waitFor(() => expect(stub.connections).toHaveLength(1))
+
+  stub.emit(PAUSE, PARKED)
+  await waitFor(() => expect(FakeNotification.shown).toHaveLength(1))
+  expect(FakeNotification.shown[0]?.body).toBe('node impl: waiting for the operator')
+})
+
+test('opening the run hands its stream over rather than opening a second', async () => {
+  installNotifications('granted')
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+  })
+  daemon = stub
+  view = renderApp(stub, '#/')
+  await waitFor(() => expect(stub.connections).toHaveLength(1))
+
+  window.location.hash = `#/runs/${RUN_ID}`
+  window.dispatchEvent(new HashChangeEvent('hashchange'))
+  await waitFor(() => expect(stub.connections).toHaveLength(2))
+  // Let a stray reopen show itself, if there is one.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(stub.connections).toHaveLength(2)
+
+  stub.emit(PAUSE, PARKED)
+  await waitFor(() => expect(FakeNotification.shown).toHaveLength(1))
+  await flush()
+  expect(FakeNotification.shown).toHaveLength(1)
 })
 
 test('a failed gate and a finished run both reach the channel', async () => {
@@ -130,7 +216,40 @@ test('reminders are off until the operator opts in, and the control says so', as
   installNotifications('granted')
   await watching()
 
-  const select = view?.container.querySelector('[data-field="reminder"]')
+  const sheet = await openInbox()
+  const select = sheet.querySelector('[data-field="reminder"]')
   expect((select as HTMLSelectElement).value).toBe('0')
   expect(notifier.state.reminderMs).toBe(0)
+})
+
+test('the browser channel can be turned on from the inbox', async () => {
+  installNotifications('default', 'granted')
+  await watching()
+
+  const sheet = await openInbox()
+  fireEvent.click(sheet.querySelector('[data-op="enable-browser"]') as HTMLButtonElement)
+
+  await waitFor(() => expect(document.querySelector('[data-channel="granted"]')).not.toBeNull())
+  expect(FakeNotification.requests).toBe(1)
+})
+
+test('the top bar offers the opt-in until the browser has been asked', async () => {
+  installNotifications('default', 'granted')
+  await watching()
+
+  const bar = () => view?.container.querySelector('[data-notifications] > [data-op="enable-browser"]')
+  expect(bar()).not.toBeNull()
+  // Offering it is not asking: nothing is requested until the click (§10).
+  expect(FakeNotification.requests).toBe(0)
+
+  fireEvent.click(bar() as HTMLButtonElement)
+  await waitFor(() => expect(bar()).toBeNull())
+  expect(FakeNotification.requests).toBe(1)
+  expect(FakeNotification.shown.map((shown) => shown.body)).toEqual(['Browser notifications are on.'])
+})
+
+test('the top bar says nothing once the browser has answered', async () => {
+  installNotifications('denied')
+  await watching()
+  expect(view?.container.querySelector('[data-notifications] > [data-op="enable-browser"]')).toBeNull()
 })

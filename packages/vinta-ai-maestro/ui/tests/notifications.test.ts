@@ -122,20 +122,111 @@ test('permission is asked for on first use, and never before there is one', asyn
   expect(FakeNotification.shown).toHaveLength(1)
 })
 
-test('a refused permission degrades to an in-page banner, and throws nothing', async () => {
+test('a refused permission degrades to the in-page inbox, and throws nothing', async () => {
   installNotifications('default', 'denied')
 
   notifier.ingest(RUN, [question('impl', 'e-ask')])
   await flush()
 
   expect(FakeNotification.shown).toHaveLength(0)
-  expect(notifier.state.banners.map((banner) => banner.nodeId)).toEqual(['impl'])
+  expect(notifier.state.inbox.map((entry) => entry.nodeId)).toEqual(['impl'])
+  expect(notifier.state.channel).toBe('denied')
 
   // A browser with no Notification API at all takes the same path.
   uninstallNotifications()
   notifier.ingest(RUN, [question('other', 'e-ask')])
   await flush()
-  expect(notifier.state.banners.map((banner) => banner.nodeId)).toEqual(['impl', 'other'])
+  expect(notifier.state.inbox.map((entry) => entry.nodeId)).toEqual(['other', 'impl'])
+})
+
+test('everything raised is kept, newest first, whichever channel carried it', async () => {
+  notifier.ingest(RUN, [
+    question('a', 'e-1'),
+    event('gate_result', 'b', { gate: 'unit', exit_code: 1, status: 'failed' }),
+    event('run_ended', null, { status: 'done' }),
+  ])
+  await flush()
+
+  const { inbox, unread } = notifier.state
+  expect(inbox.map((entry) => entry.reason)).toEqual([
+    'run finished',
+    'gate failed',
+    'waiting for the operator',
+  ])
+  expect(unread).toBe(3)
+  // The journal's clock, not the tab's.
+  expect(inbox[2]?.at).toBe(1_700_000_000_001)
+  // Persisted as ids and reasons only (§11).
+  expect(localStorage.getItem('vinta-ai-maestro:inbox')).not.toContain('invoice')
+})
+
+test('the inbox survives a reload, and so does what was read', async () => {
+  notifier.ingest(RUN, [question('a', 'e-1'), question('b', 'e-2')])
+  notifier.markRead(`${RUN}|a|e-1`)
+
+  notifier.reset()
+
+  expect(notifier.state.inbox.map((entry) => [entry.nodeId, entry.read])).toEqual([
+    ['b', false],
+    ['a', true],
+  ])
+  expect(notifier.state.unread).toBe(1)
+
+  notifier.markAllRead()
+  expect(notifier.state.unread).toBe(0)
+})
+
+test('an answered pause stays listed, and says it was answered', async () => {
+  notifier.ingest(RUN, [question('impl', 'e-ask')])
+  expect(notifier.state.inbox[0]?.waiting).toBe(true)
+
+  notifier.ingest(RUN, [event('human_answered', 'impl', { effect_id: 'e-ask', answer: true })])
+  expect(notifier.state.inbox).toHaveLength(1)
+  expect(notifier.state.inbox[0]?.waiting).toBe(false)
+})
+
+test('a pause raised before a reload still settles after it', async () => {
+  notifier.ingest(RUN, [question('impl', 'e-ask')])
+  notifier.reset()
+
+  notifier.ingest(RUN, [event('node_status', 'impl', { status: 'done' })])
+  expect(notifier.state.inbox[0]?.waiting).toBe(false)
+})
+
+test('a dismissed or cleared entry does not come back on a replay', async () => {
+  notifier.ingest(RUN, [question('a', 'e-1'), question('b', 'e-2')])
+  notifier.dismiss(`${RUN}|a|e-1`)
+  expect(notifier.state.inbox.map((entry) => entry.nodeId)).toEqual(['b'])
+
+  notifier.clear()
+  notifier.ingest(RUN, [question('a', 'e-1'), question('b', 'e-2')])
+  expect(notifier.state.inbox).toEqual([])
+})
+
+test('the operator can turn the browser channel on from a click', async () => {
+  installNotifications('default', 'granted')
+  expect(notifier.refreshChannel()).toBe('default')
+
+  await expect(notifier.enableBrowser()).resolves.toBe('granted')
+
+  expect(FakeNotification.requests).toBe(1)
+  expect(notifier.state.channel).toBe('granted')
+  // One confirmation, so the operator sees it work before a run needs it.
+  expect(FakeNotification.shown.map((shown) => shown.body)).toEqual(['Browser notifications are on.'])
+})
+
+test('a refusal from the click is reported, not thrown', async () => {
+  installNotifications('default', 'denied')
+  await expect(notifier.enableBrowser()).resolves.toBe('denied')
+  expect(FakeNotification.shown).toHaveLength(0)
+})
+
+test('clicking a notification marks its entry read', async () => {
+  notifier.ingest(RUN, [question('impl', 'e-ask')])
+  await flush()
+
+  FakeNotification.shown[0]?.onclick?.()
+  expect(notifier.state.inbox[0]?.read).toBe(true)
 })
 
 test('reminders are off by default', async () => {
