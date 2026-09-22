@@ -116,6 +116,9 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  progress at 7pm and was still stopped at 11. Every firing is a
                  full phase attempt, so the interval is the throttle: a short
                  one on an expensive plan retries a broken phase all night.
+                 An attempt that fails faster than the interval doubles the
+                 next wait, up to 8x (15m becomes 2h); one that runs at least
+                 the interval long puts it back to 15m.
   --log-level    How much the daemon records about itself, in
                  .vinta-ai-maestro/logs/daemon.ndjson and in the UI's Logs view.
                  Defaults to info: what it bound, what it refused, every node

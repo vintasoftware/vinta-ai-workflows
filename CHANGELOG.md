@@ -564,6 +564,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`--retry-after` backs off when attempts fail faster than it.** An
+  unanswered failure question used to answer itself on a flat interval
+  forever, so a phase whose attempts died within seconds was retried every
+  fifteen minutes for hours, against the same failure, at the price of a cold
+  lane each time. Each attempt that fails in less time than the interval now
+  doubles the next wait, up to 8× (15m becomes 2h); one attempt that runs at
+  least the interval long puts it back. It still never stops on its own: a
+  run whose cause goes away overnight is moving again before morning. The
+  `node.unattended_retry` log line reports the actual wait and the streak.
+
 - **Notifications have an inbox, and are heard from every view.** The UI's
   notifications used to be a row of banners in the top bar, shown only when
   browser notifications were refused. They piled up there and could be read
