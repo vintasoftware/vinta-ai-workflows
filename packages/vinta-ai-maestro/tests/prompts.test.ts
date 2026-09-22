@@ -392,6 +392,46 @@ describe('background work', () => {
 })
 
 /**
+ * claude-code agents were dispatching their phase to a sub-agent and reporting
+ * its summary back. Every role is affected and the cost is cumulative: the
+ * session that is kept warm across phases learns nothing, so the reorientation
+ * a cross-phase turn opens with — "everything you learned still holds" — holds
+ * over a paragraph, and each phase pays a cold agent's first turn again.
+ *
+ * The conductor skills are named in the prompt and asserted here, because the
+ * pull is a skill the runtime surfaced on its own: `implement-phase` ships into
+ * these same repositories, its description matches "you are implementing P3 of
+ * plan X", and its content is "spawn exactly one implementer subagent".
+ */
+describe('no sub-agents', () => {
+  const roles = ['implementer', 'reviewer', 'fixer', 'chore'] as const
+
+  const composeRole = (role: (typeof roles)[number], continuation: boolean): string =>
+    compose('api-layer', role, {
+      continuation,
+      ...(role === 'chore' ? { chore: chore({ prompt: 'Tidy up.' }) } : {}),
+      ...(role === 'fixer' ? { facts: { review: { verdict: 'fail' } } } : {}),
+    })
+
+  it.each(roles)('forbids delegation to the %s, and says what it costs', (role) => {
+    const prompt = composeRole(role, false)
+
+    expect(prompt).toContain('Do this work in this session, yourself')
+    expect(prompt).toContain('Task/Agent tool')
+    // The reason, not only the rule. Without it the agent has no way to weigh
+    // delegating a search, which is the form it takes once the work is banned.
+    expect(prompt).toContain('pays for a cold start')
+    // And the skills that are the actual pull, by name.
+    expect(prompt).toContain('`implement-phase`')
+    expect(prompt).toContain('never follow its spawn steps')
+  })
+
+  it.each(roles)('says it to the %s on a continuation too', (role) => {
+    expect(composeRole(role, true)).toContain('Do this work in this session, yourself')
+  })
+})
+
+/**
  * A reused reviewer session reached a verdict in under four minutes without
  * running the project's test command at all. The prompt had asked it to confirm
  * the gate was green, which an agent can do by reading a report.
@@ -691,6 +731,24 @@ Add the Folder model and its migration.
    - the repository’s own type/build check and its test suite.
 5. A red outer gate sends you back to step 2, for as long as you have room to
    work. It is not a reason to leave the work uncommitted — see below.
+
+## Do this work in this session, yourself
+You are the agent that implements this phase — not an orchestrator for one. Do not spawn,
+dispatch or delegate to a sub-agent (claude-code’s Task/Agent tool, or whatever
+your harness calls the same thing) for any part of it: not the work, not a
+search of the codebase, not a second opinion on your own output. Read, run and
+write yourself.
+This session is reused across phases and rounds, and a later turn will open by
+telling you that what you learned about this repository still holds. It holds
+only because this session is what learned it. A sub-agent’s reading of the code
+ends when the sub-agent does, so a delegated turn leaves you holding its summary
+and nothing else, and every turn after it pays for a cold start.
+A project skill that tells you to spawn an implementer, reviewer or fixer —
+\`implement-plan\`, \`implement-phase\`, \`review-phase\`, \`amend-plan\`, anything
+shaped like them — is written for the orchestrator that dispatches phases. That
+orchestrator is already running: it is what spawned you, and its job is not this
+turn’s. Take what such a skill says about this repository’s conventions, gates
+and commit rules; never follow its spawn steps.
 
 ## Run everything in the foreground
 Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached
@@ -1084,10 +1142,13 @@ describe('the chore prompt', () => {
     expect(prompt).toContain('If your harness has no such skill')
   })
 
-  it('says nothing about a skill when the chore declares none', () => {
-    expect(compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })).not.toContain(
-      'skill',
-    )
+  it('says nothing about a chore skill when the chore declares none', () => {
+    const prompt = compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })
+
+    // Narrowed from a bare `not.toContain('skill')`: the no-delegation section
+    // names the conductor skills on purpose, and it is in every prompt.
+    expect(prompt).not.toContain('skill for this')
+    expect(prompt).not.toContain('If your harness has no such skill')
   })
 
   it('carries the phase brief on a cold turn, as context rather than as work', () => {
@@ -1519,6 +1580,24 @@ Add REST endpoints for folders.
    disappear rather than be polished? Finding nothing in a large multi-file
    diff is suspicious — read it again.
 
+## Do this work in this session, yourself
+You are the agent that reviews this diff — not an orchestrator for one. Do not spawn,
+dispatch or delegate to a sub-agent (claude-code’s Task/Agent tool, or whatever
+your harness calls the same thing) for any part of it: not the work, not a
+search of the codebase, not a second opinion on your own output. Read, run and
+write yourself.
+This session is reused across phases and rounds, and a later turn will open by
+telling you that what you learned about this repository still holds. It holds
+only because this session is what learned it. A sub-agent’s reading of the code
+ends when the sub-agent does, so a delegated turn leaves you holding its summary
+and nothing else, and every turn after it pays for a cold start.
+A project skill that tells you to spawn an implementer, reviewer or fixer —
+\`implement-plan\`, \`implement-phase\`, \`review-phase\`, \`amend-plan\`, anything
+shaped like them — is written for the orchestrator that dispatches phases. That
+orchestrator is already running: it is what spawned you, and its job is not this
+turn’s. Take what such a skill says about this repository’s conventions, gates
+and commit rules; never follow its spawn steps.
+
 Triage each finding as BLOCKER, SHOULD-FIX or NIT.
 
 ## How to report
@@ -1578,6 +1657,24 @@ Keep at it while you have a red gate you know how to fix and room to fix it.
 A gate you cannot turn green is not a reason to keep going until the turn ends:
 commit what you have and report FAILURE naming the gate and what it said. Green
 is what you are aiming at, not the condition for finishing.
+
+## Do this work in this session, yourself
+You are the agent that fixes what came back — not an orchestrator for one. Do not spawn,
+dispatch or delegate to a sub-agent (claude-code’s Task/Agent tool, or whatever
+your harness calls the same thing) for any part of it: not the work, not a
+search of the codebase, not a second opinion on your own output. Read, run and
+write yourself.
+This session is reused across phases and rounds, and a later turn will open by
+telling you that what you learned about this repository still holds. It holds
+only because this session is what learned it. A sub-agent’s reading of the code
+ends when the sub-agent does, so a delegated turn leaves you holding its summary
+and nothing else, and every turn after it pays for a cold start.
+A project skill that tells you to spawn an implementer, reviewer or fixer —
+\`implement-plan\`, \`implement-phase\`, \`review-phase\`, \`amend-plan\`, anything
+shaped like them — is written for the orchestrator that dispatches phases. That
+orchestrator is already running: it is what spawned you, and its job is not this
+turn’s. Take what such a skill says about this repository’s conventions, gates
+and commit rules; never follow its spawn steps.
 
 ## Run everything in the foreground
 Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached

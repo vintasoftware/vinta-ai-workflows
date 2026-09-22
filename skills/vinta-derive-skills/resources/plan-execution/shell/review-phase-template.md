@@ -7,6 +7,8 @@ description: Internal review gate of [implement-plan] / [amend-plan] / [systemat
 
 The single review implementation shared by every plan-execution conductor: [implement-plan](../implement-plan/SKILL.md) (after an implementer runs), [amend-plan](../amend-plan/SKILL.md) (after a rewrite), and [systematic-debugging](../systematic-debugging/SKILL.md) (against the fix diff). Read-only orchestration: this skill **never edits code** — every issue becomes a fix-up subagent task.
 
+<!-- include: partials/dispatched-agent.md#CONDUCTOR_ENTRY_GUARD -->
+
 ## Inputs (passed by the conductor)
 
 - The phase diff (on the current branch inside `WORKROOT`).

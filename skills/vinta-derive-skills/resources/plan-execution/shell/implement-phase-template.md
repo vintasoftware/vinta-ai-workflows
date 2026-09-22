@@ -7,6 +7,8 @@ description: Internal execution step of [implement-plan] / [amend-plan] — NOT 
 
 Execution unit invoked by [implement-plan](../implement-plan/SKILL.md) (and by [amend-plan](../amend-plan/SKILL.md) for `amend-existing` rewrites). One phase in → one implementer report out. This skill does **not** review, branch, push, or open PRs — those are [review-phase](../review-phase/SKILL.md) and [integrate-phase](../integrate-phase/SKILL.md). It also does **not** decide whether a phase runs — the conductor already filtered cross-repo / flag-removal phases.
 
+<!-- include: partials/dispatched-agent.md#CONDUCTOR_ENTRY_GUARD -->
+
 ## Inputs (passed by the conductor as data — this skill re-derives none of them)
 
 - `phase` record: `{ id, title, goal, body, spec_use_case, depends_on, wave, base_branch, crew_member, crew_tier, suggested_model_tier, reusable_skills, has_e2e, acceptance }`. `crew_member` / `crew_tier` come from the phase's `**Assigned to**:` line and the plan's **Crew** table; `suggested_model_tier` is the legacy path and is set only on a plan with no roster. Exactly one of the two is populated.

@@ -17,6 +17,8 @@ The conductor itself owns only: plan parsing, the dependency graph, phase classi
 
 Execution counterpart to [plan-feature](../plan-feature/SKILL.md). Plan = contract; this skill = build pipeline.
 
+<!-- include: partials/dispatched-agent.md#CONDUCTOR_ENTRY_GUARD -->
+
 ## Working assumptions
 
 - Repo: {{PROJECT_NAME}} ({{STACK_SUMMARY}}). Conventions: [AGENTS.md](../../../AGENTS.md).

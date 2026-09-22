@@ -41,6 +41,17 @@ The conductor resolves three values **once per lane** (see `partials/worktree-se
 
 Every `git` / lint / test / build call in every sub-skill uses `git -C <WORKROOT>` **uniformly** — no `if use_worktree` inside them. Only two genuine conditionals remain, each local and data-driven: the `SANDBOX_TIER`-gated spawn wrap in `implement-phase`, and the `WORKROOT != main_checkout`-gated stray-write check in `review-phase`.
 
+## The dispatched-agent seam (`partials/dispatched-agent.md`)
+
+One rule, two shapes, because it has to hold at both ends of the unit: **the agent doing a phase never dispatches.**
+
+| Block | Consumed by | What it owns |
+|---|---|---|
+| `CONDUCTOR_ENTRY_GUARD` | `implement-plan`, `implement-phase`, `review-phase`, `amend-plan` | Refuses entry to an agent that was itself handed one phase — by another conductor, or by an external orchestrator such as [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro). The conductor is already running; it is what spawned the reader. |
+| `NO_NESTED_DISPATCH` | `implementer-prompt.md#INNER_OUTER_LOOP` → the composed prompt in `implement-phase` and `amend-plan` 4b | Tells the spawned implementer to do the work in its own session. |
+
+The cost this prevents is not duplicated orchestration — it is lost context. A phase agent is reused (review findings, a chore over its own diff, often the next phase), and that reuse only buys anything because the session that read the codebase is the session that gets the next turn. A sub-agent's reading dies with the sub-agent, leaving the parent holding a summary and every later turn starting cold.
+
 ## The parallel-lanes seam (`partials/parallel-lanes.md`)
 
 The plan gives every phase a `**Depends on**:` line. The conductor turns those into a DAG and dispatches a phase the moment its dependencies are green and a lane is free. Six blocks:

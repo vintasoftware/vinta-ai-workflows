@@ -612,6 +612,7 @@ function renderImplementer(materials: Materials): string {
     ...gateList(materials),
     '5. A red outer gate sends you back to step 2, for as long as you have room to',
     '   work. It is not a reason to leave the work uncommitted — see below.',
+    ...soloTurn('implements this phase'),
     ...foreground(),
     ...commitProtocol(materials),
     ...prContext(materials),
@@ -687,6 +688,55 @@ function foreground(): string[] {
     'with it. A turn that finishes by waiting for a background result finishes',
     'having done nothing, and the phase is then judged on an empty branch.',
     'Long commands are fine — run them and wait for them to return.',
+  ]
+}
+
+/**
+ * That the agent holding this prompt is the one that does the work.
+ *
+ * Sessions are kept warm on purpose, and `renderReorientation` is the promise
+ * that makes it worth doing: every cross-phase turn opens by telling the agent
+ * that what it learned about this repository still holds. That is only true if
+ * *this* session is what learned it.
+ *
+ * claude-code agents were instead dispatching the phase to a sub-agent and
+ * reporting its summary back. The sub-agent read the codebase, wrote the code
+ * and ended; what survived into the next phase was a paragraph. So the warm
+ * session was warm about nothing — every phase paid a cold agent's first turn
+ * again, and the cached prefix these prompts are shaped around bought a
+ * transcript of delegation rather than of the work.
+ *
+ * The pull is not laziness, which is why a bare "do not delegate" is not
+ * enough. The plan-execution skills — `implement-plan`, `implement-phase`,
+ * `review-phase`, `amend-plan` — ship into these same repositories, and they
+ * are conductors: their entire content is compose a prompt, pick a model,
+ * spawn the implementer. A session handed "You are implementing P3 of plan X"
+ * matches their descriptions exactly, loads one unprompted, and follows it
+ * correctly. Under this orchestrator that conductor is already running — it is
+ * what spawned this session — so the skill is being re-entered one level down.
+ * Naming those skills is what makes the rule actionable against a skill the
+ * runtime surfaced on its own.
+ */
+function soloTurn(what: string): string[] {
+  return [
+    '',
+    '## Do this work in this session, yourself',
+    `You are the agent that ${what} — not an orchestrator for one. Do not spawn,`,
+    'dispatch or delegate to a sub-agent (claude-code’s Task/Agent tool, or whatever',
+    'your harness calls the same thing) for any part of it: not the work, not a',
+    'search of the codebase, not a second opinion on your own output. Read, run and',
+    'write yourself.',
+    'This session is reused across phases and rounds, and a later turn will open by',
+    'telling you that what you learned about this repository still holds. It holds',
+    'only because this session is what learned it. A sub-agent’s reading of the code',
+    'ends when the sub-agent does, so a delegated turn leaves you holding its summary',
+    'and nothing else, and every turn after it pays for a cold start.',
+    'A project skill that tells you to spawn an implementer, reviewer or fixer —',
+    '`implement-plan`, `implement-phase`, `review-phase`, `amend-plan`, anything',
+    'shaped like them — is written for the orchestrator that dispatches phases. That',
+    'orchestrator is already running: it is what spawned you, and its job is not this',
+    'turn’s. Take what such a skill says about this repository’s conventions, gates',
+    'and commit rules; never follow its spawn steps.',
   ]
 }
 
@@ -1093,6 +1143,7 @@ function renderReviewer(materials: Materials): string {
     '   is there a reframe that would make whole branches, helpers or layers',
     '   disappear rather than be polished? Finding nothing in a large multi-file',
     '   diff is suspicious — read it again.',
+    ...soloTurn('reviews this diff'),
     '',
     'Triage each finding as BLOCKER, SHOULD-FIX or NIT.',
     '',
@@ -1148,6 +1199,7 @@ function renderFixer(materials: Materials): string {
     'each of these yourself:',
     ...gateList(materials),
     ...gateStopCondition(),
+    ...soloTurn('fixes what came back'),
     ...foreground(),
     ...commitProtocol(materials),
     '',
@@ -1303,6 +1355,7 @@ function renderChore(materials: Materials, chore: ChoreMaterials): string {
     'the phase is already written and reviewed.',
     '',
     materials.brief,
+    ...soloTurn('runs this chore'),
     ...foreground(),
     ...commitProtocol(materials),
     ...choreOutput(chore),
@@ -1327,6 +1380,7 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
     '',
     '## The chore',
     chore.instruction,
+    ...soloTurn('runs this chore'),
     ...foreground(),
     ...commitProtocol(materials),
     ...choreOutput(chore),
@@ -1379,6 +1433,7 @@ function renderFixerContinuation(materials: Continuation): string {
     'loop, and run each of these yourself:',
     ...gateList(materials),
     ...gateStopCondition(),
+    ...soloTurn('fixes what came back'),
     ...foreground(),
     ...commitProtocol(materials),
     '',
@@ -1423,6 +1478,8 @@ function renderReviewerContinuation(materials: Continuation): string {
     '   finding you could have raised last round: the fixer cannot be sent back',
     '   forever, and a moving bar is how a sound phase runs out of fix rounds.',
     '',
+    ...soloTurn('reviews this diff'),
+    '',
     'Triage each finding as BLOCKER, SHOULD-FIX or NIT.',
     '',
     // Restated in full, every round. See `verdictProtocol` for why this is not
@@ -1458,6 +1515,7 @@ function renderImplementerContinuation(materials: Continuation): string {
     'Finish the working instructions you were given, in the order you were given',
     'them, ending on a green outer gate:',
     ...gateList(materials),
+    ...soloTurn('implements this phase'),
     ...foreground(),
     ...commitProtocol(materials),
     '',

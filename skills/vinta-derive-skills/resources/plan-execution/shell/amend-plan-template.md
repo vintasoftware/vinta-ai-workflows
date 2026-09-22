@@ -9,6 +9,8 @@ Revise a plan in [`{{PLAN_DIR}}/`]({{PLAN_DIR}}/) after work has begun. Companio
 
 The flow is destructive (force-push). Every modification is gated on user confirmation. Default disposition for any ambiguous case is "stop and ask" — never force-push without an explicit per-branch `Confirm` from the user.{{COMMIT_STRATEGY_REFUSAL_BLOCK}}
 
+<!-- include: partials/dispatched-agent.md#CONDUCTOR_ENTRY_GUARD -->
+
 ## Working assumptions
 
 - Repo: {{PROJECT_NAME}} ({{STACK_SUMMARY}}). Conventions: [AGENTS.md](../../../AGENTS.md).
