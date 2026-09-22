@@ -130,6 +130,14 @@ const RETRY = 'retry'
 const STOP = 'stop'
 const RETRY_WITH = 'retry with '
 
+/**
+ * The most an unattended retry's wait grows to, as a multiple of `retryAfterMs`
+ * — fifteen minutes becomes two hours. Long enough that a failure nothing is
+ * fixing stops costing an attempt a quarter-hour; short enough that a run whose
+ * cause went away overnight is moving again before morning.
+ */
+const UNATTENDED_BACKOFF_CAP = 8
+
 export interface SchedulerOptions {
   /** The frozen snapshot the run executes. Its `run_started` is already journalled. */
   readonly workflow: Workflow
@@ -228,7 +236,8 @@ export interface SchedulerOptions {
    * a fresh agent session, its gates, its review. A phase that is broken rather
    * than flaky will retry all night at the cost of one attempt per interval, so
    * the interval is the throttle, and a short one on an expensive plan is the
-   * way to spend a lot of money on the same failure. `retries` is untouched:
+   * way to spend a lot of money on the same failure. It is the *base* throttle:
+   * attempts that fail faster than it double it (`#armUnattendedRetry`). `retries` is untouched:
    * it still bounds the *automatic* attempts that happen before anyone is
    * asked, which is the budget for a failure nobody has seen yet.
    */
@@ -505,6 +514,15 @@ interface NodeState {
    * automatic budget retry unattended for ever.
    */
   unattended: number
+  /**
+   * Failure questions in a row whose attempt ended faster than `retryAfterMs`.
+   * An attempt that fails in less time than the interval is being paced by the
+   * timer rather than by the work, so each one doubles the next unattended
+   * wait (see `#armUnattendedRetry`). Reset by an attempt that ran longer.
+   */
+  quickFailures: number
+  /** `clock.now()` when this attempt got its lane: what `quickFailures` measures from. */
+  attemptStartedAt: number
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -766,6 +784,8 @@ export class Scheduler {
       retries: 0,
       autoRetries: 0,
       unattended: 0,
+      quickFailures: 0,
+      attemptStartedAt: 0,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -1276,6 +1296,7 @@ export class Scheduler {
         state.crew === null ? (this.#freeLanes.pop() as string) : this.#laneFor(state.crew.member)
       this.#options.journal.acquireLease(LANE, state.node.id)
       this.#assign(state, { lane: state.lane })
+      state.attemptStartedAt = (this.#options.clock ?? systemClock).now()
 
       try {
         await this.#prepareLane(state)
@@ -2646,6 +2667,15 @@ export class Scheduler {
    * same code. A second implementation of "the answer arrived" is how the two
    * drift apart.
    *
+   * **The interval doubles while attempts fail faster than it.** An observed
+   * phase retried ten times on a fifteen-minute timer against a failure that
+   * killed each attempt within seconds: the timer was the only thing pacing it,
+   * so every firing bought the same failure at the price of a cold lane. Each
+   * quick failure in a row doubles the wait, up to `UNATTENDED_BACKOFF_CAP`
+   * times the interval; one attempt that runs at least the interval long puts
+   * it back. Still unbounded in count, for the reason `retryAfterMs` gives — a
+   * capped version stalls for the rest of the night — only slower.
+   *
    * The cancel is not optional. A question the operator *does* answer leaves a
    * timer that would otherwise fire against a node that has moved on, and
    * `answer` throws for a node that is not awaiting one — so the stray timer
@@ -2656,7 +2686,11 @@ export class Scheduler {
     if (after === undefined || after <= 0) return () => {}
 
     const clock = this.#options.clock ?? systemClock
-    return clock.at(clock.now() + after, () => {
+    const quick = clock.now() - state.attemptStartedAt < after
+    state.quickFailures = quick ? state.quickFailures + 1 : 0
+    const factor = Math.min(2 ** Math.max(0, state.quickFailures - 1), UNATTENDED_BACKOFF_CAP)
+    const wait = after * factor
+    return clock.at(clock.now() + wait, () => {
       // Between the timer firing and this running, the operator may have
       // answered: `resume` is nulled by `answer`, and asking again here is
       // cheaper than reasoning about whether that can happen.
@@ -2664,8 +2698,9 @@ export class Scheduler {
       state.unattended += 1
       this.#log.info('node.unattended_retry', {
         node: state.node.id,
-        after_ms: after,
+        after_ms: wait,
         unattended: state.unattended,
+        quick_failures: state.quickFailures,
       })
       this.answer(state.node.id, { human: { answer: RETRY, unattended: true } })
     })

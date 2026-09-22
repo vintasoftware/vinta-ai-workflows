@@ -332,6 +332,18 @@ export class RunEffectExecutor implements EffectExecutor {
           status: result.status,
           duration_ms: result.durationMs,
           cached,
+          ...(result.timeout === undefined
+            ? {}
+            : {
+                timeout: {
+                  quiet_ms: result.timeout.quietMs,
+                  output_bytes: result.timeout.outputBytes,
+                  ...(result.timeout.load1m === undefined
+                    ? {}
+                    : { load_1m: result.timeout.load1m }),
+                  cpus: result.timeout.cpus,
+                },
+              }),
         },
       })
       // And again in the node's transcript, which is where somebody reading

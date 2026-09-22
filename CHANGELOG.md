@@ -29,6 +29,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A timed-out gate says whether it hung or was slow.** A `gate_result` with
+  `status: timed_out` used to carry only the status, so a run with nine
+  timeouts could not say whether any of them was a stuck suite or a host too
+  busy to finish one. It now carries `timeout`: `quiet_ms` (how long the gate
+  had gone without writing anything when it was killed), `output_bytes`, and
+  the host's `load_1m` beside `cpus`. `quiet_ms` near the timeout is a gate
+  waiting on something; a small one with `load_1m` well above `cpus` is
+  contention. Numbers only, as before: nothing the gate printed reaches the
+  row. The monitor's brief points at the new field. Older rows have no
+  `timeout`.
+
 - **Gate durations are now kept, not just displayed.** Every `gate_result` has
   carried the runner's own `duration_ms` since gates were journalled, and
   nothing read it back: the figure went to a live panel and was afterwards
@@ -564,6 +575,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`--retry-after` backs off when attempts fail faster than it.** An
+  unanswered failure question used to answer itself on a flat interval
+  forever, so a phase whose attempts died within seconds was retried every
+  fifteen minutes for hours, against the same failure, at the price of a cold
+  lane each time. Each attempt that fails in less time than the interval now
+  doubles the next wait, up to 8× (15m becomes 2h); one attempt that runs at
+  least the interval long puts it back. It still never stops on its own: a
+  run whose cause goes away overnight is moving again before morning. The
+  `node.unattended_retry` log line reports the actual wait and the streak.
+
 - **Notifications have an inbox, and are heard from every view.** The UI's
   notifications used to be a row of banners in the top bar, shown only when
   browser notifications were refused. They piled up there and could be read
@@ -789,6 +810,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recall.
 
 ### Fixed
+
+- **A failed Claude Code turn no longer reads as `claude-code result:
+  success`.** When the CLI ends a turn with `is_error: true` beside
+  `subtype: "success"` (how a plan limit arrives, for one), the recorded
+  error printed the subtype and said "success" — 189 times in one observed
+  run. It now reads `claude-code result: is_error`. Other subtypes
+  (`error_max_turns`, …) are unchanged.
 
 - **The monitor's conversation was mostly unformatted JSON.** Not its answers —
   its *watchdog's*. An intervention turn must reply with one document matching

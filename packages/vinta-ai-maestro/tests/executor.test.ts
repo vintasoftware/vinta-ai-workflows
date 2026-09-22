@@ -835,6 +835,31 @@ describe('journalled gate results', () => {
     expect(gateResults(rig)).toEqual([{ gate: 'unit', exit_code: 3, status: 'failed' }])
   })
 
+  it('records what a timed-out gate looked like when it was killed, as numbers', async () => {
+    const hang =
+      process.platform === 'win32'
+        ? 'echo SECRET-FROM-THE-REPO& ping -n 30 127.0.0.1 >nul'
+        : 'echo SECRET-FROM-THE-REPO; sleep 30'
+    const rig = setup(() => {
+      const workflow = noisy(0)
+      return { ...workflow, gates: { unit: { cmd: hang, requires: [], timeout_s: 1 } } }
+    })
+    assign(rig)
+
+    await rig.invoke('p1', 'run_gate')
+
+    const row = rig.journal.events(RUN_ID).find((event) => event.type === 'gate_result')
+    const payload = row?.payload as {
+      status: string
+      timeout?: { quiet_ms: number; output_bytes: number; load_1m?: number; cpus: number }
+    }
+    expect(payload.status).toBe('timed_out')
+    expect(payload.timeout?.output_bytes).toBeGreaterThan(0)
+    expect(payload.timeout?.quiet_ms).toBeGreaterThan(0)
+    expect(payload.timeout?.cpus).toBeGreaterThan(0)
+    expect(JSON.stringify(payload)).not.toContain('SECRET')
+  }, 20_000)
+
   it('records a passing gate as passed with exit code 0', async () => {
     const rig = setup(() => noisy(0))
     assign(rig)

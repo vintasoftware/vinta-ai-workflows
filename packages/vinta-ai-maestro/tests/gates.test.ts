@@ -112,6 +112,50 @@ describe('gate runner', () => {
     expect(await awaitGone(grandchild, 5_000)).toBe(true)
   }, 20_000)
 
+  /**
+   * Nine timeouts in one observed run, and the journal could not say whether
+   * any of them was a hung suite or a host too busy to finish one: the row
+   * held the status and nothing else. These are the numbers that decide it.
+   */
+  it('records how long a timed-out gate had been quiet, and how busy the host was', async () => {
+    const pidFile = join(workspace, 'grandchild.pid')
+    const result = await runGate({
+      gateId: 'quiet-suite',
+      // Prints a line, then sits on a background child until it is killed.
+      gate: gate({ stdout: ['started'], background: { seconds: 60, pidFile } }, { timeout_s: 1 }),
+      cwd: workspace,
+      env: {},
+      logPath: join(workspace, 'quiet-suite.log'),
+      pools: newPools(),
+    })
+
+    expect(result.status).toBe('timed_out')
+    const facts = result.timeout
+    expect(facts).toBeDefined()
+    expect(facts?.outputBytes).toBeGreaterThan(0)
+    // It wrote once, early, and nothing after: most of the second was silence.
+    expect(facts?.quietMs).toBeGreaterThan(500)
+    expect(facts?.quietMs).toBeLessThanOrEqual(result.durationMs)
+    expect(facts?.cpus).toBeGreaterThan(0)
+    if (process.platform !== 'win32') expect(facts?.load1m).toBeGreaterThan(0)
+
+    const grandchild = Number.parseInt((await readFile(pidFile, 'utf8')).trim(), 10)
+    expect(await awaitGone(grandchild, 5_000)).toBe(true)
+  }, 20_000)
+
+  it('carries no timeout facts on a gate that exited', async () => {
+    const result = await runGate({
+      gateId: 'failing',
+      gate: gate({ stdout: ['out'], exit: 3 }),
+      cwd: workspace,
+      env: {},
+      logPath: join(workspace, 'failing.log'),
+      pools: newPools(),
+    })
+    expect(result.status).toBe('failed')
+    expect(result).not.toHaveProperty('timeout')
+  })
+
   it('releases its pools when the command fails', async () => {
     const pools = newPools()
 

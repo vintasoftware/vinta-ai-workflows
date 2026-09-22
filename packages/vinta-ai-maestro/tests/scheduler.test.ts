@@ -3240,12 +3240,77 @@ describe('a failed phase the operator can retry', () => {
       const running = r.scheduler.run()
       // Three unattended retries off one `retries: 0` budget. A version bounded
       // by that budget would stall after the first and idle for the rest of the
-      // night, which is the failure this is for.
+      // night, which is the failure this is for. Each attempt here fails
+      // instantly, so the wait doubles — slower, never stopped.
       for (let attempt = 2; attempt <= 4; attempt += 1) {
         await until(() => r.scheduler.statuses['a'] === 'awaiting_human', `offer ${attempt}`)
-        await r.advance(61_000)
+        await r.advance(60_000 * 2 ** (attempt - 2) + 1_000)
         await until(() => r.adapter.spawned.length === attempt, `attempt ${attempt}`)
       }
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expectDrained(r)
+    })
+
+    /**
+     * The ten retries this exists for: a phase whose attempts died within
+     * seconds, re-tried on a flat fifteen-minute timer for two and a half
+     * hours. The timer was the only thing pacing it.
+     */
+    it('doubles its wait while attempts fail faster than it, up to eight times', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      const waits = [60_000, 120_000, 240_000, 480_000, 480_000]
+      for (const [index, wait] of waits.entries()) {
+        const attempt = index + 2
+        await until(() => r.scheduler.statuses['a'] === 'awaiting_human', `offer ${attempt}`)
+        // Not a moment early: the operator still owns the question until then.
+        await r.advance(wait - 1_000)
+        expect(r.adapter.spawned.length).toBe(attempt - 1)
+        await r.advance(2_000)
+        await until(() => r.adapter.spawned.length === attempt, `attempt ${attempt}`)
+      }
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expectDrained(r)
+    })
+
+    it('goes back to the interval once an attempt runs at least that long', async () => {
+      let slow = false
+      const r: Rig = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+        // The attempt's own work is where its time goes: moving the clock
+        // inside the spawn is an attempt that took that long.
+        tap: () => {
+          if (slow) void r.advance(90_000)
+        },
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'offer 2')
+      await r.advance(61_000)
+      await until(() => r.adapter.spawned.length === 2, 'attempt 2')
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'offer 3')
+      // Two quick failures: this wait is doubled.
+      await r.advance(61_000)
+      expect(r.adapter.spawned.length).toBe(2)
+      slow = true
+      await r.advance(60_000)
+      await until(() => r.adapter.spawned.length === 3, 'attempt 3, the slow one')
+      slow = false
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'offer 4')
+      // Attempt 3 ran longer than the interval, so the next wait is the interval.
+      await r.advance(61_000)
+      await until(() => r.adapter.spawned.length === 4, 'attempt 4')
 
       r.scheduler.answer('a', { human: { answer: 'stop' } })
       await running

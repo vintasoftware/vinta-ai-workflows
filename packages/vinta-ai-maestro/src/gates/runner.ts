@@ -23,6 +23,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
+import { availableParallelism, loadavg } from 'node:os'
 import {
   killTree as killPlatformTree,
   ownProcessGroup,
@@ -53,6 +54,29 @@ export interface GateResult {
   readonly exitCode: number | null
   readonly durationMs: number
   readonly logPath: string
+  /** Present only on `timed_out`. See `TimeoutFacts`. */
+  readonly timeout?: TimeoutFacts
+}
+
+/**
+ * What the runner could see at the moment it killed a gate — the evidence
+ * that tells a gate that *hung* from one that was *slow*, which the timeout by
+ * itself cannot. Numbers about the process and the host, never anything the
+ * gate printed (§11).
+ *
+ * - `quietMs` is how long the gate had gone without writing a byte. Near the
+ *   full timeout is a gate waiting on something (a lock, a port, a prompt
+ *   nobody will answer); small is a gate still working when time ran out.
+ * - `outputBytes` separates "silent from the first second" from "went quiet".
+ * - `load1m` over `cpus` is the host's run queue per core when the kill fired.
+ *   Well above 1 beside a small `quietMs` is contention, not a broken suite.
+ *   Absent where the platform reports no load average (Windows reports zeros).
+ */
+export interface TimeoutFacts {
+  readonly quietMs: number
+  readonly outputBytes: number
+  readonly load1m?: number
+  readonly cpus: number
 }
 
 export interface RunGateOptions {
@@ -124,9 +148,20 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
   child.stdout?.pipe(log, { end: false })
   child.stderr?.pipe(log, { end: false })
 
-  let timedOut = false
+  // Counted, never kept: only the size and the time of the last write.
+  let outputBytes = 0
+  let lastOutputAt = startedAt
+  const heard = (chunk: Buffer | string): void => {
+    outputBytes += chunk.length
+    lastOutputAt = Date.now()
+  }
+  child.stdout?.on('data', heard)
+  child.stderr?.on('data', heard)
+
+  let timeout: TimeoutFacts | undefined
   const timer = setTimeout(() => {
-    timedOut = true
+    // Read before the kill: once the tree is gone, the load it was causing is too.
+    timeout = timeoutFacts(Date.now() - lastOutputAt, outputBytes)
     killTree(child.pid)
   }, options.gate.timeout_s * 1000)
 
@@ -138,10 +173,22 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
 
   return {
     gateId: options.gateId,
-    status: timedOut ? 'timed_out' : exitCode === 0 ? 'passed' : 'failed',
-    exitCode: timedOut ? null : exitCode,
+    status: timeout !== undefined ? 'timed_out' : exitCode === 0 ? 'passed' : 'failed',
+    exitCode: timeout !== undefined ? null : exitCode,
     durationMs: Date.now() - startedAt,
     logPath: options.logPath,
+    ...(timeout === undefined ? {} : { timeout }),
+  }
+}
+
+function timeoutFacts(quietMs: number, outputBytes: number): TimeoutFacts {
+  const [load1m] = loadavg()
+  const reported = load1m !== undefined && load1m > 0
+  return {
+    quietMs,
+    outputBytes,
+    ...(reported ? { load1m: Math.round(load1m * 100) / 100 } : {}),
+    cpus: availableParallelism(),
   }
 }
 
