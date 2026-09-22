@@ -46,6 +46,9 @@ import type { Daemon, DaemonRun } from '../src/daemon/index.ts'
 import type { HarnessAdapter } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal } from '../src/journal/journal.ts'
+import { LaneAdoptError } from '../src/lanes/pool.ts'
+import { clearRedactions, redactValue } from '../src/log/index.ts'
+import { refusal } from '../src/run/host.ts'
 import { parseWorkflow } from '../src/validate.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { isWindows } from '../src/platform/platform.ts'
@@ -339,6 +342,22 @@ describe('vinta-ai-maestro doctor', () => {
     })
   })
 
+  /**
+   * The flag that makes the command usable before a resume: checked here rather
+   * than for its effect, because the effect needs a real git and a lane
+   * worktree — which `tests/doctor.test.ts` builds. What this cannot afford to
+   * lose is the argv: an unknown option exits 2 with the usage text, so a
+   * dropped `resume` option would turn the documented invocation into an error.
+   */
+  it('accepts --resume <run-id>', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    const io = recorder()
+
+    expect(await doctorCommand([path, '--resume', 'a-run'], io.io, healthyBins(dir))).toBe(OK)
+    expect(io.err).toEqual([])
+  })
+
   it('exits non-zero on a broken environment, and still reports every check', async () => {
     const dir = makeTemp()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
@@ -355,6 +374,85 @@ describe('vinta-ai-maestro doctor', () => {
     // The whole point of the command: one broken check does not hide the rest.
     expect(io.out.some((line) => line.includes('PASS') && line.includes('git'))).toBe(true)
     expect(io.out.some((line) => line.includes('A run cannot start'))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 1b: the sentence a failed provision reaches the operator as
+// ---------------------------------------------------------------------------
+
+/**
+ * A provision that failed for a reason `refusal` did not enumerate used to
+ * reach the operator, and the daemon log, as "could not provision the lane pool
+ * under …" and nothing else. A `git config` lock collision on resume said
+ * exactly that, three times, with the real sentence — a git stderr line naming
+ * a path — discarded on the way out.
+ *
+ * The §11 rule those cases were written to is about repository *contents*:
+ * diffs, file bodies, gate output. `LaneSetupError` already settled that a
+ * command's own complaint is not that, after the same shape of failure cost an
+ * afternoon. This is the generic case of the same decision, with the same
+ * guards: a cap, and the process's redaction set.
+ */
+describe('a lane pool refusal', () => {
+  const fixture = (() => {
+    const parsed = parseWorkflow(workflowJson([node('a')]))
+    if (!parsed.ok) throw new Error('fixture workflow is invalid')
+    return parsed.workflow
+  })()
+
+  it('carries an unenumerated error\u2019s kind and message', () => {
+    const error = new Error(
+      'Command failed: git config extensions.worktreeConfig true\n' +
+        'error: could not lock config file /repo/.git/config: File exists',
+    )
+
+    const message = refusal(error, fixture, '/lanes')
+
+    expect(message).toContain('/lanes')
+    expect(message).toContain('Error')
+    expect(message).toContain('could not lock config file')
+  })
+
+  it('lets a lane error speak for itself, with no generic line over it', () => {
+    const message = refusal(
+      new LaneAdoptError('run-1-lane-1', '/lanes/run-1-lane-1', 'not a linked git worktree'),
+      fixture,
+      '/lanes',
+    )
+
+    expect(message).toContain('run-1-lane-1')
+    expect(message).toContain('not a linked git worktree')
+    expect(message).not.toContain('could not provision the lane pool')
+  })
+
+  it('redacts a registered secret rather than repeating it', () => {
+    // The daemon token is registered process-wide the moment it exists, and a
+    // refusal is printed to a terminal *and* logged. The log's sink would catch
+    // it; the sentence handed to the caller has to catch it itself.
+    redactValue('token-abcdefghijklmnop')
+
+    const message = refusal(
+      new Error('Command failed: curl http://127.0.0.1:1/?t=token-abcdefghijklmnop'),
+      fixture,
+      '/lanes',
+    )
+
+    expect(message).not.toContain('token-abcdefghijklmnop')
+    clearRedactions()
+  })
+
+  it('stays generic for an error with nothing to say', () => {
+    const message = refusal({ nope: true }, fixture, '/lanes')
+
+    expect(message).toBe('vinta-ai-maestro: could not provision the lane pool under /lanes.')
+  })
+
+  it('bounds a message that arrives enormous', () => {
+    const message = refusal(new Error('x'.repeat(5_000)), fixture, '/lanes')
+
+    expect(message.length).toBeLessThan(1_000)
+    expect(message).toContain('…')
   })
 })
 

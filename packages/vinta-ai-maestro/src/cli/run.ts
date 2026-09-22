@@ -236,6 +236,9 @@ export async function runCommand(
     const preflight = await preflightRun({
       workflow,
       repoPath: bind.repoPath,
+      // The same condition `startRun` gets `resume` from, so the preflight and
+      // the pool cannot disagree about whether these lanes are being adopted.
+      ...(resumeId === undefined ? {} : { resumeRunId: resumeId }),
       ...(deps.doctor === undefined ? {} : { doctor: deps.doctor }),
     })
     if (!preflight.ok) {

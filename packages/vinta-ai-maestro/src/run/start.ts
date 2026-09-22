@@ -52,7 +52,7 @@ import {
   MAESTRO_TOKEN_ENV,
   MAESTRO_URL_ENV,
 } from '../resources/agent-leases.ts'
-import type { Logger } from '../log/index.ts'
+import { errorFields, stackFields, type Logger } from '../log/index.ts'
 import { createScheduler, type RunReport } from '../scheduler/index.ts'
 import type { Workflow } from '../types.ts'
 import { laneRootFor } from '../cli/paths.ts'
@@ -134,6 +134,15 @@ export interface StartRunOptions {
 export interface PreflightOptions {
   readonly workflow: Workflow
   readonly repoPath: string
+  /**
+   * The run this preflight is for, when it is for a resume — set wherever
+   * `startRun` is given `resume: true`, and nowhere else.
+   *
+   * Without it the doctor reads the resume's own lanes, still holding their
+   * phase branches from the phase the kill interrupted, as leftovers of a
+   * foreign run, and refuses the resume with a remedy that would delete them.
+   */
+  readonly resumeRunId?: string
   readonly doctor?: DoctorOverrides
 }
 
@@ -169,6 +178,7 @@ export async function preflightRun(options: PreflightOptions): Promise<Preflight
     // false, so a workflow with a compose-delivered database was preflighted as
     // though docker were irrelevant to it.
     project,
+    ...(options.resumeRunId === undefined ? {} : { resumeRunId: options.resumeRunId }),
     ...options.doctor,
   })
   if (!report.ok) {
@@ -263,6 +273,15 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
           })
         : { executor: options.executor, close: () => {} }
   } catch (error) {
+    // The kind and the frames, which no refusal line can carry. Both callers
+    // log `run.provision_failed` with the operator's sentence as `reason`, and
+    // that sentence is deliberately short — so without this record a provision
+    // failure had no `error` field, no stack, and nothing to grep for but prose.
+    options.logger?.error('run.provision_failed', {
+      run: runId,
+      ...errorFields(error),
+      ...stackFields(error),
+    })
     return { ok: false, message: refusal(error, workflow, laneRoot) }
   }
 

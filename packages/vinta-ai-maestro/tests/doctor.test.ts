@@ -535,6 +535,89 @@ describe('vinta-ai-maestro doctor', () => {
       })
       expect(find(report.checks, 'branches').status).toBe('pass')
     })
+
+    /**
+     * The resume this check used to refuse.
+     *
+     * A kill mid-phase leaves the run's *own* lanes on `plan/<id>/phase-<n>` —
+     * the integrator put them there — which read as clashes turned the preflight
+     * of every `run --resume` into a wall of failures, each offering to
+     * `worktree remove --force` the lane holding the uncommitted work the
+     * resume existed to adopt.
+     *
+     * Built as a resume really leaves it: the lane branch exists, and HEAD is on
+     * the phase branch rather than on it, because `recycle` never ran.
+     */
+    const resumeFixture = async (): Promise<{ dir: string; poolRoot: string }> => {
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-doctor-resume-'))
+      temps.push(dir)
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 't@example.com')
+      git('config', 'user.name', 'T')
+      await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8')
+      git('add', '.')
+      git('commit', '-qm', 'seed')
+
+      const poolRoot = join(dir, 'lanes')
+      const lane = join(poolRoot, 'p-run1-lane-1')
+      git('worktree', 'add', '-q', '-b', 'wt/p-run1-lane-1', lane)
+      execFileSync('git', ['checkout', '-q', '-b', 'plan/p/phase-p0'], {
+        cwd: lane,
+        stdio: 'ignore',
+      })
+      return { dir, poolRoot }
+    }
+
+    const resumeWorkflow = WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'p',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'm', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      nodes: [{ id: 'p0', name: 'p0', prompt_ref: 'seed.txt' }],
+    })
+
+    it('passes when the holders are lanes of the run being resumed', async () => {
+      const { dir, poolRoot } = await resumeFixture()
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run1',
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      expect(find(report.checks, 'branches').status).toBe('pass')
+      // Not merely "not a fail": no per-branch line at all, so nothing offers
+      // to remove the lane.
+      expect(report.checks.some((check) => check.id.startsWith('branch:'))).toBe(false)
+      expect(report.ok).toBe(true)
+    })
+
+    it('still fails when the holder is a lane of some other run', async () => {
+      // The same filesystem as above. The only difference is which run is being
+      // resumed, which is the whole of what may excuse a held branch.
+      const { dir, poolRoot } = await resumeFixture()
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run2',
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      const check = find(report.checks, 'branch:plan/p/phase-p0')
+      expect(check.status).toBe('fail')
+      expect(check.remedy).toContain('worktree remove --force')
+      expect(report.ok).toBe(false)
+    })
   })
 
   it('fails when the disk cannot hold lanes + 1 worktrees', async () => {

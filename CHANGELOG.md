@@ -736,6 +736,50 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`run --resume` could not provision a pool at all on a project that
+  disables hooks.** `#configureHooks` enables `extensions.worktreeConfig`
+  before it can set `core.hooksPath --worktree`, and that first key is
+  repository-wide: the write lands in the shared `.git/config`, which git takes
+  `.git/config.lock` to edit. Called once per lane out of the provisioning
+  `Promise.all`, the lanes collided on that lock — `could not lock config file
+  …: File exists`. A fresh provision never showed it, because `worktree add`
+  goes through the pool's serialized git turn and staggered the lanes apart by
+  the time they reached the shared write; `adopt` skips `worktree add`, so every
+  lane arrived in the same tick and **every** resume of a `hooks: false` project
+  failed, reproducibly, before a single phase was scheduled. The extension now
+  goes through the same serialized turn. The `--worktree` write stays parallel:
+  it lands in `.git/worktrees/<name>/config.worktree`, one file per lane.
+
+- **A provision failure that was not one of three enumerated kinds said nothing
+  about itself.** `refusal` detailed `DiskProbeError`, `LaneSetupError` and
+  `LaneEnvFileError`; everything else — including the lock collision above and
+  `LaneAdoptError`, the one error a resume is most likely to hit — collapsed to
+  "could not provision the lane pool under …", and the daemon log recorded that
+  same sentence as `run.provision_failed`'s `reason` with no `error` field and
+  no stack. So the run that could not start left behind no record of why, in
+  either place an operator looks. The exclusion was a §11 reading
+  `LaneSetupError` had already revised for this exact reason: §11 keeps
+  repository *contents* out of the record — diffs, file bodies, gate output —
+  and an error's own complaint about a lock file or a ref is not that. An
+  unenumerated error's message is now carried, capped at 500 characters and run
+  through the log's redaction set; `LaneAdoptError` speaks for itself like the
+  other lane errors; and the failure is logged with its kind and stack frames.
+
+- **`doctor` reported the resumed run's own lanes as leftovers blocking it, and
+  offered to destroy them.** The held-branch check fails a run whose phase
+  branches are checked out in another worktree, which is right for a fresh run
+  and exactly wrong for a resume: the integrator puts a lane on
+  `plan/<id>/phase-<n>` for the duration of a phase, so a run killed mid-phase
+  — the kill a resume is *for* — leaves its own lanes holding precisely those
+  branches. Every `run --resume` therefore refused preflight with one failure
+  per phase in flight, each remedied by `git worktree remove --force <lane>`,
+  which deletes the uncommitted work the resume existed to adopt. The check now
+  takes the run being resumed and excludes lanes belonging to it, identified by
+  reading the lane root and asking each worktree which branch it holds — never
+  by comparing git's printed paths with this process's, the platform trap
+  `reap` and `LanePool` both document. `doctor` takes `--resume <run-id>` to ask
+  the same question before a resume, and a lane of *another* run still fails.
+
 - **`vinta-ai-maestro gate` gave up on the slowest gate after five minutes and
   called it a daemon it could not reach.** The command awaited one `fetch`, on
   the stated reasoning that a gate is slow for reasons the client cannot shorten

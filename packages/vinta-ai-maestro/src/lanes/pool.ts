@@ -890,7 +890,20 @@ export class LanePool {
     // which would disable hooks for the main checkout too. The env var form is
     // not available here because the agent runs its own git. So: worktree
     // config, with the extension enabled first.
-    await gitIn(lanePath, ['config', 'extensions.worktreeConfig', 'true'])
+    //
+    // **The extension goes through `#git`, which serializes; the `--worktree`
+    // write does not need to.** `extensions.worktreeConfig` is a
+    // repository-wide key, so enabling it writes the *shared* `.git/config` —
+    // one file, whichever worktree asks — and git takes `.git/config.lock` to
+    // do it. Called per lane out of the provisioning `Promise.all`, the lanes
+    // collided on that lock: `could not lock config file …: File exists`, and
+    // the pool refused. A fresh provision never showed it, because
+    // `worktree add` goes through the same turn and staggered the lanes apart
+    // — so this was a bug only on the path that skips `worktree add`, which is
+    // `adopt`, which is every resume of a project with `hooks: false`. The
+    // second write lands in `.git/worktrees/<name>/config.worktree`, a
+    // different file per lane, and stays parallel.
+    await this.#git(['config', 'extensions.worktreeConfig', 'true'])
     await gitIn(lanePath, ['config', '--worktree', 'core.hooksPath', empty])
   }
 

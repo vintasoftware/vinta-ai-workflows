@@ -567,6 +567,9 @@ export function runStarter(options: StarterOptions): RunHost {
       const preflight = await preflightRun({
         workflow,
         repoPath,
+        // `runId` is `request.runId` on this branch, and the same condition
+        // decides `startRun`'s `resume` below.
+        ...(request.kind === 'resume' ? { resumeRunId: runId } : {}),
         ...(options.doctor === undefined ? {} : { doctor: options.doctor }),
       })
       if (!preflight.ok) {
