@@ -548,6 +548,19 @@ interface NodePayloads {
     readonly status: GateStatus
     readonly duration_ms: number
     readonly cached: boolean
+    /**
+     * Only on `timed_out`: what the runner saw as it killed the gate, so a
+     * reader can tell a hung gate (`quiet_ms` near the timeout) from a slow one
+     * (small `quiet_ms`, and `load_1m` well above `cpus` when it was
+     * contention). Numbers only — never a byte of the output (§11). Absent on
+     * rows written before it existed.
+     */
+    readonly timeout?: {
+      readonly quiet_ms: number
+      readonly output_bytes: number
+      readonly load_1m?: number
+      readonly cpus: number
+    }
   }
   /**
    * What became of one chore turn (`run_chore`).

@@ -29,6 +29,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A timed-out gate says whether it hung or was slow.** A `gate_result` with
+  `status: timed_out` used to carry only the status, so a run with nine
+  timeouts could not say whether any of them was a stuck suite or a host too
+  busy to finish one. It now carries `timeout`: `quiet_ms` (how long the gate
+  had gone without writing anything when it was killed), `output_bytes`, and
+  the host's `load_1m` beside `cpus`. `quiet_ms` near the timeout is a gate
+  waiting on something; a small one with `load_1m` well above `cpus` is
+  contention. Numbers only, as before: nothing the gate printed reaches the
+  row. The monitor's brief points at the new field. Older rows have no
+  `timeout`.
+
 - **Gate durations are now kept, not just displayed.** Every `gate_result` has
   carried the runner's own `duration_ms` since gates were journalled, and
   nothing read it back: the figure went to a live panel and was afterwards
