@@ -85,4 +85,6 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
       {If run_options.full_test_suite = true:} run the **full test suite** `{{TEST_CMD}}` instead of the scoped suite — this phase guards against regressions in untouched code too.
    {{E2E_OUTER_GATE_LINE}}
 6. Outer gate fails → return step 2 (fix regression), re-run inner loop, then 5a/5b/5c. **Never** commit, push, or proceed while any gate is red.
+
+<!-- include: partials/dispatched-agent.md#NO_NESTED_DISPATCH -->
 <!-- block-end: INNER_OUTER_LOOP -->

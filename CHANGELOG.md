@@ -564,6 +564,24 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A dispatched phase agent does the work itself, instead of spawning an
+  implementer under it.** claude-code sessions run by the orchestrator were
+  handing their phase to a sub-agent and reporting its summary back, and the
+  pull was not laziness — `implement-phase` ships into the same repositories,
+  its description matches "you are implementing P3 of plan X", and its content
+  is "spawn exactly one implementer subagent". So a session was loading a
+  conductor skill on its own and correctly following it, one level below the
+  conductor that had already spawned it. The cost is the whole point of session
+  reuse: a sub-agent's reading of the codebase ends with the sub-agent, so the
+  warm session that every cross-phase turn greets with "everything you learned
+  still holds" was left holding a paragraph, and each phase paid a cold agent's
+  first turn again. Both halves are now closed. Every `vinta-ai-maestro` role
+  prompt (implementer, reviewer, fixer, chore — cold and continued) carries a
+  no-delegation section that names those skills and says what delegating costs,
+  and the plan-execution unit grows a `dispatched-agent` partial: a guard at the
+  top of all four conductors refusing entry to an agent that was itself handed
+  one phase, plus the same rule inside every composed implementer prompt.
+
 - **The node view's gate panel is a list of verdicts you can open, not a stack
   of scrolling boxes.** Every gate used to render its whole log at once, each
   in its own fixed-height box with its own scrollbar — so three gates in a
