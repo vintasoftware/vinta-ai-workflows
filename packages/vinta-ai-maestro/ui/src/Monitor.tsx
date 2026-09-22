@@ -30,10 +30,11 @@
  * journals as it thinks, so the fast one is what turns "Thinking…" from a word
  * into the thing it is actually doing.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { Button } from 'vinta-design-system/ui/button'
 import type { Client } from './client.ts'
 import { CLOSED, Entries, FoldControls, type Folded } from './Entries.tsx'
+import { useFollowing } from './follow.ts'
 import { EmptyNote, ErrorNote, Panel } from './Panel.tsx'
 import { fold } from './transcript.ts'
 
@@ -52,7 +53,7 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
   const [text, setText] = useState('')
   const [failed, setFailed] = useState(false)
   const [open, setOpen] = useState<Folded>(CLOSED)
-  const list = useRef<HTMLOListElement | null>(null)
+  const { listRef, onScroll, following, jump, stick } = useFollowing()
 
   const reload = useCallback(async () => {
     try {
@@ -79,14 +80,24 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
     return () => clearInterval(tick)
   }, [pending, reload])
 
-  // The answer arrives at the bottom, so that is where the box stays. No
-  // conditional following here, unlike a phase's transcript: this list is short,
-  // the operator just asked the question that is being answered, and there is
-  // nothing above to be reading instead.
-  useEffect(() => {
-    const element = list.current
-    if (element !== null && pending) element.scrollTop = element.scrollHeight
-  }, [entries.length, pending])
+  // The answer arrives at the bottom, so that is where the box opens and stays.
+  //
+  // It used to stick **only while a turn was running**, on the theory that this
+  // list is short and the operator is watching the answer they just asked for.
+  // Neither half held. The conversation is the journal's, so it is every
+  // question ever asked about this run — a hundred entries is ordinary — and
+  // the interventions a run makes about itself land in it with nobody having
+  // asked anything. So opening the panel put the operator at the oldest entry
+  // of a long history, and the newest, which is the only one that could still
+  // be relevant, was as far below the fold as the run was old.
+  //
+  // Now it follows the way a phase's transcript does, conditionally and with an
+  // escape (`follow.ts`), because the other half of the old reasoning was also
+  // wrong: there is plenty above worth reading, and yanking somebody out of it
+  // is worse than the problem.
+  useLayoutEffect(() => {
+    stick()
+  }, [entries.length, stick])
 
   async function ask(): Promise<void> {
     const question = text.trim()
@@ -133,15 +144,32 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
           Ask about this run — what is blocked, why a phase failed, what it would take to move on.
         </EmptyNote>
       ) : (
-        <Entries
-          rows={rows}
-          open={open}
-          listRef={(element) => {
-            list.current = element
-          }}
-          className="exchanges max-h-[var(--panel-scroll,320px)] overflow-y-auto"
-          data-exchanges
-        />
+        <>
+          {/* The escape from the following rule, and the only way back into it
+              short of scrolling to the very bottom by hand. It appears only
+              once the reader has left the newest row, so it is never a control
+              that does nothing. */}
+          {!following && (
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              className="w-fit self-end"
+              data-action="jump-latest"
+              onClick={jump}
+            >
+              Jump to latest
+            </Button>
+          )}
+          <Entries
+            rows={rows}
+            open={open}
+            listRef={listRef}
+            onScroll={onScroll}
+            className="exchanges max-h-[var(--panel-scroll,320px)] overflow-y-auto"
+            data-exchanges
+          />
+        </>
       )}
 
       {/* Said once, under the conversation, and only while nothing of the
