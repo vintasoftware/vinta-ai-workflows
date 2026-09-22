@@ -259,3 +259,142 @@ test('an attributed row stops repeating who it is', () => {
   // Labels that describe the *event* stay useful under any band.
   expect(present(by('fixer', used('Bash', { command: 'ls' }))).label).toBe('Tool · Bash')
 })
+
+/**
+ * The monitor's intervention proposal, which reached the operator's
+ * conversation as the JSON its schema demands.
+ *
+ * It is journalled there on purpose — a run that retuned itself should say so
+ * where a person is already looking — and the consequence was that the useful
+ * part, the summary paragraph, arrived a thousand characters into one unwrapped
+ * line of braces. The document is the record's; the row is the reader's.
+ */
+const proposed = (body: unknown): unknown => ({
+  type: 'assistant_text',
+  text: JSON.stringify(body),
+  by: { role: 'monitor' },
+})
+
+test('an intervention proposal reads as what it says', () => {
+  const view = present(
+    proposed({
+      schema_version: 1,
+      summary: 'The unit gate rebuilds its database on every run.',
+      changes: [
+        {
+          verb: 'retune_gate',
+          gate: 'unit',
+          cmd: 'pytest --reuse-db',
+          evidence: 'unit.log line 3: Creating test database…',
+        },
+      ],
+    }),
+  )
+
+  expect(view.kind).toBe('intervention')
+  expect(view.shape).toBe('prose')
+  expect(view.label).toBe('Proposal')
+  // Something was proposed about a live run, so the row carries a dot.
+  expect(view.tone).toBe('attention')
+  expect(view.body).toContain('The unit gate rebuilds its database on every run.')
+  expect(view.body).toContain('Proposed 1 change:')
+  expect(view.body).toContain('1. Gate unit — run: pytest --reuse-db')
+  expect(view.body).toContain('Evidence: unit.log line 3')
+  // And none of the punctuation it was carried in.
+  expect(view.body).not.toContain('schema_version')
+  expect(view.body).not.toContain('"verb"')
+})
+
+/**
+ * The expected outcome, and the one the tone must not shout about: a monitor
+ * that looked and found the run fine. `intervention.ts` says twice that empty
+ * `changes` is a real answer — a dot on every one of them would spend the
+ * signal on the case that needs no attention at all.
+ */
+test('a proposal that changes nothing says so, quietly', () => {
+  const view = present(
+    proposed({ schema_version: 1, summary: 'Both phases are doing hard work.', changes: [] }),
+  )
+
+  expect(view.body).toContain('Both phases are doing hard work.')
+  expect(view.body).toContain('Proposed no changes.')
+  expect(view.tone).toBe(null)
+})
+
+/** The brief forbids a code fence and the model writes one anyway. */
+test('a fenced proposal is still a proposal', () => {
+  const body = JSON.stringify({ schema_version: 1, summary: 'Nothing to change.', changes: [] })
+  const view = present({ type: 'assistant_text', text: `\`\`\`json\n${body}\n\`\`\`` })
+
+  expect(view.kind).toBe('intervention')
+  expect(view.body).toContain('Nothing to change.')
+})
+
+/** Every verb gets a sentence. A table keyed on the daemon's union guarantees it. */
+test('each verb renders as a sentence', () => {
+  const view = present(
+    proposed({
+      schema_version: 1,
+      summary: 'Three adjustments.',
+      changes: [
+        { verb: 'retime_gate', gate: 'e2e', timeout_s: 3600, evidence: 'killed at its ceiling' },
+        { verb: 'rebudget_fixes', node: 'p1', max_fix_rounds: 4, evidence: 'three rounds of drift' },
+        { verb: 'retier_phase', node: 'p2', model: 'opus-5', evidence: 'no precedent in this repo' },
+      ],
+    }),
+  )
+
+  expect(view.body).toContain('Proposed 3 changes:')
+  expect(view.body).toContain('1. Gate e2e — time out after 3600s')
+  expect(view.body).toContain('2. Phase p1 — 4 fix rounds')
+  expect(view.body).toContain('3. Phase p2 — run on opus-5')
+})
+
+/**
+ * A verb this build has not heard of still gets a row, for the reason an
+ * unparsed entry does: a record that silently drops what happened lies.
+ */
+test('a verb from a newer daemon is shown rather than dropped', () => {
+  const view = present(
+    proposed({
+      schema_version: 1,
+      summary: 'One change.',
+      changes: [{ verb: 'reheat_gate', gate: 'unit', degrees: 11, evidence: 'it was cold' }],
+    }),
+  )
+
+  expect(view.body).toContain('1. reheat_gate —')
+  expect(view.body).toContain('"gate":"unit"')
+  expect(view.body).toContain('Evidence: it was cold')
+})
+
+/** An answer is prose, and prose that mentions braces is still prose. */
+test('an ordinary answer is untouched', () => {
+  const view = present(said('It failed because `{` was unbalanced in the fixture.'))
+
+  expect(view.kind).toBe('assistant_text')
+  expect(view.body).toBe('It failed because `{` was unbalanced in the fixture.')
+})
+
+/**
+ * Not every JSON answer is a proposal — an older intervention, or a model that
+ * replied in JSON when nobody asked it to. Indenting is not much, but it is the
+ * difference between a paragraph of braces and something a person can skim.
+ */
+test('any other JSON answer is at least indented', () => {
+  const view = present(said('{"verdict":"unclear","looked_at":["p0","p1"]}'))
+
+  expect(view.kind).toBe('assistant_text')
+  expect(view.body).toContain('\n  "verdict": "unclear"')
+})
+
+/**
+ * Two proposals in a row are two proposals. `assistant_text` groups, because a
+ * streamed answer arrives in pieces and means one thing; a document does not.
+ */
+test('proposals do not fold into each other', () => {
+  const one = proposed({ schema_version: 1, summary: 'First look.', changes: [] })
+  const rows = fold([one, one], 0)
+
+  expect(rows).toHaveLength(2)
+})

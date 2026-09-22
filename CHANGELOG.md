@@ -754,6 +754,24 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The monitor's conversation was mostly unformatted JSON.** Not its answers —
+  its *watchdog's*. An intervention turn must reply with one document matching
+  `intervention.v1.schema.json`, which is what makes the monitor's authority
+  over a live run a closed set of verbs rather than an editor over
+  `workflow.json`; and that turn is journalled into the conversation a person
+  reads, because a run that retuned itself should say so where somebody is
+  already looking. Both of those are right. Rendering the document verbatim was
+  not, and the summary paragraph the operator wanted arrived a thousand
+  characters into one unwrapped line of braces. A proposal now renders as what
+  it says: the summary, then one line per proposed change with its evidence
+  under it, and a tone dot only when something was actually proposed — a turn
+  that looked and changed nothing is the expected outcome and should not shout.
+  The verb table is keyed on the daemon's own union, so a fifth verb fails the
+  UI build rather than shipping as a bare identifier. The journal still holds
+  the bytes the model wrote — only the row changed, so conversations already on
+  disk read as well as new ones. Any other whole-JSON answer is at least
+  indented.
+
 - **Hitting the plan's session or weekly limit failed the node instead of
   waiting for the window to end.** `claude-code`'s refusal table recognised
   "usage limit reached" and nothing else, and the classifier's default is

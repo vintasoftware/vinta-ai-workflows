@@ -6,7 +6,7 @@
  * copies whatever the adapter emitted — so the narrowing has to happen
  * somewhere, and this is the only place that knows what a chat row looks like.
  *
- * Three rules:
+ * Four rules:
  *
  * - **The union is the daemon's, not a second opinion of it.** `AGENT_KINDS` is
  *   checked against `AgentEvent['type']` in both directions: `satisfies`
@@ -22,12 +22,18 @@
  *   daemon only started writing recently, so every line of every earlier run
  *   lacks it. Those render exactly as they always did, with `role` null — an
  *   old transcript reads as a transcript, not as an error.
+ * - **An entry the model wrote for a parser is rendered for a reader.** One
+ *   kind of `assistant_text` is not prose at all: the monitor's intervention
+ *   proposal is a JSON document, journalled into the conversation a person
+ *   reads (`proposal` below). It is shown as what it says. The *journal* keeps
+ *   the bytes — nothing here rewrites the record, only the row.
  *
  * Nothing here logs. Transcript text is repository content (§11) and this
  * module's only output is a value handed to a component that renders it.
  */
 import { z } from 'zod'
 import type { AgentEvent } from '../../src/harness/adapter.ts'
+import type { InterventionVerbId } from '../../src/intervention/intervention.ts'
 import type { TranscriptEntry } from '../../src/journal/transcript.ts'
 import type { Tone } from './status.ts'
 
@@ -256,7 +262,10 @@ function build(raw: unknown): EntryView {
       // and the row says so before it says anything else.
       return row(entry.type, 'operator', entry.text, 'attention')
     case 'assistant_text':
-      return row(entry.type, 'agent', entry.text, null)
+      // A proposal first, because the monitor writes those into the same
+      // conversation and they are not prose. Then the raw text, indented if it
+      // turns out to be a JSON document of some other shape.
+      return proposal(entry.text) ?? row(entry.type, 'agent', reflow(entry.text), null)
     case 'thinking':
       return row(entry.type, 'agent', entry.text, null, 'Agent · thinking', { shape: 'thinking' })
     case 'tool_use':
@@ -525,4 +534,141 @@ function serialise(value: unknown, indent: number): string {
 
 function clamp(text: string): string {
   return text.length <= PAYLOAD_LIMIT ? text : `${text.slice(0, PAYLOAD_LIMIT)}…`
+}
+
+/**
+ * The monitor's intervention proposal — JSON on purpose, unreadable by accident.
+ *
+ * A watchdog turn must answer with one object matching
+ * `schemas/intervention.v1.schema.json`, and that is the point of the feature:
+ * the monitor's authority over a live run is a closed set of verbs rather than
+ * an editor over `workflow.json` (`intervention/intervention.ts`). The same
+ * turn is journalled into the *operator's* conversation, because a run that
+ * retuned itself should say so where a person is already looking.
+ *
+ * Those two facts together are what filled the monitor thread with braces: a
+ * document written for a parser, rendered to a reader — and the summary
+ * paragraph, which is the part a person actually wanted, buried a thousand
+ * characters into one unwrapped line. So it is read back and shown as what it
+ * says. The journal keeps the bytes the model wrote; only the row changes.
+ *
+ * **Shaped loosely, deliberately.** This is a view of a document the host has
+ * already validated or refused elsewhere, and a proposal that rendered as raw
+ * JSON again because a field this view never reads failed a check would hide
+ * the one entry the operator most needs. What *is* checked is the verb
+ * vocabulary: `VERB_LINES` is keyed on the daemon's own union, so a fifth verb
+ * fails to compile here rather than shipping as its own identifier.
+ */
+const ProposalSchema = z.object({
+  schema_version: z.number(),
+  summary: z.string(),
+  changes: z.array(z.record(z.string(), z.unknown())).default([]),
+})
+
+/**
+ * One change, in a sentence, per verb.
+ *
+ * `Record<InterventionVerbId, …>`, so this cannot go quietly out of date: a
+ * verb added to `InterventionVerbSchema` and not to this table is a type error
+ * in the UI build, which is the only place that would otherwise never notice.
+ */
+const VERB_LINES: Readonly<
+  Record<InterventionVerbId, (change: Record<string, unknown>) => string>
+> = {
+  retune_gate: (change) => `Gate ${field(change, 'gate')} — run: ${field(change, 'cmd')}`,
+  retime_gate: (change) => `Gate ${field(change, 'gate')} — time out after ${field(change, 'timeout_s')}s`,
+  rebudget_fixes: (change) =>
+    `Phase ${field(change, 'node')} — ${field(change, 'max_fix_rounds')} fix rounds`,
+  retier_phase: (change) => `Phase ${field(change, 'node')} — run on ${field(change, 'model')}`,
+}
+
+function proposal(text: string): EntryView | null {
+  const parsed = ProposalSchema.safeParse(document(text))
+  if (!parsed.success) return null
+  const { summary, changes } = parsed.data
+
+  const lines = [summary.trim(), '']
+  if (changes.length === 0) {
+    lines.push('Proposed no changes.')
+  } else {
+    lines.push(`Proposed ${changes.length} change${changes.length === 1 ? '' : 's'}:`)
+    for (const [index, change] of changes.entries()) lines.push(...describe(change, index))
+  }
+
+  // `attention` only when something was actually proposed. A turn that looked
+  // and changed nothing is the expected outcome (`intervention.ts` says so
+  // twice), and a dot on every one of them would spend the tone on the case
+  // that needs no attention at all.
+  return row(
+    'intervention',
+    'agent',
+    lines.join('\n'),
+    changes.length === 0 ? null : 'attention',
+    'Proposal',
+  )
+}
+
+function describe(change: Record<string, unknown>, index: number): readonly string[] {
+  const verb = change['verb']
+  const known = typeof verb === 'string' && verb in VERB_LINES
+  const line = known
+    ? (VERB_LINES[verb as InterventionVerbId] as (c: Record<string, unknown>) => string)(change)
+    : // A verb this build has not heard of still gets a row, for the reason an
+      // unparsed entry does: the record must not quietly drop what happened.
+      `${typeof verb === 'string' ? verb : 'unknown verb'} — ${compact(rest(change))}`
+  const evidence = change['evidence']
+  const head = `${index + 1}. ${line}`
+  return typeof evidence === 'string' && evidence.trim() !== ''
+    ? [head, `   Evidence: ${evidence.trim()}`]
+    : [head]
+}
+
+/** Everything a verb's own line did not already say. */
+function rest(change: Record<string, unknown>): Record<string, unknown> {
+  const { verb: _verb, evidence: _evidence, ...remaining } = change
+  return remaining
+}
+
+/** One field of a change, as a reader sees it. Never `[object Object]`. */
+function field(change: Record<string, unknown>, key: string): string {
+  const value = change[key]
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return value === undefined ? '?' : compact(value)
+}
+
+/**
+ * An answer that is wholly a JSON document, indented.
+ *
+ * The fallback under `proposal`, for a shape this build does not recognise —
+ * an older intervention, a model that answered in JSON when nobody asked it to.
+ * Indenting it is not much, but it is the difference between a paragraph of
+ * braces and something a person can skim, and it costs nothing when the answer
+ * is the prose it is supposed to be.
+ */
+function reflow(text: string): string {
+  const value = document(text)
+  return value === undefined ? text : serialise(value, 2)
+}
+
+/** ```json … ``` — the fence the brief forbids and a model writes anyway. */
+const FENCE = /^```(?:json)?\s*\n([\s\S]*?)\n?```$/
+
+/**
+ * The text as a JSON object or array, or `undefined` when it is not one.
+ *
+ * Whole-text only. A sentence that happens to contain braces is prose and must
+ * stay prose, which is why this tests the trimmed text's first character rather
+ * than hunting for a document inside it.
+ */
+function document(text: string): unknown {
+  const trimmed = text.trim()
+  const body = (FENCE.exec(trimmed)?.[1] ?? trimmed).trim()
+  if (!body.startsWith('{') && !body.startsWith('[')) return undefined
+  try {
+    const parsed: unknown = JSON.parse(body)
+    return typeof parsed === 'object' && parsed !== null ? parsed : undefined
+  } catch {
+    return undefined
+  }
 }
