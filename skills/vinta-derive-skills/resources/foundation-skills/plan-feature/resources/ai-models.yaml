@@ -37,7 +37,7 @@ tiers:
       anthropic:
         - id: claude-haiku-4-5
       openai:
-        - id: gpt-5.6-luna
+        - id: gpt-6-luna
           note: optimized for cost-sensitive workloads
       google:
         - id: gemini-3.1-flash-lite
@@ -50,11 +50,10 @@ tiers:
       fixtures, simple HStore/ArrayField additions.
     models:
       anthropic:
-        - id: claude-haiku-4-5
         - id: claude-sonnet-5
           note: step-up target when phase touches >3 files
       openai:
-        - id: gpt-5-mini
+        - id: gpt-6-luna
       google:
         - id: gemini-3.8-flash
 
@@ -67,9 +66,9 @@ tiers:
       covering concurrency edges.
     models:
       anthropic:
-        - id: claude-sonnet-5
+        - id: claude-opus-5-5
       openai:
-        - id: gpt-5.6-terra
+        - id: gpt-6-sol
       google:
         - id: gemini-3-pro
           note: stronger code recall
@@ -82,12 +81,10 @@ tiers:
       tuning slow query against partitioned hot table, debugging heisenbug.
     models:
       anthropic:
-        - id: claude-opus-5
+        - id: claude-fable-5-1
       openai:
         - id: gpt-6-astra
           note: frontier model; roughly twice sol's price, so reserve it for tier 4
-        - id: gpt-5.6-sol
-          note: cheaper frontier option when astra's step up is not warranted
       google:
         - id: gemini-3-pro
           note: with thinking

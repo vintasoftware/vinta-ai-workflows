@@ -1,6 +1,7 @@
 ---
 name: amend-plan
 description: Adjust an existing implementation plan in `{{PLAN_DIR}}/` after implementation has started or finished. Updates the plan file (revising existing phases or appending new ones), then for each affected phase that was already implemented adjusts its commits (`git commit --amend` or new commits) on the phase branch, force-pushes the rewritten branch, rebases every phase branch in the rewritten phase's dependency closure, force-pushes each, and refreshes the PR-context files. Use when the user says "amend the plan", "update phase N", "add a phase to plan X", "the spec changed, fix the plan", or "rewrite the implementation for phase N". NOT for one-off changes to a single file unrelated to a plan; use the regular implement skill for that. {{PR_POLICY_DESCRIPTION}}
+disable-model-invocation: true
 ---
 
 # Amend Plan

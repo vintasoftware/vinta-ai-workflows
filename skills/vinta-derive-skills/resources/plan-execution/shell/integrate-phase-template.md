@@ -1,6 +1,7 @@
 ---
 name: {{INTEGRATE_PHASE_NAME}}
 description: Internal integration step of [implement-plan] — NOT a standalone entry point. Pushes one reviewed phase along {{PROJECT_NAME}}'s commit strategy and opens (or updates) its PR through the prs-context file + bundled open-pr.sh — the only PR-creation path. The conductor passes the resolved `WORKROOT` / `BASE_BRANCH` and the PR / inline-comment policy; do not invoke directly to push arbitrary work.
+disable-model-invocation: true
 ---
 
 # Integrate one phase

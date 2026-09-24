@@ -1,6 +1,7 @@
 ---
 name: implement-plan
 description: Execute a phased implementation plan from `{{PLAN_DIR}}/` in {{PROJECT_NAME}} by orchestrating one subagent per phase (using whatever model the plan suggests and the runtime supports), running independent phases concurrently in their own worktree lanes when the plan's dependency graph allows it, pushing one branch per phase to {{CODE_HOST}}, and tracking progress. Use when the user says "implement the plan", "execute plan X", "start implementation", "run phase N of plan Y", "implement {feature} plan", or asks to drive a `*_IMPLEMENTATION_PLAN.md` file phase-by-phase. NOT for one-off changes, single-file edits, or work that doesn't have an existing plan. {{PR_POLICY_DESCRIPTION}}
+disable-model-invocation: true
 ---
 
 # Implement Plan

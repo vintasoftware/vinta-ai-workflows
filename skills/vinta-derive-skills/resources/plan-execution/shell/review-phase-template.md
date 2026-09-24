@@ -1,6 +1,7 @@
 ---
 name: review-phase
 description: Internal review gate of [implement-plan] / [amend-plan] / [systematic-debugging] — NOT a standalone entry point. Runs the mandatory three-layer review (mechanical checks, plan-compliance walkthrough, independent reviewer subagent) plus the fix loop against one phase's diff in {{PROJECT_NAME}}, spawning an independent reviewer, sending findings back to the phase's own implementer to fix, and looping until all three layers are clean. The invoking conductor passes the diff, the phase body to walk against, and the resolved `WORKROOT`; do not invoke directly to "review my code" — use the project's standard code-review path for that.
+disable-model-invocation: true
 ---
 
 # Review one phase
