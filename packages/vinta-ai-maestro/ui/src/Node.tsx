@@ -30,8 +30,9 @@
  * than the button.
  *
  * The page is two columns above a large window: what the operator *does* on
- * the left — the question, the steering box, the terminal, the transcript it
- * steers — and what they *check* on the right — the diff, the gates, the
+ * the left — the question, then the transcript with the steering box under
+ * it the way a chat puts its composer under the conversation, then the
+ * terminal — and what they *check* on the right — the diff, the gates, the
  * sessions. On a narrow window the columns stack in that order.
  */
 import { ChevronLeftIcon, TerminalIcon } from 'lucide-react'
@@ -212,6 +213,7 @@ export function NodeView({
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="flex flex-col gap-4">
+          <Transcript entries={detail.transcript.entries} />
           <Steering
             harness={detail.node.harness}
             capabilities={capabilitiesOf(snapshot, detail.node.harness)}
@@ -222,7 +224,6 @@ export function NodeView({
             onOperate={(operation, body, done) => void operate(operation, body, done)}
           />
           {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
-          <Transcript entries={detail.transcript.entries} />
         </div>
         <div className="panels flex flex-col gap-4">
           <Diff diff={detail.diff} />
