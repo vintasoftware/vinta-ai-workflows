@@ -88,6 +88,10 @@ export function Panel({
     }
   }, [expanded])
 
+  // The overlay spans the window, but a line of text as wide as a large
+  // monitor is unreadable; expanded, header and content share a centred column.
+  const column = expanded && 'mx-auto w-full max-w-6xl'
+
   const card = (
     <Card
       className={cn(
@@ -101,7 +105,7 @@ export function Panel({
       data-expanded={expanded ? '' : undefined}
       {...props}
     >
-      <CardHeader className="px-4">
+      <CardHeader className={cn('px-4', column)}>
         <CardTitle className="text-sm">{title}</CardTitle>
         {description !== undefined && (
           <CardDescription className="text-[13px]">{description}</CardDescription>
@@ -130,7 +134,7 @@ export function Panel({
           </CardAction>
         )}
       </CardHeader>
-      <CardContent className={cn('flex flex-col gap-3 px-4', contentClassName)}>
+      <CardContent className={cn('flex flex-col gap-3 px-4', column, contentClassName)}>
         {children}
       </CardContent>
     </Card>
