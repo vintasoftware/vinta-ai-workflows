@@ -7,7 +7,7 @@
  * spied on the client would prove the button called a function; this proves
  * the daemon would have accepted the request.
  */
-import { cleanup, fireEvent, waitFor, type RenderResult } from '@testing-library/react'
+import { act, cleanup, fireEvent, waitFor, type RenderResult } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest'
 import { ENTRY_KINDS_COVERED, TRANSCRIPT_KINDS } from '../src/transcript.ts'
 import { TRANSCRIPT_WINDOW } from '../src/Transcript.tsx'
@@ -473,7 +473,10 @@ test('a running gate counts up from the daemon’s clock, and a cached verdict s
     expect(toneOfGate(container, 'unit')).toBe('active')
     expect(textOf(container, '[data-gate="unit"] .gate-time')).toBe('1m 10s')
 
-    await vi.advanceTimersByTimeAsync(5_000)
+    // Inside `act`: React's scheduler kept the real `setImmediate` it found at
+    // import, so the render for the last tick lands on a real macrotask that
+    // nothing here awaits. `act` flushes it before the assertion reads the DOM.
+    await act(() => vi.advanceTimersByTimeAsync(5_000))
     expect(textOf(container, '[data-gate="unit"] .gate-time')).toBe('1m 15s')
 
     // A cached verdict reports what the gate cost when it last ran, and says
