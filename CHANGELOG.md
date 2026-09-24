@@ -575,6 +575,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Updated the OpenAI and Anthropic models to their latest version.**
+
+- **Updated the generated skills to have `disable-model-invocation: true` set.**
+
 - **`--retry-after` backs off when attempts fail faster than it.** An
   unanswered failure question used to answer itself on a flat interval
   forever, so a phase whose attempts died within seconds was retried every
