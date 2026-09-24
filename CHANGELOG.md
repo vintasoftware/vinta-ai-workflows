@@ -579,6 +579,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Updated the generated skills to have `disable-model-invocation: true` set.**
 
+- **An expanded panel reads in a centred column.** Full page used to mean
+  full width too, so on a large monitor a transcript or gate log ran in lines
+  too long to follow. The overlay still covers the window; its header and
+  content now sit in a centred column capped at `max-w-6xl`.
+
+- **The node view reads like a chat.** The transcript now sits above the
+  steering box instead of below it, so the conversation comes first and the
+  box you answer it in is under its newest turn. A terminal opened by *Take
+  over* still appears under the steering box.
+
 - **`--retry-after` backs off when attempts fail faster than it.** An
   unanswered failure question used to answer itself on a flat interval
   forever, so a phase whose attempts died within seconds was retried every
