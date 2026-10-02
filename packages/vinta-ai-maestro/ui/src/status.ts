@@ -36,6 +36,10 @@ const RUN_TONES: Readonly<Record<RunStatus, Tone>> = {
   running: 'active',
   done: 'ok',
   failed: 'error',
+  // Both chosen by the operator. A paused run is waiting for them to resume
+  // it; a cancelled one is over and asks nothing of anybody.
+  paused: 'wait',
+  cancelled: 'idle',
 }
 
 export function nodeTone(status: NodeStatus): Tone {

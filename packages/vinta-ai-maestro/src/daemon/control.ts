@@ -206,6 +206,13 @@ export interface DaemonRun {
    * denial, never as permission.
    */
   readonly permissionJudge?: PermissionJudgePort
+  /**
+   * Ends the run before its DAG does — `pause` drains it to a resumable stop,
+   * `stop` kills its live turns and cancels it. Resolves once the request is
+   * taken, not once the run has ended: the host process exits when it has.
+   * Absent on a host that cannot end a run early, and then both refuse.
+   */
+  readonly halt?: (mode: 'paused' | 'cancelled') => Promise<void>
 }
 
 /** What the daemon asks on a judged session's behalf. The input never leaves the call. */

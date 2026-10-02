@@ -550,7 +550,11 @@ export function postMortem(
         continue
       case 'run_ended':
         endedAtMs = event.ts
-        status = event.payload.status
+        // The artifact's schema is `done | failed`, and `plan-feature` reads it
+        // as "did this plan land". A run an operator cancelled did not; a
+        // paused one has not yet, and its post-mortem is not written until it
+        // ends some other way.
+        status = event.payload.status === 'done' ? 'done' : 'failed'
         continue
       case 'node_registered':
         traceOf(event.nodeId).wave = event.payload.wave

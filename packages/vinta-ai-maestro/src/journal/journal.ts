@@ -594,7 +594,9 @@ export class Journal {
         // A node that settled is no longer parked on anything, however it got
         // there — an abort while suspended ends the question without answering
         // it, and a pause left dangling in this table would outlive the run.
-        if (SETTLED.has(event.payload.status)) this.dropQuestion(event.runId, event.nodeId)
+        // Back to `pending` is the same: a halted or resumed node starts its
+        // pipeline again from the top, and asks again if it gets there.
+        if (UNPARKED.has(event.payload.status)) this.dropQuestion(event.runId, event.nodeId)
         return
       case 'node_assigned':
         // COALESCE so a patch that omits a field leaves the projected one alone.
@@ -663,7 +665,7 @@ export class Journal {
 }
 
 /** Statuses past which a pending question cannot still be pending. */
-const SETTLED: ReadonlySet<NodeStatus> = new Set<NodeStatus>(['done', 'failed', 'blocked'])
+const UNPARKED: ReadonlySet<NodeStatus> = new Set<NodeStatus>(['done', 'failed', 'blocked', 'pending'])
 
 function toPendingQuestion(row: QuestionRow): PendingQuestion {
   return {

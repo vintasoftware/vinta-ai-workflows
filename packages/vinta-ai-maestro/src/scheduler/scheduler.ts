@@ -120,6 +120,7 @@ import {
   type Reorientation,
 } from '../prompts/index.ts'
 import { choresFor } from '../chores.ts'
+import { killLiveGates } from '../gates/runner.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { ChoreTiming, Node, Pipeline, SideEffect, Workflow } from '../types.ts'
 
@@ -311,7 +312,22 @@ export interface RunReport {
   readonly failures: Readonly<Record<string, string>>
   /** Loop turns taken. Bounded by state changes — a spin would show up here. */
   readonly iterations: number
+  /**
+   * Set when the run ended because the operator halted it (`halt`), not
+   * because the DAG settled. The journal's `run_ended` carries the same word.
+   */
+  readonly halted?: HaltMode
 }
+
+/**
+ * How an operator ends a run that has not finished.
+ *
+ * - `paused` drains: no new phase starts, every running one stops at its next
+ *   step boundary, and nothing is killed. A resume picks it up.
+ * - `cancelled` kills every live agent turn first, then drains the same way.
+ *   It is final; a resume refuses it.
+ */
+export type HaltMode = 'paused' | 'cancelled'
 
 /**
  * The failure reason, with the attempts behind it.
@@ -425,6 +441,13 @@ class ReviewerEdited extends Error {}
  * already marked failed, with its reason, by the time this is thrown.
  */
 class Aborted extends Error {}
+
+/**
+ * Unwinds a node because the run is being halted (`Scheduler.halt`). Thrown
+ * only at a step boundary or before a step begins, so it never interrupts work
+ * in progress — on a pause, that is the whole point of draining.
+ */
+class Halted extends Error {}
 
 interface NodeState {
   /** Replaced by `adopt` while the node is unstarted — §9's amend path. */
@@ -704,6 +727,15 @@ export class Scheduler {
   #heights = new Map<string, number>()
   #waiters: (() => void)[] = []
   #iterations = 0
+  /** Set once by `halt`. Read at every point a node could start new work. */
+  #halt: HaltMode | null = null
+  /** Resolves when `halt` is called, for the one wait no state change ends. */
+  #halting: { promise: Promise<void>; resolve: () => void } = deferred()
+  /**
+   * Node bodies that have not returned yet. A halt is complete when this is
+   * zero: every node has reached a boundary, released what it held and left.
+   */
+  #active = 0
 
   constructor(options: SchedulerOptions) {
     this.#options = options
@@ -983,6 +1015,9 @@ export class Scheduler {
       this.#iterations += 1
       this.#dispatchReady()
       if (this.#settled()) break
+      // After `#settled`, so a run whose last node finished in the same turn
+      // the operator halted it ends as what it actually was.
+      if (this.#halt !== null && this.#active === 0) break
 
       const deadlocked = this.#deadlock()
       if (deadlocked) {
@@ -1001,7 +1036,9 @@ export class Scheduler {
       await this.#changed()
     }
 
-    const status = stop === null && this.#failures().length === 0 ? 'done' : 'failed'
+    const halted = this.#settled() ? null : this.#halt
+    const status =
+      halted ?? (stop === null && this.#failures().length === 0 ? 'done' : 'failed')
     this.#options.journal.append({
       runId: this.#options.runId,
       type: 'run_ended',
@@ -1012,7 +1049,56 @@ export class Scheduler {
       failures: this.#failures().length,
       iterations: this.#iterations,
     })
-    return this.#report(stop)
+    const report = this.#report(stop)
+    return halted === null ? report : { ...report, halted }
+  }
+
+  /**
+   * Ends the run before the DAG does, at the operator's word. Resolves at once;
+   * `run()` resolves when the drain is complete, having journalled `run_ended`
+   * with `mode` as its status.
+   *
+   * Draining rather than stopping, for both modes. A node is only ever unwound
+   * at a step boundary or before a step begins, so the lane it leaves behind is
+   * the lane a resume adopts — never one with half a gate run in it. What
+   * `cancelled` adds is the kill: every live agent turn and every running gate
+   * ends now, and the boundary arrives as soon as their effects return.
+   *
+   * Nodes unwound by a halt go back to `pending`, which is what `#seed` would
+   * make of them on a resume anyway. A node parked on a question is woken and
+   * unwound too: the question belongs to a process that is about to end.
+   *
+   * Idempotent, and a pause can be upgraded to a cancel; the reverse is ignored.
+   */
+  async halt(mode: HaltMode): Promise<void> {
+    if (this.#halt === 'cancelled' || this.#halt === mode) return
+    this.#halt = mode
+    this.#log.info('scheduler.halt', { mode })
+    this.#halting.resolve()
+    for (const state of this.#states.values()) {
+      const resume = state.resume
+      if (resume !== null) {
+        state.resume = null
+        state.parkedEffectId = null
+        resume({})
+      }
+    }
+    if (mode === 'cancelled') {
+      const kills: Promise<void>[] = []
+      for (const state of this.#states.values()) {
+        const live = state.live
+        if (live !== null) kills.push(live.session.kill().catch(() => {}))
+      }
+      killLiveGates()
+      await Promise.all(kills)
+    }
+    this.#wake()
+  }
+
+  /** Where a node goes when a halt reaches it: everything back, and `pending`. */
+  #unwindHalted(state: NodeState): void {
+    this.#release(state)
+    if (!this.#settledNode(state) && state.status !== 'pending') this.#setStatus(state, 'pending')
   }
 
   /**
@@ -1202,6 +1288,7 @@ export class Scheduler {
    * way it runs.
    */
   #dispatchReady(): void {
+    if (this.#halt !== null) return
     for (const id of this.#order) {
       const state = this.#states.get(id) as NodeState
       if (state.status !== 'pending') continue
@@ -1233,6 +1320,7 @@ export class Scheduler {
       // everything independent of it keeps going. The record is written first,
       // because `#fail` is one of the things that might have thrown.
       // -----------------------------------------------------------------
+      this.#active += 1
       void this.#runNode(state).catch((error: unknown) => {
         this.#log.error('scheduler.node_threw', {
           node: state.node.id,
@@ -1249,6 +1337,11 @@ export class Scheduler {
             ...errorFields(second),
           })
         }
+      }).finally(() => {
+        this.#active -= 1
+        // Only a halt waits on this count; waking otherwise would add a loop
+        // turn every node exit, which the scheduler's own tests count.
+        if (this.#halt !== null) this.#wake()
       })
     }
   }
@@ -1302,6 +1395,7 @@ export class Scheduler {
 
   async #runNode(state: NodeState): Promise<void> {
     while (true) {
+      if (this.#halt !== null) return this.#unwindHalted(state)
       // Staffing before capacity, deliberately. A lane is disk; who is holding
       // it is what the phase costs and whether it is any good. A free lane with
       // nobody qualified to take the phase is an idle lane — cheaper than the
@@ -1322,12 +1416,20 @@ export class Scheduler {
           this.#releaseCrew(state)
           return
         }
+        if (this.#halt !== null) return this.#unwindHalted(state)
       }
 
       // All-or-nothing, canonical order, one call: the lane and nothing else.
       // Gate pools are acquired later, while this lane is still held, which is
       // the §6 rule that an idle lane is just disk.
       state.laneLease = await this.#options.pools.acquire([LANE])
+      // The wait above ends when another node lets a lane go, and under a halt
+      // that is every node on its way out. Taking the lane on would start work.
+      if (this.#halt !== null) {
+        state.laneLease.release()
+        state.laneLease = null
+        return this.#unwindHalted(state)
+      }
       // A staffed node goes to its member's desk; an unstaffed one takes
       // whatever the free list has, exactly as before.
       state.lane =
@@ -1361,6 +1463,7 @@ export class Scheduler {
 
         // Already failed, already contained: unwinding is all that is left.
         if (error instanceof Aborted) return
+        if (error instanceof Halted) return this.#unwindHalted(state)
 
         if (error instanceof CapacityRetry) {
           // §15's ledger does not survive a *re-attempt*. A capacity refusal
@@ -1378,8 +1481,11 @@ export class Scheduler {
           // all for.
           this.#restartAttempt(state)
           this.#setStatus(state, 'waiting_on_capacity')
-          await error.waitFor()
+          // Raced, because a capacity window can be hours and nothing else
+          // would end this wait for a halt.
+          await Promise.race([error.waitFor(), this.#halting.promise])
           if (state.aborted) return
+          if (this.#halt !== null) return this.#unwindHalted(state)
           this.#setStatus(state, 'running')
           continue
         }
@@ -1411,7 +1517,7 @@ export class Scheduler {
    * workflow written before rosters existed.
    */
   async #claimCrew(state: NodeState): Promise<void> {
-    while (!state.aborted) {
+    while (!state.aborted && this.#halt === null) {
       const decision: CrewDecision = assignCrew({
         // The operator's pick, when they made one, stands in for the plan's.
         // `assignCrew` still refuses a member who is not an implementer on the
@@ -1599,6 +1705,7 @@ export class Scheduler {
     if (!this.#staffed || state.crew === null) return
 
     while (!state.aborted) {
+      if (this.#halt !== null) throw new Halted()
       const decision: ReviewDecision = assignReviewer({
         crew: this.#workflow.crew,
         authorTier: state.crew.tier,
@@ -1745,6 +1852,13 @@ export class Scheduler {
       // — and which an operator pause below reaches by the same path.
       this.#releaseGate(state)
       if (state.aborted) throw new Aborted()
+      // A pause lets the pipeline keep moving until it reaches its next piece
+      // of work, which the effect door then refuses: a step whose turn just
+      // ended may be one transition from done, and stopping it here would
+      // throw that away. A cancel stops now, because the turn it ends was
+      // killed, and a transition reading a killed turn as a failure would
+      // record one that never happened.
+      if (this.#halt === 'cancelled' && result.kind !== 'final') throw new Halted()
 
       if (result.kind === 'suspended') {
         // The question itself was journalled when the effect ran; here the
@@ -2019,11 +2133,14 @@ export class Scheduler {
    * sleeps, so the one place an abort has to be able to wake it.
    */
   async #park(state: NodeState): Promise<GuardContext> {
+    // Nobody will answer: the process asking is on its way out.
+    if (this.#halt !== null) throw new Halted()
     this.#setStatus(state, 'awaiting_human')
     const facts = await new Promise<GuardContext>((resolve) => {
       state.resume = resolve
     })
     if (state.aborted) throw new Aborted()
+    if (this.#halt !== null) throw new Halted()
     this.#setStatus(state, 'running')
     return facts
   }
@@ -2099,6 +2216,9 @@ export class Scheduler {
     return {
       execute: async (invocation: EffectInvocation): Promise<EffectOutcome> => {
         if (state.aborted) throw new Aborted()
+        // The one door every new piece of work goes through — an agent turn, a
+        // gate, a chore, a question. Shut under a halt.
+        if (this.#halt !== null) throw new Halted()
         const verb = invocation.effect.definitionId
         if (verb === 'spawn_agent') return this.#observe(state, await this.#spawn(state, invocation))
         if (verb === 'run_chore') return await this.#chores(state, invocation)
@@ -3107,4 +3227,12 @@ function questionContext(value: unknown): HumanQuestion['context'] | undefined {
 /** Convenience constructor, matching the shape the rest of the package uses. */
 export function createScheduler(options: SchedulerOptions): Scheduler {
   return new Scheduler(options)
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = (): void => {}
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
 }
