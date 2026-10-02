@@ -26,6 +26,7 @@ import {
   NodeDetailSchema,
   MonitorAskedSchema,
   MonitorHistorySchema,
+  NodeChangesSchema,
   RunUsageResponseSchema,
   OkResponseSchema,
   RedirectRequestSchema,
@@ -33,6 +34,7 @@ import {
   RunSnapshotSchema,
   type EventFrame,
   type Frame,
+  type NodeChanges,
   type NodeDetail,
   type RunUsageResponse,
   type RunSnapshot,
@@ -97,6 +99,19 @@ export interface Client {
   /** The node view's read: transcript tail, gate logs, diff ref, question (§10). */
   readonly node: (runId: string, nodeId: string) => Promise<NodeDetail>
   /**
+   * What the node changed: files with their counts, and the patch when asked.
+   *
+   * Two reads for one endpoint, because they cost differently. The summary
+   * card wants the counts on every refresh and never the patch; the diff view
+   * wants the patch once. The daemon runs git for both, so the cheap one is
+   * the one polled.
+   */
+  readonly changes: (
+    runId: string,
+    nodeId: string,
+    options: { readonly patch: boolean },
+  ) => Promise<NodeChanges>
+  /**
    * The run-level rollup: reuse counts and token/cost/cache totals (§15.6).
    *
    * Its own read rather than part of the snapshot, because the daemon folds
@@ -154,6 +169,12 @@ export function createClient(origin: string, token: string): Client {
     },
     async usage(runId) {
       return await get(`/api/runs/${encodeURIComponent(runId)}/usage`, RunUsageResponseSchema)
+    },
+    async changes(runId, nodeId, options) {
+      return await get(
+        `${nodePath(runId, nodeId)}/changes?patch=${options.patch ? 'true' : 'false'}`,
+        NodeChangesSchema,
+      )
     },
     async operate(runId, nodeId, operation, body) {
       const path = `${nodePath(runId, nodeId)}/${operation}`

@@ -1,6 +1,6 @@
 /**
- * The node view (§10): the transcript, the gate logs, the diff ref, the
- * steering box, the pending question, and the five operations of §9.
+ * The node view (§10): the transcript, the gate logs, what the phase changed,
+ * the steering box, the pending question, and the five operations of §9.
  *
  * What makes this screen different from the run view is that it is the only
  * one that *writes*. Three rules follow from that.
@@ -32,15 +32,12 @@
  * The page is two columns above a large window: what the operator *does* on
  * the left — the question, then the transcript with the steering box under
  * it the way a chat puts its composer under the conversation, then the
- * terminal — and what they *check* on the right — the diff, the gates, the
- * sessions. On a narrow window the columns stack in that order.
+ * terminal — and what they *check* on the right — the changes, the gates,
+ * the sessions. On a narrow window the columns stack in that order.
  */
 import { ChevronLeftIcon, TerminalIcon } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import {
-  DescriptionDetails,
-  DescriptionList,
-  DescriptionTerm,
   HStack,
   PageHeader,
   PageHeaderActions,
@@ -58,6 +55,7 @@ import { Button } from 'vinta-design-system/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'vinta-design-system/ui/card'
 import { Textarea } from 'vinta-design-system/ui/textarea'
 import type { NodeDetail, RunSnapshot } from '../../src/daemon/schemas.ts'
+import { Changes } from './Changes.tsx'
 import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
 import { Live } from './Live.tsx'
@@ -226,7 +224,7 @@ export function NodeView({
           {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
         </div>
         <div className="panels flex flex-col gap-4">
-          <Diff diff={detail.diff} />
+          <Changes client={client} runId={runId} nodeId={nodeId} ref={detail.diff} cursor={cursor} />
           <Gates gates={detail.gates} failing={failingGate} />
           <Sessions sessions={detail.sessions} />
         </div>
@@ -518,43 +516,6 @@ function delivery(harness: string, status: NodeStatus, inject: boolean): string 
   return inject
     ? `Delivered straight into the running ${harness} session.`
     : `${harness} cannot join a running turn: your message is queued and delivered on the next resume.`
-}
-
-/**
- * The diff, as a *reference*. The API serves branch, base and lane rather than
- * a rendering, because running git in a lane is the git unit's job (§10) — so
- * this panel names what to diff and where, and does not pretend to show it.
- */
-function Diff({ diff }: { readonly diff: NodeDetail['diff'] }) {
-  const complete = diff.branch !== null && diff.baseBranch !== null
-  return (
-    <Panel title="Diff" data-diff>
-      <DescriptionList>
-        <DescriptionTerm>branch</DescriptionTerm>
-        <DescriptionDetails className="font-mono text-xs" data-diff-branch>
-          {diff.branch ?? '—'}
-        </DescriptionDetails>
-        <DescriptionTerm>base</DescriptionTerm>
-        <DescriptionDetails className="font-mono text-xs" data-diff-base>
-          {diff.baseBranch ?? '—'}
-        </DescriptionDetails>
-        <DescriptionTerm>lane</DescriptionTerm>
-        <DescriptionDetails className="font-mono text-xs" data-diff-lane>
-          {diff.lane ?? '—'}
-        </DescriptionDetails>
-      </DescriptionList>
-      {complete ? (
-        // Wraps rather than overflowing: two long branch names are routinely
-        // wider than this panel, and a command that runs off the edge of its
-        // box is one nobody can copy without selecting blind.
-        <pre className="m-0 whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
-          git diff {diff.baseBranch}...{diff.branch}
-        </pre>
-      ) : (
-        <Hint className="muted">This node has no branch yet.</Hint>
-      )}
-    </Panel>
-  )
 }
 
 /**

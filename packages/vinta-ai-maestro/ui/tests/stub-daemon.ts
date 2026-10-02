@@ -34,6 +34,7 @@ import {
   MonitorAskSchema,
   MonitorAskedSchema,
   MonitorHistorySchema,
+  NodeChangesSchema,
   NodeDetailSchema,
   OkResponseSchema,
   RunUsageResponseSchema,
@@ -45,6 +46,7 @@ import {
   toIssues,
   toWireIssues,
   type EventFrame,
+  type NodeChanges,
   type NodeDetail,
   type RunSnapshot,
   type RunUsageResponse,
@@ -111,6 +113,12 @@ export interface StubOptions {
   /** Node details, keyed `${runId}/${nodeId}`. Anything else is `unknown_node`. */
   readonly details?: Readonly<Record<string, NodeDetail>>
   /**
+   * What each node changed, keyed the same way. A node with no entry answers
+   * 404 — a daemon older than this browser — and the card has to say so
+   * rather than show an empty list as though nothing changed.
+   */
+  readonly changes?: Readonly<Record<string, NodeChanges>>
+  /**
    * §15.6's rollup, by run id. A run with no entry answers 404 — which is what
    * a daemon older than this browser looks like, and the run view has to keep
    * drawing the graph through it.
@@ -152,6 +160,9 @@ export interface StubDaemon {
   readonly emit: (...events: NewEvent[]) => void
   readonly setSnapshot: (runId: string, snapshot: RunSnapshot) => void
   readonly setNodeDetail: (runId: string, nodeId: string, detail: NodeDetail) => void
+  readonly setNodeChanges: (runId: string, nodeId: string, changes: NodeChanges) => void
+  /** Every read of a node's changes, in order, with whether the patch was asked for. */
+  readonly changeReads: readonly { runId: string; nodeId: string; patch: boolean }[]
   /** Every question posted to the monitor, in order, parsed by the daemon's schema. */
   readonly asked: readonly { runId: string; text: string }[]
   /**
@@ -174,6 +185,8 @@ const TOKEN = 'stub-token'
 export async function startStubDaemon(options: StubOptions): Promise<StubDaemon> {
   const snapshots = new Map(Object.entries(options.snapshots))
   const details = new Map(Object.entries(options.details ?? {}))
+  const changesByNode = new Map(Object.entries(options.changes ?? {}))
+  const changeReads: { runId: string; nodeId: string; patch: boolean }[] = []
   const usageByRun = new Map(Object.entries(options.usage ?? {}))
   const posts: Post[] = []
   const puts: WorkflowPut[] = []
@@ -350,6 +363,19 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       )
     }
 
+    const changes = /^\/api\/runs\/([^/]+)\/nodes\/([^/]+)\/changes$/.exec(url.pathname)
+    if (changes !== null) {
+      const runId = decodeURIComponent(changes[1] ?? '')
+      const nodeId = decodeURIComponent(changes[2] ?? '')
+      const held = changesByNode.get(`${runId}/${nodeId}`)
+      if (held === undefined) return json(response, 404, { error: 'unknown_node', issues: null })
+      const patch = url.searchParams.get('patch') === 'true'
+      changeReads.push({ runId, nodeId, patch })
+      // The daemon reads the patch only when asked; the stub serves the same
+      // distinction so a card that asked for it by mistake is caught here.
+      return json(response, 200, NodeChangesSchema.parse(patch ? held : { ...held, patch: null }))
+    }
+
     const node = /^\/api\/runs\/([^/]+)\/nodes\/([^/]+)$/.exec(url.pathname)
     if (node !== null) {
       const key = `${decodeURIComponent(node[1] ?? '')}/${decodeURIComponent(node[2] ?? '')}`
@@ -428,6 +454,10 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
     setNodeDetail(runId, nodeId, detail) {
       details.set(`${runId}/${nodeId}`, detail)
     },
+    setNodeChanges(runId, nodeId, changes) {
+      changesByNode.set(`${runId}/${nodeId}`, changes)
+    },
+    changeReads,
     asked,
     monitorSays(runId, ...entries) {
       conversation(runId).entries.push(...entries)
