@@ -29,6 +29,10 @@ export const EFFECT_IDS = [
 
 export const AGENT_ROLES = ['implementer', 'reviewer', 'fixer', 'chore', 'conflict-fixer'] as const
 
+/** Where in a phase a chore runs. `run_chore`'s `when` param selects one. */
+export const CHORE_TIMINGS = ['before_gate', 'after_pr'] as const
+export type ChoreTiming = (typeof CHORE_TIMINGS)[number]
+
 const Id = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]*$/, 'must be lowercase kebab-case')
@@ -233,6 +237,16 @@ export const ChoreSchema = z.strictObject({
     .describe(
       'Overrides the model the phase’s implementer would otherwise run at. A mechanical pass ' +
         'does not need the tier the phase was staffed at.',
+    ),
+  when: z
+    .enum(CHORE_TIMINGS)
+    .default('before_gate')
+    .describe(
+      'When the chore runs. `before_gate` — the default — runs it between a passing review and ' +
+        'the gates, on the diff that is about to merge. `after_pr` runs it once the phase is ' +
+        'merged, pushed and its pull request is open, for work about the PR rather than the ' +
+        'diff (a review canvas, a PR comment). An `after_pr` chore must not edit the tree, is ' +
+        'skipped when no PR opened, and cannot be `on_failure: fail`.',
     ),
   on_failure: z
     .enum(['continue', 'fail'])

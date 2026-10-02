@@ -420,10 +420,23 @@ export const SessionTurnSchema = z.strictObject({
   at: z.number().int(),
 })
 
+/**
+ * The phase's pull request, as `open_pr` recorded it. `url` only when it
+ * opened; `reason` only when it did not — `unavailable` (no `gh`) or `failed`.
+ */
+export const PullRequestRefSchema = z.strictObject({
+  opened: z.boolean(),
+  url: z.string().nullable(),
+  number: z.number().int().nullable(),
+  reason: z.enum(['unavailable', 'failed']).nullable(),
+})
+
 export const NodeDetailSchema = z.strictObject({
   runId: z.string(),
   node: NodeSummarySchema,
   diff: DiffRefSchema,
+  /** Null until the node reaches `open_pr`. */
+  pullRequest: PullRequestRefSchema.nullable(),
   transcript: z.strictObject({
     stream: z.enum(['transcript', 'raw']),
     /** The last `limit` entries. Transcripts are tailed, never paged backwards. */

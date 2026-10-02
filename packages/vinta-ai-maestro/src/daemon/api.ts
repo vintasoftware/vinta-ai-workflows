@@ -26,6 +26,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
+import { prNumberOf } from '../integration/pr.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
 import {
   LEVELS,
@@ -631,6 +632,7 @@ export function createApi(options: ApiOptions): Hono {
       runId,
       node: nodeSummary(node, declared?.name ?? node.node_id),
       diff: { branch: node.branch, baseBranch: node.base_branch, lane: node.lane },
+      pullRequest: pullRequest(journal, runId, node.node_id),
       transcript: {
         stream,
         entries: journal.tailTranscript(runId, node.node_id, limit, stream),
@@ -1209,6 +1211,30 @@ function sessionTurns(journal: Journal, runId: string, nodeId: string): SessionT
   }
   return turns
 }
+
+function pullRequest(journal: Journal, runId: string, nodeId: string): NodeDetail['pullRequest'] {
+  const event = journal.latestPr(runId, nodeId)
+  if (event === undefined) return null
+  const payload = PrPayloadSchema.safeParse(event.payload)
+  if (!payload.success) return null
+  const { opened, url, reason } = payload.data
+  // Only a forge URL reaches the browser as a link: the payload is read off
+  // disk, and an `href` is the one field here a browser would act on.
+  const safeUrl = url !== undefined && /^https:\/\//.test(url) ? url : null
+  return {
+    opened,
+    url: safeUrl,
+    number: safeUrl === null ? null : (prNumberOf(safeUrl) ?? null),
+    reason: reason ?? null,
+  }
+}
+
+/** The `node_pr` journal payload, read back off disk. */
+const PrPayloadSchema = z.object({
+  opened: z.boolean(),
+  url: z.string().optional(),
+  reason: z.enum(['unavailable', 'failed']).optional(),
+})
 
 /** The journal payload, read back off disk — hence parsed rather than cast. */
 const SessionPayloadSchema = z.object({

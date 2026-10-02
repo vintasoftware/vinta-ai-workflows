@@ -30,6 +30,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Maestro: chores that run after the PR opens (`when: "after_pr"`).** A
+  chore can now declare `when`. The default, `before_gate`, keeps today's
+  `polish` timing. `after_pr` runs the chore at the end of `standard-phase`'s
+  `integrate` state, after `open_pr`, for work about the PR rather than the
+  diff, such as a review canvas. `open_pr` now states `pr.opened` / `pr.url` /
+  `pr.number` as facts, so a guard can read them, and the `pr` root joins the
+  guard context. An `after_pr` chore's prompt names the PR and forbids
+  editing, committing or pushing. It is skipped when no PR opened. The
+  validator refuses `after_pr` with `on_failure: "fail"`, because the phase is
+  already merged. `run_chore` takes a `when` param. Custom pipelines that
+  call it without one keep running the `before_gate` chores.
+  `schemas/workflow.v1.schema.json` is regenerated, and the change is
+  additive.
+- **Maestro: the node view links the phase's PR.** `GET
+  /api/runs/:runId/nodes/:nodeId` now carries `pullRequest` (`opened`, `url`,
+  `number`, `reason`), read from the latest `node_pr` event. The **Diff**
+  panel shows `#<n>` as a link, or says why no PR opened (`gh` missing or
+  failed). Only an `https://` URL becomes a link. The link carries
+  `rel="noreferrer noopener"` because the page URL holds the daemon token.
 - **A timed-out gate says whether it hung or was slow.** A `gate_result` with
   `status: timed_out` used to carry only the status, so a run with nine
   timeouts could not say whether any of them was a stuck suite or a host too

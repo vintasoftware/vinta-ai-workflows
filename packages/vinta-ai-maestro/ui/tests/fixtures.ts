@@ -192,6 +192,7 @@ export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {
     runId: RUN_ID,
     node: node('impl', 'running'),
     diff: { branch: 'feature/impl', baseBranch: 'main', lane: 'lane-1' },
+    pullRequest: null,
     transcript: { stream: 'transcript', entries: [] },
     gates: [],
     sessions: [],

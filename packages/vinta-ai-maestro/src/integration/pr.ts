@@ -73,3 +73,16 @@ export async function openPullRequest(options: OpenPrOptions): Promise<PrResult>
     }
   }
 }
+
+/**
+ * The PR number at the end of a GitHub `/pull/<n>` or GitLab
+ * `/merge_requests/<n>` URL, or undefined for any other shape.
+ *
+ * `gh pr create` prints the URL and nothing else, so the number is read off it
+ * rather than asked for in a second call — a tool that wants the number (a
+ * review canvas is keyed by it) should not have to parse a URL itself.
+ */
+export function prNumberOf(url: string): number | undefined {
+  const match = /\/(?:pull|merge_requests)\/(\d+)\/?$/.exec(url.trim())
+  return match === null ? undefined : Number(match[1])
+}

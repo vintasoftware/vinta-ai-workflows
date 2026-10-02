@@ -77,6 +77,7 @@ import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from 
 import { computeWaves } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
 import type { Integrator } from '../integration/integrator.ts'
+import { prNumberOf } from '../integration/pr.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
@@ -588,7 +589,20 @@ export class RunEffectExecutor implements EffectExecutor {
         ...(result.reason === undefined ? {} : { reason: result.reason }),
       },
     })
-    return {}
+
+    // Stated as facts as well, for what follows in the same state: an
+    // `after_pr` chore is handed the PR it is about, and is skipped when there
+    // is none. The URL is the forge's own, not repository content.
+    const number = result.url === undefined ? undefined : prNumberOf(result.url)
+    return {
+      facts: {
+        pr: {
+          opened: result.opened,
+          ...(result.url === undefined ? {} : { url: result.url }),
+          ...(number === undefined ? {} : { number }),
+        },
+      },
+    }
   }
 
   /** Pushes one branch to the lane's remote. Silent where there is no remote. */

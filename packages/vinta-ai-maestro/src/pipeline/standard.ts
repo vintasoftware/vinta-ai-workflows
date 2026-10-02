@@ -4,6 +4,8 @@
  *
  * ```
  * implement ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
+ *                        │                                     │             (merge, push, PR,
+ *                        │                                     │              after_pr chores)
  *                        │                                     ├─ exit≠0, rounds left ──▶ fix
  *                        │                                     └─ exit≠0, none left ──▶ failed
  *                        ├─ verdict=fail, rounds left ──▶ fix ──▶ review
@@ -135,6 +137,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
         {
           id: 'e-chores',
           definitionId: 'run_chore',
+          params: { when: 'before_gate' },
           description: 'The chores this node runs, in order. None is a no-op.',
         },
       ],
@@ -164,11 +167,21 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       // opened, so it reaches none of the three: the wave branch does not carry
       // it, the pushed branch does not have it, and it is not in the PR diff.
       // It has to be part of what gets merged, so it is written before the merge.
+      //
+      // The `after_pr` chores come last because they are about the PR: a review
+      // canvas posted as a PR comment needs the PR to exist. They edit nothing,
+      // so nothing after them has to be re-merged or re-gated.
       onEnter: [
         { id: 'e-tracking', definitionId: 'write_tracking', params: { scope: 'phase' } },
         { id: 'e-merge', definitionId: 'git_merge', params: { strategy: '--no-ff' } },
         { id: 'e-push', definitionId: 'git_push' },
         { id: 'e-pr', definitionId: 'open_pr', params: { draft: true } },
+        {
+          id: 'e-pr-chores',
+          definitionId: 'run_chore',
+          params: { when: 'after_pr' },
+          description: 'The chores this node runs once its PR is open. None is a no-op.',
+        },
       ],
     },
     { id: 'done', name: 'Done', position: { x: 800, y: 0 }, data: { outcome: 'done' } },

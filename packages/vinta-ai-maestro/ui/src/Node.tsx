@@ -226,7 +226,7 @@ export function NodeView({
           {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
         </div>
         <div className="panels flex flex-col gap-4">
-          <Diff diff={detail.diff} />
+          <Diff diff={detail.diff} pullRequest={detail.pullRequest} />
           <Gates gates={detail.gates} failing={failingGate} />
           <Sessions sessions={detail.sessions} />
         </div>
@@ -525,11 +525,37 @@ function delivery(harness: string, status: NodeStatus, inject: boolean): string 
  * a rendering, because running git in a lane is the git unit's job (§10) — so
  * this panel names what to diff and where, and does not pretend to show it.
  */
-function Diff({ diff }: { readonly diff: NodeDetail['diff'] }) {
+function Diff({
+  diff,
+  pullRequest,
+}: {
+  readonly diff: NodeDetail['diff']
+  readonly pullRequest: NodeDetail['pullRequest']
+}) {
   const complete = diff.branch !== null && diff.baseBranch !== null
   return (
     <Panel title="Diff" data-diff>
       <DescriptionList>
+        {pullRequest === null ? null : (
+          <>
+            <DescriptionTerm>pull request</DescriptionTerm>
+            <DescriptionDetails className="font-mono text-xs" data-diff-pr>
+              {pullRequest.url === null ? (
+                pullRequest.reason === 'unavailable' ? (
+                  'not opened — gh is not installed'
+                ) : (
+                  'not opened — gh failed'
+                )
+              ) : (
+                // The page URL carries the daemon token, so the forge must not
+                // be sent it as a referrer.
+                <a href={pullRequest.url} target="_blank" rel="noreferrer noopener">
+                  {pullRequest.number === null ? pullRequest.url : `#${pullRequest.number}`}
+                </a>
+              )}
+            </DescriptionDetails>
+          </>
+        )}
         <DescriptionTerm>branch</DescriptionTerm>
         <DescriptionDetails className="font-mono text-xs" data-diff-branch>
           {diff.branch ?? '—'}

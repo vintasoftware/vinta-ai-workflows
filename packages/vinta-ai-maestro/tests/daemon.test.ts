@@ -587,6 +587,27 @@ describe('snapshots', () => {
     expect(detail.sessions.some((turn) => turn.sessionId === 'other-node-session')).toBe(false)
   })
 
+  it('serves the phase PR, null before one was attempted, and only an https URL as a link', async () => {
+    const r = await rig()
+    const detailOf = async () =>
+      NodeDetailSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a`)).body)
+    expect((await detailOf()).pullRequest).toBe(null)
+
+    const pr = (payload: { opened: boolean; base: string; head: string; url?: string }) =>
+      r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_pr', payload })
+    pr({ opened: true, base: 'main', head: 'phase-a', url: 'https://github.com/acme/app/pull/9' })
+    expect((await detailOf()).pullRequest).toEqual({
+      opened: true,
+      url: 'https://github.com/acme/app/pull/9',
+      number: 9,
+      reason: null,
+    })
+
+    // The latest row wins, and a URL the browser would act on is refused.
+    pr({ opened: true, base: 'main', head: 'phase-a', url: 'javascript:alert(1)' })
+    expect((await detailOf()).pullRequest?.url).toBe(null)
+  })
+
   it('serves an empty session list for a node whose agents have not run', async () => {
     const r = await rig()
     const detail = NodeDetailSchema.parse(

@@ -279,6 +279,20 @@ export class Journal {
   }
 
   /**
+   * The last `node_pr` row for one node, or undefined when it never reached
+   * `open_pr`. A narrow read for the same reason `sessionHistory` is one.
+   */
+  latestPr(runId: string, nodeId: string): StoredEvent | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM events WHERE run_id = ? AND node_id = ? AND type = 'node_pr'" +
+          ' ORDER BY id DESC LIMIT 1',
+      )
+      .get(runId, nodeId) as EventRow | undefined
+    return row === undefined ? undefined : toStoredEvent(row)
+  }
+
+  /**
    * Every gate edge for one node, oldest first: the `gate_started` rows and
    * the `gate_result` rows interleaved in commit order.
    *

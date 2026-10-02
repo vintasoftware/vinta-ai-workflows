@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { composePrBody, readPrContext, PRS_CONTEXT_DIR } from '../src/integration/pr-body.ts'
+import { prNumberOf } from '../src/integration/pr.ts'
 
 const lane = (): string => mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-prbody-'))
 
@@ -118,5 +119,17 @@ describe('composing a body when the agent wrote none', () => {
     // An exit code, never the run's stdout.
     expect(text.body).toContain('`unit` (exit 1)')
     expect(text.body).not.toMatch(/FAILED|Traceback|assert/)
+  })
+})
+
+describe('the PR number off the URL gh printed', () => {
+  it('reads GitHub and GitLab URLs', () => {
+    expect(prNumberOf('https://github.com/acme/app/pull/42\n')).toBe(42)
+    expect(prNumberOf('https://gitlab.com/acme/app/-/merge_requests/7')).toBe(7)
+  })
+
+  it('says nothing for any other shape rather than guessing', () => {
+    expect(prNumberOf('https://example.invalid/pr/1')).toBeUndefined()
+    expect(prNumberOf('')).toBeUndefined()
   })
 })

@@ -120,7 +120,7 @@ import {
 } from '../prompts/index.ts'
 import { choresFor } from '../chores.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
-import type { Node, Pipeline, SideEffect, Workflow } from '../types.ts'
+import type { ChoreTiming, Node, Pipeline, SideEffect, Workflow } from '../types.ts'
 
 /** The pool a node is dispatched into. Required of every workflow (§5.1). */
 const LANE = 'lane'
@@ -2066,21 +2066,33 @@ export class Scheduler {
    *
    * `Aborted` is never swallowed by either: the run is being torn down, and
    * there is nothing left for the next chore to run in.
+   *
+   * **An `after_pr` chore with no PR is skipped**, not failed. `open_pr` never
+   * fails a phase — a missing `gh` leaves the work merged and says so — and a
+   * chore about the PR has nothing to work on when there is none.
    */
   async #chores(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
     const named = invocation.effect.params['chore']
     const declared = this.#workflow.chores[typeof named === 'string' ? named : '']
+    const when: ChoreTiming =
+      invocation.effect.params['when'] === 'after_pr' ? 'after_pr' : 'before_gate'
     // A named chore is run whatever the node declared — that is what naming one
-    // in the pipeline is for. Everything else takes the node's own list.
+    // in the pipeline is for. Everything else takes the node's own list, at
+    // this point in the phase.
     const chores =
       typeof named === 'string'
         ? declared === undefined
           ? []
           : [{ id: named, chore: declared }]
-        : choresFor(this.#workflow, state.node)
+        : choresFor(this.#workflow, state.node, when)
+    const prOpened = invocation.context.pr?.['opened'] === true
 
     for (const entry of chores) {
       const startedAt = Date.now()
+      if (entry.chore.when === 'after_pr' && !prOpened) {
+        this.#choreResult(state, entry.id, 'skipped', startedAt)
+        continue
+      }
       const spawn: EffectInvocation = {
         ...invocation,
         effect: {

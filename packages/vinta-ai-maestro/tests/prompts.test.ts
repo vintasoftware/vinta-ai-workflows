@@ -1187,6 +1187,33 @@ describe('the chore prompt', () => {
   })
 })
 
+describe('the after_pr chore prompt', () => {
+  const canvas = () =>
+    chore(
+      { prompt: 'Run /pr-review-canvas on this PR.', skill: 'pr-review-canvas', when: 'after_pr' },
+      'review-canvas',
+    )
+  const pr = { pr: { opened: true, url: 'https://github.com/acme/app/pull/42', number: 42 } }
+
+  it('names the PR it is about, on both forms', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', { continuation, facts: pr, chore: canvas() })
+      expect(prompt).toContain('https://github.com/acme/app/pull/42 (number 42)')
+      expect(prompt).toContain('Run /pr-review-canvas on this PR.')
+      expect(prompt).toContain('Use the `pr-review-canvas` skill')
+    }
+  })
+
+  it('forbids edits and drops the commit protocol: the phase is already merged', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', { continuation, facts: pr, chore: canvas() })
+      expect(prompt).toContain('Do not edit, stage, commit or push anything')
+      expect(prompt).not.toContain('Committing is part of the work')
+      expect(prompt).not.toContain("Do not run this phase's gates")
+    }
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 6. prompt_template is the seam
 // ---------------------------------------------------------------------------

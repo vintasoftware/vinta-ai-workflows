@@ -1423,6 +1423,8 @@ describe('standard-phase under the scheduler', () => {
       'git_merge',
       'git_push',
       'open_pr',
+      // The `after_pr` chores, once the PR is open. None declared: a no-op.
+      'run_chore',
     ])
     expectDrained(r)
   })
@@ -2263,6 +2265,58 @@ const choresOf = (rig_: Rig, nodeId: string): unknown[] =>
     .events('run-1')
     .filter((event) => event.type === 'chore_result' && event.nodeId === nodeId)
     .map((event) => event.payload)
+
+/** A one-node standard-phase run with a `before_gate` and an `after_pr` chore. */
+const prChoreRig = (prFacts: Readonly<Record<string, string | number | boolean>> | undefined) =>
+  rig(
+    makeWorkflow([node('a', [], { chores: ['deslop', 'canvas'] })], {
+      chores: {
+        deslop: { prompt: 'Rewrite the comments.' },
+        canvas: { prompt: 'Post a review canvas.', skill: 'pr-review-canvas', when: 'after_pr' },
+      },
+      pipelines: { 'standard-phase': STANDARD_PHASE },
+      pipeline: 'standard-phase',
+    }),
+    {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+        ...(prFacts === undefined ? {} : { 'e-pr': { facts: { pr: prFacts } } }),
+      },
+    },
+  )
+
+describe('after_pr chores', () => {
+  it('runs after the PR opens, not before the gate', async () => {
+    const r = prChoreRig({ opened: true, url: 'https://github.com/acme/app/pull/7', number: 7 })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // The polish pass runs only `deslop`; `canvas` waits for the PR.
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
+      { chore: 'canvas', status: 'ran', duration_ms: expect.any(Number) },
+    ])
+    const verbs = r.calls.map((call) => call.verb)
+    expect(verbs.lastIndexOf('run_chore')).toBeGreaterThan(verbs.indexOf('open_pr'))
+    // Implementer, reviewer, deslop, canvas.
+    expect(r.adapter.spawned).toHaveLength(4)
+    expectDrained(r)
+  })
+
+  it('is skipped, and the phase still done, when no PR opened', async () => {
+    const r = prChoreRig({ opened: false })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
+      { chore: 'canvas', status: 'skipped', duration_ms: expect.any(Number) },
+    ])
+    expect(r.adapter.spawned).toHaveLength(3)
+    expectDrained(r)
+  })
+})
 
 /** A chore registry with the two shapes every test below draws from. */
 const CHORE_SET = {

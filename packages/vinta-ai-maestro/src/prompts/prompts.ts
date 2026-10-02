@@ -56,7 +56,7 @@ import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import { AGENT_ROLES, type AgentRole, type Chore, type Node, type Workflow } from '../types.ts'
+import { AGENT_ROLES, type AgentRole, type Chore, type ChoreTiming, type Node, type Workflow } from '../types.ts'
 
 /** The line the reviewer is asked to end on, and the one `executor.ts` reads. */
 export const VERDICT_MARKER = 'VERDICT:'
@@ -1243,6 +1243,9 @@ interface ChoreMaterials {
   /** The instruction, from `prompt` verbatim or `prompt_ref` off the lane. */
   readonly instruction: string
   readonly skill: string | null
+  readonly when: ChoreTiming
+  /** The phase's PR, as `open_pr` stated it. Null before one opened. */
+  readonly pr: { readonly url: string; readonly number: number | null } | null
 }
 
 /**
@@ -1273,7 +1276,15 @@ function choreMaterials(request: SpawnPromptRequest, workspace: string): ChoreMa
     throw new PromptError(`node "${request.node.id}": chore "${id}" declares no instruction`)
   }
 
-  return { id, instruction, skill: chore.skill ?? null }
+  const url = request.facts.pr?.['url']
+  const number = request.facts.pr?.['number']
+  return {
+    id,
+    instruction,
+    skill: chore.skill ?? null,
+    when: chore.when,
+    pr: typeof url === 'string' ? { url, number: typeof number === 'number' ? number : null } : null,
+  }
 }
 
 /**
@@ -1297,6 +1308,7 @@ function choreMaterials(request: SpawnPromptRequest, workspace: string): ChoreMa
  * chore that broke something.
  */
 function choreRules(materials: Continuation, chore: ChoreMaterials): string[] {
+  if (chore.when === 'after_pr') return afterPrRules(materials, chore)
   return [
     '',
     '## What this turn is, and is not',
@@ -1324,13 +1336,50 @@ function choreRules(materials: Continuation, chore: ChoreMaterials): string[] {
   ]
 }
 
+/**
+ * The rules for a chore that runs once the phase's PR is open.
+ *
+ * The opposite bound from a `before_gate` chore: the phase is already merged
+ * and pushed, so an edit now would be one that no reviewer and no gate saw,
+ * on a branch that is already the PR. The turn works *about* the PR — a
+ * review canvas, a comment — and leaves the tree as it found it.
+ */
+function afterPrRules(materials: Continuation, chore: ChoreMaterials): string[] {
+  const pr = chore.pr
+  return [
+    '',
+    '## What this turn is, and is not',
+    `This phase is done: \`${materials.branch}\` is reviewed, gated, merged and pushed,`,
+    pr === null
+      ? 'and its pull request is open.'
+      : `and its pull request is open: ${pr.url}${pr.number === null ? '' : ` (number ${pr.number})`}.`,
+    'This turn is about that pull request. It is not another implementation round.',
+    '',
+    'Do not edit, stage, commit or push anything in this worktree. A change made now',
+    'would reach the PR with no review and no gate behind it. If the chore seems to',
+    'need a code change, say so in your report instead.',
+    '',
+    'Do what the chore says and nothing else. If it does not apply to this PR,',
+    'do nothing and say so — that is a complete and correct outcome.',
+    ...(chore.skill === null
+      ? []
+      : [
+          '',
+          `Use the \`${chore.skill}\` skill for this. If your harness has no such skill,`,
+          'say so in your report and do the work by the instruction below.',
+        ]),
+  ]
+}
+
 /** What a chore turn has to report back. Short: it is a small job. */
 function choreOutput(chore: ChoreMaterials): string[] {
   return [
     '',
     '## Required output',
     `- Status: SUCCESS or FAILURE, and why. "Nothing to do for ${chore.id}" is SUCCESS.`,
-    '- Files modified, paths only.',
+    ...(chore.when === 'after_pr'
+      ? ['- Any links the chore produced (a comment, a review URL).']
+      : ['- Files modified, paths only.']),
     '- Anything you deliberately left alone, and why.',
   ]
 }
@@ -1357,7 +1406,7 @@ function renderChore(materials: Materials, chore: ChoreMaterials): string {
     materials.brief,
     ...soloTurn('runs this chore'),
     ...foreground(),
-    ...commitProtocol(materials),
+    ...(chore.when === 'after_pr' ? [] : commitProtocol(materials)),
     ...choreOutput(chore),
   ])
 }
@@ -1382,7 +1431,7 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
     chore.instruction,
     ...soloTurn('runs this chore'),
     ...foreground(),
-    ...commitProtocol(materials),
+    ...(chore.when === 'after_pr' ? [] : commitProtocol(materials)),
     ...choreOutput(chore),
   ])
 }
