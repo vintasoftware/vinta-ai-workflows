@@ -221,8 +221,10 @@ The editor's design says hosts inject the side-effect catalog and treat guards a
 | `git_push` | — | |
 | `open_pr` | `base`, `draft` | |
 | `write_tracking` | `scope` | `run` / `phase` / `wave` |
-| `await_human` | `reason` | Releases gate resources immediately; lane retention per §6 and O3 |
+| `await_human` | `question`, `kind`, `choices`, `context`, `unattended_answer` | Releases gate resources immediately; lane retention per §6 and O3. `unattended_answer` is the plan saying what the question means when nobody is there (§16.5) |
 | `notify` | `channel`, `text` | |
+| `record_decision` | — | Files the answer the node just resumed from in its review ledger (§16.3) |
+| `grant_fix_rounds` | — | Gives the node its `max_fix_rounds` budget again; the scheduler owns the counter (§16.5) |
 
 Guards are expressions over a small documented context: `review.verdict`, `gate.exit_code`, `human.answer`, `fix_rounds`, `node.*`, `run.*`. Evaluated by a tiny hand-written evaluator — **never `eval` or `new Function`**. A guard is author-supplied data in a tool running with the developer's full permissions; treating it as code turns "someone edited my plan" into arbitrary code execution. Safety is structural rather than a blocklist: the root identifier is allowlisted at parse time, every path step goes through `Object.hasOwn`, and the grammar has no call syntax at all, so `f(x)` is a parse error rather than a sandbox to escape.
 
@@ -232,10 +234,15 @@ The default `standard-phase` pipeline ships with the package:
 
 ```
 implement ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
-                       │                                     └─ exit≠0 ──▶ fix ──▶ review
-                       └─ verdict=fail ──▶ fix ──▶ review
-fix ── guard: fix_rounds >= node.max_fix_rounds ──▶ failed
+                       │                                     └─ exit≠0 ──▶ fix
+                       └─ verdict=fail ──▶ fix ──┬─ nothing gated ──▶ review
+                                                 └─ gated ──▶ consult ──▶ review
+review / gate ── guard: fix_rounds >= node.max_fix_rounds ──▶ exhausted
+exhausted ──┬─ continue (grant_fix_rounds) ──▶ fix
+            └─ stop ──▶ failed
 ```
+
+The review/fix loop in that diagram is §16's.
 
 `polish` runs the phase's **chores** (§8). It sits between the passing review and the gate on purpose: a chore edits the tree, so anywhere after the gate merges a diff the gates never ran against, and anywhere before the review has the fixer rewriting what the chore just did.
 
@@ -765,3 +772,53 @@ The per-node rows come from the journal, not from a projection, over the existin
 ### 15.8 Interaction with takeover
 
 §9's PTY round trip stages a resumed id for the node's next spawn. With a ledger that id belongs to **the slot the taken-over turn was running under** — an operator who takes over a fixer turn must not have their session handed to whatever spawns next.
+
+---
+
+## 16. The review loop
+
+`standard-phase`'s review and fix states are the **thermo-nuclear review loop** Vinta runs by hand: one reviewer held to a demanding standard, a fixer that checks every finding before acting on it, scope questions sent to a person rather than assumed by either agent, and a loop that ends only on the reviewer's explicit approval. The skill it comes from runs both roles from one host session. Here the roles are the two §15 slots that already existed: **the reviewer is the `review` slot**, kept across rounds, and **the fixer is the implementer continuing `main`** — the agent that wrote the code is the one that verifies the findings against it.
+
+### 16.1 The reviewer
+
+**The standard.** The reviewer is held to the shipped Review Standard (`src/prompts/review-standard.ts`) — stance, evidence bar, a ten-item priority order, preferred remedies, approval bar — unless the lane carries a project `REVIEW.md`, which replaces it wholesale. Wholesale, never merged: a standard written to be read alone, handed in beside another, is two contradicting rulebooks.
+
+**The stated requirement** is the phase brief and the plan-level sections, verbatim, as before. The reviewer still runs the gates itself and still reads the working tree as well as the diff.
+
+**Approval is explicit.** `VERDICT: pass` is the reviewer approving; a turn that states nothing fails closed, as it always did. Questions the reviewer cannot answer — a scenario that is genuinely undecided — go under their own heading, apart from blockers; whether a person sees them is the fixer's call.
+
+**Pass two.** A re-review gets the fixer's report (a summary to check, not to trust), the ledger (§16.3), and the pass-two rules, restated every round: blockers only, each new one saying why the previous pass missed it, and nothing re-raised that was approved, rejected with counter-evidence, or settled — unless with new evidence it names.
+
+**The reviewer must not edit, and the host checks.** `HEAD` and the tracked diff of the lane are hashed before the review turn and after it. A change parks the node on a `keep` / `stop` question with the edits left in place — reverting them would destroy the evidence of what the reviewer did. There is no unattended answer: this is the one question about the loop's own integrity. Tracked files only, because the reviewer is told to run gates and gates leave untracked output behind; a reviewer that *creates* a file is therefore not caught, which is the price of a check that does not fire on every review.
+
+### 16.2 The fixer
+
+The fixer's prompt carries the skill's discipline, in both its cold and continued forms. Findings are leads, not orders: reproduce, check invariants and callers, decide correct, partial or unsupported. Choose the remedy that makes the bad state unreachable, then the simplest. Make the code keep the promises its text makes. Look for the project's pattern before adding machinery for a rare case. Poka-yoke over defence, cohesion over extraction, tests only where behaviour changed or a bug was verified, one commit per round.
+
+**What it will not decide, it gates.** Four triggers, closed: `unreachable` (a scenario nothing reaches), `defensive` (a check on data already validated), `ambiguity` (docs, tests and code disagree, or the requirement names a mechanism that defeats its own goal), `destructive` (deletes, migrations, production). It fixes everything else first, then lists the gated items, each with evidence, the reviewer's recommendation, its own, and the **default** taken if nobody answers — never the destructive option.
+
+**It ends on a machine-read block** — a fenced `review-ledger` JSON object of `rejected` and `gated` — exactly as the reviewer ends on `VERDICT:`. The block and its parser are one definition (`src/prompts/ledger.ts`). A block that does not parse is no block: nothing rejected, nothing gated, and the next review sees every finding again, which is the safe direction to be wrong in. The executor turns it into one fact, `review.gated`, the count a guard reads.
+
+### 16.3 The review ledger
+
+Two facts cross between the fixer and the reviewer and fit nowhere else: **rejected findings** with their counter-evidence, and **settled decisions** — a person's answer to a batch of gated items, dated. They live in `runs/<run-id>/nodes/<node-id>/review-ledger.jsonl`, one entry per fixer report and per answer, beside the transcript and for the same reason: they are agents' prose about the repository, and the event log is identifiers (§11). `purge` takes them with the run.
+
+`record_decision` files an answer, which pairs with the most recent report before it — the file's order guarantees that. Every later reviewer and fixer prompt renders the whole ledger, so a round that went fresh (a stale session, the turn ceiling, §15.5's final round) loses nothing a person decided.
+
+### 16.4 The reviewer's model
+
+A review is the step between a plan and its merge, so it is not tied to the tier the phase was written at. A staffed reviewer runs on its member's model, as before. An unstaffed one runs on `defaults.reviewer_model` when the workflow names one, then on the harness's own name for its top tier (`HarnessAdapter.reviewModel` — `opus` for claude-code; codex and opencode declare none, since neither has a tier alias that does not go stale), and only then on the node's model. Reasoning effort is not yet a harness parameter, so "highest effort" is whatever the CLI defaults to.
+
+### 16.5 Budget, consult, and what an unattended run does
+
+**`consult`** is an `await_human` with `kind: 'text'`: the whole batch at once, answered per item or with `defaults`. It is not a round. It goes straight back to the reviewer, which reads the round's fix with the decisions beside it; an in-scope answer is therefore implemented by the next fix round, which the reviewer asks for. The skill orders it slightly differently — its fixer applies the answers before the re-review — and the difference is deliberate: applying them here would need a fixer turn that is not a round, and the counter keys off the role (§15.1).
+
+**`max_fix_rounds` defaults to 4, and exhausting it asks rather than fails.** `exhausted` is a `continue` / `stop` question. `continue` runs `grant_fix_rounds` — the one verb that moves the scheduler's counter — and goes straight to a fixer, since the last thing that happened was a failure nobody has answered yet. `stop` fails the phase into `--on-failure` exactly as exhaustion used to. Under §15.5 the last round of each grant goes fresh, as it would have.
+
+**Unattended, the plan supplies the answer and `--retry-after` supplies the moment.** A plan question may declare `unattended_answer`; with `--retry-after` set, the host answers it with that value once the window passes and journals the answer `unattended`. `consult` declares `defaults`; `exhausted` declares `stop`, so an unattended run spends no more than it used to. A plan question that declares none — "is this migration safe to deploy" — still waits for a person: the orchestrator never overrules a plan, it only acts on what the plan said. Without `--retry-after` every question waits, which is the behaviour before this section existed.
+
+### 16.6 Not done here
+
+- **The skills path.** `review-layers.md` and the plan-execution partials still describe the three-layer review. §1 says a semantic change is decided here and then written into the partial; that rewrite is a follow-up, not part of this change.
+- **The pause report.** The skill's fifth-iteration pause carries the fixer's own view of whether more work is worth it. `exhausted` points the operator at the transcript — the remaining blockers and the fixer's last report — rather than spending a turn to compose one.
+- **Untracked reviewer writes** (§16.1).
