@@ -207,6 +207,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`plan-feature` AI model tiers pick up the late-September releases.**
+  `plan-feature/resources/ai-models.yaml` now cites `claude-sonnet-5-5`
+  (tier 2, was `claude-sonnet-5`) and `gpt-6.1-sol` (tier 3, was
+  `gpt-6-sol`). The retired `gemini-3-pro` (tiers 3–4) is replaced by
+  `gemini-3.1-pro-preview`, the only Gemini Pro id currently listed. Tier
+  *placement* is unchanged. **Consumers**: re-sync to pick up the refreshed
+  model suggestions.
+
 - **`vinta-ai-maestro run` starts the run as a background job and returns.**
   The run no longer needs the terminal that started it, or any terminal: close
   it and the run carries on. `run` prints the run id and the commands that
@@ -248,6 +256,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   being fixed at 380px.
 
 ### Fixed
+
+- **`check-ai-models` no longer mistakes sibling models for snapshots of a
+  cited id.** The id matcher used substring matching, so `claude-sonnet-5`
+  matched `claude-sonnet-5-5` (hiding the newer Sonnet and Opus releases).
+  It also matched `gemini-3-pro` to `gemini-3-pro-image`, so a retired model
+  still looked available. It now accepts only exact ids, dated or `-vN`
+  snapshot suffixes, and provider prefixes.
 
 - **The editor's canvas inspector no longer offers fields it then discards.**
   Its Status and Wave fields were folded back into the workflow and silently
