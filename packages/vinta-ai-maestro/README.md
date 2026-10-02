@@ -92,6 +92,8 @@ Every command runs against a project checkout — your project, not this one. `-
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 | `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
 
+There is also `judge-hook`, which is internal: it is the hook `--permission judged` installs, and claude-code runs it, not you.
+
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
 
 The daemon-facing commands use three exit codes, so a script can tell the cases
@@ -542,7 +544,7 @@ Point the adapter at a specific binary with an environment variable, which overr
 
 ### What an agent may do in its lane
 
-`--permission <ask|auto|full>` on `run` and `serve`, defaulting to **`auto`**: the agent works unattended inside its own lane, which is what a lane is for.
+`--permission <ask|auto|full|judged>` on `run` and `serve`, defaulting to **`auto`**: the agent works unattended inside its own lane, which is what a lane is for.
 
 **The operator sets this, never the workflow document.** It is an argument to the command rather than a field in the JSON, and deliberately so — the document is committed and shared, and a file in a repository should not be able to tell someone else's machine to run agents without approvals. A plan may say which model writes a phase; it may not say how much of a stranger's filesystem that model gets.
 
@@ -551,14 +553,46 @@ Point the adapter at a specific binary with an environment variable, which overr
 | `ask` | `--permission-mode manual` | `--sandbox workspace-write` |
 | `auto` | `--permission-mode auto` | `--approve-for-me` |
 | `full` | `--allow-dangerously-skip-permissions --permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
+| `judged` | as `full`, plus a `PreToolUse` hook that asks a System One classifier about each judged call | refused by `doctor` |
 
 `ask` is the CLIs' own default and the one to avoid headlessly: nothing answers a permission prompt in a `run`. The request surfaces as a `permission_request` event and the transcript renders it, but no reply is ever sent — so the agent reports a blocked working directory and the phase fails having written nothing. Use it with `serve` and a human watching, or not at all.
 
 `full` is available and is not the default. Both vendors describe their equivalent as being for sandboxes with no internet access, and a lane is not that — it has the network and whatever credentials the machine holds.
 
+`judged` is `full` with a check: every call to a judged tool (default `Bash`) is put to the classifier configured with `--system-one`, and runs only if it is judged safe. Anything that goes wrong along the way — no answer, no daemon, a hook that crashed — is a denial. It is faster than waiting on vendor prompts nobody will answer, and it is not a sandbox: a classifier reads one command line and cannot see what a script it names will do.
+
 Two argument combinations are refused by the CLIs themselves, which is why the table is not symmetric: codex rejects `--sandbox` alongside `--approve-for-me` (the latter already implies the former), and `codex exec resume` accepts neither, so a resumed thread keeps the policy it was created under.
 
 A lane is still a worktree of your repository, so committed settings travel into it: for `claude-code`, a `.claude/settings.json` narrowing tools further is honoured on top of whatever mode is passed.
+
+## System One classifiers
+
+`--system-one <config.json>` on `run`, `serve` and `doctor` points a run at a fast classifier — one that answers yes/no or scores a fixed set of labels, and writes nothing. The file is the operator's and never part of the plan:
+
+```jsonc
+{
+  "adapter": { "type": "http", "url": "https://classifier.internal/v1", "api_key_env": "S1_API_KEY" },
+  "judges": {
+    "gate_triage": { "rerun_above": 0.8 },   // rerun a red gate the classifier calls flaky, once
+    "permission": { "tools": ["Bash"], "allow_above": 0.9 }   // needed by --permission judged
+  }
+}
+```
+
+`http` POSTs `{ kind, question, labels, input }` and reads `{ scores }` or `{ yes }` back, with the key from the environment variable you name (removed from the daemon's environment once read, so agents never see it). `command` runs a local program with the same JSON on stdin and stdout — the choice when repository content must not leave the machine, because a hosted classifier receives diffs, gate logs and shell commands.
+
+A plan can then declare **judge gates** next to its command gates:
+
+```jsonc
+"gates": {
+  "unit": { "cmd": "pytest", "requires": ["test-suite"] },
+  "no-body-logs": {
+    "judge": { "question": "Does this diff log request or response bodies?", "fail_on": ["yes"], "threshold": 0.6 }
+  }
+}
+```
+
+A judge gate asks its question about the lane's diff and reports exit 0 or 1, so the pipeline and the fix loop treat it as any other gate; its log holds the question and the answer, which is what the fixer reads. It can only fail a phase — gates run in order and stop at the first red one — and without `--system-one` it answers per its `on_unavailable` (`pass` by default). See [SPEC.md §17](SPEC.md).
 
 ## Limits worth knowing before you rely on it
 
