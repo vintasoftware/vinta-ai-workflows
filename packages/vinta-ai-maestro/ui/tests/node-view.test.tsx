@@ -26,6 +26,7 @@ import {
 } from './fixtures.ts'
 import { renderApp, textOf } from './render-app.tsx'
 import { startStubDaemon, type StubDaemon } from './stub-daemon.ts'
+import { WINDOWS_TIMING_RETRY } from '../../tests/support/platform.ts'
 
 let daemon: StubDaemon | null = null
 let view: RenderResult | null = null
@@ -547,7 +548,9 @@ test('the changes card says why a phase has no PR', async () => {
   expect(container.querySelector('[data-diff-pr] a')).toBe(null)
 })
 
-test('a node with no transcript, no gates and no question renders', async () => {
+// Windows-flaky: the Changes card's own fetch outran the 5s wait on run
+// 37011106720 (windows-latest); the rerun of the same commit passed.
+test('a node with no transcript, no gates and no question renders', WINDOWS_TIMING_RETRY, async () => {
   const fresh = { ...node('impl', 'pending'), lane: null, branch: null, baseBranch: null }
   const stub = await startStubDaemon({
     runs: [runSummary()],

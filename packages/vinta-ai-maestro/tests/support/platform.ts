@@ -37,3 +37,21 @@
  * `tests/platform.test.ts`.
  */
 export const FAKE_BIN_VIA_EXECFILE = process.platform !== 'win32'
+
+/**
+ * Up to two retries on Windows, for the tests CI has shown fail there on timing
+ * alone — and nowhere else, and for nothing else.
+ *
+ * A retry cannot hide a real bug: a test that is wrong fails every attempt, so
+ * it still fails the run. What it does hide is a *new* intermittent failure,
+ * which is why this is an opt-in per test rather than a config-wide `retry`. A
+ * test earns it with evidence, not suspicion: a Windows failure followed by a
+ * pass with no change to the test or the code under it, written next to the
+ * test with the CI run that showed it. When a test's timing problem gets a real
+ * fix — waiting on the thing it races, as `leaves no orphan pty` now does —
+ * take the retry off.
+ *
+ * Elsewhere this is `retry: 0`, so macOS and Linux keep reporting any failure
+ * on the first attempt.
+ */
+export const WINDOWS_TIMING_RETRY = { retry: process.platform === 'win32' ? 2 : 0 } as const
