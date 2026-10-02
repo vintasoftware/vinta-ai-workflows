@@ -1156,6 +1156,81 @@ describe('the git verbs', () => {
   })
 
   /**
+   * Every PR a plan needs to reach `base_branch`: one per phase, one per
+   * `integ-` branch, and the plan PR off the final wave, opened by the phase
+   * that closed it — after that phase's own PR, so the plan PR can list it.
+   */
+  it('opens the integration and plan PRs a diamond needs to land', async () => {
+    const diamond = (): Workflow =>
+      WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'diamond',
+        base_branch: 'main',
+        defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+        resources: { lane: { capacity: 3, kind: 'worktree' } },
+        nodes: [
+          { id: 'p1', name: 'One', prompt_ref: 'plan.md#1' },
+          { id: 'p2', name: 'Two', prompt_ref: 'plan.md#2' },
+          {
+            id: 'p3',
+            name: 'Three',
+            prompt_ref: 'plan.md#3',
+            depends_on: [
+              { node: 'p1', artifact: 'one' },
+              { node: 'p2', artifact: 'two' },
+            ],
+          },
+        ],
+      })
+    const rig = setup(diamond)
+    const prs = (): { nodeId: string | null; payload: Record<string, unknown> }[] =>
+      rig.journal
+        .events(RUN_ID)
+        .filter((event) => event.type === 'node_pr' || event.type === 'run_pr')
+        .map((event) => ({
+          nodeId: 'nodeId' in event ? event.nodeId : null,
+          payload: event.payload as Record<string, unknown>,
+        }))
+
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    for (const nodeId of ['p1', 'p2']) {
+      await rig.invoke(nodeId, 'git_merge')
+      await rig.invoke(nodeId, 'open_pr', { draft: true })
+    }
+    // Wave 1 is not the last wave: no plan PR yet, and no integration PR for
+    // phases based on `base_branch`.
+    expect(prs().map((pr) => pr.payload['kind'])).toEqual(['phase', 'phase'])
+
+    await work(rig, 'p3', 2)
+    await rig.invoke('p3', 'git_merge')
+    // The final wave is built, but the plan PR waits for p3's own `open_pr`.
+    expect(prs().some((pr) => pr.nodeId === null)).toBe(false)
+    await rig.invoke('p3', 'open_pr', { draft: true })
+
+    const p3 = prs().filter((pr) => pr.nodeId === 'p3')
+    expect(p3.map((pr) => pr.payload['kind'])).toEqual(['integration', 'phase'])
+    expect(p3[0]?.payload).toMatchObject({ base: 'main', head: 'plan/diamond/integ-p3' })
+    expect(p3[1]?.payload).toMatchObject({
+      base: 'plan/diamond/integ-p3',
+      head: branchOf(rig.workflow, 'p3'),
+    })
+
+    const plan = prs().filter((pr) => pr.nodeId === null)
+    expect(plan).toHaveLength(1)
+    expect(plan[0]?.payload).toMatchObject({
+      base: 'main',
+      head: waveBranch(rig.workflow, 2),
+      // No `gh` in the rig: recorded as not opened, never thrown.
+      opened: false,
+    })
+
+    // Spent: a second `open_pr` from the same phase does not open it again.
+    await rig.invoke('p3', 'open_pr', { draft: true })
+    expect(prs().filter((pr) => pr.nodeId === null)).toHaveLength(1)
+  })
+
+  /**
    * The half of the retry fix that lives here: *whether* this is a second
    * attempt is a question about this run, and only the journal answers it.
    * `node_assigned` carrying the phase branch is the record that the node has

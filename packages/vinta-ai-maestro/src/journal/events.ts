@@ -255,6 +255,18 @@ interface RunPayloads {
    */
   run_resumed: { readonly attempt: number }
   /**
+   * The plan-level PR: the final wave branch into `base_branch`, opened once
+   * the last wave merges. `node_pr`'s fields, for `node_pr`'s reasons — and no
+   * node, because it belongs to all of them.
+   */
+  run_pr: {
+    readonly opened: boolean
+    readonly base: string
+    readonly head: string
+    readonly url?: string
+    readonly reason?: 'unavailable' | 'failed'
+  }
+  /**
    * §9's amend, as the run's own history: the reason a node's base moved.
    *
    * Deliberately *not* projected. The frozen snapshot on disk is the run's
@@ -379,8 +391,13 @@ interface NodePayloads {
    * A URL, a branch pair and a refusal code. The refusal's own `message` is
    * deliberately not carried: it is composed from whatever `gh` said, and this
    * row is served over the API.
+   *
+   * `kind` separates a phase's own PR from the one a multi-dependency phase
+   * opens for its `integ-<id>` branch. Absent on rows written before there
+   * was a second kind, which were all `phase`.
    */
   node_pr: {
+    readonly kind?: 'phase' | 'integration'
     readonly opened: boolean
     readonly base: string
     readonly head: string
