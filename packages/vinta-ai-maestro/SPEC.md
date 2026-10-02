@@ -105,9 +105,15 @@ It renders and edits **plan DAGs**: nodes with status, wave banding, edges label
   ┌─────────────── browser (localhost or port-forward) ────────────────┐
   │  React app: run graph · node detail · transcript · xterm · editor  │
   └───────────────────────────┬────────────────────────────────────────┘
-                    HTTP + WebSocket (127.0.0.1, token)
+                    HTTP + WebSocket (127.0.0.1, ui token)
   ┌───────────────────────────┴────────────────────────────────────────┐
-  │  vinta-ai-maestro daemon (Node 22+)                                      │
+  │  vinta-ai-maestro ui — static app · journal reads · editor        │
+  │  forwards a live run's /api/runs/<id>/* and /ws?run=<id> ──────┐   │
+  └────────────────────────────────────────────────────────────────┼───┘
+                            loopback, that job's token (job.json)  │
+  ┌────────────────────────────────────────────────────────────────┴───┐
+  │  one run's job: `run --foreground`, detached (Node 22+)             │
+  │  its own loopback API — for its agents and for pause / stop        │
   │                                                                    │
   │   Scheduler ── Resource pools ── Gate runner                       │
   │       │              │                                             │
@@ -119,6 +125,8 @@ It renders and edits **plan DAGs**: nodes with status, wave banding, edges label
   └───────────┬──────────────────┬─────────────────────┬───────────────┘
         child processes     git / compose        .vinta-ai-maestro/
 ```
+
+**Each run is a background job, and the UI is a separate process.** `run` spawns a detached `run --foreground`, waits until it reports the run started, and exits; the job is then the run's only host, and no terminal's lifetime is attached to it. The job keeps a loopback API because its agents need one (`with`, `gate`, the judged hook) and because `pause` and `stop` reach it there; it serves no UI. It writes `runs/<id>/job.json` — pid, address, token, `0600` — which is how every other process finds it, and removes it on the way out; a record whose pid is gone means no job. `ui` serves the app and the journal for every run, and forwards everything addressed to a run with a live job — the `/api/runs/<id>` prefix and that run's socket — to the job, swapping its own token for the job's so the browser never holds the second. A run started from the browser is launched as a job like any other. Two processes on one journal is the case SQLite's WAL and `busy_timeout` already cover; several jobs on one project is the same case again.
 
 **Why a daemon plus a browser UI rather than a desktop app.** Running several agents in parallel worktrees with forked databases and full test suites is a workstation-melting workload; the first time it needs to run on a bigger remote box or a devcontainer, a browser UI is a port-forward and a desktop app is a rewrite. It also erases code signing, notarization, per-OS build matrices and updater infrastructure. Wrapping the same served UI in Electrobun or Tauri later, if a dock icon is wanted, does not require touching application code.
 
@@ -252,6 +260,8 @@ The review/fix loop in that diagram is §16's.
 .vinta-ai-maestro/                      # gitignored, inside the project
   flow.db                         # SQLite
   runs/<run-id>/
+    job.json                      # the live job's pid, address and token, 0600; gone when it ends
+    job.log                       # the job's stdout and stderr, every attempt appended
     workflow.json                 # frozen snapshot at run start
     nodes/<node-id>/
       transcript.jsonl            # normalized AgentEvent stream, append-only
@@ -512,16 +522,33 @@ So a watchdog wakes the monitor when a phase outruns a threshold (1h) or a gate'
 
 **The record splits along §11's line.** Identifiers and targets go in the journal, where the ledger folds them and the API serves them. The monitor's `summary` and each verb's `evidence` are a model's prose about a repository and go in `runs/<run-id>/interventions.jsonl` — one line per attempt, including every attempt that changed nothing, because a refused proposal is an agent trying to do what it may not do with nobody in the room, and that is the record worth keeping.
 
+### 9.3 Ending a run early
+
+Two operations on a run as a whole, beside §9's five on a node, and both are journalled as how the run ended — `run_ended` carries `paused` or `cancelled`:
+
+| Operation | Mechanism | Ends | Resumable |
+|---|---|---|---|
+| Pause | no new dispatch; every running node stops at its next piece of work; nothing killed | `paused` | yes |
+| Stop | every live agent session and running gate killed, then the same drain | `cancelled` | no |
+
+**Draining is the whole design of pause.** The scheduler stops dispatching, and the effect door — the one place every agent turn, gate, chore and question starts — is shut. A step already in flight runs to its end, and the pipeline keeps evaluating transitions until it reaches its next effect, so a phase whose last turn just finished still settles `done`. Everything else is unwound where it waits: a node parked on a question is woken, one waiting on capacity or a lane is released, and each unwound node goes back to `pending`, which is what a resume would make of it anyway. Its lane stays, with whatever the step left in it. The run ends when no node body is still executing, and the job exits.
+
+**Stop is the kill, then the same drain, bounded.** A killed turn is not let reach a transition: a guard reading it would record a failure that never happened. The drain is as quick as the slowest effect noticing its process died, so the job bounds it, and past the bound writes `cancelled` itself. A gate leads its own process group, so the gate runner keeps a registry of live gates for this; nothing else would end one.
+
+**A run with no job.** A `running` row whose job is gone is a run whose host died. There is nothing to drain, so pause refuses — it is already as resumable as a pause would leave it — and stop writes `cancelled` directly. A job that is alive but will not answer is the one case stop ends from outside: signalled, then killed, with the cancellation written afterwards.
+
+Pause is upgradeable to stop; the reverse is ignored. A run whose last node settles in the same turn it is halted ends as what it actually was. A paused run writes no post-mortem: it has not ended in the sense §13.6 means.
+
 ---
 
 ## 10. UI
 
-React + Vite, served by the daemon at `127.0.0.1` behind a random per-run token in the URL. Chosen for mature `xterm.js` bindings, virtualized log views, and the general ecosystem weight the app shell needs. Both graph surfaces are Web Components and mount unchanged: `vinta-dag-editor` (ours, §3) for the plan DAG, `vinta-state-machine-editor@0.10.0` for pipelines.
+React + Vite, served by `vinta-ai-maestro ui` at `127.0.0.1` behind a random token in the URL, minted when `ui` starts. `ui` hosts no run (§4): a live run's traffic is forwarded to its job, so the views below behave the same whichever process answers them. Chosen for mature `xterm.js` bindings, virtualized log views, and the general ecosystem weight the app shell needs. Both graph surfaces are Web Components and mount unchanged: `vinta-dag-editor` (ours, §3) for the plan DAG, `vinta-state-machine-editor@0.10.0` for pipelines.
 
 | View | Contents |
 |---|---|
 | Runs | List, status, elapsed, resume/purge |
-| Run | Live DAG via `vinta-dag-editor` in read mode — node status colors, wave banding, edges labelled with the dependency artifact. Resource pool meters, the gate queue with positions, and per-harness capacity state (§6.1). |
+| Run | Live DAG via `vinta-dag-editor` in read mode — node status colors, wave banding, edges labelled with the dependency artifact. Resource pool meters, the gate queue with positions, and per-harness capacity state (§6.1). Pause and Stop for the whole run (§9.3) while it is running, Stop confirmed inline because it is final. |
 | Node | Transcript (chat-rendered normalized events: markdown prose, tool calls as a verb and a target with their result seated under them, consecutive reads grouped), gate logs, what the phase changed — files with line counts, and a link to the full diff — the steering box, the pending human question with its context (§9.1), and the five operations from §9 |
 | Changes | The node's whole diff, full page and linkable (`#/runs/<run>/nodes/<node>/changes`): a sticky file list, unified hunks with syntax highlighting and both line numbers. Served by `GET …/nodes/:nodeId/changes`, which the git unit answers from the lane's working tree while the lane holds the branch — uncommitted work included — and from the branch after that |
 | Terminal | `xterm.js` over WebSocket — PTY takeover and raw stream tailing |

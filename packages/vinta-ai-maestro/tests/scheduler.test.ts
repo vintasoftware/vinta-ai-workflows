@@ -4118,3 +4118,123 @@ describe('a failed phase the operator can retry', () => {
     await running
   })
 })
+
+// ---------------------------------------------------------------------------
+// Halting a run: `pause` and `stop`
+// ---------------------------------------------------------------------------
+
+describe('halt', () => {
+  const runEnded = (r: Rig): unknown[] =>
+    r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'run_ended')
+      .map((event) => event.payload)
+
+  it('pauses by draining: the step in flight finishes, and nothing new starts', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.halt('paused')
+    // Nothing was killed: the turn is still open until the agent finishes it.
+    expect(r.stall.live()).toBe(true)
+    r.stall.release()
+    const report = await running
+
+    // `solo` is one turn, so finishing it finishes the phase. `b` never starts.
+    expect(report.statuses).toEqual({ a: 'done', b: 'pending' })
+    expect(report.halted).toBe('paused')
+    expect(runEnded(r)).toEqual([{ status: 'paused' }])
+    expect(r.adapter.spawned).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('stops a longer pipeline at its next step and puts the node back to pending', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.halt('paused')
+    r.stall.release()
+    const report = await running
+
+    // The first turn ran to its end; the second was never spawned.
+    expect(r.adapter.spawned).toHaveLength(1)
+    expect(report.statuses).toEqual({ a: 'pending' })
+    expect(r.journal.nodes('run-1').find((row) => row.node_id === 'a')?.status).toBe('pending')
+    expectDrained(r)
+  })
+
+  it('cancels by killing the live turn first', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' }), node('b', ['a'])]), {
+      stall: true,
+    })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.halt('cancelled')
+    r.stall.release()
+    const report = await running
+
+    expect(report.halted).toBe('cancelled')
+    expect(runEnded(r)).toEqual([{ status: 'cancelled' }])
+    // The turn ended because it was killed, not because it finished.
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'session_ended', result: 'interrupted' }),
+    )
+    expect(r.adapter.spawned).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('wakes a node parked on a question, and drops the question with it', async () => {
+    const workflow = makeWorkflow([node('a', [], { gates: ['unit'], pipeline: 'gated' })], {
+      resources: {
+        lane: { capacity: 2, kind: 'worktree' },
+        'test-suite': { capacity: 1, kind: 'semaphore' },
+      },
+      gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+    })
+    const r = rig(workflow)
+    const running = r.scheduler.run()
+    await flush()
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    expect(r.journal.pendingQuestions('run-1')).toHaveLength(1)
+
+    await r.scheduler.halt('paused')
+    const report = await running
+
+    expect(report.halted).toBe('paused')
+    expect(report.statuses).toEqual({ a: 'pending' })
+    expect(r.journal.pendingQuestions('run-1')).toEqual([])
+    expectDrained(r)
+  })
+
+  it('ends as what it was when the last node settles in the same turn', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.halt('paused')
+    r.stall.release()
+    const report = await running
+
+    // Every node settled, so the pause found nothing left to pause.
+    expect(report.halted).toBeUndefined()
+    expect(runEnded(r)).toEqual([{ status: 'done' }])
+  })
+
+  it('upgrades a pause to a cancel, and never the other way round', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.halt('paused')
+    await r.scheduler.halt('cancelled')
+    await r.scheduler.halt('paused')
+    r.stall.release()
+    const report = await running
+
+    expect(report.halted).toBe('cancelled')
+    expect(runEnded(r)).toEqual([{ status: 'cancelled' }])
+  })
+})

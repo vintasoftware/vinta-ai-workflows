@@ -162,6 +162,12 @@ export interface ApiOptions {
   /** Where the built UI lives. Defaults to this package's `dist/ui`. */
   readonly uiDir?: string
   /**
+   * `false` for a run's own job, which serves agents and the control commands
+   * and has no page to offer: `ui` is the process that serves the app. Every
+   * path then goes through the token check, the app shell included.
+   */
+  readonly serveUi?: boolean
+  /**
    * The editable workflow documents (§10's Editor row). Defaults to the
    * project's `ai-plans/` — the directory `plan-feature` writes into and the
    * one `run` is pointed at, so the editor opens the reviewed source rather
@@ -243,6 +249,7 @@ export function createApi(options: ApiOptions): Hono {
    * it can answer with comes out of the UI directory.
    */
   app.use('*', async (c, next) => {
+    if (options.serveUi === false) return await next()
     const path = new URL(c.req.url).pathname
     if (path === '/api' || path.startsWith('/api/') || path === '/ws') return await next()
     const method = c.req.method
@@ -866,6 +873,46 @@ export function createApi(options: ApiOptions): Hono {
       run.control.answer(nodeId, { human: { answer: body.answer } }),
     ),
   )
+
+  /**
+   * Ending a run before its DAG does: `pause` drains it to a resumable stop,
+   * `stop` kills its live turns and cancels it for good.
+   *
+   * `202`, not `200`: the request is taken, and the run ends when its running
+   * phases reach a boundary — immediately for a stop, after their current step
+   * for a pause. The host process exits once it has; that is the signal a
+   * caller waits on, and `run_ended` is the record.
+   *
+   * A run the journal says is `running` but nobody is hosting is a run whose
+   * process died. There is nothing to drain, so `pause` refuses — it is
+   * already exactly as resumable as a pause would make it — and `stop` writes
+   * the cancellation itself, which is the one thing left to do for it. When a
+   * job for the run is alive somewhere, `ui` forwards these requests to it and
+   * never reaches this branch.
+   */
+  const halt = (mode: 'paused' | 'cancelled') => async (c: Context) => {
+    const body = await readBody(c, NoArgsRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    const found = resolveRead(c)
+    if ('response' in found) return found.response
+    const { run, row } = found
+    if (run !== null) {
+      if (run.halt === undefined) return fail(c, 501, 'halt_unsupported')
+      if (row.status !== 'running') return fail(c, 409, 'run_not_running')
+      await run.halt(mode)
+      log.info('runs.halt_requested', { run: row.id, mode })
+      return c.json({ ok: true } as const, 202)
+    }
+    if (mode === 'paused') return fail(c, 409, 'run_not_live')
+    if (row.status === 'done' || row.status === 'cancelled') {
+      return fail(c, 409, 'run_not_running')
+    }
+    journal.append({ runId: row.id, type: 'run_ended', payload: { status: 'cancelled' } })
+    log.info('runs.cancelled_unhosted', { run: row.id, was: row.status })
+    return c.json({ ok: true } as const, 200)
+  }
+  app.post('/api/runs/:runId/pause', halt('paused'))
+  app.post('/api/runs/:runId/stop', halt('cancelled'))
 
   // -------------------------------------------------------------------------
   // Workflows — the documents §10's Editor row edits.

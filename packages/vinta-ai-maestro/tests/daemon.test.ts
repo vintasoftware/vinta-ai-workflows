@@ -2775,3 +2775,62 @@ describe('starting a run through the API', () => {
     expect(result.status).toBe(401)
   })
 })
+
+describe('halting a run (pause / stop)', () => {
+  it('hands a live run’s pause and stop to its host, and answers 202', async () => {
+    const r = await rig()
+    const modes: string[] = []
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      halt: async (mode) => {
+        modes.push(mode)
+      },
+    })
+
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/pause`, { method: 'POST', body: {} })).status).toBe(202)
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/stop`, { method: 'POST', body: {} })).status).toBe(202)
+    expect(modes).toEqual(['paused', 'cancelled'])
+  })
+
+  it('refuses for a host that cannot halt', async () => {
+    const r = await rig()
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/pause`, { method: 'POST', body: {} })
+    expect(result).toMatchObject({ status: 501, body: { error: 'halt_unsupported' } })
+  })
+
+  it('cancels a run nobody is hosting, and will not pause one', async () => {
+    const r = await rig()
+    r.journal.createRun('orphan', makeWorkflow())
+
+    const paused = await call(r.daemon, '/api/runs/orphan/pause', { method: 'POST', body: {} })
+    expect(paused).toMatchObject({ status: 409, body: { error: 'run_not_live' } })
+
+    const stopped = await call(r.daemon, '/api/runs/orphan/stop', { method: 'POST', body: {} })
+    expect(stopped.status).toBe(200)
+    expect(r.journal.run('orphan')?.status).toBe('cancelled')
+
+    const again = await call(r.daemon, '/api/runs/orphan/stop', { method: 'POST', body: {} })
+    expect(again).toMatchObject({ status: 409, body: { error: 'run_not_running' } })
+  })
+})
+
+describe('a run’s own job', () => {
+  it('serves no app shell: every path needs the token', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-daemon-'))
+    const journal = openJournal(dir)
+    const built = bundle()
+    const daemon = await startDaemon({ journal, uiDir: built.uiDir, serveUi: false })
+    cleanups.push(async () => {
+      await daemon.close()
+      journal.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    expect((await raw(daemon, '/', { token: null })).status).toBe(401)
+    // With the token it is still not a page: there is none to serve here.
+    expect((await raw(daemon, '/')).status).toBe(404)
+  })
+})

@@ -207,6 +207,39 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro run` starts the run as a background job and returns.**
+  The run no longer needs the terminal that started it, or any terminal: close
+  it and the run carries on. `run` prints the run id and the commands that
+  reach it, and if the preflight refuses it prints the report and says the run
+  did not start. **Migration:** a script or CI job that relied on `run`
+  blocking until the run ended, and on its exit code, adds `--foreground`,
+  which keeps the old behaviour exactly. The run's job serves no UI and prints
+  no URL any more — see `ui` below. (`vinta-ai-maestro`)
+- **New commands to reach a background run:** `status [run-id]` (every run, or
+  one run phase by phase; `--json` for scripts), `logs <run-id> [-f]` (the
+  run's job log — what `run` used to print — followed until the job exits),
+  `pause <run-id>` (nothing new starts, running phases finish their current
+  step, then the job exits with the run `paused`; `run --resume` continues it)
+  and `stop <run-id>` (live agent turns and gates are killed and the run ends
+  `cancelled`, which `--resume` refuses). Both also accept `--wait`. Two new
+  run statuses come with them, `paused` and `cancelled`; the post-mortem still
+  reports `done` or `failed`, and a paused run writes none until it ends.
+  (`vinta-ai-maestro`)
+- **`vinta-ai-maestro ui` serves the browser UI, and hosts no runs.** `serve`
+  is the same command under its old name. It reads every run from the journal
+  and forwards a live run's requests and socket to the job hosting it, so
+  watching, steering, answering and taking over work as before — and closing
+  it no longer interrupts anything. A run started or resumed from the UI is
+  launched as a background job with `ui`'s run settings. The job's own token is
+  kept in `.vinta-ai-maestro/runs/<run-id>/job.json` (mode `0600`, removed when
+  the job ends) and is never printed; treat that file like the URL.
+  (`vinta-ai-maestro`)
+- **`purge` keeps a run whose job is still running**, and says so.
+  (`vinta-ai-maestro`)
+- **The run view has Pause and Stop buttons**, beside Replay, while the run is
+  running. Stop asks for confirmation first, because it cannot be undone; both
+  say what is happening until the run's job has ended it. (`vinta-ai-maestro`)
+
 - **The canvas no longer swallows the page's scroll.** A bare wheel over the
   graph used to zoom it and block the page from scrolling; it now scrolls the
   page, and zoom is ⌘ or Ctrl + scroll (which is also how a trackpad pinch

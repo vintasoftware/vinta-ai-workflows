@@ -124,6 +124,12 @@ export interface StartRunOptions {
    * the preflight before this is reached.
    */
   readonly systemOne?: SystemOne
+  /**
+   * Told when an operator halts the run (`pause` / `stop`), before the drain
+   * begins. The host's chance to say so, and to bound how long a cancel may
+   * take to wind down.
+   */
+  readonly onHalt?: (mode: 'paused' | 'cancelled') => void
 }
 
 /**
@@ -387,6 +393,10 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
     ...(amend === undefined ? {} : { amend }),
     ...(permissionJudge === undefined ? {} : { permissionJudge }),
+    halt: async (mode) => {
+      options.onHalt?.(mode)
+      await scheduler.halt(mode)
+    },
   }
   daemon.register(registered)
 
@@ -415,6 +425,9 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   const finished = (async (): Promise<RunOutcome> => {
     try {
       const report = await scheduler.run()
+      // A paused run has not ended in the sense §13.6 means: it will be picked
+      // up again, and a post-mortem now would describe half of it as the whole.
+      if (report.halted === 'paused') return { report, postMortem: null }
       // `scheduler.run` journalled `run_ended`, which is the one moment a
       // post-mortem is true (§13.6).
       return { report, postMortem: emitPostMortem(journal, runId, options.waveResults ?? host.waveResults) }

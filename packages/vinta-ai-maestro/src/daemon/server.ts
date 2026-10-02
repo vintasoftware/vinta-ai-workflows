@@ -33,6 +33,7 @@ import type { Monitor } from '../monitor/monitor.ts'
 import { createApi } from './api.ts'
 import { createToken, isLoopback, presentedToken, tokenMatches } from './auth.ts'
 import type { DaemonRun, RunStartPort } from './control.ts'
+import { forwardHttp, relaySocket, runOfPath, type UpstreamFor } from './proxy.ts'
 import { DEFAULT_POLL_MS, EventStream } from './stream.ts'
 
 /** The only path that upgrades. Everything else is HTTP (§10). */
@@ -63,6 +64,13 @@ export interface DaemonOptions {
    * `dist/ui`; supplying one is for tests. Nothing outside it is ever served.
    */
   readonly uiDir?: string
+  /** `false` for a run's job: the app shell is `ui`'s to serve. See `ApiOptions.serveUi`. */
+  readonly serveUi?: boolean
+  /**
+   * The job hosting a run, for `ui` (`proxy.ts`). Every request and socket
+   * addressed to a run it resolves is forwarded there once the token checks.
+   */
+  readonly upstream?: UpstreamFor
   /** Where the `--host` warning goes. `console.warn` by default. */
   readonly warn?: (message: string) => void
   /**
@@ -136,6 +144,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return starter
     },
     ...(options.uiDir === undefined ? {} : { uiDir: options.uiDir }),
+    ...(options.serveUi === undefined ? {} : { serveUi: options.serveUi }),
     ...(options.monitorFor === undefined ? {} : { monitorFor: options.monitorFor }),
     ...(options.leaseWaitMs === undefined ? {} : { leaseWaitMs: options.leaseWaitMs }),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
@@ -143,11 +152,34 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const stream = new EventStream(options.journal, options.pollMs ?? DEFAULT_POLL_MS)
   const sockets = new WebSocketServer({ noServer: true })
 
+  const upstream = options.upstream
   const server = createServer((req, res) => {
+    // Forwarded only once the token checks: an unauthenticated request falls
+    // through to the API, whose middleware answers it `401` like any other.
+    if (upstream !== undefined) {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? LOOPBACK}`)
+      const runId = runOfPath(url.pathname)
+      const target = runId === null || runs.has(runId) ? null : upstream(runId)
+      if (target !== null && tokenMatches(token, presentedToken(req.headers.authorization, url))) {
+        void forwardHttp(req, res, url, target, log)
+        return
+      }
+    }
     void respond(app, req, res, log)
   })
   server.on('upgrade', (req, socket, head) => {
-    upgrade({ req, socket, head, token, journal: options.journal, runs, sockets, stream, log })
+    upgrade({
+      req,
+      socket,
+      head,
+      token,
+      journal: options.journal,
+      runs,
+      sockets,
+      stream,
+      log,
+      ...(upstream === undefined ? {} : { upstream }),
+    })
   })
 
   /**
@@ -218,6 +250,7 @@ interface UpgradeContext {
   readonly sockets: WebSocketServer
   readonly stream: EventStream
   readonly log: Logger
+  readonly upstream?: UpstreamFor
 }
 
 /**
@@ -248,6 +281,19 @@ function upgrade(context: UpgradeContext): void {
   }
 
   const runId = url.searchParams.get('run') ?? ''
+
+  // A run hosted by a live job is that job's to stream: its PTY channel is the
+  // only one that can reach the run's sessions. Relayed, not redirected, so
+  // the browser never holds the job's token.
+  const target = context.runs.has(runId) ? null : (context.upstream?.(runId) ?? null)
+  if (target !== null) {
+    context.sockets.handleUpgrade(req, socket, head, (ws) => {
+      log.debug('ws.relayed', { run: runId })
+      relaySocket(ws, url, target, log)
+    })
+    return
+  }
+
   // The journal says whether a run *exists*; the registry only says whether it
   // is *live*. This is `resolveRead`'s sibling in `api.ts`, and it is here for
   // the same reason: that one used to demand a registry entry as well as a

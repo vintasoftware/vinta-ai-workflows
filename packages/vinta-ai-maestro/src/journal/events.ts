@@ -10,7 +10,14 @@
  * name events without pulling SQLite in behind them.
  */
 
-export type RunStatus = 'running' | 'done' | 'failed'
+/**
+ * `paused` and `cancelled` are ends an operator chose, not ones the DAG
+ * reached. `paused` is resumable and says so; `cancelled` is not, and
+ * `--resume` refuses it exactly as it refuses `done`. `failed` stays what it
+ * was: the run did not complete and nobody asked it to stop, which includes a
+ * host process that died under it.
+ */
+export type RunStatus = 'running' | 'done' | 'failed' | 'paused' | 'cancelled'
 
 export type NodeStatus =
   | 'pending'

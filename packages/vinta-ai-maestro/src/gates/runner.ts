@@ -21,7 +21,7 @@
  * Gate output goes to the log file and nowhere else. It is repository content
  * verbatim, so it never reaches a result field or an error message.
  */
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { availableParallelism, loadavg } from 'node:os'
 import {
@@ -105,6 +105,22 @@ export interface RunGateOptions {
 }
 
 /**
+ * Every gate this process has running. A gate leads its own process group, so
+ * nothing ends it when its host goes away — a cancelled run whose e2e suite
+ * kept going for twenty minutes after `stop` would be exactly that.
+ */
+const live = new Set<ChildProcess>()
+
+/**
+ * Ends every gate this process started that is still running. For a run being
+ * cancelled (`Scheduler.halt`); the gate's own effect then returns failed, and
+ * the node unwinds at that boundary.
+ */
+export function killLiveGates(): void {
+  for (const child of live) killTree(child.pid)
+}
+
+/**
  * Acquires the gate's pools, runs it, releases them. The standalone entry
  * point — use it when nothing else already holds those pools.
  */
@@ -143,6 +159,8 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
     detached: ownProcessGroup(),
     ...spawnOptionsFor(shell),
   })
+  live.add(child)
+  child.once('close', () => live.delete(child))
   // Combined output, in arrival order. `end: false` because the log is closed
   // once, after the child is gone, rather than by whichever pipe drains first.
   child.stdout?.pipe(log, { end: false })

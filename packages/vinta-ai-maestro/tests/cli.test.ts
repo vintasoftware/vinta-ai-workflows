@@ -22,6 +22,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -31,12 +32,23 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
+import { WebSocket } from 'ws'
 
 import { amendRun, type AmendResult } from '../src/amend/amend.ts'
 import { doctorCommand, type DoctorOverrides } from '../src/cli/doctor.ts'
 import { FAILED, OK, USAGE, type Io } from '../src/cli/io.ts'
 import { main } from '../src/cli/index.ts'
 import { purgeCommand } from '../src/cli/purge.ts'
+import { pauseCommand, stopCommand } from '../src/cli/halt.ts'
+import { logsCommand } from '../src/cli/logs.ts'
+import { statusCommand } from '../src/cli/status.ts'
+import {
+  jobLogPathFor,
+  jobPathFor,
+  readJob,
+  writeJob,
+  type LaunchResult,
+} from '../src/job/job.ts'
 import { runCommand } from '../src/cli/run.ts'
 import { serveCommand, reachableUrl } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
@@ -162,6 +174,13 @@ const workflowJson = (nodes: readonly Record<string, unknown>[]): Record<string,
 
 /** `RunDeps.executor`: a host that owns its own lanes and supplies no facts. */
 const NO_EFFECTS: EffectExecutor = { execute: async () => ({}) }
+
+/** A fixture as the journal's `createRun` wants it. */
+const parseWorkflowOrThrow = (value: unknown) => {
+  const parsed = parseWorkflow(value)
+  if (!parsed.ok) throw new Error('fixture workflow does not parse')
+  return parsed.workflow
+}
 
 const node = (id: string, deps: readonly string[] = []): Record<string, unknown> => ({
   id,
@@ -1073,7 +1092,7 @@ describe('vinta-ai-maestro run', () => {
     const io = recorder()
     let daemon: Daemon | null = null
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'cli-run',
@@ -1084,22 +1103,22 @@ describe('vinta-ai-maestro run', () => {
 
     expect(code).toBe(OK)
     expect(daemon).not.toBeNull()
-    // The URL is printed before the first node dispatches — §9's whole
-    // interaction model depends on being able to open it during the run.
-    expect(io.out.findIndex((line) => line.includes('token='))).toBeLessThan(
-      io.out.findIndex((line) => line.includes('cli-run completed')),
-    )
+    // The job serves no UI, so it has no URL to hand anyone: `ui` is how a run
+    // is watched, and it finds the job through `job.json`, which is gone once
+    // the run is.
+    expect(io.out.some((line) => line.includes('token='))).toBe(false)
+    expect(readJob(dir, 'cli-run')).toBeNull()
     // §5.3: the snapshot the run executes, frozen into its own directory.
     expect(existsSync(join(dir, '.vinta-ai-maestro', 'runs', 'cli-run', 'workflow.json'))).toBe(true)
   })
 
-  it('never writes the token more than once here either', async () => {
+  it('never writes its token to any stream', async () => {
     const dir = makeTemp()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
     const io = recorder()
     let daemon: Daemon | null = null
 
-    await runCommand([path, '--repo', dir], io.io, {
+    await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'token-run',
@@ -1109,7 +1128,7 @@ describe('vinta-ai-maestro run', () => {
     })
 
     const token = (daemon as unknown as Daemon).token
-    expect(io.all().filter((line) => line.includes(token))).toHaveLength(1)
+    expect(io.all().filter((line) => line.includes(token))).toHaveLength(0)
   })
 
   /**
@@ -1123,7 +1142,7 @@ describe('vinta-ai-maestro run', () => {
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a'), node('b', ['a'])]))
     const io = recorder()
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'pm-run',
@@ -1160,7 +1179,7 @@ describe('vinta-ai-maestro run', () => {
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a'), node('b')]))
     const io = recorder()
 
-    await runCommand([path, '--repo', dir], io.io, {
+    await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'conflict-run',
@@ -1186,7 +1205,7 @@ describe('vinta-ai-maestro run', () => {
     // The same run without the record: empty findings, and a gap that says so.
     const bare = makeTemp()
     const barePath = writeJson(bare, 'workflow.json', workflowJson([node('a'), node('b')]))
-    await runCommand([barePath, '--repo', bare], recorder().io, {
+    await runCommand(['--foreground', barePath, '--repo', bare], recorder().io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'bare-run',
@@ -1293,7 +1312,10 @@ const assemblyWorkflow = (
 })
 
 /** A `MockAdapter` that records how much had been printed at the first dispatch. */
-const dispatchSpy = (io: Recorder): { adapter: HarnessAdapter; at: () => number } => {
+const dispatchSpy = (
+  io: Recorder,
+  onFirst: () => void = () => {},
+): { adapter: HarnessAdapter; at: () => number } => {
   const mock = new MockAdapter({ id: 'claude-code' })
   let at = -1
   return {
@@ -1303,7 +1325,10 @@ const dispatchSpy = (io: Recorder): { adapter: HarnessAdapter; at: () => number 
       capabilities: mock.capabilities,
       preflight: () => mock.preflight(),
       spawn: (task) => {
-        if (at < 0) at = io.out.length
+        if (at < 0) {
+          at = io.out.length
+          onFirst()
+        }
         return mock.spawn(task)
       },
     },
@@ -1425,7 +1450,7 @@ describe('vinta-ai-maestro run, composed', () => {
     const adapter = new MockAdapter({ id: 'claude-code' })
 
     expect(
-      await runCommand([path, '--repo', dir], recorder().io, {
+      await runCommand(['--foreground', path, '--repo', dir], recorder().io, {
         adapters: { 'claude-code': adapter },
         runId: 'lease-env',
         doctor: healthyBins(dir),
@@ -1444,10 +1469,13 @@ describe('vinta-ai-maestro run, composed', () => {
     const dir = gitRepo()
     const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a'), node('b', ['a'])], 2))
     const io = recorder()
-    const spy = dispatchSpy(io)
+    let recordAtDispatch: ReturnType<typeof readJob> = null
+    const spy = dispatchSpy(io, () => {
+      recordAtDispatch = readJob(dir, 'e2e')
+    })
     let registered: DaemonRun | null = null
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': spy.adapter },
       runId: 'e2e',
       doctor: healthyBins(dir),
@@ -1492,11 +1520,11 @@ describe('vinta-ai-maestro run, composed', () => {
     // §9's amend path is reachable: the rebaser is registered on the run.
     expect(typeof (registered as unknown as DaemonRun).amend?.rebase).toBe('function')
 
-    // The URL is printed before the first node dispatches — an operator who
-    // could only reach the UI afterwards could not steer anything.
-    const url = io.out.findIndex((line) => line.includes('token='))
-    expect(url).toBeGreaterThanOrEqual(0)
-    expect(url).toBeLessThan(spy.at())
+    // Findable before the first agent runs — which is when `ui`, `pause` and
+    // `stop` start being able to reach it. An operator who could only reach
+    // the run afterwards could not steer anything.
+    expect(recordAtDispatch).toMatchObject({ runId: 'e2e', pid: process.pid })
+    expect(spy.at()).toBeGreaterThanOrEqual(0)
 
     // Teardown is never automatic (§8): the lanes outlive the run they served.
     expect(existsSync(join(laneRoot(dir), 'e2e-lane-1'))).toBe(true)
@@ -1509,7 +1537,7 @@ describe('vinta-ai-maestro run, composed', () => {
     const bins = healthyBins(dir)
     const io = recorder()
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       runId: 'sick',
       doctor: { ...bins, bins: { ...bins.bins, harness: { 'claude-code': MISSING } } },
@@ -1530,7 +1558,7 @@ describe('vinta-ai-maestro run, composed', () => {
     const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a')]))
     const io = recorder()
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       runId: 'full',
       // The doctor's probe passes and the pool's does not, which is the case
@@ -1590,7 +1618,7 @@ describe('vinta-ai-maestro run, composed', () => {
     }
 
     expect(
-      await runCommand([path, '--repo', dir], io.io, {
+      await runCommand(['--foreground', path, '--repo', dir], io.io, {
         adapters: { 'claude-code': adapter },
         runId: 'amend',
         doctor: healthyBins(dir),
@@ -1639,7 +1667,7 @@ describe('vinta-ai-maestro run, composed', () => {
     })
     const io = recorder()
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       runId: 'db',
       doctor: healthyBins(dir),
@@ -1697,7 +1725,7 @@ describe('vinta-ai-maestro run, composed', () => {
     })
     const io = recorder()
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       runId: 'single',
       doctor: healthyBins(dir),
@@ -1730,7 +1758,7 @@ describe('vinta-ai-maestro run, composed', () => {
     const path = writeJson(dir, 'workflow.json', assemblyWorkflow([node('a')]))
     const io = recorder()
 
-    const code = await runCommand([path, '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       runId: 'plain',
       doctor: healthyBins(dir),
@@ -1777,7 +1805,7 @@ describe('vinta-ai-maestro run, composed', () => {
     expect((opened as { id: string }).id).toBe('cli-fixture')
 
     // `run`'s half: the same path, executed without moving anything.
-    const code = await runCommand([path, '--repo', dir], recorder().io, {
+    const code = await runCommand(['--foreground', path, '--repo', dir], recorder().io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'agreed-run',
@@ -2022,7 +2050,7 @@ describe('vinta-ai-maestro run --resume', () => {
     interrupt(dir, 'resume-run')
     const io = recorder()
 
-    const code = await runCommand(['--resume', 'resume-run', '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', '--resume', 'resume-run', '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
     })
@@ -2045,7 +2073,7 @@ describe('vinta-ai-maestro run --resume', () => {
     const startedAt = before.runs().find((row) => row.id === 'attempt-run')?.started_at
     before.close()
 
-    await runCommand(['--resume', 'attempt-run', '--repo', dir], recorder().io, {
+    await runCommand(['--foreground', '--resume', 'attempt-run', '--repo', dir], recorder().io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
     })
@@ -2068,14 +2096,14 @@ describe('vinta-ai-maestro run --resume', () => {
   it('refuses a run that already finished, rather than writing over its history', async () => {
     const dir = makeTemp()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
-    await runCommand([path, '--repo', dir], recorder().io, {
+    await runCommand(['--foreground', path, '--repo', dir], recorder().io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'finished-run',
     })
 
     const io = recorder()
-    const code = await runCommand(['--resume', 'finished-run', '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', '--resume', 'finished-run', '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
     })
@@ -2088,7 +2116,7 @@ describe('vinta-ai-maestro run --resume', () => {
     const dir = makeTemp()
     const io = recorder()
 
-    const code = await runCommand(['--resume', 'ghost-run', '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', '--resume', 'ghost-run', '--repo', dir], io.io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
     })
@@ -2105,7 +2133,7 @@ describe('vinta-ai-maestro run --resume', () => {
     // They name the run in incompatible ways — a document whose snapshot is not
     // frozen yet, and a run whose snapshot was frozen hours ago. Any precedence
     // rule here is a way to silently run a plan nobody asked for.
-    const code = await runCommand([path, '--resume', 'x', '--repo', dir], io.io, {
+    const code = await runCommand(['--foreground', path, '--resume', 'x', '--repo', dir], io.io, {
       executor: NO_EFFECTS,
     })
 
@@ -2113,111 +2141,273 @@ describe('vinta-ai-maestro run --resume', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Runs as background jobs
+// ---------------------------------------------------------------------------
+
 /**
- * A run whose lifetime is the daemon's, not the terminal's.
- *
- * This is the end-to-end proof of the whole feature: `serve` brings a daemon up
- * with no run at all, a plain HTTP request submits one, the request comes back
- * with an id long before the run is finished, and the run then reaches `done`
- * inside a daemon that knew nothing about it at boot. Every previous way to
- * start a run built its own daemon and died with it.
+ * Holds every session open after `session_started` until `release`, so a run
+ * stays live long enough to be reached from outside — which is what every test
+ * below is about.
  */
-describe('vinta-ai-maestro serve, hosting runs', () => {
+const holding = (): { adapter: HarnessAdapter; release(): void; live(): boolean } => {
+  const inner = new MockAdapter({ id: 'claude-code' })
+  let open!: () => void
+  const gate = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  let parked = 0
+  return {
+    release: () => open(),
+    live: () => parked > 0,
+    adapter: {
+      id: inner.id,
+      capabilities: inner.capabilities,
+      preflight: () => inner.preflight(),
+      async spawn(task) {
+        const outcome = await inner.spawn(task)
+        if (!outcome.ok) return outcome
+        const session = outcome.session
+        return {
+          ok: true,
+          session: {
+            id: session.id,
+            events: {
+              async *[Symbol.asyncIterator]() {
+                let first = true
+                for await (const event of session.events) {
+                  yield event
+                  if (first) {
+                    first = false
+                    parked += 1
+                    await gate
+                    parked -= 1
+                  }
+                }
+              },
+            },
+            send: (text: string) => session.send(text),
+            interrupt: () => session.interrupt(),
+            kill: () => session.kill(),
+          },
+        }
+      },
+    },
+  }
+}
+
+/** Polls until `read` holds, on real time: these tests cross real sockets. */
+const eventually = async (read: () => boolean, label: string): Promise<void> => {
+  for (let i = 0; i < 400; i += 1) {
+    if (read()) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+/**
+ * `launch`, hosted in this process: the job is `run --foreground` with the
+ * test's own deps, rather than a detached child that could not be handed an
+ * executor. Everything else — the arguments, `job.json`, the token, the API —
+ * is the real thing.
+ */
+const inProcessLaunch = (deps: Parameters<typeof runCommand>[2] = {}) => {
+  const jobs: Promise<number>[] = []
+  const argvs: (readonly string[])[] = []
+  const ios: Recorder[] = []
+  const launch = (args: readonly string[], runId: string): Promise<LaunchResult> => {
+    argvs.push(args)
+    const repo = args[args.indexOf('--repo') + 1] as string
+    const io = recorder()
+    ios.push(io)
+    return new Promise((resolve) => {
+      const job = runCommand(args.slice(1), io.io, {
+        ...deps,
+        onStarted: () => {
+          const record = readJob(repo, runId)
+          resolve(record === null ? { ok: false, output: 'no job.json' } : { ok: true, record })
+        },
+      })
+      jobs.push(job)
+      void job.then(() => resolve({ ok: false, output: io.all().join('\n') }))
+    })
+  }
+  return { launch, jobs, argvs, ios }
+}
+
+const authed = (token: string): Record<string, string> => ({
+  authorization: `Bearer ${token}`,
+  'content-type': 'application/json',
+})
+
+describe('vinta-ai-maestro run, in the background', () => {
+  it('hands the run to a job and returns, saying how to reach it', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    const seen: (readonly string[])[] = []
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir, '--retries', '2'], io.io, {
+      runId: 'bg-run',
+      launch: async (args) => {
+        seen.push(args)
+        return {
+          ok: true,
+          record: { runId: 'bg-run', pid: 4242, url: 'http://127.0.0.1:1', token: 'secret-token', state: 'running', startedAt: 0 },
+        }
+      },
+    })
+
+    expect(code).toBe(OK)
+    // The job is `run --foreground`, with every setting spelled out and the
+    // id the launcher chose, so the two cannot disagree about which run it is.
+    expect(seen[0]).toEqual(
+      expect.arrayContaining(['run', '--foreground', '--run-id', 'bg-run', '--repo', dir, '--retries', '2', '--log-stderr']),
+    )
+    expect(seen[0]?.[1]).toBe(path)
+    const printed = io.all().join('\n')
+    expect(printed).toContain('run bg-run started (job pid 4242)')
+    expect(printed).toContain('vinta-ai-maestro status bg-run')
+    expect(printed).toContain('vinta-ai-maestro stop bg-run')
+    // The job's token is in `job.json` and nowhere else.
+    expect(printed).not.toContain('secret-token')
+  })
+
+  it('says what the job said when it refuses to start', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    const io = recorder()
+
+    const code = await runCommand([path, '--repo', dir], io.io, {
+      runId: 'bg-refused',
+      launch: async () => ({ ok: false, output: 'vinta-ai-maestro: refusing to start — reasons\n' }),
+    })
+
+    expect(code).toBe(FAILED)
+    expect(io.err).toContain('vinta-ai-maestro: refusing to start — reasons')
+    expect(io.err).toContain('vinta-ai-maestro: run bg-refused did not start.')
+  })
+
+  it('writes job.json for this user only while the job runs, and removes it after', async () => {
+    const dir = gitRepo()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    const hold = holding()
+    const { launch, jobs } = inProcessLaunch({ adapters: { 'claude-code': hold.adapter }, executor: NO_EFFECTS })
+    const io = recorder()
+
+    expect(await runCommand([path, '--repo', dir], io.io, { runId: 'job-file', launch })).toBe(OK)
+
+    const record = readJob(dir, 'job-file')
+    expect(record).toMatchObject({ runId: 'job-file', pid: process.pid, state: 'running' })
+    if (!isWindows()) expect(statSync(jobPathFor(dir, 'job-file')).mode & 0o777).toBe(0o600)
+    expect(io.all().join('\n')).not.toContain(record?.token as string)
+
+    hold.release()
+    expect(await jobs[0]).toBe(OK)
+    expect(readJob(dir, 'job-file')).toBeNull()
+  })
+
+  it('refuses to resume a run that was stopped', async () => {
+    const dir = gitRepo()
+    const journal = openJournal(dir)
+    journal.createRun('stopped-run', parseWorkflowOrThrow(workflowJson([node('a')])))
+    journal.append({ runId: 'stopped-run', type: 'run_ended', payload: { status: 'cancelled' } })
+    journal.close()
+    const io = recorder()
+
+    const code = await runCommand(['--resume', 'stopped-run', '--repo', dir], io.io, {
+      launch: async () => {
+        throw new Error('must not launch')
+      },
+    })
+
+    expect(code).toBe(FAILED)
+    expect(io.err.join('\n')).toContain('was stopped and cannot be resumed')
+  })
+})
+
+describe('vinta-ai-maestro ui, with runs as jobs', () => {
+  const plan = (dir: string): void => {
+    mkdirSync(join(dir, 'ai-plans'), { recursive: true })
+    writeFileSync(
+      join(dir, 'ai-plans', 'cli-fixture.workflow.json'),
+      JSON.stringify(workflowJson([node('a'), node('b', ['a'])])),
+      'utf8',
+    )
+  }
+
   /** `POST /api/runs`, as a client with nothing but the URL and the token. */
   const submit = async (daemon: Daemon, body: unknown): Promise<{ status: number; body: any }> => {
     const response = await fetch(`${daemon.url}/api/runs`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${daemon.token}` },
+      headers: authed(daemon.token),
       body: JSON.stringify(body),
     })
     return { status: response.status, body: await response.json() }
   }
 
-  it('runs a plan submitted over HTTP, in a daemon that started with none', async () => {
+  it('launches a plan submitted over HTTP as a job, with the settings it was given', async () => {
     const dir = gitRepo()
-    // Where the editor lists from and `plan-feature` writes to — the id in the
-    // request is this file's basename, never a path the caller chose.
-    mkdirSync(join(dir, 'ai-plans'), { recursive: true })
-    writeFileSync(
-      join(dir, 'ai-plans', 'assembly.workflow.json'),
-      JSON.stringify(assemblyWorkflow([node('a')])),
-      'utf8',
-    )
-    const io = recorder()
+    plan(dir)
+    const { launch, jobs, argvs } = inProcessLaunch({
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+    })
     const seen: { status: number; body: any }[] = []
 
-    await serveCommand(['--repo', dir], io.io, {
-      doctor: healthyBins(dir),
+    await serveCommand(['--repo', dir, '--on-failure', 'stop'], recorder().io, {
+      launch,
       wait: async (daemon) => {
-        seen.push(await submit(daemon, { workflow: 'assembly' }))
-        // Registered, so the run is reachable the moment the POST returns —
-        // and the run itself is still going.
-        const snapshot = await fetch(`${daemon.url}/api/runs/${seen[0]!.body.runId}`, {
-          headers: { authorization: `Bearer ${daemon.token}` },
-        })
-        expect(snapshot.status).toBe(200)
+        seen.push(await submit(daemon, { workflow: 'cli-fixture' }))
       },
     })
 
     expect(seen[0]?.status).toBe(201)
     const runId = seen[0]?.body.runId as string
-    expect(runId.startsWith('assembly-')).toBe(true)
+    expect(runId.startsWith('cli-fixture-')).toBe(true)
+    expect(argvs[0]).toEqual(expect.arrayContaining(['--foreground', '--run-id', runId, '--on-failure', 'stop']))
+    expect(argvs[0]?.[1]).toBe(join(dir, 'ai-plans', 'cli-fixture.workflow.json'))
 
-    // The daemon and the process that hosted it are both gone by here. What
-    // proves the run was real is the journal it left on disk.
+    expect(await jobs[0]).toBe(OK)
     const journal = openJournal(dir)
     try {
-      expect(journal.runs().map((row) => row.id)).toContain(runId)
-      expect(journal.nodes(runId).map((row) => row.node_id)).toEqual(['a'])
+      expect(journal.run(runId)?.status).toBe('done')
     } finally {
       journal.close()
     }
   })
 
-  it('answers 404 for a plan that is not in ai-plans/', async () => {
+  it('answers 404 for a plan that is not in ai-plans/, and for one that would escape it', async () => {
     const dir = gitRepo()
-    const io = recorder()
     const seen: { status: number; body: any }[] = []
 
-    await serveCommand(['--repo', dir], io.io, {
+    await serveCommand(['--repo', dir], recorder().io, {
+      launch: async () => {
+        throw new Error('must not launch')
+      },
       wait: async (daemon) => {
         seen.push(await submit(daemon, { workflow: 'nothing-here' }))
-      },
-    })
-
-    expect(seen[0]?.status).toBe(404)
-    expect(seen[0]?.body.error).toBe('unknown_workflow')
-  })
-
-  it('refuses an id that would escape ai-plans/', async () => {
-    const dir = gitRepo()
-    const io = recorder()
-    const seen: { status: number; body: any }[] = []
-
-    await serveCommand(['--repo', dir], io.io, {
-      wait: async (daemon) => {
-        // An id becomes a path, so a traversal is the one thing the caller must
-        // not be able to spell. Refused as "no such workflow" rather than read.
         seen.push(await submit(daemon, { workflow: '../../etc/passwd' }))
       },
     })
 
-    expect(seen[0]?.status).toBe(404)
-    expect(seen[0]?.body.error).toBe('unknown_workflow')
+    expect(seen.map((entry) => [entry.status, entry.body.error])).toEqual([
+      [404, 'unknown_workflow'],
+      [404, 'unknown_workflow'],
+    ])
   })
 
   it('refuses to resume a run that already finished', async () => {
     const dir = gitRepo()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
-    await runCommand([path, '--repo', dir], recorder().io, {
+    await runCommand(['--foreground', path, '--repo', dir], recorder().io, {
       adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
       executor: NO_EFFECTS,
       runId: 'served-done',
     })
-
-    const io = recorder()
     const seen: { status: number; body: any }[] = []
-    await serveCommand(['--repo', dir], io.io, {
+
+    await serveCommand(['--repo', dir], recorder().io, {
       wait: async (daemon) => {
         seen.push(await submit(daemon, { resume: 'served-done' }))
       },
@@ -2226,54 +2416,233 @@ describe('vinta-ai-maestro serve, hosting runs', () => {
     expect(seen[0]?.status).toBe(409)
     expect(seen[0]?.body.error).toBe('run_finished')
   })
-})
 
-/**
- * Shutting a hosting daemon down while its runs are still going.
- *
- * The failure this pins is one the feature created: a daemon-hosted run is
- * awaited by nobody, so a `serve` on its way out used to close the journal
- * underneath live schedulers — which surfaced as "the database connection is
- * not open" from whichever lease released last, and left the run `running` in
- * the journal for ever. Both halves are checked here: the run is recorded as
- * interrupted, and it is resumable afterwards.
- */
-describe('vinta-ai-maestro serve, shutting down mid-run', () => {
-  it('records its live runs as interrupted, and says how to resume them', async () => {
+  it('forwards a live run’s reads, its socket and a pause to the job hosting it', async () => {
     const dir = gitRepo()
-    mkdirSync(join(dir, 'ai-plans'), { recursive: true })
-    writeFileSync(
-      join(dir, 'ai-plans', 'assembly.workflow.json'),
-      JSON.stringify(assemblyWorkflow([node('a'), node('b', ['a'])])),
-      'utf8',
-    )
-    const io = recorder()
-    const ids: string[] = []
+    plan(dir)
+    const hold = holding()
+    const { launch, jobs } = inProcessLaunch({
+      adapters: { 'claude-code': hold.adapter },
+      executor: NO_EFFECTS,
+    })
+    let runId = ''
+    let jobToken = ''
 
-    await serveCommand(['--repo', dir], io.io, {
-      doctor: healthyBins(dir),
-      // Returns the instant the POST does, which is exactly the shape of an
-      // operator pressing Ctrl-C while a run is under way.
+    await serveCommand(['--repo', dir], recorder().io, {
+      launch,
       wait: async (daemon) => {
-        const response = await fetch(`${daemon.url}/api/runs`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${daemon.token}` },
-          body: JSON.stringify({ workflow: 'assembly' }),
+        runId = (await submit(daemon, { workflow: 'cli-fixture' })).body.runId
+        jobToken = readJob(dir, runId)?.token as string
+        await eventually(() => hold.live(), 'the first turn to open')
+
+        // A read the job answers: the live statuses only its scheduler holds.
+        const snapshot = await fetch(`${daemon.url}/api/runs/${runId}`, { headers: authed(daemon.token) })
+        expect(snapshot.status).toBe(200)
+        expect(((await snapshot.json()) as any).nodes.find((n: any) => n.nodeId === 'a').status).toBe('running')
+
+        // `ui`'s token is the browser's; the job's is never accepted here.
+        const wrong = await fetch(`${daemon.url}/api/runs/${runId}`, { headers: authed(jobToken) })
+        expect(wrong.status).toBe(401)
+
+        // The run's socket, relayed: the backlog arrives as a frame.
+        const ws = new WebSocket(`${daemon.url.replace('http', 'ws')}/ws?run=${runId}&since=0&token=${daemon.token}`)
+        const frame = await new Promise<any>((resolve, reject) => {
+          ws.once('message', (data) => resolve(JSON.parse(String(data))))
+          ws.once('error', reject)
         })
-        ids.push(((await response.json()) as { runId: string }).runId)
+        ws.close()
+        expect(frame.channel).toBe('events')
+
+        const paused = await fetch(`${daemon.url}/api/runs/${runId}/pause`, {
+          method: 'POST',
+          headers: authed(daemon.token),
+          body: '{}',
+        })
+        expect(paused.status).toBe(202)
+        hold.release()
+        expect(await jobs[0]).toBe(FAILED)
       },
     })
 
-    const runId = ids[0] as string
-    expect(io.err.join('\n')).toContain(`run --resume ${runId}`)
-
     const journal = openJournal(dir)
     try {
-      // Not `running`: the row moved, so the run list and the UI can tell it
-      // apart from one still in flight. And not `done`, so `--resume` takes it.
-      expect(journal.runs().find((row) => row.id === runId)?.status).toBe('failed')
+      expect(journal.run(runId)?.status).toBe('paused')
+      // `a`'s turn finished it; `b` never started.
+      expect(Object.fromEntries(journal.nodes(runId).map((row) => [row.node_id, row.status]))).toEqual({
+        a: 'done',
+        b: 'pending',
+      })
     } finally {
       journal.close()
     }
+  })
+
+  it('leaves its runs running when it exits', async () => {
+    const dir = gitRepo()
+    plan(dir)
+    const hold = holding()
+    const { launch, jobs, ios } = inProcessLaunch({
+      adapters: { 'claude-code': hold.adapter },
+      executor: NO_EFFECTS,
+    })
+    const io = recorder()
+    let runId = ''
+
+    // Returns the instant the POST does — an operator closing the UI mid-run.
+    await serveCommand(['--repo', dir], io.io, {
+      launch,
+      wait: async (daemon) => {
+        runId = (await submit(daemon, { workflow: 'cli-fixture' })).body.runId
+      },
+    })
+
+    expect(readJob(dir, runId)).not.toBeNull()
+    expect(io.all().join('\n')).not.toContain('interrupted')
+    hold.release()
+    expect(await jobs[0]).toBe(OK)
+    expect(ios[0]?.all().join('\n')).toContain(`run ${runId} completed.`)
+  })
+})
+
+describe('vinta-ai-maestro status, pause, stop, logs', () => {
+  /** A run the journal says is `running`, with whatever job record a test wants. */
+  const orphan = (dir: string, runId: string): void => {
+    const journal = openJournal(dir)
+    journal.createRun(runId, parseWorkflowOrThrow(workflowJson([node('a'), node('b', ['a'])])))
+    journal.close()
+  }
+
+  it('lists runs, calling a running row with no job behind it interrupted', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'orphaned')
+    const io = recorder()
+
+    expect(await statusCommand(['--repo', dir], io.io)).toBe(OK)
+    const row = io.out.find((line) => line.startsWith('orphaned'))
+    expect(row).toMatch(/interrupted\s+0\/2/)
+
+    const one = recorder()
+    expect(await statusCommand(['orphaned', '--repo', dir, '--json'], one.io)).toBe(OK)
+    expect(JSON.parse(one.out.join(''))).toMatchObject({ runId: 'orphaned', state: 'interrupted', pid: null })
+  })
+
+  it('says there are no runs without creating a store', async () => {
+    const dir = makeTemp()
+    const io = recorder()
+    expect(await statusCommand(['--repo', dir], io.io)).toBe(OK)
+    expect(existsSync(join(dir, '.vinta-ai-maestro'))).toBe(false)
+  })
+
+  it('will not pause a run nothing is hosting, and says it is already resumable', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'orphaned')
+    const io = recorder()
+
+    expect(await pauseCommand(['orphaned', '--repo', dir], io.io)).toBe(FAILED)
+    expect(io.err.join('\n')).toContain('run --resume orphaned')
+  })
+
+  it('stops a run nothing is hosting by making it final', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'orphaned')
+    const io = recorder()
+
+    expect(await stopCommand(['orphaned', '--repo', dir], io.io)).toBe(OK)
+    const journal = openJournal(dir)
+    try {
+      expect(journal.run('orphaned')?.status).toBe('cancelled')
+    } finally {
+      journal.close()
+    }
+    // And a second stop has nothing left to do.
+    expect(await stopCommand(['orphaned', '--repo', dir], recorder().io)).toBe(FAILED)
+  })
+
+  it('asks a live job over its API, with its token, and never prints the token', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'hosted')
+    writeJob(dir, { runId: 'hosted', pid: 999_999, url: 'http://127.0.0.1:9', token: 'job-secret', state: 'running', startedAt: 0 })
+    const requests: { url: string; auth: string | null }[] = []
+    const io = recorder()
+
+    const code = await stopCommand(['hosted', '--repo', dir], io.io, {
+      alive: () => true,
+      fetch: (async (url: string, init: RequestInit) => {
+        requests.push({ url, auth: new Headers(init.headers).get('authorization') })
+        return new Response('{"ok":true}', { status: 202 })
+      }) as unknown as typeof fetch,
+    })
+
+    expect(code).toBe(OK)
+    expect(requests).toEqual([{ url: 'http://127.0.0.1:9/api/runs/hosted/stop', auth: 'Bearer job-secret' }])
+    expect(io.all().join('\n')).not.toContain('job-secret')
+  })
+
+  it('ends a job that will not answer by force, and cancels the run', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'stuck')
+    writeJob(dir, { runId: 'stuck', pid: 999_998, url: 'http://127.0.0.1:9', token: 't', state: 'running', startedAt: 0 })
+    const signals: NodeJS.Signals[] = []
+    let alive = true
+
+    const code = await stopCommand(['stuck', '--repo', dir], recorder().io, {
+      alive: () => alive,
+      sleep: async () => {},
+      kill: (_pid, signal) => {
+        signals.push(signal)
+        alive = false
+      },
+      fetch: (async () => {
+        throw new Error('ECONNREFUSED')
+      }) as unknown as typeof fetch,
+    })
+
+    expect(code).toBe(OK)
+    expect(signals).toEqual(['SIGTERM'])
+    const journal = openJournal(dir)
+    try {
+      expect(journal.run('stuck')?.status).toBe('cancelled')
+    } finally {
+      journal.close()
+    }
+  })
+
+  it('prints the job log, its tail, and follows it until the job is gone', async () => {
+    const dir = gitRepo()
+    mkdirSync(join(dir, '.vinta-ai-maestro', 'runs', 'logged'), { recursive: true })
+    writeFileSync(jobLogPathFor(dir, 'logged'), 'one\ntwo\nthree\n', 'utf8')
+
+    const all = recorder()
+    expect(await logsCommand(['logged', '--repo', dir], all.io)).toBe(OK)
+    expect(all.out).toEqual(['one', 'two', 'three'])
+
+    const tail = recorder()
+    expect(await logsCommand(['logged', '--repo', dir, '-n', '2'], tail.io)).toBe(OK)
+    expect(tail.out).toEqual(['two', 'three'])
+
+    writeJob(dir, { runId: 'logged', pid: 999_997, url: 'http://127.0.0.1:9', token: 't', state: 'running', startedAt: 0 })
+    let polls = 0
+    const follow = recorder()
+    const code = await logsCommand(['logged', '--repo', dir, '-n', '0', '-f'], follow.io, {
+      alive: () => polls < 2,
+      sleep: async () => {
+        polls += 1
+        if (polls === 1) writeFileSync(jobLogPathFor(dir, 'logged'), 'one\ntwo\nthree\nfour\n', 'utf8')
+      },
+    })
+    expect(code).toBe(OK)
+    expect(follow.out).toEqual(['four'])
+  })
+
+  it('keeps a live run out of a purge', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'live-run')
+    writeJob(dir, { runId: 'live-run', pid: process.pid, url: 'http://127.0.0.1:9', token: 't', state: 'running', startedAt: 0 })
+    const io = recorder()
+
+    await purgeCommand(['live-run', '--repo', dir, '--yes'], io.io)
+
+    expect(existsSync(join(dir, '.vinta-ai-maestro', 'runs', 'live-run'))).toBe(true)
+    expect(io.err.join('\n')).toContain('keeping live-run')
   })
 })
