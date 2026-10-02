@@ -9,9 +9,12 @@
   },
   "scripts": {
     "check-ai-models": "node scripts/check-ai-models.mjs",
+    "validate-schemas": "node scripts/validate-schemas.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "yaml": "^2.4.0"
   },
   "files": [

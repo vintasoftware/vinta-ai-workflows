@@ -25,7 +25,7 @@ Today `implement-plan` *is* the orchestrator, written as a prompt. That prompt i
 - Subscription auth only. The daemon never handles an API key.
 - Live directed-graph view, per-agent transcript view, per-agent interaction (interrupt, redirect, add context), and PTY takeover.
 - Crash-safe resume.
-- Integration: dependency-derived phase branches, wave merges, conflict fixer, PR opening.
+- Integration: dependency-derived phase branches, wave merges, conflict fixer, and every PR the plan needs to reach `base_branch` (phase, integration and plan PRs).
 - **Graceful degradation under harness capacity limits** (§6.1). A vendor saying "not right now" is backpressure, not failure: the node waits and resumes automatically.
 - **Browser and OS notifications**, with `await_human` questions answerable directly from the UI (§9).
 - **Windows**, after macOS and Linux are complete, tested and polished (Wave 7).
@@ -429,6 +429,14 @@ Sandbox denies the whole pool root and allows back only the running lane, so an 
 They are a separate registry rather than a second kind of gate because sharing one would be wrong three ways: a chore invalidates the gate cache key (§13.4) by running, it contends for a harness slot rather than a `test-suite` pool, and it must not be the thing standing between a phase and its merge. A chore that fails is journalled and the phase continues to its gates; `on_failure: 'fail'` is for one the phase is not correct without. A capacity refusal skips it for the same reason — re-driving a finished phase to fit in a polish turn costs more than the polish is worth.
 
 **Integration.** Branch topology follows dependencies, not plan order: no dependencies cuts from `base_branch`; exactly one cuts from that node's branch; several cut from an `integ-<id>` merge of them, merged in `depends_on` declaration order so the result is deterministic and derivable from the node alone. `wave-0` *is* `base_branch`; each later wave merges into `wave-<N>`. Merge conflicts are handed to a conflict-fixer agent in the dedicated integration worktree and re-enter the gate.
+
+**Every branch a plan lands through has a PR.** Three kinds, all opened by `open_pr` and journalled whether or not they opened (`node_pr` with `kind`, and `run_pr`):
+
+- **Phase PR** — the node's branch into its computed base. The review unit.
+- **Integration PR** — a multi-dependency node's `integ-<id>` into `base_branch`, opened by that node just before its phase PR. Without it the phase PR targets a branch nothing targets, and no stack containing a multi-dependency node reaches `base_branch`.
+- **Plan PR** — the final wave branch into `base_branch`, opened by the `open_pr` of the node whose `git_merge` built that wave (after its own phase PR, so the body can list it). The body lists every PR above in a merge order that works. It is the only PR carrying the conflict resolutions between sibling nodes that no later node depends on both of, so it is merged last whether the plan lands in one merge or phase by phase.
+
+Every wave branch is pushed after its merge. A `gh` refusal saying the head already has a PR is recorded as opened, with that PR's URL, so a retried phase or a resumed run does not report a failure for a PR that exists.
 
 A conflict surviving its fixer-round budget is reported as a plan defect — two same-wave nodes own the same code — naming **both** nodes and the contested paths, and the conflicted merge is left in place because it is the only copy of what the fixer attempted. **That budget is an integration-level setting (default 2), not either node's `max_fix_rounds`**: a conflict belongs to a pair of nodes, so deriving it from one would make the answer depend on which node happened to merge second.
 
