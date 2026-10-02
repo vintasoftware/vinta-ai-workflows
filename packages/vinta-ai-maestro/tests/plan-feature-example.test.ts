@@ -325,3 +325,47 @@ describe('plan-feature worked example', () => {
     }
   })
 })
+
+/**
+ * `plan-feature`'s "The review-canvas chore" block is emitted verbatim into a
+ * workflow when a project enables the PR Review Canvas integration. Read
+ * straight out of the skill rather than copied into a fixture, so a change to
+ * the snippet is checked against the schema the moment it is made.
+ */
+describe('plan-feature review-canvas chore', () => {
+  const SKILL = join(
+    HERE,
+    '..',
+    '..',
+    '..',
+    'skills',
+    'vinta-derive-skills',
+    'resources',
+    'foundation-skills',
+    'plan-feature',
+    'SKILL.md',
+  )
+
+  const snippet = (): Record<string, unknown> => {
+    const text = readFileSync(SKILL, 'utf8')
+    const section = text.slice(text.indexOf('### The review-canvas chore'))
+    const block = /```json\n([\s\S]*?)\n```/.exec(section)?.[1]
+    if (block === undefined) throw new Error('no json block under "The review-canvas chore"')
+    return JSON.parse(`{${block}}`) as Record<string, unknown>
+  }
+
+  it('parses as an after_pr chore beside deslop in the worked example', () => {
+    const doc = example() as {
+      chores: Record<string, unknown>
+      defaults: { chores: string[] }
+    }
+    doc.chores = { ...doc.chores, ...snippet() }
+    doc.defaults.chores = [...doc.defaults.chores, 'review-canvas']
+    const result = parseWorkflow(doc)
+    if (!result.ok) throw new Error(`expected valid, got:\n${formatIssues(result.issues)}`)
+
+    expect(result.workflow.chores['review-canvas']?.when).toBe('after_pr')
+    expect(result.workflow.chores['review-canvas']?.skill).toBe('pr-review-canvas')
+    expect(result.workflow.chores['review-canvas']?.on_failure).toBe('continue')
+  })
+})

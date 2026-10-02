@@ -101,10 +101,37 @@ For each vendor in the user's selection:
 
 Any mismatches → re-run the script. If still wrong → inspect the script's output for warnings (it warns when a target path exists as a non-symlink real file).
 
+### 7b. Install integration skills
+
+Read `integrations` from `.vinta-ai-workflows.yaml`. Skip this step when nothing there is `enabled`. Run it **after** step 6: the vendor skill paths must already be symlinks into `ai-tools/skills/`, or the tool would create real vendor directories that block those symlinks.
+
+**`pr-review-canvas` = enabled:**
+
+1. Check for the CLI with `pr-review --version`. If it is missing, print the install command and skip the rest of this integration. **Do not install it yourself.** It is a global, machine-level tool, like `gh`:
+
+   ```bash
+   npm install -g @vintasoftware/pr-review-canvas
+   ```
+
+   Tell the user to install it, then re-run this step (or run `pr-review install-skill --claude-dir ai-tools/skills --codex-dir ai-tools/skills` themselves).
+2. Install the skill into the canonical directory:
+
+   ```bash
+   pr-review install-skill --claude-dir ai-tools/skills --codex-dir ai-tools/skills --json
+   ```
+
+   Both flags point at `ai-tools/skills/`, so the tool writes one copy, `ai-tools/skills/pr-review-canvas/`. Every vendor then reaches that copy through its symlink. The tool also adds `.pr-review/settings.yml` to `.gitignore`.
+3. **Never edit `ai-tools/skills/pr-review-canvas/SKILL.md`.** The tool stamps a body hash into its frontmatter, and `pr-review doctor` and `pr-review serve` flag a modified copy as stale. To refresh the skill, run `pr-review upgrade`, not this flow.
+4. Run `pr-review doctor`. Its `skill` check must pass, and it reads the copy through `.agents/skills/`, which step 6 always links. Show any other failed checks to the user with the hints the tool prints, most often `gh auth login` / `glab auth login` or a missing `origin` remote. These do not block the bootstrap.
+5. Do not write `pr-review.config.yml`. Every key in it is optional, and the defaults are correct. Mention that the team can copy the tool's example config to change sharing or mark high-risk paths.
+
+On `SKILL_DIR_EXISTS` (exit 1), a hand-made `ai-tools/skills/pr-review-canvas/` without the tool's marker is in the way. Show it to the user and ask before re-running with `--force`. `--force` replaces that directory.
+
 ### 8. Commit
 
 Stage:
-- `ai-tools/` (canonical sources + script)
+- `ai-tools/` (canonical sources + script, plus any integration skill from step 7b)
+- `.gitignore` (when step 7b's `pr-review install-skill` added `.pr-review/settings.yml`)
 - `package.json` (script alias + yaml dep)
 - `pnpm-lock.yaml` / `package-lock.json` / `yarn.lock` (after install)
 - `AGENTS.md` (regular file at the repo root)

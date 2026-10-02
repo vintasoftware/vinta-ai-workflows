@@ -109,7 +109,7 @@ For each `affects-project` and `opt-in-offer` and `config-schema-change` entry, 
 
 `tooling` changes batch under one prompt: `Apply all tooling changes?` — they're typically idempotent and small.
 
-`opt-in-offer` `Skip` writes the corresponding entry to `foundation_skills` (or wherever it lives) as `disabled` so the next sync respects the choice.
+`opt-in-offer` `Skip` writes the corresponding entry to `foundation_skills` (or `integrations`, or wherever it lives) as `disabled` so the next sync respects the choice.
 
 Don't batch `affects-project` decisions. Each is a separate decision so the user can keep their hand-tuned wording for one skill while accepting another.
 
@@ -124,6 +124,7 @@ In order:
    - Bump `schema_version` if the major changed.
 
 2. **`opt-in-offer` accepts** — flip the corresponding entry to `enabled` in the config; copy / render the artifact (foundation skill, agent, etc.).
+   - **An integration** (`integrations.<name>` in the config, such as `pr-review-canvas`) has no bundled artifact to copy. Flip it to `enabled`, then run [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md)'s **Install integration skills** step, which uses the tool's own CLI. The plan-execution skills and `plan-feature` read the flag at runtime, so nothing needs re-deriving. Offer it only when its preconditions hold. For `pr-review-canvas`, that means `project.code_host` is `github` / `gitlab` and `policies.pr_creation` is `agents-create`. `Skip` writes `disabled` under `integrations`.
 
 3. **`affects-project` accepts** — re-render the relevant template (for `implement-plan` / `amend-plan`) or re-copy the foundation skill body (for verbatim ones — delegated to [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)). Use the values in `.vinta-ai-workflows.yaml` as the substitution source. Validate every `{{PLACEHOLDER}}` is resolved.
 

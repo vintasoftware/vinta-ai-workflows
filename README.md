@@ -292,6 +292,22 @@ Land at `ai-tools/agents/<name>.yaml` (canonical YAML; `setup-ai-tools.mjs` emit
 
 Stack templates may add specialists like `migration-author` (Django) or `deploy-author` (Medplum) — see disclaimer above.
 
+### Integrations (external tools)
+
+Integrations are external tools that ship their own skill. The bootstrap asks about each one. When one is enabled, the tool's own CLI installs and updates its skill. This package never copies, renders or edits that skill. Enabling one is recorded under `integrations` in `.vinta-ai-workflows.yaml`.
+
+| Integration | What it adds |
+|---|---|
+| [`pr-review-canvas`](https://github.com/vintasoftware/pr-review-canvas) | A review canvas for every PR an agent opens: the diff grouped by topic, with attention points for the reviewer, shared as a PR comment and read in a local app (`pr-review serve`). `integrate-phase` runs `/pr-review-canvas <n>` after `open-pr.sh` publishes the PR. `plan-feature` adds an `after_pr` `review-canvas` chore so that [vinta-ai-maestro](packages/vinta-ai-maestro/README.md#chores-about-the-pr--when-after_pr) does the same on each phase PR. Offered only for GitHub / GitLab projects where agents open PRs. |
+
+The tool itself is a machine-level install, like `gh`, and the bootstrap never installs it:
+
+```bash
+npm install -g @vintasoftware/pr-review-canvas
+```
+
+When the CLI is present, the bootstrap runs `pr-review install-skill --claude-dir ai-tools/skills --codex-dir ai-tools/skills`, so one copy in `ai-tools/skills/pr-review-canvas/` serves every vendor. Refresh it with `pr-review upgrade`, and check it with `pr-review doctor`. Do not edit the copy: the tool stamps a hash into it and reports an edited copy as stale. Sharing and other settings live in the tool's own `pr-review.config.yml`.
+
 ## Staying in sync with upstream
 
 Bootstrap is a snapshot. `vinta-ai-workflows` keeps shipping — new foundation skills, refined templates, sharper agent prompts, schema additions, stack support, best-practice updates lifted from real projects. Pulling those into a previously-bootstrapped repo is a first-class flow, not an afterthought. **This is one of the most important capabilities of the package.**

@@ -250,6 +250,18 @@
         "fixer": { "type": "string", "enum": ["enabled", "disabled"] }
       }
     },
+    "integrations": {
+      "description": "Per-integration opt-in for external tools that ship their own skills, as opposed to foundation skills this package bundles. An integration's skill is installed by that tool's own CLI into `ai-tools/skills/<name>/`, carries the tool's own ownership marker, and is never copied, rendered or refreshed by `vinta-derive-skills` / `vinta-update-project-skills`. Use `enabled` / `disabled`; `disabled` is a sticky opt-out, as for `foundation_skills`. Absent means the integration was never offered (projects bootstrapped before it existed).",
+      "type": "object",
+      "additionalProperties": { "type": "string", "enum": ["enabled", "disabled"] },
+      "properties": {
+        "pr-review-canvas": {
+          "description": "PR Review Canvas (`@vintasoftware/pr-review-canvas`, CLI `pr-review`): a topic-grouped review canvas for each PR, posted as a PR comment and read in a local review app. When `enabled`: `vinta-install-ai-tools-setup` runs `pr-review install-skill` into `ai-tools/skills/` (the CLI itself is a global install the user does, never auto-installed); the `integrate-phase` PR step runs the `pr-review-canvas` skill after `open-pr.sh` publishes a PR; and `plan-feature` adds an `after_pr` `review-canvas` chore to the maestro workflow it writes. Posting the canvas comment follows the tool's own `sharing.canvasComment` setting in `pr-review.config.yml`.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        }
+      }
+    },
     "agent_models": {
       "description": "Per-role / per-task model selection for the plan-execution family, expressed as **tiers** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml`. Each consuming skill resolves a tier to a concrete model at runtime: take that tier's `models`, filter to the vendors the runtime exposes, pick the cheapest survivor. This keeps the config free of hard-coded model IDs (which go stale) — the nightly `check-ai-models` job keeps the tier table fresh. Every key is optional; an unset key (or the whole section absent) means the spawn uses the runtime's default model, i.e. today's behavior. These are the **project defaults**: the `reviewer` / `fixer` tiers here can be overridden per phase by a plan's optional `**Review models**:` line (a phase override wins over the value here for that phase only — see `plan-feature`). The per-phase implementer model is NOT here — that stays owned by each plan phase's `**Suggested AI model**:` line. The mechanical steps (`worktree_prep`, `integrate`) are never plan-named.",
       "type": "object",

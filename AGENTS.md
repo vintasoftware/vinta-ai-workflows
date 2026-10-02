@@ -106,7 +106,8 @@ Beyond the above there is nothing else to run — no Jest, pytest, ruff, or esli
   3. Step 0.5 YAML emission in `vinta-bootstrap-ai-tools/SKILL.md`.
   4. Whichever downstream skill consumes it knows how.
   5. CHANGELOG entry.
-  Skipping any step leaves the field orphaned. **Standalone resource schemas** (e.g. `ai-models.v1.schema.json`, which validates a data file a single skill reads — not a per-project produced artifact) have a lighter contract: the schema file + a `schemas/README.md` inventory row + the one consuming skill + a CHANGELOG entry. No bootstrap interview, no Step 0.5 emission.
+  Skipping any step leaves the field orphaned.
+- **Integrations are external tools, not foundation skills.** An entry under `integrations` in the config schema (today `pr-review-canvas`) names a tool whose CLI installs its own skill into `ai-tools/skills/<name>/`. Bundle none of its content here, and give it no `foundation-skills/` directory. The release pre-flight's "every enum has a directory" check covers `foundation_skills` only. The ripple contract above still applies: schema entry, bootstrap question (group D.2), Step 0.5 emission, the consumer (`vinta-install-ai-tools-setup` step 7b plus whatever reads the flag at runtime), and a CHANGELOG entry. Never auto-install the tool's CLI. Print the install command instead, as `open-pr.sh` does for `gh`. **Standalone resource schemas** (e.g. `ai-models.v1.schema.json`, which validates a data file a single skill reads — not a per-project produced artifact) have a lighter contract: the schema file + a `schemas/README.md` inventory row + the one consuming skill + a CHANGELOG entry. No bootstrap interview, no Step 0.5 emission.
 
 ## Branch model
 
