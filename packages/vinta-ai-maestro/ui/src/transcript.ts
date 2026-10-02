@@ -190,6 +190,16 @@ export interface EntryView {
   /** The session slot (§15), where the turn ran on one. */
   readonly slot: string | null
   /**
+   * The call, read for a reader, on a `tool_use` row and nowhere else — see
+   * `ToolView`. Null on every other kind.
+   */
+  readonly tool: ToolView | null
+  /**
+   * The call id a `tool_use` or `tool_result` carries, so `fold` can seat a
+   * result under the call it answers. Null on every other kind.
+   */
+  readonly toolId: string | null
+  /**
    * Which chore this turn was running, on a `chore` role and nowhere else.
    *
    * The role alone is not enough to band by here: a phase runs its chores one
@@ -197,6 +207,270 @@ export interface EntryView {
    * long turn by somebody called Chore.
    */
   readonly chore: string | null
+}
+
+/**
+ * What a tool call *is*, across the harnesses' vocabularies.
+ *
+ * claude-code says `Read`, `Edit`, `Bash`; opencode says `read`, `edit`,
+ * `bash`; codex says `command_execution` and `file_change`, and an MCP tool
+ * says whatever its server named it. Rendering the vendor's name was honest
+ * and unreadable — a row reading `Tool · str_replace_based_edit_tool` tells
+ * the operator less than the one word "Edit" does. So the name is sorted into
+ * a kind, the kind picks a verb and an icon, and the *arguments* are read by
+ * the names every harness uses for them (`file_path` / `filePath` / `path`),
+ * so the row can say what was read, edited or run.
+ *
+ * `other` is the honest fallback: the vendor's name on the label and the
+ * argument that says most on the row, exactly as before.
+ */
+export type ToolKind =
+  | 'read'
+  | 'edit'
+  | 'write'
+  | 'shell'
+  | 'search'
+  | 'glob'
+  | 'list'
+  | 'fetch'
+  | 'web'
+  | 'agent'
+  | 'todo'
+  | 'other'
+
+export interface ToolView {
+  readonly id: string
+  /** The harness's own name for the tool. */
+  readonly name: string
+  readonly kind: ToolKind
+  /** What the row leads with: `Read`, `Edit`, `Shell` … or `Tool · <name>`. */
+  readonly verb: string
+  /** The one argument worth the collapsed row: a path, a command, a pattern, a URL. */
+  readonly target: string | null
+  /** The file the call is about, where there is one — what the open row highlights as. */
+  readonly path: string | null
+  readonly command: string | null
+  /** An edit's two sides, for the open row's diff. */
+  readonly edit: { readonly before: string; readonly after: string } | null
+  /** A write's whole content. */
+  readonly content: string | null
+  /** The remaining scalar arguments, for the open row. */
+  readonly args: readonly (readonly [string, string])[]
+}
+
+/** The kinds that read the tree rather than change it, which `fold` groups. */
+export const EXPLORING: ReadonlySet<ToolKind> = new Set(['read', 'search', 'glob', 'list'])
+
+const VERBS: Readonly<Record<Exclude<ToolKind, 'other'>, string>> = {
+  read: 'Read',
+  edit: 'Edit',
+  write: 'Write',
+  shell: 'Shell',
+  search: 'Grep',
+  glob: 'Glob',
+  list: 'List',
+  fetch: 'Fetch',
+  web: 'Web search',
+  agent: 'Agent',
+  todo: 'Todo',
+}
+
+/**
+ * The vendors' tool names, lower-cased, by kind. An MCP prefix
+ * (`mcp__server__tool`) is stripped before the lookup, so a server that names
+ * its tool `read_file` reads as a read.
+ */
+const TOOL_NAMES: Readonly<Record<string, ToolKind>> = {
+  read: 'read',
+  read_file: 'read',
+  view: 'read',
+  cat: 'read',
+  notebookread: 'read',
+  edit: 'edit',
+  multiedit: 'edit',
+  notebookedit: 'edit',
+  str_replace_editor: 'edit',
+  str_replace_based_edit_tool: 'edit',
+  apply_patch: 'edit',
+  file_change: 'edit',
+  patch: 'edit',
+  write: 'write',
+  write_file: 'write',
+  create_file: 'write',
+  bash: 'shell',
+  shell: 'shell',
+  command_execution: 'shell',
+  execute_command: 'shell',
+  run_command: 'shell',
+  terminal: 'shell',
+  grep: 'search',
+  search: 'search',
+  rg: 'search',
+  ripgrep: 'search',
+  search_files: 'search',
+  glob: 'glob',
+  find: 'glob',
+  find_files: 'glob',
+  list: 'list',
+  ls: 'list',
+  list_dir: 'list',
+  list_directory: 'list',
+  webfetch: 'fetch',
+  web_fetch: 'fetch',
+  fetch: 'fetch',
+  websearch: 'web',
+  web_search: 'web',
+  task: 'agent',
+  agent: 'agent',
+  subagent: 'agent',
+  dispatch_agent: 'agent',
+  todowrite: 'todo',
+  todoread: 'todo',
+  todo: 'todo',
+  update_todo: 'todo',
+}
+
+/** The argument names each harness uses, in the order worth trying. */
+const PATH_KEYS = ['file_path', 'filePath', 'path', 'notebook_path', 'target_file', 'filename'] as const
+const COMMAND_KEYS = ['command', 'cmd'] as const
+const PATTERN_KEYS = ['pattern', 'query', 'regex'] as const
+const BEFORE_KEYS = ['old_string', 'oldString', 'old_str', 'old_text'] as const
+const AFTER_KEYS = ['new_string', 'newString', 'new_str', 'new_text'] as const
+const CONTENT_KEYS = ['content', 'contents', 'file_text', 'text'] as const
+
+/** An argument shown as `key=value` is clipped to this; the payload has the rest. */
+const ARG_LIMIT = 120
+
+function toolView(id: string, name: string, input: unknown): ToolView {
+  const kind = kindOf(name)
+  const fields: Record<string, unknown> =
+    typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : {}
+  const path = pick(fields, PATH_KEYS)
+  const command = pick(fields, COMMAND_KEYS)
+  const before = pick(fields, BEFORE_KEYS)
+  const after = pick(fields, AFTER_KEYS)
+  const content = pick(fields, CONTENT_KEYS)
+  const pattern = pick(fields, PATTERN_KEYS)
+  const taken = new Set<string>()
+  const take = (keys: readonly string[]): void => {
+    for (const key of keys) if (typeof fields[key] === 'string') taken.add(key)
+  }
+
+  let target: string | null
+  switch (kind) {
+    case 'read':
+    case 'edit':
+    case 'write':
+      take(PATH_KEYS)
+      // codex's `file_change` names its files in a list rather than a field.
+      target = path ?? codexPaths(fields)
+      break
+    case 'shell':
+      take(COMMAND_KEYS)
+      target = command === null ? null : firstLine(command)
+      break
+    case 'search':
+      take(PATTERN_KEYS)
+      take(PATH_KEYS)
+      target = pattern === null ? null : path === null ? pattern : `${pattern} in ${path}`
+      break
+    case 'glob':
+      take(PATTERN_KEYS)
+      take(PATH_KEYS)
+      target = pattern ?? path
+      break
+    case 'list':
+      take(PATH_KEYS)
+      target = path
+      break
+    case 'fetch':
+      take(['url'])
+      target = pick(fields, ['url'])
+      break
+    case 'web':
+      take(PATTERN_KEYS)
+      target = pattern
+      break
+    case 'agent': {
+      take(['description', 'prompt'])
+      const description = pick(fields, ['description'])
+      const prompt = pick(fields, ['prompt'])
+      target = description ?? (prompt === null ? null : firstLine(prompt))
+      break
+    }
+    case 'todo': {
+      const todos = fields['todos']
+      target = Array.isArray(todos) ? `${todos.length} ${todos.length === 1 ? 'item' : 'items'}` : null
+      break
+    }
+    case 'other':
+      target = null
+  }
+  // An edit's two sides and a write's body are the open row's, never a `key=value`.
+  take(BEFORE_KEYS)
+  take(AFTER_KEYS)
+  if (kind === 'write') take(CONTENT_KEYS)
+
+  const args: (readonly [string, string])[] = []
+  for (const [key, value] of Object.entries(fields)) {
+    if (taken.has(key)) continue
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      const text = String(value)
+      args.push([key, text.length > ARG_LIMIT ? `${text.slice(0, ARG_LIMIT)}…` : firstLine(text)])
+    }
+  }
+
+  return {
+    id,
+    name,
+    kind,
+    verb: kind === 'other' ? `Tool · ${name}` : VERBS[kind],
+    target,
+    path: kind === 'search' ? null : path,
+    command,
+    edit: before !== null && after !== null ? { before, after } : null,
+    content: kind === 'write' ? content : null,
+    args,
+  }
+}
+
+function kindOf(name: string): ToolKind {
+  const bare = name.toLowerCase().replace(/^mcp__.*?__/, '')
+  return TOOL_NAMES[bare] ?? TOOL_NAMES[bare.split('.').at(-1) ?? ''] ?? 'other'
+}
+
+function pick(fields: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = fields[key]
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return null
+}
+
+/** codex's `file_change`: `changes: [{ path, kind }]`. The first path, and how many more. */
+function codexPaths(fields: Record<string, unknown>): string | null {
+  const changes = fields['changes']
+  if (!Array.isArray(changes) || changes.length === 0) return null
+  const paths = changes
+    .map((change: unknown) =>
+      typeof change === 'object' && change !== null ? (change as Record<string, unknown>)['path'] : undefined,
+    )
+    .filter((path): path is string => typeof path === 'string')
+  if (paths.length === 0) return null
+  return paths.length === 1 ? (paths[0] ?? null) : `${paths[0]} and ${paths.length - 1} more`
+}
+
+/** How many lines an edit adds and removes, for the `+N −M` beside it. */
+export function editCounts(edit: { readonly before: string; readonly after: string }): {
+  readonly additions: number
+  readonly deletions: number
+} {
+  return { additions: lineCount(edit.after), deletions: lineCount(edit.before) }
+}
+
+function lineCount(text: string): number {
+  if (text === '') return 0
+  return text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
 }
 
 const AUTHOR_LABELS: Readonly<Record<Author, string>> = {
@@ -250,6 +524,8 @@ function build(raw: unknown): EntryView {
       shape: 'prose',
       role: null,
       slot: null,
+      tool: null,
+      toolId: null,
       chore: null,
     }
   }
@@ -268,14 +544,18 @@ function build(raw: unknown): EntryView {
       return proposal(entry.text) ?? row(entry.type, 'agent', reflow(entry.text), null)
     case 'thinking':
       return row(entry.type, 'agent', entry.text, null, 'Agent · thinking', { shape: 'thinking' })
-    case 'tool_use':
-      return row(entry.type, 'tool', payload(entry.input), null, `Tool · ${entry.name}`, {
+    case 'tool_use': {
+      const tool = toolView(entry.id, entry.name, entry.input)
+      return row(entry.type, 'tool', payload(entry.input), null, tool.verb, {
         shape: 'tool',
         // Not the first line of the payload, which for every structured tool
         // call is `{`. The argument that says what the call *does* — a command,
         // a path — is the one the collapsed row is for.
-        headline: argument(entry.input),
+        headline: tool.target ?? argument(entry.input),
+        tool,
+        toolId: entry.id,
       })
+    }
     case 'tool_result':
       return row(
         entry.type,
@@ -283,7 +563,7 @@ function build(raw: unknown): EntryView {
         entry.summary,
         entry.ok ? 'ok' : 'error',
         `Tool result · ${entry.ok ? 'ok' : 'failed'}`,
-        { shape: 'tool' },
+        { shape: 'tool', toolId: entry.id },
       )
     case 'permission_request':
       // Compact, not the indented form the tool rows use. This one is prose —
@@ -337,7 +617,12 @@ function row(
   body: string,
   tone: Tone | null,
   label?: string,
-  options: { readonly shape?: Shape; readonly headline?: string } = {},
+  options: {
+    readonly shape?: Shape
+    readonly headline?: string
+    readonly tool?: ToolView
+    readonly toolId?: string
+  } = {},
 ): EntryView {
   const text = body.trim()
   return {
@@ -350,6 +635,8 @@ function row(
     shape: options.shape ?? 'prose',
     role: null,
     slot: null,
+    tool: options.tool ?? null,
+    toolId: options.toolId ?? null,
     chore: null,
   }
 }
@@ -381,11 +668,25 @@ function row(
  */
 const GROUPED: ReadonlySet<string> = new Set(['thinking', 'assistant_text'])
 
+/**
+ * How far back a result looks for its call. A call's result follows it within
+ * a handful of entries in every harness; the bound is against a result whose
+ * call fell outside the served tail, which must not scan the whole window.
+ */
+const PAIR_WINDOW = 50
+
 export function fold(entries: readonly unknown[], offset: number): readonly Row[] {
   const rows: Row[] = []
   for (const [index, raw] of entries.entries()) {
     const view = present(raw)
     const last = rows.at(-1)
+
+    // A result sits under the call it answers, matched by id — the row then
+    // says what the call was *and* how it went, and the list is half as long.
+    // A result whose call is not here (it fell outside the served tail) is
+    // still a row of its own: the record must not drop what happened.
+    if (view.kind === 'tool_result' && view.toolId !== null && seat(rows, view)) continue
+
     // Same kind *and* same author. Two agents thinking in sequence is two
     // thoughts, and merging them would attribute half of one to the other.
     if (
@@ -395,20 +696,64 @@ export function fold(entries: readonly unknown[], offset: number): readonly Row[
       last.chore === view.chore
     ) {
       last.views.push(view)
+      last.results.push(null)
       continue
     }
+
+    // Consecutive reads, searches and listings are one stretch of looking
+    // around, and read better as "Explored · 4 reads, 2 searches" than as six
+    // rows. Only the exploring kinds group, only with each other, and only
+    // under one author: an edit between two reads is its own row.
+    if (
+      view.tool !== null &&
+      EXPLORING.has(view.tool.kind) &&
+      last !== undefined &&
+      isExploring(last) &&
+      last.role === view.role &&
+      last.chore === view.chore
+    ) {
+      last.views.push(view)
+      last.results.push(null)
+      continue
+    }
+
     rows.push({
       at: offset + index,
       shape: view.shape,
       role: view.role,
       chore: view.chore,
       views: [view],
+      results: [null],
     })
   }
   return rows
 }
 
-/** One rendered row: a single entry, or a run of consecutive thinking. */
+/** Puts a result under its call, if the call is in the last `PAIR_WINDOW` rows. */
+function seat(rows: Row[], result: EntryView): boolean {
+  for (let back = rows.length - 1; back >= Math.max(0, rows.length - PAIR_WINDOW); back -= 1) {
+    const row = rows[back]
+    if (row === undefined || row.shape !== 'tool') continue
+    const index = row.views.findIndex(
+      (view, position) => view.tool?.id === result.toolId && row.results[position] === null,
+    )
+    if (index !== -1) {
+      row.results[index] = result
+      return true
+    }
+  }
+  return false
+}
+
+/** Whether every call in the row is one of the exploring kinds. */
+function isExploring(row: Row): boolean {
+  return (
+    row.shape === 'tool' &&
+    row.views.every((view) => view.tool !== null && EXPLORING.has(view.tool.kind))
+  )
+}
+
+/** One rendered row: a single entry, a run of consecutive thinking, or a stretch of exploring. */
 export interface Row {
   /** Absolute index of the first entry in the row. The React key. */
   readonly at: number
@@ -418,6 +763,37 @@ export interface Row {
   /** Which chore, where the author is one — two chores are two turns. */
   readonly chore: string | null
   readonly views: EntryView[]
+  /**
+   * Aligned with `views`: the result each call received, or null where none
+   * has (yet). Always null outside a tool row.
+   */
+  readonly results: (EntryView | null)[]
+}
+
+/** A row holding more than one call: a stretch of exploring, grouped by `fold`. */
+export function isExploration(row: Row): boolean {
+  return row.shape === 'tool' && row.views.length > 1
+}
+
+/** Whether every call in the row has its result — "Explored" rather than "Exploring". */
+export function settled(row: Row): boolean {
+  return row.results.every((result) => result !== null)
+}
+
+/** `3 reads, 2 searches, 1 listing` — what a stretch of exploring amounted to. */
+export function explorationSummary(row: Row): string {
+  const counts = { read: 0, search: 0, list: 0 }
+  for (const view of row.views) {
+    const kind = view.tool?.kind
+    if (kind === 'read') counts.read += 1
+    else if (kind === 'search' || kind === 'glob') counts.search += 1
+    else if (kind === 'list') counts.list += 1
+  }
+  const parts: string[] = []
+  if (counts.read > 0) parts.push(`${counts.read} ${counts.read === 1 ? 'read' : 'reads'}`)
+  if (counts.search > 0) parts.push(`${counts.search} ${counts.search === 1 ? 'search' : 'searches'}`)
+  if (counts.list > 0) parts.push(`${counts.list} ${counts.list === 1 ? 'listing' : 'listings'}`)
+  return parts.join(', ')
 }
 
 /** The body of a row, which for grouped thinking is every member's. */
@@ -425,13 +801,17 @@ export function bodyOf(row: Row): string {
   return row.views.map((view) => view.body).join('\n\n')
 }
 
-/** What a collapsed row shows: the first member's line, whatever the row holds. */
+/** What a collapsed row shows: the first member's line, or what a stretch of exploring amounted to. */
 export function headlineOf(row: Row): string {
-  return row.views[0]?.headline ?? ''
+  return isExploration(row) ? explorationSummary(row) : (row.views[0]?.headline ?? '')
 }
 
-/** Whether opening the row would reveal anything the headline did not say. */
+/**
+ * Whether opening the row would reveal anything the headline did not say. A
+ * call always has its payload behind it, and a call with a result has that.
+ */
 export function hasMore(row: Row): boolean {
+  if (isExploration(row) || row.results.some((result) => result !== null)) return true
   return bodyOf(row) !== headlineOf(row)
 }
 

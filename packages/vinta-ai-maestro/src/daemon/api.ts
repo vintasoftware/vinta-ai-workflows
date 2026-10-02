@@ -12,7 +12,9 @@
  * - **Refs, not renderings.** A node's detail carries the *reference* a diff
  *   needs — branch, base, lane — not a diff. Running git in a lane belongs to
  *   the git unit; an API that shelled out here would be a second place that
- *   knows how phase branches are named.
+ *   knows how phase branches are named. The changes endpoint keeps to that:
+ *   it hands `integration/changes.ts` the branch, the base and the lane's
+ *   path off the journal row, and serves what comes back.
  * - **Tails, not pages.** Transcripts and gate logs are append-only files that
  *   reach megabytes. `Journal` reads them backwards from the end, and so does
  *   this: the last `limit` entries, and the last 64 KiB of a gate log.
@@ -23,9 +25,11 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { closeSync, openSync, readSync, statSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
+import { laneRootFor } from '../cli/paths.ts'
+import { describeChanges } from '../integration/changes.ts'
 import type { Journal, NodeRow, RunRow } from '../journal/journal.ts'
 import {
   LEVELS,
@@ -76,6 +80,7 @@ import {
   type LogPage,
   type MonitorAsked,
   type Issue,
+  type NodeChanges,
   type NodeDetail,
   type RunSnapshot,
   type RunSummary,
@@ -111,6 +116,11 @@ const GATE_LOG_TAIL_BYTES = 64 * 1024
 const TranscriptQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(1000).default(100),
   stream: z.enum(['transcript', 'raw']).default('transcript'),
+})
+
+/** Whether the changes endpoint reads the patch, which is the expensive half. */
+const ChangesQuerySchema = z.object({
+  patch: z.enum(['true', 'false']).default('false'),
 })
 
 /** §13.2's page. Same exclusive `since` as the journal and the socket. */
@@ -640,6 +650,53 @@ export function createApi(options: ApiOptions): Hono {
       question: question(runId, found.run, node),
     }
     return c.json(detail)
+  })
+
+  /**
+   * What the node changed: files, counts and — on request — the patch (§10).
+   *
+   * Everything git needs is on the journal row. The lane's *path* is derived
+   * the way the pool derives it, from the same root `purge` and `doctor` use,
+   * so this route knows no more about lane layout than they do. A node with no
+   * branch yet, or one whose branch git no longer has, is an empty description
+   * with `source: none` — a 200, because "nothing to show" is an answer.
+   */
+  app.get('/api/runs/:runId/nodes/:nodeId/changes', async (c) => {
+    const found = resolveNode(c)
+    if ('response' in found) return found.response
+    const query = ChangesQuerySchema.safeParse(c.req.query())
+    if (!query.success) return fail(c, 400, 'invalid_request', toIssues(query.error))
+
+    const { runId, node } = found
+    const ref = { branch: node.branch, baseBranch: node.base_branch, lane: node.lane }
+    const empty: NodeChanges = {
+      runId,
+      nodeId: node.node_id,
+      ...ref,
+      source: 'none',
+      files: [],
+      totals: { files: 0, additions: 0, deletions: 0 },
+      patch: null,
+      truncated: false,
+    }
+    if (node.branch === null || node.base_branch === null) return c.json(empty)
+
+    const repo = dirname(journal.root)
+    const changes = await describeChanges({
+      repo,
+      branch: node.branch,
+      baseBranch: node.base_branch,
+      lanePath: node.lane === null ? null : join(laneRootFor(repo), node.lane),
+      patch: query.data.patch === 'true',
+    })
+    const body: NodeChanges = {
+      runId,
+      nodeId: node.node_id,
+      ...ref,
+      ...changes,
+      files: [...changes.files],
+    }
+    return c.json(body)
   })
 
   /**

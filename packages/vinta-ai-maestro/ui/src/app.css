@@ -114,9 +114,202 @@ state-machine-editor {
 }
 
 /* The transcript's rows and the gate logs carry repository content verbatim;
-   a long token must wrap rather than widen the card. */
+   a long token must wrap rather than widen the card. Rendered markdown is the
+   exception: its blocks are elements, and the newlines between them are
+   whitespace, not blank lines. */
 .entry-body,
 .gate-log {
   white-space: pre-wrap;
   word-break: break-word;
+}
+.entry-body.markdown,
+.entry-body .markdown {
+  white-space: normal;
+}
+
+/*
+ * Code and diffs (`Code.tsx`).
+ *
+ * shiki emits both themes on every token as custom properties and this picks
+ * one by the same `dark` class the design system sets on the root — so a
+ * theme toggle is a repaint, not a re-tokenise.
+ *
+ * The diff's own colours are built from the ok and error tones because
+ * green-for-added and red-for-removed is the convention every operator
+ * arrives with, not because an added line is "ok" or a removed one an error.
+ * The row tints are mixed from the tone's strong colour rather than taken from
+ * the soft one, so they stay faint enough for the code on them to keep its own
+ * colour. The modified mark is amber for the reason review tools use it: it is
+ * neither of the other two.
+ */
+:root {
+  --diff-add: var(--tone-ok);
+  --diff-del: var(--tone-error);
+  --diff-add-bg: color-mix(in oklch, var(--tone-ok) 11%, transparent);
+  --diff-del-bg: color-mix(in oklch, var(--tone-error) 11%, transparent);
+}
+
+.code span[style],
+.diff span[style] {
+  color: var(--shiki-light);
+}
+.dark .code span[style],
+.dark .diff span[style] {
+  color: var(--shiki-dark);
+}
+
+.diff tr.diff-add {
+  background: var(--diff-add-bg);
+}
+.diff tr.diff-del {
+  background: var(--diff-del-bg);
+}
+.diff tr.diff-add > td.diff-marker {
+  color: var(--tone-ok-foreground);
+}
+.diff tr.diff-del > td.diff-marker {
+  color: var(--tone-error-foreground);
+}
+.diff tr.diff-add .diff-word {
+  background: color-mix(in oklch, var(--tone-ok) 28%, transparent);
+  border-radius: 2px;
+}
+.diff tr.diff-del .diff-word,
+.diff td.diff-del .diff-word {
+  background: color-mix(in oklch, var(--tone-error) 28%, transparent);
+  border-radius: 2px;
+}
+.diff td.diff-add .diff-word {
+  background: color-mix(in oklch, var(--tone-ok) 28%, transparent);
+  border-radius: 2px;
+}
+/* Split: the tint is the cell's, and the two halves are kept apart by a rule. */
+.diff td.diff-add {
+  background: var(--diff-add-bg);
+}
+.diff td.diff-del {
+  background: var(--diff-del-bg);
+}
+.diff td.diff-blank {
+  background: color-mix(in oklch, var(--muted) 60%, transparent);
+}
+.diff tr.diff-split-row > td:nth-child(3) {
+  border-left: 1px solid var(--border);
+}
+.diff-text-add {
+  color: var(--tone-ok-foreground);
+}
+.diff-text-del {
+  color: var(--tone-error-foreground);
+}
+.diff-bar-add {
+  background: var(--diff-add);
+}
+.diff-bar-del {
+  background: var(--diff-del);
+}
+.diff-mark-add {
+  background: var(--tone-ok-soft);
+  color: var(--tone-ok-foreground);
+}
+.diff-mark-del {
+  background: var(--tone-error-soft);
+  color: var(--tone-error-foreground);
+}
+.diff-mark-mod {
+  background: var(--tone-wait-soft);
+  color: var(--tone-wait-foreground);
+}
+
+/*
+ * Prose (`Markdown.tsx`). Tailwind's preflight strips every default margin, so
+ * rendered markdown needs its rhythm back: a paragraph's gap, a list's indent,
+ * a heading's weight. Sized to the transcript's 14px rather than to a
+ * document's — this is a chat, read beside a diff, not an article.
+ */
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown blockquote,
+.markdown table {
+  margin: 0.35em 0;
+}
+.markdown ul,
+.markdown ol {
+  padding-left: 1.4em;
+}
+.markdown ul {
+  list-style: disc;
+}
+.markdown ol {
+  list-style: decimal;
+}
+.markdown li + li {
+  margin-top: 0.1em;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 0.7em 0 0.25em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.markdown h1 {
+  font-size: 1.15em;
+}
+.markdown h2 {
+  font-size: 1.08em;
+}
+.markdown h3,
+.markdown h4 {
+  font-size: 1em;
+}
+.markdown a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown blockquote {
+  padding-left: 0.8em;
+  border-left: 2px solid var(--border);
+  color: var(--muted-foreground);
+}
+.markdown hr {
+  margin: 0.8em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.markdown table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+.markdown th,
+.markdown td {
+  padding: 0.25em 0.6em;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.markdown th {
+  background: var(--muted);
+  font-weight: 600;
+}
+.markdown-quiet p {
+  margin: 0.35em 0;
+}
+
+/* The operator's own words, set apart the way a chat sets the reader's side
+   apart: the attention tone's tint, which is already the colour of "a human
+   acted here" everywhere else on the page. */
+.entry-operator > .entry-body {
+  padding: 0.5rem 0.75rem;
+  border-left: 2px solid var(--tone-attention);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--tone-attention) 7%, transparent);
 }
