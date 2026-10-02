@@ -30,6 +30,44 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The node view shows what a phase changed, and the whole diff on request.**
+  The *Diff* panel used to print `git diff base...branch` for the operator to
+  paste into a terminal. It is now a *Changes* card: how many files changed
+  and how many lines were added and removed, then each file — up to ten, the
+  rest as a count — with its status mark (`A`, `M`, `D`, `R`, `?` for a file
+  not yet added to git), its own `+N −M`, and a five-block bar that compares
+  the files to each other at a glance. *View full diff* opens a new route,
+  `#/runs/<run>/nodes/<node>/changes`, that renders the unified diff with
+  syntax highlighting (shiki, GitHub light and dark following the theme),
+  old and new line numbers, hunk headers with their function context, a
+  sticky file list that scrolls to each file, and a fold on any file past 400
+  changed lines. The daemon serves it from a new endpoint,
+  `GET /api/runs/:runId/nodes/:nodeId/changes`, answered by the git unit: from
+  the lane's **working tree** while the lane still holds the phase's branch —
+  so an agent's uncommitted edits and untracked files are visible while it is
+  working — and from the branch itself once the lane has moved on. The card
+  polls the counts on the node view's cadence and never the patch; the diff
+  view reads the patch once, and again on a button or when the run moves. A
+  patch over 2 MiB is cut at a file boundary and says so; the per-file counts
+  are complete whatever its size. A daemon older than this browser gets the
+  reference — branch, base, lane — as before. (`vinta-ai-maestro`)
+
+- **The transcript reads like the harnesses do.** An agent's prose is
+  rendered as the markdown it is — headings, lists, inline code and fenced
+  blocks, the blocks highlighted like the diff — instead of as its asterisks;
+  raw HTML in it stays text. Tool calls are a verb and a target on one line —
+  `Read` and a path, `Shell` and a command, `Edit` and a path with `+N −M`
+  beside it — whatever the harness named the tool (`Bash`, `bash`,
+  `command_execution` and an MCP server's `read_file` all read as what they
+  are), with the result's verdict as a dot at the end of the row because the
+  result now sits under the call it answers. Open, an edit is a diff of its
+  two sides, a write is the file, a shell call is the command and what it
+  printed, a failed one with a red edge. A stretch of consecutive reads,
+  searches and listings is one row — *Explored · 3 reads, 2 searches* — that
+  opens into the calls. The operator's own message is set apart in a tinted
+  block. The transcript panel also takes the height the window leaves it
+  rather than a fixed 480px. (`vinta-ai-maestro`)
+
 - **A timed-out gate says whether it hung or was slow.** A `gate_result` with
   `status: timed_out` used to carry only the status, so a run with nine
   timeouts could not say whether any of them was a stuck suite or a host too

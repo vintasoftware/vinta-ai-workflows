@@ -499,7 +499,8 @@ React + Vite, served by the daemon at `127.0.0.1` behind a random per-run token 
 |---|---|
 | Runs | List, status, elapsed, resume/purge |
 | Run | Live DAG via `vinta-dag-editor` in read mode — node status colors, wave banding, edges labelled with the dependency artifact. Resource pool meters, the gate queue with positions, and per-harness capacity state (§6.1). |
-| Node | Transcript (chat-rendered normalized events), gate logs, `git diff` for the node's branch, the steering box, the pending human question with its context (§9.1), and the five operations from §9 |
+| Node | Transcript (chat-rendered normalized events: markdown prose, tool calls as a verb and a target with their result seated under them, consecutive reads grouped), gate logs, what the phase changed — files with line counts, and a link to the full diff — the steering box, the pending human question with its context (§9.1), and the five operations from §9 |
+| Changes | The node's whole diff, full page and linkable (`#/runs/<run>/nodes/<node>/changes`): a sticky file list, unified hunks with syntax highlighting and both line numbers. Served by `GET …/nodes/:nodeId/changes`, which the git unit answers from the lane's working tree while the lane holds the branch — uncommitted work included — and from the branch after that |
 | Terminal | `xterm.js` over WebSocket — PTY takeover and raw stream tailing |
 | Editor | `vinta-dag-editor` in edit mode (add node, draw dependency, set gates/harness/model) plus `vinta-state-machine-editor` for pipelines |
 | Logs | The daemon's own log (§13.8) — level, run, node and substring filters, following the tail. Its own section rather than a run panel, because the records worth reading most are the ones with no run to file them under |
