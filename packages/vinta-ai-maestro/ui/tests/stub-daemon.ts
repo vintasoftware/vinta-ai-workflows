@@ -151,6 +151,10 @@ export interface StubDaemon {
   readonly emitPty: (frame: PtyServerFrame) => void
   /** Every §9 operation the stub accepted, in order. */
   readonly posts: readonly Post[]
+  /** Every run-level pause or stop the stub accepted (§9.3), in order. */
+  readonly halts: readonly { runId: string; mode: 'pause' | 'stop' }[]
+  /** Makes the next pause or stop answer 409 with this error code. */
+  readonly refuseHalt: (code: string) => void
   /** Every workflow save the stub accepted, in order. */
   readonly puts: readonly WorkflowPut[]
   /** Every §13.2 event-page read the stub served, in order. */
@@ -189,6 +193,8 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
   const changeReads: { runId: string; nodeId: string; patch: boolean }[] = []
   const usageByRun = new Map(Object.entries(options.usage ?? {}))
   const posts: Post[] = []
+  const halts: { runId: string; mode: 'pause' | 'stop' }[] = []
+  let haltRefusal: string | null = null
   const puts: WorkflowPut[] = []
   const workflows = new Map(Object.entries(options.workflows ?? {}))
   const log: StoredEvent[] = []
@@ -258,6 +264,21 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
         })
       }
       return json(response, 200, WorkflowResponseSchema.parse({ id, workflow: parsed.workflow }))
+    }
+
+    // §9.3's run-level halt. `202` like the daemon: the request is taken, and
+    // the run ends later, which a test says by emitting `run_ended`.
+    const halt = /^\/api\/runs\/([^/]+)\/(pause|stop)$/.exec(url.pathname)
+    if (request.method === 'POST' && halt !== null) {
+      const parsed = NoArgsRequestSchema.safeParse(JSON.parse((await readBody(request)) || '{}'))
+      if (!parsed.success) return json(response, 400, { error: 'invalid_request', issues: null })
+      if (haltRefusal !== null) {
+        const code = haltRefusal
+        haltRefusal = null
+        return json(response, 409, { error: code, issues: null })
+      }
+      halts.push({ runId: decodeURIComponent(halt[1] ?? ''), mode: halt[2] as 'pause' | 'stop' })
+      return json(response, 202, OkResponseSchema.parse({ ok: true }))
     }
 
     // The five §9 operations. Validated with the daemon's request schemas, so
@@ -439,6 +460,10 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       }
     },
     posts,
+    halts,
+    refuseHalt: (code: string) => {
+      haltRefusal = code
+    },
     puts,
     eventReads,
     workflow(id) {

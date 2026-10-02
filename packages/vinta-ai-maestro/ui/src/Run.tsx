@@ -47,6 +47,7 @@ import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import { nodeLabel, nodeTone, runTone } from './status.ts'
 import { elapsed, useNow } from './time.ts'
 import { MonitorPanel } from './Monitor.tsx'
+import { RunControls } from './RunControls.tsx'
 import { useRun } from './useRun.ts'
 
 /**
@@ -132,6 +133,7 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
             {elapsed(snapshot.run.startedAt, endedAt ?? now)}
           </span>
           <Live connected={connected} />
+          <RunControls client={client} runId={runId} status={status} />
           {/* Offered on a live run too: §13.2's value is answering "which minute
               did it go wrong", which is a question you ask while it is still
               going. Replay covers the events journalled so far and says so. */}

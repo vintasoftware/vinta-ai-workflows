@@ -22,6 +22,7 @@ import {
   AddContextRequestSchema,
   AnswerRequestSchema,
   FrameSchema,
+  ErrorResponseSchema,
   NoArgsRequestSchema,
   NodeDetailSchema,
   MonitorAskedSchema,
@@ -127,6 +128,13 @@ export interface Client {
     body: OperationBody<K>,
   ) => Promise<void>
   /**
+   * End the run before its DAG does (SPEC §9.3). `pause` drains it to a
+   * resumable stop; `stop` kills its live turns and cancels it for good.
+   * Resolves when the run's job has the request — the run itself ends a
+   * little later, and the stream's `run_ended` is what says so.
+   */
+  readonly halt: (runId: string, mode: 'pause' | 'stop') => Promise<void>
+  /**
    * Ask the run's monitor a question. Resolves when the daemon has *accepted*
    * it, which is long before it is answered.
    *
@@ -187,6 +195,29 @@ export function createClient(origin: string, token: string): Client {
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify(parsed.data),
       })
+      if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
+      if (!OkResponseSchema.safeParse(await response.json()).success) {
+        throw new Error(`${path}: response did not match the daemon schema`)
+      }
+    },
+    async halt(runId, mode) {
+      const path = `/api/runs/${encodeURIComponent(runId)}/${mode}`
+      const response = await fetch(`${origin}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: '{}',
+      })
+      // A 409 is a refusal worth naming, because the operator's next move
+      // depends on which: a run that already ended, or one nothing is hosting
+      // — its job died, and it is already as resumable as a pause would make it.
+      if (response.status === 409) {
+        const body = ErrorResponseSchema.safeParse(await response.json().catch(() => null))
+        throw new Error(
+          body.success && body.data.error === 'run_not_live'
+            ? 'Nothing is running this run any more — its job has exited. Resume it with `vinta-ai-maestro run --resume`.'
+            : 'The run is no longer running.',
+        )
+      }
       if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
       if (!OkResponseSchema.safeParse(await response.json()).success) {
         throw new Error(`${path}: response did not match the daemon schema`)
