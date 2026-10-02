@@ -85,6 +85,15 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
             : `chore "${choreId}" declares both \`prompt\` and \`prompt_ref\` — keep one`,
       })
     }
+    // By the time an `after_pr` chore runs, the phase is merged and pushed.
+    // Failing the phase then would mark merged work as failed, and nothing
+    // could undo the merge.
+    if (chore.when === 'after_pr' && chore.on_failure === 'fail') {
+      issues.push({
+        path: ['chores', choreId, 'on_failure'],
+        message: `chore "${choreId}" runs after the PR opens, so it cannot \`on_failure: fail\` — the phase is already merged`,
+      })
+    }
   }
 
   workflow.defaults.chores.forEach((chore, i) => {

@@ -77,6 +77,28 @@ describe('which chores a node runs', () => {
     expect(choresFor(workflow, node(workflow, 'p1'))[0]?.chore.session).toBe('main')
   })
 
+  it('narrows to the chores that run at one point in the phase', () => {
+    const workflow = staffed((doc) => {
+      doc.chores.canvas = { prompt: 'Post a review canvas.', when: 'after_pr' }
+      doc.defaults.chores = ['deslop', 'canvas']
+    })
+    const p1 = node(workflow, 'p1')
+
+    expect(choresFor(workflow, p1, 'before_gate').map((entry) => entry.id)).toEqual(['deslop'])
+    expect(choresFor(workflow, p1, 'after_pr').map((entry) => entry.id)).toEqual(['canvas'])
+    // No timing is every chore, which is what a named `run_chore` reads.
+    expect(choresFor(workflow, p1).map((entry) => entry.id)).toEqual(['deslop', 'canvas'])
+  })
+
+  it('refuses an after_pr chore that would fail an already-merged phase', () => {
+    const doc = JSON.parse(readFileSync(join(HERE, 'fixtures', 'golden-workflow.json'), 'utf8'))
+    doc.chores = { canvas: { prompt: 'Post a canvas.', when: 'after_pr', on_failure: 'fail' } }
+    const result = parseWorkflow(doc)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(formatIssues(result.issues)).toMatch(/cannot `on_failure: fail`/)
+  })
+
   it('drops an undeclared id rather than throwing — the validator refuses those', () => {
     const workflow = staffed((doc) => {
       doc.nodes[0].chores = ['deslop']

@@ -51,6 +51,7 @@ export function Changes({
   nodeId,
   ref,
   cursor,
+  pullRequest,
 }: {
   readonly client: Client
   readonly runId: string
@@ -59,6 +60,8 @@ export function Changes({
   readonly ref: NodeDetail['diff']
   /** The run stream's cursor: a frame means something moved, and the counts are re-read. */
   readonly cursor: number
+  /** The phase's own PR, once `open_pr` ran. Null before then. */
+  readonly pullRequest: NodeDetail['pullRequest']
 }) {
   const [state, setState] = useState<State>({ kind: 'loading' })
   const tick = useNow(REFRESH_MS)
@@ -150,7 +153,34 @@ export function Changes({
       {/* The reference, always: it is what the operator reaches for when the
           card cannot help, and what the older panel was. */}
       <Ref diff={ref} />
+      {pullRequest !== null && <PullRequestLine pullRequest={pullRequest} />}
     </Panel>
+  )
+}
+
+/** The phase PR as a link, or why there is none. */
+function PullRequestLine({
+  pullRequest,
+}: {
+  readonly pullRequest: NonNullable<NodeDetail['pullRequest']>
+}) {
+  return (
+    <p className="m-0 font-mono text-[11px] text-muted-foreground" data-diff-pr>
+      PR{' '}
+      {pullRequest.url === null ? (
+        pullRequest.reason === 'unavailable' ? (
+          'not opened — gh is not installed'
+        ) : (
+          'not opened — gh failed'
+        )
+      ) : (
+        // The page URL carries the daemon token, so the forge must not be
+        // sent it as a referrer.
+        <a href={pullRequest.url} target="_blank" rel="noreferrer noopener">
+          {pullRequest.number === null ? pullRequest.url : `#${pullRequest.number}`}
+        </a>
+      )}
+    </p>
   )
 }
 

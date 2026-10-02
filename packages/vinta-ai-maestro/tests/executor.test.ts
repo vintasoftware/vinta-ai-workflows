@@ -1241,8 +1241,11 @@ describe('the git verbs', () => {
       true,
     )
 
-    // No `gh` on the path this takes: a degraded PR is reported, never thrown.
-    await expect(rig.invoke('p1', 'open_pr', { draft: true })).resolves.toEqual({})
+    // No `gh` on the path this takes: a degraded PR is reported, never thrown,
+    // and stated as a fact so an `after_pr` chore knows there is nothing to do.
+    await expect(rig.invoke('p1', 'open_pr', { draft: true })).resolves.toEqual({
+      facts: { pr: { opened: false } },
+    })
     // And no remote: pushing is a documented no-op rather than a failure.
     await expect(rig.invoke('p1', 'git_push')).resolves.toEqual({})
 

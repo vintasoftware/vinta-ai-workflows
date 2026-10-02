@@ -215,11 +215,11 @@ The editor's design says hosts inject the side-effect catalog and treat guards a
 |---|---|---|
 | `spawn_agent` | `role`, `prompt_template`, `harness?`, `model?` | `role` ∈ implementer, reviewer, fixer, chore, conflict-fixer |
 | `run_gate` | `gate` | Acquires the gate's resources first |
-| `run_chore` | `chore?` | One agent turn per chore the node runs; no `chore` takes the node's own list |
+| `run_chore` | `chore?`, `when?` | One agent turn per chore the node runs; no `chore` takes the node's own list, narrowed to the chores whose `when` matches (`before_gate` by default, or `after_pr`) |
 | `git_branch` | `from` | `from` resolves via the dependency-derived base rule |
 | `git_merge` | `branch`, `strategy` | `--no-ff` for lane merges; never squash |
 | `git_push` | — | |
-| `open_pr` | `base`, `draft` | |
+| `open_pr` | `base`, `draft` | States `pr.opened`, plus `pr.url` / `pr.number` when it opened |
 | `write_tracking` | `scope` | `run` / `phase` / `wave` |
 | `await_human` | `question`, `kind`, `choices`, `context`, `unattended_answer` | Releases gate resources immediately; lane retention per §6 and O3. `unattended_answer` is the plan saying what the question means when nobody is there (§16.5) |
 | `notify` | `channel`, `text` | |
@@ -244,7 +244,7 @@ exhausted ──┬─ continue (grant_fix_rounds) ──▶ fix
 
 The review/fix loop in that diagram is §16's.
 
-`polish` runs the phase's **chores** (§8). It sits between the passing review and the gate on purpose: a chore edits the tree, so anywhere after the gate merges a diff the gates never ran against, and anywhere before the review has the fixer rewriting what the chore just did.
+`polish` runs the phase's **chores** (§8). It sits between the passing review and the gate on purpose: a chore edits the tree, so anywhere after the gate merges a diff the gates never ran against, and anywhere before the review has the fixer rewriting what the chore just did. A chore declared `when: after_pr` is the exception. It runs at the end of `integrate`, after `open_pr`, because it is about the PR rather than the diff. It must not edit the tree, it is skipped when no PR opened, and it cannot be `on_failure: fail`, because the phase is already merged.
 
 ### 5.3 Journal and on-disk layout
 

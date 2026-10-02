@@ -142,6 +142,8 @@ Shells under `plan-execution/shell/` are thin — most content lives in `plan-ex
 
 **When `foundation_skills.prepare-worktree` is `disabled`**, parallel execution is impossible (several agents cannot share one working tree). Render the plan-execution unit sequential-only: strip the Step 0 (e) question and the `{If run_options.parallel_phases = true:}` gate from the implementer prompt, and keep the `parallel-lanes` blocks — the scheduler with `max_parallel_lanes = 1` **is** the sequential path, and the DAG still orders the phases correctly. Only the pool provisioning collapses to the single-worktree branch of `WORKROOT_RESOLUTION`.
 
+**The review-canvas gate stays, whatever the config says.** The PR-context block carries a `{If integrations.pr-review-canvas = enabled in .vinta-ai-workflows.yaml:}` paragraph. Render it verbatim, including the gate. It is a runtime gate that the integrating agent reads, so a team that enables the integration later through [vinta-sync-ai-tools](../vinta-sync-ai-tools/SKILL.md) needs no re-derive. Strip it only when `policies.pr_creation = branches-only`, because then no agent ever runs `open-pr.sh`.
+
 **`ask` → two `integrate-phase` variants, no dual-render.** When `policies.commit_strategy = ask`, render `integrate-phase-template.md` **twice**:
 - `ai-tools/skills/integrate-phase-stacked/SKILL.md` — `<RESOLVED>` = `stacked`, `{{INTEGRATE_PHASE_NAME}}` = `integrate-phase-stacked`.
 - `ai-tools/skills/integrate-phase-modular/SKILL.md` — `<RESOLVED>` = `modular`, `{{INTEGRATE_PHASE_NAME}}` = `integrate-phase-modular`.
@@ -345,6 +347,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 - **Foundation set is a unit.** Always copy `plan-feature` + `create-spec` + `open-pr-from-context` together — they reference each other. `create-qa-use-cases` joins only when `add-e2e-test` is enabled; when it's not, strip `plan-feature`'s e2e regions (the `<!-- e2e:start/end -->` pass) so no cross-link dangles.
 - **The plan-execution unit is generated, not copied.** `implement-plan` + `implement-phase` + `review-phase` + `integrate-phase` + `amend-plan` all have too much project-specific content for verbatim shipping. They are separate files but a **co-shipped unit** — never emit the conductors without the three sub-skills; a conductor whose `[implement-phase]` / `[review-phase]` / integrate link dangles is a broken skill.
 - **Optional skills (`add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `handoff-to-client`) are gated by user answer.** Don't ship them by default. `handoff-to-client` is additionally template-rendered (bucket B) — its config lives under `skills.handoff-to-client.*`.
+- **Integration skills are not yours.** `ai-tools/skills/pr-review-canvas/` (and any other skill an `integrations.*` tool installs) is written and refreshed by that tool's CLI. It carries the tool's own marker. Never copy, render, scrub or delete it here. The tool's `doctor` treats any edit as a stale copy.
 - **Each skill solves one job.** Two unrelated checklists → split.
 - **Reference real files in the target.** Skill links must point to existing paths.
 - **Skills auto-load by description.** Specific triggers, specific outcomes.

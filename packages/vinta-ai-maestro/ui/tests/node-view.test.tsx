@@ -500,6 +500,53 @@ function toneOfGate(container: HTMLElement, gateId: string): string | null | und
   return container.querySelector(`[data-gate="${gateId}"] .chip`)?.getAttribute('data-tone')
 }
 
+test('the changes card links the phase PR without sending the token as a referrer', async () => {
+  const done = node('impl', 'done')
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [done] }) },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({
+        node: done,
+        pullRequest: {
+          opened: true,
+          url: 'https://github.com/acme/app/pull/42',
+          number: 42,
+          reason: null,
+        },
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-diff-pr] a')).not.toBe(null))
+  const link = container.querySelector('[data-diff-pr] a') as HTMLAnchorElement
+  expect(link.getAttribute('href')).toBe('https://github.com/acme/app/pull/42')
+  expect(link.textContent).toBe('#42')
+  expect(link.getAttribute('rel')).toContain('noreferrer')
+})
+
+test('the changes card says why a phase has no PR', async () => {
+  const done = node('impl', 'done')
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [done] }) },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({
+        node: done,
+        pullRequest: { opened: false, url: null, number: null, reason: 'unavailable' },
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-diff-pr]')).not.toBe(null))
+  expect(textOf(container, '[data-diff-pr]')).toContain('gh is not installed')
+  expect(container.querySelector('[data-diff-pr] a')).toBe(null)
+})
+
 test('a node with no transcript, no gates and no question renders', async () => {
   const fresh = { ...node('impl', 'pending'), lane: null, branch: null, baseBranch: null }
   const stub = await startStubDaemon({

@@ -586,6 +586,15 @@
             "type": "string",
             "minLength": 1
           },
+          "when": {
+            "default": "before_gate",
+            "description": "When the chore runs. `before_gate` — the default — runs it between a passing review and the gates, on the diff that is about to merge. `after_pr` runs it once the phase is merged, pushed and its pull request is open, for work about the PR rather than the diff (a review canvas, a PR comment). An `after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be `on_failure: fail`.",
+            "type": "string",
+            "enum": [
+              "before_gate",
+              "after_pr"
+            ]
+          },
           "on_failure": {
             "default": "continue",
             "description": "`continue` — the default — journals a failed chore and moves on to the gates. A chore is polish, and losing an implemented phase to one that timed out is the worse trade. `fail` is for a chore whose output the phase is not correct without.",

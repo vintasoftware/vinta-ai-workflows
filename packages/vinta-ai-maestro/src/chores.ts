@@ -17,7 +17,7 @@
  * A resolver that threw would turn an authoring mistake into a phase that dies
  * mid-run, long after the document could have been fixed.
  */
-import type { Chore, Node, Workflow } from './types.ts'
+import type { Chore, ChoreTiming, Node, Workflow } from './types.ts'
 
 /** The chore ids this node runs, in order, before any of them are resolved. */
 export function choreIdsFor(
@@ -33,13 +33,22 @@ export interface ResolvedChore {
   readonly chore: Chore
 }
 
-/** The chores this node runs, in order, with undeclared ids dropped. */
+/**
+ * The chores this node runs, in order, with undeclared ids dropped.
+ *
+ * `when` narrows the list to one point in the phase. One list per node rather
+ * than one per timing, because which chores a phase runs is the plan's choice
+ * and when each runs is the chore's own: a review-canvas chore runs after the
+ * PR on every phase that names it, without the plan having to say so twice.
+ */
 export function choresFor(
   workflow: Pick<Workflow, 'defaults' | 'chores'>,
   node: Pick<Node, 'chores'>,
+  when?: ChoreTiming,
 ): readonly ResolvedChore[] {
   return choreIdsFor(workflow, node).flatMap((id) => {
     const chore = workflow.chores[id]
-    return chore === undefined ? [] : [{ id, chore }]
+    if (chore === undefined) return []
+    return when === undefined || chore.when === when ? [{ id, chore }] : []
   })
 }

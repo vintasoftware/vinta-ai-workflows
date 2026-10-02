@@ -224,7 +224,7 @@ export function NodeView({
           {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
         </div>
         <div className="panels flex flex-col gap-4">
-          <Changes client={client} runId={runId} nodeId={nodeId} ref={detail.diff} cursor={cursor} />
+          <Changes client={client} runId={runId} nodeId={nodeId} ref={detail.diff} cursor={cursor} pullRequest={detail.pullRequest} />
           <Gates gates={detail.gates} failing={failingGate} />
           <Sessions sessions={detail.sessions} />
         </div>

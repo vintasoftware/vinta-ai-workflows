@@ -23,7 +23,7 @@ This orchestrator runs six sub-skills in order. Each is its own SKILL.md so it c
 2. [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) — synthesize the root `AGENTS.md` from the inventory + a focused interview for what the analysis can't see.
 3. [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) — author `ai-tools/agents/*.yaml`. Always emits the foundation trio (`implementer`, `reviewer`, `fixer`); adds stack-specific specialists when the user supplies a template for a matched stack.
 4. [vinta-derive-skills](../vinta-derive-skills/SKILL.md) — author `ai-tools/skills/*/SKILL.md`. Always copies the project-agnostic foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`) verbatim from its bundled resources. Generates `implement-plan` from a parameterized template using project specifics. Asks the user whether the optional `add-e2e-test` and `add-env-var` skills are needed. Asks for stack-specific templates per matched stack.
-5. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) — copy the canonical `setup-ai-tools.mjs` into `ai-tools/scripts/`, wire the package script alias, run setup, verify all vendor paths resolve.
+5. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) — copy the canonical `setup-ai-tools.mjs` into `ai-tools/scripts/`, wire the package script alias, run setup, verify all vendor paths resolve. Then install the skills of any enabled integration (D.2) through that tool's own CLI.
 6. [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md) — find any pre-existing implementation plans / feature specs scattered across the repo (`docs/`, `specs/`, `plans/`, root markdown, etc.) and propose moving them to the canonical layout `ai-plans/YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md`. Read-only by default; every rename is gated on per-file user approval. Skipped automatically when the analysis finds no candidates.
 
 Each sub-skill returns a short status report. Don't run the next sub-skill until the previous finished cleanly. If a sub-skill fails or surfaces ambiguity, surface that to the user and resolve before continuing.
@@ -144,6 +144,16 @@ Seven skills are part of the foundation set but aren't always needed. Ask explic
 
 If the user answers "No" to any of the seven, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above. `add-one-off-script` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/add-one-off-script/](../vinta-derive-skills/resources/foundation-skills/add-one-off-script/) — its body is project-agnostic; the per-project variability lives in the `skills.add-one-off-script.*` config block above and in env vars consumed at runtime. `prepare-worktree` is also copied verbatim from [vinta-derive-skills/resources/foundation-skills/prepare-worktree/](../vinta-derive-skills/resources/foundation-skills/prepare-worktree/) — same pattern: project-agnostic body, per-project defaults under `skills.prepare-worktree.*`. `thermo-nuclear-code-quality-review` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/](../vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/) with no follow-up config — its body is fully project-agnostic. `handoff-to-client` is always template-rendered from [vinta-derive-skills/resources/handoff-to-client-template.md](../vinta-derive-skills/resources/handoff-to-client-template.md) — no per-project drafting interview, just the client-handoff config follow-up above.
 
+### D.2 Integrations (external tools)
+
+Integrations are external tools that ship their own skill. They are not foundation skills: this package bundles none of their content. When one is enabled, the tool's own CLI installs its skill, and this flow only wires that skill in. Ask once per integration:
+
+1. **`pr-review-canvas`** ([PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas), CLI `pr-review`). Should agents generate a review canvas for every PR they open? A canvas is the PR's diff grouped by topic, with attention points for the reviewer. It is shared as a PR comment and read in a local review app (`pr-review serve`). Ask **only when** `project.code_host` is `github` or `gitlab` **and** the `pr_creation` policy (C.4) is `agents-create`. Otherwise set `disabled` without asking: the tool supports only those two hosts, and with `branches-only` no agent opens a PR to attach a canvas to. `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for teams that review agent-written PRs, where a large multi-phase diff is the normal case. Default to `Yes` when [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) already found the tool in use: a `pr-review-canvas` skill classified `integration`, or a `pr-review.config.yml`.
+
+   Mention the requirements in the question: Node.js 22+, a logged-in `gh` or `glab`, and Claude Code or Codex as the agent. Do **not** install the CLI. Like `open-pr.sh`'s `yq` / `jq` / `gh`, it is a machine-level dependency the user installs. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) checks for it and prints `npm install -g @vintasoftware/pr-review-canvas` when it is missing.
+
+   No follow-up config. The tool's own settings (sharing on/off, high-risk paths, prompt overrides) live in its `pr-review.config.yml` at the repo root, and the tool owns that file.
+
 ### E. Existing AI artifacts (per-artifact disposition)
 
 [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md#11-existing-ai-tooling-artifacts)'s **Existing AI-tooling artifacts** scan produces an inventory of **every** AI-tooling artifact already in the repo: instruction docs (AGENTS.md / CLAUDE.md / .cursorrules / .github/copilot-instructions.md / ...), skills under `.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, `.github/skills/`, `.agents/skills/`, `ai-tools/skills/`, and sub-agent files under `.claude/agents/`, `.cursor/agents/`, `.codex/agents/`, `.github/agents/`, `ai-tools/agents/`.
@@ -161,6 +171,8 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Migrate to ai-tools/skills/<name>/` — move into the canonical layout; `setup-ai-tools.mjs` will re-link to the chosen vendors. Vendor-prefixed dir (`vinta-*`) is left alone — installed by the `vinta-ai-workflows` CLI.
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
+
+  **Integration-owned skills** (name matches an integration under D.2 — today `pr-review-canvas`) get no question. Leave them where they are. Their tool owns them through its own marker file (`.pr-review-install`), and its `doctor` / `upgrade` commands manage them. When the integration is `enabled` and the existing copy sits in a real `.claude/skills/` or `.agents/skills/` directory rather than in `ai-tools/skills/`, tell the user once. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) installs a fresh copy into `ai-tools/skills/`, so the old copy becomes redundant once the vendor directory is a symlink.
 
   Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `deslop-comments`, `handoff`, `handoff-to-client`, `write-unit-test`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
 
@@ -220,7 +232,7 @@ Captured interview state lands in **one** YAML file at the repo root: `.vinta-ai
 
 This file is the **only** source of truth for project-wide settings. Every downstream sub-skill (4 → 6 below) reads from it instead of receiving values via in-conversation state. Every meta-skill ([vinta-sync-ai-tools](../vinta-sync-ai-tools/SKILL.md), [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)) reads + rewrites it.
 
-Write the file now (before any sub-skill runs). Populate from the interview groups **Scope**, **Stack detection**, **Project conventions**, **Optional foundation skills**, and **Existing AI artifacts**:
+Write the file now (before any sub-skill runs). Populate from the interview groups **Scope**, **Stack detection**, **Project conventions**, **Optional foundation skills**, **Integrations**, and **Existing AI artifacts**:
 
 ```yaml
 # yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
@@ -290,6 +302,9 @@ foundation_agents:
   implementer: enabled
   reviewer: enabled
   fixer: enabled
+
+integrations:
+  pr-review-canvas: <Integrations → pr-review-canvas answer → enabled | disabled; disabled without asking when code_host ∉ {github, gitlab} or pr_creation = branches-only>
 
 # Only emit the roles the user chose in the "Agent model tiers" question (C.10).
 # Omit the whole block on "Leave unset"; omit any individual role left unset.
@@ -434,6 +449,7 @@ ai-tools/
 │   │       └── one_off_script_base.ts
 │   ├── prepare-worktree/SKILL.md       ← optional — only if user opts in (verbatim copy; project-agnostic body, defaults under skills.prepare-worktree.*)
 │   ├── thermo-nuclear-code-quality-review/SKILL.md ← optional — only if user opts in (verbatim copy; deep structural-maintainability audit, escalation target for review-phase Layer 3)
+│   ├── pr-review-canvas/                ← integration — only when integrations.pr-review-canvas = enabled and `pr-review` is installed. Written by `pr-review install-skill`, never by this flow; owned through its `.pr-review-install` marker, refreshed by `pr-review upgrade`
 │   ├── run-one-off-script-django/       ← optional sister skill — only when stack matches + user supplies template (authors Jupyter notebook / mgmt command runner + JupyterRuntime / DjangoMgmtRuntime adapter in the per-script folder)
 │   ├── run-one-off-script-medplum/      ← optional sister skill — only when stack matches + user supplies template (authors Medplum bot + MedplumBotRuntime adapter in the per-script folder)
 │   └── <stack-specific skills>/SKILL.md ← only if user supplied templates

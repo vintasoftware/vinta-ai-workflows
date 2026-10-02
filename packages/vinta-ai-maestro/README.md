@@ -200,6 +200,33 @@ than re-driving a finished phase to fit the turn in.
 Each turn lands in the phase transcript attributed to `chore` and its id, beside
 a `chore_result` event saying whether it ran, failed or was skipped.
 
+### Chores about the PR — `when: "after_pr"`
+
+Some work is about the pull request rather than the diff: posting a review
+canvas, or leaving a summary comment. Give such a chore `"when": "after_pr"` and
+`standard-phase` runs it in `integrate`, after `open_pr`. The turn is told the
+PR's URL and number, and is told not to edit the tree: by then the phase is
+merged and pushed. If no PR opened (no `gh`, or `gh` failed), the chore is
+skipped. It cannot be `on_failure: "fail"`, because the merge cannot be undone.
+
+The [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
+integration is the motivating case. Once `pr-review install-skill` has run in
+the project, this chore posts a topic-grouped review canvas on every phase PR:
+
+```jsonc
+"defaults": { "chores": ["deslop", "review-canvas"] },
+"chores": {
+  "review-canvas": {
+    "skill": "pr-review-canvas",
+    "when": "after_pr",
+    "prompt": "Run `/pr-review-canvas` with this phase's PR number. Report the review URL and the comment link."
+  }
+}
+```
+
+The node view links the phase's PR on its **Changes** card, or says why none
+opened.
+
 ## The review loop
 
 `standard-phase` reviews and fixes a phase the way Vinta's thermo-nuclear review

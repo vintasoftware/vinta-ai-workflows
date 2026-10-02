@@ -608,7 +608,8 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `resources.<pool>` | One `{"kind": "semaphore"}` pool per expensive shared thing a gate contends for — the test database, the e2e browser grid, a staging deploy slot. `capacity: 1` when only one can run at a time. |
 | `gates.<id>` | The checks a phase must pass, as **shell commands run in the phase's lane** — the project's real typecheck / test / lint invocations, not an agent and not prose. Give the slow ones `requires` naming the pool they contend for, and a `timeout_s` that is generous rather than tight. |
 | `chores.<id>` | Agent turns a phase runs beside its gates, for work that changes the diff rather than judging it. **Always emit the `deslop` chore below** — it is the comment-hygiene pass, and without it a maestro run has none. Add another only when the plan genuinely needs one (a changelog entry, a translation extraction); a chore is a model turn per phase, so each one has to earn it. |
-| `defaults.chores` | `["deslop"]`. The chores every phase runs unless it names its own. |
+| `chores.review-canvas` | **Emit only when `.vinta-ai-workflows.yaml` has `integrations.pr-review-canvas: enabled`.** An `after_pr` chore: maestro runs it once each phase's PR is open, and it posts a review canvas on that PR. Emit it exactly as shown under "The review-canvas chore" below. Never emit it when the integration is `disabled` or absent. The skill it names is installed only when the integration is enabled. |
+| `defaults.chores` | `["deslop"]`, plus `"review-canvas"` when that chore is emitted. The chores every phase runs unless it names its own. |
 | `nodes[].chores` | **Omit** on almost every phase — absent means the run-wide default. Name a list only to give one phase a different set, and `[]` to opt one out. A list *replaces* the default rather than adding to it. |
 | `nodes[]` | One per phase, in plan order. |
 | `nodes[].id` | `p` + the phase number, lowercased: `Phase 1` → `p1`, `Phase 4a` → `p4a`, `Phase 1b` → `p1b`. |
@@ -700,6 +701,21 @@ The remaining values — `migrate_cmd`, the database names, the server URL, the 
 **Omit `pipelines` entirely.** Naming `standard-phase` in `defaults.pipeline` is enough: the executor ships that pipeline and supplies it. Do not paste a copy into the plan — a pasted pipeline is a copy that cannot be fixed centrally, so an executor-side correction would never reach a plan already written, and a hand-edited one is how a plan silently stops running its reviewer.
 
 Author a `pipelines` block only when a project genuinely needs a *different* lifecycle. That is an executor-configuration decision made once per project, not a per-plan choice, and a declared id shadows the shipped pipeline of the same name.
+
+### The review-canvas chore
+
+Emit this chore only when `.vinta-ai-workflows.yaml` has `integrations.pr-review-canvas: enabled`. Then add `"review-canvas"` to `defaults.chores` after `"deslop"`:
+
+```json
+"review-canvas": {
+  "skill": "pr-review-canvas",
+  "when": "after_pr",
+  "prompt": "Generate the review canvas for this phase's pull request: run `/pr-review-canvas` with the PR number named above. Report the local review URL and the PR comment link it returns. Do not change any file in the repository.",
+  "description": "A topic-grouped review canvas on each phase PR, for the human reviewer."
+}
+```
+
+`"when": "after_pr"` is what makes this work. Maestro runs the chore at the end of `integrate`, once the PR is open, and tells the agent the PR's URL and number. When no PR opened, it skips the chore. Do not give it `on_failure: "fail"`; maestro refuses that for an `after_pr` chore, because the phase is already merged. The integration never changes how the plan's phases are written, so the worked example below leaves this chore out.
 
 ### Worked example
 
@@ -1060,4 +1076,5 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] No credential anywhere in the workflow file: `connection_url_var` is a variable name, and `server_url` is a host and port.
 - [ ] Model ids come from [resources/ai-models.yaml](resources/ai-models.yaml) and appear **only** in the `crew` block — no node carries a `model`, and `crew` transcribes the Crew table row for row.
 - [ ] `chores` declares `deslop` and `defaults.chores` names it, so every phase's diff gets the comment pass before it is gated. No node carries its own `chores` unless that phase genuinely needs a different set.
+- [ ] `chores.review-canvas` (with `"when": "after_pr"`) is declared and in `defaults.chores` **if and only if** `.vinta-ai-workflows.yaml` has `integrations.pr-review-canvas: enabled`.
 - [ ] `pipelines` is omitted — `defaults.pipeline: standard-phase` is enough, and the executor supplies it.

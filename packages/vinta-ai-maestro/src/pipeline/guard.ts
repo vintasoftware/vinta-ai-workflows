@@ -40,12 +40,22 @@ export interface GuardContext {
   readonly human?: Readonly<Record<string, ContextValue>>
   readonly node?: Readonly<Record<string, ContextValue>>
   readonly run?: Readonly<Record<string, ContextValue>>
+  /** What `open_pr` reported: `opened`, and `url` / `number` when it did. */
+  readonly pr?: Readonly<Record<string, ContextValue>>
   /** Host-maintained fix counter. The interpreter reads it and never writes it. */
   readonly fix_rounds?: number
 }
 
 /** The only identifiers a path may start with. Anything else is a parse error. */
-export const GUARD_CONTEXT_ROOTS = ['review', 'gate', 'human', 'node', 'run', 'fix_rounds'] as const
+export const GUARD_CONTEXT_ROOTS = [
+  'review',
+  'gate',
+  'human',
+  'node',
+  'run',
+  'pr',
+  'fix_rounds',
+] as const
 
 const ROOTS: ReadonlySet<string> = new Set(GUARD_CONTEXT_ROOTS)
 

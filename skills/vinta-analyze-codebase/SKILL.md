@@ -164,6 +164,7 @@ For each skill, also classify:
 
 - `vinta-managed` — directory name starts with `vinta-` (installed by `vinta-ai-workflows`; can be left alone or refreshed via that CLI).
 - `foundation-shape` — name matches the Vinta foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `write-unit-test`). `implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`.
+- `integration` — installed by an external tool that the bootstrap's **Integrations** group knows about. The directory carries that tool's marker, such as `pr-review-canvas/` with a `.pr-review-install` file (installed by `pr-review install-skill`). The tool owns it. Record it, and also record `pr-review.config.yml` at the repo root when present, so the bootstrap can default the integration question to `Yes`.
 - `project-custom` — anything else; written by the team.
 
 **Sub-agents** — list every agent file with its name + description:

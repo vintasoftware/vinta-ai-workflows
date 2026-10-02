@@ -59,5 +59,7 @@ Two project-level signals decide the actual behavior:
 
    When policy = "branches only": **don't run the script.** File stays `status: pending`.
 
+   {If integrations.pr-review-canvas = enabled in `.vinta-ai-workflows.yaml`:} **Review canvas.** After exit `0` or `1`, the PR is up. Generate its review canvas with the `pr-review-canvas` skill ([pr-review-canvas](../pr-review-canvas/SKILL.md)). Pass the PR number from the end of `pr_url` (`…/pull/<n>` or `…/merge_requests/<n>`), as in `/pr-review-canvas <n>`. Run it again each time this step re-runs `open-pr.sh` on the same PR, for example after each phase under one plan-level PR. The tool updates the canvas incrementally. The skill posts the canvas as a PR comment unless the project's `pr-review.config.yml` turns sharing off. Add its local review URL and the comment link to the user update. A canvas that fails never fails the phase. Report the skill's error, and point at `pr-review doctor` when the error suggests setup. When the `pr-review-canvas` skill is not installed, say so once, point at `vinta-install-ai-tools-setup`, and skip.
+
 8. **Skill wrapper** — [open-pr-from-context](../open-pr-from-context/SKILL.md) is available for ad-hoc invocation (after the run, on a different machine, etc.). The orchestrator can call the script directly here; the skill is for humans.
 <!-- block-end: PR_CONTEXT -->

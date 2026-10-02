@@ -30,6 +30,50 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **PR Review Canvas integration (`integrations.pr-review-canvas`).** The
+  bootstrap now offers [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
+  as its first *integration*: an external tool that installs its own skill.
+  Nothing from it is bundled here. A new optional top-level `integrations`
+  object in `vinta-ai-workflows-config.v1.schema.json` records the opt-in
+  (`enabled` / `disabled`). It is additive, so no schema major bump. The
+  question is interview group D.2. It is asked only when `code_host` is
+  GitHub or GitLab and `pr_creation` is `agents-create`.
+  When it is enabled:
+  - `vinta-install-ai-tools-setup` step 7b runs
+    `pr-review install-skill --claude-dir ai-tools/skills --codex-dir ai-tools/skills`.
+    It writes one tool-owned copy that every vendor symlink reaches, then
+    runs `pr-review doctor`. The CLI is never auto-installed; the step prints
+    `npm install -g @vintasoftware/pr-review-canvas` instead.
+  - The `integrate-phase` PR step runs `/pr-review-canvas <n>` after
+    `open-pr.sh` publishes. This is a runtime gate in `partials/pr-context.md`,
+    so enabling the integration later needs no re-derive.
+  - `plan-feature` adds an `after_pr` `review-canvas` chore to the maestro
+    workflow it writes.
+
+  `vinta-analyze-codebase`, `vinta-derive-skills` and
+  `vinta-update-project-skills` treat an integration-owned skill (marker
+  `.pr-review-install`) as the tool's and never diff or edit it. Refresh it
+  with `pr-review upgrade`. `vinta-sync-ai-tools` offers the integration to
+  existing projects as an `opt-in-offer`.
+- **Maestro: chores that run after the PR opens (`when: "after_pr"`).** A
+  chore can now declare `when`. The default, `before_gate`, keeps today's
+  `polish` timing. `after_pr` runs the chore at the end of `standard-phase`'s
+  `integrate` state, after `open_pr`, for work about the PR rather than the
+  diff, such as a review canvas. `open_pr` now states `pr.opened` / `pr.url` /
+  `pr.number` as facts, so a guard can read them, and the `pr` root joins the
+  guard context. An `after_pr` chore's prompt names the PR and forbids
+  editing, committing or pushing. It is skipped when no PR opened. The
+  validator refuses `after_pr` with `on_failure: "fail"`, because the phase is
+  already merged. `run_chore` takes a `when` param. Custom pipelines that
+  call it without one keep running the `before_gate` chores.
+  `schemas/workflow.v1.schema.json` is regenerated, and the change is
+  additive.
+- **Maestro: the node view links the phase's PR.** `GET
+  /api/runs/:runId/nodes/:nodeId` now carries `pullRequest` (`opened`, `url`,
+  `number`, `reason`), read from the latest `node_pr` event. The **Changes**
+  card shows `#<n>` as a link, or says why no PR opened (`gh` missing or
+  failed). Only an `https://` URL becomes a link. The link carries
+  `rel="noreferrer noopener"` because the page URL holds the daemon token.
 - **The node view shows what a phase changed, and the whole diff on request.**
   The *Diff* panel used to print `git diff base...branch` for the operator to
   paste into a terminal. It is now a *Changes* card: how many files changed
