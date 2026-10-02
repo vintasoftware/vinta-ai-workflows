@@ -579,7 +579,7 @@ A lane is still a worktree of your repository, so committed settings travel into
 }
 ```
 
-`http` POSTs `{ kind, question, labels, input }` and reads `{ scores }` or `{ yes }` back, with the key from the environment variable you name (removed from the daemon's environment once read, so agents never see it). `command` runs a local program with the same JSON on stdin and stdout — the choice when repository content must not leave the machine, because a hosted classifier receives diffs, gate logs and shell commands.
+`http` POSTs `{ kind, question, labels, input }` and reads `{ scores }` or `{ yes }` back, with the key from the environment variable you name (removed from the daemon's environment once read, so agents never see it). Before a run starts, the preflight asks the classifier one synthetic question, so a missing or rejected key, or an unreachable URL, stops the run at minute zero instead of at the first gate. Set `"probe": false` to skip it. `doctor` also warns about an `http` adapter with no `api_key_env`, since that sends no `Authorization` header. `command` runs a local program with the same JSON on stdin and stdout — the choice when repository content must not leave the machine, because a hosted classifier receives diffs, gate logs and shell commands.
 
 A plan can then declare **judge gates** next to its command gates:
 

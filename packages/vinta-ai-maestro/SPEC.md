@@ -900,6 +900,10 @@ This amends §2's no-API-keys constraint. That constraint still holds for every 
 
 The file lives on the operator's machine for the reason `permissions.ts` gives. A committed document may say which model writes a phase. It may not say where a stranger's machine sends its diffs, or what an agent may do on it. A block that is present enables its judge; an absent one disables it.
 
+**The preflight asks once.** `doctor`, and the preflight before every run, ask the classifier one synthetic question (`PROBE_QUESTION`, whose input is a fixed string and carries no project data). The offline check can see a key that is missing from the environment. It cannot see a key the endpoint rejects, or a URL nobody answers on, and those otherwise surface only as every judgement of the run coming back unanswered. An unanswered probe fails the preflight, naming the status (`HTTP 401`), never a response body. `"probe": false` at the top level of the config keeps the preflight offline.
+
+An `http` adapter with no `api_key_env` is valid, because an internal classifier may need no key. It is also the usual cause of an endpoint that answers every question with a 401, so `doctor` warns about it (`system-one-config`) and does not refuse.
+
 **Data handling (§11).** A configured classifier receives repository content: diffs, the end of gate logs, and shell commands. On an engagement where that must not leave the machine, the `command` adapter pointed at a local model is the supported answer. Whether a hosted classifier is acceptable is a compliance decision for the project lead, not something this package can settle.
 
 ### 17.4 Judge gates

@@ -65,7 +65,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     JSON on stdin and stdout). Out-of-tree adapters register through
     `registerSystemOneAdapter`. The file also turns on the built-in judges.
     This is the only API key the package uses; LLM harnesses still run on your
-    logged-in CLIs.
+    logged-in CLIs. Before a run starts, the preflight asks the classifier one
+    synthetic question, so a missing or rejected key, or an unreachable URL,
+    fails at minute zero rather than at the first gate. `"probe": false`
+    skips it. `doctor` warns about an `http` adapter with no `api_key_env`.
   - **Judge gates.** A workflow gate can be
     `{ "judge": { "question" | "question_ref", "labels", "fail_on",
     "threshold", "on_unavailable" } }` instead of `{ "cmd": … }`. It asks the
