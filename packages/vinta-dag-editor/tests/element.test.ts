@@ -101,11 +101,25 @@ describe('edge labels', () => {
   it('keeps the whole artifact reachable on a label the gap is too narrow for', () => {
     const element = mount(SKIPPING)
     const label = control(element, 'select-edge', 'a-d')
-    // The CSS truncates; the name itself is still on the element, and still in
-    // the sentence a screen reader is given.
+    // The CSS truncates; the name itself is still on the element, in the
+    // sentence a screen reader is given, in the tooltip, and — once the edge is
+    // picked — printed in full in the details strip under the canvas.
     expect(label.textContent).toBe('the BookmarkFolder model and its migration')
-    expect(label.title).toBe('the BookmarkFolder model and its migration')
+    expect(label.dataset.tooltip).toBe('the BookmarkFolder model and its migration')
     expect(label.getAttribute('aria-label')).toContain('the BookmarkFolder model and its migration')
+    label.click()
+    expect(shadow(element).querySelector('.details')?.textContent).toBe(
+      'E2E depends on Schema for the BookmarkFolder model and its migration',
+    )
+  })
+
+  it('prints a selected node in full in read mode, where there is no inspector', () => {
+    const element = mount(SAMPLE)
+    control(element, 'select-node', 'b').click()
+    const details = shadow(element).querySelector('.details')
+    expect(details?.querySelector('.inspector-title')?.textContent).toBe('API')
+    expect(details?.textContent).toContain('Running')
+    expect(shadow(element).querySelector('.inspector input')).toBeNull()
   })
 })
 
@@ -306,7 +320,8 @@ describe('immutability', () => {
       control(element, 'zoom-in').click()
       control(element, 'zoom-out').click()
       pan(element)
-      element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true }))
+      element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true, ctrlKey: true }))
+      element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
     }).not.toThrow()
 
     expect(frozen).toEqual(snapshot)
@@ -319,7 +334,13 @@ describe('pan and zoom', () => {
     pan(element)
     const scene = shadow(element).querySelector('.scene')
     expect(scene instanceof HTMLElement && scene.style.transform).toContain('translate(30px, 12px)')
-    element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true }))
+    // A bare wheel is the page's to scroll; zoom wants ⌘ or Ctrl (a trackpad
+    // pinch arrives the same way).
+    const plain = new WheelEvent('wheel', { deltaY: -100, bubbles: true, cancelable: true })
+    element.dispatchEvent(plain)
+    expect(element.viewport.scale).toBe(1)
+    expect(plain.defaultPrevented).toBe(false)
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true, ctrlKey: true }))
     expect(element.viewport.scale).toBeGreaterThan(1)
     element.viewport = { x: 0, y: 0, scale: 1 }
     expect(scene instanceof HTMLElement && scene.style.transform).toContain('scale(1)')

@@ -44,7 +44,24 @@ vinta-dag {
   --vdag-status-done: var(--tone-ok);
   --vdag-status-failed: var(--tone-error);
   --vdag-status-blocked: var(--tone-idle-foreground);
+  --vdag-danger: var(--destructive);
+  --vdag-shadow: var(--shadow-xs);
   font-family: var(--font-sans);
+}
+
+/*
+ * The canvas's own inspector offers a node's name, status and wave. In the
+ * workflow editor none of the three is its to edit: the name has a field in
+ * the panel beside the graph, status is run state and is not in the document,
+ * and wave is computed from the dependencies — an edit to either was folded
+ * back into the workflow and silently lost. Hidden here through the parts the
+ * component exposes, the inspector is left with what only it can do: a
+ * dependency's artifact, and the two delete actions.
+ */
+.editor vinta-dag::part(field-name),
+.editor vinta-dag::part(field-status),
+.editor vinta-dag::part(field-wave) {
+  display: none;
 }
 
 /*
@@ -74,8 +91,13 @@ state-machine-editor {
      node. The canvas rendered nothing at all, in the run view and the editor
      alike, while every UI test passed: jsdom has no layout engine, so a
      collapsed flex child measures the same as a correct one there. Give the
-     host a height and let it lay itself out. */
-  height: 380px;
+     host a height and let it lay itself out.
+
+     A plan is wider than it is tall and the canvas frames the whole graph on
+     first render, so the width of this box, not its height, decides how big a
+     node is drawn. The height follows the window so a tall screen is not left
+     with a strip of graph over a field of nothing. */
+  height: clamp(340px, 46vh, 560px);
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);

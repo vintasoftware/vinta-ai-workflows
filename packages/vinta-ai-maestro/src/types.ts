@@ -25,6 +25,8 @@ export const EFFECT_IDS = [
   'write_tracking',
   'await_human',
   'notify',
+  'record_decision',
+  'grant_fix_rounds',
 ] as const
 
 export const AGENT_ROLES = ['implementer', 'reviewer', 'fixer', 'chore', 'conflict-fixer'] as const
@@ -359,13 +361,14 @@ export const NodeSchema = z.strictObject({
     .number()
     .int()
     .min(0)
-    .default(2)
+    .default(4)
     .describe(
-      'Rounds the fixer gets to clear a review’s findings before the phase fails. Two is a ' +
-        'budget, not a target, and it is measured in *rounds* rather than findings — a first ' +
-        'review raising four legitimate blockers can exhaust it while every round is making ' +
-        'progress. Raise it on a phase you expect to be argued over; it is the knob that ' +
-        'decides how much a phase gets to be wrong before it is handed to `--on-failure`.',
+      'Fix rounds a phase may spend before the operator is asked whether to keep going (§16). ' +
+        'A round is a fixer turn — one answer to a review that returned blockers or a gate ' +
+        'that went red. It is measured in *rounds* rather than findings, so a first review ' +
+        'raising four legitimate blockers spends one. When it runs out the shipped pipeline ' +
+        'asks rather than fails: `continue` grants the same budget again, `stop` fails the ' +
+        'phase and hands it to `--on-failure`.',
     ),
 })
 
@@ -635,6 +638,16 @@ export const DefaultsSchema = z.strictObject({
       'The chores every phase runs unless it names its own. Most chores are run-wide — a ' +
         'comment pass, a changelog entry — and repeating them on every node is how one phase ' +
         'ends up quietly missing one.',
+    ),
+  reviewer_model: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The model review turns run on when no reviewer is staffed on the roster (§16.4). A ' +
+        'review is the step standing between a plan and its merge, so it is not tied to the ' +
+        'tier the phase was written at. Absent takes the harness’s own top tier where it names ' +
+        'one, and the node’s model where it does not.',
     ),
   max_session_turns: z
     .number()

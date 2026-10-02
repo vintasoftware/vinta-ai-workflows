@@ -76,7 +76,7 @@ export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
   },
   await_human: {
     id: 'await_human',
-    params: ['question', 'kind', 'choices', 'context', 'reason'],
+    params: ['question', 'kind', 'choices', 'context', 'reason', 'unattended_answer'],
     description:
       'Asks the operator a question and suspends the run. The only verb with control-flow ' +
       'meaning to the interpreter; the answer re-enters the guard context as `human.answer`. ' +
@@ -85,12 +85,32 @@ export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
       '`context` names what the node view renders beside it — `diffRef`, `gateLogRef`, ' +
       '`transcriptCursor`. `reason` is the older one-line form and still reads as the ' +
       'question when no `question` is given. The host journals the whole shape with the ' +
-      'pause, which is what makes the question outlive a daemon restart.',
+      'pause, which is what makes the question outlive a daemon restart. `unattended_answer` ' +
+      'is the plan saying what this question means when nobody is there: under `--retry-after` ' +
+      'the host answers it with that value once the window passes, journalled as unattended. ' +
+      'Absent — the default — waits for a person however long that takes.',
   },
   notify: {
     id: 'notify',
     params: ['channel', 'text'],
     description: 'Sends a browser or OS notification.',
+  },
+  record_decision: {
+    id: 'record_decision',
+    params: [],
+    description:
+      'Records the answer to the question the run just resumed from as a settled decision in ' +
+      'the node’s review ledger (§16.3), against the scope questions the fixer last raised. ' +
+      'Every later review and fix prompt carries it, so neither agent re-asks what a person ' +
+      'already decided.',
+  },
+  grant_fix_rounds: {
+    id: 'grant_fix_rounds',
+    params: [],
+    description:
+      'Gives the node its `max_fix_rounds` budget again (§16.5). The scheduler owns the ' +
+      'counter, so this is the only way a pipeline can move it; the shipped one does so when ' +
+      'the operator answers `continue` to the exhausted-budget question.',
   },
 }
 

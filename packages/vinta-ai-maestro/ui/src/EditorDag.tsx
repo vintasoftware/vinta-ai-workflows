@@ -14,18 +14,25 @@
  * - **A drawn dependency seeds an empty artifact.** The component's default
  *   seed is the word `artifact`, which would pass the schema's `min(1)` and
  *   bless an unexplained dependency. See `NEW_EDGE_ARTIFACT`.
+ * - **A refused dependency is reported, not swallowed.** The canvas will not
+ *   draw a self-loop, a duplicate or a cycle; it says which, and the editor
+ *   turns that into a sentence where the gesture happened.
  */
 import type * as React from 'react'
 import { useLayoutEffect, useRef } from 'react'
 import {
   DAG_CHANGE_EVENT,
+  DAG_REFUSE_EVENT,
   DAG_SELECTION_CHANGE_EVENT,
   defineDagEditor,
   type Dag,
   type DagChangeDetail,
+  type DagRefuseDetail,
   type DagSelectionChangeDetail,
+  type EdgeRefusal,
   type VintaDagElement,
 } from 'vinta-dag-editor/src/index.ts'
+import { pushSelection } from './Dag.tsx'
 import { NEW_EDGE_ARTIFACT } from './editor-model.ts'
 
 defineDagEditor()
@@ -35,6 +42,8 @@ export interface EditorDagProps {
   readonly selected: string | null
   readonly onChange: (dag: Dag) => void
   readonly onSelect: (nodeId: string | null) => void
+  /** A dependency the canvas would not draw, and the rule it broke. */
+  readonly onRefuse: (reason: EdgeRefusal) => void
 }
 
 export function EditorDag({
@@ -42,6 +51,7 @@ export function EditorDag({
   selected,
   onChange,
   onSelect,
+  onRefuse,
 }: EditorDagProps): React.ReactElement {
   const host = useRef<VintaDagElement | null>(null)
 
@@ -62,21 +72,27 @@ export function EditorDag({
       const detail = (event as CustomEvent<DagSelectionChangeDetail>).detail
       onSelect(detail.selection?.kind === 'node' ? detail.selection.id : null)
     }
+    const refused = (event: Event): void => {
+      onRefuse((event as CustomEvent<DagRefuseDetail>).detail.reason)
+    }
     element.addEventListener(DAG_CHANGE_EVENT, changed)
     element.addEventListener(DAG_SELECTION_CHANGE_EVENT, selection)
+    element.addEventListener(DAG_REFUSE_EVENT, refused)
     return () => {
       element.removeEventListener(DAG_CHANGE_EVENT, changed)
       element.removeEventListener(DAG_SELECTION_CHANGE_EVENT, selection)
+      element.removeEventListener(DAG_REFUSE_EVENT, refused)
     }
-  }, [onChange, onSelect])
+  }, [onChange, onSelect, onRefuse])
 
   useLayoutEffect(() => {
     if (host.current !== null) host.current.value = dag
   }, [dag])
 
   useLayoutEffect(() => {
-    if (host.current === null) return
-    host.current.selection = selected === null ? null : { kind: 'node', id: selected }
+    const element = host.current
+    if (element === null) return
+    pushSelection(element, selected)
   }, [selected])
 
   return <vinta-dag ref={host} className="dag" />

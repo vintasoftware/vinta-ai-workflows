@@ -16,8 +16,8 @@
  *   quite true, and the exact gaps are named in `toMachine`/`fromMachine`
  *   rather than discovered later as data loss.
  */
-import type { Dag, DagEdge, DagNode } from 'vinta-dag-editor/src/index.ts'
-import { addEdge } from 'vinta-dag-editor/src/index.ts'
+import type { Dag, DagEdge, DagNode, EdgeRefusal } from 'vinta-dag-editor/src/index.ts'
+import { addEdge, edgeRefusal } from 'vinta-dag-editor/src/index.ts'
 import type {
   JsonObject,
   SideEffect as MachineEffect,
@@ -146,25 +146,14 @@ export function patchDependency(
   }
 }
 
-export type EdgeRefusal = 'self' | 'duplicate' | 'cycle'
+/** The component's own rule names, re-exported so the editor has one source for them. */
+export { edgeRefusal, type EdgeRefusal }
 
 /**
- * Why `addEdge` said no.
- *
- * The component refuses a self-loop, a duplicate and a cycle by returning
- * `null` and emitting nothing — correct for a canvas, useless for a person, who
- * is left with a gesture that did nothing. The refusal is re-derived here from
- * the same function, so the editor can say which rule was hit without a second
- * opinion about what a legal edge is.
+ * `addEdge`'s result folded straight into the workflow, or the refusal — the
+ * component's own `edgeRefusal`, so the reason the form gives and the reason
+ * the canvas reports for the same dependency can never be two different ones.
  */
-export function edgeRefusal(dag: Dag, from: string, to: string): EdgeRefusal | null {
-  if (addEdge(dag, from, to, NEW_EDGE_ARTIFACT) !== null) return null
-  if (from === to) return 'self'
-  if (dag.edges.some((edge) => edge.from === from && edge.to === to)) return 'duplicate'
-  return 'cycle'
-}
-
-/** `addEdge`'s result folded straight into the workflow, or the refusal. */
 export function addDependency(
   workflow: Workflow,
   from: string,

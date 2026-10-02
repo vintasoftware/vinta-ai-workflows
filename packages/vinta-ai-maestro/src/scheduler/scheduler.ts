@@ -72,13 +72,14 @@
  * Identifiers only in every journalled field and every error message. Agent
  * output goes to the transcript file, which is where §5.3 puts it.
  */
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl } from '../admission/admission.ts'
 import { systemClock, type Clock } from '../admission/clock.ts'
 import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
 import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
-import { gitLines } from '../integration/git.ts'
+import { git, gitLines } from '../integration/git.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
   ChoreStatus,
@@ -128,6 +129,8 @@ const LANE = 'lane'
 /** The answers `#offerRetry` understands. `retry with ` carries a member id. */
 const RETRY = 'retry'
 const STOP = 'stop'
+/** The answer to `#reviewerEdited` that carries on with the reviewer's edits in place. */
+const KEEP = 'keep'
 const RETRY_WITH = 'retry with '
 
 /**
@@ -218,12 +221,14 @@ export interface SchedulerOptions {
    * it again?" while nobody was at the keyboard. The answer, when it came, was
    * `retry`, and it worked. Nothing about that wait bought anything.
    *
-   * **It applies to the failure question and to nothing else.** A plan-authored
-   * `await_human` gate is a question the plan wanted a person to answer — "is
-   * this schema change safe to deploy" — and a timer that answered those would
-   * be the orchestrator overruling the plan on the operator's behalf. Those
-   * park through the same `#park`, which is why the timer lives in
-   * `#offerRetry` rather than there.
+   * **Beyond the failure question, it answers only what the plan said it may.**
+   * A plan-authored `await_human` gate is a question the plan wanted a person
+   * to answer — "is this schema change safe to deploy" — and a timer that
+   * answered those would be the orchestrator overruling the plan on the
+   * operator's behalf. So a plan question is answered only when it declares
+   * its own `unattended_answer` (`#armUnattendedAnswer`): the shipped
+   * pipeline's consult takes `defaults` and its exhausted budget takes `stop`
+   * (§16). The answer is the plan's; this window is only when it is given.
    *
    * **Deliberately unbounded.** It fires again on each new question, for as
    * long as nobody answers — because the failure it exists for is a run that
@@ -403,6 +408,12 @@ class SpawnFatal extends Error {}
 class LaneUnusable extends Error {}
 
 /**
+ * The operator stopped a phase whose reviewer edited its lane (§16.1). Its
+ * message is a lane name and a fixed phrase, so `failureReason` keeps it.
+ */
+class ReviewerEdited extends Error {}
+
+/**
  * Unwinds a node the operator aborted (§9). It carries no message: the node is
  * already marked failed, with its reason, by the time this is thrown.
  */
@@ -463,6 +474,12 @@ interface NodeState {
   aborted: boolean
   /** The effect the node is parked on, for the answer event that closes it. */
   parkedEffectId: string | null
+  /**
+   * What the question the node is about to park on means when nobody answers
+   * it — the plan's `unattended_answer`, captured as the question is asked.
+   * Null for a question that waits for a person however long that takes.
+   */
+  unattendedAnswer: string | null
   /** Fixer runs taken so far. The `fix_rounds` fact the interpreter reads. */
   fixRounds: number
   /**
@@ -505,6 +522,8 @@ interface NodeState {
   retryMember: string | null
   /** How many times the operator has been offered this node. Keeps effect ids apart. */
   retries: number
+  /** Review turns that changed the lane (§16.1). Keeps their questions' effect ids apart. */
+  reviewerEdits: number
   /** Automatic attempts already spent on this node, under `onFailure: retry`. */
   autoRetries: number
   /**
@@ -604,6 +623,7 @@ function failureReason(error: unknown): string {
     error instanceof PromptError ||
     error instanceof SpawnFatal ||
     error instanceof LaneUnusable ||
+    error instanceof ReviewerEdited ||
     // The interpreter composed this one out of a state id and a trigger id.
     error instanceof PipelineStuckError
   ) {
@@ -776,12 +796,14 @@ export class Scheduler {
       pauseRequested: false,
       aborted: false,
       parkedEffectId: null,
+      unattendedAnswer: null,
       fixRounds: 0,
       lastGate: null,
       lastVerdict: null,
       lane: null,
       retryMember: null,
       retries: 0,
+      reviewerEdits: 0,
       autoRetries: 0,
       unattended: 0,
       quickFailures: 0,
@@ -1707,7 +1729,9 @@ export class Scheduler {
         // The question itself was journalled when the effect ran; here the
         // node only records which pause it is asleep on.
         state.parkedEffectId = result.effectId
+        const cancel = this.#armUnattendedAnswer(state)
         const facts = await this.#park(state)
+        cancel()
         result = await run.resume(this.#withPending(state, run, facts))
         continue
       }
@@ -1716,10 +1740,9 @@ export class Scheduler {
           outcome: this.#outcomeOf(state, result.state),
           state: result.state,
           // The interpreter's own name for the edge that ended the run. An
-          // author-chosen id, which is what §11 allows and what tells
-          // `t-gate-exhausted` from `t-review-exhausted` — two ways a
-          // `standard-phase` node reaches `failed` that read identically
-          // from the state id alone.
+          // author-chosen id, which is what §11 allows. In `standard-phase`
+          // both exhausted doors now leave through `t-stop`, and the gate and
+          // verdict clauses `settledReason` adds are what tell them apart.
           ...(result.via === undefined ? {} : { via: result.via }),
         }
       }
@@ -1997,6 +2020,21 @@ export class Scheduler {
         // pause exists first, so a restart reads it instead of re-asking.
         if (verb === 'await_human') {
           this.#ask(state, invocation.effect.id, questionOf(invocation.effect.params))
+          const unattended = invocation.effect.params['unattended_answer']
+          state.unattendedAnswer = typeof unattended === 'string' ? unattended : null
+        }
+        if (verb === 'grant_fix_rounds') {
+          // §16.5. The counter is the scheduler's, so this is the one place it
+          // moves other than a fixer finishing; the fact goes back with it so a
+          // guard read in this same step sees the budget it was just given.
+          this.#log.info('node.fix_rounds_granted', {
+            node: state.node.id,
+            spent: state.fixRounds,
+            granted: state.node.max_fix_rounds,
+          })
+          state.fixRounds = 0
+          await this.#options.executor.execute(invocation)
+          return { facts: { fix_rounds: 0 } }
         }
         return this.#observe(state, await this.#options.executor.execute(invocation))
       },
@@ -2150,13 +2188,74 @@ export class Scheduler {
       // the one reviewer on the plan.
       await this.#claimReviewer(state)
       if (state.aborted) throw new Aborted()
+      const before = await this.#laneMark(state)
+      let outcome: EffectOutcome
       try {
-        return await this.#spawnTurn(state, invocation)
+        outcome = await this.#spawnTurn(state, invocation)
       } finally {
         this.#releaseReviewer(state)
       }
+      const after = await this.#laneMark(state)
+      if (before !== null && after !== null && before !== after) await this.#reviewerEdited(state)
+      return outcome
     }
     return await this.#spawnTurn(state, invocation)
+  }
+
+  /**
+   * `HEAD` and the tracked diff of the node's lane, hashed: what a review turn
+   * must leave exactly as it found it (§16.1).
+   *
+   * Tracked files only. A reviewer is told to run the gates, and gates leave
+   * caches and build output behind as untracked files; counting those would
+   * stop every loop on the reviewer doing what it was asked. A reviewer that
+   * *creates* a file is therefore not caught — the cost of a check that does
+   * not cry wolf, and the edits that matter land in files the phase touched.
+   *
+   * Null when it cannot be read — no lane on disk, git refusing — and a null on
+   * either side skips the comparison: an unreadable mark is not evidence of an
+   * edit.
+   */
+  async #laneMark(state: NodeState): Promise<string | null> {
+    if (state.lane === null) return null
+    const cwd = join(this.#options.laneRoot, state.lane)
+    if (!existsSync(cwd)) return null
+    try {
+      const head = await git(cwd, ['rev-parse', 'HEAD'])
+      const diff = await git(cwd, ['diff', 'HEAD', '--binary'])
+      return createHash('sha256').update(head).update('\0').update(diff).digest('hex')
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The reviewer changed the lane. The skill this loop comes from is plain
+   * about it: stop, say so, and let a person decide what happens to the edits.
+   *
+   * The edits are left exactly where they are — reverting them would destroy
+   * the only evidence of what the reviewer did. `keep` carries on with the
+   * verdict the reviewer stated; anything else fails the phase. No unattended
+   * answer: this is the one question in the loop that is about the loop's own
+   * integrity, and guessing it is how a review that rewrote the code merges.
+   */
+  async #reviewerEdited(state: NodeState): Promise<void> {
+    state.reviewerEdits += 1
+    const effectId = `reviewer-edit:${state.node.id}:${state.reviewerEdits}`
+    this.#log.warn('node.reviewer_edited', { node: state.node.id, lane: state.lane ?? '' })
+    this.#ask(state, effectId, {
+      question:
+        'The reviewer changed this lane during its turn — it moved HEAD or edited tracked ' +
+        'files, which a review must never do. Its changes are left as they are. Keep them ' +
+        'and carry on with the review loop, or stop this phase?',
+      kind: 'choice',
+      choices: [KEEP, STOP],
+    })
+    state.parkedEffectId = effectId
+    const facts = await this.#park(state)
+    if (facts.human?.['answer'] !== KEEP) {
+      throw new ReviewerEdited(`reviewer edited lane "${state.lane ?? ''}"; the operator stopped the phase`)
+    }
   }
 
   async #spawnTurn(
@@ -2669,6 +2768,34 @@ export class Scheduler {
   }
 
   /**
+   * Starts the clock on a plan-authored question that said what it means when
+   * nobody answers it (`unattended_answer`), and hands back the way to stop it.
+   *
+   * The same `--retry-after` window the failure question uses, because it is
+   * the same operator decision — "do not wait for me longer than this" — and a
+   * second knob for it would be one an operator sets and forgets the other of.
+   * Unset, nothing is armed and the question waits for a person, which is what
+   * every plan-authored question did before this existed. The plan, not the
+   * orchestrator, is what supplies the answer, so this is still never the
+   * scheduler overruling a plan on the operator's behalf.
+   *
+   * One shot and no backoff: the question is not retried, it is answered.
+   */
+  #armUnattendedAnswer(state: NodeState): () => void {
+    const answer = state.unattendedAnswer
+    state.unattendedAnswer = null
+    const after = this.#options.retryAfterMs
+    if (answer === null || after === undefined || after <= 0) return () => {}
+
+    const clock = this.#options.clock ?? systemClock
+    return clock.at(clock.now() + after, () => {
+      if (state.resume === null || state.aborted) return
+      this.#log.info('node.unattended_answer', { node: state.node.id, after_ms: after })
+      this.answer(state.node.id, { human: { answer, unattended: true } })
+    })
+  }
+
+  /**
    * Starts the clock on an unanswered failure question, and hands back the way
    * to stop it.
    *
@@ -2802,7 +2929,15 @@ export class Scheduler {
     const override = params['model']
     if (typeof override === 'string') return override
 
-    if (params['role'] === 'reviewer' && state.reviewer !== null) return state.reviewer.model
+    if (params['role'] === 'reviewer') {
+      if (state.reviewer !== null) return state.reviewer.model
+      // §16.4: an unstaffed review is not tied to the tier the phase was
+      // written at. The workflow's own choice first, then the harness's name
+      // for its top tier, and only then the node's model.
+      const harness = this.#adapter(this.#harnessOf(state, params['harness'], params['role']))
+      const chosen = this.#workflow.defaults.reviewer_model ?? harness.reviewModel
+      if (chosen !== undefined) return chosen
+    }
 
     const crew = state.crew
     if (crew !== null) return crew.model
