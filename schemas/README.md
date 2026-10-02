@@ -90,3 +90,7 @@ done
 ```
 
 For PR-context frontmatter, extract the YAML block first (`yq` does this cleanly), then validate.
+
+## Checking the schemas themselves (this repo only)
+
+`npm run validate-schemas` (also part of `npm test`) compiles every schema here under Ajv's strict Draft 2020-12 mode and checks the fixtures in `tests/schema-fixtures/<schema-file-stem>/`: everything under `valid/` must pass, everything under `invalid/` must fail. A fixture is `.json`, `.yaml` / `.yml`, or a `.md` file whose YAML frontmatter is the payload. **A conditional rule (`if` / `then`) needs an `invalid/` fixture for each branch it enforces** — a lenient validator ignores a broken one silently. Pass file paths instead to validate payloads against the schema their `$schema` key or `yaml-language-server` comment names.

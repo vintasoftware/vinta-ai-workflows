@@ -30,6 +30,30 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A plan's PRs now reach `main`.** Phase PRs alone did not: a phase with
+  several dependencies targets its `integ-<id>` branch, and nothing ever
+  targeted that branch, so every PR stacked above it was stuck. Conflict
+  resolutions from wave merges were on no phase branch at all. maestro and the
+  stacked-branches `implement-plan` now open two more kinds of PR:
+  - an **integration PR** per `integ-<id>` branch, into `base_branch`, opened
+    by that phase just before its own PR;
+  - a **plan PR** from the final wave branch into `base_branch`, opened once
+    the last wave merges. Its body lists every phase and integration PR in an
+    order that merges, and the two ways to land the plan: merge it alone, or
+    merge the listed PRs in order and this one last.
+
+  maestro also pushes every wave branch, journals the new PRs (`node_pr` gains
+  `kind`, and a new `run_pr` event), and treats `gh`'s "a pull request already
+  exists" as opened, with that PR's URL, so a retry no longer reports a failure.
+  `prs-context-frontmatter.v1` gains an optional `kind`
+  (`phase` | `integration` | `plan`); `phase_id` and `phase_title` are no
+  longer required for `kind: plan`.
+- **The schemas are checked.** `npm run validate-schemas` (and `npm test`)
+  compiles every schema under `schemas/` with Ajv in strict Draft 2020-12 mode
+  and checks the fixtures in `tests/schema-fixtures/`: `valid/` must pass,
+  `invalid/` must fail. Source-side only — `ajv` and `ajv-formats` are root
+  devDependencies, and nothing new ships.
+
 - **A timed-out gate says whether it hung or was slow.** A `gate_result` with
   `status: timed_out` used to carry only the status, so a run with nine
   timeouts could not say whether any of them was a stuck suite or a host too
