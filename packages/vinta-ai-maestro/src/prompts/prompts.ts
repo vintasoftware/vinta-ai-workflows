@@ -51,12 +51,14 @@
  * journal payload or a process argument — every `PromptError` below names the
  * node id and the `prompt_ref` and stops there.
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import { AGENT_ROLES, type AgentRole, type Chore, type Node, type Workflow } from '../types.ts'
+import { GATE_TRIGGERS, LEDGER_FENCE, parseLedger, viewLedger, type LedgerView } from './ledger.ts'
+import { PASS_TWO, REVIEW_STANDARD } from './review-standard.ts'
 
 /** The line the reviewer is asked to end on, and the one `executor.ts` reads. */
 export const VERDICT_MARKER = 'VERDICT:'
@@ -84,11 +86,18 @@ export class PromptError extends Error {}
 /** How much of an agent's final report is carried into the next prompt. */
 const SUMMARY_LIMIT = 4_000
 
+/**
+ * The cap on a review or fix report handed across the loop. Larger than a
+ * dependency summary because it *is* the work: a deep review routinely runs past
+ * four thousand characters, and a fixer handed half the findings fixes half.
+ */
+const FINDINGS_LIMIT = 24_000
+
 /** How far back in a transcript a final report is looked for. */
 const TRANSCRIPT_WINDOW = 50
 
 /** What the journal is asked for. Narrow, so a test double is two methods. */
-export type PromptJournal = Pick<Journal, 'tailTranscript' | 'nodes'>
+export type PromptJournal = Pick<Journal, 'tailTranscript' | 'nodes' | 'reviewLedger'>
 
 /** One member of a phase's dependency closure, as the implementer is told it. */
 export interface DependencyContext {
@@ -313,9 +322,16 @@ interface Continuation {
   readonly workspace: string
   readonly branch: string
   readonly baseBranch: string
-  /** The reviewer's findings, when this node's last turn was a review. */
+  /**
+   * The last report on this node: the reviewer's findings when its last turn
+   * was a review, the fixer's report when it was a fix.
+   */
   readonly findings: string | null
   readonly facts: GuardContext
+  /** What the loop has already settled (§16.3). Empty on a phase's first review. */
+  readonly ledger: LedgerView
+  /** Whether the lane carries a project `REVIEW.md`, which replaces the shipped standard. */
+  readonly projectStandard: boolean
 }
 
 /** What a cold turn is composed from: the above, plus everything read off disk. */
@@ -343,8 +359,10 @@ function resume(request: SpawnPromptRequest, workspace: string): Continuation {
     // fallbacks only ever cover a pipeline that spawns before it branches.
     branch: row?.branch ?? 'HEAD',
     baseBranch: row?.base_branch ?? workflow.base_branch,
-    findings: lastReport(journal, runId, node.id),
+    findings: lastReport(journal, runId, node.id, FINDINGS_LIMIT),
     facts: request.facts,
+    ledger: viewLedger(parseLedger(journal.reviewLedger(runId, node.id))),
+    projectStandard: existsSync(join(workspace, 'REVIEW.md')),
   }
 }
 
@@ -489,13 +507,18 @@ function slug(title: string): string {
  * and a dependency's lane has usually been recycled by the time a dependent
  * runs.
  */
-function lastReport(journal: PromptJournal, runId: string, nodeId: string): string | null {
+function lastReport(
+  journal: PromptJournal,
+  runId: string,
+  nodeId: string,
+  limit = SUMMARY_LIMIT,
+): string | null {
   const entries = journal.tailTranscript(runId, nodeId, TRANSCRIPT_WINDOW)
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const entry = entries[i] as { type?: string; text?: string } | null
     if (entry === null || typeof entry !== 'object') continue
     if (entry.type === 'assistant_text' && typeof entry.text === 'string' && entry.text !== '') {
-      return entry.text.slice(0, SUMMARY_LIMIT)
+      return entry.text.slice(0, limit)
     }
   }
   return null
@@ -1093,62 +1116,70 @@ function workingTree(materials: Continuation): string[] {
 function renderReviewer(materials: Materials): string {
   const { node, workflow } = materials
   return section([
-    `You are reviewing ${node.id}: ${node.name} of plan ${workflow.id}.`,
-    'You review: read, run and report, but never edit code. Every issue you find',
-    'is reported, not fixed — a fixer agent acts on your findings after you.',
+    `You are the reviewer of ${node.id}: ${node.name} of plan ${workflow.id}.`,
+    'You read, run and report; you never edit. A fixer acts on your findings after',
+    'you, and this review loop ends only when you explicitly approve. The orchestrator',
+    'records `HEAD` and the tracked diff before your turn and compares them after it:',
+    'any edit or commit you make stops the loop and is put to the operator. Scratch',
+    'work — a throwaway repository to check git behaviour, say — goes in a temporary',
+    'directory outside this worktree.',
     '',
     '## What to review',
     `The diff of \`${materials.branch}\` against its base \`${materials.baseBranch}\`:`,
     `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
-    'Read the full diff of every changed file. Spot-checking is not enough.',
+    'Read the full diff of every changed file, and the callers and context around',
+    'it. Spot-checking is not a review.',
     ...workingTree(materials),
     ...commandBlock(materials),
     ...gateBlock(materials),
     ...leaseBlock(materials),
     '',
-    '## What that diff was supposed to implement',
+    '## The stated requirement',
+    'This diff implements the phase below. It is the requirement, verbatim: the code',
+    'should do what it asks, not something adjacent.',
+    '',
     materials.brief,
     ...planLevel(materials, [
       'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim.',
-      'They are what "scope creep" and "plan compliance" below are measured against:',
-      'a change serving a non-goal is scope creep, and one that contradicts a guiding',
+      'A change serving a non-goal is scope creep, and one that contradicts a guiding',
       'decision is a finding even where the phase body says nothing about it. Do not',
       'ask this diff to satisfy the whole plan — it implements one phase, and the',
       'phase body above is the only thing it was asked for.',
     ]),
     '',
-    '## The three layers, all of them, in order',
-    '1. Mechanical. The changed-file list matches the report; the whole diff read;',
-    '   and **you run these yourself and read what they print** — an implementer',
-    '   saying they were green is a claim, not evidence, and a verdict reached',
-    '   without running them is a guess:',
+    '## Run the gates yourself',
+    'An implementer saying they were green is a claim, not evidence. Run each of',
+    'these and read what it returns:',
     ...gateList(materials),
-    '   Say in your report that you ran them and what they returned. If you could',
-    '   not run them, that is a finding, not something to pass over.',
-    // The implementer now reports its own gate runs, and that report is a thing
-    // to check rather than a thing to accept. Saying so here because the
-    // obvious misreading of a new "gates I ran" section in the material under
-    // review is that the running has been done — which is the reviewer bug this
-    // layer was written for, arriving from a new direction.
-    '   The implementer’s report lists the gates it ran and what they returned.',
-    '   That is a claim to check against your own run, not one to accept in place',
-    '   of it. Running them again is cheap: an unchanged tree is served from cache.',
-    '   Scope creep and unrelated churn surfaced; a scan of the diff for secrets',
-    '   (password, secret, token, api_key, AKIA, BEGIN … KEY).',
-    '2. Plan compliance. Every change the phase body asked for is implemented;',
-    '   every test it named exists and its assertions exercise the named behaviour;',
-    '   the acceptance line is satisfiable by this diff; repo conventions followed;',
-    '   new comments read as plain English, one idea per sentence.',
-    '3. Independent judgment. Correctness, edge cases, and one structural question:',
-    '   is there a reframe that would make whole branches, helpers or layers',
-    '   disappear rather than be polished? Finding nothing in a large multi-file',
-    '   diff is suspicious — read it again.',
-    ...soloTurn('reviews this diff'),
+    'Say in your report that you ran them and what they returned. If you could not',
+    'run them, that is a finding. Running them again is cheap: an unchanged tree is',
+    'served from cache.',
+    ...settledBlock(materials),
     '',
-    'Triage each finding as BLOCKER, SHOULD-FIX or NIT.',
+    ...standardBlock(materials),
+    ...soloTurn('reviews this diff'),
     '',
     ...verdictProtocol(),
   ])
+}
+
+/**
+ * The standard the review is held to: the project's own `REVIEW.md` where it
+ * has one, and the shipped Review Standard otherwise (§16.1).
+ *
+ * Wholesale, never merged. A project that wrote its own standard wrote it to be
+ * read alone, and a reviewer handed both would be applying whichever of two
+ * contradicting rules it happened to weigh last.
+ */
+function standardBlock(materials: Continuation): string[] {
+  if (materials.projectStandard) {
+    return [
+      '## The standard',
+      `Read \`${join(materials.workspace, 'REVIEW.md')}\` and apply it. It is this project’s`,
+      'review standard and the only one you hold this diff to.',
+    ]
+  }
+  return ['## The standard', '', ...REVIEW_STANDARD]
 }
 
 /**
@@ -1163,18 +1194,156 @@ function renderReviewer(materials: Materials): string {
  * fail-closed default, which fails the node and burns its fix rounds on a
  * review nobody asked for. So this block is not optional in either form, and
  * sharing it is what stops one of them from drifting.
+ *
+ * `pass` is the explicit approval §16 makes the loop's only exit — passing
+ * gates are not approval, and neither is a review that ran out of things to say.
  */
 function verdictProtocol(): string[] {
   return [
     '## How to report',
-    'List your findings, each with its triage level, file and line. Then end your',
-    'final message with one line, exactly:',
+    'Prioritized findings first, each a BLOCKER with file:line evidence, its failure',
+    'mode or cost, the remedy, and your confidence. Fewer high-conviction findings',
+    'beat a long list. Then, under their own heading, **questions for the human**:',
+    'scenarios that are genuinely undecided, each with your recommendation. Those are',
+    'not blockers — the fixer decides whether to put them to a person.',
+    '',
+    'End your final message with one line, exactly:',
     `    ${VERDICT_MARKER} pass`,
     'or',
     `    ${VERDICT_MARKER} fail`,
-    `Use \`${VERDICT_MARKER} fail\` if any BLOCKER stands. That line is read by the`,
+    `\`${VERDICT_MARKER} pass\` is your explicit approval: nothing blocks and the phase meets`,
+    `the standard. Any blocker standing is \`${VERDICT_MARKER} fail\`. That line is read by the`,
     'orchestrator; a turn that ends without it is taken as a failure, so it must be',
     'the last thing you write.',
+  ]
+}
+
+/**
+ * What the review ledger already settled (§16.3), for every prompt on either
+ * side of the loop.
+ *
+ * Rejected findings carry the fixer's counter-evidence, so a reviewer can tell
+ * "answered" from "ignored" and re-raise one only with something new. Settled
+ * decisions carry what a person decided, dated, so neither agent re-asks it.
+ * An empty ledger renders nothing: the first review of a phase has no history.
+ */
+function settledBlock(materials: Continuation): string[] {
+  const { rejected, settled } = materials.ledger
+  const lines: string[] = []
+  if (settled.length > 0) {
+    lines.push(
+      '',
+      '## Settled decisions',
+      'A person decided these. Treat each as part of the requirement. Re-raise one only',
+      'with new evidence, and name the evidence.',
+    )
+    for (const decision of settled) {
+      const how = decision.unattended
+        ? 'Nobody answered in time, so each item took its stated default.'
+        : `The operator answered: ${decision.answer ?? '(no answer)'}`
+      lines.push('', `### Decided ${decision.at.slice(0, 10)}`, how)
+      for (const item of decision.items) {
+        lines.push(
+          `- ${item.id} (${item.trigger}): ${item.finding}`,
+          `  Fixer recommended: ${item.recommendation}. Default: ${item.default}.`,
+        )
+      }
+    }
+  }
+  if (rejected.length > 0) {
+    lines.push(
+      '',
+      '## Findings the fixer rejected, with its counter-evidence',
+      'Check the counter-evidence rather than accepting it. Re-raise a finding only',
+      'with evidence that answers it.',
+    )
+    for (const item of rejected) lines.push(`- ${item.finding}`, `  Counter-evidence: ${item.counter_evidence}`)
+  }
+  return lines
+}
+
+/**
+ * How the fixer treats what came back (§16.2) — the thermo-nuclear loop's
+ * fixer discipline, shared by both fixer prompts.
+ *
+ * The fixer is the implementer continuing its own session, which is what makes
+ * "verify before fixing" cheap: the agent checking a finding is the one that
+ * knows why the code is the way it is. It is also what makes it necessary. An
+ * author told "fix exactly what is listed" fixes unsupported findings too, and
+ * every one of them is defensive code nobody needed.
+ */
+function fixerProtocol(): string[] {
+  return [
+    '',
+    '## Verify before fixing',
+    'The findings are leads, not orders. For each one: reproduce or prove the claim',
+    'from code and tests; check the repository’s invariants, the intended behaviour,',
+    'the history and the current callers; then decide whether it is correct,',
+    'partially correct or unsupported. Reject unsupported findings, issues outside',
+    'this phase, and anything that fails the evidence bar — and keep the concrete',
+    'counter-evidence, because the reviewer is shown it.',
+    '',
+    'Choosing the remedy is yours. Where a verified problem has several, pick the one',
+    'that makes the bad state unreachable for every consumer of the data — a type, an',
+    'exact comparison, a key derived by construction — and then the simplest. Where',
+    'docs, names or copy promise more than the code does, make the code keep the',
+    'promise; weaken the text only where a person has settled the case is out of',
+    'scope. Before adding machinery for a rare case, look for the project’s existing',
+    'pattern in its README, AGENTS.md, rules and neighbouring code: the pattern is',
+    'the answer, and no pattern means asking, not assuming.',
+    '',
+    '## What goes to a person instead of into the code',
+    'Do not fix a finding that depends on a decision that is not yours. Put it to the',
+    'operator when it asks for:',
+    '- `unreachable` — handling for a scenario no current caller, type or data reaches;',
+    '- `defensive` — a check on data already typed or validated upstream;',
+    '- `ambiguity` — docs, tests and code disagree about what is wanted and none is',
+    '  clearly the bug, or the requirement names a mechanism that does not achieve its',
+    '  own goal;',
+    '- `destructive` — a delete, a migration, or anything touching production.',
+    'Fix every other justified finding first. The orchestrator asks the operator about',
+    'every gated item at once after your turn, and the review after that sees the',
+    'answers. For `unreachable` and `defensive` your recommendation is normally "reject',
+    'the finding". Every item states the default taken if nobody answers, and for a',
+    '`destructive` one that default is never the destructive option.',
+    '',
+    '## How to fix',
+    'Address every verified finding as one coherent design change. Prefer changes',
+    'that delete concepts, branches, duplicated state and boundary leaks, and keep',
+    'intended behaviour unless a finding proves it wrong — when a fix changes',
+    'documented behaviour, change the docs, names and copy in the same commit. Where a',
+    'fix needs a guarantee, take the highest rung available: the illegal state made',
+    'unrepresentable in types; a static check; a scripted check such as a test; one',
+    'assertion at the trust boundary; a runtime check inside the flow, last. A new',
+    'file needs a reason a reader would recognise, not a line count. Add a test only',
+    'where a fix changes behaviour or a verified bug was found, enter through the',
+    'real routes rather than seeding state, and delete tests a simplification made',
+    'redundant. Change nothing unrelated: the next review reads every line.',
+  ]
+}
+
+/** The fixer's report, ending in the block `readFixerReport` parses. */
+function fixerOutput(materials: Continuation): string[] {
+  return [
+    '',
+    '## Required output',
+    '- Status: SUCCESS or FAILURE, and why.',
+    '- The commit this round made, by hash, and the files it changed, paths only.',
+    ...gateReport(materials),
+    '- Each finding: fixed (and how), rejected (and the counter-evidence), or gated.',
+    '- The reason for each new file.',
+    '',
+    `Then end with exactly one fenced \`${LEDGER_FENCE}\` block — the orchestrator reads it,`,
+    'and an item missing from it is one nobody downstream is told about:',
+    '',
+    '```' + LEDGER_FENCE,
+    '{"rejected": [{"finding": "<the finding, one line>", "counter_evidence": "<file:line and why>"}],',
+    ' "gated": [{"id": "g1", "trigger": "unreachable", "finding": "<one line>",',
+    '            "evidence": "<file:line>", "reviewer_recommendation": "<its words>",',
+    '            "recommendation": "<yours>", "default": "<what happens if nobody answers>"}]}',
+    '```',
+    'Use empty lists when there is nothing to put in them. `trigger` is one of',
+    `${GATE_TRIGGERS.map((trigger) => `\`${trigger}\``).join(', ')}.`,
   ]
 }
 
@@ -1187,27 +1356,24 @@ function renderFixer(materials: Materials): string {
     ...gateBlock(materials),
     ...leaseBlock(materials),
     '',
-    '## What failed',
+    '## What came back',
     ...failure(materials),
+    ...settledBlock(materials),
     '',
     '## The phase this branch is implementing',
     materials.brief,
+    ...fixerProtocol(),
     '',
-    '## What to do',
-    'Fix exactly what is listed above, and nothing else — an unrelated change here',
-    'is scope creep the reviewer will send back. Then re-run the inner loop, and run',
-    'each of these yourself:',
+    '## Verify',
+    'Re-run the inner loop, then run each of these yourself:',
     ...gateList(materials),
     ...gateStopCondition(),
     ...soloTurn('fixes what came back'),
     ...foreground(),
     ...commitProtocol(materials),
-    '',
-    '## Required output',
-    '- Status: SUCCESS or FAILURE, and why.',
-    '- Files modified, paths only.',
-    ...gateReport(materials),
-    '- What you changed for each finding, and any finding you did not act on.',
+    'Keep this round to one commit where you can — a hook rewrite aside — with a',
+    'message naming the findings it addresses, so the reviewer can read the round.',
+    ...fixerOutput(materials),
   ])
 }
 
@@ -1412,6 +1578,10 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
  * agent told to change one named thing only widens it. Both are right: the
  * session this continues is the implementer's, and the implementer was given
  * them. The line is true of the context window, not of the fixer's own prompt.
+ *
+ * The protocol is restated in full, unlike the brief. It is short beside the
+ * findings it governs, and a fixer that remembers "verify before fixing" from
+ * three rounds ago is the one most tempted to stop doing it.
  */
 function renderFixerContinuation(materials: Continuation): string {
   const { node } = materials
@@ -1425,39 +1595,52 @@ function renderFixerContinuation(materials: Continuation): string {
       'The review did not pass and recorded no findings. Re-read your own diff',
       'against the phase brief already above, and fix what does not match it.',
     ]),
+    ...settledBlock(materials),
+    ...fixerProtocol(),
     '',
-    '## What to do',
-    'Change exactly what is named above and nothing else. Everything else on this',
-    'branch stays as it is — an unrelated edit here is scope creep the next review',
-    'will send back, and it costs a fix round you may need. Then re-run the inner',
-    'loop, and run each of these yourself:',
+    '## Verify',
+    'Re-run the inner loop, then run each of these yourself:',
     ...gateList(materials),
     ...gateStopCondition(),
     ...soloTurn('fixes what came back'),
     ...foreground(),
     ...commitProtocol(materials),
-    '',
-    '## Required output',
-    '- Status: SUCCESS or FAILURE, and why.',
-    '- Files modified, paths only.',
-    ...gateReport(materials),
-    '- What you changed for each finding, and any finding you did not act on.',
+    'Keep this round to one commit where you can — a hook rewrite aside — with a',
+    'message naming the findings it addresses, so the reviewer can read the round.',
+    ...fixerOutput(materials),
   ])
 }
 
+/**
+ * The reviewer, continuing its own session across rounds (§16, pass two).
+ *
+ * Three things are new to it and nothing else is: the fixer's report, which is
+ * a summary to check rather than to trust; the ledger's rejected findings and
+ * settled decisions, which change what may be raised again; and the pass-two
+ * rules, restated every round because they are what keeps the bar from moving.
+ */
 function renderReviewerContinuation(materials: Continuation): string {
   const { node } = materials
   return section([
-    `Still reviewing ${node.id}: ${node.name}. A fixer has acted on the findings you`,
-    'raised above; the phase brief and the plan’s bounds are unchanged and already',
-    'in this session, so only the diff is new.',
-    'You still review rather than edit: report every issue, fix none of them.',
+    `Still reviewing ${node.id}: ${node.name}. A fixer has acted on your last review;`,
+    'the phase brief, the plan’s bounds and the standard are unchanged and already',
+    'in this session.',
+    'You still review rather than edit: report every issue, fix none of them. The',
+    'orchestrator still compares `HEAD` and the tracked diff across your turn.',
+    '',
+    '## What the fixer says it did',
+    'A summary to check against the diff, not one to accept in place of reading it:',
+    '',
+    materials.findings ?? 'The fixer left no report. Read the diff for what changed.',
+    ...settledBlock(materials),
     '',
     '## What to re-review',
-    'The diff as it now stands:',
+    'The diff as it now stands, and the commits this round added:',
     `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
-    'Read it again in full. A fix moves lines you had already accepted, so a diff',
-    'you only re-read around the findings is one you have not read.',
+    `    git -C ${materials.workspace} log --oneline ${materials.baseBranch}..${materials.branch}`,
+    'Read it again in full and reapply the whole standard. A fix moves lines you had',
+    'already accepted, so a diff you only re-read around the findings is one you have',
+    'not read.',
     '',
     '**Run these again yourself, every round.** A session that remembers running',
     'them last round is remembering a different tree:',
@@ -1469,18 +1652,8 @@ function renderReviewerContinuation(materials: Continuation): string {
     'exactly the round where last round’s answer is wrong.',
     ...workingTree(materials),
     '',
-    '## What to decide',
-    '1. Each finding you raised: addressed, addressed in a way that breaks something',
-    '   else, or not addressed. Say which, per finding.',
-    '2. Anything the fix itself introduced — a new problem in new code is a new',
-    '   finding, at its own triage level.',
-    '3. Nothing else. Do not re-open what you already passed, and do not raise a',
-    '   finding you could have raised last round: the fixer cannot be sent back',
-    '   forever, and a moving bar is how a sound phase runs out of fix rounds.',
-    '',
+    ...PASS_TWO,
     ...soloTurn('reviews this diff'),
-    '',
-    'Triage each finding as BLOCKER, SHOULD-FIX or NIT.',
     '',
     // Restated in full, every round. See `verdictProtocol` for why this is not
     // the sort of repetition a delta is allowed to drop.
@@ -1540,9 +1713,14 @@ function failure(
     'fix what does not match it.',
   ],
 ): string[] {
+  // The review is checked first because the gate root outlives it. A red gate
+  // sends the node through a fixer and back to review, and a review that then
+  // fails leaves the old `gate.exit_code` in the context — read first, it would
+  // hand this fixer last round's gate instead of the findings it is answering.
+  const reviewFailed = materials.facts.review?.['verdict'] === 'fail'
   const gate = materials.facts.gate
   const exitCode = gate?.['exit_code']
-  if (typeof exitCode === 'number' && exitCode !== 0) {
+  if (!reviewFailed && typeof exitCode === 'number' && exitCode !== 0) {
     const id = gate?.['id']
     const logRef = gate?.['log_ref']
     return [

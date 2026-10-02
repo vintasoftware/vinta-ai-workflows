@@ -40,7 +40,7 @@ describe('golden workflow', () => {
 
     const p1 = result.workflow.nodes[0]
     expect(p1?.depends_on).toEqual([])
-    expect(p1?.max_fix_rounds).toBe(2)
+    expect(p1?.max_fix_rounds).toBe(4)
     expect(result.workflow.gates.types?.requires).toEqual([])
   })
 

@@ -576,6 +576,43 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **maestro's review/fix loop is now the thermo-nuclear review loop.** The
+  shipped `standard-phase` changes for every run that uses it:
+  - **The reviewer** keeps its session across rounds. It is held to a shipped
+    Review Standard (evidence bar, priority order, approval bar), or to the
+    project's `REVIEW.md`, which replaces that standard when the lane has one.
+    `VERDICT: pass` is now an explicit approval. A re-review gets the fixer's
+    report, every finding already rejected or settled, and the pass-two rules.
+  - **The orchestrator checks that a review turn changed nothing.** If `HEAD`
+    or a tracked file moved, the node stops and asks whether to keep the edits
+    or stop the phase.
+  - **The fixer** (the implementer continuing its session) verifies each
+    finding before acting on it and rejects unsupported ones with
+    counter-evidence. It sends scope decisions to the operator instead of
+    making them: unreachable scenarios, defensive checks, requirements
+    ambiguities, destructive operations. The new `consult` state asks about the
+    whole batch at once and does not count as a fix round.
+  - **The review ledger.** Rejections and the operator's answers are kept in
+    `runs/<run-id>/nodes/<node-id>/review-ledger.jsonl` and shown to every
+    later review and fix.
+  - **The budget.** `max_fix_rounds` now defaults to **4** (was 2). Running out
+    asks `continue` / `stop` instead of failing the phase.
+  - **Unattended runs.** Under `--retry-after`, a scope question nobody answers
+    takes each item's default, and an exhausted budget nobody answers takes
+    `stop`, which fails into `--on-failure` as before. Without `--retry-after`
+    both questions wait for a person.
+  - **The reviewer's model.** An unstaffed review runs on the new optional
+    `defaults.reviewer_model`, then the harness's top tier (`opus` on
+    claude-code), then the phase's model.
+  - **New pieces.** `await_human` gains an optional `unattended_answer`, and
+    there are two new effects, `record_decision` and `grant_fix_rounds`; the
+    schema stays at `workflow.v1`.
+  - **Migration.** A workflow that pins `max_fix_rounds` keeps its number but
+    now gets asked at the end of it. One that ships its own `standard-phase`
+    shadows the built-in and is unaffected. The skills-path review partials
+    are not updated yet (SPEC §16.6). See
+    [SPEC §16](packages/vinta-ai-maestro/SPEC.md#16-the-review-loop).
+
 - **Updated the OpenAI and Anthropic models to their latest version.**
 
 - **Updated the generated skills to have `disable-model-invocation: true` set.**
