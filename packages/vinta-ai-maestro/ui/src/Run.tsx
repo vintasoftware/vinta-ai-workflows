@@ -95,6 +95,11 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
     [nodes, edges],
   )
 
+  // The node view (§10), by the same fragment the roster's Open button uses.
+  const openNode = (nodeId: string): void => {
+    location.hash = `#/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}`
+  }
+
   if (snapshot === null) {
     return (
       <section className="run">
@@ -141,7 +146,11 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
 
       {error !== null && <ErrorNote>{error}</ErrorNote>}
 
-      <DagView dag={dag} selected={selected} onSelect={setSelected} />
+      <DagView dag={dag} selected={selected} onSelect={setSelected} onOpen={openNode} />
+      <Hint className="-mt-3 text-xs">
+        Click a node to see what it depends on and what waits for it; double-click to open it.
+        Drag to pan, ⌘ or Ctrl + scroll to zoom.
+      </Hint>
 
       <div className="panels grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Nodes

@@ -24,9 +24,11 @@
 import type * as React from 'react'
 import { useLayoutEffect, useRef } from 'react'
 import {
+  DAG_NODE_ACTIVATE_EVENT,
   DAG_SELECTION_CHANGE_EVENT,
   defineDagEditor,
   type Dag,
+  type DagNodeActivateDetail,
   type DagSelectionChangeDetail,
   type VintaDagElement,
 } from 'vinta-dag-editor/src/index.ts'
@@ -48,31 +50,55 @@ export interface DagViewProps {
   readonly dag: Dag
   readonly selected: string | null
   readonly onSelect: (nodeId: string | null) => void
+  /** A node opened — double-clicked, or Enter on the selected one. */
+  readonly onOpen?: (nodeId: string) => void
 }
 
-export function DagView({ dag, selected, onSelect }: DagViewProps): React.ReactElement {
+export function DagView({ dag, selected, onSelect, onOpen }: DagViewProps): React.ReactElement {
   const host = useRef<VintaDagElement | null>(null)
 
   useLayoutEffect(() => {
     const element = host.current
     if (element === null) return
     element.mode = 'read'
-    const listener = (event: Event): void => {
-      const { selection } = (event as CustomEvent<DagSelectionChangeDetail>).detail
-      onSelect(selection?.kind === 'node' ? selection.id : null)
+    const selection = (event: Event): void => {
+      const detail = (event as CustomEvent<DagSelectionChangeDetail>).detail
+      onSelect(detail.selection?.kind === 'node' ? detail.selection.id : null)
     }
-    element.addEventListener(DAG_SELECTION_CHANGE_EVENT, listener)
-    return () => element.removeEventListener(DAG_SELECTION_CHANGE_EVENT, listener)
-  }, [onSelect])
+    const open = (event: Event): void => {
+      onOpen?.((event as CustomEvent<DagNodeActivateDetail>).detail.nodeId)
+    }
+    element.addEventListener(DAG_SELECTION_CHANGE_EVENT, selection)
+    element.addEventListener(DAG_NODE_ACTIVATE_EVENT, open)
+    return () => {
+      element.removeEventListener(DAG_SELECTION_CHANGE_EVENT, selection)
+      element.removeEventListener(DAG_NODE_ACTIVATE_EVENT, open)
+    }
+  }, [onSelect, onOpen])
 
   useLayoutEffect(() => {
     if (host.current !== null) host.current.value = dag
   }, [dag])
 
   useLayoutEffect(() => {
-    if (host.current === null) return
-    host.current.selection = selected === null ? null : { kind: 'node', id: selected }
+    const element = host.current
+    if (element === null) return
+    pushSelection(element, selected)
   }, [selected])
 
   return <vinta-dag ref={host} className="dag" />
+}
+
+/**
+ * The host's selection is a node id, and an edge the operator picked on the
+ * canvas is reported up as "no node". Pushing that `null` straight back would
+ * clear the edge the moment it was picked — so a `null` only clears a *node*,
+ * and an edge selection is the canvas's own to keep.
+ */
+export function pushSelection(element: VintaDagElement, selected: string | null): void {
+  if (selected !== null) {
+    element.selection = { kind: 'node', id: selected }
+    return
+  }
+  if (element.selection?.kind === 'node') element.selection = null
 }

@@ -15,6 +15,8 @@ import type { DagNodeStatus } from './types'
 
 export interface DagStrings {
   readonly canvas: string
+  /** Shown over a canvas with no nodes in it. */
+  readonly empty: string
   readonly addNode: string
   readonly deleteNode: string
   readonly deleteEdge: string
@@ -42,14 +44,15 @@ export interface DagStrings {
 
 export const DEFAULT_STRINGS: DagStrings = {
   canvas: 'Plan graph',
+  empty: 'No nodes yet',
   addNode: 'Add node',
   deleteNode: 'Delete node',
   deleteEdge: 'Delete dependency',
-  connect: 'Draw dependency from this node',
-  connectHint: ({ name }) => `Choose the node that depends on ${name}`,
-  zoomIn: 'Zoom in',
-  zoomOut: 'Zoom out',
-  fitView: 'Fit',
+  connect: 'Draw a dependency from this node — drag to a node, or click and pick one',
+  connectHint: ({ name }) => `Choose the node that depends on ${name} · Esc cancels`,
+  zoomIn: 'Zoom in (⌘ or Ctrl + scroll, or +)',
+  zoomOut: 'Zoom out (⌘ or Ctrl + scroll, or −)',
+  fitView: 'Fit the whole graph (0)',
   nameField: 'Name',
   statusField: 'Status',
   waveField: 'Wave',

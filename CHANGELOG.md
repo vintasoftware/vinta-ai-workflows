@@ -30,6 +30,56 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The plan graph is readable, and says where you are in it.** The canvas
+  `vinta-ai-maestro`'s run view and workflow editor share (`vinta-dag-editor`)
+  was a strip of six-pixel cards: a five-wave plan was framed into a 380px box
+  at half scale, every dependency label was a bordered box truncated to "the
+  BookmarkFolder…" piled on the line it labelled, edges had no direction, and
+  nothing changed when a node was picked. Redrawn: edges carry arrowheads and
+  the ones touching the selected or hovered node are pulled forward while the
+  rest recede; cards show a status dot and label (running pulses; failed and
+  awaiting-human tint the whole card) and clamp a long name to two lines;
+  labels are quiet pills in the gap between waves and spread apart when two
+  share one; the zoom and fit controls are icons with tooltips; an empty canvas
+  says so. **Long text is reachable three ways:** an instant tooltip on hover
+  or keyboard focus for a clamped name or truncated artifact, a label that
+  grows to its full text when hovered or selected, and a details strip under
+  the canvas — in the run view too — printing the selected node's name and
+  status or the selected dependency as a sentence. Keyboard: `+`/`−`/`0` zoom
+  and fit, Enter on the selected node opens it. Double-clicking a node in the
+  run view opens its node view (`vinta-dag-node-activate`).
+- **Dependencies are drawn by dragging.** Drag from a node's handle onto
+  another node; a dashed preview follows the pointer, the source is ringed, and
+  every card says whether it would take the drop — a cycle, a duplicate, or the
+  source itself is dimmed and refused before the gesture is spent. Click-then-
+  pick and the `e` key still work. A refused dependency now says which rule it
+  broke (`vinta-dag-refuse`), and the editor shows that where the gesture
+  happened instead of nothing.
+
+### Changed
+
+- **The canvas no longer swallows the page's scroll.** A bare wheel over the
+  graph used to zoom it and block the page from scrolling; it now scrolls the
+  page, and zoom is ⌘ or Ctrl + scroll (which is also how a trackpad pinch
+  arrives), the buttons, or the keys. Dragging the canvas shows a grab cursor
+  and never selects text. The host box follows the window's height instead of
+  being fixed at 380px.
+
+### Fixed
+
+- **The editor's canvas inspector no longer offers fields it then discards.**
+  Its Status and Wave fields were folded back into the workflow and silently
+  dropped — status is run state and wave is computed from dependencies — and
+  Name duplicated the field in the panel beside the graph. They are hidden in
+  the editor through the parts the component now exposes, leaving the
+  inspector the one thing only it can do: a dependency's artifact and the
+  delete actions.
+- **Picking a dependency after a node no longer loses it on the next frame.**
+  The host reported an edge selection as "no node", pushed that back into the
+  canvas, and cleared the edge the moment it was picked; the edge's inspector
+  flashed and vanished. A cleared node selection now leaves an edge selection
+  alone.
+- **Pressing on the canvas's toolbar or inspector no longer pans the graph.**
 - **A timed-out gate says whether it hung or was slow.** A `gate_result` with
   `status: timed_out` used to carry only the status, so a run with nine
   timeouts could not say whether any of them was a stuck suite or a host too
