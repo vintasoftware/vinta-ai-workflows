@@ -11,15 +11,21 @@ export { DAG_EDITOR_TAG, defineDagEditor } from './define'
 export { VintaDagElement } from './element'
 export {
   DAG_CHANGE_EVENT,
+  DAG_NODE_ACTIVATE_EVENT,
+  DAG_REFUSE_EVENT,
   DAG_SELECTION_CHANGE_EVENT,
   type DagChange,
   type DagChangeDetail,
+  type DagNodeActivateDetail,
+  type DagRefuseDetail,
   type DagSelectionChangeDetail,
 } from './events'
 export { layoutDag, NODE_HEIGHT, NODE_WIDTH } from './layout'
 export {
   addEdge,
   addNode,
+  type EdgeRefusal,
+  edgeRefusal,
   type NodePatch,
   removeEdge,
   removeNode,

@@ -10,14 +10,38 @@
  * diffing. A plan DAG is tens of nodes, the input is immutable so there is
  * nothing to reconcile, and the only cost is focus, which `#render` restores by
  * the control's action/id pair.
+ *
+ * Two things deliberately do *not* re-render: hovering a node (its edges are
+ * pulled forward by toggling a class on them) and the tooltip (one element,
+ * moved). Both happen on every pointer movement, and a rebuild per movement
+ * would make the canvas feel like it was fighting the mouse.
  */
 
-import type { DagChange, DagChangeDetail, DagSelectionChangeDetail } from './events'
-import { DAG_CHANGE_EVENT, DAG_SELECTION_CHANGE_EVENT } from './events'
+import type {
+  DagChange,
+  DagChangeDetail,
+  DagNodeActivateDetail,
+  DagRefuseDetail,
+  DagSelectionChangeDetail,
+} from './events'
+import {
+  DAG_CHANGE_EVENT,
+  DAG_NODE_ACTIVATE_EVENT,
+  DAG_REFUSE_EVENT,
+  DAG_SELECTION_CHANGE_EVENT,
+} from './events'
 import { layoutDag } from './layout'
 import type { NodePatch } from './model'
-import { addEdge, addNode, removeEdge, removeNode, updateEdge, updateNode } from './model'
-import { buildCanvas, sceneSize } from './scene'
+import {
+  addEdge,
+  addNode,
+  edgeRefusal,
+  removeEdge,
+  removeNode,
+  updateEdge,
+  updateNode,
+} from './model'
+import { buildCanvas, handlePoint, placedAt, previewPath, sceneSize } from './scene'
 import type { DagStringOverrides, DagStrings } from './strings'
 import { DEFAULT_STRINGS, mergeStrings } from './strings'
 import { STYLES } from './styles'
@@ -27,6 +51,9 @@ import { DAG_NODE_STATUSES } from './types'
 const EMPTY_DAG: Dag = { nodes: [], edges: [] }
 const ZOOM_STEP = 1.2
 const ZOOM_RANGE = { min: 0.2, max: 3 }
+/** Pointer travel below this is a click on the handle, not the start of a drag. */
+const DRAG_THRESHOLD = 4
+const SVG_NS = 'http://www.w3.org/2000/svg'
 
 export class VintaDagElement extends HTMLElement {
   static readonly observedAttributes: readonly string[] = ['mode']
@@ -41,6 +68,15 @@ export class VintaDagElement extends HTMLElement {
   #fitted = false
   #resize: ResizeObserver | null = null
   #pan: { readonly x: number; readonly y: number; readonly origin: DagViewport } | null = null
+  /** A dependency being dragged off a handle; `moved` separates it from a click. */
+  #drag: {
+    readonly source: string
+    readonly x: number
+    readonly y: number
+    moved: boolean
+  } | null = null
+  /** The click the browser synthesises after a drag release is not a click on anything. */
+  #swallowClick = false
 
   constructor() {
     super()
@@ -49,10 +85,15 @@ export class VintaDagElement extends HTMLElement {
     style.textContent = STYLES
     this.#root.append(style)
     this.#root.addEventListener('click', (event) => this.#onClick(event))
+    this.#root.addEventListener('dblclick', (event) => this.#onDoubleClick(event))
     this.#root.addEventListener('change', (event) => this.#onChange(event))
     this.#root.addEventListener('keydown', (event) => {
       if (event instanceof KeyboardEvent) this.#onKeyDown(event)
     })
+    this.#root.addEventListener('pointerover', (event) => this.#onPointerOver(event))
+    this.#root.addEventListener('pointerout', (event) => this.#onPointerOut(event))
+    this.#root.addEventListener('focusin', (event) => this.#showTooltip(event.target))
+    this.#root.addEventListener('focusout', () => this.#hideTooltip())
     this.addEventListener('pointerdown', (event) => this.#onPointerDown(event))
     this.addEventListener('wheel', (event) => this.#onWheel(event), { passive: false })
   }
@@ -125,9 +166,7 @@ export class VintaDagElement extends HTMLElement {
   }
 
   zoomBy(factor: number): void {
-    const scale = clamp(this.#viewport.scale * factor, ZOOM_RANGE.min, ZOOM_RANGE.max)
-    this.#viewport = { ...this.#viewport, scale }
-    this.#applyViewport()
+    this.#zoomAt(factor, this.#viewportCentre())
   }
 
   /**
@@ -193,8 +232,8 @@ export class VintaDagElement extends HTMLElement {
    */
   #fitTo(positions: ReadonlyMap<string, DagPoint>): void {
     if (this.#value.nodes.length === 0) return
-    const viewport = this.#root.querySelector('.viewport')
-    if (!(viewport instanceof HTMLElement)) return
+    const viewport = this.#viewportElement()
+    if (!viewport) return
     const box = viewport.getBoundingClientRect()
     const content = sceneSize(this.#value, positions)
     if (box.width <= 0 || box.height <= 0) return
@@ -221,7 +260,33 @@ export class VintaDagElement extends HTMLElement {
     scene.style.transform = `translate(${x}px, ${y}px) scale(${scale})`
   }
 
+  #viewportElement(): HTMLElement | null {
+    const viewport = this.#root.querySelector('.viewport')
+    return viewport instanceof HTMLElement ? viewport : null
+  }
+
+  #viewportCentre(): DagPoint {
+    const box = this.#viewportElement()?.getBoundingClientRect()
+    return { x: (box?.width ?? 0) / 2, y: (box?.height ?? 0) / 2 }
+  }
+
+  /** Scales about a point in viewport pixels, so that point stays where it is. */
+  #zoomAt(factor: number, at: DagPoint): void {
+    const scale = clamp(this.#viewport.scale * factor, ZOOM_RANGE.min, ZOOM_RANGE.max)
+    const ratio = scale / this.#viewport.scale
+    this.#viewport = {
+      scale,
+      x: at.x - (at.x - this.#viewport.x) * ratio,
+      y: at.y - (at.y - this.#viewport.y) * ratio,
+    }
+    this.#applyViewport()
+  }
+
   #onClick(event: Event): void {
+    if (this.#swallowClick) {
+      this.#swallowClick = false
+      return
+    }
     const control = actionOf(event.target)
     if (!control) {
       // Only the canvas itself clears the selection; the inspector sits outside
@@ -241,6 +306,8 @@ export class VintaDagElement extends HTMLElement {
       const added = addNode(this.#value, this.#strings.newNodeName)
       this.#selection = { kind: 'node', id: added.nodeId }
       this.#commit(added.dag, { kind: 'node-add', nodeId: added.nodeId })
+      // The new card, not the button that made it: the next thing to do is name it.
+      this.#focus('select-node', added.nodeId)
     } else if (id !== undefined) {
       this.#onEntityClick(action, id)
     }
@@ -259,6 +326,11 @@ export class VintaDagElement extends HTMLElement {
     } else if (action === 'delete-edge') {
       this.#deleteEdge(id)
     }
+  }
+
+  #onDoubleClick(event: Event): void {
+    const control = actionOf(event.target)
+    if (control?.action === 'select-node' && control.id !== undefined) this.#activate(control.id)
   }
 
   #onChange(event: Event): void {
@@ -284,10 +356,26 @@ export class VintaDagElement extends HTMLElement {
     const control = actionOf(target)
     if (event.key === 'Escape') {
       this.#pending = null
+      this.#hideTooltip()
       this.#select(null, true)
       // #select is a no-op when nothing was selected, but a cancelled edge
       // still has to leave the screen.
       this.#render()
+      return
+    }
+    if (event.key === '+' || event.key === '=') {
+      event.preventDefault()
+      this.zoomBy(ZOOM_STEP)
+      return
+    }
+    if (event.key === '-') {
+      event.preventDefault()
+      this.zoomBy(1 / ZOOM_STEP)
+      return
+    }
+    if (event.key === '0') {
+      event.preventDefault()
+      this.fitToContent()
       return
     }
     if (!control?.id) return
@@ -295,6 +383,19 @@ export class VintaDagElement extends HTMLElement {
     if (action === 'select-node' && event.key.startsWith('Arrow')) {
       event.preventDefault()
       this.#moveFocus(id, event.key)
+      return
+    }
+    // Enter on the node that is already selected opens it; the platform's
+    // click that follows re-selects it, which is a no-op. Not while a
+    // dependency is being drawn: then Enter is how the keyboard closes it.
+    if (
+      event.key === 'Enter' &&
+      action === 'select-node' &&
+      this.#pending === null &&
+      this.#selection?.kind === 'node' &&
+      this.#selection.id === id
+    ) {
+      this.#activate(id)
       return
     }
     if (this.#mode !== 'edit') return
@@ -316,8 +417,24 @@ export class VintaDagElement extends HTMLElement {
     }
   }
 
+  /**
+   * Listened for on the host, where the target is retargeted to the host
+   * itself; `composedPath()[0]` is the element actually under the pointer.
+   */
   #onPointerDown(event: PointerEvent | MouseEvent): void {
-    if (actionOf(event.target)) return
+    this.#swallowClick = false
+    this.#hideTooltip()
+    const target = event.composedPath()[0] ?? null
+    const control = actionOf(target)
+    if (control?.action === 'connect' && control.id !== undefined && this.#mode === 'edit') {
+      this.#beginDrag(control.id, event)
+      return
+    }
+    if (control) return
+    if (event.button !== 0) return
+    if (!(target instanceof Element) || !target.closest('.viewport')) return
+    const viewport = this.#viewportElement()
+    viewport?.classList.add('panning')
     this.#pan = { x: event.clientX, y: event.clientY, origin: this.#viewport }
     const move = (moved: PointerEvent | MouseEvent): void => {
       const pan = this.#pan
@@ -331,6 +448,7 @@ export class VintaDagElement extends HTMLElement {
     }
     const stop = (): void => {
       this.#pan = null
+      viewport?.classList.remove('panning')
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', stop)
     }
@@ -338,21 +456,162 @@ export class VintaDagElement extends HTMLElement {
     window.addEventListener('pointerup', stop)
   }
 
+  /**
+   * A dependency drawn by dragging: off a node's handle, onto another node.
+   *
+   * The click-and-pick gesture stays — a press that never travels is left to
+   * the click handler, which toggles the source as before — so the two coexist
+   * and the keyboard path is unchanged. Once the pointer has travelled, the
+   * source is marked pending (so every card says whether it would accept the
+   * drop), a dashed preview follows the pointer, and release on a card closes
+   * the edge or reports why it cannot. Release anywhere else cancels.
+   */
+  #beginDrag(source: string, event: PointerEvent | MouseEvent): void {
+    const drag = { source, x: event.clientX, y: event.clientY, moved: false }
+    this.#drag = drag
+    const move = (moved: PointerEvent | MouseEvent): void => {
+      if (this.#drag !== drag) return
+      if (!drag.moved) {
+        if (Math.hypot(moved.clientX - drag.x, moved.clientY - drag.y) < DRAG_THRESHOLD) return
+        drag.moved = true
+        this.#pending = source
+        this.#render()
+      }
+      this.#drawPreview(source, moved)
+    }
+    const stop = (up: PointerEvent | MouseEvent): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', stop)
+      if (this.#drag !== drag) return
+      this.#drag = null
+      this.#clearPreview()
+      if (!drag.moved) return
+      this.#swallowClick = true
+      const target = this.#nodeAt(up.clientX, up.clientY)
+      if (target !== null) this.#activateNode(target)
+      else {
+        this.#pending = null
+        this.#render()
+      }
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop)
+  }
+
+  #drawPreview(source: string, at: { readonly clientX: number; readonly clientY: number }): void {
+    const svg = this.#root.querySelector('.edges')
+    const viewport = this.#viewportElement()
+    if (!(svg instanceof SVGElement) || !viewport) return
+    let path = svg.querySelector('.preview')
+    if (!(path instanceof SVGElement)) {
+      path = this.ownerDocument.createElementNS(SVG_NS, 'path')
+      path.setAttribute('class', 'edge preview')
+      svg.append(path)
+    }
+    const box = viewport.getBoundingClientRect()
+    const { x, y, scale } = this.#viewport
+    const end = { x: (at.clientX - box.left - x) / scale, y: (at.clientY - box.top - y) / scale }
+    const start = handlePoint(placedAt(layoutDag(this.#value), source))
+    path.setAttribute('d', previewPath(start, end))
+  }
+
+  #clearPreview(): void {
+    this.#root.querySelector('.edges .preview')?.remove()
+  }
+
+  /** The node card under a point on screen, if the platform can tell us. */
+  #nodeAt(clientX: number, clientY: number): string | null {
+    const root = this.#root as ShadowRoot & {
+      elementFromPoint?: (x: number, y: number) => Element | null
+    }
+    if (typeof root.elementFromPoint !== 'function') return null
+    const control = actionOf(root.elementFromPoint(clientX, clientY))
+    return control?.action === 'select-node' && control.id !== undefined ? control.id : null
+  }
+
+  #onPointerOver(event: Event): void {
+    const control = actionOf(event.target)
+    this.#showTooltip(event.target)
+    if (control?.action === 'select-node' && control.id !== undefined) this.#highlight(control.id)
+  }
+
+  #onPointerOut(event: Event): void {
+    const control = actionOf(event.target)
+    if (!control) return
+    // Leaving one child of the control for another is not leaving the control.
+    const next = event instanceof MouseEvent ? event.relatedTarget : null
+    if (next instanceof Node && event.target instanceof Node && event.target.contains(next)) return
+    this.#hideTooltip()
+    if (control.action === 'select-node') this.#highlight(null)
+  }
+
+  /** Pulls a node's edges forward without a re-render. `null` lets go. */
+  #highlight(nodeId: string | null): void {
+    for (const edge of this.#root.querySelectorAll('.edge, .edge-label')) {
+      if (!(edge instanceof HTMLElement || edge instanceof SVGElement)) continue
+      const hot = nodeId !== null && (edge.dataset.from === nodeId || edge.dataset.to === nodeId)
+      edge.classList.toggle('hot', hot)
+    }
+  }
+
+  /**
+   * The full text of whatever is under the pointer or has focus — a name the
+   * card clamps, an artifact the gap truncates, an icon button's label. One
+   * element, moved; shown for a card or a label only when its text does not
+   * already fit, so a short name is not repeated under itself.
+   */
+  #showTooltip(target: EventTarget | null): void {
+    const source = target instanceof Element ? target.closest('[data-tooltip]') : null
+    const viewport = this.#viewportElement()
+    if (!(source instanceof HTMLElement) || !viewport?.contains(source)) {
+      this.#hideTooltip()
+      return
+    }
+    const clipped = source.querySelector('.node-name, .edge-label') ?? source
+    if (
+      (source.classList.contains('node') || source.classList.contains('edge-label')) &&
+      clipped.scrollWidth <= clipped.clientWidth &&
+      clipped.scrollHeight <= clipped.clientHeight
+    ) {
+      this.#hideTooltip()
+      return
+    }
+    const existing = viewport.querySelector('.tooltip')
+    let tooltip: HTMLElement
+    if (existing instanceof HTMLElement) tooltip = existing
+    else {
+      tooltip = this.ownerDocument.createElement('div')
+      tooltip.className = 'tooltip'
+      tooltip.setAttribute('role', 'tooltip')
+      viewport.append(tooltip)
+    }
+    tooltip.textContent = source.dataset.tooltip ?? ''
+    const box = viewport.getBoundingClientRect()
+    const at = source.getBoundingClientRect()
+    tooltip.style.left = `${clamp(at.left - box.left + at.width / 2, 12, Math.max(12, box.width - 12))}px`
+    tooltip.style.top = `${at.bottom - box.top + 6}px`
+    tooltip.hidden = false
+  }
+
+  #hideTooltip(): void {
+    const tooltip = this.#root.querySelector('.tooltip')
+    if (tooltip instanceof HTMLElement) tooltip.hidden = true
+  }
+
+  /**
+   * Zoom is on the wheel only with ⌘ or Ctrl held — which is also how a
+   * trackpad pinch arrives. A bare wheel is left to the page: this canvas sits
+   * in a page that scrolls, and a strip of it that swallowed every wheel event
+   * was a wall the operator had to steer the pointer around.
+   */
   #onWheel(event: WheelEvent): void {
+    if (!(event.ctrlKey || event.metaKey)) return
     event.preventDefault()
     const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP
-    const scale = clamp(this.#viewport.scale * factor, ZOOM_RANGE.min, ZOOM_RANGE.max)
     // Keep the point under the cursor still, so zooming reads as magnifying
     // what the user is looking at rather than as the graph sliding away.
-    const ratio = scale / this.#viewport.scale
-    const box = this.getBoundingClientRect()
-    const cursor = { x: event.clientX - box.left, y: event.clientY - box.top }
-    this.#viewport = {
-      scale,
-      x: cursor.x - (cursor.x - this.#viewport.x) * ratio,
-      y: cursor.y - (cursor.y - this.#viewport.y) * ratio,
-    }
-    this.#applyViewport()
+    const box = this.#viewportElement()?.getBoundingClientRect() ?? this.getBoundingClientRect()
+    this.#zoomAt(factor, { x: event.clientX - box.left, y: event.clientY - box.top })
   }
 
   /** Clicking or Entering a node either completes a pending edge or selects it. */
@@ -366,12 +625,27 @@ export class VintaDagElement extends HTMLElement {
     const next = addEdge(this.#value, source, id, this.#strings.newEdgeArtifact)
     if (!next) {
       this.#render()
+      const reason = edgeRefusal(this.#value, source, id)
+      if (reason !== null) {
+        const detail: DagRefuseDetail = { from: source, to: id, reason }
+        this.dispatchEvent(
+          new CustomEvent(DAG_REFUSE_EVENT, { detail, bubbles: true, composed: true }),
+        )
+      }
       return
     }
     const added = next.edges[next.edges.length - 1]
     if (!added) return
     this.#selection = { kind: 'edge', id: added.id }
     this.#commit(next, { kind: 'edge-add', edgeId: added.id })
+  }
+
+  /** A node opened, as opposed to selected. What that means is the host's. */
+  #activate(nodeId: string): void {
+    const detail: DagNodeActivateDetail = { nodeId }
+    this.dispatchEvent(
+      new CustomEvent(DAG_NODE_ACTIVATE_EVENT, { detail, bubbles: true, composed: true }),
+    )
   }
 
   #deleteNode(id: string): void {

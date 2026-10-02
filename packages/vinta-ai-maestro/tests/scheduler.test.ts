@@ -12,6 +12,7 @@
  * invisible in the run it happens in and fatal three phases later, so it is
  * checked on the happy paths and on the failure paths alike.
  */
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -35,7 +36,7 @@ import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pip
 import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
-import { createScheduler, type Scheduler } from '../src/scheduler/index.ts'
+import { createScheduler, type RunReport, type Scheduler } from '../src/scheduler/index.ts'
 import { WorkflowSchema, type EffectId, type Workflow } from '../src/types.ts'
 
 const HARNESS = 'claude-code'
@@ -148,6 +149,21 @@ async function until(read: () => boolean, label: string): Promise<void> {
     await flush(1)
   }
   throw new Error(`timed out waiting for ${label}`)
+}
+
+/**
+ * Runs a `standard-phase` workflow and answers its exhausted-budget question
+ * (§16.5) with `stop` for every node that reaches it — the answer that ends the
+ * phase the way an exhausted budget always did, so the assertions after it are
+ * about the failure rather than about the question in front of it.
+ */
+async function runStoppingAtExhaustion(r: Rig, ...nodeIds: readonly string[]): Promise<RunReport> {
+  const running = r.scheduler.run()
+  for (const nodeId of nodeIds) {
+    await until(() => r.scheduler.statuses[nodeId] === 'awaiting_human', `${nodeId} to exhaust its budget`)
+    r.scheduler.answer(nodeId, { human: { answer: 'stop' } })
+  }
+  return await running
 }
 
 interface Recorder extends EffectExecutor {
@@ -1585,11 +1601,13 @@ describe('standard-phase under the scheduler', () => {
       },
     )
 
-    const report = await r.scheduler.run()
+    const report = await runStoppingAtExhaustion(r, 'a')
 
-    // `max_fix_rounds` defaults to 2, and `fix_rounds` is the count of fixer
-    // turns taken — so two fixers run and the third round is refused.
-    expect(r.calls.filter((call) => call.effect === 'e-fix')).toHaveLength(2)
+    // `max_fix_rounds` defaults to 4, and `fix_rounds` is the count of fixer
+    // turns taken — so four fixers run, the fifth round is put to the operator,
+    // and `stop` fails the phase.
+    expect(r.calls.filter((call) => call.effect === 'e-fix')).toHaveLength(4)
+    expect(r.calls.filter((call) => call.effect === 'e-exhausted')).toHaveLength(1)
     expect(report.statuses).toEqual({ a: 'failed', b: 'blocked' })
     expect(r.calls.some((call) => call.effect === 'e-failed')).toBe(true)
     expectDrained(r)
@@ -1613,7 +1631,7 @@ describe('standard-phase under the scheduler', () => {
       },
     )
 
-    await r.scheduler.run()
+    await runStoppingAtExhaustion(r, 'a')
 
     const attributions = r.journal
       .tailTranscript('run-1', 'a', 200)
@@ -1655,29 +1673,32 @@ describe('standard-phase under the scheduler', () => {
         .map((event) => String((event.payload as { reason: unknown }).reason))
 
     // A gate that stays red under a reviewer that keeps passing: review → gate
-    // → fix, twice, and then `t-gate-exhausted`.
+    // → fix until the budget is spent, then the operator says `stop`.
     const red = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
       outcomes: {
         'e-review': { facts: { review: { verdict: 'pass' } } },
         'e-gate': { facts: { gate: { id: 'unit', exit_code: 2 } } },
       },
     })
-    expect((await red.scheduler.run()).statuses).toEqual({ a: 'failed' })
+    expect((await runStoppingAtExhaustion(red, 'a')).statuses).toEqual({ a: 'failed' })
 
-    // A reviewer that never passes: review → fix, twice, and then
-    // `t-review-exhausted`. The gate never runs, so there is no gate to name.
+    // A reviewer that never passes: review → fix until the budget is spent. The
+    // gate never runs, so there is no gate to name.
     const rejected = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
       outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
     })
-    expect((await rejected.scheduler.run()).statuses).toEqual({ a: 'failed' })
+    expect((await runStoppingAtExhaustion(rejected, 'a')).statuses).toEqual({ a: 'failed' })
 
+    // Both now leave through the one `exhausted` question, so the edge is the
+    // same and the clauses are what tell them apart: the red gate in one, the
+    // failing verdict in the other.
     expect(reasonsFor(red, 'a')).toEqual([
-      'pipeline ended in state "failed" via "t-gate-exhausted"; gate "unit" exited 2; ' +
-        '2 of 2 fix rounds spent',
+      'pipeline ended in state "failed" via "t-stop"; gate "unit" exited 2; ' +
+        '4 of 4 fix rounds spent',
     ])
     expect(reasonsFor(rejected, 'a')).toEqual([
-      'pipeline ended in state "failed" via "t-review-exhausted"; review verdict "fail"; ' +
-        '2 of 2 fix rounds spent',
+      'pipeline ended in state "failed" via "t-stop"; review verdict "fail"; ' +
+        '4 of 4 fix rounds spent',
     ])
 
     // §11: a gate id and an exit code, never what the gate printed. The
@@ -1706,15 +1727,15 @@ describe('standard-phase under the scheduler', () => {
       },
     })
 
-    expect((await r.scheduler.run()).statuses).toEqual({ a: 'failed' })
+    expect((await runStoppingAtExhaustion(r, 'a')).statuses).toEqual({ a: 'failed' })
     expect(
       r.journal
         .events('run-1')
         .filter((event) => event.type === 'node_error')
         .map((event) => String((event.payload as { reason: unknown }).reason)),
     ).toEqual([
-      'pipeline ended in state "failed" via "t-gate-exhausted"; gate "unit" timed out; ' +
-        '2 of 2 fix rounds spent',
+      'pipeline ended in state "failed" via "t-stop"; gate "unit" timed out; ' +
+        '4 of 4 fix rounds spent',
     ])
     expectDrained(r)
   })
@@ -1762,14 +1783,316 @@ describe('standard-phase under the scheduler', () => {
     expect(r.calls.some((call) => call.effect === 'e-gate')).toBe(true)
 
     // The gate ran and it is not in the sentence. The fix-round count is,
-    // because `0 of 2` is itself the news: nothing was even tried.
+    // because `0 of 4` is itself the news: nothing was even tried.
     expect(
       r.journal
         .events('run-1')
         .filter((event) => event.type === 'node_error')
         .map((event) => String((event.payload as { reason: unknown }).reason)),
-    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 2 fix rounds spent'])
+    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 4 fix rounds spent'])
     expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §16: the thermo-nuclear review loop, at the scheduler's seams
+//
+// The prompts carry the loop's discipline; what the scheduler owns is the four
+// places the loop leaves the agents: the consult, its unattended answer, the
+// exhausted-budget question and the reviewer that edits. Each is driven
+// through the shipped pipeline rather than a pipeline written for the test.
+// ---------------------------------------------------------------------------
+
+/** Every `human_answered` row this run journalled, payload only. */
+const answersOf = (r: Rig): unknown[] =>
+  r.journal
+    .events('run-1')
+    .filter((event) => event.type === 'human_answered')
+    .map((event) => event.payload)
+
+/** How many times an effect ran, by its pipeline id. */
+const countOf = (r: Rig, effect: string): number =>
+  r.calls.filter((call) => call.effect === effect).length
+
+describe('§16 the review loop', () => {
+  it('puts gated findings to the operator once, files the answer, and reviews without a round', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': [
+          { facts: { review: { verdict: 'fail' } } },
+          { facts: { review: { verdict: 'pass' } } },
+        ],
+        'e-fix': { facts: { review: { gated: 2 } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the consult')
+    const asked = r.journal.events('run-1').filter((event) => event.type === 'human_question')
+    expect(asked.map((event) => (event.payload as { effect_id: string }).effect_id)).toEqual([
+      'e-consult',
+    ])
+    expect(asked[0]?.payload).toMatchObject({ kind: 'text' })
+
+    r.scheduler.answer('a', { human: { answer: 'g1: reject; g2: in scope' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // One fixer, and the consult did not cost another: it went straight to the
+    // reviewer, which read the round's fix with the decisions beside it.
+    expect(countOf(r, 'e-fix')).toBe(1)
+    const order = r.calls
+      .map((call) => call.effect)
+      .filter((effect) => ['e-fix', 'e-consult', 'e-record-decision', 'e-review'].includes(effect))
+    expect(order).toEqual(['e-review', 'e-fix', 'e-consult', 'e-record-decision', 'e-review'])
+    // `record_decision` is handed the answer it files.
+    const recorded = r.calls.find((call) => call.effect === 'e-record-decision')
+    expect(recorded?.context.human?.['answer']).toBe('g1: reject; g2: in scope')
+    expectDrained(r)
+  })
+
+  it('reaches the reviewer when the executor reports nothing about gating', async () => {
+    // An injected executor that predates `review.gated` must not strand a node
+    // in `fix`: the missing fact takes the door to the reviewer.
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': [
+          { facts: { review: { verdict: 'fail' } } },
+          { facts: { review: { verdict: 'pass' } } },
+        ],
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    expect(countOf(r, 'e-consult')).toBe(0)
+  })
+
+  it('answers a consult itself under --retry-after, with the defaults, on the record as unattended', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      retryAfterMs: 60_000,
+      outcomes: {
+        'e-review': [
+          { facts: { review: { verdict: 'fail' } } },
+          { facts: { review: { verdict: 'pass' } } },
+        ],
+        'e-fix': { facts: { review: { gated: 1 } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the consult')
+    await r.advance(59_999)
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    await r.advance(1)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(answersOf(r)).toEqual([{ effect_id: 'e-consult', answer: 'defaults', unattended: true }])
+    const recorded = r.calls.find((call) => call.effect === 'e-record-decision')
+    expect(recorded?.context.human).toMatchObject({ answer: 'defaults', unattended: true })
+    expectDrained(r)
+  })
+
+  it('waits for a person on a consult when no --retry-after was given', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': [
+          { facts: { review: { verdict: 'fail' } } },
+          { facts: { review: { verdict: 'pass' } } },
+        ],
+        'e-fix': { facts: { review: { gated: 1 } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the consult')
+    await r.advance(86_400_000)
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    expect(answersOf(r)).toEqual([])
+
+    r.scheduler.answer('a', { human: { answer: 'defaults' } })
+    await running
+    expectDrained(r)
+  })
+
+  it('grants the budget again on continue, and fails the phase on stop', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'], max_fix_rounds: 1 })]), {
+      outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first exhaustion')
+    expect(countOf(r, 'e-fix')).toBe(1)
+
+    r.scheduler.answer('a', { human: { answer: 'continue' } })
+    // Waited on by fixer count rather than by status: answering does not move
+    // the status synchronously, so `awaiting_human` would match the park the
+    // node was just told to leave.
+    await until(() => countOf(r, 'e-fix') === 2, 'the granted round')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second exhaustion')
+    expect(countOf(r, 'e-grant')).toBe(1)
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    // Two fixers in all: the one the plan budgeted and the one `continue` bought.
+    expect(countOf(r, 'e-fix')).toBe(2)
+    expect(countOf(r, 'e-exhausted')).toBe(2)
+    expect(report.failures['a']).toContain('via "t-stop"')
+    expectDrained(r)
+  })
+
+  it('answers the exhausted question with stop when nobody is there', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'], max_fix_rounds: 1 })]), {
+      retryAfterMs: 60_000,
+      outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the exhaustion')
+    await r.advance(60_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(countOf(r, 'e-grant')).toBe(0)
+    expect(answersOf(r)).toEqual([{ effect_id: 'e-exhausted', answer: 'stop', unattended: true }])
+  })
+
+  /**
+   * A lane that is a real repository, so a reviewer turn can be caught moving
+   * it: one commit carrying the brief, on both slots the rig hands out.
+   */
+  const repository = (r: Rig): void => {
+    for (const slot of ['run-1-lane-1', 'run-1-lane-2']) {
+      const cwd = join(r.laneRoot, slot)
+      mkdirSync(cwd, { recursive: true })
+      writeFileSync(join(cwd, 'plan.md'), '## a\n\nAdd the Folder model.\n')
+      const run = (...args: string[]): void => {
+        execFileSync('git', args, { cwd, stdio: 'ignore' })
+      }
+      run('init', '-q', '-b', 'main')
+      run('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', 'plan.md')
+      run('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'seed')
+    }
+  }
+
+  /**
+   * `until`, on the wall clock. The lane check runs real `git` subprocesses,
+   * which take longer than the event-loop turns `until` counts.
+   */
+  const untilGit = async (read: () => boolean, label: string): Promise<void> => {
+    const deadline = Date.now() + 10_000
+    while (!read()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+
+  /** A reviewer that edits a tracked file during its turn — what a review must never do. */
+  const editingReviewer = (r: Rig) => (call: Call): void => {
+    if (call.effect !== 'e-review') return
+    for (const slot of ['run-1-lane-1', 'run-1-lane-2']) {
+      writeFileSync(join(r.laneRoot, slot, 'plan.md'), '## a\n\nRewritten by the reviewer.\n')
+    }
+  }
+
+  it('stops the loop and asks when the reviewer edits the lane, and fails on stop', async () => {
+    let r: Rig | undefined
+    r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      tap: (call) => editingReviewer(r as Rig)(call),
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+    repository(r)
+
+    const running = r.scheduler.run()
+    await untilGit(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the edit question')
+    const asked = r.journal.events('run-1').filter((event) => event.type === 'human_question')
+    expect(asked.at(-1)?.payload).toMatchObject({
+      effect_id: 'reviewer-edit:a:1',
+      kind: 'choice',
+      choices: ['keep', 'stop'],
+    })
+    // Nothing downstream of the review ran on the edited tree.
+    expect(countOf(r, 'e-gate')).toBe(0)
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(report.failures['a']).toContain('reviewer edited lane')
+    expectDrained(r)
+  })
+
+  it('carries on with the reviewer’s verdict when the operator keeps the edits', async () => {
+    let r: Rig | undefined
+    r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      tap: (call) => editingReviewer(r as Rig)(call),
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+    repository(r)
+
+    const running = r.scheduler.run()
+    await untilGit(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the edit question')
+    r.scheduler.answer('a', { human: { answer: 'keep' } })
+
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+
+  it('does not stop a reviewer that left the lane as it found it', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+    repository(r)
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    expect(r.journal.events('run-1').some((event) => event.type === 'human_question')).toBe(false)
+  })
+
+  it('runs an unstaffed review on defaults.reviewer_model, not the phase’s model', async () => {
+    const base = standardWorkflow([node('a', [], { gates: ['unit'] })])
+    const workflow = WorkflowSchema.parse({
+      ...base,
+      defaults: { ...base.defaults, reviewer_model: 'top-tier' },
+    })
+    const r = rig(workflow, {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned.map((task) => task.model)).toEqual(['opus', 'top-tier'])
+  })
+
+  it('falls back to the phase’s model when neither the workflow nor the harness names one', async () => {
+    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
+      outcomes: {
+        'e-review': { facts: { review: { verdict: 'pass' } } },
+        'e-gate': { facts: { gate: { exit_code: 0 } } },
+      },
+    })
+
+    await r.scheduler.run()
+
+    // The mock harness declares no `reviewModel`, so nothing outranks the node.
+    expect(r.adapter.spawned.map((task) => task.model)).toEqual(['opus', 'opus'])
   })
 })
 
@@ -1808,7 +2131,7 @@ describe('prompt composition', () => {
     expect(prompts).toHaveLength(2)
     expect(prompts[0]).toContain('You are implementing a')
     expect(prompts[0]).toContain('Add the Folder model and its migration.')
-    expect(prompts[1]).toContain('You are reviewing a')
+    expect(prompts[1]).toContain('You are the reviewer of a')
     expect(prompts.every((prompt) => prompt !== 'plan.md#a')).toBe(true)
     expectDrained(r)
   })
@@ -3455,7 +3778,8 @@ describe('a failed phase the operator can retry', () => {
      * the plan wanted a person to answer — "is this migration safe to deploy" —
      * and both it and the failure offer park through the same `#park`. A timer
      * there would be the orchestrator overruling the plan on the operator's
-     * behalf, so it lives in `#offerRetry` instead.
+     * behalf, so a plan question is answered only when it names its own
+     * `unattended_answer` (§16), and this one names none.
      */
     it('never answers a plan’s own await_human gate', async () => {
       const r = rig(makeWorkflow([node('a', [], { pipeline: 'gated' })]), {

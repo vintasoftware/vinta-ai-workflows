@@ -424,6 +424,13 @@ export interface HarnessAdapter {
    */
   readonly id: string
   readonly capabilities: HarnessCapabilities
+  /**
+   * The name this CLI gives its top model tier, where it has one that does not
+   * go stale (§16.4): what an unstaffed review runs on when the workflow names
+   * no `defaults.reviewer_model`. A tier alias, never a dated model id. Absent
+   * means the harness has no such name, and the review takes the node's model.
+   */
+  readonly reviewModel?: string
   /** Reports whether the CLI is installed and logged in. Never authenticates. */
   preflight(): Promise<PreflightResult>
   /** Never throws on capacity — see §6.1. */

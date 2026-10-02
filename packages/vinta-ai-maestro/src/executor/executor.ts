@@ -22,6 +22,7 @@
  * | verb | facts | who reads it |
  * |---|---|---|
  * | `spawn_agent` (`role: reviewer`) | `review.verdict` — `'pass'` \| `'fail'` | `t-review-pass` / `t-review-fail` |
+ * | `spawn_agent` (`role: fixer`) | `review.gated` — scope questions the fixer raised | `t-fix-gated` / `t-fix-reviewed` |
  * | `spawn_agent` (any other role) | none | — |
  * | `run_gate` | `gate.id`, `gate.exit_code`, `gate.status`, `gate.cached`, `gate.log_ref` | `t-gate-pass` / `t-gate-fail` |
  * | `git_branch` | none | — |
@@ -31,6 +32,8 @@
  * | `write_tracking` | none | — |
  * | `await_human` | none — the *answer* arrives as `human.answer`, from the scheduler | any guard on `human.*` |
  * | `notify` | none | — |
+ * | `record_decision` | none — files the answer in the review ledger | — |
+ * | `grant_fix_rounds` | none — the scheduler resets `fix_rounds` itself | — |
  *
  * `fix_rounds` is the scheduler's, fed in on every step; nothing here writes it.
  *
@@ -81,7 +84,7 @@ import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
-import { readVerdict } from '../prompts/index.ts'
+import { readFixerReport, readVerdict } from '../prompts/index.ts'
 import type { Node, Workflow } from '../types.ts'
 import { composePrBody, readPrContext, type PrText } from '../integration/pr-body.ts'
 import { createOsNotifier, notifyReason, type Notifier } from './notify.ts'
@@ -131,7 +134,7 @@ export interface RunExecutorOptions {
   readonly notifier?: Notifier
 }
 
-/** How many transcript entries back to look for the reviewer's verdict. */
+/** How many transcript entries back to look for the verdict or the fixer's block. */
 const TRANSCRIPT_WINDOW = 50
 
 export class RunEffectExecutor implements EffectExecutor {
@@ -227,6 +230,12 @@ export class RunEffectExecutor implements EffectExecutor {
         return await this.#notify(nodeId, 'waiting for the operator')
       case 'notify':
         return await this.#notify(nodeId, params['text'])
+      case 'record_decision':
+        return this.#recordDecision(nodeId, invocation.context)
+      case 'grant_fix_rounds':
+        // The scheduler owns the counter and has already moved it; there is no
+        // body left for the host to run.
+        return {}
     }
   }
 
@@ -235,23 +244,82 @@ export class RunEffectExecutor implements EffectExecutor {
   // -------------------------------------------------------------------------
 
   #reviewed(nodeId: string, params: Readonly<Record<string, unknown>>): EffectOutcome {
-    if (params['role'] !== 'reviewer') return {}
-    return { facts: { review: { verdict: this.#verdict(nodeId) } } }
+    if (params['role'] === 'reviewer') return { facts: { review: { verdict: this.#verdict(nodeId) } } }
+    if (params['role'] === 'fixer') return { facts: { review: { gated: this.#fixerReport(nodeId) } } }
+    return {}
   }
 
   /**
-   * The last verdict the reviewer stated in the turn that just ended. Read
-   * backwards from the tail so an earlier round's verdict can never be picked
-   * up, and stopped at the previous `session_ended` for the same reason.
+   * The last verdict the reviewer stated in the turn that just ended. A turn
+   * that errored, or stated nothing, takes the fail-closed default.
    */
   #verdict(nodeId: string): 'pass' | 'fail' {
     const fallback = this.#options.defaultVerdict ?? 'fail'
+    const turn = this.#lastTurn(nodeId)
+    if (!turn.ok) return fallback
+    for (const text of turn.texts) {
+      // `src/prompts` owns the marker: the reviewer prompt asks for exactly what
+      // this reads, so the protocol cannot drift out of one of the two places.
+      // The verdict only — the transcript text itself goes no further.
+      const stated = readVerdict(text)
+      if (stated !== undefined) return stated
+    }
+    return fallback
+  }
+
+  /**
+   * Files the fixer's `review-ledger` block into the node's ledger (§16.3) and
+   * returns how many findings it put to a person — the one fact a guard reads.
+   *
+   * A turn with no readable block files nothing and gates nothing. That is the
+   * safe way round: the review that follows sees every finding again, rather
+   * than a scope question silently going unasked.
+   */
+  #fixerReport(nodeId: string): number {
+    const turn = this.#lastTurn(nodeId)
+    if (!turn.ok) return 0
+    for (const text of turn.texts) {
+      const report = readFixerReport(text)
+      if (report === undefined) continue
+      this.#options.journal.appendReviewLedger(this.#options.runId, nodeId, {
+        kind: 'report',
+        at: new Date().toISOString(),
+        ...report,
+      })
+      return report.gated.length
+    }
+    return 0
+  }
+
+  /**
+   * The answer the node just resumed from, filed as a settled decision against
+   * the fixer's last batch of scope questions (§16.3).
+   */
+  #recordDecision(nodeId: string, context: EffectInvocation['context']): EffectOutcome {
+    const answer = context.human?.['answer']
+    this.#options.journal.appendReviewLedger(this.#options.runId, nodeId, {
+      kind: 'decision',
+      at: new Date().toISOString(),
+      answer: answer === undefined || answer === null ? null : String(answer),
+      unattended: context.human?.['unattended'] === true,
+    })
+    return {}
+  }
+
+  /**
+   * The assistant text of the turn that just ended, newest first, and whether
+   * that turn ended cleanly. Read backwards from the tail and stopped at the
+   * previous `session_ended`, so an earlier round's words can never be read as
+   * this one's.
+   */
+  #lastTurn(nodeId: string): { readonly ok: boolean; readonly texts: readonly string[] } {
     const entries = this.#options.journal.tailTranscript(
       this.#options.runId,
       nodeId,
       TRANSCRIPT_WINDOW,
     )
 
+    const texts: string[] = []
     let sawEnd = false
     for (let i = entries.length - 1; i >= 0; i -= 1) {
       const entry = entries[i] as { type?: string; text?: string; result?: string } | null
@@ -261,18 +329,13 @@ export class RunEffectExecutor implements EffectExecutor {
         // `session_ended` means we have walked into the previous round.
         if (sawEnd) break
         sawEnd = true
-        if (entry.result !== 'ok') return fallback
+        if (entry.result !== 'ok') return { ok: false, texts }
         continue
       }
-      if (entry.type === 'error') return fallback
-      if (entry.type !== 'assistant_text' || typeof entry.text !== 'string') continue
-      // `src/prompts` owns the marker: the reviewer prompt asks for exactly what
-      // this reads, so the protocol cannot drift out of one of the two places.
-      // The verdict only — the transcript text itself goes no further.
-      const stated = readVerdict(entry.text)
-      if (stated !== undefined) return stated
+      if (entry.type === 'error') return { ok: false, texts }
+      if (entry.type === 'assistant_text' && typeof entry.text === 'string') texts.push(entry.text)
     }
-    return fallback
+    return { ok: true, texts }
   }
 
   // -------------------------------------------------------------------------

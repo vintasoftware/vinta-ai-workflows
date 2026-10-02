@@ -33,7 +33,7 @@
 import { ChevronRightIcon, PlusIcon, SaveIcon } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Dag } from 'vinta-dag-editor/src/index.ts'
+import type { Dag, EdgeRefusal } from 'vinta-dag-editor/src/index.ts'
 import {
   HStack,
   PageHeader,
@@ -172,6 +172,10 @@ export function EditorView({
     setRefused(null)
   }, [])
 
+  const onRefuse = useCallback((reason: EdgeRefusal): void => {
+    setNotice(REFUSALS[reason] ?? 'That dependency was refused.')
+  }, [])
+
   const onDagChange = useCallback((dag: Dag): void => {
     setNotice(null)
     setDraft((current) => (current === null ? current : applyDag(current, dag)))
@@ -236,7 +240,18 @@ export function EditorView({
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="flex min-w-0 flex-col gap-4">
-          <EditorDag dag={dag} selected={selected} onChange={onDagChange} onSelect={setSelected} />
+          <EditorDag
+            dag={dag}
+            selected={selected}
+            onChange={onDagChange}
+            onSelect={setSelected}
+            onRefuse={onRefuse}
+          />
+          <Hint className="-mt-3 text-xs">
+            Drag from a node's handle onto another node to add a dependency, then name the
+            artifact. Select a node or a dependency and press Delete to remove it. Drag to pan,
+            ⌘ or Ctrl + scroll to zoom.
+          </Hint>
 
           <DependencyForm
             nodes={draft.nodes}
