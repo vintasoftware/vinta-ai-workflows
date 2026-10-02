@@ -379,6 +379,7 @@ export function runAdapterContract(
       'quota',
       'transient',
       'stale_session',
+      'unauthenticated',
       'fatal',
     ] as const) {
       test(`spawn returns a ${kind} refusal instead of throwing`, async (fixture, within) => {

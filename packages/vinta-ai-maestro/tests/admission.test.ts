@@ -338,12 +338,13 @@ describe('admission control', () => {
 
   it('resumes a journaled wait across a restart without re-firing it', async () => {
     const retryAfter = new Date(clock.now() + 3_600_000)
-    const adapter = new MockAdapter({ spawns: ['quota', 'quota'], retryAfter })
+    const adapter = new MockAdapter({ spawns: ['quota'], retryAfter })
     const before: CapacityWait[] = []
     const first = control({ onWait: (w) => before.push(w) })
 
-    // Two nodes in flight together are both refused, so both reach the park
-    // path — one wait window, and §6.1's one notification, not two.
+    // Two nodes in flight together: the first is refused, and the second —
+    // queued at the start gate behind it — joins that wait without spending a
+    // spawn of its own. One wait window, and §6.1's one notification, not two.
     const outcomes = await Promise.all([
       first.admit(adapter, task('p1')),
       first.admit(adapter, task('p2')),
@@ -429,6 +430,158 @@ describe('admission control', () => {
     expect(admission.wakeAt('calm')).toBeUndefined()
     admitted(await admission.admit(calm, task('p2')))
     expect(calm.spawned).toHaveLength(1)
+  })
+
+  /** A spawn that resolves only when the test says so, to observe the start gate. */
+  class GatedAdapter extends MockAdapter {
+    readonly started: string[] = []
+    readonly #open: (() => void)[] = []
+
+    override async spawn(task: AgentTask) {
+      this.started.push(task.nodeId)
+      await new Promise<void>((resolve) => this.#open.push(resolve))
+      return super.spawn(task)
+    }
+
+    /** Lets the oldest spawn in progress report its session. */
+    finishNext(): void {
+      this.#open.shift()?.()
+    }
+  }
+
+  it('starts one spawn at a time per harness, each after the previous has a session', async () => {
+    const adapter = new GatedAdapter()
+    const admission = control({ ceilings: { mock: 4 } })
+
+    const pending = ['p1', 'p2', 'p3'].map((id) => admission.admit(adapter, task(id)))
+    await settle()
+    // Three slots are free, but only one CLI is booting.
+    expect(admission.inFlight('mock')).toBe(3)
+    expect(adapter.started).toEqual(['p1'])
+
+    adapter.finishNext()
+    await settle()
+    expect(adapter.started).toEqual(['p1', 'p2'])
+
+    adapter.finishNext()
+    await settle()
+    adapter.finishNext()
+    for (const outcome of await Promise.all(pending)) admitted(outcome)
+    expect(adapter.started).toEqual(['p1', 'p2', 'p3'])
+  })
+
+  it('lets a refusal reach the spawns queued at the start gate before they spend one', async () => {
+    const adapter = new GatedAdapter({ spawns: ['concurrency'] })
+    const admission = control({ ceilings: { mock: 4 } })
+
+    const pending = ['p1', 'p2', 'p3'].map((id) => admission.admit(adapter, task(id)))
+    await settle()
+    adapter.finishNext() // p1 is refused, parking the harness
+    const outcomes = await Promise.all(pending)
+
+    expect(outcomes.map((o) => o.status)).toEqual(['retry', 'retry', 'retry'])
+    expect(adapter.started).toEqual(['p1'])
+    expect(admission.inFlight('mock')).toBe(0)
+  })
+
+  it('starts spawns together when the start gate is off', async () => {
+    const adapter = new GatedAdapter()
+    const admission = control({ ceilings: { mock: 4 }, serialStart: false })
+
+    const pending = ['p1', 'p2', 'p3'].map((id) => admission.admit(adapter, task(id)))
+    await settle()
+    expect(adapter.started).toEqual(['p1', 'p2', 'p3'])
+    for (let i = 0; i < 3; i += 1) adapter.finishNext()
+    for (const outcome of await Promise.all(pending)) admitted(outcome)
+  })
+
+  it('hands a freed slot to the highest-priority spawn, arrival order breaking ties', async () => {
+    const adapter = new MockAdapter()
+    const admission = control({ ceilings: { mock: 1 } })
+
+    const holder = await admission.admit(adapter, task('holder'))
+    if (holder.status !== 'admitted') throw new Error('expected admission')
+
+    const order: string[] = []
+    const queue = (id: string, priority: number) =>
+      admission.admit(adapter, task(id), { priority }).then((outcome) => {
+        order.push(id)
+        admitted(outcome)
+      })
+    const queued = [queue('leaf', 1), queue('spine', 5), queue('branch', 3), queue('twin', 5)]
+    await settle()
+    expect(order).toEqual([])
+
+    holder.release()
+    await Promise.all(queued)
+    expect(order).toEqual(['spine', 'twin', 'branch', 'leaf'])
+  })
+
+  it('opens the next run at a fresh discovered ceiling and recovers from there', async () => {
+    const adapter = new MockAdapter({ spawns: ['concurrency'] })
+    const first = control({ ceilings: { mock: 8 }, increaseAfter: 1 })
+    const refused = await first.admit(adapter, task('p1'))
+    expect(refused.status).toBe('retry')
+    expect(first.ceiling('mock')).toBe(4)
+    first.close()
+
+    // A later run against the same account, inside the freshness window.
+    clock.advance(60 * 60 * 1_000)
+    const second = control({ ceilings: { mock: 8 }, increaseAfter: 1 })
+    expect(second.ceiling('mock')).toBe(4)
+    // A hint, not a cap: clean spawns still probe back toward the configured value.
+    admitted(await second.admit(adapter, task('p2')))
+    expect(second.ceiling('mock')).toBe(5)
+  })
+
+  it('discards a discovered ceiling once it is stale, or once it has recovered', async () => {
+    const adapter = new MockAdapter({ spawns: ['concurrency'] })
+    const first = control({ ceilings: { mock: 8 } })
+    await first.admit(adapter, task('p1'))
+    first.close()
+
+    clock.advance(7 * 60 * 60 * 1_000) // past the six-hour default
+    const stale = control({ ceilings: { mock: 8 }, increaseAfter: 1 })
+    expect(stale.ceiling('mock')).toBe(8)
+    stale.close()
+
+    // Recovery clears the row too: a run that climbed back leaves no hint.
+    const again = new MockAdapter({ spawns: ['concurrency'] })
+    const throttled = control({ ceilings: { mock: 2 }, increaseAfter: 1 })
+    const outcome = await throttled.admit(again, task('p1'))
+    if (outcome.status === 'retry') clock.advance(outcome.wakeAt - clock.now() + 1)
+    admitted(await throttled.admit(again, task('p2')))
+    expect(throttled.ceiling('mock')).toBe(2)
+    throttled.close()
+    expect(control({ ceilings: { mock: 2 } }).ceiling('mock')).toBe(2)
+  })
+
+  it('never starts a run above its configured ceiling, whatever the hint says', async () => {
+    const adapter = new MockAdapter({ spawns: ['concurrency'] })
+    const first = control({ ceilings: { mock: 8 } })
+    await first.admit(adapter, task('p1'))
+    first.close()
+    expect(control({ ceilings: { mock: 2 } }).ceiling('mock')).toBe(2)
+  })
+
+  it('holds a login refusal for the whole harness until the operator says it is logged in', async () => {
+    const adapter = new MockAdapter({ spawns: ['unauthenticated'] })
+    const admission = control()
+
+    const first = await admission.admit(adapter, task('p1'))
+    expect(first.status).toBe('unauthenticated')
+    // Not a wait, and nothing to do with capacity.
+    expect(admission.wakeAt('mock')).toBeUndefined()
+    expect(admission.ceiling('mock')).toBe(4)
+    expect(admission.inFlight('mock')).toBe(0)
+
+    // Every later spawn is told the same thing without asking the vendor again.
+    expect((await admission.admit(adapter, task('p2'))).status).toBe('unauthenticated')
+    expect(adapter.spawned).toHaveLength(0)
+
+    admission.loggedIn('mock')
+    admitted(await admission.admit(adapter, task('p2')))
+    expect(adapter.spawned).toHaveLength(1)
   })
 
   it('rejects a harness with no configured ceiling', async () => {

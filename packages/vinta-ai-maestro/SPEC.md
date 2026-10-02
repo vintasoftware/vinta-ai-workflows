@@ -313,11 +313,13 @@ Adapters classify every spawn refusal rather than throwing:
 ```ts
 type SpawnOutcome =
   | { ok: true; session: AgentSession }
-  | { ok: false; kind: 'rate_limit' | 'concurrency' | 'quota' | 'transient' | 'fatal';
+  | { ok: false; kind: 'rate_limit' | 'concurrency' | 'quota' | 'transient' | 'unauthenticated' | 'fatal';
       retryAfter?: Date; message: string }
 ```
 
-Only `fatal` — a missing binary, a broken workflow, an unauthenticated CLI that preflight somehow missed — fails the node. Everything else returns it to the ready set.
+Only `fatal` — a missing binary, a broken workflow — fails the node. Every capacity kind returns it to the ready set.
+
+**A logged-out harness waits for a person, with no fallback.** `unauthenticated` is neither a failure nor a wait: no timer ends it and retrying only re-asks a vendor that already said no. The node parks in place (lane held, as a mid-pipeline refusal is) in `awaiting_human` on a question with two answers, `logged in` and `stop`. Nothing answers it automatically — no automatic attempt, no unattended retry — whatever `onFailure` says. The harness holds the refusal, so every later spawn on it asks the same question without spawning; the first `logged in` resumes every node waiting on that harness, and `stop` fails only the node it was given for, bypassing the retry policy. A login that did not take is refused again and asked again.
 
 **Resources are released before waiting — but only while the lane is still empty.** The rule splits on whether the node has produced anything yet:
 
@@ -329,6 +331,12 @@ These do not conflict. The dispatch-time deadlock is caused by nodes that have d
 Resuming in place needs the harness's session id (`AgentTask.resumeSessionId`), which is why `resume` is a declared capability rather than an optimization.
 
 **Per-harness admission control, adaptive.** Each harness has an effective in-flight ceiling, starting at its configured value. On a `concurrency` or `rate_limit` refusal the ceiling halves (floor 1); after a run of clean spawns it increments by one back toward the configured value. Additive-increase/multiplicative-decrease, because the real limit is undocumented, varies by account and plan, and changes under us — so it has to be discovered and re-discovered rather than configured.
+
+The discovered ceiling is kept per harness (`capacity_ceilings`, beside `capacity_waits`) as a **hint for the next run**, trusted for six hours: a run started soon after another was throttled opens at the width that worked rather than re-learning the limit by being refused. It is never above the configured value, additive increase still probes upward from it, and the row is dropped once the ceiling recovers. Past the window it is ignored — the limit belongs to the vendor, and a stale guess is worse than starting over.
+
+**One spawn starting at a time, per harness.** The ceiling bounds how many sessions run, not how many boot in the same instant, and CLIs booting together contend for local state (config, OAuth token refresh). A spawn waits until the one ahead of it has a session or a refusal; a refusal therefore parks every spawn queued behind it before any of them spends one.
+
+**Critical path first.** When spawns queue behind the ceiling, a freed slot goes to the node with the greatest height — the longest chain of nodes still in front of it — with arrival order breaking ties. At the configured ceiling nothing queues and this changes nothing; under throttling it is what decides the run's length. The plan itself is never rewritten to reduce parallelism: the graph states what *can* run together, admission decides what *does*.
 
 **Waiting is honest and durable.** Backoff is exponential with full jitter, except when the harness reports an actual reset time, in which case that time is used rather than guessed. A `quota` wait can last hours: such a node enters `waiting_on_capacity`, is rendered as such in the UI (not as an error), notifies the user once, and **journals its wake time** so a daemon restart resumes the wait rather than losing or re-firing it. Waiting nodes are never busy-polled — one timer per harness, not one per node.
 

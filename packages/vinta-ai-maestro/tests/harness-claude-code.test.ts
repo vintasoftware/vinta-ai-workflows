@@ -400,10 +400,12 @@ describe('spawn refusal classification', () => {
     expect(kindOf('/bin/sh: claude: command not found', 127)).toBe('fatal')
   })
 
-  it('calls a logged-out CLI fatal', () => {
-    expect(kindOf('Invalid API key · Please run /login')).toBe('fatal')
-    expect(kindOf('You are not logged in. Run claude and use /login')).toBe('fatal')
-    expect(kindOf('OAuth token has expired')).toBe('fatal')
+  // §6.1: a person logging in fixes this, and nothing else does — so it is
+  // neither `fatal` (which fails the subtree) nor a wait (which retries).
+  it('calls a logged-out CLI unauthenticated, for the operator', () => {
+    expect(kindOf('Invalid API key · Please run /login')).toBe('unauthenticated')
+    expect(kindOf('You are not logged in. Run claude and use /login')).toBe('unauthenticated')
+    expect(kindOf('OAuth token has expired')).toBe('unauthenticated')
   })
 
   it('calls an exhausted usage window quota, not fatal', () => {
@@ -428,6 +430,27 @@ describe('spawn refusal classification', () => {
       'quota',
     )
     expect(kindOf('Your limit resets at 15:00')).toBe('quota')
+  })
+
+  it('calls an organization spend cap quota, in the wordings the 2.1.274 binary carries', () => {
+    expect(
+      kindOf(
+        'API Error: 400 {"type":"error","error":{"type":"billing_error","message":"spend limit reached (daily; resets 2026-08-08 00:00 UTC)"}}',
+      ),
+    ).toBe('quota')
+    expect(kindOf('anthropic-ratelimit-unified-overage-disabled-reason: org_spend_cap_reached')).toBe(
+      'quota',
+    )
+    expect(kindOf('usage credit limit reached')).toBe('quota')
+
+    const refusal = classifySpawnFailure(
+      'spend limit reached (daily; resets 2026-08-08 00:00 UTC)',
+      1,
+      'phase-1',
+      { now: new Date('2026-08-07T10:00:00Z') },
+    )
+    expect(refusal.retryAfter?.toISOString()).toBe('2026-08-08T00:00:00.000Z')
+    expect(refusal.message).toContain('spend-limit-reached')
   })
 
   it('does not read a warning that a limit is near as a refusal', () => {
@@ -532,11 +555,11 @@ describe('spawn refusal classification', () => {
     expect(refusal.message.toLowerCase().includes('5f2c1b90')).toBe(false)
   })
 
-  it('never attaches a retry time to fatal, which is not a wait', () => {
+  it('never attaches a retry time to a login refusal, which is not a wait', () => {
     const refusal = classifySpawnFailure('not logged in; retry after 60 seconds', 1, 'n', {
       now: new Date(),
     })
-    expect(refusal.kind).toBe('fatal')
+    expect(refusal.kind).toBe('unauthenticated')
     expect(refusal.retryAfter).toBe(undefined)
   })
 })

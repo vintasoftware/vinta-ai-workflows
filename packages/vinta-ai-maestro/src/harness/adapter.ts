@@ -332,8 +332,9 @@ export interface PtyHandle {
 }
 
 /**
- * Why a spawn was refused. Every kind but `fatal` is a wait, not a failure:
- * the node releases its resources and returns to pending (§6.1).
+ * Why a spawn was refused. Every kind but `fatal`, `stale_session` and
+ * `unauthenticated` is a wait, not a failure: the node releases its resources
+ * and returns to pending (§6.1).
  */
 export type SpawnRefusalKind =
   | 'rate_limit'
@@ -358,6 +359,16 @@ export type SpawnRefusalKind =
    * and what it is looking at is something else.
    */
   | 'stale_session'
+  /**
+   * The CLI is not logged in, or its credentials were rejected.
+   *
+   * Not `fatal`, because nothing about the run is broken — a person logging
+   * in fixes it, and failing the node would throw away a subtree for want of a
+   * `/login`. Not a wait either, because no amount of time fixes it: there is
+   * no reset, and retrying only re-asks a vendor that already said no. So it
+   * is the one refusal that goes to the operator, with no fallback (§6.1).
+   */
+  | 'unauthenticated'
   | 'fatal'
 
 /**
@@ -368,7 +379,7 @@ export type SpawnRefusalKind =
  * here too because a *session* reports one now, and the harness boundary may
  * not import from the module that consumes it.
  */
-export type CapacityKind = Exclude<SpawnRefusalKind, 'fatal' | 'stale_session'>
+export type CapacityKind = Exclude<SpawnRefusalKind, 'fatal' | 'stale_session' | 'unauthenticated'>
 
 /**
  * A capacity refusal the vendor announced **inside a turn that had already

@@ -492,7 +492,7 @@ const SIGNATURES: readonly RefusalSignature[] = [
     pattern: /enoent|command not found|no such file|is not recognized/,
   },
   {
-    kind: 'fatal',
+    kind: 'unauthenticated',
     reason: 'not-authenticated',
     pattern:
       /providerautherror|not (logged in|authenticated)|auth login|unauthorized|forbidden|\b40[13]\b|invalid api key|authentication_error|oauth token (has )?expired|credentials? (not found|expired|invalid)/,

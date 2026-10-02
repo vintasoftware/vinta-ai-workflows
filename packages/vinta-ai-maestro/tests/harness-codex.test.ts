@@ -279,10 +279,12 @@ describe('spawn refusal classification', () => {
     expect(kindOf('/bin/sh: codex: command not found', 127)).toBe('fatal')
   })
 
-  it('calls a logged-out CLI fatal', () => {
-    expect(kindOf('Not logged in. Run `codex login`.')).toBe('fatal')
-    expect(kindOf('401 Unauthorized')).toBe('fatal')
-    expect(kindOf('OAuth token has expired')).toBe('fatal')
+  // §6.1: a person logging in fixes this, and nothing else does — so it is
+  // neither `fatal` (which fails the subtree) nor a wait (which retries).
+  it('calls a logged-out CLI unauthenticated, for the operator', () => {
+    expect(kindOf('Not logged in. Run `codex login`.')).toBe('unauthenticated')
+    expect(kindOf('401 Unauthorized')).toBe('unauthenticated')
+    expect(kindOf('OAuth token has expired')).toBe('unauthenticated')
   })
 
   it('calls a directory codex will not run in fatal, since waiting cannot fix it', () => {
@@ -373,11 +375,11 @@ describe('spawn refusal classification', () => {
     expect(classifySpawnFailure('429 rate limit', 1, 'phase-1', { now }).retryAfter).toBe(undefined)
   })
 
-  it('never attaches a retry time to fatal, which is not a wait', () => {
+  it('never attaches a retry time to a login refusal, which is not a wait', () => {
     const refusal = classifySpawnFailure('not logged in; retry after 60 seconds', 1, 'n', {
       now: new Date(),
     })
-    expect(refusal.kind).toBe('fatal')
+    expect(refusal.kind).toBe('unauthenticated')
     expect(refusal.retryAfter).toBe(undefined)
   })
 })
