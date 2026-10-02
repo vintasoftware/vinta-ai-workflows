@@ -64,6 +64,7 @@ import { openJournal } from '../src/journal/journal.ts'
 import { isWindows } from '../src/platform/platform.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 import { fakeCliFromSource } from './support/fake-cli.ts'
+import { WINDOWS_TIMING_RETRY } from './support/platform.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 
@@ -298,7 +299,9 @@ describe('attachPty against a fake binary', () => {
 // ---------------------------------------------------------------------------
 
 describe('interrupt → attach → detach → resume', () => {
-  it('carries the same session id through all four steps', async () => {
+  // Windows-flaky: failed on run 36964360767 (windows-latest), passed on the
+  // next commit, which changed nothing in the pty path.
+  it('carries the same session id through all four steps', WINDOWS_TIMING_RETRY, async () => {
     const adapter = new MockAdapter()
     const outcome = await adapter.spawn(TASK)
     expect(outcome.ok).toBe(true)

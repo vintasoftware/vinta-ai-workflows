@@ -70,6 +70,7 @@ import { ResourcePools } from '../src/resources/pools.ts'
 import { AgentLeaseBroker } from '../src/resources/agent-leases.ts'
 import { createScheduler, type Scheduler } from '../src/scheduler/index.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { WINDOWS_TIMING_RETRY } from './support/platform.ts'
 
 const HARNESS = 'claude-code'
 const RUN_ID = 'run-1'
@@ -1487,7 +1488,9 @@ describe('replay pages', () => {
     expect(EventFrameSchema.shape.events.safeParse(page.events).success).toBe(true)
   })
 
-  it('reads a run the daemon is not running — the journal is the only source', async () => {
+  // Windows-flaky: failed on run 35019878260 (windows-latest), passed on the
+  // next commit, which changed nothing in the daemon or the journal.
+  it('reads a run the daemon is not running — the journal is the only source', WINDOWS_TIMING_RETRY, async () => {
     const r = await rig()
     // A run from before the last restart: on disk, never registered.
     r.journal.createRun('run-history', makeWorkflow())
