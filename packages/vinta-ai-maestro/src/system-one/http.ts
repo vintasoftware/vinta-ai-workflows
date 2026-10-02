@@ -67,6 +67,14 @@ export class HttpSystemOneAdapter implements SystemOneAdapter {
     if (this.#apiKeyEnv !== undefined && this.#key === undefined) {
       return { ready: false, hint: `export ${this.#apiKeyEnv} before starting the daemon` }
     }
+    // Valid — an internal classifier may need no key — and the usual cause of
+    // an endpoint that answers every question with a 401. Said, not refused.
+    if (this.#apiKeyEnv === undefined) {
+      return {
+        ready: true,
+        warning: 'no api_key_env is configured, so requests carry no Authorization header',
+      }
+    }
     return { ready: true }
   }
 

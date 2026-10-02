@@ -40,6 +40,7 @@ import { commandInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import { isJudgeGate, type Workflow } from '../types.ts'
 import { JUDGED_HARNESSES, type AgentPermission } from '../harness/permissions.ts'
 import type { SystemOne } from '../system-one/config.ts'
+import { PROBE_QUESTION } from '../system-one/adapter.ts'
 
 const run = promisify(execFile)
 
@@ -769,13 +770,42 @@ export async function checkSystemOne(
 ): Promise<CheckResult[]> {
   const checks: CheckResult[] = []
   if (systemOne !== undefined) {
+    const label = `System One classifier (${systemOne.adapter.id})`
     const ready = await systemOne.adapter.preflight()
-    checks.push({
-      id: 'system-one',
-      label: `System One classifier (${systemOne.adapter.id})`,
-      status: ready.ready ? 'pass' : 'fail',
-      ...(ready.ready || ready.hint === undefined ? {} : { remedy: ready.hint }),
-    })
+    if (!ready.ready) {
+      checks.push({
+        id: 'system-one',
+        label,
+        status: 'fail',
+        ...(ready.hint === undefined ? {} : { remedy: ready.hint }),
+      })
+    } else if (systemOne.probe === false) {
+      checks.push({ id: 'system-one', label: `${label}, not probed`, status: 'pass' })
+    } else {
+      // One real round trip, with a synthetic question. The offline check
+      // cannot see a key the endpoint rejects or a URL nobody answers on, and
+      // those otherwise surface as every judgement of the run coming back
+      // unanswered. The refusal names a status, never a body (`http.ts`).
+      const probed = await systemOne.adapter.classify(PROBE_QUESTION)
+      checks.push(
+        probed.ok
+          ? { id: 'system-one', label: `${label}, answered in ${probed.latencyMs} ms`, status: 'pass' }
+          : {
+              id: 'system-one',
+              label: `${label} did not answer a probe: ${probed.message}`,
+              status: 'fail',
+              remedy: 'check the adapter URL and its key, or set "probe": false to start without asking',
+            },
+      )
+    }
+    if (ready.warning !== undefined) {
+      checks.push({
+        id: 'system-one-config',
+        label: `System One classifier: ${ready.warning}`,
+        status: 'warn',
+        remedy: 'add "api_key_env" to the adapter block if the classifier needs a key',
+      })
+    }
   }
 
   const judged = Object.entries(workflow.gates).filter(([, gate]) => isJudgeGate(gate))

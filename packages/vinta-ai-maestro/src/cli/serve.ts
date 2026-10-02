@@ -155,6 +155,8 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  reach it, the environment variable holding its key, and which
                  built-in judges consult it (gate triage, the permission
                  judge). A JSON file on this machine, never part of the plan.
+                 Before each run it is asked one synthetic question, so a bad
+                 key or URL stops the run at once; "probe": false skips that.
                  Without it a plan's judge gates answer as unavailable. With it,
                  diffs, gate logs and commands are sent to that classifier —
                  point it at a local one where that must not happen.
