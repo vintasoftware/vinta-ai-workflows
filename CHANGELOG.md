@@ -207,6 +207,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`plan-feature` AI model tiers pick up the late-September releases.**
+  `plan-feature/resources/ai-models.yaml` now cites `claude-sonnet-5-5`
+  (tier 2, was `claude-sonnet-5`) and `gpt-6.1-sol` (tier 3, was
+  `gpt-6-sol`). The retired `gemini-3-pro` (tiers 3–4) is replaced by
+  `gemini-3.1-pro-preview`, the only Gemini Pro id currently listed. Tier
+  *placement* is unchanged. **Consumers**: re-sync to pick up the refreshed
+  model suggestions.
+
 - **`vinta-ai-maestro run` starts the run as a background job and returns.**
   The run no longer needs the terminal that started it, or any terminal: close
   it and the run carries on. `run` prints the run id and the commands that
