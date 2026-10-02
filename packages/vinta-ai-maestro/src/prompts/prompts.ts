@@ -56,7 +56,7 @@ import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import { AGENT_ROLES, type AgentRole, type Chore, type ChoreTiming, type Node, type Workflow } from '../types.ts'
+import { AGENT_ROLES, isJudgeGate, type AgentRole, type Chore, type ChoreTiming, type Node, type Workflow } from '../types.ts'
 import { GATE_TRIGGERS, LEDGER_FENCE, parseLedger, viewLedger, type LedgerView } from './ledger.ts'
 import { PASS_TWO, REVIEW_STANDARD } from './review-standard.ts'
 
@@ -988,8 +988,22 @@ than being part of it.`,
   ]
 }
 
+/**
+ * The node's gates an agent can run through the verb — its command gates.
+ *
+ * A judge gate is left out of every list an agent reads (§17.4): the verb
+ * refuses it, because its question is about the finished phase, and a list
+ * naming it would send the agent into a refusal it can do nothing about.
+ */
+function agentGates(materials: Continuation): string[] {
+  return materials.node.gates.filter((id) => {
+    const gate = materials.workflow.gates[id]
+    return gate !== undefined && !isJudgeGate(gate)
+  })
+}
+
 function gateList(materials: Continuation): string[] {
-  const gates = materials.node.gates.filter((id) => materials.workflow.gates[id] !== undefined)
+  const gates = agentGates(materials)
   return gates.length === 0
     ? ['   - the repository’s own type/build check and its test suite.']
     : gates.map((id) => `   - \`vinta-ai-maestro gate ${id}\``)
@@ -1019,7 +1033,7 @@ function gateReport(materials: Continuation): string[] {
 
 /** Whether this node has declared gates to point the verb at. */
 const hasGates = (materials: Continuation): boolean =>
-  materials.node.gates.some((id) => materials.workflow.gates[id] !== undefined)
+  agentGates(materials).length > 0
 
 /**
  * How to run a gate, and why by id rather than by command.
@@ -1038,7 +1052,7 @@ const hasGates = (materials: Continuation): boolean =>
  * misread.
  */
 function gateBlock(materials: Continuation): string[] {
-  const first = materials.node.gates.find((id) => materials.workflow.gates[id] !== undefined)
+  const first = agentGates(materials)[0]
   if (first === undefined) return []
 
   return [

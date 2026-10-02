@@ -43,7 +43,7 @@ import { runGateCached, type GateCache } from '../gates/cache.ts'
 import { TIMEOUT_EXIT } from '../gates/runner.ts'
 import type { Journal } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
-import type { Workflow } from '../types.ts'
+import { isJudgeGate, type Workflow } from '../types.ts'
 import type { ResourcePools } from './pools.ts'
 
 /** The lane a node was assigned, as the host already describes one. */
@@ -229,6 +229,9 @@ export class AgentGateBroker {
 
     const gate = this.#workflow.gates[gateId]
     if (gate === undefined) throw new AgentGateRefusal('unknown_gate')
+    // A judge gate's question is about the finished phase, and asking it of a
+    // tree mid-turn spends a classifier call on a diff that is about to move.
+    if (isJudgeGate(gate)) throw new AgentGateRefusal('judge_gate')
 
     // The node holds `lane` from its first admission to its last turn
     // (`Scheduler`'s `laneLease`). Acquiring it again on the node's own behalf

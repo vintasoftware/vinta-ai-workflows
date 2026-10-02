@@ -53,6 +53,7 @@ import {
   monitorFactory,
   toBind,
   toRetryAfterMs,
+  toSystemOne,
   untilSignalled,
 } from './serve.ts'
 
@@ -115,6 +116,7 @@ export async function runCommand(
         host: { type: 'string' },
         port: { type: 'string' },
         permission: { type: 'string' },
+        'system-one': { type: 'string' },
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
         'retry-after': { type: 'string' },
@@ -154,6 +156,9 @@ export async function runCommand(
     return USAGE
   }
   const permission = requested ?? DEFAULT_PERMISSION
+
+  const systemOne = toSystemOne(parsed.values['system-one'], permission, io)
+  if (systemOne === null) return USAGE
 
   // Rejected rather than defaulted, for the reason `--permission` is: a typo
   // that quietly became `stop` would look like the flag worked, and the
@@ -240,6 +245,8 @@ export async function runCommand(
       // the pool cannot disagree about whether these lanes are being adopted.
       ...(resumeId === undefined ? {} : { resumeRunId: resumeId }),
       ...(deps.doctor === undefined ? {} : { doctor: deps.doctor }),
+      permission,
+      ...(systemOne === undefined ? {} : { systemOne }),
     })
     if (!preflight.ok) {
       resumeJournal?.close()
@@ -313,6 +320,7 @@ export async function runCommand(
       daemon,
       repoPath: bind.repoPath,
       permission,
+      ...(systemOne === undefined ? {} : { systemOne }),
       logger: log,
       ...(resumeId === undefined ? {} : { resume: true }),
       ...(onFailure === undefined ? {} : { onFailure }),

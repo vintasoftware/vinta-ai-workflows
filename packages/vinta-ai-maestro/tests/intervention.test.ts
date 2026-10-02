@@ -31,10 +31,14 @@ import {
 import { serializeInterventionSchema } from '../src/intervention/schema.ts'
 import { allowedVerbs } from '../src/intervention/intervene.ts'
 import type { NodeStatus, StoredEvent } from '../src/journal/events.ts'
-import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { WorkflowSchema, isJudgeGate, type Gate, type Workflow } from '../src/types.ts'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+/** A gate's command, or undefined for a judge gate or a missing one. */
+const commandOf = (gate: Gate | undefined): string | undefined =>
+  gate === undefined || isJudgeGate(gate) ? undefined : gate.cmd
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -82,9 +86,9 @@ describe('what the monitor may change', () => {
     const result = applyIntervention(workflow(), proposal([retune('pytest --reuse-db')]))
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error('refused')
-    expect(result.workflow.gates['unit']?.cmd).toBe('pytest --reuse-db')
+    expect(commandOf(result.workflow.gates['unit'])).toBe('pytest --reuse-db')
     // Everything else is untouched: this is a gate command, not a plan edit.
-    expect(result.workflow.gates['lint']?.cmd).toBe('ruff check .')
+    expect(commandOf(result.workflow.gates['lint'])).toBe('ruff check .')
     expect(result.workflow.nodes).toEqual(workflow().nodes)
   })
 
@@ -178,7 +182,7 @@ describe('what the monitor may change', () => {
     const result = applyIntervention(wf, proposal([retune('pytest -m "not slow" --reuse-db')]))
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error('refused')
-    expect(result.workflow.gates['unit']?.cmd).toBe('pytest -m "not slow" --reuse-db')
+    expect(commandOf(result.workflow.gates['unit'])).toBe('pytest -m "not slow" --reuse-db')
   })
 
   it('refuses a model that is not on the run’s roster', () => {
@@ -222,7 +226,7 @@ describe('what the monitor may change', () => {
     if (!result.ok) throw new Error('refused')
     expect(result.applied).toHaveLength(1)
     expect(result.refused[0]?.refusal.code).toBe('unknown_gate')
-    expect(result.workflow.gates['unit']?.cmd).toBe('pytest --reuse-db')
+    expect(commandOf(result.workflow.gates['unit'])).toBe('pytest --reuse-db')
   })
 
   it('refuses a proposal that would change nothing', () => {

@@ -98,6 +98,18 @@ export const AgentGateRequestSchema = z.strictObject({
   holderNode: z.string().min(1),
 })
 
+/**
+ * §17.6 — one tool call a `judged` session's hook asks about. `input` is the
+ * call's own input, repository-shaped content, and is passed to the classifier
+ * and nowhere else.
+ */
+export const PermissionRequestSchema = z.strictObject({
+  holderNode: z.string().min(1),
+  tool: z.string().min(1),
+  input: z.unknown(),
+  cwd: z.string(),
+})
+
 /** §9.1 — the answer lands in the guard context as `human.answer`. */
 export const AnswerRequestSchema = z.strictObject({
   answer: z.union([z.string(), z.number(), z.boolean(), z.null()]),

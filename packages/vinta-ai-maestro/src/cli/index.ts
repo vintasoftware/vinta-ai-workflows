@@ -23,6 +23,7 @@ import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
 import { SIMULATE_USAGE, simulateCommand } from './simulate.ts'
 import { WITH_USAGE, withCommand } from './with.ts'
+import { judgeHookCommandMain } from '../system-one/hook.ts'
 
 export const HELP = `vinta-ai-maestro — code-orchestrated parallel execution of a plan.
 
@@ -42,6 +43,8 @@ usage: vinta-ai-maestro <command> [options]
   with <resource> -- <cmd>   Run a command while holding a live run's resource.
   gate <gate-id>             Run one of a live run's declared gates against this
                              turn's lane, leased and cached by the daemon.
+  judge-hook                 Internal: the safety hook --permission judged
+                             installs. Reads one tool call on stdin.
 
   -h, --help                 Print this.
 
@@ -98,6 +101,13 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await withCommand(rest, io)
     case 'gate':
       return await gateCommand(rest, io)
+    case 'judge-hook':
+      return await judgeHookCommandMain({
+        stdin: readStdin,
+        out: io.out,
+        err: io.err,
+        env: process.env,
+      })
     default:
       // The unknown word is echoed back because a typo is the likely cause and
       // seeing it is how the reader spots one. It is an argument, never a path
@@ -107,6 +117,12 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       io.err(HELP)
       return USAGE
   }
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = []
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk as Buffer))
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 export { OK, FAILED, USAGE, processIo, type Io } from './io.ts'

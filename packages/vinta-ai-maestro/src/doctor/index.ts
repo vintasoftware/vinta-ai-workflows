@@ -37,7 +37,9 @@ import { measureBytes, probePoolDisk } from '../lanes/disk.ts'
 import type { ProjectSpec } from '../lanes/pool.ts'
 import { readSummary, resetPlan } from '../lanes/summary.ts'
 import { commandInvocation, spawnOptionsFor } from '../platform/platform.ts'
-import type { Workflow } from '../types.ts'
+import { isJudgeGate, type Workflow } from '../types.ts'
+import { JUDGED_HARNESSES, type AgentPermission } from '../harness/permissions.ts'
+import type { SystemOne } from '../system-one/config.ts'
 
 const run = promisify(execFile)
 
@@ -90,6 +92,10 @@ export interface DoctorOptions {
    */
   readonly resumeRunId?: string
   readonly bins?: DoctorBins
+  /** The operator's `--permission`. Only `judged` changes an answer here. */
+  readonly permission?: AgentPermission
+  /** The operator's `--system-one` (§17). */
+  readonly systemOne?: SystemOne
 }
 
 const PROBE_TIMEOUT_MS = 10_000
@@ -742,6 +748,73 @@ async function checkBriefs(
   return results
 }
 
+/**
+ * §17: whether the classifier the operator configured can be asked anything,
+ * and whether what the plan and the flags expect of it adds up.
+ *
+ * Three answers, kept apart because their remedies are:
+ *
+ * - **the classifier itself** — configured and with its key present. Offline:
+ *   no question is sent, so a doctor run costs nothing and leaks nothing.
+ * - **the plan's judge gates without a classifier** — a warning where every one
+ *   is advisory, a failure where one says `on_unavailable: fail`, because that
+ *   phase can then never pass.
+ * - **`judged`** — it needs a permission judge, and every harness the plan
+ *   dispatches to must be able to host the hook.
+ */
+export async function checkSystemOne(
+  workflow: Workflow,
+  systemOne: SystemOne | undefined,
+  permission: AgentPermission | undefined,
+): Promise<CheckResult[]> {
+  const checks: CheckResult[] = []
+  if (systemOne !== undefined) {
+    const ready = await systemOne.adapter.preflight()
+    checks.push({
+      id: 'system-one',
+      label: `System One classifier (${systemOne.adapter.id})`,
+      status: ready.ready ? 'pass' : 'fail',
+      ...(ready.ready || ready.hint === undefined ? {} : { remedy: ready.hint }),
+    })
+  }
+
+  const judged = Object.entries(workflow.gates).filter(([, gate]) => isJudgeGate(gate))
+  if (judged.length > 0 && systemOne === undefined) {
+    const blocking = judged.filter(([, gate]) => isJudgeGate(gate) && gate.judge.on_unavailable === 'fail')
+    checks.push({
+      id: 'system-one-gates',
+      label:
+        blocking.length > 0
+          ? `judge gates ${blocking.map(([id]) => id).join(', ')} fail without a classifier`
+          : `judge gates ${judged.map(([id]) => id).join(', ')} will pass unasked`,
+      status: blocking.length > 0 ? 'fail' : 'warn',
+      remedy: 'pass --system-one <config.json>',
+    })
+  }
+
+  if (permission === 'judged') {
+    const unhostable = referencedHarnesses(workflow).filter((id) => !JUDGED_HARNESSES.includes(id))
+    if (systemOne?.judges.permission === undefined) {
+      checks.push({
+        id: 'judged-permission',
+        label: '--permission judged has no permission judge to ask',
+        status: 'fail',
+        remedy: 'add judges.permission to the --system-one config',
+      })
+    } else if (unhostable.length > 0) {
+      checks.push({
+        id: 'judged-permission',
+        label: `--permission judged cannot be hosted by ${unhostable.join(', ')}`,
+        status: 'fail',
+        remedy: `run with --permission auto, or move those phases to ${JUDGED_HARNESSES.join(', ')}`,
+      })
+    } else {
+      checks.push({ id: 'judged-permission', label: '--permission judged', status: 'pass' })
+    }
+  }
+  return checks
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const { workflow, repoPath } = options
   const gitBin = options.bins?.git ?? 'git'
@@ -778,8 +851,11 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       heldBranches(),
     ])
 
+  const systemOne = await checkSystemOne(workflow, options.systemOne, options.permission)
+
   const checks = [
     ...harnesses,
+    ...systemOne,
     git,
     worktrees,
     compose,

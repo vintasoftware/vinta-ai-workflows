@@ -85,8 +85,16 @@ import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
-import { readFixerReport, readVerdict } from '../prompts/index.ts'
-import type { Node, Workflow } from '../types.ts'
+import { readFixerReport, readVerdict, resolveBrief } from '../prompts/index.ts'
+import { isJudgeGate, type CommandGate, type JudgeGate, type Node, type Workflow } from '../types.ts'
+import type { SystemOneJudge } from '../journal/events.ts'
+import type { SystemOne } from '../system-one/config.ts'
+import {
+  judgeCacheKey,
+  runJudgeGate,
+  triageGateFailure,
+  type Judgement,
+} from '../system-one/judges.ts'
 import {
   composePlanPrBody,
   composePrBody,
@@ -140,6 +148,12 @@ export interface RunExecutorOptions {
   readonly defaultVerdict?: 'pass' | 'fail'
   /** Injected in tests, and on a platform with no notification channel. */
   readonly notifier?: Notifier
+  /**
+   * The operator's classifier (§17). Absent when the run was started without
+   * `--system-one`: judge gates then answer as unavailable, and no built-in
+   * judge runs.
+   */
+  readonly systemOne?: SystemOne
 }
 
 /** How many transcript entries back to look for the verdict or the fixer's block. */
@@ -369,13 +383,70 @@ export class RunEffectExecutor implements EffectExecutor {
     for (const gateId of gateIds) {
       const gate = this.#workflow.gates[gateId]
       if (gate === undefined) continue
+      const logPath = this.#options.journal.gateLogPath(this.#options.runId, nodeId, gateId)
 
-      const { result, cached } = await this.#gate(gateId, lane, {
+      let { result, cached } = isJudgeGate(gate)
+        ? await this.#judgeGate(nodeId, gateId, gate, lane, logPath)
+        : await this.#commandGate(nodeId, gateId, gate, lane, logPath)
+      let exitCode = this.#recordGate(nodeId, gateId, result, cached)
+
+      // §17.5: a red command gate the classifier calls flaky or environmental
+      // is run again before a fixer is spent on it. Only a fresh failure: a
+      // cached one is a verdict this tree already earned, reruns included.
+      let triage: string | undefined
+      const triageConfig = this.#options.systemOne?.judges.gate_triage
+      const adapter = this.#options.systemOne?.adapter
+      if (
+        !isJudgeGate(gate) &&
+        result.status === 'failed' &&
+        !cached &&
+        triageConfig !== undefined &&
+        adapter !== undefined
+      ) {
+        for (let rerun = 0; rerun < triageConfig.max_reruns; rerun += 1) {
+          const sorted = await triageGateFailure({ config: triageConfig, adapter, logPath: result.logPath })
+          this.#judged(nodeId, 'gate_triage', gateId, sorted.judgement)
+          triage = sorted.label ?? triage
+          if (!sorted.rerun) break
+          ;({ result, cached } = await this.#commandGate(nodeId, gateId, gate, lane, logPath, true))
+          exitCode = this.#recordGate(nodeId, gateId, result, cached)
+          if (result.status !== 'failed') break
+        }
+      }
+
+      last = {
+        id: gateId,
+        exit_code: exitCode,
+        status: result.status,
+        cached,
+        log_ref: result.logPath,
+        ...(triage === undefined ? {} : { triage }),
+      }
+      // Declaration order, and the first red gate is the answer: running the
+      // rest costs the most contended pool in the system to learn nothing.
+      if (exitCode !== 0) break
+    }
+    return { facts: { gate: last } }
+  }
+
+  /** A command gate, in the node's lane, with the cache in front. */
+  async #commandGate(
+    nodeId: string,
+    gateId: string,
+    gate: CommandGate,
+    lane: ExecutorLane,
+    logPath: string,
+    rerun = false,
+  ): Promise<{ readonly result: GateResult; readonly cached: boolean }> {
+    return await this.#gate(
+      gateId,
+      lane,
+      {
         gateId,
         gate,
         cwd: lane.path,
         env: lane.env,
-        logPath: this.#options.journal.gateLogPath(this.#options.runId, nodeId, gateId),
+        logPath,
         // At the spawn, not here: the scheduler already holds this gate's
         // pools, but the cache sits in between and a hit must not announce a
         // start it never made.
@@ -387,67 +458,9 @@ export class RunEffectExecutor implements EffectExecutor {
             payload: { gate: gateId },
           })
         },
-      })
-      const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
-      // The result reaches the journal; the output does not. §13.6's
-      // missing-dependency finding needs to know that *this* gate failed and
-      // later passed, which is a fact about ids and an exit code — the lines
-      // the gate printed stay in `log_ref`'s file, and nothing here reads them.
-      // The duration rides along for the same reason and is the same kind of
-      // fact: a number the runner measured, about the gate and not about what
-      // it printed. A cached hit reports the duration of the run that filled
-      // the cache, which is what makes a cheap hit distinguishable from a
-      // cheap gate.
-      this.#options.journal.append({
-        runId: this.#options.runId,
-        nodeId,
-        type: 'gate_result',
-        payload: {
-          gate: gateId,
-          exit_code: exitCode,
-          status: result.status,
-          duration_ms: result.durationMs,
-          cached,
-          ...(result.timeout === undefined
-            ? {}
-            : {
-                timeout: {
-                  quiet_ms: result.timeout.quietMs,
-                  output_bytes: result.timeout.outputBytes,
-                  ...(result.timeout.load1m === undefined
-                    ? {}
-                    : { load_1m: result.timeout.load1m }),
-                  cpus: result.timeout.cpus,
-                },
-              }),
-        },
-      })
-      // And again in the node's transcript, which is where somebody reading
-      // what happened to this phase actually looks. The gates were the one
-      // thing missing from it: four agents' output in order, and no sign of
-      // the thing that judged them. Identifiers and an exit code only — the
-      // gate's output stays in `logPath`'s file, which the node endpoint
-      // already serves (§11).
-      this.#options.journal.appendTranscript(this.#options.runId, nodeId, {
-        type: 'gate_run',
-        gate: gateId,
-        exitCode,
-        status: result.status,
-        cached,
-        by: { role: GATE_ROLE },
-      })
-      last = {
-        id: gateId,
-        exit_code: exitCode,
-        status: result.status,
-        cached,
-        log_ref: result.logPath,
-      }
-      // Declaration order, and the first red gate is the answer: running the
-      // rest costs the most contended pool in the system to learn nothing.
-      if (exitCode !== 0) break
-    }
-    return { facts: { gate: last } }
+      },
+      rerun,
+    )
   }
 
   /**
@@ -455,23 +468,151 @@ export class RunEffectExecutor implements EffectExecutor {
    * the module comment. A hit never reaches the runner at all, which is the
    * point: the scheduler already holds the pools, but a real run's cost is the
    * gate command, not the lease.
+   *
+   * `rerun` skips the lookup — a triage rerun (§17.5) exists to ask the same
+   * tree again, and the cache would answer with the failure it is doubting —
+   * and still stores, so the rerun's verdict is the one the next lookup gets.
    */
   async #gate(
     gateId: string,
     lane: ExecutorLane,
     options: Omit<RunGateOptions, 'pools'>,
+    rerun = false,
   ): Promise<{ readonly result: GateResult; readonly cached: boolean }> {
     const cache = this.#options.cache
     if (cache === undefined) return { result: await executeGate(options), cached: false }
 
     const treeHash = laneTreeHash(lane.path)
-    if (this.#options.noCache !== true) {
+    if (this.#options.noCache !== true && !rerun) {
       const hit = cache.lookup(gateId, treeHash, options.gate.cmd)
       if (hit !== undefined) return { result: hit, cached: true }
     }
     const result = await executeGate(options)
     cache.store(treeHash, options.gate.cmd, result)
     return { result, cached: false }
+  }
+
+  /**
+   * A judge gate (§17.4): the lane's diff, asked of the operator's classifier.
+   *
+   * Cached on the same key shape as a command gate, with the resolved question
+   * and the adapter standing in for the command. Only an *answered* question is
+   * stored: an unavailable classifier is a fact about the network, not about
+   * the tree, and caching it would make one outage that tree's verdict.
+   */
+  async #judgeGate(
+    nodeId: string,
+    gateId: string,
+    gate: JudgeGate,
+    lane: ExecutorLane,
+    logPath: string,
+  ): Promise<{ readonly result: GateResult; readonly cached: boolean }> {
+    const { judge } = gate
+    const question =
+      judge.question ??
+      resolveBrief(lane.path, nodeId, judge.question_ref as string, `gates.${gateId}.judge.question_ref`)
+    const adapter = this.#options.systemOne?.adapter
+    const cache = this.#options.cache
+    const key = judgeCacheKey(judge, question, adapter?.id ?? 'none')
+    const treeHash = cache === undefined ? undefined : laneTreeHash(lane.path)
+
+    if (cache !== undefined && treeHash !== undefined && this.#options.noCache !== true) {
+      const hit = cache.lookup(gateId, treeHash, key)
+      if (hit !== undefined) return { result: hit, cached: true }
+    }
+
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId,
+      type: 'gate_started',
+      payload: { gate: gateId },
+    })
+    const ran = await runJudgeGate({
+      gateId,
+      judge,
+      question,
+      lanePath: lane.path,
+      base: this.#row(nodeId)?.base_branch ?? this.#options.integrator.base(nodeId).branch,
+      logPath,
+      adapter,
+    })
+    this.#judged(nodeId, 'gate', gateId, ran.judgement)
+    if (cache !== undefined && treeHash !== undefined && ran.judgement.outcome === 'answered') {
+      cache.store(treeHash, key, ran.result)
+    }
+    return { result: ran.result, cached: false }
+  }
+
+  /**
+   * Journals one gate's verdict and returns the exit code a guard reads.
+   *
+   * The result reaches the journal; the output does not. §13.6's
+   * missing-dependency finding needs to know that *this* gate failed and later
+   * passed, which is a fact about ids and an exit code — the lines the gate
+   * printed stay in `log_ref`'s file, and nothing here reads them. The duration
+   * rides along for the same reason and is the same kind of fact: a number the
+   * runner measured, about the gate and not about what it printed. A cached hit
+   * reports the duration of the run that filled the cache, which is what makes
+   * a cheap hit distinguishable from a cheap gate.
+   */
+  #recordGate(nodeId: string, gateId: string, result: GateResult, cached: boolean): number {
+    const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId,
+      type: 'gate_result',
+      payload: {
+        gate: gateId,
+        exit_code: exitCode,
+        status: result.status,
+        duration_ms: result.durationMs,
+        cached,
+        ...(result.timeout === undefined
+          ? {}
+          : {
+              timeout: {
+                quiet_ms: result.timeout.quietMs,
+                output_bytes: result.timeout.outputBytes,
+                ...(result.timeout.load1m === undefined ? {} : { load_1m: result.timeout.load1m }),
+                cpus: result.timeout.cpus,
+              },
+            }),
+      },
+    })
+    // And again in the node's transcript, which is where somebody reading
+    // what happened to this phase actually looks. The gates were the one
+    // thing missing from it: four agents' output in order, and no sign of
+    // the thing that judged them. Identifiers and an exit code only — the
+    // gate's output stays in `logPath`'s file, which the node endpoint
+    // already serves (§11).
+    this.#options.journal.appendTranscript(this.#options.runId, nodeId, {
+      type: 'gate_run',
+      gate: gateId,
+      exitCode,
+      status: result.status,
+      cached,
+      by: { role: GATE_ROLE },
+    })
+    return exitCode
+  }
+
+  /** One `system_one_judged` row. Labels, scores and ids — never what was judged. */
+  #judged(nodeId: string, judge: SystemOneJudge, subject: string, judgement: Judgement): void {
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId,
+      type: 'system_one_judged',
+      payload: {
+        judge,
+        subject,
+        adapter: this.#options.systemOne?.adapter.id ?? null,
+        outcome: judgement.outcome,
+        decision: judgement.decision,
+        ...(judgement.top === undefined ? {} : { top: judgement.top }),
+        ...(judgement.score === undefined ? {} : { score: judgement.score }),
+        ...(judgement.latencyMs === undefined ? {} : { latency_ms: judgement.latencyMs }),
+      },
+    })
   }
 
   // -------------------------------------------------------------------------

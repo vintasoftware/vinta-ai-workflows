@@ -200,6 +200,22 @@ export interface DaemonRun {
    * refuses an amendment that would need one rather than half-applying it.
    */
   readonly amend?: AmendRunner
+  /**
+   * §17.6's judge, for a run started with `--permission judged`. Absent
+   * otherwise, and the endpoint then refuses — which a judged hook reads as a
+   * denial, never as permission.
+   */
+  readonly permissionJudge?: PermissionJudgePort
+}
+
+/** What the daemon asks on a judged session's behalf. The input never leaves the call. */
+export interface PermissionJudgePort {
+  judge(request: {
+    readonly holderNode: string
+    readonly tool: string
+    readonly input: unknown
+    readonly cwd: string
+  }): Promise<{ readonly allow: boolean; readonly reason: string }>
 }
 
 /** Raised by `runControl` for a §9 verb the host did not supply. */

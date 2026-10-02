@@ -57,6 +57,7 @@ import { OpencodeAdapter } from '../src/harness/opencode.ts'
 import { EventPageSchema, NodeChangesSchema, StartRunResponseSchema } from '../src/daemon/schemas.ts'
 import { PtyServerFrameSchema } from '../src/daemon/pty-frames.ts'
 import type {
+  PermissionJudgePort,
   RunStartOutcome,
   RunStartPort,
   RunStartRequest,
@@ -1107,6 +1108,55 @@ describe('gates run for an agent', () => {
 
     expect(result.status).toBe(501)
     expect(result.body).toMatchObject({ error: 'gates_unavailable' })
+  })
+})
+
+describe('POST /api/runs/:runId/permission (§17.6)', () => {
+  const register = (r: Awaited<ReturnType<typeof rig>>, judge?: PermissionJudgePort): void => {
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      ...(judge === undefined ? {} : { permissionJudge: judge }),
+    })
+  }
+
+  it('relays the judge for a node of the run', async () => {
+    const r = await rig()
+    const asked: unknown[] = []
+    register(r, {
+      judge: async (request) => {
+        asked.push(request)
+        return { allow: false, reason: 'judged unsafe' }
+      },
+    })
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/permission`, {
+      method: 'POST',
+      body: { holderNode: 'a', tool: 'Bash', input: { command: 'rm -rf ~' }, cwd: '/lane' },
+    })
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({ allow: false, reason: 'judged unsafe' })
+    expect(asked).toEqual([{ holderNode: 'a', tool: 'Bash', input: { command: 'rm -rf ~' }, cwd: '/lane' }])
+  })
+
+  it('refuses a node that is not the run’s, and a run with no judge', async () => {
+    const r = await rig()
+    register(r, { judge: async () => ({ allow: true, reason: '' }) })
+    const ghost = await call(r.daemon, `/api/runs/${RUN_ID}/permission`, {
+      method: 'POST',
+      body: { holderNode: 'ghost', tool: 'Bash', input: null, cwd: '' },
+    })
+    expect(ghost.status).toBe(400)
+
+    const bare = await rig()
+    register(bare)
+    const none = await call(bare.daemon, `/api/runs/${RUN_ID}/permission`, {
+      method: 'POST',
+      body: { holderNode: 'a', tool: 'Bash', input: null, cwd: '' },
+    })
+    expect(none.status).toBe(501)
+    expect(none.body).toMatchObject({ error: 'judge_unavailable' })
   })
 })
 

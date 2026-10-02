@@ -63,6 +63,7 @@ import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
   AgentGateRequestSchema,
+  PermissionRequestSchema,
   AgentLeaseRequestSchema,
   AnswerRequestSchema,
   HumanQuestionSchema,
@@ -603,6 +604,34 @@ export function createApi(options: ApiOptions): Hono {
       // have deadlocked against the lane the node is holding.
       return fail(c, 409, error instanceof AgentGateRefusal ? error.code : 'gate_unavailable')
     }
+  })
+
+  /**
+   * §17.6 — a `judged` session's hook asking whether one tool call may run.
+   *
+   * Every refusal here is a denial on the hook's side, by construction: it
+   * reads anything but a `200` with a boolean as "no". So the codes only have
+   * to say *why* for the transcript, never to be safe.
+   */
+  app.post('/api/runs/:runId/permission', async (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    if (run.permissionJudge === undefined) return fail(c, 501, 'judge_unavailable')
+
+    const body = await readBody(c, PermissionRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    if (!journal.nodes(runId).some((node) => node.node_id === body.value.holderNode)) {
+      return fail(c, 400, 'invalid_holder')
+    }
+    const decided = await run.permissionJudge.judge({
+      holderNode: body.value.holderNode,
+      tool: body.value.tool,
+      input: body.value.input,
+      cwd: body.value.cwd,
+    })
+    return c.json({ allow: decided.allow, reason: decided.reason })
   })
 
   app.get('/api/runs/:runId/nodes/:nodeId', (c) => {

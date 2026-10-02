@@ -637,13 +637,16 @@ function readAccessArgs(
   roots: readonly string[],
   lane: string,
   settingsDir: string,
-): readonly string[] {
+  judgeHook: JudgeHook | undefined,
+): readonly string[] | null {
   const grant: ReadGrant = { roots, lane }
   const dirs = roots.length === 0 ? [] : addDirArgs(grant)
 
   // `auto` is the only mode that allows the shell, and the allowance lives in
   // this file rather than in the grant — see the paragraph above.
   const allow = permission === 'auto' ? ['Bash'] : []
+  // `judged` keeps the sibling-lane deny list `full` drops: the hook judges
+  // shell calls, and these rules are what still holds for the editing tools.
   const deny =
     permission === 'full' || roots.length === 0
       ? []
@@ -663,7 +666,14 @@ function readAccessArgs(
   // cannot survive a quoted region: `platform.ts` refuses an argument
   // containing one instead of escaping it, so the whole spawn fails before the
   // binary is reached. A JSON object is nothing but quotes.
-  const settings = writeSettings(settingsDir, lane, allow, deny)
+  const hook = permission === 'judged' ? judgeHook : undefined
+  // `judged` with no hook to install is `full` with the check missing. That is
+  // the one combination this refuses outright rather than degrading.
+  if (permission === 'judged' && hook === undefined) return null
+  const settings = writeSettings(settingsDir, lane, allow, deny, hook)
+  // And for the same reason a `judged` spawn whose settings could not be
+  // written does not start: the hook lives in that file and nowhere else.
+  if (permission === 'judged' && settings === null) return null
   // Fail *closed*. Without the policy the grant is a write grant, so a
   // directory that cannot be written to costs the read access rather than the
   // guard — the one direction in which this may silently do less. It costs the
@@ -697,6 +707,7 @@ function writeSettings(
   lane: string,
   allow: readonly string[],
   deny: readonly string[],
+  judgeHook?: JudgeHook,
 ): string | null {
   const name = `${lane.split(/[/\\]/).filter(Boolean).pop() ?? 'lane'}.settings.json`
   const path = join(dir, name)
@@ -704,13 +715,31 @@ function writeSettings(
     ...(allow.length === 0 ? {} : { allow: [...allow] }),
     ...(deny.length === 0 ? {} : { deny: [...deny] }),
   }
+  // §17.6. `disableAllHooks: false` is asserted in the file with the highest
+  // precedence because the agent writes in the lane: a `settings.local.json`
+  // there turning hooks off would otherwise switch the judge off for the next
+  // session started in it. Rewritten on every spawn, like everything here.
+  const hooks =
+    judgeHook === undefined
+      ? {}
+      : {
+          disableAllHooks: false,
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: judgeHook.tools.join('|'),
+                hooks: [{ type: 'command', command: judgeHook.command, timeout: judgeHook.timeoutS }],
+              },
+            ],
+          },
+        }
   // The compaction assertion sits beside the permissions rather than inside
   // them because it is not one: it grants nothing and denies nothing. It is
   // here at all because this file is the only thing the adapter layers on top
   // of the user's own settings, and their `autoCompactEnabled: false` is the
   // one way a machine can turn compaction off that stripping the environment
   // does not reach (`compaction.ts`).
-  const content = { ...CLAUDE_CODE_COMPACTION_SETTINGS, permissions }
+  const content = { ...CLAUDE_CODE_COMPACTION_SETTINGS, permissions, ...hooks }
   try {
     mkdirSync(dir, { recursive: true })
     writeFileSync(path, `${JSON.stringify(content, null, 2)}\n`, 'utf8')
@@ -752,6 +781,21 @@ const STRIPPED_ENV = [
 // Adapter
 // ---------------------------------------------------------------------------
 
+/**
+ * The command a judged session's hook runs, and for which tools.
+ *
+ * A command line rather than a function because claude-code runs it: it is a
+ * child of the agent's process, reaching the daemon over the same token-guarded
+ * route `vinta-ai-maestro gate` uses (`system-one/hook.ts`).
+ */
+export interface JudgeHook {
+  readonly command: string
+  /** Tool names, joined into the hook's matcher. */
+  readonly tools: readonly string[]
+  /** The vendor's own ceiling on one hook run, in seconds. */
+  readonly timeoutS: number
+}
+
 export interface ClaudeCodeAdapterOptions {
   /** Overrides `VINTA_AI_MAESTRO_CLAUDE_BIN`, which overrides `"claude"`. */
   readonly bin?: string
@@ -787,6 +831,11 @@ export interface ClaudeCodeAdapterOptions {
    * where `purge` can reach it.
    */
   readonly settingsDir?: string
+  /**
+   * The `PreToolUse` hook `judged` installs (§17.6). Required by that mode: a
+   * `judged` spawn without one is refused rather than run unchecked.
+   */
+  readonly judgeHook?: JudgeHook
   /** How long a spawn may go without an init frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
@@ -860,6 +909,23 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       }
     }
 
+    const access = readAccessArgs(
+      permission,
+      this.options.readRoots ?? [],
+      task.cwd,
+      this.options.settingsDir ?? tmpdir(),
+      this.options.judgeHook,
+    )
+    // Only `judged` returns null, and only when its hook could not be put in
+    // place. `fatal`, because waiting changes nothing about either cause.
+    if (access === null) {
+      return {
+        ok: false,
+        kind: 'fatal',
+        message: `claude-code refused to spawn node ${task.nodeId}: --permission judged could not install its safety hook`,
+      }
+    }
+
     const args = [
       ...BASE_ARGS,
       // Without this the CLI runs in its default mode and asks before every
@@ -868,12 +934,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       // ever sent — so the agent reports a blocked working directory and the
       // phase fails having written nothing.
       ...claudeCodeArgs(permission),
-      ...readAccessArgs(
-        permission,
-        this.options.readRoots ?? [],
-        task.cwd,
-        this.options.settingsDir ?? tmpdir(),
-      ),
+      ...access,
       '--model',
       task.model,
       ...(task.resumeSessionId === undefined ? [] : ['--resume', task.resumeSessionId]),

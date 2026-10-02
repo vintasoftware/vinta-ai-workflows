@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GateCache, laneTreeHash, runGateCached } from '../src/gates/cache.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
-import type { Gate } from '../src/types.ts'
+import type { CommandGate as Gate } from '../src/types.ts'
 import { renderGate, type GateScript } from './support/gate-script.ts'
 
 /**

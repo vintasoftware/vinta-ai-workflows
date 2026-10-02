@@ -35,7 +35,7 @@ import { join } from 'node:path'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import type { Journal } from '../journal/journal.ts'
 import { Monitor, runDigest } from '../monitor/monitor.ts'
-import type { Workflow } from '../types.ts'
+import { isJudgeGate, type Workflow } from '../types.ts'
 import {
   applyIntervention,
   InterventionSchema,
@@ -196,7 +196,9 @@ export async function intervene(options: InterveneOptions): Promise<Intervention
 export function allowedVerbs(workflow: Workflow): string {
   const lines: string[] = []
 
-  const tunable = Object.entries(workflow.gates).filter(([, gate]) => gate.tuning !== undefined)
+  const tunable = Object.entries(workflow.gates).flatMap(([id, gate]) =>
+    isJudgeGate(gate) || gate.tuning === undefined ? [] : [[id, gate] as const],
+  )
   if (tunable.length === 0) {
     lines.push(
       '- `retune_gate` is NOT available on this run: no gate declares a `tuning` block, so no',

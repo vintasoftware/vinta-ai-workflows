@@ -158,6 +158,10 @@ describe('claude-code', () => {
         bin,
         permission,
         settingsDir: join(dir, 'settings'),
+        // `judged` refuses to spawn without its hook, which is its own test.
+        ...(permission === 'judged'
+          ? { judgeHook: { command: 'true', tools: ['Bash'], timeoutS: 60 } }
+          : {}),
       }).spawn(task(lane))
       expect(outcome.ok, permission).toBe(true)
       if (!outcome.ok) return

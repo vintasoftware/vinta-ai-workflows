@@ -10,17 +10,24 @@ import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { formatDoctorReport, runDoctor, type DoctorOptions } from '../doctor/index.ts'
+import { AGENT_PERMISSIONS, DEFAULT_PERMISSION, isAgentPermission } from '../harness/permissions.ts'
+import { loadSystemOne, SystemOneConfigError, type SystemOne } from '../system-one/config.ts'
 import { laneRootFor } from './paths.ts'
 import { projectSpec } from './project.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 
 export const DOCTOR_USAGE = `usage: vinta-ai-maestro doctor <workflow.json> [--repo <dir>] [--resume <run-id>]
+                                [--permission <mode>] [--system-one <config.json>]
 
   --repo <dir>     The project checkout the lanes will be worktrees of.
                    Defaults to the current directory.
   --resume <id>    Check the environment for \`run --resume <id>\` rather than
                    for a fresh run: that run's own lanes are holding its phase
-                   branches on purpose, and are not leftovers to clear.`
+                   branches on purpose, and are not leftovers to clear.
+  --permission     The mode the run will use. Only judged changes the answer:
+                   it needs a permission judge and a harness that can host it.
+  --system-one     The classifier config the run will use. Checked offline —
+                   no question is sent.`
 
 /**
  * Overrides merged into the assembled options — the injected binaries and disk
@@ -39,7 +46,12 @@ export async function doctorCommand(
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { repo: { type: 'string' }, resume: { type: 'string' } },
+      options: {
+        repo: { type: 'string' },
+        resume: { type: 'string' },
+        permission: { type: 'string' },
+        'system-one': { type: 'string' },
+      },
       allowPositionals: true,
     })
   } catch {
@@ -51,6 +63,25 @@ export async function doctorCommand(
   if (path === undefined || parsed.positionals.length > 1) {
     io.err(DOCTOR_USAGE)
     return USAGE
+  }
+
+  const requested = parsed.values['permission']
+  if (requested !== undefined && !isAgentPermission(requested)) {
+    io.err(`vinta-ai-maestro: --permission must be one of ${AGENT_PERMISSIONS.join(', ')}`)
+    return USAGE
+  }
+  const permission = requested ?? DEFAULT_PERMISSION
+  // Not `toSystemOne`: that refuses `judged` without a judge at the command
+  // line, and answering that question in the report is this command's job.
+  let systemOne: SystemOne | undefined
+  const configPath = parsed.values['system-one']
+  if (configPath !== undefined) {
+    try {
+      systemOne = loadSystemOne(configPath)
+    } catch (error) {
+      io.err(`vinta-ai-maestro: --system-one: ${error instanceof SystemOneConfigError ? error.message : 'could not be loaded'}`)
+      return USAGE
+    }
   }
 
   const workflow = await loadWorkflow(path, io)
@@ -69,6 +100,8 @@ export async function doctorCommand(
     // reads as a pass.
     project: projectSpec(workflow.project),
     ...(resumeRunId === undefined ? {} : { resumeRunId }),
+    permission,
+    ...(systemOne === undefined ? {} : { systemOne }),
     ...overrides,
   })
 
