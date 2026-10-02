@@ -244,6 +244,8 @@ function rig(
     readonly onFailure?: 'stop' | 'retry' | 'ask' | null
     /** Automatic attempts under `retry`. */
     readonly retries?: number
+    /** The harness's configured admission ceiling. Defaults to 8. */
+    readonly ceiling?: number
   readonly retryAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
     readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
@@ -288,7 +290,7 @@ function rig(
   const admission = new AdmissionControl({
     journal,
     runId,
-    ceilings: { [HARNESS]: 8 },
+    ceilings: { [HARNESS]: options.ceiling ?? 8 },
     clock,
     // Full jitter with a fixed draw: the backoff is then the cap itself, which
     // is a number this test can advance past exactly.
@@ -1133,10 +1135,121 @@ describe('failure containment', () => {
 // 4–5: waiting versus stopping
 // ---------------------------------------------------------------------------
 
+describe('critical path first (§6.1)', () => {
+  it('gives a throttled harness slot to the node with the longest chain in front of it', async () => {
+    // `leaf2` is declared — and so queues — before `spine`, but `spine` has two
+    // nodes waiting on it and `leaf2` has none.
+    const r = rig(
+      makeWorkflow(
+        [node('leaf1'), node('leaf2'), node('spine'), node('mid', ['spine']), node('tail', ['mid'])],
+        { lanes: 5 },
+      ),
+      { ceiling: 1 },
+    )
+
+    const report = await r.scheduler.run()
+    expect(report.status).toBe('completed')
+
+    const first = (id: string) => r.adapter.spawned.findIndex((t) => t.nodeId === id)
+    expect(first('leaf1')).toBe(0) // nothing queued yet: the first spawn goes straight in
+    expect(first('spine')).toBeLessThan(first('leaf2'))
+    expectDrained(r)
+  })
+})
+
+describe('a logged-out harness (§6.1)', () => {
+  const questions = (r: Rig) =>
+    r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'human_question')
+      .map((event) => ({ node: event.nodeId, ...(event.payload as unknown as { question: string; choices: string[] }) }))
+
+  it('parks the node on a login question with no fallback, whatever the failure policy', async () => {
+    const r = rig(makeWorkflow([node('a')]), {
+      spawns: ['unauthenticated'],
+      // Every automatic path a failure could take, armed: none may fire.
+      onFailure: 'retry',
+      retries: 3,
+      retryAfterMs: 60_000,
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the login question')
+    const [asked] = questions(r)
+    expect(asked?.question).toMatch(/is not logged in/)
+    expect(asked?.choices).toEqual(['logged in', 'stop'])
+
+    // Hours pass: no unattended retry, no automatic attempt, no failure.
+    await r.advance(6 * 60 * 60 * 1_000)
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    expect(r.adapter.spawned).toHaveLength(0)
+    expect(r.journal.events('run-1').some((event) => event.type === 'human_answered')).toBe(false)
+
+    r.scheduler.answer('a', { human: { answer: 'logged in' } })
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('resumes every node the same harness refused on one answer', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b'), node('c')], { lanes: 3 }), {
+      spawns: ['unauthenticated'],
+    })
+
+    const running = r.scheduler.run()
+    await until(
+      () => ['a', 'b', 'c'].every((id) => r.scheduler.statuses[id] === 'awaiting_human'),
+      'every node asking',
+    )
+    // One refusal was spent; the other two were told without spawning.
+    expect(questions(r)).toHaveLength(3)
+
+    r.scheduler.answer('b', { human: { answer: 'logged in' } })
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    expectDrained(r)
+  })
+
+  it('fails only the node whose question was answered stop, with no retry', async () => {
+    const r = rig(makeWorkflow([node('a')]), {
+      spawns: ['unauthenticated'],
+      onFailure: 'retry',
+      retries: 3,
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the login question')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(questions(r)).toHaveLength(1) // not re-offered as a failure to retry
+    expect(r.adapter.spawned).toHaveLength(0)
+    expectDrained(r)
+  })
+
+  it('asks again if the harness is still logged out after the answer', async () => {
+    const r = rig(makeWorkflow([node('a')]), { spawns: ['unauthenticated', 'unauthenticated'] })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first question')
+    r.scheduler.answer('a', { human: { answer: 'logged in' } })
+    await until(() => questions(r).length === 2, 'the second question')
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+
+    r.scheduler.answer('a', { human: { answer: 'logged in' } })
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+})
+
 describe('deadlock detection', () => {
   it('does not call a run that is entirely inside a capacity window a deadlock', async () => {
+    // One refusal is enough to park both: `b` waits at the start gate behind
+    // `a`'s spawn, and joins the wait it ends in.
     const r = rig(makeWorkflow([node('a'), node('b')], { lanes: 2 }), {
-      spawns: ['quota', 'quota'],
+      spawns: ['quota'],
     })
 
     const running = r.scheduler.run()

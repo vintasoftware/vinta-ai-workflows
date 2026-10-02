@@ -576,6 +576,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **maestro starts one session at a time per harness, and remembers the
+  account's limit.** Sessions used to boot simultaneously up to the harness
+  ceiling, and N Claude Code CLIs starting together contend for the same local
+  config and OAuth token: a probe against 2.1.274 measured time to `init`
+  rising from 1.2 s with two simultaneous starts to 4.8 s with sixteen, against
+  a flat 0.7 s when each waited for the previous one. A spawn now waits until
+  the one ahead of it has a session or a refusal, so a refusal also parks every
+  queued spawn before it spends one. The ceiling AIMD discovers after a
+  `concurrency` or `rate_limit` refusal is kept per harness in `flow.db` and a
+  run started within six hours opens at it instead of re-learning the limit by
+  being refused; clean spawns still probe back up to the configured value, and
+  the hint is dropped once the ceiling recovers or goes stale. When a harness
+  is throttled, the freed slot goes to the node with the longest chain of work
+  still in front of it rather than to whichever queued first.
+
 - **Updated the OpenAI and Anthropic models to their latest version.**
 
 - **Updated the generated skills to have `disable-model-invocation: true` set.**
@@ -825,6 +840,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recall.
 
 ### Fixed
+
+- **maestro asks you to log in instead of failing on a logged-out harness.**
+  A CLI that was not logged in (or whose token was rejected) was `fatal`: the
+  node failed and its whole subtree blocked. It now parks in `awaiting_human`
+  on a "not logged in" question answered with `logged in` or `stop`, holding
+  its lane. Nothing answers it for you — no automatic or unattended retry,
+  regardless of `onFailure` — and one `logged in` resumes every node that
+  harness refused. Adapters report it as the new `unauthenticated` refusal
+  kind (Claude Code, Codex and opencode).
+- **maestro no longer fails a node on an organization spend cap.** Claude
+  Code's `billing_error` "spend limit reached (daily; resets …)", the
+  `org_spend_cap_reached` overage reason and "usage credit limit reached"
+  matched no refusal pattern and were classified `fatal`, failing the node and
+  blocking its subtree. They are now `quota` waits, and the stated
+  `resets YYYY-MM-DD HH:MM UTC` time is honored as the wake time.
 
 - **A failed Claude Code turn no longer reads as `claude-code result:
   success`.** When the CLI ends a turn with `is_error: true` beside

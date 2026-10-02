@@ -594,10 +594,12 @@ describe('spawn refusal classification', () => {
     expect(kindOf('/bin/sh: opencode: command not found', 127)).toBe('fatal')
   })
 
-  it('calls a logged-out server fatal', () => {
-    expect(kindOf('http 401 unauthorized', 401)).toBe('fatal')
-    expect(kindOf('{"name":"ProviderAuthError"}')).toBe('fatal')
-    expect(kindOf('no credentials found; run opencode auth login')).toBe('fatal')
+  // §6.1: a person logging in fixes this, and nothing else does — so it is
+  // neither `fatal` (which fails the subtree) nor a wait (which retries).
+  it('calls a logged-out server unauthenticated, for the operator', () => {
+    expect(kindOf('http 401 unauthorized', 401)).toBe('unauthenticated')
+    expect(kindOf('{"name":"ProviderAuthError"}')).toBe('unauthenticated')
+    expect(kindOf('no credentials found; run opencode auth login')).toBe('unauthenticated')
   })
 
   it('calls an exhausted usage window quota, not fatal', () => {
@@ -674,11 +676,11 @@ describe('spawn refusal classification', () => {
     expect(classifySpawnFailure('http 429 rate limit', 429, 'phase-1', { now }).retryAfter).toBe(undefined)
   })
 
-  it('never attaches a retry time to fatal, which is not a wait', () => {
+  it('never attaches a retry time to a login refusal, which is not a wait', () => {
     const refusal = classifySpawnFailure('http 401 unauthorized retry-after: 60', 401, 'n', {
       now: new Date(),
     })
-    expect(refusal.kind).toBe('fatal')
+    expect(refusal.kind).toBe('unauthenticated')
     expect(refusal.retryAfter).toBe(undefined)
   })
 })
@@ -1046,13 +1048,13 @@ describe('spawn against a stub server', () => {
     }
   })
 
-  it('classifies a logged-out server as fatal and an overloaded one as transient', async () => {
+  it('classifies a logged-out server as unauthenticated and an overloaded one as transient', async () => {
     const stub = await startStub()
     const adapter = new OpencodeAdapter({ baseUrl: stub.url })
     try {
       stub.promptStatus = 401
       const unauthorized = await adapter.spawn(task())
-      expect(unauthorized.ok === false && unauthorized.kind).toBe('fatal')
+      expect(unauthorized.ok === false && unauthorized.kind).toBe('unauthenticated')
 
       stub.promptStatus = 503
       const overloaded = await adapter.spawn(task())
