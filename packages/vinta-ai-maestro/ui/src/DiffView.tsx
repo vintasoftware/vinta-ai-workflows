@@ -17,6 +17,9 @@
  *
  * Re-read when the run's stream moves, because a running phase's working tree
  * moves with it — and on a button, for the operator who does not trust that.
+ *
+ * **Unified or split** is the operator's call and is remembered per browser,
+ * not per run: a reviewer who reads side by side reads every diff that way.
  */
 import { ChevronLeftIcon, RefreshCwIcon } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -32,12 +35,36 @@ import { Button } from 'vinta-design-system/ui/button'
 import type { ChangedFile, NodeChanges } from '../../src/daemon/schemas.ts'
 import { Chip } from './Chip.tsx'
 import type { Client } from './client.ts'
-import { ChangeBar, Counts, FileDiffCard, PathName, StatusMark } from './Code.tsx'
+import { ChangeBar, Counts, FileDiffCard, PathName, StatusMark, type DiffStyle } from './Code.tsx'
 import { parsePatch, type FileDiff } from './diff.ts'
 import { languageFor } from './highlight.ts'
 import { Live } from './Live.tsx'
 import { EmptyNote, ErrorNote } from './Panel.tsx'
 import { useRun } from './useRun.ts'
+
+/** Where the layout choice lives. Named for the app, as the theme key is. */
+export const DIFF_STYLE_KEY = 'vinta-ai-maestro:diff-style'
+
+function readStyle(): DiffStyle {
+  try {
+    return localStorage.getItem(DIFF_STYLE_KEY) === 'split' ? 'split' : 'unified'
+  } catch {
+    return 'unified'
+  }
+}
+
+function useDiffStyle(): [DiffStyle, (next: DiffStyle) => void] {
+  const [style, setStyle] = useState<DiffStyle>(readStyle)
+  const choose = (next: DiffStyle): void => {
+    setStyle(next)
+    try {
+      localStorage.setItem(DIFF_STYLE_KEY, next)
+    } catch {
+      // A browser that refuses storage still gets the layout for this page.
+    }
+  }
+  return [style, choose]
+}
 
 export function DiffView({
   client,
@@ -55,6 +82,7 @@ export function DiffView({
   const [changes, setChanges] = useState<NodeChanges | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [reloads, setReloads] = useState(0)
+  const [style, setStyle] = useDiffStyle()
   const cursor = projection.cursor
 
   useEffect(() => {
@@ -124,6 +152,22 @@ export function DiffView({
               {changes.totals.files} {changes.totals.files === 1 ? 'file' : 'files'}
             </span>
             <Counts additions={changes.totals.additions} deletions={changes.totals.deletions} className="text-sm" />
+            <span className="inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5" role="group" aria-label="Diff layout">
+              {STYLES.map(([value, label]) => (
+                <Button
+                  key={value}
+                  type="button"
+                  variant={style === value ? 'secondary' : 'ghost'}
+                  size="xs"
+                  className={style === value ? 'bg-background shadow-xs hover:bg-background' : ''}
+                  data-style={value}
+                  aria-pressed={style === value}
+                  onClick={() => setStyle(value)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </span>
             <Button
               type="button"
               variant="outline"
@@ -182,7 +226,7 @@ export function DiffView({
 
           <div className="flex min-w-0 flex-col gap-4">
             {files.map((file) => (
-              <FileSection key={file.path} file={file} diff={byPath.get(file.path) ?? null} />
+              <FileSection key={file.path} file={file} diff={byPath.get(file.path) ?? null} style={style} />
             ))}
           </div>
         </div>
@@ -191,7 +235,20 @@ export function DiffView({
   )
 }
 
-function FileSection({ file, diff }: { readonly file: ChangedFile; readonly diff: FileDiff | null }) {
+const STYLES: readonly (readonly [DiffStyle, string])[] = [
+  ['unified', 'Unified'],
+  ['split', 'Split'],
+]
+
+function FileSection({
+  file,
+  diff,
+  style,
+}: {
+  readonly file: ChangedFile
+  readonly diff: FileDiff | null
+  readonly style: DiffStyle
+}) {
   const id = anchor(file.path)
   if (diff === null) {
     return (
@@ -216,6 +273,7 @@ function FileSection({ file, diff }: { readonly file: ChangedFile; readonly diff
       lang={languageFor(file.path)}
       counts={file}
       status={file.status}
+      style={style}
     />
   )
 }

@@ -148,6 +148,32 @@ state-machine-editor {
 .diff tr.diff-del > td.diff-marker {
   color: var(--tone-error-foreground);
 }
+.diff tr.diff-add .diff-word {
+  background: color-mix(in oklch, var(--tone-ok) 28%, transparent);
+  border-radius: 2px;
+}
+.diff tr.diff-del .diff-word,
+.diff td.diff-del .diff-word {
+  background: color-mix(in oklch, var(--tone-error) 28%, transparent);
+  border-radius: 2px;
+}
+.diff td.diff-add .diff-word {
+  background: color-mix(in oklch, var(--tone-ok) 28%, transparent);
+  border-radius: 2px;
+}
+/* Split: the tint is the cell's, and the two halves are kept apart by a rule. */
+.diff td.diff-add {
+  background: var(--diff-add-bg);
+}
+.diff td.diff-del {
+  background: var(--diff-del-bg);
+}
+.diff td.diff-blank {
+  background: color-mix(in oklch, var(--muted) 60%, transparent);
+}
+.diff tr.diff-split-row > td:nth-child(3) {
+  border-left: 1px solid var(--border);
+}
 .diff-text-add {
   color: var(--tone-ok-foreground);
 }

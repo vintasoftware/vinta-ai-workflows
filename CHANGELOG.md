@@ -41,7 +41,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   syntax highlighting (shiki, GitHub light and dark following the theme),
   old and new line numbers, hunk headers with their function context, a
   sticky file list that scrolls to each file, and a fold on any file past 400
-  changed lines. The daemon serves it from a new endpoint,
+  changed lines. Within a removed line and the added line it pairs with, the
+  words that differ are marked, so a flipped operator or a renamed variable
+  reads at a glance; a line rewritten rather than edited keeps the row colour
+  alone. *Unified* or *Split* — the old file beside the new — is a toggle in
+  the header, remembered per browser. The daemon serves it from a new endpoint,
   `GET /api/runs/:runId/nodes/:nodeId/changes`, answered by the git unit: from
   the lane's **working tree** while the lane still holds the phase's branch —
   so an agent's uncommitted edits and untracked files are visible while it is

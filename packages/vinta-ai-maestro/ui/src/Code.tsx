@@ -13,12 +13,12 @@
  * green and red, because added-is-green and removed-is-red is the one
  * convention every operator arrives with.
  */
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { cn } from 'vinta-design-system/lib/utils'
 import { Button } from 'vinta-design-system/ui/button'
 import type { ChangedFile } from '../../src/daemon/schemas.ts'
-import type { FileDiff, Hunk, LineKind } from './diff.ts'
-import { splitPath } from './diff.ts'
+import type { FileDiff, Hunk, LineKind, Segment } from './diff.ts'
+import { emphasis, splitPath, splitRows } from './diff.ts'
 import { useTokens, type Token, type Tokens } from './highlight.ts'
 
 // ---------------------------------------------------------------------------
@@ -76,24 +76,84 @@ export function CodeBlock({
   )
 }
 
-/** One line: its tokens when there are some, its text otherwise. */
+/**
+ * One line: its tokens when there are some, its text otherwise — and, on a
+ * diff line with a partner, the words that changed marked over either.
+ *
+ * Two overlays with their own boundaries: syntax tokens from the grammar,
+ * change segments from the word diff. Rather than nest one in the other the
+ * line is cut at every boundary of both, so each piece has one colour and one
+ * emphasis and the markup stays flat.
+ */
 function Line({
   text,
   tokens,
+  segments,
 }: {
   readonly text: string
   readonly tokens?: readonly Token[] | undefined
+  readonly segments?: readonly Segment[] | undefined
 }) {
-  if (tokens === undefined) return <>{text}</>
+  if (tokens === undefined && segments === undefined) return <>{text}</>
   return (
     <>
-      {tokens.map((token, index) => (
-        <span key={index} style={token.style}>
-          {token.content}
+      {pieces(text, tokens, segments).map((piece, index) => (
+        <span
+          key={index}
+          style={piece.style}
+          className={piece.changed ? 'diff-word' : undefined}
+          data-changed={piece.changed ? '' : undefined}
+        >
+          {piece.text}
         </span>
       ))}
     </>
   )
+}
+
+interface Piece {
+  readonly text: string
+  readonly style?: Readonly<Record<string, string>> | undefined
+  readonly changed: boolean
+}
+
+/** The line cut at every token and segment boundary. */
+function pieces(
+  text: string,
+  tokens: readonly Token[] | undefined,
+  segments: readonly Segment[] | undefined,
+): Piece[] {
+  const cuts = new Set<number>([0, text.length])
+  let at = 0
+  for (const token of tokens ?? []) cuts.add((at += token.content.length))
+  at = 0
+  for (const segment of segments ?? []) cuts.add((at += segment.text.length))
+  const offsets = [...cuts].filter((cut) => cut <= text.length).sort((a, b) => a - b)
+
+  const result: Piece[] = []
+  let tokenIndex = 0
+  let tokenEnd = tokens?.[0]?.content.length ?? Number.POSITIVE_INFINITY
+  let segmentIndex = 0
+  let segmentEnd = segments?.[0]?.text.length ?? Number.POSITIVE_INFINITY
+  for (let index = 1; index < offsets.length; index += 1) {
+    const start = offsets[index - 1] as number
+    const end = offsets[index] as number
+    if (end === start) continue
+    while (tokens !== undefined && start >= tokenEnd && tokenIndex < tokens.length - 1) {
+      tokenIndex += 1
+      tokenEnd += tokens[tokenIndex]?.content.length ?? 0
+    }
+    while (segments !== undefined && start >= segmentEnd && segmentIndex < segments.length - 1) {
+      segmentIndex += 1
+      segmentEnd += segments[segmentIndex]?.text.length ?? 0
+    }
+    result.push({
+      text: text.slice(start, end),
+      style: tokens?.[tokenIndex]?.style,
+      changed: segments?.[segmentIndex]?.changed ?? false,
+    })
+  }
+  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -107,23 +167,31 @@ function Line({
  */
 export const LARGE_FILE_LINES = 400
 
+/** Unified is one column of lines; split is the old file beside the new. */
+export type DiffStyle = 'unified' | 'split'
+
 /**
- * One file's hunks, as a table: old line, new line, marker, code.
+ * One file's hunks, as a table: unified — old line, new line, marker, code —
+ * or split, with the old file on the left and the new on the right.
  *
  * The two sides are tokenised separately — every context and added line as
  * the new text, every context and removed line as the old — so a construct
  * that spans lines highlights the way it does in the editor, and a line is
- * never coloured by what sits above it on the other side.
+ * never coloured by what sits above it on the other side. Within a removed
+ * line and the added line it pairs with, the words that differ are marked
+ * (`diff.ts`'s `emphasis`), in either layout.
  */
 export function FileDiffBody({
   file,
   lang,
   numbered = true,
+  style = 'unified',
 }: {
   readonly file: FileDiff
   readonly lang: string | null
   /** Off for a diff that has no line numbers to show — an edit's two strings. */
   readonly numbered?: boolean
+  readonly style?: DiffStyle
 }) {
   if (file.binary) return <DiffNote>Binary file — no text to show.</DiffNote>
   if (file.hunks.length === 0) {
@@ -136,12 +204,26 @@ export function FileDiffBody({
     )
   }
   return (
-    <div className="diff overflow-x-auto" data-diff-file={file.path}>
-      <table className="w-full border-collapse font-mono text-xs leading-5">
+    <div className="diff overflow-x-auto" data-diff-file={file.path} data-diff-style={style}>
+      <table className={cn('w-full border-collapse font-mono text-xs leading-5', style === 'split' && 'table-fixed')}>
+        {/* Fixed layout shares the width evenly unless told otherwise; the
+            gutters are told, so the two code columns get the rest, half each. */}
+        {style === 'split' && (
+          <colgroup>
+            <col className="w-12" />
+            <col />
+            <col className="w-12" />
+            <col />
+          </colgroup>
+        )}
         <tbody>
-          {file.hunks.map((hunk, index) => (
-            <HunkRows key={index} hunk={hunk} lang={lang} numbered={numbered} />
-          ))}
+          {file.hunks.map((hunk, index) =>
+            style === 'split' ? (
+              <SplitHunkRows key={index} hunk={hunk} lang={lang} />
+            ) : (
+              <HunkRows key={index} hunk={hunk} lang={lang} numbered={numbered} />
+            ),
+          )}
         </tbody>
       </table>
     </div>
@@ -164,20 +246,11 @@ function HunkRows({
   const [oldText, newText, oldIndex, newIndex] = sides(hunk)
   const oldTokens = useTokens(oldText, lang)
   const newTokens = useTokens(newText, lang)
+  const marks = useMemo(() => emphasis(hunk), [hunk])
 
   return (
     <>
-      {numbered && (
-        <tr className="diff-hunk bg-muted/60 text-muted-foreground" data-hunk>
-          <td colSpan={3} className="select-none px-2 py-0.5 text-right">
-            …
-          </td>
-          <td className="px-2 py-0.5">
-            @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
-            {hunk.section !== '' && <span className="ml-2 opacity-70">{hunk.section}</span>}
-          </td>
-        </tr>
-      )}
+      {numbered && <HunkHeader hunk={hunk} span={4} />}
       {hunk.lines.map((line, index) => {
         const tokens =
           line.kind === 'del' ? oldTokens?.[oldIndex[index] ?? -1] : newTokens?.[newIndex[index] ?? -1]
@@ -187,17 +260,85 @@ function HunkRows({
             {numbered && <td className={GUTTER}>{line.newNo ?? ''}</td>}
             <td className={cn(GUTTER, 'diff-marker w-4 px-1 text-center')}>{MARKER[line.kind]}</td>
             <td className="whitespace-pre-wrap break-all px-2">
-              <Line text={line.text} tokens={tokens} />
-              {line.noNewline === true && (
-                <span className="ml-2 text-muted-foreground" title="No newline at end of file">
-                  ⏎
-                </span>
-              )}
+              <Line text={line.text} tokens={tokens} segments={marks.get(index)} />
+              {line.noNewline === true && <NoNewline />}
             </td>
           </tr>
         )
       })}
     </>
+  )
+}
+
+/**
+ * The split layout: old number, old line, new number, new line. A paired
+ * change shares a row; what pairs with nothing has a blank across from it.
+ * No marker column — the side says which is which, and the row tint says
+ * whether it changed.
+ */
+function SplitHunkRows({ hunk, lang }: { readonly hunk: Hunk; readonly lang: string | null }) {
+  const [oldText, newText, oldIndex, newIndex] = sides(hunk)
+  const oldTokens = useTokens(oldText, lang)
+  const newTokens = useTokens(newText, lang)
+  const marks = useMemo(() => emphasis(hunk), [hunk])
+  const rows = useMemo(() => splitRows(hunk), [hunk])
+
+  const cell = (index: number | null, side: 'old' | 'new') => {
+    const line = index === null ? undefined : hunk.lines[index]
+    if (index === null || line === undefined) {
+      return (
+        <>
+          <td className={GUTTER} />
+          <td className="diff-blank" data-side={side} />
+        </>
+      )
+    }
+    const tokens = side === 'old' ? oldTokens?.[oldIndex[index] ?? -1] : newTokens?.[newIndex[index] ?? -1]
+    return (
+      <>
+        <td className={cn(GUTTER, ROW[line.kind])}>{side === 'old' ? line.oldNo : line.newNo}</td>
+        <td
+          className={cn('whitespace-pre-wrap break-all px-2', ROW[line.kind])}
+          data-side={side}
+          data-line={line.kind}
+        >
+          <Line text={line.text} tokens={tokens} segments={marks.get(index)} />
+          {line.noNewline === true && <NoNewline />}
+        </td>
+      </>
+    )
+  }
+
+  return (
+    <>
+      <HunkHeader hunk={hunk} span={4} />
+      {rows.map((row, index) => (
+        <tr key={index} className="diff-split-row" data-split-row>
+          {cell(row.left, 'old')}
+          {cell(row.right, 'new')}
+        </tr>
+      ))}
+    </>
+  )
+}
+
+function HunkHeader({ hunk, span }: { readonly hunk: Hunk; readonly span: number }) {
+  return (
+    <tr className="diff-hunk bg-muted/60 text-muted-foreground" data-hunk>
+      <td colSpan={span} className="px-2 py-0.5">
+        <span className="select-none pr-3">…</span>
+        @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
+        {hunk.section !== '' && <span className="ml-2 opacity-70">{hunk.section}</span>}
+      </td>
+    </tr>
+  )
+}
+
+function NoNewline() {
+  return (
+    <span className="ml-2 text-muted-foreground" title="No newline at end of file">
+      ⏎
+    </span>
   )
 }
 
@@ -377,6 +518,7 @@ export function FileDiffCard({
   counts,
   status,
   id,
+  style = 'unified',
 }: {
   readonly file: FileDiff
   readonly lang: string | null
@@ -384,6 +526,7 @@ export function FileDiffCard({
   readonly counts: { readonly additions: number | null; readonly deletions: number | null }
   readonly status: ChangedFile['status']
   readonly id: string
+  readonly style?: DiffStyle
 }) {
   const changed = file.additions + file.deletions
   const [open, setOpen] = useState(changed <= LARGE_FILE_LINES)
@@ -415,7 +558,7 @@ export function FileDiffCard({
           {open ? 'Collapse' : `Show ${changed} changed lines`}
         </Button>
       </header>
-      {open && <FileDiffBody file={file} lang={lang} />}
+      {open && <FileDiffBody file={file} lang={lang} style={style} />}
     </section>
   )
 }

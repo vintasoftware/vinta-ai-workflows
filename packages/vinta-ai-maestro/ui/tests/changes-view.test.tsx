@@ -9,6 +9,7 @@ import { cleanup, fireEvent, waitFor, type RenderResult } from '@testing-library
 import { afterEach, expect, test } from 'vitest'
 import { CHANGES_SHOWN } from '../src/Changes.tsx'
 import { LARGE_FILE_LINES } from '../src/Code.tsx'
+import { DIFF_STYLE_KEY } from '../src/DiffView.tsx'
 import {
   changedFile,
   node,
@@ -28,6 +29,7 @@ afterEach(async () => {
   view = null
   cleanup()
   sessionStorage.clear()
+  localStorage.clear()
   await daemon?.close()
   daemon = null
 })
@@ -239,4 +241,69 @@ ${lines}
   fireEvent.click(container.querySelector('[data-action="toggle-file"]')!)
   expect(card?.hasAttribute('data-open')).toBe(true)
   expect(card?.querySelectorAll('tr[data-line="add"]')).toHaveLength(LARGE_FILE_LINES + 1)
+})
+
+/**
+ * The row colour says a line changed; the emphasis says which words. For a
+ * flipped operator or a renamed variable that is the whole finding.
+ */
+test('the words that changed within a paired line are marked', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+    changes: { [`${RUN_ID}/impl`]: nodeChanges({ files: FILES, patch: PATCH }) },
+  })
+  daemon = stub
+  const { container } = open(stub, `#/runs/${RUN_ID}/nodes/impl/changes`)
+
+  await waitFor(() => expect(container.querySelector('[data-diff-file="src/billing/invoice.ts"]')).not.toBe(null))
+  const invoice = container.querySelector('[data-diff-file="src/billing/invoice.ts"]')!
+  const added = invoice.querySelector('tr[data-line="add"]')!
+  const marked = [...added.querySelectorAll('[data-changed]')].map((span) => span.textContent).join('')
+  expect(marked).toBe(' * line.quantity')
+  // The removed side of the pair has nothing to mark: every word of it survived.
+  expect(invoice.querySelector('tr[data-line="del"] [data-changed]')).toBe(null)
+  // And the whole line is still there, emphasis or not.
+  expect(added.textContent).toContain('return lines.reduce((sum, line) => sum + line.amount * line.quantity, 0)')
+})
+
+test('split puts the old file beside the new, pairs across a row, and is remembered', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+    changes: { [`${RUN_ID}/impl`]: nodeChanges({ files: FILES, patch: PATCH }) },
+  })
+  daemon = stub
+  const { container } = open(stub, `#/runs/${RUN_ID}/nodes/impl/changes`)
+
+  await waitFor(() => expect(container.querySelector('[data-style="split"]')).not.toBe(null))
+  expect(container.querySelector('[data-style="unified"]')?.getAttribute('aria-pressed')).toBe('true')
+
+  fireEvent.click(container.querySelector('[data-style="split"]')!)
+
+  const invoice = container.querySelector('[data-diff-file="src/billing/invoice.ts"]')!
+  expect(invoice.getAttribute('data-diff-style')).toBe('split')
+  const rows = [...invoice.querySelectorAll('tr[data-split-row]')]
+  // Context on both sides, the changed pair across one row, context again.
+  expect(rows).toHaveLength(3)
+  const sides = (row: Element) =>
+    [...row.querySelectorAll('td[data-side]')].map((cell) => [cell.getAttribute('data-side'), cell.getAttribute('data-line')])
+  expect(sides(rows[1]!)).toEqual([
+    ['old', 'del'],
+    ['new', 'add'],
+  ])
+  expect(rows[1]?.querySelector('td[data-side="old"]')?.textContent).toContain('line.amount, 0)')
+  expect(rows[1]?.querySelector('td[data-side="new"]')?.textContent).toContain('line.quantity, 0)')
+  // The added file has nothing on the old side.
+  const serializer = container.querySelector('[data-diff-file="src/billing/serializer.ts"]')!
+  expect(serializer.querySelectorAll('td.diff-blank[data-side="old"]')).toHaveLength(2)
+  // The choice outlives the page.
+  expect(localStorage.getItem(DIFF_STYLE_KEY)).toBe('split')
+
+  const again = open(stub, `#/runs/${RUN_ID}/nodes/impl/changes`)
+  await waitFor(() =>
+    expect(again.container.querySelector('[data-style="split"]')?.getAttribute('aria-pressed')).toBe('true'),
+  )
 })

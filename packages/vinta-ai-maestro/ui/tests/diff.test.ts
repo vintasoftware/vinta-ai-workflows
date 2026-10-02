@@ -2,7 +2,7 @@
  * The patch reader: git's format in, numbered rows out, nothing dropped.
  */
 import { expect, test } from 'vitest'
-import { parsePatch, splitPath } from '../src/diff.ts'
+import { emphasis, pairs, parsePatch, splitPath, splitRows, wordDiff, type Hunk } from '../src/diff.ts'
 
 const MODIFIED = `diff --git a/src/app.ts b/src/app.ts
 index 1234567..89abcde 100644
@@ -140,4 +140,99 @@ test('an empty patch is no files', () => {
 test('a path splits into the directory to dim and the name to show', () => {
   expect(splitPath('src/billing/invoice.ts')).toEqual(['src/billing/', 'invoice.ts'])
   expect(splitPath('README.md')).toEqual(['', 'README.md'])
+})
+
+// ---------------------------------------------------------------------------
+// Pairing, word emphasis, and the split view
+// ---------------------------------------------------------------------------
+
+const hunkOf = (...spec: readonly (readonly [string, string])[]): Hunk => {
+  let oldNo = 1
+  let newNo = 1
+  return {
+    oldStart: 1,
+    oldLines: 0,
+    newStart: 1,
+    newLines: 0,
+    section: '',
+    lines: spec.map(([kind, text]) => {
+      if (kind === 'del') return { kind: 'del', text, oldNo: oldNo++, newNo: null }
+      if (kind === 'add') return { kind: 'add', text, oldNo: null, newNo: newNo++ }
+      return { kind: 'context', text, oldNo: oldNo++, newNo: newNo++ }
+    }),
+  }
+}
+
+test('a removed line pairs with the added line in the same position of the run', () => {
+  const hunk = hunkOf(['context', 'a'], ['del', 'b1'], ['del', 'b2'], ['del', 'b3'], ['add', 'c1'], ['add', 'c2'], ['context', 'd'])
+  const partner = pairs(hunk)
+
+  expect(partner.get(1)).toBe(4)
+  expect(partner.get(2)).toBe(5)
+  expect(partner.get(4)).toBe(1)
+  // The third removed line became nothing.
+  expect(partner.has(3)).toBe(false)
+  expect(partner.has(0)).toBe(false)
+})
+
+test('an added run with no removed run before it pairs with nothing', () => {
+  const hunk = hunkOf(['add', 'x'], ['context', 'y'], ['del', 'z'])
+
+  expect(pairs(hunk).size).toBe(0)
+})
+
+/** The whole finding, for a renamed variable: the two tokens that differ, not the tail of the line. */
+test('a word diff emphasises the tokens that changed and keeps the rest', () => {
+  const result = wordDiff(
+    'return lines.reduce((sum, line) => sum + line.amount, 0)',
+    'return lines.reduce((sum, line) => sum + line.amount * line.quantity, 0)',
+  )
+
+  expect(result).not.toBeNull()
+  expect(result?.before.every((segment) => !segment.changed)).toBe(true)
+  const added = result?.after.filter((segment) => segment.changed).map((segment) => segment.text)
+  expect(added).toEqual([' * line.quantity'])
+  // The segments concatenate back to the line: nothing is lost in the emphasis.
+  expect(result?.after.map((segment) => segment.text).join('')).toBe(
+    'return lines.reduce((sum, line) => sum + line.amount * line.quantity, 0)',
+  )
+})
+
+test('a word diff marks both sides of a substitution', () => {
+  const result = wordDiff('const value = 1', 'const value = 2')
+
+  expect(result?.before).toEqual([
+    { text: 'const value = ', changed: false },
+    { text: '1', changed: true },
+  ])
+  expect(result?.after).toEqual([
+    { text: 'const value = ', changed: false },
+    { text: '2', changed: true },
+  ])
+})
+
+/** A rewritten line gets the row colour alone; highlighting most of it says less than nothing. */
+test('lines that share too little are not word-diffed', () => {
+  expect(wordDiff('import { a } from "./a"', 'export default function main() {}')).toBeNull()
+  expect(wordDiff('', 'anything')).toBeNull()
+})
+
+test('emphasis is keyed by line index, for the paired lines only', () => {
+  const hunk = hunkOf(['del', 'const a = 1'], ['del', 'gone entirely'], ['add', 'const a = 2'])
+  const marks = emphasis(hunk)
+
+  expect([...marks.keys()]).toEqual([0, 2])
+  expect(marks.get(2)?.find((segment) => segment.changed)?.text).toBe('2')
+})
+
+test('split rows put context on both sides, pairs across, and leftovers alone', () => {
+  const hunk = hunkOf(['context', 'a'], ['del', 'b1'], ['del', 'b2'], ['add', 'c1'], ['context', 'd'], ['add', 'e'])
+
+  expect(splitRows(hunk)).toEqual([
+    { left: 0, right: 0 },
+    { left: 1, right: 3 },
+    { left: 2, right: null },
+    { left: 4, right: 4 },
+    { left: null, right: 5 },
+  ])
 })
