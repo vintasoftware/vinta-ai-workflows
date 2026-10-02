@@ -60,7 +60,7 @@ pnpm install
 That is the development setup. To *use* it, there is no clone at all — the package is published:
 
 ```bash
-npx vinta-ai-maestro@alpha serve
+npx vinta-ai-maestro@alpha ui
 ```
 
 `@alpha` while the only published versions are pre-releases. Plain `npx vinta-ai-maestro` resolves the `latest` dist-tag, which is correct once a stable exists.
@@ -80,21 +80,34 @@ The published binary is a different file — `dist/cli/bin.js`, plain JavaScript
 
 Every command runs against a project checkout — your project, not this one. `--repo <dir>` names it; with no flag it is the current directory.
 
-## The six commands
+## The commands
 
 | Command | What it does |
 |---|---|
 | `doctor <workflow.json> [--repo <dir>] [--resume <run-id>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
-| `serve [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon and prints the URL to open. Its editor edits `<repo>/ai-plans/*.workflow.json`. |
-| `run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Starts the daemon *and* executes the workflow. Exits when the run ends. |
-| `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. |
+| `run <workflow.json> [--repo <dir>]` | Starts the workflow as a **background job** and returns once it is under way. The run does not need the terminal: close it and the run carries on. `--foreground` hosts it in this process instead and exits when it ends, for CI. |
+| `run --resume <run-id>` | Picks an interrupted or paused run back up, as a background job. |
+| `status [run-id] [--json]` | Every run in the project and what it is doing — or one run, phase by phase. A run whose job died without ending it shows as `interrupted`. |
+| `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
+| `pause <run-id> [--wait]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
+| `stop <run-id> [--wait]` | Kills every live agent turn and gate now. The run is `cancelled` and cannot be resumed. |
+| `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. |
+| `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. A run whose job is still running is kept. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 | `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
 
 There is also `judge-hook`, which is internal: it is the hook `--permission judged` installs, and claude-code runs it, not you.
 
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
+
+### A run is a background job
+
+`run` hands the run to a detached copy of itself — the run's *job* — and returns as soon as the job says the run has started. The job is the run's only host: it holds the scheduler, the agents, and a loopback API the agents call back into (`with`, `gate`). It writes `.vinta-ai-maestro/runs/<run-id>/job.json` — its pid, that API's address and its token — and every other command finds the run through that file. It serves no UI.
+
+`ui` is the browser's way in. It reads every run's history from the journal, and for a run whose job is alive it forwards that run's requests and socket to the job, so the live graph, steering, answering a question and taking over a terminal all work as if the two were one process. Close `ui` and the runs carry on; open it tomorrow and it shows them where they got to.
+
+A run ends one of four ways, and the journal says which: it settles (`done` or `failed`), it is paused (`paused`, resumable), it is stopped (`cancelled`, final), or its job is killed by a signal (`failed`, resumable — exactly what closing the terminal used to do). `status` shows a run whose job vanished without writing any of those — a reboot, a `kill -9` — as `interrupted`, and `run --resume` picks it up.
 
 The daemon-facing commands use three exit codes, so a script can tell the cases
 apart: `0` success, `1` the command ran and the answer was no, `2` the command
@@ -304,10 +317,10 @@ A repository with two phases that depend on nothing, so both belong to wave 1 an
 
   Scope it to what your phases actually need; this is the permissive end.
 
-**3. Review and approve it in the editor.** `serve` opens the daemon with no run attached. Its Editor lists every `ai-plans/*.workflow.json` in the project — the file you just wrote, or the one `plan-feature` wrote — and saving writes back to that same file:
+**3. Review and approve it in the editor.** `ui` serves the browser UI for the project. Its Editor lists every `ai-plans/*.workflow.json` in the project — the file you just wrote, or the one `plan-feature` wrote — and saving writes back to that same file:
 
 ```console
-$ vinta-ai-maestro serve
+$ vinta-ai-maestro ui
 vinta-ai-maestro: daemon listening on http://127.0.0.1:52218
 Open this URL. It carries the access token, so treat it as a secret:
   http://127.0.0.1:52218/?token=<the-token-printed-here>
@@ -370,13 +383,16 @@ Both phases start at `0s` — that is the parallelism the plan claimed, confirme
 
 ```console
 $ vinta-ai-maestro run ai-plans/widget-tags.workflow.json
-vinta-ai-maestro: daemon listening on http://127.0.0.1:52765
-Open this URL. It carries the access token, so treat it as a secret:
-  http://127.0.0.1:52765/?token=<the-token-printed-here>
-vinta-ai-maestro: run widget-tags-mtvodosx started (2 nodes).
+vinta-ai-maestro: starting run widget-tags-mtvodosx in the background…
+vinta-ai-maestro: run widget-tags-mtvodosx started (job pid 48213).
+  status   vinta-ai-maestro status widget-tags-mtvodosx
+  logs     vinta-ai-maestro logs widget-tags-mtvodosx --follow
+  ui       vinta-ai-maestro ui
+  pause    vinta-ai-maestro pause widget-tags-mtvodosx
+  stop     vinta-ai-maestro stop widget-tags-mtvodosx
 ```
 
-The daemon comes up before the first node dispatches, so you can open the URL and watch. Both phases are assigned a lane immediately and implement concurrently, each in its own worktree under `.vinta-ai-maestro/lanes/`, on its own branch cut from `base_branch`:
+The command returns; the run does not need this terminal. The preflight is the job's — if it refuses, `run` prints the report and says the run did not start. Watch it from the terminal with `status` and `logs -f`, or keep `ui` open in another one and follow it in the browser. Both phases are assigned a lane immediately and implement concurrently, each in its own worktree under `.vinta-ai-maestro/lanes/`, on its own branch cut from `base_branch`:
 
 ```console
 $ git branch
@@ -388,7 +404,7 @@ $ git branch
   wt/widget-tags-mtvodosx-lane-2
 ```
 
-`plan/…/phase-<id>` is the phase's own branch; `wt/…` are the branches the lane and integration worktrees are checked out on. When the run ends, read [What this walkthrough has and has not been run against](#what-this-walkthrough-has-and-has-not-been-run-against) before you read the last two lines it prints.
+`plan/…/phase-<id>` is the phase's own branch; `wt/…` are the branches the lane and integration worktrees are checked out on. Need the machine back for an hour? `vinta-ai-maestro pause <run-id>` lets the phases finish the step they are in and ends the job; `vinta-ai-maestro run --resume <run-id>` carries on later. When the run ends, read [What this walkthrough has and has not been run against](#what-this-walkthrough-has-and-has-not-been-run-against) before you read the last two lines it prints.
 
 **7. Read what happened, then clean up.** A finished run leaves its worktrees, branches and databases in place on purpose — they are the evidence. The post-mortem is written at the end and is what `plan-feature` reads before drawing the next feature's graph:
 
@@ -420,6 +436,8 @@ Everything a run writes lives inside the project, never in a global cache direct
   logs/daemon.<n>.ndjson        # rotations, oldest pruned past five
   lanes/<lane>/                 # the lane worktrees, and .templates/ for forked DBs
   runs/<run-id>/
+    job.json                    # while the job runs: pid, API address, token (0600)
+    job.log                     # the job's console, every attempt appended
     workflow.json               # the snapshot frozen at run start
     postmortem.json             # written once the run has ended
     nodes/<node-id>/
@@ -448,10 +466,10 @@ It removes the run *directory* — snapshot, transcripts, raw streams, gate logs
 
 Transcripts say what the *agents* did. This says what the *daemon* did — which is the half you need when the answer is "nothing happened", "it stopped", or "the process is gone".
 
-It is a file and a view, and they show the same records:
+It is a file and a view, and they show the same records. Every process writes to the same file — each run's job and `ui` — and every record carries its `pid`. For one run's job alone, `vinta-ai-maestro logs <run-id>` is shorter:
 
 ```console
-$ vinta-ai-maestro serve
+$ vinta-ai-maestro ui
 vinta-ai-maestro: daemon listening on http://127.0.0.1:52765
 Open this URL. It carries the access token, so treat it as a secret:
   http://127.0.0.1:52765/?token=<the-token-printed-here>
@@ -505,9 +523,9 @@ Everything other than `message` is **identifiers only** — the rule `flow.db` f
 Flags:
 
 ```console
-$ vinta-ai-maestro serve --log-level debug   # adds a line per request and per socket
-$ vinta-ai-maestro serve --log-stderr        # also print to the terminal, one line each
-$ vinta-ai-maestro serve --log-detail kind   # drop error messages, keep kinds and frames
+$ vinta-ai-maestro ui --log-level debug   # adds a line per request and per socket
+$ vinta-ai-maestro ui --log-stderr        # also print to the terminal, one line each
+$ vinta-ai-maestro ui --log-detail kind   # drop error messages, keep kinds and frames
 ```
 
 `run` accepts the same three, and writes to the same file.
@@ -525,6 +543,8 @@ Open this URL. It carries the access token, so treat it as a secret:
 ```
 
 That line is the only place in this package's output where the token ever appears. It is not in the "listening on" line, not in warnings, not in errors — so pasting a log into a ticket is safe, and pasting *that* URL into a ticket publishes the run.
+
+Each run's job has a token of its own, which it is never printed: it is written to that run's `job.json`, readable by your user only, and removed when the job ends. `ui` reads it to forward a live run's traffic, and the browser never sees it — its requests carry `ui`'s token, which the job would refuse. Treat `job.json` like the URL: it is access to the run.
 
 **`--host` is explicit and warned about.** The default bind is `127.0.0.1`. Any other value makes the daemon reachable from other machines, and the daemon prints a warning naming the host — on stderr, where it cannot be mistaken for part of the URL. Anyone who can reach the daemon and holds the token can drive the run: there is no per-user access control, by design. Prefer an SSH port-forward to `--host` for a daemon on a bigger box.
 
@@ -544,7 +564,7 @@ Point the adapter at a specific binary with an environment variable, which overr
 
 ### What an agent may do in its lane
 
-`--permission <ask|auto|full|judged>` on `run` and `serve`, defaulting to **`auto`**: the agent works unattended inside its own lane, which is what a lane is for.
+`--permission <ask|auto|full|judged>` on `run` and `ui` (for the runs it starts), defaulting to **`auto`**: the agent works unattended inside its own lane, which is what a lane is for.
 
 **The operator sets this, never the workflow document.** It is an argument to the command rather than a field in the JSON, and deliberately so — the document is committed and shared, and a file in a repository should not be able to tell someone else's machine to run agents without approvals. A plan may say which model writes a phase; it may not say how much of a stranger's filesystem that model gets.
 
@@ -555,7 +575,7 @@ Point the adapter at a specific binary with an environment variable, which overr
 | `full` | `--allow-dangerously-skip-permissions --permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
 | `judged` | as `full`, plus a `PreToolUse` hook that asks a System One classifier about each judged call | refused by `doctor` |
 
-`ask` is the CLIs' own default and the one to avoid headlessly: nothing answers a permission prompt in a `run`. The request surfaces as a `permission_request` event and the transcript renders it, but no reply is ever sent — so the agent reports a blocked working directory and the phase fails having written nothing. Use it with `serve` and a human watching, or not at all.
+`ask` is the CLIs' own default and the one to avoid headlessly: nothing answers a permission prompt in a `run`. The request surfaces as a `permission_request` event and the transcript renders it, but no reply is ever sent — so the agent reports a blocked working directory and the phase fails having written nothing. Use it with `ui` open and a human watching, or not at all.
 
 `full` is available and is not the default. Both vendors describe their equivalent as being for sandboxes with no internet access, and a lane is not that — it has the network and whatever credentials the machine holds.
 
@@ -567,7 +587,7 @@ A lane is still a worktree of your repository, so committed settings travel into
 
 ## System One classifiers
 
-`--system-one <config.json>` on `run`, `serve` and `doctor` points a run at a fast classifier — one that answers yes/no or scores a fixed set of labels, and writes nothing. The file is the operator's and never part of the plan:
+`--system-one <config.json>` on `run`, `ui` and `doctor` points a run at a fast classifier — one that answers yes/no or scores a fixed set of labels, and writes nothing. The file is the operator's and never part of the plan:
 
 ```jsonc
 {
