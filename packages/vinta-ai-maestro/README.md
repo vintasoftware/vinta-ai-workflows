@@ -224,7 +224,7 @@ the project, this chore posts a topic-grouped review canvas on every phase PR:
 }
 ```
 
-The node view links the phase's PR in its **Diff** panel, or says why none
+The node view links the phase's PR on its **Changes** card, or says why none
 opened.
 
 ## The review loop

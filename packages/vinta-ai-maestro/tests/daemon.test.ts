@@ -54,7 +54,7 @@ import {
 import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { CodexAdapter } from '../src/harness/codex.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
-import { EventPageSchema, StartRunResponseSchema } from '../src/daemon/schemas.ts'
+import { EventPageSchema, NodeChangesSchema, StartRunResponseSchema } from '../src/daemon/schemas.ts'
 import { PtyServerFrameSchema } from '../src/daemon/pty-frames.ts'
 import type {
   RunStartOutcome,
@@ -441,6 +441,47 @@ describe('snapshots', () => {
       },
     ])
     lease.release()
+  })
+
+  it('serves a node’s changes, and an empty description for a node with no branch', async () => {
+    const r = await rig()
+
+    const unassigned = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/changes`)
+    expect(unassigned.status).toBe(200)
+    expect(NodeChangesSchema.parse(unassigned.body)).toEqual({
+      runId: RUN_ID,
+      nodeId: 'a',
+      branch: null,
+      baseBranch: null,
+      lane: null,
+      source: 'none',
+      files: [],
+      totals: { files: 0, additions: 0, deletions: 0 },
+      patch: null,
+      truncated: false,
+    })
+
+    // Assigned, but the store sits in a directory that is not a repository
+    // and the branch exists nowhere: git has nothing to say, and that is a
+    // 200 saying so rather than a 500. The ref still rides along.
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'node_assigned',
+      payload: { lane: 'run-1-lane-1', branch: 'phase/a', base_branch: 'main' },
+    })
+    const assigned = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/changes?patch=true`)
+    expect(assigned.status).toBe(200)
+    expect(NodeChangesSchema.parse(assigned.body)).toMatchObject({
+      branch: 'phase/a',
+      baseBranch: 'main',
+      lane: 'run-1-lane-1',
+      source: 'none',
+      files: [],
+    })
+
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/zz/changes`)).status).toBe(404)
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/changes?patch=yes`)).status).toBe(400)
   })
 
   it('serves a node detail: transcript page, gate log and diff ref', async () => {

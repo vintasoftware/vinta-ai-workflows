@@ -275,6 +275,137 @@ test('a streamed thought is one row', () => {
   expect(body).toContain('part 11')
 })
 
+/**
+ * An agent writes markdown. It used to render as the asterisks and backticks,
+ * which is most of what made a transcript hard to read.
+ */
+test('an agent’s answer renders as the markdown it is', () => {
+  const view = render(
+    <Transcript
+      entries={[
+        {
+          type: 'assistant_text',
+          text: '## Plan\n\n- read `src/a.ts`\n- run the suite\n\n```ts\nconst a = 1\n```',
+        },
+      ]}
+    />,
+  )
+
+  const body = view.container.querySelector('.entry-body')!
+  expect(body.querySelector('h2')?.textContent).toBe('Plan')
+  expect(body.querySelectorAll('li')).toHaveLength(2)
+  expect(body.querySelector('li code')?.textContent).toBe('src/a.ts')
+  // A fenced block is a code block, highlighted as what the fence said.
+  expect(body.querySelector('pre.code')?.getAttribute('data-lang')).toBe('ts')
+  expect(body.querySelector('pre.code')?.textContent).toContain('const a = 1')
+  // And the asterisks are gone.
+  expect(body.textContent).not.toContain('##')
+})
+
+/** Raw HTML in an answer is text. Repository content never becomes markup (§11). */
+test('markup in an answer is shown, not rendered', () => {
+  const view = render(
+    <Transcript entries={[{ type: 'assistant_text', text: 'see <img src=x onerror=alert(1)> here' }]} />,
+  )
+
+  expect(view.container.querySelector('.entry-body img')).toBe(null)
+})
+
+/** The operator's own words are set apart, the way a chat sets the reader's side apart. */
+test('the operator’s message is set apart from the agent’s', () => {
+  const view = render(<Transcript entries={[{ type: 'user_message', text: 'prefer a migration' }]} />)
+
+  const row = view.container.querySelector('li[data-kind="user_message"]')!
+  expect([...row.classList]).toContain('entry-operator')
+  expect(row.querySelector('.entry-body')?.textContent).toContain('prefer a migration')
+})
+
+/**
+ * An edit, opened, is a diff: the two strings the harness was given, one red
+ * and one green, highlighted as the file's language. The row itself carries
+ * the size of the change.
+ */
+test('an edit opens into a diff of its two sides', () => {
+  const view = render(
+    <Transcript
+      entries={[
+        {
+          type: 'tool_use',
+          name: 'Edit',
+          id: 'e1',
+          input: { file_path: 'src/a.ts', old_string: 'const a = 1', new_string: 'const a = 2\nconst b = 3' },
+        },
+        { type: 'tool_result', id: 'e1', ok: true, summary: 'The file has been updated.' },
+      ]}
+    />,
+  )
+
+  const row = view.container.querySelector('li[data-kind="tool_use"]')!
+  expect(row.querySelector('.entry-author')?.textContent).toBe('Edit')
+  expect(row.querySelector('[data-headline]')?.textContent).toBe('src/a.ts')
+  expect(row.querySelector('[data-counts]')?.textContent).toBe('+2−1')
+  expect(row.querySelector('[data-result]')?.getAttribute('data-tone')).toBe('ok')
+
+  fireEvent.click(row.querySelector('[data-action="toggle-entry"]')!)
+
+  const lines = [...row.querySelectorAll('[data-edit] tr[data-line]')]
+  expect(lines.map((line) => line.getAttribute('data-line'))).toEqual(['del', 'add', 'add'])
+  expect(lines[0]?.textContent).toContain('const a = 1')
+  expect(lines[2]?.textContent).toContain('const b = 3')
+  // What the tool said back, under the diff.
+  expect(row.querySelector('[data-output]')?.textContent).toBe('The file has been updated.')
+})
+
+/** A shell call opens into the command and what it printed. */
+test('a shell call opens into its command and output', () => {
+  const view = render(
+    <Transcript
+      entries={[
+        call('pnpm test'),
+        { type: 'tool_result', id: 't-pnpm test', ok: false, summary: 'FAIL src/a.test.ts\n  2 failing' },
+      ]}
+    />,
+  )
+
+  const row = view.container.querySelector('li[data-kind="tool_use"]')!
+  expect(row.querySelector('.entry-author')?.textContent).toBe('Shell')
+  fireEvent.click(row.querySelector('[data-action="toggle-entry"]')!)
+
+  expect(row.querySelector('[data-command]')?.textContent).toContain('pnpm test')
+  expect(row.querySelector('[data-command]')?.getAttribute('data-lang')).toBe('bash')
+  expect(row.querySelector('[data-output]')?.textContent).toContain('2 failing')
+  expect([...(row.querySelector('[data-output]')?.classList ?? [])]).toContain('border-tone-error')
+})
+
+/** Reading is most of what an agent does and the least of what the operator came to see. */
+test('a stretch of exploring is one row that opens into its calls', () => {
+  const view = render(
+    <Transcript
+      entries={[
+        { type: 'tool_use', name: 'Read', id: 'r1', input: { file_path: 'src/a.ts' } },
+        { type: 'tool_result', id: 'r1', ok: true, summary: '40 lines' },
+        { type: 'tool_use', name: 'Grep', id: 'g1', input: { pattern: 'invoice', path: 'src' } },
+        { type: 'tool_result', id: 'g1', ok: true, summary: '3 matches' },
+        { type: 'tool_use', name: 'Read', id: 'r2', input: { file_path: 'src/b.ts' } },
+        { type: 'tool_result', id: 'r2', ok: true, summary: '12 lines' },
+      ]}
+    />,
+  )
+
+  expect(view.container.querySelectorAll('li[data-entry]')).toHaveLength(1)
+  const row = view.container.querySelector('li[data-group="exploring"]')!
+  expect(row.querySelector('.entry-author')?.textContent).toBe('Explored')
+  expect(row.querySelector('[data-headline]')?.textContent).toBe('2 reads, 1 search')
+
+  fireEvent.click(row.querySelector('[data-action="toggle-entry"]')!)
+
+  const calls = [...row.querySelectorAll('[data-call]')]
+  expect(calls.map((item) => item.getAttribute('data-call'))).toEqual(['r1', 'g1', 'r2'])
+  expect(calls[1]?.textContent).toContain('Grep')
+  expect(calls[1]?.textContent).toContain('invoice in src')
+  expect(calls[2]?.querySelector('[data-result]')?.getAttribute('data-tone')).toBe('ok')
+})
+
 // ---------------------------------------------------------------------------
 // Whose rows these are
 // ---------------------------------------------------------------------------

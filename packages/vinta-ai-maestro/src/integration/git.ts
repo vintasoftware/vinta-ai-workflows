@@ -40,9 +40,24 @@ export class GitCommandError extends Error {
   }
 }
 
-export async function git(cwd: string, args: readonly string[]): Promise<string> {
+/**
+ * `execFile`'s default `maxBuffer` is 1 MiB, which a `git diff` of a real
+ * phase clears routinely. Callers that read a patch say how much they can hold.
+ */
+export interface GitOptions {
+  readonly maxBuffer?: number
+}
+
+export async function git(
+  cwd: string,
+  args: readonly string[],
+  options: GitOptions = {},
+): Promise<string> {
   try {
-    const { stdout } = await exec('git', [...args], { cwd })
+    const { stdout } = await exec('git', [...args], {
+      cwd,
+      ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+    })
     return stdout
   } catch (error) {
     // A spawn failure — git missing from PATH — keeps its own `ENOENT`, which

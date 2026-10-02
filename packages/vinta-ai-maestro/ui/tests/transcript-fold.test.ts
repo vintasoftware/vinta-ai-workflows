@@ -6,7 +6,16 @@
  * through two layers that have their own reasons to change.
  */
 import { expect, test } from 'vitest'
-import { bodyOf, fold, hasMore, headlineOf, present } from '../src/transcript.ts'
+import {
+  bodyOf,
+  editCounts,
+  fold,
+  hasMore,
+  headlineOf,
+  isExploration,
+  present,
+  settled,
+} from '../src/transcript.ts'
 
 const thinking = (text: string): unknown => ({ type: 'thinking', text })
 const said = (text: string): unknown => ({ type: 'assistant_text', text })
@@ -257,7 +266,126 @@ test('an attributed row stops repeating who it is', () => {
   expect(present(by('reviewer', thinking('hmm'))).label).toBe('thinking')
 
   // Labels that describe the *event* stay useful under any band.
-  expect(present(by('fixer', used('Bash', { command: 'ls' }))).label).toBe('Tool · Bash')
+  expect(present(by('fixer', used('Bash', { command: 'ls' }))).label).toBe('Shell')
+})
+
+// ---------------------------------------------------------------------------
+// What a tool call is
+// ---------------------------------------------------------------------------
+
+/**
+ * Three harnesses, three vocabularies, one row. `Read`, `read` and `read_file`
+ * are the same thing to an operator, and the row says so.
+ */
+test('a tool call is sorted into a kind whatever the harness called it', () => {
+  expect(present(used('Read', { file_path: 'src/a.ts' })).tool?.kind).toBe('read')
+  expect(present(used('read', { filePath: 'src/a.ts' })).tool?.kind).toBe('read')
+  expect(present(used('mcp__fs__read_file', { path: 'src/a.ts' })).tool?.kind).toBe('read')
+  expect(present(used('Bash', { command: 'ls' })).tool?.kind).toBe('shell')
+  expect(present(used('command_execution', { command: 'ls' })).tool?.kind).toBe('shell')
+  expect(present(used('str_replace_based_edit_tool', {})).tool?.kind).toBe('edit')
+  expect(present(used('Weather', { city: 'Recife' })).tool?.kind).toBe('other')
+})
+
+test('the label is the verb, and the target is the argument that matters', () => {
+  const edit = present(
+    used('Edit', { file_path: 'src/a.ts', old_string: 'a\nb', new_string: 'a\nb\nc', replace_all: false }),
+  )
+  expect(edit.label).toBe('Edit')
+  expect(edit.headline).toBe('src/a.ts')
+  expect(edit.tool?.path).toBe('src/a.ts')
+  expect(edit.tool?.edit).toEqual({ before: 'a\nb', after: 'a\nb\nc' })
+  // The two sides are the open row's diff, never a `key=value`; the rest are.
+  expect(edit.tool?.args).toEqual([['replace_all', 'false']])
+
+  const grep = present(used('Grep', { pattern: 'TODO', path: 'src', output_mode: 'files_with_matches' }))
+  expect(grep.label).toBe('Grep')
+  expect(grep.headline).toBe('TODO in src')
+
+  const write = present(used('write', { filePath: 'README.md', content: '# hi\n' }))
+  expect(write.label).toBe('Write')
+  expect(write.tool?.content).toBe('# hi\n')
+
+  const agent = present(used('Task', { description: 'Find the seam', prompt: 'Look for…', subagent_type: 'Explore' }))
+  expect(agent.label).toBe('Agent')
+  expect(agent.headline).toBe('Find the seam')
+
+  // An unknown tool keeps the vendor's name, so nothing is renamed by guessing.
+  expect(present(used('Weather', { city: 'Recife' })).label).toBe('Tool · Weather')
+})
+
+/** codex names the files of a change in a list, not a field. */
+test('a codex file change names its first file and counts the rest', () => {
+  const view = present(
+    used('file_change', { changes: [{ path: 'a.ts', kind: 'update' }, { path: 'b.ts', kind: 'add' }] }),
+  )
+  expect(view.label).toBe('Edit')
+  expect(view.headline).toBe('a.ts and 1 more')
+})
+
+test('an edit’s size is its two sides’ line counts', () => {
+  expect(editCounts({ before: 'a\nb\n', after: 'a\nb\nc\nd\n' })).toEqual({ additions: 4, deletions: 2 })
+  expect(editCounts({ before: '', after: 'one' })).toEqual({ additions: 1, deletions: 0 })
+})
+
+// ---------------------------------------------------------------------------
+// A result under its call, and exploring as one row
+// ---------------------------------------------------------------------------
+
+const result = (id: string, ok: boolean, summary = 'done'): unknown => ({ type: 'tool_result', id, ok, summary })
+
+/** The row says what the call was *and* how it went; the list is half as long. */
+test('a result sits under the call it answers', () => {
+  const rows = fold(
+    [used('Bash', { command: 'pnpm test' }), result('t-Bash', false, '2 failing'), said('Fixing.')],
+    0,
+  )
+
+  expect(rows).toHaveLength(2)
+  expect(rows[0]?.results[0]?.tone).toBe('error')
+  expect(rows[0]?.results[0]?.body).toBe('2 failing')
+  // A call with a result always has something to open.
+  expect(hasMore(rows[0]!)).toBe(true)
+})
+
+/** A result whose call fell outside the served tail is still a row: the record must not lie. */
+test('a result with no call in the window is a row of its own', () => {
+  const rows = fold([result('t-elsewhere', true)], 0)
+
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.views[0]?.kind).toBe('tool_result')
+})
+
+test('consecutive reads and searches fold into one stretch of exploring', () => {
+  const rows = fold(
+    [
+      used('Read', { file_path: 'a.ts' }),
+      result('t-Read', true),
+      { type: 'tool_use', name: 'Grep', id: 'g1', input: { pattern: 'x' } },
+      result('g1', true),
+      { type: 'tool_use', name: 'Glob', id: 'g2', input: { pattern: '*.ts' } },
+      used('Edit', { file_path: 'a.ts', old_string: 'a', new_string: 'b' }),
+    ],
+    0,
+  )
+
+  expect(rows).toHaveLength(2)
+  expect(isExploration(rows[0]!)).toBe(true)
+  expect(headlineOf(rows[0]!)).toBe('1 read, 2 searches')
+  // Two of three calls have answered; the row is still exploring.
+  expect(settled(rows[0]!)).toBe(false)
+  // An edit is never part of the stretch.
+  expect(isExploration(rows[1]!)).toBe(false)
+  expect(rows[1]?.views[0]?.label).toBe('Edit')
+})
+
+test('a stretch of exploring is broken by a change of author', () => {
+  const rows = fold(
+    [by('implementer', used('Read', { file_path: 'a.ts' })), by('reviewer', used('Read', { file_path: 'b.ts' }))],
+    0,
+  )
+
+  expect(rows).toHaveLength(2)
 })
 
 /**

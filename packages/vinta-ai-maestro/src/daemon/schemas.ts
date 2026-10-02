@@ -394,6 +394,54 @@ export const DiffRefSchema = z.strictObject({
 })
 
 /**
+ * What a phase changed (§10): the files with their line counts, and the patch
+ * when asked for. Read by the git unit (`integration/changes.ts`) from the
+ * lane's working tree while the lane holds the branch, and from the branch
+ * itself after that — `source` says which, because they can differ: a working
+ * tree has edits no commit has yet.
+ *
+ * `patch` is null when the client did not ask (`?patch=true`), and the summary
+ * card never does. `truncated` is about the patch alone; the per-file counts
+ * come from `--numstat` and are complete whatever the patch's size.
+ */
+export const ChangedFileSchema = z.strictObject({
+  path: z.string(),
+  oldPath: z.string().nullable(),
+  status: z.enum([
+    'added',
+    'modified',
+    'deleted',
+    'renamed',
+    'copied',
+    'type_changed',
+    'unmerged',
+    'untracked',
+    'unknown',
+  ]),
+  /** Null for a binary file. */
+  additions: z.number().int().nullable(),
+  deletions: z.number().int().nullable(),
+  binary: z.boolean(),
+})
+
+export const NodeChangesSchema = z.strictObject({
+  runId: z.string(),
+  nodeId: z.string(),
+  branch: z.string().nullable(),
+  baseBranch: z.string().nullable(),
+  lane: z.string().nullable(),
+  source: z.enum(['worktree', 'branch', 'none']),
+  files: z.array(ChangedFileSchema),
+  totals: z.strictObject({
+    files: z.number().int(),
+    additions: z.number().int(),
+    deletions: z.number().int(),
+  }),
+  patch: z.string().nullable(),
+  truncated: z.boolean(),
+})
+
+/**
  * One agent turn's session decision (§15), on the wire.
  *
  * A closed `reason` vocabulary rather than a sentence, for the same reason the
@@ -774,6 +822,8 @@ export type HumanQuestion = z.infer<typeof HumanQuestionSchema>
 export type RunSummary = z.infer<typeof RunSummarySchema>
 export type RunSnapshot = z.infer<typeof RunSnapshotSchema>
 export type NodeDetail = z.infer<typeof NodeDetailSchema>
+export type NodeChanges = z.infer<typeof NodeChangesSchema>
+export type ChangedFile = z.infer<typeof ChangedFileSchema>
 export type SessionTurn = z.infer<typeof SessionTurnSchema>
 export type RunUsageResponse = z.infer<typeof RunUsageResponseSchema>
 export type StartRunResponse = z.infer<typeof StartRunResponseSchema>

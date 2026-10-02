@@ -18,6 +18,7 @@ import {
   gate,
   harness,
   node,
+  nodeChanges,
   nodeDetail,
   RUN_ID,
   runSummary,
@@ -67,6 +68,9 @@ const ALL_KINDS = [
 test('every normalized event kind renders, and the operator’s own message is attributed to them', async () => {
   // Compile-time coverage, asserted at runtime so the check has a witness.
   expect(ENTRY_KINDS_COVERED).toBe(true)
+  // Every kind but one is a row of its own. The result of a call sits under
+  // the call (`transcript.ts`'s `fold`), so it is asserted on that row below.
+  const OWN_ROW = TRANSCRIPT_KINDS.filter((kind) => kind !== 'tool_result')
 
   const stub = await startStubDaemon({
     runs: [runSummary()],
@@ -80,15 +84,15 @@ test('every normalized event kind renders, and the operator’s own message is a
   daemon = stub
   const { container } = open(stub, 'impl')
 
-  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(13))
+  await waitFor(() => expect(container.querySelectorAll('[data-entry]')).toHaveLength(OWN_ROW.length))
 
   // Not one kind falls through to a blank row, and no two look alike.
-  const labels = TRANSCRIPT_KINDS.map((kind) => {
+  const labels = OWN_ROW.map((kind) => {
     const row = container.querySelector(`[data-kind="${kind}"] .entry-author`)
     expect(row, kind).not.toBe(null)
     return row?.textContent ?? ''
   })
-  expect(new Set(labels).size).toBe(TRANSCRIPT_KINDS.length)
+  expect(new Set(labels).size).toBe(OWN_ROW.length)
 
   // §7: the steering the operator typed is the operator's, and the row says so
   // before it says anything else. It must never read as the agent speaking.
@@ -102,10 +106,14 @@ test('every normalized event kind renders, and the operator’s own message is a
     container.querySelector('[data-kind="assistant_text"] .entry-author')?.getAttribute('data-author'),
   ).toBe('agent')
 
+  // The call's row says what it was — a verb, then the file — and how it went:
+  // the result is seated under it, its verdict a dot at the row's end.
+  const read = container.querySelector('[data-kind="tool_use"]')
+  expect(read?.querySelector('.entry-author')?.textContent).toBe('Read')
+  expect(read?.querySelector('[data-headline]')?.textContent).toBe('src/billing.ts')
+  expect(read?.querySelector('[data-result]')?.getAttribute('data-tone')).toBe('ok')
   // A failing tool result is distinguishable from a passing one by more than text.
-  expect(container.querySelector('[data-kind="tool_result"] .chip')?.getAttribute('data-tone')).toBe(
-    'ok',
-  )
+  expect(read?.querySelector('[data-result] .chip')?.getAttribute('data-tone')).toBe('ok')
   expect(container.querySelector('[data-kind="error"] .chip')?.getAttribute('data-tone')).toBe(
     'error',
   )
@@ -434,11 +442,11 @@ test('the gate panel names each verdict, and opens one log at a time', async () 
   expect(textOf(container, '[data-gate-log="lint"]')).toContain('0 problems')
   expect(container.querySelector('[data-gate-log="unit"]')).toBe(null)
 
-  // The diff is a *ref* — branch, base, lane — because that is what §10 serves.
+  // The reference — branch, base, lane — stays on the changes card beside the
+  // description (`changes-view.test.tsx` covers the description itself).
   expect(textOf(container, '[data-diff-branch]')).toBe('phase/impl')
   expect(textOf(container, '[data-diff-base]')).toBe('wave-0')
   expect(textOf(container, '[data-diff-lane]')).toBe('lane-2')
-  expect(textOf(container, '[data-diff]')).toContain('git diff wave-0...phase/impl')
 })
 
 test('a running gate counts up from the daemon’s clock, and a cached verdict says so', async () => {
@@ -492,7 +500,7 @@ function toneOfGate(container: HTMLElement, gateId: string): string | null | und
   return container.querySelector(`[data-gate="${gateId}"] .chip`)?.getAttribute('data-tone')
 }
 
-test('the diff panel links the phase PR without sending the token as a referrer', async () => {
+test('the changes card links the phase PR without sending the token as a referrer', async () => {
   const done = node('impl', 'done')
   const stub = await startStubDaemon({
     runs: [runSummary()],
@@ -519,7 +527,7 @@ test('the diff panel links the phase PR without sending the token as a referrer'
   expect(link.getAttribute('rel')).toContain('noreferrer')
 })
 
-test('the diff panel says why a phase has no PR', async () => {
+test('the changes card says why a phase has no PR', async () => {
   const done = node('impl', 'done')
   const stub = await startStubDaemon({
     runs: [runSummary()],
@@ -550,13 +558,16 @@ test('a node with no transcript, no gates and no question renders', async () => 
         diff: { branch: null, baseBranch: null, lane: null },
       }),
     },
+    changes: {
+      [`${RUN_ID}/impl`]: nodeChanges({ branch: null, baseBranch: null, lane: null, source: 'none' }),
+    },
   })
   daemon = stub
   const { container } = open(stub, 'impl')
 
   await waitFor(() => expect(container.textContent).toContain('No transcript yet.'))
   expect(container.textContent).toContain('No gate has run yet.')
-  expect(container.textContent).toContain('This node has no branch yet.')
+  await waitFor(() => expect(container.textContent).toContain('This node has no branch yet.'))
   expect(container.querySelector('[data-question]')).toBe(null)
   expect(container.querySelector('[data-entry]')).toBe(null)
   expect(container.querySelector('[data-transcript-window]')).toBe(null)

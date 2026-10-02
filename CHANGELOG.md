@@ -70,10 +70,52 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   additive.
 - **Maestro: the node view links the phase's PR.** `GET
   /api/runs/:runId/nodes/:nodeId` now carries `pullRequest` (`opened`, `url`,
-  `number`, `reason`), read from the latest `node_pr` event. The **Diff**
-  panel shows `#<n>` as a link, or says why no PR opened (`gh` missing or
+  `number`, `reason`), read from the latest `node_pr` event. The **Changes**
+  card shows `#<n>` as a link, or says why no PR opened (`gh` missing or
   failed). Only an `https://` URL becomes a link. The link carries
   `rel="noreferrer noopener"` because the page URL holds the daemon token.
+- **The node view shows what a phase changed, and the whole diff on request.**
+  The *Diff* panel used to print `git diff base...branch` for the operator to
+  paste into a terminal. It is now a *Changes* card: how many files changed
+  and how many lines were added and removed, then each file — up to ten, the
+  rest as a count — with its status mark (`A`, `M`, `D`, `R`, `?` for a file
+  not yet added to git), its own `+N −M`, and a five-block bar that compares
+  the files to each other at a glance. *View full diff* opens a new route,
+  `#/runs/<run>/nodes/<node>/changes`, that renders the unified diff with
+  syntax highlighting (shiki, GitHub light and dark following the theme),
+  old and new line numbers, hunk headers with their function context, a
+  sticky file list that scrolls to each file, and a fold on any file past 400
+  changed lines. Within a removed line and the added line it pairs with, the
+  words that differ are marked, so a flipped operator or a renamed variable
+  reads at a glance; a line rewritten rather than edited keeps the row colour
+  alone. *Unified* or *Split* — the old file beside the new — is a toggle in
+  the header, remembered per browser. The daemon serves it from a new endpoint,
+  `GET /api/runs/:runId/nodes/:nodeId/changes`, answered by the git unit: from
+  the lane's **working tree** while the lane still holds the phase's branch —
+  so an agent's uncommitted edits and untracked files are visible while it is
+  working — and from the branch itself once the lane has moved on. The card
+  polls the counts on the node view's cadence and never the patch; the diff
+  view reads the patch once, and again on a button or when the run moves. A
+  patch over 2 MiB is cut at a file boundary and says so; the per-file counts
+  are complete whatever its size. A daemon older than this browser gets the
+  reference — branch, base, lane — as before. (`vinta-ai-maestro`)
+
+- **The transcript reads like the harnesses do.** An agent's prose is
+  rendered as the markdown it is — headings, lists, inline code and fenced
+  blocks, the blocks highlighted like the diff — instead of as its asterisks;
+  raw HTML in it stays text. Tool calls are a verb and a target on one line —
+  `Read` and a path, `Shell` and a command, `Edit` and a path with `+N −M`
+  beside it — whatever the harness named the tool (`Bash`, `bash`,
+  `command_execution` and an MCP server's `read_file` all read as what they
+  are), with the result's verdict as a dot at the end of the row because the
+  result now sits under the call it answers. Open, an edit is a diff of its
+  two sides, a write is the file, a shell call is the command and what it
+  printed, a failed one with a red edge. A stretch of consecutive reads,
+  searches and listings is one row — *Explored · 3 reads, 2 searches* — that
+  opens into the calls. The operator's own message is set apart in a tinted
+  block. The transcript panel also takes the height the window leaves it
+  rather than a fixed 480px. (`vinta-ai-maestro`)
+
 - **A plan's PRs now reach `main`.** Phase PRs alone did not: a phase with
   several dependencies targets its `integ-<id>` branch, and nothing ever
   targeted that branch, so every PR stacked above it was stuck. Conflict

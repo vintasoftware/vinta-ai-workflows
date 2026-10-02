@@ -1,5 +1,5 @@
 /**
- * Four views, so the route is the fragment and there is still no router.
+ * Six views, so the route is the fragment and there is still no router.
  *
  * The fragment is also the only navigation that is safe to render: the token
  * lives in the page's query string, and a fragment link leaves it exactly
@@ -26,6 +26,7 @@ import {
   AppTopbarActions,
 } from 'vinta-design-system/layout'
 import type { Client } from './client.ts'
+import { DiffView } from './DiffView.tsx'
 import { EditorList, EditorView } from './Editor.tsx'
 import { Logs } from './Logs.tsx'
 import { pageLogsClient, type LogsClient } from './logs-client.ts'
@@ -43,6 +44,11 @@ import { useRunWatch } from './watch.ts'
 // route cannot be swallowed by the run route.
 const RUN_ROUTE = /^#\/runs\/([^/]+)$/
 const NODE_ROUTE = /^#\/runs\/([^/]+)\/nodes\/(.+)$/
+// A node id is one segment too (same guarantee), so `/changes` after it is
+// this route and not part of the id. The optional `?file=` is which file to
+// scroll to — a query inside the fragment, because the real query string is
+// the token's and nothing else may be written into it.
+const CHANGES_ROUTE = /^#\/runs\/([^/]+)\/nodes\/([^/]+)\/changes(?:\?file=(.*))?$/
 const REPLAY_ROUTE = /^#\/runs\/([^/]+)\/replay$/
 const EDITOR_ROUTE = /^#\/editor(?:\/([^/]+))?$/
 const LOGS_ROUTE = /^#\/logs$/
@@ -54,6 +60,14 @@ type Route =
   // remount when the run changes. A boolean field would have made those three
   // facts conditional inside one view.
   | { readonly kind: 'replay'; readonly runId: string }
+  // §10's diff, full page. Its own member for the same reasons replay is: a
+  // different read, a different layout, and a remount when the node changes.
+  | {
+      readonly kind: 'changes'
+      readonly runId: string
+      readonly nodeId: string
+      readonly file: string | null
+    }
   | { readonly kind: 'editor'; readonly workflowId: string | null }
   // Not addressed by a run, because the records worth reading most are the
   // ones with no run to address them by: a bind that failed, a start request
@@ -144,6 +158,17 @@ export function App({
         <Replay key={route.runId} client={client} replay={replayClient} runId={route.runId} />
       )
     }
+    if (route.kind === 'changes') {
+      return (
+        <DiffView
+          key={`${route.runId}/${route.nodeId}`}
+          client={client}
+          runId={route.runId}
+          nodeId={route.nodeId}
+          file={route.file}
+        />
+      )
+    }
     if (route.nodeId === null) {
       return <Run key={route.runId} client={client} runId={route.runId} />
     }
@@ -191,6 +216,15 @@ function routeOf(hash: string): Route | null {
   const replay = REPLAY_ROUTE.exec(hash)
   if (replay?.[1] !== undefined) {
     return { kind: 'replay', runId: decodeURIComponent(replay[1]) }
+  }
+  const changes = CHANGES_ROUTE.exec(hash)
+  if (changes?.[1] !== undefined && changes[2] !== undefined) {
+    return {
+      kind: 'changes',
+      runId: decodeURIComponent(changes[1]),
+      nodeId: decodeURIComponent(changes[2]),
+      file: changes[3] === undefined || changes[3] === '' ? null : decodeURIComponent(changes[3]),
+    }
   }
   const node = NODE_ROUTE.exec(hash)
   if (node?.[1] !== undefined && node[2] !== undefined) {

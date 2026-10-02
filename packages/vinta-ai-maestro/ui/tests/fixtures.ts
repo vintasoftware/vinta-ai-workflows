@@ -5,6 +5,8 @@
  */
 import type { TranscriptEntry } from '../../src/journal/transcript.ts'
 import type {
+  ChangedFile,
+  NodeChanges,
   NodeDetail,
   RunSnapshot,
   RunSummary,
@@ -197,6 +199,44 @@ export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {
     gates: [],
     sessions: [],
     question: null,
+    ...parts,
+  }
+}
+
+/** One changed file. Modified, a few lines each way, unless told otherwise. */
+export function changedFile(path: string, parts: Partial<ChangedFile> = {}): ChangedFile {
+  return {
+    path,
+    oldPath: null,
+    status: 'modified',
+    additions: 4,
+    deletions: 2,
+    binary: false,
+    ...parts,
+  }
+}
+
+/**
+ * What a node changed. Totals are derived from the files unless given, so a
+ * test that lists three files does not have to add them up by hand.
+ */
+export function nodeChanges(parts: Partial<NodeChanges> = {}): NodeChanges {
+  const files = parts.files ?? []
+  return {
+    runId: RUN_ID,
+    nodeId: 'impl',
+    branch: 'feature/impl',
+    baseBranch: 'main',
+    lane: 'lane-1',
+    source: 'branch',
+    files,
+    totals: {
+      files: files.length,
+      additions: files.reduce((sum, file) => sum + (file.additions ?? 0), 0),
+      deletions: files.reduce((sum, file) => sum + (file.deletions ?? 0), 0),
+    },
+    patch: null,
+    truncated: false,
     ...parts,
   }
 }
