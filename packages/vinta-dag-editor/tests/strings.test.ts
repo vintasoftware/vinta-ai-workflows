@@ -15,6 +15,7 @@ import { control, mount, SAMPLE, shadow } from './helpers'
 
 const MARKED: DagStrings = {
   canvas: '⟦canvas⟧',
+  empty: '⟦empty⟧',
   addNode: '⟦addNode⟧',
   deleteNode: '⟦deleteNode⟧',
   deleteEdge: '⟦deleteEdge⟧',

@@ -99,18 +99,19 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  the previous one's commits and starts a fresh agent session —
                  "cold" is about the session, not the branch.
                  This is the *outer* budget. The inner one is each phase's own
-                 max_fix_rounds (default 2), which counts review rounds rather
-                 than findings: a first review raising four blockers can use it
-                 up while every round makes progress. A phase that keeps
-                 arriving here usually wants that raised, not this.
+                 max_fix_rounds (default 4), which counts fix rounds rather
+                 than findings: a first review raising four blockers spends one.
+                 When it runs out the phase asks whether to continue, and only
+                 "stop" brings it here.
   --retry-after  How long an unanswered failure question waits before it
                  answers itself "retry". Unset — the default — waits for a
                  person, which is what a run did before this existed. Accepts
                  minutes bare or a unit: 15, 15m, 90s, 2h.
-                 It reaches only the *failure* question, never a plan's own
-                 await_human gate: a plan that stops to ask whether a migration
-                 is safe wants a person, and answering that on their behalf is
-                 not this flag's business.
+                 Beyond the failure question it reaches only a plan question
+                 that names its own unattended answer — the shipped pipeline's
+                 scope questions take each item's default, and its exhausted
+                 budget takes "stop". A plan question that names none, like
+                 whether a migration is safe, always waits for a person.
                  Deliberately unbounded — it fires again on each new question,
                  because the thing it exists for is a run that stopped making
                  progress at 7pm and was still stopped at 11. Every firing is a

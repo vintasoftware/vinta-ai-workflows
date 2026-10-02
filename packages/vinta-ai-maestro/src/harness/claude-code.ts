@@ -789,6 +789,8 @@ const INSTALL_HINT =
 export class ClaudeCodeAdapter implements HarnessAdapter {
   readonly id = 'claude-code'
   readonly capabilities = CAPABILITIES
+  /** The CLI's own alias for its top tier, resolved by the CLI to the current model. */
+  readonly reviewModel = 'opus'
   readonly bin: string
 
   #forced: SpawnRefusalKind | null = null

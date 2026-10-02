@@ -5,10 +5,30 @@
  * ```
  * implement ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
  *                        │                                     ├─ exit≠0, rounds left ──▶ fix
- *                        │                                     └─ exit≠0, none left ──▶ failed
- *                        ├─ verdict=fail, rounds left ──▶ fix ──▶ review
- *                        └─ verdict=fail, none left ──▶ failed
+ *                        │                                     └─ exit≠0, none left ──▶ exhausted
+ *                        ├─ verdict=fail, rounds left ──▶ fix ──┬─ nothing gated ──▶ review
+ *                        │                                      └─ gated ──▶ consult ──▶ review
+ *                        └─ verdict=fail, none left ──▶ exhausted
+ * exhausted ──┬─ continue (budget granted again) ──▶ fix
+ *             └─ stop ──▶ failed
  * ```
+ *
+ * **The review/fix loop is the thermo-nuclear review loop (§16).** The reviewer
+ * holds the `review` slot across rounds and is held to the Review Standard (or
+ * the project's `REVIEW.md`); the fixer is the implementer continuing `main`,
+ * and it verifies every finding before acting on it. What it will not decide —
+ * a scenario nothing reaches, a defensive check, a requirements ambiguity, a
+ * destructive operation — it gates, and `consult` puts the whole batch to the
+ * operator at once. The answer is filed in the review ledger by
+ * `record_decision`, so every later review and fix sees it as settled. A
+ * consult is not a round: it goes straight back to the reviewer, who reads the
+ * fix the round made and the decisions beside it.
+ *
+ * `consult` answers itself under `--retry-after` with `defaults` — each item
+ * takes the default the fixer stated for it — because the plan says so here,
+ * in `unattended_answer`. `exhausted` answers itself with `stop`, which hands
+ * the phase to `--on-failure` exactly as an exhausted budget did before this
+ * question existed; an unattended run therefore spends no more than it used to.
  *
  * **Why `polish` sits between the review and the gate**, rather than after the
  * gate or before the review. A chore edits the tree, so anywhere after the gate
@@ -41,8 +61,14 @@
  * budget question belongs in front of the fixer rather than behind it.
  *
  * `max_fix_rounds` still means what it said: the number of fixers a phase may
- * spend. `0` now means none at all, where before it let one run and then failed
- * the phase regardless of what it did.
+ * spend before somebody is asked. `0` means none at all.
+ *
+ * **Exhaustion asks rather than fails.** A phase that is still being argued over
+ * after four rounds is either diminishing returns or a real disagreement, and
+ * neither is the orchestrator's to call. `continue` grants the budget again —
+ * `grant_fix_rounds`, the only verb that moves the counter — and goes straight
+ * to a fixer, since the last thing that happened was a failure it has not yet
+ * answered.
  *
  * The copy in `tests/fixtures/golden-workflow.json` is the same *graph* with
  * almost no effects: it is a schema fixture, and a fixture that ran agents
@@ -128,6 +154,46 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       ],
     },
     {
+      id: 'consult',
+      name: 'Consult',
+      position: { x: 200, y: 280 },
+      onEnter: [
+        {
+          id: 'e-consult',
+          definitionId: 'await_human',
+          params: {
+            question:
+              'The fixer has scope questions it will not decide for you. Its last report, in the ' +
+              'transcript, lists each one with the evidence, the reviewer’s recommendation and ' +
+              'its own. Answer per item, e.g. "g1: reject; g2: in scope — handle it", or ' +
+              '"defaults" to take every item’s stated default.',
+            kind: 'text',
+            unattended_answer: 'defaults',
+          },
+        },
+      ],
+    },
+    {
+      id: 'exhausted',
+      name: 'Exhausted',
+      position: { x: 400, y: 140 },
+      onEnter: [
+        {
+          id: 'e-exhausted',
+          definitionId: 'await_human',
+          params: {
+            question:
+              'This phase spent its fix rounds and the review has not approved it. The ' +
+              'transcript has the remaining blockers and the fixer’s last report. Continue ' +
+              'for another round of the same budget, or stop the phase?',
+            kind: 'choice',
+            choices: ['continue', 'stop'],
+            unattended_answer: 'stop',
+          },
+        },
+      ],
+    },
+    {
       id: 'polish',
       name: 'Polish',
       position: { x: 300, y: -140 },
@@ -207,7 +273,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
     {
       id: 't-review-exhausted',
       from: 'review',
-      to: 'failed',
+      to: 'exhausted',
       guard: "review.verdict == 'fail' && fix_rounds >= node.max_fix_rounds",
     },
     { id: 't-gate-pass', from: 'gate', to: 'integrate', guard: 'gate.exit_code == 0' },
@@ -224,12 +290,30 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
     {
       id: 't-gate-exhausted',
       from: 'gate',
-      to: 'failed',
+      to: 'exhausted',
       guard: 'gate.exit_code != 0 && fix_rounds >= node.max_fix_rounds',
     },
-    // Unconditional, and that is the fix: a fixer's work always goes back to a
-    // reviewer, which is the only thing that can say it worked.
-    { id: 't-fix-reviewed', from: 'fix', to: 'review' },
+    // A fixer's work always goes back to a reviewer, which is the only thing
+    // that can say it worked — through `consult` first when it gated something.
+    // Written as a negation so that an executor reporting no `review.gated` at
+    // all reaches the reviewer rather than stranding the node: a missing fact
+    // makes every comparison false, and `!` turns that into the safe door.
+    { id: 't-fix-gated', from: 'fix', to: 'consult', guard: 'review.gated > 0' },
+    { id: 't-fix-reviewed', from: 'fix', to: 'review', guard: '!(review.gated > 0)' },
+    {
+      id: 't-consulted',
+      from: 'consult',
+      to: 'review',
+      effects: [{ id: 'e-record-decision', definitionId: 'record_decision' }],
+    },
+    {
+      id: 't-continue',
+      from: 'exhausted',
+      to: 'fix',
+      guard: "human.answer == 'continue'",
+      effects: [{ id: 'e-grant', definitionId: 'grant_fix_rounds' }],
+    },
+    { id: 't-stop', from: 'exhausted', to: 'failed', guard: "!(human.answer == 'continue')" },
     { id: 't-integrated', from: 'integrate', to: 'done' },
   ],
   initialStateIds: ['implement'],

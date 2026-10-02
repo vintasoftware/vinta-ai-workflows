@@ -46,7 +46,7 @@ import type {
   SpawnOutcome,
 } from '../src/harness/adapter.ts'
 import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
-import { VERDICT_MARKER } from '../src/prompts/index.ts'
+import { LEDGER_FENCE, VERDICT_MARKER } from '../src/prompts/index.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import { Integrator } from '../src/integration/integrator.ts'
@@ -209,6 +209,11 @@ function setup(
     /** Answers out of the task's prompt — an agent that read what it was told. */
     readonly reply?: (task: AgentTask) => MockScript
     readonly cache?: boolean
+    /**
+     * `--retry-after`, for a run that reaches a question with an unattended
+     * answer — `standard-phase`'s exhausted budget answers itself `stop` (§16.5).
+     */
+    readonly retryAfterMs?: number
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-executor-'))
@@ -333,6 +338,7 @@ function setup(
           adapters: adapters as Readonly<Record<string, HarnessAdapter>>,
           executor,
           laneRoot,
+          ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
         }).run()
       } finally {
         admission.close()
@@ -565,7 +571,11 @@ describe('the fix loop', () => {
     // words and carries no brief; the cold prompt that opened the slot does.
     expect(fix?.prompt).toContain('same session')
     expect(implement?.prompt).not.toContain('same session')
-    expect(fix?.prompt.length).toBeLessThan((implement?.prompt ?? '').length)
+    // Neither of the two headings a brief is carried under: the delta restates
+    // how to fix, never what the phase was.
+    expect(implement?.prompt).toContain('## Your tasks')
+    expect(fix?.prompt).not.toContain('## Your tasks')
+    expect(fix?.prompt).not.toContain('## The phase this branch is implementing')
 
     // The one thing a reviewer continuation may never drop: without it the
     // executor reads no verdict and takes the fail-closed default on a node
@@ -598,9 +608,9 @@ describe('the fix loop', () => {
       .filter((task) => task.nodeId === 'p1')
       .map((task) =>
       task.prompt.includes('You are fixing') ||
-      task.prompt.includes('Change exactly what is named above')
+      task.prompt.includes('## Verify before fixing')
         ? 'fixer'
-        : task.prompt.includes('You are reviewing') || task.prompt.includes('Still reviewing')
+        : task.prompt.includes('You are the reviewer of') || task.prompt.includes('Still reviewing')
           ? 'reviewer'
           : 'implementer',
     )
@@ -619,14 +629,110 @@ describe('the fix loop', () => {
           gates: { unit: { cmd: 'exit 1', timeout_s: 30 } },
         })
       },
-      { script: PASSING },
+      // Nobody is at the exhausted-budget question, so it takes its unattended
+      // answer — `stop` — once the window passes, exactly as an exhausted
+      // budget failed the phase before the question existed.
+      { script: PASSING, retryAfterMs: 10 },
     )
     const report = await within(60_000, rig.run(), 'the exhausted fix loop')
 
     expect(report.statuses['p1']).toBe('failed')
     expect(report.statuses['p2']).toBe('blocked')
-    // `standard-phase`'s `failed` state notifies — identifiers and a fixed reason.
-    expect(rig.notifications).toEqual([{ scope: 'node', id: 'p1', reason: 'phase failed' }])
+    // The exhausted-budget question notifies as any question does, and then
+    // `standard-phase`'s `failed` state does — identifiers and fixed reasons.
+    expect(rig.notifications).toEqual([
+      { scope: 'node', id: 'p1', reason: 'waiting for the operator' },
+      { scope: 'node', id: 'p1', reason: 'phase failed' },
+    ])
+  })
+}, REAL_RUN_TIMEOUT_MS)
+
+// ---------------------------------------------------------------------------
+// §16.3: the review ledger the fixer and the operator write into
+// ---------------------------------------------------------------------------
+
+describe('the review ledger', () => {
+  const onePhase = (): Workflow =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'ledger',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1' }],
+    })
+
+  const gatedItem = {
+    id: 'g1',
+    trigger: 'defensive',
+    finding: 'Re-check parent_id in the view',
+    evidence: 'schemas.py:12 validates it',
+    reviewer_recommendation: 'Add the check',
+    recommendation: 'reject the finding',
+    default: 'reject the finding',
+  }
+
+  /** One finished fixer turn in the transcript, ending on `text`. */
+  const fixerTurn = (rig: Rig, text: string, result = 'ok'): void => {
+    rig.journal.appendTranscript(RUN_ID, 'p1', { type: 'assistant_text', text })
+    rig.journal.appendTranscript(RUN_ID, 'p1', { type: 'session_ended', result })
+  }
+
+  const execute = (rig: Rig, verb: EffectId, params: Record<string, unknown>, human = {}) =>
+    rig.executor.execute({
+      effect: SideEffectSchema.parse({ id: `e-${verb.replace(/_/g, '-')}`, definitionId: verb, params }),
+      origin: { kind: 'onEnter', stateId: 'direct' },
+      context: { node: { id: 'p1' }, human },
+    })
+
+  it('files the fixer’s block and reports how many findings it gated', async () => {
+    const rig = setup(onePhase)
+    fixerTurn(
+      rig,
+      'Fixed one.\n\n```' + LEDGER_FENCE + '\n' +
+        JSON.stringify({ rejected: [{ finding: 'A', counter_evidence: 'a.py:1' }], gated: [gatedItem] }) +
+        '\n```',
+    )
+
+    const outcome = await execute(rig, 'spawn_agent', { role: 'fixer' })
+
+    expect(outcome.facts).toEqual({ review: { gated: 1 } })
+    const ledger = rig.journal.reviewLedger(RUN_ID, 'p1')
+    expect(ledger).toHaveLength(1)
+    expect(ledger[0]).toMatchObject({ kind: 'report', gated: [gatedItem], rejected: [{ finding: 'A' }] })
+  })
+
+  it('files nothing and gates nothing for a turn with no block, or one that errored', async () => {
+    const rig = setup(onePhase)
+    fixerTurn(rig, 'Fixed everything, trust me.')
+    expect((await execute(rig, 'spawn_agent', { role: 'fixer' })).facts).toEqual({ review: { gated: 0 } })
+
+    fixerTurn(rig, '```' + LEDGER_FENCE + '\n' + JSON.stringify({ gated: [gatedItem] }) + '\n```', 'error')
+    expect((await execute(rig, 'spawn_agent', { role: 'fixer' })).facts).toEqual({ review: { gated: 0 } })
+
+    expect(rig.journal.reviewLedger(RUN_ID, 'p1')).toEqual([])
+  })
+
+  it('files an answer as a decision, unattended or not', async () => {
+    const rig = setup(onePhase)
+    await execute(rig, 'record_decision', {}, { answer: 'g1: reject' })
+    await execute(rig, 'record_decision', {}, { answer: 'defaults', unattended: true })
+
+    expect(rig.journal.reviewLedger(RUN_ID, 'p1')).toMatchObject([
+      { kind: 'decision', answer: 'g1: reject', unattended: false },
+      { kind: 'decision', answer: 'defaults', unattended: true },
+    ])
+  })
+
+  it('keeps the ledger out of the event log, which holds identifiers only', async () => {
+    const rig = setup(onePhase)
+    fixerTurn(rig, '```' + LEDGER_FENCE + '\n' + JSON.stringify({ gated: [gatedItem] }) + '\n```')
+    await execute(rig, 'spawn_agent', { role: 'fixer' })
+    await execute(rig, 'record_decision', {}, { answer: 'g1: reject' })
+
+    const logged = JSON.stringify(rig.journal.events(RUN_ID))
+    expect(logged).not.toContain(gatedItem.finding)
+    expect(logged).not.toContain('g1: reject')
   })
 }, REAL_RUN_TIMEOUT_MS)
 
@@ -1428,12 +1534,14 @@ describe('composed prompts, end to end', () => {
   it('fails when the agent ignores its prompt — the run this bug produced', async () => {
     const rig = setup(() => goldenWorkflow(CLEAN_GATES), {
       reply: () => ({ events: [{ type: 'assistant_text', text: 'ok, done' }], result: 'ok' }),
+      retryAfterMs: 10,
     })
 
     const report = await within(60_000, rig.run(), 'the run nobody told what to do')
 
     // No verdict stated, so the reviewer's silence fails closed, the fix rounds
-    // run out, and the node fails with its dependents blocked behind it.
+    // run out, nobody answers the exhausted-budget question, and the node fails
+    // with its dependents blocked behind it.
     expect(report.statuses['p1']).toBe('failed')
     expect(report.statuses['p4']).toBe('blocked')
   })
