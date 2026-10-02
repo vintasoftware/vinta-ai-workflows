@@ -114,6 +114,14 @@ export const GateTriageSchema = z.strictObject({
 
 export const SystemOneConfigSchema = z.strictObject({
   adapter: z.looseObject({ type: z.string().min(1) }),
+  probe: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Whether the preflight asks the classifier one synthetic question before a run starts. ' +
+        'It is what catches a wrong key or URL at minute zero rather than at the first gate; ' +
+        'false keeps the preflight offline.',
+    ),
   judges: z
     .strictObject({
       permission: PermissionJudgeSchema.optional().describe(
@@ -134,6 +142,8 @@ export type SystemOneConfig = z.infer<typeof SystemOneConfigSchema>
 export interface SystemOne {
   readonly adapter: SystemOneAdapter
   readonly judges: SystemOneConfig['judges']
+  /** Ask `PROBE_QUESTION` at preflight. Absent means yes. */
+  readonly probe?: boolean
 }
 
 export class SystemOneConfigError extends Error {}
@@ -161,7 +171,7 @@ export function createSystemOne(
   if (env === process.env) {
     for (const name of factory.secretEnv?.(parsed.data) ?? []) delete process.env[name]
   }
-  return { adapter, judges: config.judges }
+  return { adapter, judges: config.judges, probe: config.probe }
 }
 
 /**

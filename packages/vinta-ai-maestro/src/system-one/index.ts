@@ -1,5 +1,6 @@
 /** Public surface of System One (§17): the adapter seam, the shipped adapters, the config, the judges. */
 export {
+  PROBE_QUESTION,
   YES_NO,
   isYesNo,
   mass,

@@ -23,6 +23,7 @@ import {
   HttpSystemOneAdapter,
   MockSystemOneAdapter,
   PERMISSION_QUESTION,
+  PROBE_QUESTION,
   SystemOneConfigError,
   judgePermission,
   loadSystemOne,
@@ -475,6 +476,54 @@ describe('the doctor', () => {
     expect(await checkSystemOne(workflow(), systemOne({ permission: PERMISSION }), 'judged')).toContainEqual(
       expect.objectContaining({ id: 'judged-permission', status: 'pass' }),
     )
+  })
+
+  it('probes the classifier with a synthetic question, and passes when it answers', async () => {
+    const adapter = new MockSystemOneAdapter(() => ({ yes: 1 }))
+    const checks = await checkSystemOne(workflow(), { adapter, judges: {} }, 'auto')
+    expect(checks).toContainEqual(expect.objectContaining({ id: 'system-one', status: 'pass' }))
+    expect(adapter.asked).toEqual([PROBE_QUESTION])
+  })
+
+  it('fails when the probe goes unanswered, naming the status and never a body', async () => {
+    const rejecting = new HttpSystemOneAdapter({
+      url: 'https://classifier.example.invalid',
+      fetch: (async () => new Response('{"error":"bad key"}', { status: 401 })) as typeof fetch,
+    })
+    const [check] = await checkSystemOne(workflow(), { adapter: rejecting, judges: {} }, 'auto')
+    expect(check).toMatchObject({ id: 'system-one', status: 'fail' })
+    expect(check?.label).toContain('HTTP 401')
+    expect(check?.label).not.toContain('bad key')
+  })
+
+  it('stays offline with "probe": false', async () => {
+    const adapter = new MockSystemOneAdapter(() => ({ yes: 1 }))
+    const checks = await checkSystemOne(workflow(), { adapter, judges: {}, probe: false }, 'auto')
+    expect(checks).toContainEqual(expect.objectContaining({ id: 'system-one', status: 'pass' }))
+    expect(adapter.asked).toHaveLength(0)
+  })
+
+  it('warns about an http adapter that sends no key', async () => {
+    const keyless = new HttpSystemOneAdapter({
+      url: 'https://classifier.example.invalid',
+      fetch: (async () => Response.json({ yes: 1 })) as typeof fetch,
+    })
+    const checks = await checkSystemOne(workflow(), { adapter: keyless, judges: {} }, 'auto')
+    expect(checks).toEqual([
+      expect.objectContaining({ id: 'system-one', status: 'pass' }),
+      expect.objectContaining({ id: 'system-one-config', status: 'warn' }),
+    ])
+  })
+
+  it('reads probe from the config, defaulting to on', () => {
+    const write = (body: unknown): string => {
+      const path = join(makeTemp(), 'system-one.json')
+      writeFileSync(path, JSON.stringify(body))
+      return path
+    }
+    const adapter = { type: 'command', argv: ['true'] }
+    expect(loadSystemOne(write({ adapter })).probe).toBe(true)
+    expect(loadSystemOne(write({ adapter, probe: false })).probe).toBe(false)
   })
 
   it('warns about advisory judge gates without a classifier and fails on required ones', async () => {

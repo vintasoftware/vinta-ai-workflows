@@ -63,6 +63,23 @@ export interface SystemOnePreflight {
   readonly ready: boolean
   /** What the operator does about it. Never a credential. */
   readonly hint?: string
+  /**
+   * Something that does not stop a run but probably will hurt one — a
+   * configuration that is valid and likely wrong. `doctor` reports it as a
+   * warning; `ready` stays true.
+   */
+  readonly warning?: string
+}
+
+/**
+ * The one question a preflight probe asks (§17.3). Synthetic on purpose: a
+ * probe runs before any lane exists and must not send a byte of the
+ * repository anywhere, so the input is a fixed string and not a diff.
+ */
+export const PROBE_QUESTION: SystemOneQuestion = {
+  question: 'Is this text a connectivity check?',
+  labels: ['yes', 'no'],
+  input: 'vinta-ai-maestro preflight probe: this text is a connectivity check and contains no project data.',
 }
 
 export interface SystemOneAdapter {
