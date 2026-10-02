@@ -85,14 +85,14 @@ function liveIdsFromLiteLLM(doc) {
 // --- match helpers --------------------------------------------------------------
 
 // A cited id is alive if the aggregator lists it exactly or as a dated/versioned snapshot
-// (claude-haiku-4-5 ⊂ claude-haiku-4-5-20251001 / ...@20251001).
+// (claude-haiku-4-5 ⊂ claude-haiku-4-5-20251001 / ...@20251001), optionally provider-
+// prefixed (LiteLLM's vertex_ai/…, Bedrock's us.anthropic.…). Anything looser misreads
+// sibling models as snapshots: claude-sonnet-5 must not match claude-sonnet-5-5, and
+// gemini-3-pro must not match gemini-3-pro-image.
+const SNAPSHOT_SUFFIX = String.raw`(?:-\d{8}|-\d{4}-\d{2}-\d{2}|@\d{8})?(?:-v\d+(?::\d+)?)?`;
 function liveMatch(cited, liveId) {
-  return (
-    liveId === cited ||
-    liveId.startsWith(cited + '-') ||
-    liveId.startsWith(cited + '@') ||
-    liveId.includes(cited)
-  );
+  const escaped = cited.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[/.])${escaped}${SNAPSHOT_SUFFIX}$`).test(liveId);
 }
 
 // Family root = alpha/dash prefix up to the first version digit.

@@ -249,6 +249,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`check-ai-models` no longer mistakes sibling models for snapshots of a
+  cited id.** The id matcher used substring matching, so `claude-sonnet-5`
+  matched `claude-sonnet-5-5` (hiding the newer Sonnet and Opus releases).
+  It also matched `gemini-3-pro` to `gemini-3-pro-image`, so a retired model
+  still looked available. It now accepts only exact ids, dated or `-vN`
+  snapshot suffixes, and provider prefixes.
+
 - **The editor's canvas inspector no longer offers fields it then discards.**
   Its Status and Wave fields were folded back into the workflow and silently
   dropped — status is run state and wave is computed from dependencies — and
