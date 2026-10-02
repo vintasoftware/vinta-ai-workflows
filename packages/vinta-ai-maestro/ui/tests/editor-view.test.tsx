@@ -167,6 +167,33 @@ test('deleting an edge removes the dependency and leaves the rest of the node al
   expect(saved.nodes[0]?.gates).toEqual(['unit'])
 })
 
+test('an edge picked after a node keeps its inspector open', async () => {
+  const { container } = await openEditor()
+
+  fireEvent.click(control(container, 'select-node', 'p1'))
+  await waitFor(() => expect(container.querySelector('[data-node="p1"]')).not.toBe(null))
+  fireEvent.click(control(container, 'select-edge', 'p1-p2'))
+
+  // The host's node selection is cleared — the fields panel goes back to its
+  // prompt — but the edge the author just picked stays picked, with its
+  // artifact field under the canvas. It used to vanish on the next frame.
+  await waitFor(() => expect(container.querySelector('[data-node="p1"]')).toBe(null))
+  expect(control(container, 'select-edge', 'p1-p2').getAttribute('aria-pressed')).toBe('true')
+  expect(control(container, 'edge-artifact')).toBeInstanceOf(HTMLInputElement)
+})
+
+test('a dependency the canvas refuses is explained where the gesture happened', async () => {
+  const { container } = await openEditor()
+
+  // p2 already depends on p1; closing the edge the other way is a cycle.
+  fireEvent.click(control(container, 'connect', 'p2'))
+  fireEvent.click(control(container, 'select-node', 'p1'))
+  await waitFor(() =>
+    expect(container.querySelector('[data-role="notice"]')?.textContent).toContain('cycle'),
+  )
+  expect(container.querySelector('[data-role="valid"]')).not.toBe(null)
+})
+
 test('the dependency form carries the artifact, and refuses a cycle with its reason', async () => {
   const { container } = await openEditor()
 
