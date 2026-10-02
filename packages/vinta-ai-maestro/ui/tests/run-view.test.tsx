@@ -410,3 +410,20 @@ test('the lane column drops the run id every lane name repeats', async () => {
   // A node the scheduler has not placed yet still reads as having no lane.
   expect(textOf(container, 'tr[data-node="review"] td:nth-child(4)')).toBe('—')
 })
+
+test('double-clicking a node on the graph opens its node view', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+  await waitFor(() => expect(cardColorOf(container, 'impl')).toBe('var(--vdag-status-running)'))
+
+  const card = container
+    .querySelector('vinta-dag')
+    ?.shadowRoot?.querySelector('button[data-action="select-node"][data-id="impl"]')
+  card?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+  expect(window.location.hash).toBe(`#/runs/${RUN_ID}/nodes/impl`)
+  await waitFor(() => expect(container.querySelector('section.node')).not.toBe(null))
+})

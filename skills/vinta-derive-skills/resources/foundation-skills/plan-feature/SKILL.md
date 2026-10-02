@@ -619,7 +619,7 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `nodes[].gates` | The gate ids this phase must pass, in the order they should run. |
 | `nodes[].crew` | The id from this phase's `**Assigned to**:` line. **Required on every node of a staffed workflow** — a half-staffed document is refused, because the executor would be running two staffing rules at once. |
 | `nodes[].model` / `nodes[].harness` | **Omit `model` entirely on a staffed workflow** — the member carries it, and a node setting both is refused. `harness` only when this one phase runs on a different CLI than `defaults`. |
-| `nodes[].max_fix_rounds` | Omit (defaults to 2). Set it higher only on a phase whose review you expect to iterate — a delicate migration, a concurrency protocol. |
+| `nodes[].max_fix_rounds` | Omit (defaults to 4). When a phase spends it, the executor asks the operator whether to continue rather than failing the phase, so this is how often somebody is asked, not a hard cap. Set it higher only on a phase whose review you expect to iterate — a delicate migration, a concurrency protocol. |
 | `nodes[].pipeline` | Omit. A per-phase pipeline is for a phase that genuinely runs a different lifecycle, which is rare enough that needing it is a signal to re-read the plan. |
 | `pipelines` | **Omit.** The executor ships `standard-phase` — see "The pipeline block". |
 

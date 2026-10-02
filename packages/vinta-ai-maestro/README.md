@@ -200,6 +200,37 @@ than re-driving a finished phase to fit the turn in.
 Each turn lands in the phase transcript attributed to `chore` and its id, beside
 a `chore_result` event saying whether it ran, failed or was skipped.
 
+## The review loop
+
+`standard-phase` reviews and fixes a phase the way Vinta's thermo-nuclear review
+loop does by hand ([SPEC §16](SPEC.md#16-the-review-loop)):
+
+- **The reviewer** keeps one session across rounds and is held to the shipped
+  Review Standard — or to your project's `REVIEW.md`, if the lane has one, which
+  replaces it entirely. It runs the gates itself, never edits, and ends on
+  `VERDICT: pass` only when it explicitly approves. If a review turn moves
+  `HEAD` or edits a tracked file, the node stops and asks whether to keep the
+  edits or stop the phase.
+- **The fixer** is the implementer continuing its own session. It verifies each
+  finding before acting on it, rejects the unsupported ones with
+  counter-evidence, and does not decide scope on your behalf: a finding about an
+  unreachable scenario, a defensive check, a requirements ambiguity or a
+  destructive operation is put to you instead, all at once, in the node view.
+- **Rejections and your answers** are kept per node in
+  `runs/<run-id>/nodes/<node-id>/review-ledger.jsonl`, and every later review
+  and fix is shown them, so nobody re-asks what you already decided.
+- **After `max_fix_rounds` (default 4)** the phase asks whether to continue for
+  another round of the same budget or stop.
+
+Under `--retry-after`, nobody answering a scope question takes each item's
+stated default, and nobody answering the exhausted-budget question takes
+`stop` — so an unattended run spends no more than it did before. Without it,
+both wait for you.
+
+An unstaffed review runs on `defaults.reviewer_model` if the workflow sets one,
+otherwise on the harness's top tier (`opus` on claude-code), otherwise on the
+phase's own model.
+
 ## Walkthrough — two phases in parallel
 
 A repository with two phases that depend on nothing, so both belong to wave 1 and both run at once.

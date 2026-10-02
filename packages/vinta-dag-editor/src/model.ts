@@ -13,6 +13,9 @@ import type { Dag, DagNode } from './types'
 
 export type NodePatch = Partial<Pick<DagNode, 'name' | 'status' | 'wave'>>
 
+/** The three rules `addEdge` enforces, named so a host can tell the user which one it hit. */
+export type EdgeRefusal = 'self' | 'duplicate' | 'cycle'
+
 export function addNode(dag: Dag, name: string): { readonly dag: Dag; readonly nodeId: string } {
   const nodeId = freshId('node', new Set(dag.nodes.map((node) => node.id)))
   const node: DagNode = { id: nodeId, name, status: 'pending', wave: 0 }
@@ -45,6 +48,18 @@ export function addEdge(dag: Dag, from: string, to: string, artifact: string): D
   if (reaches(dag, to, from)) return null
   const id = freshId(`${from}-${to}`, new Set(dag.edges.map((edge) => edge.id)))
   return { ...dag, edges: [...dag.edges, { id, from, to, artifact }] }
+}
+
+/**
+ * Why `addEdge` would say no, or `null` when it would not. Derived from the
+ * same checks rather than restated, so the reason can never disagree with the
+ * refusal.
+ */
+export function edgeRefusal(dag: Dag, from: string, to: string): EdgeRefusal | null {
+  if (from === to) return 'self'
+  if (dag.edges.some((edge) => edge.from === from && edge.to === to)) return 'duplicate'
+  if (reaches(dag, to, from)) return 'cycle'
+  return null
 }
 
 export function removeEdge(dag: Dag, edgeId: string): Dag {
