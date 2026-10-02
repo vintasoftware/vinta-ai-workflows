@@ -120,6 +120,12 @@ const SECONDS_RESET = /retry[- ]after(?:\s*[:=])?\s*(\d+)|retry (?:in|after) (\d
 const RELATIVE_RESET = /(?:try again|retry|resets?)\s+(?:in|after)\s+([0-9a-z ]{1,40})/
 const RELATIVE_UNIT = /(\d+)\s*(hours?|minutes?|seconds?|hrs?|mins?|secs?|h|m|s)\b/g
 const ISO_RESET = /(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z?)/
+/**
+ * "resets 2026-08-08 00:00 UTC" — the spend-cap wording. Only with both the
+ * verb and the zone: a bare date and time elsewhere in a diagnostic is as
+ * likely to be a log timestamp as a reset.
+ */
+const DATED_UTC_RESET = /resets?\s+(?:at\s+|on\s+)?(\d{4}-\d{2}-\d{2})[ t](\d{2}:\d{2})(?::\d{2})?\s*utc\b/
 const EPOCH_RESET = /"?(?:resets?_?at|reset_time|x-ratelimit-reset)"?\s*[:=]\s*"?(\d{10,13})"?/
 /**
  * A wall-clock reset, with the day when a day was named.
@@ -186,6 +192,12 @@ export function parseRetryAfter(raw: string, now: Date = new Date()): Date | und
   const iso = ISO_RESET.exec(text)
   if (iso?.[1] !== undefined) {
     const at = new Date(iso[1].toUpperCase())
+    if (!Number.isNaN(at.getTime())) return at
+  }
+
+  const dated = DATED_UTC_RESET.exec(text)
+  if (dated?.[1] !== undefined && dated[2] !== undefined) {
+    const at = new Date(`${dated[1]}T${dated[2]}:00Z`)
     if (!Number.isNaN(at.getTime())) return at
   }
 
@@ -377,11 +389,12 @@ export function classifier(
       const matched = find(text, context.resuming === true)
       const kind = matched?.kind ?? 'fatal'
       const reason = matched?.reason ?? 'unclassified'
-      // Neither of these is a wait, so a reset time stated alongside one is
-      // noise: `fatal` never runs again, and the answer to `stale_session` is
-      // an immediate retry with a fresh session (§15.4) — a delay would buy
-      // nothing, since a forgotten session does not come back.
-      const waiting = kind !== 'fatal' && kind !== 'stale_session'
+      // None of these is a wait, so a reset time stated alongside one is
+      // noise: `fatal` never runs again, the answer to `stale_session` is an
+      // immediate retry with a fresh session (§15.4) — a delay would buy
+      // nothing, since a forgotten session does not come back — and
+      // `unauthenticated` waits on a person logging in, not on a clock.
+      const waiting = kind !== 'fatal' && kind !== 'stale_session' && kind !== 'unauthenticated'
       const retryAfter = waiting ? parseRetryAfter(text, now) : undefined
       return {
         ok: false,
@@ -399,7 +412,13 @@ export function classifier(
       // same reason `reasonFor` excludes them.
       const matched = find(output.toLowerCase(), false)
       if (matched === undefined) return undefined
-      if (matched.kind === 'fatal' || matched.kind === 'stale_session') return undefined
+      if (
+        matched.kind === 'fatal' ||
+        matched.kind === 'stale_session' ||
+        matched.kind === 'unauthenticated'
+      ) {
+        return undefined
+      }
       const retryAfter = parseRetryAfter(output.toLowerCase(), now ?? new Date())
       return {
         kind: matched.kind as CapacityKind,

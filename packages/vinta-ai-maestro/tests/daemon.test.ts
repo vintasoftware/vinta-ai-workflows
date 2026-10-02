@@ -603,7 +603,22 @@ describe('snapshots', () => {
       reason: null,
     })
 
-    // The latest row wins, and a URL the browser would act on is refused.
+    // An integration PR journaled after it is not the phase's PR.
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'node_pr',
+      payload: {
+        kind: 'integration',
+        opened: true,
+        base: 'main',
+        head: 'integ-a',
+        url: 'https://github.com/acme/app/pull/8',
+      },
+    })
+    expect((await detailOf()).pullRequest?.number).toBe(9)
+
+    // The latest phase row wins, and a URL the browser would act on is refused.
     pr({ opened: true, base: 'main', head: 'phase-a', url: 'javascript:alert(1)' })
     expect((await detailOf()).pullRequest?.url).toBe(null)
   })

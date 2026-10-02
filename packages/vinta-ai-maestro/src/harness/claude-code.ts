@@ -373,7 +373,7 @@ const SIGNATURES: readonly RefusalSignature[] = [
     pattern: /enoent|command not found|no such file|is not recognized/,
   },
   {
-    kind: 'fatal',
+    kind: 'unauthenticated',
     reason: 'not-authenticated',
     pattern:
       /\/login|not logged in|log ?in to|logged out|unauthorized|authentication_error|invalid api key|oauth token (has )?expired|credentials? (not found|expired|invalid)/,
@@ -383,6 +383,15 @@ const SIGNATURES: readonly RefusalSignature[] = [
     reason: 'usage-window-exhausted',
     pattern:
       /usage limit reached|usage limit will reset|quota (exceeded|exhausted)|credit balance|out of credits|insufficient_quota/,
+  },
+  {
+    // An organization's spend cap, which resets on its own period. Wording from
+    // the 2.1.274 binary: `billing_error` "spend limit reached (daily; resets
+    // …)", the `org_spend_cap_reached` overage reason, and "usage credit limit
+    // reached" — none of which the row above matches, so each was `fatal`.
+    kind: 'quota',
+    reason: 'spend-limit-reached',
+    pattern: /spend (limit|cap) reached|spend_cap_reached|credit limit reached/,
   },
   {
     kind: 'concurrency',

@@ -87,7 +87,14 @@ import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipelin
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readFixerReport, readVerdict } from '../prompts/index.ts'
 import type { Node, Workflow } from '../types.ts'
-import { composePrBody, readPrContext, type PrText } from '../integration/pr-body.ts'
+import {
+  composePlanPrBody,
+  composePrBody,
+  readPrContext,
+  type PlanPrStep,
+  type PrText,
+} from '../integration/pr-body.ts'
+import type { PrResult } from '../integration/pr.ts'
 import { createOsNotifier, notifyReason, type Notifier } from './notify.ts'
 import {
   renderPhase,
@@ -165,6 +172,11 @@ export class RunEffectExecutor implements EffectExecutor {
    * `LanePool` serializes its `worktree add` calls for the same reason.
    */
   #integrationTurn: Promise<unknown> = Promise.resolve()
+  /**
+   * Set when a node's `git_merge` built the final wave, and spent by that
+   * node's `open_pr`, which opens the plan PR after its own. See `#merge`.
+   */
+  #planPrDue: { readonly wave: number; readonly by: string } | null = null
 
   constructor(options: RunExecutorOptions) {
     this.#options = options
@@ -549,8 +561,29 @@ export class RunEffectExecutor implements EffectExecutor {
     // declared complete and the wave that is merged be different sets.
     const members = this.#waveMembers(wave)
     if (!this.#lastOfWave(nodeId, members)) return {}
-    await this.#integration(() => this.#options.integrator.mergeWave(wave, members))
+    // Read with the membership, for the same reason: the plan this node counted
+    // its wave against is the plan whose last wave this is or is not.
+    const final = wave === this.#finalWave()
+    await this.#integration(async () => {
+      const result = await this.#options.integrator.mergeWave(wave, members)
+      // Pushed, because the plan PR is opened from the last one and a PR needs
+      // a head the forge has seen. The rest are pushed for the same reason the
+      // skills always pushed them: they are what a person resuming or landing
+      // the plan by hand starts from.
+      await this.#pushFrom(this.#options.integrationPath, result.branch)
+    })
+    // Opened by this node's own `open_pr`, not here. `git_merge` runs before
+    // `open_pr` in the phase pipeline, so a plan PR opened now would be written
+    // before the last phase's PR exists and could not list it.
+    if (final) this.#planPrDue = { wave, by: nodeId }
     return {}
+  }
+
+  /** The highest wave in the plan as it stands — the branch carrying every phase. */
+  #finalWave(): number {
+    let last = 0
+    for (const wave of this.#waves.values()) last = Math.max(last, wave)
+    return last
   }
 
   /** The wave's phases, in plan order — the tie-break every merge order uses. */
@@ -626,7 +659,18 @@ export class RunEffectExecutor implements EffectExecutor {
     // single-dependency base is another phase's branch, which that phase
     // pushed when it integrated — before this one could start, because it is a
     // dependency.
-    if (base.kind === 'integration') await this.#pushBranch(nodeId, base.branch)
+    if (base.kind === 'integration') {
+      await this.#pushBranch(nodeId, base.branch)
+      // **And the integration branch gets a PR of its own.** It used to be
+      // pushed only so this phase's PR had something to target, and then
+      // nothing targeted *it*: every PR stacked above it had no path to
+      // `base_branch`, and landing the plan meant redoing the merges by hand.
+      // Opened before the phase PR so the forge lists them in merge order.
+      const integration = await integrator.openIntegrationPr(nodeId, {
+        draft: params['draft'] === true,
+      })
+      if (integration !== null) this.#recordPr(nodeId, 'integration', integration)
+    }
 
     const result = await integrator.openPr(nodeId, {
       draft: params['draft'] === true,
@@ -640,22 +684,23 @@ export class RunEffectExecutor implements EffectExecutor {
     // "never tells you". A PR that did not open is now as visible as one that
     // did, and the body's provenance with it: an operator reading a thin PR
     // should be able to see it was composed rather than written.
-    journal.append({
-      runId,
-      nodeId,
-      type: 'node_pr',
-      payload: {
-        opened: result.opened,
-        base: result.base,
-        head: result.head,
-        ...(result.url === undefined ? {} : { url: result.url }),
-        ...(result.reason === undefined ? {} : { reason: result.reason }),
-      },
-    })
+    this.#recordPr(nodeId, 'phase', result)
+
+    if (this.#planPrDue?.by === nodeId) {
+      const { wave } = this.#planPrDue
+      this.#planPrDue = null
+      const plan = await integrator.openPlanPr(wave, {
+        draft: params['draft'] === true,
+        text: this.#planPrText(wave),
+      })
+      if (plan !== null) {
+        journal.append({ runId, type: 'run_pr', payload: prPayload(plan) })
+      }
+    }
 
     // Stated as facts as well, for what follows in the same state: an
-    // `after_pr` chore is handed the PR it is about, and is skipped when there
-    // is none. The URL is the forge's own, not repository content.
+    // `after_pr` chore is handed the phase PR it is about, and is skipped when
+    // there is none. The URL is the forge's own, not repository content.
     const number = result.url === undefined ? undefined : prNumberOf(result.url)
     return {
       facts: {
@@ -668,13 +713,71 @@ export class RunEffectExecutor implements EffectExecutor {
     }
   }
 
+  #recordPr(nodeId: string, kind: 'phase' | 'integration', result: PrResult): void {
+    const { journal, runId } = this.#options
+    journal.append({ runId, nodeId, type: 'node_pr', payload: { kind, ...prPayload(result) } })
+  }
+
+  /**
+   * The plan PR's body: every PR the plan needs, in an order that merges.
+   *
+   * Walked from the graph rather than from the journal, so a phase whose PR
+   * did not open is still listed — as a gap somebody has to fill, which is the
+   * point of listing it. The journal only supplies the URLs.
+   */
+  #planPrText(wave: number): PrText {
+    const { integrator, journal, runId } = this.#options
+    const urls = new Map<string, string>()
+    for (const event of journal.events(runId)) {
+      if (event.type !== 'node_pr' || event.payload.url === undefined) continue
+      urls.set(`${event.payload.kind ?? 'phase'}:${event.nodeId}`, event.payload.url)
+    }
+
+    const ordered = [...this.#workflow.nodes].sort(
+      (a, b) => (this.#waves.get(a.id) ?? 0) - (this.#waves.get(b.id) ?? 0),
+    )
+    const steps: PlanPrStep[] = []
+    for (const node of ordered) {
+      const base = integrator.base(node.id)
+      if (base.kind === 'integration') {
+        const url = urls.get(`integration:${node.id}`)
+        steps.push({
+          kind: 'integration',
+          nodeId: node.id,
+          head: base.branch,
+          base: this.#workflow.base_branch,
+          ...(url === undefined ? {} : { url }),
+        })
+      }
+      const url = urls.get(`phase:${node.id}`)
+      steps.push({
+        kind: 'phase',
+        nodeId: node.id,
+        head: integrator.nodeBranch(node.id),
+        base: base.branch,
+        ...(url === undefined ? {} : { url }),
+      })
+    }
+
+    return composePlanPrBody({
+      planId: this.#workflow.id,
+      baseBranch: this.#workflow.base_branch,
+      head: integrator.waveBranch(wave),
+      steps,
+    })
+  }
+
   /** Pushes one branch to the lane's remote. Silent where there is no remote. */
   async #pushBranch(nodeId: string, branch: string): Promise<void> {
-    const lane = this.#lane(nodeId)
-    const remotes = await gitLines(lane.path, ['remote'])
+    await this.#pushFrom(this.#lane(nodeId).path, branch)
+  }
+
+  /** Pushes one branch from a checkout. Silent where there is no remote. */
+  async #pushFrom(cwd: string, branch: string): Promise<void> {
+    const remotes = await gitLines(cwd, ['remote'])
     const remote = remotes[0]
     if (remote === undefined) return
-    await gitOk(lane.path, ['push', remote, branch])
+    await gitOk(cwd, ['push', remote, branch])
   }
 
   /**
@@ -892,4 +995,21 @@ export class RunEffectExecutor implements EffectExecutor {
 /** Convenience constructor, matching the shape the rest of the package uses. */
 export function createRunExecutor(options: RunExecutorOptions): RunEffectExecutor {
   return new RunEffectExecutor(options)
+}
+
+/** A PR result as the journal keeps it: no `message`, which quotes `gh`. */
+function prPayload(result: PrResult): {
+  opened: boolean
+  base: string
+  head: string
+  url?: string
+  reason?: 'unavailable' | 'failed'
+} {
+  return {
+    opened: result.opened,
+    base: result.base,
+    head: result.head,
+    ...(result.url === undefined ? {} : { url: result.url }),
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+  }
 }

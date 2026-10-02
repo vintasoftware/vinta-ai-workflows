@@ -9,7 +9,13 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { composePrBody, readPrContext, PRS_CONTEXT_DIR } from '../src/integration/pr-body.ts'
+import {
+  composeIntegrationPrBody,
+  composePlanPrBody,
+  composePrBody,
+  readPrContext,
+  PRS_CONTEXT_DIR,
+} from '../src/integration/pr-body.ts'
 import { prNumberOf } from '../src/integration/pr.ts'
 
 const lane = (): string => mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-prbody-'))
@@ -131,5 +137,43 @@ describe('the PR number off the URL gh printed', () => {
   it('says nothing for any other shape rather than guessing', () => {
     expect(prNumberOf('https://example.invalid/pr/1')).toBeUndefined()
     expect(prNumberOf('')).toBeUndefined()
+  })
+})
+
+describe('the integration branch PR', () => {
+  it('names what it merges and the order to land it in', () => {
+    const text = composeIntegrationPrBody({
+      nodeId: 'p2',
+      name: 'Aggregate root fields',
+      branch: 'plan/x/integ-p2',
+      baseBranch: 'main',
+      dependsOn: ['p0', 'p1'],
+    })
+    expect(text.title).toBe('Integrate p0 + p1 for Aggregate root fields')
+    expect(text.body).toContain('## Merge order')
+    expect(text.body).toContain('`plan/x/integ-p2`')
+    expect(text.body).toContain('Retarget the PR for `p2` to `main`')
+  })
+})
+
+describe('the plan PR', () => {
+  it('lists every PR in merge order, and the ones that never opened', () => {
+    const text = composePlanPrBody({
+      planId: 'x',
+      baseBranch: 'main',
+      head: 'plan/x/wave-2',
+      steps: [
+        { kind: 'phase', nodeId: 'p0', head: 'plan/x/phase-p0', base: 'main', url: 'https://example.invalid/pr/1' },
+        { kind: 'phase', nodeId: 'p1', head: 'plan/x/phase-p1', base: 'main' },
+        { kind: 'integration', nodeId: 'p2', head: 'plan/x/integ-p2', base: 'main', url: 'https://example.invalid/pr/3' },
+        { kind: 'phase', nodeId: 'p2', head: 'plan/x/phase-p2', base: 'plan/x/integ-p2', url: 'https://example.invalid/pr/4' },
+      ],
+    })
+    expect(text.title).toBe('Land plan x')
+    const order = text.body.split('## Merge order')[1] ?? ''
+    expect(order.indexOf('pr/1')).toBeLessThan(order.indexOf('pr/3'))
+    expect(order.indexOf('pr/3')).toBeLessThan(order.indexOf('pr/4'))
+    expect(order).toContain('phase `p1`: (no PR — open it by hand)')
+    expect(order).toContain('5. This PR.')
   })
 })

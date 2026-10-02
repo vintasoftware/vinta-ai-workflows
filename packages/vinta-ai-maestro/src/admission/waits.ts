@@ -17,7 +17,13 @@
  * process and cannot outlive it; a wake time describes the vendor's clock,
  * which does not care that we restarted.
  *
- * Identifiers only: run id, harness id, a refusal kind and a timestamp.
+ * The same connection keeps `capacity_ceilings`: the last ceiling AIMD
+ * discovered per harness, and when. Keyed by harness alone, not by run — the
+ * limit it describes belongs to the account, and a run that starts an hour
+ * after another was throttled is talking to the same account. It is a hint,
+ * not a fact, so `AdmissionControl` only trusts a row while it is fresh.
+ *
+ * Identifiers only: run id, harness id, a refusal kind, a count and timestamps.
  */
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
@@ -26,6 +32,18 @@ import type { SpawnRefusalKind } from '../harness/adapter.ts'
 export interface StoredWait {
   readonly kind: SpawnRefusalKind
   readonly wakeAt: number
+}
+
+export interface StoredCeiling {
+  readonly ceiling: number
+  /** Epoch ms of the refusal or increase that produced it. */
+  readonly observedAt: number
+}
+
+interface CeilingRow {
+  readonly harness: string
+  readonly ceiling: number
+  readonly observed_at: number
 }
 
 interface WaitRow {
@@ -41,6 +59,11 @@ CREATE TABLE IF NOT EXISTS capacity_waits (
   kind TEXT NOT NULL,
   wake_at INTEGER NOT NULL,
   PRIMARY KEY (run_id, harness)
+);
+CREATE TABLE IF NOT EXISTS capacity_ceilings (
+  harness TEXT PRIMARY KEY,
+  ceiling INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL
 );
 `
 
@@ -78,6 +101,29 @@ export class CapacityWaitLog {
       .all(runId) as WaitRow[]
     return new Map(
       rows.map((row) => [row.harness, { kind: row.kind as SpawnRefusalKind, wakeAt: row.wake_at }]),
+    )
+  }
+
+  recordCeiling(harness: string, stored: StoredCeiling): void {
+    this.#db
+      .prepare(
+        'INSERT OR REPLACE INTO capacity_ceilings (harness, ceiling, observed_at) VALUES (?, ?, ?)',
+      )
+      .run(harness, stored.ceiling, stored.observedAt)
+  }
+
+  /** Called when the ceiling is back at its configured value. Idempotent. */
+  clearCeiling(harness: string): void {
+    this.#db.prepare('DELETE FROM capacity_ceilings WHERE harness = ?').run(harness)
+  }
+
+  /** Every discovered ceiling, by harness id, regardless of age. */
+  loadCeilings(): Map<string, StoredCeiling> {
+    const rows = this.#db
+      .prepare('SELECT harness, ceiling, observed_at FROM capacity_ceilings')
+      .all() as CeilingRow[]
+    return new Map(
+      rows.map((row) => [row.harness, { ceiling: row.ceiling, observedAt: row.observed_at }]),
     )
   }
 

@@ -283,9 +283,13 @@ export class Journal {
    * `open_pr`. A narrow read for the same reason `sessionHistory` is one.
    */
   latestPr(runId: string, nodeId: string): StoredEvent | undefined {
+    // The phase's own PR. A node based on an `integ-<id>` branch also journals
+    // that branch's PR (`kind: integration`); rows from before `kind` existed
+    // are all phase PRs.
     const row = this.db
       .prepare(
         "SELECT * FROM events WHERE run_id = ? AND node_id = ? AND type = 'node_pr'" +
+          " AND coalesce(json_extract(payload_json, '$.kind'), 'phase') = 'phase'" +
           ' ORDER BY id DESC LIMIT 1',
       )
       .get(runId, nodeId) as EventRow | undefined
