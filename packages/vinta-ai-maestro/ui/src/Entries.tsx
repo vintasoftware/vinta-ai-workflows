@@ -10,21 +10,70 @@
  * only true of the parsing: the monitor panel drew its own rows, so an agent's
  * thinking arrived there as a wall of undifferentiated prose.
  *
+ * What a row looks like is decided by what it is (`transcript.ts`):
+ *
+ * - **Prose is markdown.** An agent's answer is headings, lists and fenced
+ *   code, and it used to render as the asterisks. The operator's own message
+ *   is set apart in a tinted block, the way every chat the operator has used
+ *   sets their side apart.
+ * - **A tool call is a verb and a target**, on one line — `Read` and a path,
+ *   `Shell` and a command, `Edit` and a path with `+4 −1` beside it — with its
+ *   result's verdict as a dot at the end, because `fold` seats the result
+ *   under the call. Open, an edit is a diff, a write is the file, a shell
+ *   call is the command and what it printed.
+ * - **A stretch of exploring is one row**, "Explored · 3 reads, 2 searches",
+ *   that opens into the calls. Reading is how an agent spends most of its
+ *   turn and the least of what the operator came to see.
+ * - **Thinking is quiet**: smaller, dimmer, folded.
+ *
  * What is here is everything below the scroller. What is not is any opinion
  * about scrolling, windowing or panels, which is exactly the split that let the
  * monitor reuse it.
  */
-import { ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
-import { Fragment, useEffect, useState } from 'react'
+import {
+  BotIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ExternalLinkIcon,
+  FilePlus2Icon,
+  FileTextIcon,
+  FolderIcon,
+  FolderSearchIcon,
+  GlobeIcon,
+  ListTodoIcon,
+  PencilLineIcon,
+  SearchIcon,
+  SquareTerminalIcon,
+  TelescopeIcon,
+  WrenchIcon,
+  type LucideIcon,
+} from 'lucide-react'
+import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { cn } from 'vinta-design-system/lib/utils'
 import { Button } from 'vinta-design-system/ui/button'
 import { ToneDot } from './Chip.tsx'
-import { bodyOf, hasMore, headlineOf, type Row } from './transcript.ts'
+import { CodeBlock, Counts, FileDiffBody, PathName } from './Code.tsx'
+import type { FileDiff } from './diff.ts'
+import { languageFor, SHELL } from './highlight.ts'
+import { Prose } from './Markdown.tsx'
+import {
+  bodyOf,
+  editCounts,
+  explorationSummary,
+  hasMore,
+  headlineOf,
+  isExploration,
+  settled,
+  type EntryView,
+  type Row,
+  type ToolKind,
+  type ToolView,
+} from './transcript.ts'
 
 /** The author's colour: the operator stands out, machinery recedes. */
 const AUTHOR: Readonly<Record<string, string>> = {
   operator: 'text-tone-attention-foreground',
-  tool: 'text-muted-foreground',
+  tool: 'text-foreground',
   system: 'text-muted-foreground',
 }
 
@@ -168,17 +217,26 @@ function Entry({
   const view = row.views[0]
   if (view === undefined) return null
   const quiet = row.shape === 'thinking'
-  // A chevron that reveals what is already on screen teaches the operator not
-  // to trust chevrons, so a row with nothing behind its headline offers none.
   const toggle = onToggle !== undefined && hasMore(row) ? onToggle : undefined
 
+  if (row.shape === 'prose') return <ProseEntry row={row} view={view} />
+
+  const exploring = isExploration(row)
+  const tool = view.tool
+  const Icon = exploring ? TelescopeIcon : tool === null ? null : ICONS[tool.kind]
+  const result = row.results[0] ?? null
+  // A tool row: the verb, then the target; otherwise the label as it was.
+  const label = exploring ? (settled(row) ? 'Explored' : 'Exploring…') : view.label
   const attribution = (
     <>
+      {Icon !== null && (
+        <Icon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+      )}
       <span
-        className={cn('entry-author', quiet ? 'font-medium' : 'font-semibold', AUTHOR[view.author])}
+        className={cn('entry-author shrink-0', quiet ? 'font-medium' : 'font-medium', AUTHOR[view.author])}
         data-author={view.author}
       >
-        {view.label}
+        {label}
       </span>
       {/* The kind is `view.label`'s job and the status is the dot's; the event
           type stays in `data-kind`, where a test or a stylesheet can reach it
@@ -187,31 +245,29 @@ function Entry({
     </>
   )
 
-  // Prose is never folded. An agent's answer and an operator's steering are the
-  // things the transcript exists to show, and a chevron in front of them would
-  // be a control whose only use is to hide the point — so these rows keep the
-  // head-over-body shape they have always had.
-  if (row.shape === 'prose') {
-    return (
-      <li data-entry={row.at} data-kind={view.kind} data-shape="prose" data-open="" className={ROW}>
-        {/* An agent's answer under a band that already reads REVIEWER needs no
-            head at all; `transcript.ts` decides that and empties the label. */}
-        {(view.label !== '' || view.tone !== null) && (
-          <p className="entry-head flex items-center gap-2 text-[13px]">{attribution}</p>
-        )}
-        {/* `bodyOf`, not `view.body`. Prose groups now — a streamed answer is
-            several `assistant_text` events and one statement — so a row can
-            hold more than the view its head was built from. */}
-        <p className="entry-body text-sm">{bodyOf(row)}</p>
-      </li>
-    )
-  }
-
-  const headline = (
+  const headline = exploring ? (
+    <span className="entry-headline min-w-0 flex-1 truncate text-muted-foreground" data-headline>
+      {explorationSummary(row)}
+    </span>
+  ) : tool !== null ? (
+    <Target tool={tool} className="entry-headline min-w-0 flex-1" />
+  ) : (
     <span className="entry-headline min-w-0 flex-1 truncate text-muted-foreground" data-headline>
       {headlineOf(row)}
     </span>
   )
+
+  // What the call amounted to, on the right: an edit's size, and the verdict.
+  const trailing = (
+    <>
+      {tool?.edit !== null && tool?.edit !== undefined && (
+        <Counts {...editCounts(tool.edit)} className="shrink-0" />
+      )}
+      {!exploring && result !== null && <Verdict result={result} />}
+      {exploring && !settled(row) && <ToneDot tone="active" />}
+    </>
+  )
+
   const head = cn(
     'entry-head flex min-w-0 items-center gap-2',
     quiet ? 'text-[11px]' : 'text-[13px]',
@@ -222,13 +278,15 @@ function Entry({
       data-entry={row.at}
       data-kind={view.kind}
       data-shape={row.shape}
+      data-group={exploring ? 'exploring' : undefined}
       data-open={open ? '' : undefined}
-      className={cn(quiet ? 'py-1.5' : 'py-2', 'flex flex-col gap-0.5 first:pt-0 last:pb-0')}
+      className={cn(quiet ? 'py-1.5' : 'py-2', 'flex flex-col gap-1 first:pt-0 last:pb-0')}
     >
       {toggle === undefined ? (
         <p className={head}>
           {attribution}
           {headline}
+          {trailing}
         </p>
       ) : (
         <button
@@ -236,7 +294,7 @@ function Entry({
           data-action="toggle-entry"
           aria-expanded={open}
           onClick={toggle}
-          className={cn(head, 'cursor-pointer border-0 bg-transparent p-0 text-left')}
+          className={cn(head, 'w-full cursor-pointer border-0 bg-transparent p-0 text-left')}
         >
           {open ? (
             <ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
@@ -244,25 +302,270 @@ function Entry({
             <ChevronRightIcon aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
           )}
           {attribution}
-          {!open && headline}
+          {headline}
+          {trailing}
         </button>
       )}
       {open && toggle !== undefined && (
-        <p
-          className={cn(
-            'entry-body pl-5',
-            quiet ? 'text-xs text-muted-foreground' : 'font-mono text-xs',
+        <div className={cn('entry-body flex flex-col gap-2 pl-5', quiet && 'text-xs text-muted-foreground')}>
+          {quiet ? (
+            <Prose text={bodyOf(row)} className="markdown-quiet" />
+          ) : exploring ? (
+            <Calls row={row} />
+          ) : tool !== null ? (
+            <Call tool={tool} view={view} result={result} />
+          ) : (
+            <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs">{bodyOf(row)}</pre>
           )}
-        >
-          {bodyOf(row)}
+        </div>
+      )}
+    </li>
+  )
+}
+
+/**
+ * A prose row: an agent's answer, the operator's message, an error, a gate.
+ *
+ * An agent's answer under a band that already reads REVIEWER needs no head at
+ * all; `transcript.ts` decides that and empties the label. `bodyOf`, not
+ * `view.body`: a streamed answer is several `assistant_text` events and one
+ * statement, so a row can hold more than the view its head was built from.
+ */
+function ProseEntry({ row, view }: { readonly row: Row; readonly view: EntryView }) {
+  const operator = view.author === 'operator'
+  // Markdown for what a person or a model wrote to be read; the rest — an
+  // error message, a gate verdict, a proposal laid out line by line — is text
+  // whose line breaks mean something and must stay where they are.
+  const markdown = view.kind === 'assistant_text' || view.kind === 'user_message'
+  return (
+    <li
+      data-entry={row.at}
+      data-kind={view.kind}
+      data-shape="prose"
+      data-open=""
+      className={cn(ROW, operator && 'entry-operator')}
+    >
+      {(view.label !== '' || view.tone !== null) && (
+        <p className="entry-head flex items-center gap-2 text-[13px]">
+          <span
+            className={cn('entry-author font-semibold', AUTHOR[view.author])}
+            data-author={view.author}
+          >
+            {view.label}
+          </span>
+          {view.tone !== null && <ToneDot tone={view.tone} />}
         </p>
+      )}
+      {markdown ? (
+        <Prose text={bodyOf(row)} className="entry-body text-sm" />
+      ) : (
+        <p className="entry-body text-sm">{bodyOf(row)}</p>
       )}
     </li>
   )
 }
 
 /** Shared by every row so the dividers land on an even rhythm. */
-const ROW = 'flex flex-col gap-0.5 py-2.5 first:pt-0 last:pb-0'
+const ROW = 'flex flex-col gap-1 py-2.5 first:pt-0 last:pb-0'
+
+// ---------------------------------------------------------------------------
+// Tool calls
+// ---------------------------------------------------------------------------
+
+const ICONS: Readonly<Record<ToolKind, LucideIcon>> = {
+  read: FileTextIcon,
+  edit: PencilLineIcon,
+  write: FilePlus2Icon,
+  shell: SquareTerminalIcon,
+  search: SearchIcon,
+  glob: FolderSearchIcon,
+  list: FolderIcon,
+  fetch: ExternalLinkIcon,
+  web: GlobeIcon,
+  agent: BotIcon,
+  todo: ListTodoIcon,
+  other: WrenchIcon,
+}
+
+/**
+ * The target, on the collapsed row: a path with its directory dimmed, a
+ * command in mono, a sentence for an agent's brief. `data-headline` is what
+ * the tests read, and what a reader reads too.
+ */
+function Target({ tool, className }: { readonly tool: ToolView; readonly className?: string }) {
+  if (tool.target === null) {
+    return (
+      <span className={cn('truncate text-muted-foreground', className)} data-headline>
+        {tool.args.length === 0 ? '' : tool.args.map(([key, value]) => `${key}=${value}`).join(' ')}
+      </span>
+    )
+  }
+  const mono = tool.kind !== 'agent' && tool.kind !== 'todo'
+  if (tool.path !== null && tool.target === tool.path) {
+    return (
+      <span className={cn('flex min-w-0 items-center', className)} data-headline>
+        <PathName path={tool.path} className="text-xs" />
+      </span>
+    )
+  }
+  return (
+    <span className={cn('flex min-w-0 items-baseline gap-1', className)}>
+      {tool.kind === 'shell' && (
+        <span aria-hidden="true" className="shrink-0 font-mono text-xs text-muted-foreground">
+          $
+        </span>
+      )}
+      <span
+        className={cn('truncate', mono ? 'font-mono text-xs' : 'text-muted-foreground')}
+        data-headline
+      >
+        {tool.target}
+      </span>
+    </span>
+  )
+}
+
+/** The result's verdict, as the dot the rows have always used. */
+function Verdict({ result }: { readonly result: EntryView }) {
+  return (
+    <span data-result data-tone={result.tone ?? undefined} className="flex shrink-0 items-center">
+      {result.tone !== null && <ToneDot tone={result.tone} />}
+    </span>
+  )
+}
+
+/** The open tool row: what the call was, in the form its kind reads best in. */
+function Call({
+  tool,
+  view,
+  result,
+}: {
+  readonly tool: ToolView
+  readonly view: EntryView
+  readonly result: EntryView | null
+}) {
+  return (
+    <>
+      {tool.kind === 'edit' && tool.edit !== null && (
+        <div className="overflow-hidden rounded-md border" data-edit>
+          <FileDiffBody file={editAsFile(tool)} lang={tool.path === null ? null : languageFor(tool.path)} numbered={false} />
+        </div>
+      )}
+      {tool.kind === 'write' && tool.content !== null && (
+        <CodeBlock code={tool.content} lang={tool.path === null ? null : languageFor(tool.path)} data-write />
+      )}
+      {tool.kind === 'shell' && tool.command !== null && (
+        <CodeBlock code={tool.command} lang={SHELL} data-command />
+      )}
+      {tool.args.length > 0 && <Args args={tool.args} />}
+      {/* Kinds whose arguments the forms above did not spend: the payload, indented. */}
+      {!(tool.kind === 'edit' && tool.edit !== null) &&
+        !(tool.kind === 'write' && tool.content !== null) &&
+        !(tool.kind === 'shell' && tool.command !== null) &&
+        tool.args.length === 0 &&
+        tool.kind !== 'agent' &&
+        tool.kind !== 'todo' && <CodeBlock code={view.body} lang="json" />}
+      {(tool.kind === 'agent' || tool.kind === 'todo') && tool.args.length === 0 && (
+        <pre className="m-0 whitespace-pre-wrap break-words text-xs text-muted-foreground">{view.body}</pre>
+      )}
+      {result !== null && <Output result={result} />}
+    </>
+  )
+}
+
+/** `key=value` rows, for the arguments a call's own form did not show. */
+function Args({ args }: { readonly args: readonly (readonly [string, string])[] }) {
+  return (
+    <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 font-mono text-xs">
+      {args.map(([key, value]) => (
+        <Fragment key={key}>
+          <dt className="text-muted-foreground">{key}</dt>
+          <dd className="m-0 truncate">{value}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  )
+}
+
+/** What the tool printed back. The harness clipped it; this wraps it. */
+function Output({ result }: { readonly result: EntryView }) {
+  if (result.body === '') return null
+  return (
+    <pre
+      className={cn(
+        'entry-output m-0 whitespace-pre-wrap break-words rounded-md border-l-2 bg-muted/60 px-3 py-2 font-mono text-xs',
+        result.tone === 'error' ? 'border-tone-error' : 'border-border',
+      )}
+      data-output
+    >
+      {result.body}
+    </pre>
+  )
+}
+
+/** The calls inside a stretch of exploring, one line each, with their verdicts. */
+function Calls({ row }: { readonly row: Row }) {
+  return (
+    <ul className="m-0 flex list-none flex-col gap-1 p-0">
+      {row.views.map((view, index) => {
+        const tool = view.tool
+        if (tool === null) return null
+        const Icon = ICONS[tool.kind]
+        const result = row.results[index] ?? null
+        return (
+          <li key={index} className="flex min-w-0 items-center gap-2 text-[13px]" data-call={tool.id}>
+            <Icon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="shrink-0 font-medium">{tool.verb}</span>
+            <Target tool={tool} className="min-w-0 flex-1" />
+            {result !== null && <Verdict result={result} />}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+/**
+ * An edit as a one-hunk file, so the diff table can draw it. The two sides
+ * are the harness's `old_string` and `new_string`; there are no line numbers
+ * to show because the call does not say where in the file it landed.
+ */
+function editAsFile(tool: ToolView): FileDiff {
+  const before = lines(tool.edit?.before ?? '')
+  const after = lines(tool.edit?.after ?? '')
+  return {
+    path: tool.path ?? '',
+    oldPath: null,
+    status: 'modified',
+    binary: false,
+    additions: after.length,
+    deletions: before.length,
+    hunks: [
+      {
+        oldStart: 1,
+        oldLines: before.length,
+        newStart: 1,
+        newLines: after.length,
+        section: '',
+        lines: [
+          ...before.map((text, index) => ({ kind: 'del' as const, text, oldNo: index + 1, newNo: null })),
+          ...after.map((text, index) => ({ kind: 'add' as const, text, oldNo: null, newNo: index + 1 })),
+        ],
+      },
+    ],
+  }
+}
+
+function lines(text: string): string[] {
+  if (text === '') return []
+  const split = text.split('\n')
+  if (split.at(-1) === '') split.pop()
+  return split
+}
+
+// ---------------------------------------------------------------------------
+// Author bands
+// ---------------------------------------------------------------------------
 
 /**
  * Where one agent stops and the next starts.
@@ -347,3 +650,5 @@ const ROLE_NAMES: Readonly<Record<string, string>> = {
   gate: 'Gate',
   monitor: 'Monitor',
 }
+
+export type { ReactNode }

@@ -47,7 +47,9 @@ const SCROLL_MARGIN = 40
 
 export function Transcript({ entries }: { readonly entries: readonly unknown[] }) {
   // The box's height is the panel's to decide (`Panel.tsx`): expanded it is a
-  // screen, collapsed it is 480px, and the following below works either way.
+  // screen, in the page it is what the window leaves after the header — the
+  // transcript is what the operator came for — and the following below works
+  // either way.
   const [visible, setVisible] = useState(TRANSCRIPT_WINDOW)
   const [open, setOpen] = useState<Folded>(CLOSED)
   const { listRef, onScroll, following, jump, stick, list } = useFollowing()
@@ -134,7 +136,7 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
             rows={rows}
             open={open}
             listRef={listRef}
-            className="max-h-[var(--panel-scroll,480px)] overflow-y-auto"
+            className="max-h-[var(--panel-scroll,calc(100vh-18rem))] min-h-[320px] overflow-y-auto"
             onScroll={(event) => {
               onScroll(event)
               if (hidden > 0 && event.currentTarget.scrollTop <= SCROLL_MARGIN) grow()
