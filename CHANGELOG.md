@@ -72,6 +72,29 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   block. The transcript panel also takes the height the window leaves it
   rather than a fixed 480px. (`vinta-ai-maestro`)
 
+- **A plan's PRs now reach `main`.** Phase PRs alone did not: a phase with
+  several dependencies targets its `integ-<id>` branch, and nothing ever
+  targeted that branch, so every PR stacked above it was stuck. Conflict
+  resolutions from wave merges were on no phase branch at all. maestro and the
+  stacked-branches `implement-plan` now open two more kinds of PR:
+  - an **integration PR** per `integ-<id>` branch, into `base_branch`, opened
+    by that phase just before its own PR;
+  - a **plan PR** from the final wave branch into `base_branch`, opened once
+    the last wave merges. Its body lists every phase and integration PR in an
+    order that merges, and the two ways to land the plan: merge it alone, or
+    merge the listed PRs in order and this one last.
+
+  maestro also pushes every wave branch, journals the new PRs (`node_pr` gains
+  `kind`, and a new `run_pr` event), and treats `gh`'s "a pull request already
+  exists" as opened, with that PR's URL, so a retry no longer reports a failure.
+  `prs-context-frontmatter.v1` gains an optional `kind`
+  (`phase` | `integration` | `plan`); `phase_id` and `phase_title` are no
+  longer required for `kind: plan`.
+- **The schemas are checked.** `npm run validate-schemas` (and `npm test`)
+  compiles every schema under `schemas/` with Ajv in strict Draft 2020-12 mode
+  and checks the fixtures in `tests/schema-fixtures/`: `valid/` must pass,
+  `invalid/` must fail. Source-side only — `ajv` and `ajv-formats` are root
+  devDependencies, and nothing new ships.
 - **The plan graph is readable, and says where you are in it.** The canvas
   `vinta-ai-maestro`'s run view and workflow editor share (`vinta-dag-editor`)
   was a strip of six-pixel cards: a five-wave plan was framed into a 380px box
@@ -705,6 +728,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     are not updated yet (SPEC §16.6). See
     [SPEC §16](packages/vinta-ai-maestro/SPEC.md#16-the-review-loop).
 
+- **maestro starts one session at a time per harness, and remembers the
+  account's limit.** Sessions used to boot simultaneously up to the harness
+  ceiling, and N Claude Code CLIs starting together contend for the same local
+  config and OAuth token: a probe against 2.1.274 measured time to `init`
+  rising from 1.2 s with two simultaneous starts to 4.8 s with sixteen, against
+  a flat 0.7 s when each waited for the previous one. A spawn now waits until
+  the one ahead of it has a session or a refusal, so a refusal also parks every
+  queued spawn before it spends one. The ceiling AIMD discovers after a
+  `concurrency` or `rate_limit` refusal is kept per harness in `flow.db` and a
+  run started within six hours opens at it instead of re-learning the limit by
+  being refused; clean spawns still probe back up to the configured value, and
+  the hint is dropped once the ceiling recovers or goes stale. When a harness
+  is throttled, the freed slot goes to the node with the longest chain of work
+  still in front of it rather than to whichever queued first.
+
 - **Updated the OpenAI and Anthropic models to their latest version.**
 
 - **Updated the generated skills to have `disable-model-invocation: true` set.**
@@ -954,6 +992,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recall.
 
 ### Fixed
+
+- **maestro asks you to log in instead of failing on a logged-out harness.**
+  A CLI that was not logged in (or whose token was rejected) was `fatal`: the
+  node failed and its whole subtree blocked. It now parks in `awaiting_human`
+  on a "not logged in" question answered with `logged in` or `stop`, holding
+  its lane. Nothing answers it for you — no automatic or unattended retry,
+  regardless of `onFailure` — and one `logged in` resumes every node that
+  harness refused. Adapters report it as the new `unauthenticated` refusal
+  kind (Claude Code, Codex and opencode).
+- **maestro no longer fails a node on an organization spend cap.** Claude
+  Code's `billing_error` "spend limit reached (daily; resets …)", the
+  `org_spend_cap_reached` overage reason and "usage credit limit reached"
+  matched no refusal pattern and were classified `fatal`, failing the node and
+  blocking its subtree. They are now `quota` waits, and the stated
+  `resets YYYY-MM-DD HH:MM UTC` time is honored as the wake time.
 
 - **A failed Claude Code turn no longer reads as `claude-code result:
   success`.** When the CLI ends a turn with `is_error: true` beside

@@ -124,9 +124,16 @@ The budget is an **integration-level** setting, not either phase's `max_fix_roun
 
 **Confirming a fix requires reading the files, not asking git.** `git add` clears a path's unmerged flag whether or not `<<<<<<<` is still sitting in it, so git cannot tell you whether the fixer actually resolved anything. Scan the conflicted paths for conflict markers before committing the merge. Skip this and a fixer that did nothing produces a merge commit full of markers that passes straight into the wave branch.
 
-### One PR per phase, based on the phase's base
+### PRs: one per phase, plus what it takes to reach `<BASE_BRANCH>`
 
 The PR `base` written into the prs-context frontmatter is the phase's **computed `base_branch`** — `<BASE_BRANCH>`, a single dependency's branch, or the `integ-{P.id}` branch. Never `<BASE_BRANCH>` for a phase that has dependencies; a wrong base makes the PR diff include every upstream phase and the review is unusable.
+
+Phase PRs are review units, and on their own they do not land the plan. Under a per-phase PR strategy the conductor also opens:
+
+- **An integration PR per `integ-{P.id}` branch**, into `<BASE_BRANCH>`, just before `P`'s own PR. Without it `P`'s PR targets a branch nothing targets, and nothing stacked on `P` can reach `<BASE_BRANCH>`.
+- **A plan PR at run end**, from the final `wave-{N}` branch into `<BASE_BRANCH>`. It is the only branch carrying the conflict resolutions made during wave merges, so it is merged last whichever way the plan lands. Its description lists every phase and integration PR in merge order.
+
+The commit strategy's PR-open timing says which files to write and when.
 <!-- block-end: LANE_TOPOLOGY -->
 
 <!-- block-begin: LANE_SCHEDULER -->

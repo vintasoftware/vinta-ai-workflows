@@ -37,7 +37,7 @@ import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { ConflictFixer, ConflictRequest } from './fixer.ts'
 import { git, gitLines, gitOk } from './git.ts'
-import type { PrText } from './pr-body.ts'
+import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
 
 /** What integration reads from a node. `Node` satisfies it structurally. */
@@ -435,6 +435,11 @@ export class Integrator {
 
   // -------------------------------------------------------------------------
   // Pull requests
+  //
+  // Three kinds, and a plan needs all three to reach `base_branch` through its
+  // PRs: one per phase (the review unit), one per `integ-<id>` branch (so a
+  // phase stacked on one has a path down), and one for the plan (the final
+  // wave branch, the only branch carrying every conflict resolution).
   // -------------------------------------------------------------------------
 
   /**
@@ -461,6 +466,68 @@ export class Integrator {
       head: this.nodeBranch(nodeId),
       title: options.text?.title ?? node.name,
       body: options.text?.body ?? node.prompt_ref,
+      draft: options.draft ?? false,
+      ...(this.#options.ghPath === undefined ? {} : { ghPath: this.#options.ghPath }),
+    })
+  }
+
+  /**
+   * The PR that takes a multi-dependency node's `integ-<id>` branch to
+   * `base_branch`, or null for a node whose base is not one.
+   *
+   * The phase PR targets `integ-<id>`, so without this one the stack above it
+   * has no path to `base_branch` — see `composeIntegrationPrBody`. Opened by
+   * the same node, at the same time, so it exists whenever the PR that needs it
+   * does. Never throws, for the reason `openPr` does not.
+   */
+  async openIntegrationPr(
+    nodeId: string,
+    options: { readonly draft?: boolean; readonly text?: PrText } = {},
+  ): Promise<PrResult | null> {
+    const base = this.base(nodeId)
+    if (base.kind !== 'integration') return null
+    const text =
+      options.text ??
+      composeIntegrationPrBody({
+        nodeId,
+        name: this.#node(nodeId).name,
+        branch: base.branch,
+        baseBranch: this.#plan.base_branch,
+        dependsOn: base.nodes,
+      })
+    return await openPullRequest({
+      cwd: this.#options.integrationPath,
+      nodeId,
+      label: `the integration branch of node ${nodeId}`,
+      base: this.#plan.base_branch,
+      head: base.branch,
+      title: text.title,
+      body: text.body,
+      draft: options.draft ?? false,
+      ...(this.#options.ghPath === undefined ? {} : { ghPath: this.#options.ghPath }),
+    })
+  }
+
+  /**
+   * The PR that lands the whole plan: `wave-<wave>` into `base_branch`.
+   *
+   * `wave` is the caller's, for `mergeWave`'s reason — the caller decided this
+   * was the final wave from its own reading of the plan, and this must open the
+   * branch that reading built. Wave 0 *is* `base_branch`, and a PR from a branch
+   * into itself is not one, so that answers null.
+   */
+  async openPlanPr(
+    wave: number,
+    options: { readonly draft?: boolean; readonly text: PrText },
+  ): Promise<PrResult | null> {
+    if (wave < 1) return null
+    return await openPullRequest({
+      cwd: this.#options.integrationPath,
+      label: `plan ${this.#plan.id}`,
+      base: this.#plan.base_branch,
+      head: this.waveBranch(wave),
+      title: options.text.title,
+      body: options.text.body,
       draft: options.draft ?? false,
       ...(this.#options.ghPath === undefined ? {} : { ghPath: this.#options.ghPath }),
     })

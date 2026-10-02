@@ -75,10 +75,10 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AdmissionControl } from '../admission/admission.ts'
+import type { AdmissionControl, AdmissionOutcome, AdmitOptions } from '../admission/admission.ts'
 import { systemClock, type Clock } from '../admission/clock.ts'
 import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
-import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
+import { computeHeights, computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import { git, gitLines } from '../integration/git.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
@@ -129,6 +129,8 @@ const LANE = 'lane'
 /** The answers `#offerRetry` understands. `retry with ` carries a member id. */
 const RETRY = 'retry'
 const STOP = 'stop'
+/** The login question's affirmative: the operator has logged the harness in. */
+const LOGGED_IN = 'logged in'
 /** The answer to `#reviewerEdited` that carries on with the reviewer's edits in place. */
 const KEEP = 'keep'
 const RETRY_WITH = 'retry with '
@@ -394,6 +396,11 @@ class CapacityRetry extends Error {
 
 /** `fatal` only — a broken harness, which is the one refusal that fails a node. */
 class SpawnFatal extends Error {}
+/**
+ * The operator answered the login question with `stop` (§6.1). A failure, but
+ * one a person chose, so nothing in `#recover` may second-guess it.
+ */
+class LoginDeclined extends SpawnFatal {}
 
 /**
  * A lane that could not be made clean for the next node.
@@ -526,6 +533,8 @@ interface NodeState {
   reviewerEdits: number
   /** Automatic attempts already spent on this node, under `onFailure: retry`. */
   autoRetries: number
+  /** Login questions asked, for a unique effect id per ask (§6.1). */
+  loginAsks: number
   /**
    * Failure questions this node answered for itself because nobody did. Its own
    * counter rather than `autoRetries`: the two are spent in different places
@@ -689,6 +698,10 @@ export class Scheduler {
   /** Members whose last phase failed: their next turn starts cold (§15.2). */
   readonly #poisoned = new Set<string>()
   #waves = new Map<string, number>()
+  /** Nodes parked on the login question, by harness id (§6.1). */
+  readonly #loginWaiters = new Map<string, Set<NodeState>>()
+  /** Critical-path priority per node, handed to admission (§6.1). */
+  #heights = new Map<string, number>()
   #waiters: (() => void)[] = []
   #iterations = 0
 
@@ -805,6 +818,7 @@ export class Scheduler {
       retries: 0,
       reviewerEdits: 0,
       autoRetries: 0,
+      loginAsks: 0,
       unattended: 0,
       quickFailures: 0,
       attemptStartedAt: 0,
@@ -937,6 +951,7 @@ export class Scheduler {
     }
 
     this.#waves = computeWaves(workflow.nodes)
+    this.#heights = computeHeights(workflow.nodes)
     // The loop is asleep on `#changed()`; a new node may be dispatchable now.
     this.#wake()
   }
@@ -956,6 +971,7 @@ export class Scheduler {
     }
 
     this.#waves = computeWaves(this.#workflow.nodes)
+    this.#heights = computeHeights(this.#workflow.nodes)
     this.#log.info('scheduler.started', {
       nodes: this.#workflow.nodes.length,
       waves: this.#waves.size,
@@ -1369,6 +1385,11 @@ export class Scheduler {
         }
         const reason = failureReason(error)
         this.#recordAttemptFailure(state, reason, error)
+        // The operator was asked and said stop: no retry policy overrides that.
+        if (error instanceof LoginDeclined) {
+          this.#fail(state, attempted(reason, state))
+          return
+        }
         if (await this.#recover(state)) continue
         this.#fail(state, attempted(reason, state))
         return
@@ -1926,6 +1947,73 @@ export class Scheduler {
   }
 
   /**
+   * `admit`, with §6.1's login rule around it: an `unauthenticated` harness
+   * parks this node on a question to the operator, in place, and the spawn is
+   * attempted again only once they say the harness is logged in. Never an
+   * automatic retry and never an unattended one — retrying cannot log a CLI in,
+   * and whatever `onFailure` says is about failures, which this is not.
+   *
+   * In place, holding the lane, because a login can lapse mid-pipeline and the
+   * lane is the implementer's work (§6.1's rule for a mid-pipeline refusal). A
+   * node refused at dispatch holds an empty lane across the wait; on a
+   * single-harness run nothing else could use it, since every spawn is refused.
+   *
+   * `build` is called per attempt so a retry carries whatever the operator
+   * queued while the node waited.
+   */
+  async #admitLoggedIn(
+    state: NodeState,
+    adapter: HarnessAdapter,
+    build: () => AgentTask,
+    options: AdmitOptions,
+  ): Promise<Exclude<AdmissionOutcome, { status: 'unauthenticated' }>> {
+    const admission = this.#options.admission
+    for (;;) {
+      const outcome = await admission.admit(adapter, build(), options)
+      if (outcome.status !== 'unauthenticated') return outcome
+      if (!(await this.#awaitLogin(state, adapter.id))) throw new LoginDeclined(outcome.message)
+    }
+  }
+
+  /**
+   * Asks the operator to log `harness` in, and returns whether they did.
+   *
+   * Every node refused by the same harness asks, so each is answerable where
+   * the operator finds it — but they are one question: the first `logged in`
+   * answers all of them, because the login it reports is the harness's, not
+   * the node's. `stop` answers only the node it was given for.
+   */
+  async #awaitLogin(state: NodeState, harness: string): Promise<boolean> {
+    if (state.aborted) return false
+    state.loginAsks += 1
+    const effectId = `login:${state.node.id}:${state.loginAsks}`
+    this.#ask(state, effectId, {
+      // The harness id and nothing the vendor said (§11).
+      question: `${harness} is not logged in. Log it in on this machine, then answer "${LOGGED_IN}" to continue.`,
+      kind: 'choice',
+      choices: [LOGGED_IN, STOP],
+    })
+    state.parkedEffectId = effectId
+
+    const waiting = this.#loginWaiters.get(harness) ?? new Set<NodeState>()
+    this.#loginWaiters.set(harness, waiting)
+    waiting.add(state)
+    let facts: GuardContext
+    try {
+      facts = await this.#park(state)
+    } finally {
+      waiting.delete(state)
+    }
+
+    if (facts.human?.['answer'] !== LOGGED_IN) return false
+    this.#options.admission.loggedIn(harness)
+    for (const other of [...waiting]) {
+      if (other.resume !== null) this.answer(other.node.id, facts)
+    }
+    return true
+  }
+
+  /**
    * Parks a node on an unanswered question: `awaiting_human`, its lane still
    * held, waiting on the promise `answer` resolves. The one place a node
    * sleeps, so the one place an abort has to be able to wake it.
@@ -2327,7 +2415,9 @@ export class Scheduler {
     // Computed once, before the first `build`, because a capacity retry rebuilds
     // the task and re-running a git command per attempt would be wasted work.
     const reorientation = await this.#reorientation(state, plan, params['role'])
-    let outcome = await admission.admit(adapter, build(plan))
+    // The tallest node first when the harness is throttled; see `computeHeights`.
+    const priority = { priority: this.#heights.get(state.node.id) ?? 0 }
+    let outcome = await this.#admitLoggedIn(state, adapter, () => build(plan), priority)
 
     // §15.4: the vendor has forgotten the session this task asked to continue.
     // Exactly one retry, cold and with the full prompt — the harness is
@@ -2352,7 +2442,7 @@ export class Scheduler {
         reason: 'stale_session',
         turns: 1,
       }
-      outcome = await admission.admit(adapter, build(plan))
+      outcome = await this.#admitLoggedIn(state, adapter, () => build(plan), priority)
     }
 
     if (outcome.status === 'failed') throw new SpawnFatal(outcome.message)

@@ -36,11 +36,33 @@
  * kept per `adapter.id` — two harnesses share nothing, and pressure on one must
  * not throttle the other.
  *
- * The ceiling itself is deliberately in-memory and not journaled. It is a
- * guess about a number the vendor never told us; a restarted daemon
- * re-discovers it within a few spawns, and reloading a stale one would be
- * carrying a guess across the very event most likely to invalidate it. The
- * *wake time* is journaled, because that is a fact the vendor reported.
+ * The discovered ceiling is kept as a *hint* across runs and restarts, keyed by
+ * harness, and trusted only while it is fresh (`ceilingFreshForMs`). Without it
+ * every run opened at the configured width and re-learned the account's limit
+ * by being refused, once per run. With it, a run started shortly after another
+ * was throttled opens at the width that worked, and additive increase still
+ * probes back toward the configured value — so a hint that was too cautious
+ * costs a few clean spawns, never the run. Past the freshness window it is
+ * discarded: the limit is the vendor's and changes under us, and an old guess
+ * is worse than starting over. The *wake time* is journaled as a fact, because
+ * the vendor reported it; the ceiling only ever as a hint.
+ *
+ * **One spawn starting at a time, per harness.** The ceiling bounds how many
+ * sessions *run*; it says nothing about how many *start* in the same instant.
+ * N CLIs booting together contend for the same local state — the config file,
+ * the OAuth token a 401 makes every one of them refresh at once — and a probe
+ * against Claude Code 2.1.274 measured it: time to `init` grew from 1.2 s with
+ * two simultaneous starts to 4.8 s with sixteen, against a flat 0.7 s when each
+ * waited for the previous one's `init`. So a spawn waits for the one ahead of
+ * it to report a session (or be refused) before it starts. That also means a
+ * refusal is seen by every spawn queued behind it before they spend one.
+ *
+ * **Critical path first.** Slots go to the queued spawn with the highest
+ * `priority` (the scheduler passes the node's height — the longest chain of
+ * work still in front of it), arrival order breaking ties. At the configured
+ * ceiling nobody queues and this changes nothing; once a refusal has halved
+ * it, it is what keeps a leaf from taking the slot a node with ten dependents
+ * was waiting for.
  *
  * **One timer per harness, never a poll.** A refusal parks the harness, not the
  * node: every later node for that harness joins the same wait instead of
@@ -73,11 +95,14 @@ import { CapacityWaitLog } from './waits.ts'
  * expired token, and letting it reach the AIMD controller would shrink the
  * ceiling in response to something that says nothing about concurrency.
  */
-export type CapacityRefusalKind = Exclude<SpawnRefusalKind, 'fatal' | 'stale_session'>
+export type CapacityRefusalKind = Exclude<
+  SpawnRefusalKind,
+  'fatal' | 'stale_session' | 'unauthenticated'
+>
 
 /** Narrows a kind read back off disk to the ones that mean "wait". */
 const isWait = (kind: SpawnRefusalKind): kind is CapacityRefusalKind =>
-  kind !== 'fatal' && kind !== 'stale_session'
+  kind !== 'fatal' && kind !== 'stale_session' && kind !== 'unauthenticated'
 
 /** What a harness is waiting on, for the UI and the one-shot notification. */
 export interface CapacityWait {
@@ -107,6 +132,13 @@ export type AdmissionOutcome =
    * ceiling did not move, so that retry is free to proceed.
    */
   | { readonly status: 'stale_session'; readonly message: string }
+  /**
+   * The harness is not logged in (§6.1). Not a failure and not a wait: the
+   * caller asks the operator to log in, and calls `loggedIn` once they say
+   * they have. Until then every spawn on this harness comes back this way
+   * without being attempted — one refusal is the whole harness's answer.
+   */
+  | { readonly status: 'unauthenticated'; readonly message: string }
   | {
       readonly status: 'retry'
       readonly kind: CapacityRefusalKind
@@ -128,6 +160,16 @@ export interface AdmissionOptions {
   readonly increaseAfter?: number
   readonly baseBackoffMs?: number
   readonly maxBackoffMs?: number
+  /**
+   * How long a discovered ceiling stays trustworthy as the next run's
+   * starting point. Past it the configured value is used.
+   */
+  readonly ceilingFreshForMs?: number
+  /**
+   * Whether spawns on one harness start one at a time (the default). Off
+   * only for tests and simulations that need to observe raw concurrency.
+   */
+  readonly serialStart?: boolean
   /** Fired once per wait window, per harness — §6.1's single notification. */
   readonly onWait?: (wait: CapacityWait) => void
 }
@@ -147,6 +189,24 @@ const DEFAULT_BASE_BACKOFF_MS = 1_000
  * early, instead of sleeping past it.
  */
 const DEFAULT_MAX_BACKOFF_MS = 300_000
+/**
+ * Six hours: about one plan usage window. A limit discovered within it was
+ * discovered against the same window and the same competing sessions; one
+ * from yesterday was not.
+ */
+const DEFAULT_CEILING_FRESH_FOR_MS = 6 * 60 * 60 * 1_000
+
+/** Per-spawn admission hints. */
+export interface AdmitOptions {
+  /** Higher goes first when slots are scarce. The scheduler passes node height. */
+  readonly priority?: number
+}
+
+interface QueuedSlot {
+  readonly priority: number
+  readonly seq: number
+  readonly grant: () => void
+}
 
 /**
  * Exponential backoff with full jitter: uniform over `[0, cap]` where the cap
@@ -166,6 +226,7 @@ export function backoffMs(
 }
 
 interface HarnessState {
+  readonly harness: string
   /** The configured ceiling: AIMD's upper bound, never exceeded. */
   readonly configured: number
   ceiling: number
@@ -182,8 +243,12 @@ interface HarnessState {
   cancelTimer: (() => void) | null
   /** Resolvers for nodes parked on this harness. One timer serves them all. */
   waiters: (() => void)[]
-  /** Resolvers for nodes queued behind the ceiling, in arrival order. */
-  slots: (() => void)[]
+  /** Nodes queued behind the ceiling; `#pump` takes the highest priority. */
+  slots: QueuedSlot[]
+  /** Resolves when the spawn currently starting has a session or a refusal. */
+  starting: Promise<void>
+  /** The `unauthenticated` refusal this harness is holding, until `loggedIn`. */
+  loginRequired: string | null
 }
 
 export class AdmissionControl {
@@ -191,11 +256,14 @@ export class AdmissionControl {
   readonly #clock: Clock
   readonly #waitLog: CapacityWaitLog
   readonly #states = new Map<string, HarnessState>()
+  readonly #hints: Map<string, number>
+  #seq = 0
 
   constructor(options: AdmissionOptions) {
     this.#options = options
     this.#clock = options.clock ?? systemClock
     this.#waitLog = new CapacityWaitLog(options.journal.root)
+    this.#hints = this.#freshHints()
 
     // Boot: a wait recorded before the restart resumes at its original wake
     // time. `notified` starts true because the operator was already told about
@@ -221,21 +289,39 @@ export class AdmissionControl {
    * a refusal into a wait. Never throws on capacity; never fails a node for
    * anything but `fatal`.
    */
-  async admit(adapter: HarnessAdapter, task: AgentTask): Promise<AdmissionOutcome> {
+  async admit(
+    adapter: HarnessAdapter,
+    task: AgentTask,
+    options: AdmitOptions = {},
+  ): Promise<AdmissionOutcome> {
     const state = this.#state(adapter.id)
 
+    if (state.loginRequired !== null) return { status: 'unauthenticated', message: state.loginRequired }
     // The harness is already parked: park this node too rather than spending a
     // spawn to be told the same thing again.
     if (this.#parked(state)) return this.#retry(state, task.nodeId)
 
-    await this.#acquireSlot(state)
-    // Another node may have been refused while we queued for the slot.
+    await this.#acquireSlot(state, options.priority ?? 0)
+    const started = await this.#startGate(state)
+    // Another node may have been refused while we queued for the slot, or
+    // while the spawn ahead of us was starting.
+    if (state.loginRequired !== null) {
+      started()
+      this.#releaseSlot(state)
+      return { status: 'unauthenticated', message: state.loginRequired }
+    }
     if (this.#parked(state)) {
+      started()
       this.#releaseSlot(state)
       return this.#retry(state, task.nodeId)
     }
 
-    const outcome = await adapter.spawn(task)
+    let outcome: Awaited<ReturnType<HarnessAdapter['spawn']>>
+    try {
+      outcome = await adapter.spawn(task)
+    } finally {
+      started()
+    }
     if (outcome.ok) {
       this.#onClean(state)
       let released = false
@@ -259,6 +345,12 @@ export class AdmissionControl {
     // ceiling was safe, only that it was never tested.
     if (outcome.kind === 'stale_session') {
       return { status: 'stale_session', message: outcome.message }
+    }
+    // Neither parked nor counted by AIMD: it says nothing about capacity, and
+    // no timer ends it. The harness holds the refusal until `loggedIn`.
+    if (outcome.kind === 'unauthenticated') {
+      state.loginRequired = outcome.message
+      return { status: 'unauthenticated', message: outcome.message }
     }
 
     this.#park(adapter.id, state, outcome.kind, outcome.retryAfter)
@@ -291,6 +383,14 @@ export class AdmissionControl {
     const state = this.#state(harness)
     this.#park(harness, state, refusal.kind, refusal.retryAfter)
     return this.#retry(state, nodeId)
+  }
+
+  /**
+   * The operator says this harness is logged in again. Spawns on it are
+   * attempted from here on; if the login did not take, the next one says so.
+   */
+  loggedIn(harness: string): void {
+    this.#state(harness).loginRequired = null
   }
 
   /** The effective ceiling — the discovered one, not the configured one. */
@@ -349,6 +449,7 @@ export class AdmissionControl {
     // halving on them would shrink the run for a reason it cannot fix.
     if (kind === 'concurrency' || kind === 'rate_limit') {
       state.ceiling = Math.max(1, Math.floor(state.ceiling / 2))
+      this.#rememberCeiling(harness, state)
     }
 
     const now = this.#clock.now()
@@ -402,16 +503,53 @@ export class AdmissionControl {
     state.cleanRun += 1
     if (state.cleanRun < (this.#options.increaseAfter ?? DEFAULT_INCREASE_AFTER)) return
     state.cleanRun = 0
+    const before = state.ceiling
     state.ceiling = Math.min(state.configured, state.ceiling + 1)
+    if (state.ceiling !== before) this.#rememberCeiling(state.harness, state)
     this.#pump(state)
   }
 
-  #acquireSlot(state: HarnessState): Promise<void> {
-    if (state.inFlight < state.ceiling) {
+  /** The hint for the next run; cleared once the ceiling is back where it started. */
+  #rememberCeiling(harness: string, state: HarnessState): void {
+    if (state.ceiling >= state.configured) this.#waitLog.clearCeiling(harness)
+    else this.#waitLog.recordCeiling(harness, { ceiling: state.ceiling, observedAt: this.#clock.now() })
+  }
+
+  /** Discovered ceilings still young enough to start from, by harness. */
+  #freshHints(): Map<string, number> {
+    const freshFor = this.#options.ceilingFreshForMs ?? DEFAULT_CEILING_FRESH_FOR_MS
+    const now = this.#clock.now()
+    const hints = new Map<string, number>()
+    for (const [harness, stored] of this.#waitLog.loadCeilings()) {
+      if (now - stored.observedAt <= freshFor && stored.ceiling >= 1) hints.set(harness, stored.ceiling)
+    }
+    return hints
+  }
+
+  /**
+   * Waits for the spawn ahead on this harness to have a session or a refusal,
+   * then takes its place. The returned function hands the gate on; it is
+   * idempotent, and a no-op when `serialStart` is off.
+   */
+  async #startGate(state: HarnessState): Promise<() => void> {
+    if (this.#options.serialStart === false) return () => {}
+    const ahead = state.starting
+    let open!: () => void
+    state.starting = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    await ahead
+    return open
+  }
+
+  #acquireSlot(state: HarnessState, priority: number): Promise<void> {
+    if (state.inFlight < state.ceiling && state.slots.length === 0) {
       state.inFlight += 1
       return Promise.resolve()
     }
-    return new Promise<void>((resolve) => state.slots.push(resolve))
+    return new Promise<void>((grant) => {
+      state.slots.push({ priority, seq: this.#seq++, grant })
+    })
   }
 
   #releaseSlot(state: HarnessState): void {
@@ -420,15 +558,25 @@ export class AdmissionControl {
   }
 
   /**
-   * Hands out freed slots in arrival order. `inFlight` is incremented here,
-   * synchronously, rather than by the woken caller — a resolved promise runs a
-   * microtask later, which is long enough for two waiters to both observe a
-   * single free slot.
+   * Hands out freed slots, highest priority first and arrival order within a
+   * priority. `inFlight` is incremented here, synchronously, rather than by the
+   * woken caller — a resolved promise runs a microtask later, which is long
+   * enough for two waiters to both observe a single free slot.
+   *
+   * A linear scan rather than a heap: the queue is bounded by the plan's node
+   * count, and a slot is granted once per spawn.
    */
   #pump(state: HarnessState): void {
     while (state.slots.length > 0 && state.inFlight < state.ceiling) {
+      let best = 0
+      for (let i = 1; i < state.slots.length; i += 1) {
+        const a = state.slots[i] as QueuedSlot
+        const b = state.slots[best] as QueuedSlot
+        if (a.priority > b.priority || (a.priority === b.priority && a.seq < b.seq)) best = i
+      }
+      const [next] = state.slots.splice(best, 1)
       state.inFlight += 1
-      state.slots.shift()?.()
+      next?.grant()
     }
   }
 
@@ -437,9 +585,11 @@ export class AdmissionControl {
     if (existing) return existing
     const configured = this.#options.ceilings[harness]
     if (configured === undefined) throw new Error(`unknown harness "${harness}"`)
+    const hint = this.#hints.get(harness)
     const state: HarnessState = {
+      harness,
       configured,
-      ceiling: configured,
+      ceiling: hint === undefined ? configured : Math.min(configured, hint),
       inFlight: 0,
       cleanRun: 0,
       attempt: 0,
@@ -449,6 +599,8 @@ export class AdmissionControl {
       cancelTimer: null,
       waiters: [],
       slots: [],
+      starting: Promise.resolve(),
+      loginRequired: null,
     }
     this.#states.set(harness, state)
     return state

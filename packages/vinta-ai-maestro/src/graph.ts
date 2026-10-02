@@ -109,3 +109,38 @@ export function computeWaves(nodes: readonly GraphNode[]): Map<string, number> {
   for (const node of nodes) waveOf(node.id)
   return waves
 }
+
+/**
+ * Longest-path height per node: 1 for a node nothing depends on, otherwise one
+ * more than its tallest dependent. The mirror of `computeWaves` — that counts
+ * the chain behind a node, this counts the chain still in front of it.
+ *
+ * It is the critical-path priority (§6.1). When a harness is throttled below
+ * the number of ready nodes, which node gets the next slot decides the run's
+ * length: a leaf taking it while a node with ten dependents queues lengthens
+ * the whole run by that node's wait. The tallest node goes first.
+ *
+ * Throws on a cyclic graph; call `findCycle` first.
+ */
+export function computeHeights(nodes: readonly GraphNode[]): Map<string, number> {
+  if (findCycle(nodes)) throw new Error('computeHeights called on a cyclic graph')
+
+  const dependents = new Map<string, string[]>(nodes.map((n) => [n.id, []]))
+  for (const node of nodes) {
+    for (const dep of node.depends_on) dependents.get(dep.node)?.push(node.id)
+  }
+  const heights = new Map<string, number>()
+
+  const heightOf = (id: string): number => {
+    const cached = heights.get(id)
+    if (cached !== undefined) return cached
+
+    const below = dependents.get(id) ?? []
+    const height = below.length === 0 ? 1 : 1 + Math.max(...below.map(heightOf))
+    heights.set(id, height)
+    return height
+  }
+
+  for (const node of nodes) heightOf(node.id)
+  return heights
+}

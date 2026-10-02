@@ -178,3 +178,112 @@ export function composePrBody(facts: PhaseFacts): PrText {
 
   return { title: facts.name, body: lines.join('\n'), source: 'composed' }
 }
+
+/** What the PR for a multi-dependency phase's `integ-<id>` branch needs to say. */
+export interface IntegrationFacts {
+  readonly nodeId: string
+  readonly name: string
+  /** The integration branch, which is this PR's head. */
+  readonly branch: string
+  /** The run's `base_branch`, which is this PR's base. */
+  readonly baseBranch: string
+  /** The dependencies it merges, in the order it merged them. */
+  readonly dependsOn: readonly string[]
+}
+
+/**
+ * The PR that takes an `integ-<id>` branch to `base_branch`.
+ *
+ * **Without it a plan with any multi-dependency phase could not be merged
+ * through its PRs.** That phase's PR targets `integ-<id>`, and nothing ever
+ * targeted `integ-<id>` itself: it was pushed so the phase PR had a base, and
+ * then it sat there. Every PR above it was stacked on a branch with no way to
+ * reach `base_branch`, and landing the plan meant someone rebuilding the
+ * merges by hand.
+ *
+ * Based on `base_branch` rather than on any one dependency, because it has
+ * several parents and no single one of them is "below" it. Its diff starts as
+ * the whole of its dependencies and shrinks, as their own PRs land, to what
+ * only this branch carries: the merge commits and any conflict an agent
+ * resolved while building it.
+ */
+export function composeIntegrationPrBody(facts: IntegrationFacts): PrText {
+  const deps = facts.dependsOn.map((id) => `\`${id}\``).join(', ')
+  const lines = [
+    `Integration branch for phase \`${facts.nodeId}\`. It merges that phase's dependencies — ` +
+      `${deps} — into one branch, so the phase has a single base. The PR for ` +
+      `\`${facts.nodeId}\` targets \`${facts.branch}\`.`,
+    '',
+    '## Merge order',
+    '',
+    `1. Merge the PRs for ${deps} first.`,
+    `2. Merge this one. By then its diff is only what this branch adds: the merge ` +
+      'commits, and any conflict an agent resolved while building it.',
+    `3. Retarget the PR for \`${facts.nodeId}\` to \`${facts.baseBranch}\`. GitHub does ` +
+      'this by itself when the merged branch is deleted.',
+    '',
+    'Use merge commits, not squash, all the way down the stack. A squash gives the ' +
+      'stacked PRs above it a diff that repeats every change below them.',
+  ]
+  return { title: `Integrate ${facts.dependsOn.join(' + ')} for ${facts.name}`, body: lines.join('\n'), source: 'composed' }
+}
+
+/** One PR in the plan's merge order, as the journal recorded it. */
+export interface PlanPrStep {
+  readonly kind: 'phase' | 'integration'
+  readonly nodeId: string
+  readonly head: string
+  readonly base: string
+  readonly url?: string
+}
+
+export interface PlanFacts {
+  readonly planId: string
+  readonly baseBranch: string
+  /** The final wave branch, which carries every phase. This PR's head. */
+  readonly head: string
+  /** Every PR the run opened or tried to, in an order that merges cleanly. */
+  readonly steps: readonly PlanPrStep[]
+}
+
+/**
+ * The PR that lands the whole plan: the final wave branch into `base_branch`.
+ *
+ * Phase PRs are review units, and a stack of them only reaches `base_branch`
+ * if every link in it does. The wave spine is the one branch that is known to
+ * hold the whole plan — every phase, every `integ-` merge, and the conflict
+ * resolutions made between sibling phases that nobody depends on both of,
+ * which no phase PR carries at all. So this PR is merged last whichever way the
+ * team lands the plan, and its diff is always "what is not on the base yet".
+ */
+export function composePlanPrBody(facts: PlanFacts): PrText {
+  const lines: string[] = [
+    `Lands plan \`${facts.planId}\` on \`${facts.baseBranch}\`. \`${facts.head}\` is the ` +
+      'last wave branch, so it holds every phase and every conflict resolution the run made.',
+    '',
+    '## How to land the plan',
+    '',
+    'Pick one. Use merge commits, not squash, either way.',
+    '',
+    `- **All at once.** Merge this PR. Phase PRs based on \`${facts.baseBranch}\` close ` +
+      'as merged by themselves; close the stacked ones.',
+    '- **Phase by phase.** Merge the PRs below in order, then this one last. Its diff ' +
+      'shrinks to what is not on the base yet — usually the conflict resolutions between ' +
+      'sibling phases, which no phase PR carries.',
+  ]
+
+  if (facts.steps.length > 0) {
+    lines.push('', '## Merge order', '')
+    facts.steps.forEach((step, index) => {
+      const what =
+        step.kind === 'integration'
+          ? `integration branch for \`${step.nodeId}\``
+          : `phase \`${step.nodeId}\``
+      const link = step.url === undefined ? '(no PR — open it by hand)' : step.url
+      lines.push(`${index + 1}. ${what}: ${link} — \`${step.head}\` into \`${step.base}\``)
+    })
+    lines.push(`${facts.steps.length + 1}. This PR.`)
+  }
+
+  return { title: `Land plan ${facts.planId}`, body: lines.join('\n'), source: 'composed' }
+}

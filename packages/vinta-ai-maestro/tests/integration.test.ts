@@ -1017,6 +1017,92 @@ describe('pull requests', () => {
     },
   )
 
+  /**
+   * A phase stacked on an `integ-` branch only reaches `base_branch` if the
+   * `integ-` branch does. It used to be pushed and then left without a PR, so
+   * no stack containing a multi-dependency phase could be merged through PRs.
+   */
+  it.runIf(FAKE_BIN_VIA_EXECFILE)(
+    'opens a PR for each integration branch, into base_branch',
+    async () => {
+      const repo = await makeRepo()
+      const gh = stubGh(repo.root)
+      const integrator = new Integrator({
+        plan: plan([node('a'), node('b'), node('c', ['a']), node('d', ['a', 'b'])]),
+        integrationPath: repo.integ,
+        fixer: spyFixer(),
+        ghPath: gh.path,
+      })
+
+      // Only a multi-dependency node has one.
+      expect(await integrator.openIntegrationPr('a')).toBeNull()
+      expect(await integrator.openIntegrationPr('c')).toBeNull()
+
+      const result = await integrator.openIntegrationPr('d', { draft: true })
+      expect(result).toMatchObject({
+        opened: true,
+        nodeId: 'd',
+        base: 'main',
+        head: 'plan/wf/integ-d',
+      })
+      const args = await gh.args()
+      expect(args[args.indexOf('--title') + 1]).toBe('Integrate a + b for Phase d')
+      expect(args).toContain('--draft')
+    },
+  )
+
+  it.runIf(FAKE_BIN_VIA_EXECFILE)(
+    'opens the plan PR from the final wave branch into base_branch',
+    async () => {
+      const repo = await makeRepo()
+      const gh = stubGh(repo.root)
+      const integrator = new Integrator({
+        plan: plan([node('a'), node('b', ['a'])]),
+        integrationPath: repo.integ,
+        fixer: spyFixer(),
+        ghPath: gh.path,
+      })
+      const text = { title: 'Land plan wf', body: 'body', source: 'composed' as const }
+
+      // Wave 0 is `base_branch` itself: there is nothing to open.
+      expect(await integrator.openPlanPr(0, { text })).toBeNull()
+
+      const result = await integrator.openPlanPr(2, { text })
+      expect(result).toMatchObject({ opened: true, base: 'main', head: 'plan/wf/wave-2' })
+      expect(result?.nodeId).toBeUndefined()
+    },
+  )
+
+  /**
+   * A retried phase or a resumed run asks again. "That PR is already open"
+   * is the answer it wanted, and it used to be journalled as a failure.
+   */
+  it.runIf(FAKE_BIN_VIA_EXECFILE)('treats a PR that is already open as opened', async () => {
+    const repo = await makeRepo()
+    const ghPath = fakeCliFromSource(
+      repo.root,
+      'gh',
+      [
+        `process.stderr.write(${JSON.stringify(
+          'a pull request for branch "plan/wf/phase-a" into branch "main" already exists:\nhttps://example.invalid/pr/7\n',
+        )})`,
+        'process.exit(1)',
+      ].join('\n'),
+    )
+    const integrator = new Integrator({
+      plan: plan([node('a')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+      ghPath,
+    })
+
+    expect(await integrator.openPr('a')).toMatchObject({
+      opened: true,
+      existing: true,
+      url: 'https://example.invalid/pr/7',
+    })
+  })
+
   it('degrades to a clear report when gh is unavailable', async () => {
     const repo = await makeRepo()
     const integrator = new Integrator({

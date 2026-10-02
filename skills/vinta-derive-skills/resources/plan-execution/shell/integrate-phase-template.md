@@ -29,4 +29,4 @@ Invoked by [implement-plan](../implement-plan/SKILL.md) after [review-phase](../
 
 ## Output
 
-Return to the conductor: the branch pushed, and the PR-context file path with its `status` (`published` + `pr_url` when `open-pr.sh` ran; `pending` otherwise) plus the publish command when `pending`.
+Return to the conductor: the branch pushed (plus the `integ-` branch when one was pushed), and each PR-context file path written — the integration file first when there is one — with its `status` (`published` + `pr_url` when `open-pr.sh` ran; `pending` otherwise) plus the publish command when `pending`.

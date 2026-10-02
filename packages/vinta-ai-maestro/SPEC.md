@@ -25,7 +25,7 @@ Today `implement-plan` *is* the orchestrator, written as a prompt. That prompt i
 - Subscription auth only. The daemon never handles an API key.
 - Live directed-graph view, per-agent transcript view, per-agent interaction (interrupt, redirect, add context), and PTY takeover.
 - Crash-safe resume.
-- Integration: dependency-derived phase branches, wave merges, conflict fixer, PR opening.
+- Integration: dependency-derived phase branches, wave merges, conflict fixer, and every PR the plan needs to reach `base_branch` (phase, integration and plan PRs).
 - **Graceful degradation under harness capacity limits** (§6.1). A vendor saying "not right now" is backpressure, not failure: the node waits and resumes automatically.
 - **Browser and OS notifications**, with `await_human` questions answerable directly from the UI (§9).
 - **Windows**, after macOS and Linux are complete, tested and polished (Wave 7).
@@ -313,11 +313,13 @@ Adapters classify every spawn refusal rather than throwing:
 ```ts
 type SpawnOutcome =
   | { ok: true; session: AgentSession }
-  | { ok: false; kind: 'rate_limit' | 'concurrency' | 'quota' | 'transient' | 'fatal';
+  | { ok: false; kind: 'rate_limit' | 'concurrency' | 'quota' | 'transient' | 'unauthenticated' | 'fatal';
       retryAfter?: Date; message: string }
 ```
 
-Only `fatal` — a missing binary, a broken workflow, an unauthenticated CLI that preflight somehow missed — fails the node. Everything else returns it to the ready set.
+Only `fatal` — a missing binary, a broken workflow — fails the node. Every capacity kind returns it to the ready set.
+
+**A logged-out harness waits for a person, with no fallback.** `unauthenticated` is neither a failure nor a wait: no timer ends it and retrying only re-asks a vendor that already said no. The node parks in place (lane held, as a mid-pipeline refusal is) in `awaiting_human` on a question with two answers, `logged in` and `stop`. Nothing answers it automatically — no automatic attempt, no unattended retry — whatever `onFailure` says. The harness holds the refusal, so every later spawn on it asks the same question without spawning; the first `logged in` resumes every node waiting on that harness, and `stop` fails only the node it was given for, bypassing the retry policy. A login that did not take is refused again and asked again.
 
 **Resources are released before waiting — but only while the lane is still empty.** The rule splits on whether the node has produced anything yet:
 
@@ -329,6 +331,12 @@ These do not conflict. The dispatch-time deadlock is caused by nodes that have d
 Resuming in place needs the harness's session id (`AgentTask.resumeSessionId`), which is why `resume` is a declared capability rather than an optimization.
 
 **Per-harness admission control, adaptive.** Each harness has an effective in-flight ceiling, starting at its configured value. On a `concurrency` or `rate_limit` refusal the ceiling halves (floor 1); after a run of clean spawns it increments by one back toward the configured value. Additive-increase/multiplicative-decrease, because the real limit is undocumented, varies by account and plan, and changes under us — so it has to be discovered and re-discovered rather than configured.
+
+The discovered ceiling is kept per harness (`capacity_ceilings`, beside `capacity_waits`) as a **hint for the next run**, trusted for six hours: a run started soon after another was throttled opens at the width that worked rather than re-learning the limit by being refused. It is never above the configured value, additive increase still probes upward from it, and the row is dropped once the ceiling recovers. Past the window it is ignored — the limit belongs to the vendor, and a stale guess is worse than starting over.
+
+**One spawn starting at a time, per harness.** The ceiling bounds how many sessions run, not how many boot in the same instant, and CLIs booting together contend for local state (config, OAuth token refresh). A spawn waits until the one ahead of it has a session or a refusal; a refusal therefore parks every spawn queued behind it before any of them spends one.
+
+**Critical path first.** When spawns queue behind the ceiling, a freed slot goes to the node with the greatest height — the longest chain of nodes still in front of it — with arrival order breaking ties. At the configured ceiling nothing queues and this changes nothing; under throttling it is what decides the run's length. The plan itself is never rewritten to reduce parallelism: the graph states what *can* run together, admission decides what *does*.
 
 **Waiting is honest and durable.** Backoff is exponential with full jitter, except when the harness reports an actual reset time, in which case that time is used rather than guessed. A `quota` wait can last hours: such a node enters `waiting_on_capacity`, is rendered as such in the UI (not as an error), notifies the user once, and **journals its wake time** so a daemon restart resumes the wait rather than losing or re-firing it. Waiting nodes are never busy-polled — one timer per harness, not one per node.
 
@@ -429,6 +437,14 @@ Sandbox denies the whole pool root and allows back only the running lane, so an 
 They are a separate registry rather than a second kind of gate because sharing one would be wrong three ways: a chore invalidates the gate cache key (§13.4) by running, it contends for a harness slot rather than a `test-suite` pool, and it must not be the thing standing between a phase and its merge. A chore that fails is journalled and the phase continues to its gates; `on_failure: 'fail'` is for one the phase is not correct without. A capacity refusal skips it for the same reason — re-driving a finished phase to fit in a polish turn costs more than the polish is worth.
 
 **Integration.** Branch topology follows dependencies, not plan order: no dependencies cuts from `base_branch`; exactly one cuts from that node's branch; several cut from an `integ-<id>` merge of them, merged in `depends_on` declaration order so the result is deterministic and derivable from the node alone. `wave-0` *is* `base_branch`; each later wave merges into `wave-<N>`. Merge conflicts are handed to a conflict-fixer agent in the dedicated integration worktree and re-enter the gate.
+
+**Every branch a plan lands through has a PR.** Three kinds, all opened by `open_pr` and journalled whether or not they opened (`node_pr` with `kind`, and `run_pr`):
+
+- **Phase PR** — the node's branch into its computed base. The review unit.
+- **Integration PR** — a multi-dependency node's `integ-<id>` into `base_branch`, opened by that node just before its phase PR. Without it the phase PR targets a branch nothing targets, and no stack containing a multi-dependency node reaches `base_branch`.
+- **Plan PR** — the final wave branch into `base_branch`, opened by the `open_pr` of the node whose `git_merge` built that wave (after its own phase PR, so the body can list it). The body lists every PR above in a merge order that works. It is the only PR carrying the conflict resolutions between sibling nodes that no later node depends on both of, so it is merged last whether the plan lands in one merge or phase by phase.
+
+Every wave branch is pushed after its merge. A `gh` refusal saying the head already has a PR is recorded as opened, with that PR's URL, so a retried phase or a resumed run does not report a failure for a PR that exists.
 
 A conflict surviving its fixer-round budget is reported as a plan defect — two same-wave nodes own the same code — naming **both** nodes and the contested paths, and the conflicted merge is left in place because it is the only copy of what the fixer attempted. **That budget is an integration-level setting (default 2), not either node's `max_fix_rounds`**: a conflict belongs to a pair of nodes, so deriving it from one would make the answer depend on which node happened to merge second.
 
