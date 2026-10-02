@@ -30,9 +30,10 @@
  * post-mortem down with the transcripts it was supposed to replace.
  */
 import { readdir, rm } from 'node:fs/promises'
-import { join, relative, resolve, sep } from 'node:path'
+import { basename, join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { liveJob } from '../job/job.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { laneRootFor, runsRootFor } from './paths.ts'
 import { findReapable, reap, type Reapable } from './reap.ts'
@@ -95,9 +96,19 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
   const runsRoot = runsRootFor(repoPath)
   const runId = parsed.positionals[0]
 
-  const targets =
+  const found =
     runId === undefined ? await everyRun(runsRoot) : await within(runsRoot, runId, io)
-  if (targets === null) return FAILED
+  if (found === null) return FAILED
+  // A run whose job is alive is writing into this directory right now —
+  // transcripts, gate logs, its own `job.json`. Deleting it underneath the job
+  // destroys the evidence of a run that is still producing it, so it is kept
+  // and named, and `stop` is how it becomes purgeable.
+  const targets = found.filter((target) => {
+    const id = basename(target)
+    if (liveJob(repoPath, id) === null) return true
+    io.err(`vinta-ai-maestro: keeping ${id} — its job is still running. Stop it first.`)
+    return false
+  })
 
   const wantsLanes = parsed.values.lanes === true || parsed.values.branches === true
   const reapable = wantsLanes

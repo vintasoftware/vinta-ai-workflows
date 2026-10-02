@@ -1,10 +1,10 @@
 /**
  * The `vinta-ai-maestro` command line.
  *
- * Seven subcommands, dispatched by hand. `node:util`'s `parseArgs` does the flag
+ * A dozen subcommands, dispatched by hand. `node:util`'s `parseArgs` does the flag
  * parsing inside each one, and nothing else does any: a framework here would be
  * a dependency, a plugin lifecycle and a help renderer bought to replace a
- * switch statement over seven strings.
+ * switch statement over a dozen strings.
  *
  * `main` returns an exit code rather than calling `process.exit`. That is what
  * makes the commands testable without a built binary, and it keeps the one
@@ -18,10 +18,13 @@
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
 import { GATE_USAGE, gateCommand } from './gate.ts'
+import { PAUSE_USAGE, STOP_USAGE, pauseCommand, stopCommand } from './halt.ts'
+import { LOGS_USAGE, logsCommand } from './logs.ts'
 import { PURGE_USAGE, purgeCommand } from './purge.ts'
 import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
 import { SIMULATE_USAGE, simulateCommand } from './simulate.ts'
+import { STATUS_USAGE, statusCommand } from './status.ts'
 import { WITH_USAGE, withCommand } from './with.ts'
 import { judgeHookCommandMain } from '../system-one/hook.ts'
 
@@ -33,11 +36,16 @@ usage: vinta-ai-maestro <command> [options]
                              non-zero if a run cannot start.
   simulate <workflow.json>   Project the schedule without running it: wall
                              clock, critical path and pool contention.
-  serve                      Start the daemon and print the URL to open.
-                             Runs submitted to it outlive the terminal that
-                             submitted them.
-  run <workflow.json>        Start the daemon and execute the workflow.
-  run --resume <run-id>      Pick an interrupted run back up where it stopped.
+  run <workflow.json>        Start the workflow as a background job and
+                             return. The run outlives this terminal.
+  run --resume <run-id>      Pick an interrupted or paused run back up.
+  status [run-id]            What every run — or one run — is doing.
+  logs <run-id> [-f]         A run's job log; -f follows it to the end.
+  pause <run-id>             Let running steps finish, then stop. Resumable.
+  stop <run-id>              Kill the run now. Final.
+  ui                         Serve the browser UI for every run and print the
+                             URL to open. Closing it leaves runs running.
+                             (\`serve\` is the same command.)
   purge [run-id]             Delete run state under .vinta-ai-maestro/ — transcripts
                              and gate logs hold repository contents verbatim.
   with <resource> -- <cmd>   Run a command while holding a live run's resource.
@@ -60,7 +68,12 @@ const USAGES: Readonly<Record<string, string>> = {
   doctor: DOCTOR_USAGE,
   simulate: SIMULATE_USAGE,
   serve: SERVE_USAGE,
+  ui: SERVE_USAGE,
   run: RUN_USAGE,
+  status: STATUS_USAGE,
+  logs: LOGS_USAGE,
+  pause: PAUSE_USAGE,
+  stop: STOP_USAGE,
   purge: PURGE_USAGE,
   with: WITH_USAGE,
   gate: GATE_USAGE,
@@ -92,9 +105,18 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
     case 'simulate':
       return await simulateCommand(rest, io)
     case 'serve':
+    case 'ui':
       return await serveCommand(rest, io)
     case 'run':
       return await runCommand(rest, io)
+    case 'status':
+      return await statusCommand(rest, io)
+    case 'logs':
+      return await logsCommand(rest, io)
+    case 'pause':
+      return await pauseCommand(rest, io)
+    case 'stop':
+      return await stopCommand(rest, io)
     case 'purge':
       return await purgeCommand(rest, io)
     case 'with':
@@ -130,6 +152,9 @@ export { doctorCommand } from './doctor.ts'
 export { simulateCommand } from './simulate.ts'
 export { serveCommand, announce, type ServeDeps } from './serve.ts'
 export { runCommand, type RunDeps } from './run.ts'
+export { statusCommand } from './status.ts'
+export { logsCommand, type LogsDeps } from './logs.ts'
+export { pauseCommand, stopCommand, type HaltDeps } from './halt.ts'
 export { purgeCommand } from './purge.ts'
 export { withCommand, type WithDeps } from './with.ts'
 export { gateCommand, type GateDeps } from './gate.ts'

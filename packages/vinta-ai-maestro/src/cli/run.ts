@@ -1,26 +1,33 @@
 /**
- * `vinta-ai-maestro run <workflow.json>` — start the daemon, then execute.
+ * `vinta-ai-maestro run <workflow.json>` — start a run as a background job.
  *
- * The daemon comes up *before* the scheduler starts, and its URL is printed
- * before the first node dispatches. A run lasts hours; an operator who could
- * only reach the UI after the run finished would have no way to watch, steer or
- * answer an `await_human` gate — which is the entire §9 interaction model.
+ * **Two halves, one command.** Without `--foreground`, this process does the
+ * cheap checks — the flags, the workflow, whether a resume is possible at all
+ * — then hands the run to a detached copy of itself and waits only until that
+ * copy reports the run started (`job/job.ts`). It then prints the run id and
+ * the commands that reach it, and exits. The terminal is free; the run is not
+ * tied to it.
  *
- * **What is left here.** The composition moved to `src/run/`, where `serve`'s
- * `POST /api/runs` reaches it too. What stays is everything that is genuinely
- * about a command line: parsing flags, bringing up a daemon this process owns,
- * printing, turning an outcome into an exit code — and deciding to wait, which
- * is the one thing that distinguishes this host from the daemon-hosted one.
+ * With `--foreground`, this process *is* the job: it brings up the run's
+ * loopback API — which its agents call back into for `with`, `gate` and the
+ * judged hook — composes the run on it, and waits for it to end. That is what
+ * the detached copy runs, and it is also how CI runs a plan, because there the
+ * exit code is the point and nothing else is watching.
  *
- * **This command no longer owns the run's durability.** It used to be the only
- * way to start a run, which made the terminal the run's lifetime: closing it
- * killed the daemon, the scheduler and every agent, and left the `runs` row
- * saying `running` forever with nothing able to pick it up. Two things changed
- * that. A run can now be submitted to a daemon that was already up (`serve`),
- * and a run that *was* interrupted can be picked up again (`--resume`). What is
- * left in this file for the operator who does neither is the signal handling
- * below: SIGHUP, SIGINT and SIGTERM end the run through the same path a
- * finished one takes, so the journal says what actually happened.
+ * **The job serves no UI.** `vinta-ai-maestro ui` is the process that serves
+ * the app, and it forwards a live run's traffic to the job that hosts it. The
+ * job's token is written to `runs/<id>/job.json` and nowhere else: never
+ * printed, never logged.
+ *
+ * **How a job ends.** Four ways, and each leaves the journal saying which:
+ *
+ * - the DAG settles — `done` or `failed`, with a post-mortem;
+ * - `pause` — running phases finish their current step, nothing new starts,
+ *   and the run ends `paused`, resumable;
+ * - `stop` — live turns and gates are killed and the run ends `cancelled`,
+ *   which `--resume` refuses;
+ * - a signal (SIGHUP, SIGINT, SIGTERM) — the run ends `failed`, resumable, as
+ *   a closed terminal always left it.
  *
  * **Teardown is asymmetric on purpose.** The port, the databases and the caches
  * are closed in a `finally`; the *lanes are not*. §8 is explicit that a
@@ -28,16 +35,13 @@
  * the evidence a human reads when something went wrong, and since `--resume`
  * they are also what the next attempt continues in.
  */
+import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { startDaemon, type Daemon, type DaemonRun } from '../daemon/index.ts'
 import { formatDoctorReport } from '../doctor/index.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
-import {
-  AGENT_PERMISSIONS,
-  DEFAULT_PERMISSION,
-  isAgentPermission,
-} from '../harness/permissions.ts'
+import { launchJob, removeJob, writeJob, type LaunchResult } from '../job/job.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
@@ -46,37 +50,54 @@ import type { RunStop } from '../scheduler/index.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 import { errorFields, installCrashHandlers, redactValue } from '../log/index.ts'
-import { reportLogFailures, toLogSetup } from './logging.ts'
-import {
-  SERVE_USAGE,
-  announce,
-  monitorFactory,
-  toBind,
-  toRetryAfterMs,
-  toSystemOne,
-  untilSignalled,
-} from './serve.ts'
+import { reportLogFailures, toLogSetup, type LogValues } from './logging.ts'
+import { jobArgs, resumeRefusal, toRunPolicy, type JobTarget, type RunPolicy } from './policy.ts'
+import { monitorFactory, toBind, untilSignalled, type Bind } from './serve.ts'
 
-export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]
-       vinta-ai-maestro run --resume <runId> [--repo <dir>] [--host <host>] [--port <n>]
+export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
+       vinta-ai-maestro run --resume <runId> [options]
+
+  Starts the run as a background job and returns once it is under way. The
+  run carries on after this terminal closes. Reach it with:
+
+    vinta-ai-maestro status [runId]     what it is doing
+    vinta-ai-maestro logs <runId> -f    what it is saying
+    vinta-ai-maestro ui                 the browser UI, for every run
+    vinta-ai-maestro pause <runId>      finish current steps, then stop; resumable
+    vinta-ai-maestro stop <runId>       kill it now; final
 
   <workflow.json>  Usually ai-plans/<feature>.workflow.json — the committed
                  document plan-feature wrote and the editor edits.
-  --resume <id>  Pick up a run that was interrupted, instead of starting one.
-                 Phases already done stay done, their lane worktrees are reused
-                 rather than recreated — whatever an agent had written and not
-                 committed is still there — and a phase that was mid-turn when
-                 the run stopped runs again from the top of its pipeline.
-                 The plan comes from the run's frozen snapshot, not from the
-                 file it was written from: editing that file afterwards does not
-                 reach back into a run already under way.
-${SERVE_USAGE.split('\n').slice(1).join('\n')}`
+  --resume <id>  Pick up a run that was interrupted or paused, instead of
+                 starting one. Phases already done stay done, their lane
+                 worktrees are reused rather than recreated — whatever an agent
+                 had written and not committed is still there — and a phase that
+                 was mid-step when the run stopped runs again from the top of
+                 its pipeline. The plan comes from the run's frozen snapshot,
+                 not from the file it was written from: editing that file
+                 afterwards does not reach back into a run already under way.
+                 A run that finished, or was stopped, cannot be resumed.
+  --foreground   Host the run in this process and wait for it to end, exiting
+                 0 only when every phase completed. For CI, where the exit
+                 code is the point. Closing the terminal then interrupts the
+                 run, which stays resumable.
+
+  --repo <dir>   The project whose .vinta-ai-maestro/ store holds the run.
+                 Defaults to the current directory.
+  --host <host>  The run's API bind address — what its agents call back into.
+                 Defaults to 127.0.0.1; there is no reason to change it unless
+                 agents run somewhere that cannot reach loopback.
+  --port <n>     Defaults to 0 — an OS-assigned port.
+  --on-failure, --retries, --retry-after, --permission, --system-one,
+  --no-intervene, --log-level, --log-stderr, --log-detail
+                 As for \`vinta-ai-maestro ui --help\`, which documents each.`
 
 export interface RunDeps {
   /**
    * Replaces the whole host composition: the effect bodies, the lane pool the
    * production ones run in, and the preflight that guards it. Present, this
    * command starts a daemon and schedules; absent, it builds the real thing.
+   * Only meaningful with `--foreground`: a detached job is another process.
    */
   readonly executor?: EffectExecutor
   /** Adapters by harness id. Defaults to the real CLI-driving ones. */
@@ -100,6 +121,13 @@ export interface RunDeps {
   readonly perLaneBytes?: number
   /** Called once the daemon is up and the run has been registered. */
   readonly onStarted?: (daemon: Daemon, run: DaemonRun) => void
+  /**
+   * How a background run is launched. Defaults to `launchJob`, which spawns a
+   * detached copy of this CLI; a test hosts the job in its own process.
+   */
+  readonly launch?: (args: readonly string[], runId: string) => Promise<LaunchResult>
+  /** How long a cancelled run may take to drain before it is ended anyway. */
+  readonly cancelDeadlineMs?: number
 }
 
 export async function runCommand(
@@ -121,6 +149,10 @@ export async function runCommand(
         retries: { type: 'string' },
         'retry-after': { type: 'string' },
         resume: { type: 'string' },
+        foreground: { type: 'boolean' },
+        // Internal: the id the launcher chose, so it can say which run it
+        // started before the job has written anything.
+        'run-id': { type: 'string' },
         'log-level': { type: 'string' },
         'log-stderr': { type: 'boolean' },
         'log-detail': { type: 'string' },
@@ -146,46 +178,98 @@ export async function runCommand(
 
   const bind = toBind(parsed.values, io)
   if (bind === null) return USAGE
+  const policy = toRunPolicy(parsed.values, io)
+  if (policy === null) return USAGE
 
-  // Rejected here rather than passed through: an unrecognised value must not
-  // quietly become the default, because the default is the permissive end of
-  // the range and the typo most worth catching is `--permission ful`.
-  const requested = parsed.values['permission']
-  if (requested !== undefined && !isAgentPermission(requested)) {
-    io.err(`vinta-ai-maestro: --permission must be one of ${AGENT_PERMISSIONS.join(', ')}`)
-    return USAGE
+  if (parsed.values.foreground !== true) {
+    return await launchRun({ path, resumeId, bind, policy, log: parsed.values, io, deps })
   }
-  const permission = requested ?? DEFAULT_PERMISSION
+  return await hostRun({
+    path,
+    resumeId,
+    runId: parsed.values['run-id'],
+    bind,
+    policy,
+    log: parsed.values,
+    io,
+    deps,
+  })
+}
 
-  const systemOne = toSystemOne(parsed.values['system-one'], permission, io)
-  if (systemOne === null) return USAGE
+interface RunRequest {
+  readonly path: string | undefined
+  readonly resumeId: string | undefined
+  readonly bind: Bind
+  readonly policy: RunPolicy
+  readonly log: LogValues
+  readonly io: Io
+  readonly deps: RunDeps
+}
 
-  // Rejected rather than defaulted, for the reason `--permission` is: a typo
-  // that quietly became `stop` would look like the flag worked, and the
-  // operator would find out by watching a failed run end without asking them.
-  const onFailure = parsed.values['on-failure']
-  if (
-    onFailure !== undefined &&
-    onFailure !== 'stop' &&
-    onFailure !== 'retry' &&
-    onFailure !== 'ask'
-  ) {
-    io.err('vinta-ai-maestro: --on-failure must be one of stop, retry, ask')
-    return USAGE
+/**
+ * The background half: check what can be checked cheaply, launch the job,
+ * wait for it to report the run started, say how to reach it.
+ *
+ * The preflight is the job's, not this process's. It runs the project's own
+ * `prepare_cmd` — often a `docker compose up` — and running that twice per
+ * start would be a real cost paid for nothing. The job's refusal comes back as
+ * the text it printed, which is the same text a foreground run prints.
+ */
+async function launchRun(request: RunRequest): Promise<number> {
+  const { bind, policy, io, deps } = request
+  let target: JobTarget
+  if (request.resumeId === undefined) {
+    const workflow = await loadWorkflow(request.path as string, io)
+    if (workflow === null) return FAILED
+    target = {
+      kind: 'workflow',
+      path: request.path as string,
+      runId: deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`,
+    }
+  } else {
+    const journal = openJournal(bind.repoPath)
+    try {
+      const refusal = resumeRefusal(journal, bind.repoPath, request.resumeId)
+      if (refusal !== null) {
+        io.err(refusal.message)
+        return FAILED
+      }
+    } finally {
+      journal.close()
+    }
+    target = { kind: 'resume', runId: request.resumeId }
   }
 
-  // A budget, so it is bounded and finite. Zero is meaningful — it is `ask`
-  // spelled through this flag — and anything unparseable is a typo worth
-  // catching rather than a silent fallback to the default.
-  const retryAfterMs = toRetryAfterMs(parsed.values['retry-after'], io)
-  if (retryAfterMs === null) return USAGE
+  const { runId } = target
+  io.out(`vinta-ai-maestro: starting run ${runId} in the background…`)
+  const args = jobArgs(target, bind, policy, request.log)
+  const launched = await (deps.launch ?? ((jobArgv, id) =>
+    launchJob({ repoPath: bind.repoPath, runId: id, args: jobArgv })))(args, runId)
 
-  const rawRetries = parsed.values['retries']
-  const retries = rawRetries === undefined ? undefined : Number(rawRetries)
-  if (retries !== undefined && (!Number.isInteger(retries) || retries < 0 || retries > 5)) {
-    io.err('vinta-ai-maestro: --retries must be a whole number from 0 to 5')
-    return USAGE
+  if (!launched.ok) {
+    // The job's own words — the doctor report, the refusal — because those
+    // are what the operator would have seen had they run it in the foreground.
+    const output = launched.output.trimEnd()
+    if (output !== '') io.err(output)
+    io.err(`vinta-ai-maestro: run ${runId} did not start.`)
+    return FAILED
   }
+
+  const repo = bind.repoPath === resolve(process.cwd()) ? '' : ` --repo ${bind.repoPath}`
+  io.out(`vinta-ai-maestro: run ${runId} ${target.kind === 'resume' ? 'resumed' : 'started'} (job pid ${launched.record.pid}).`)
+  io.out(`  status   vinta-ai-maestro status ${runId}${repo}`)
+  io.out(`  logs     vinta-ai-maestro logs ${runId} --follow${repo}`)
+  io.out(`  ui       vinta-ai-maestro ui${repo}`)
+  io.out(`  pause    vinta-ai-maestro pause ${runId}${repo}`)
+  io.out(`  stop     vinta-ai-maestro stop ${runId}${repo}`)
+  return OK
+}
+
+/** The foreground half: this process is the run's job. */
+async function hostRun(request: RunRequest & { readonly runId: string | undefined }): Promise<number> {
+  const { bind, policy, io, deps } = request
+  const { permission, systemOne } = policy
+  const resumeId = request.resumeId
 
   // The plan, and where it came from. A resume reads the *frozen* snapshot —
   // the document the run actually started with — rather than the file on disk,
@@ -198,25 +282,16 @@ export async function runCommand(
   let runId: string
   let resumeJournal: Journal | undefined
   if (resumeId === undefined) {
-    const loaded = await loadWorkflow(path as string, io)
+    const loaded = await loadWorkflow(request.path as string, io)
     if (loaded === null) return FAILED
     workflow = loaded
-    runId = deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`
+    runId = request.runId ?? deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`
   } else {
     resumeJournal = openJournal(bind.repoPath)
-    const row = resumeJournal.runs().find((candidate) => candidate.id === resumeId)
-    if (row === undefined) {
+    const refusal = resumeRefusal(resumeJournal, bind.repoPath, resumeId, process.pid)
+    if (refusal !== null) {
       resumeJournal.close()
-      io.err(`vinta-ai-maestro: no run "${resumeId}" in ${bind.repoPath}`)
-      return FAILED
-    }
-    if (row.status === 'done') {
-      resumeJournal.close()
-      // Refused rather than started, because there is nothing to resume: every
-      // node settled and a resume would do nothing but write a second
-      // `run_ended` over a finished history. Re-running the plan is a different
-      // request with a different answer.
-      io.err(`vinta-ai-maestro: run "${resumeId}" already finished. Run the plan again instead.`)
+      io.err(refusal.message)
       return FAILED
     }
     try {
@@ -259,11 +334,10 @@ export async function runCommand(
 
   const journal = resumeJournal ?? openJournal(bind.repoPath)
 
-  // Same log the daemon-hosted path writes, in the same file. A run started
-  // from a terminal and one submitted over HTTP are the same run to whoever is
-  // debugging it a day later, and two log locations would be a question they
-  // have to answer before they can start.
-  const logging = toLogSetup(parsed.values, bind.repoPath, io)
+  // Same log the other commands write, in the same file. A run is the same run
+  // to whoever is debugging it a day later however it was started, and two log
+  // locations would be a question they have to answer before they can start.
+  const logging = toLogSetup(request.log, bind.repoPath, io)
   if (logging === null) {
     journal.close()
     return USAGE
@@ -277,6 +351,9 @@ export async function runCommand(
       logger: log,
       warn: (message) => io.err(message),
       monitorFor: monitorFactory(journal, bind.repoPath, permission),
+      // The app is `ui`'s to serve. This listener is for the run's agents and
+      // for the commands that reach the run through `job.json`.
+      serveUi: false,
       ...(bind.host === undefined ? {} : { host: bind.host }),
       ...(bind.port === undefined ? {} : { port: bind.port }),
     })
@@ -293,6 +370,19 @@ export async function runCommand(
   }
 
   redactValue(daemon.token)
+  const startedAt = Date.now()
+  const record = (state: 'starting' | 'running'): void =>
+    writeJob(bind.repoPath, {
+      runId,
+      pid: process.pid,
+      url: daemon.url,
+      token: daemon.token,
+      state,
+      startedAt,
+    })
+  // Before the pool, which takes real time: `status` can already say the run
+  // is starting, and `stop` can already find it.
+  record('starting')
 
   // Installed before the run exists, so an exception during provisioning is
   // caught too — that is where a run spends its first minute, and a crash
@@ -303,13 +393,19 @@ export async function runCommand(
     inFlight: () => [runId],
     onFatal: () => {
       journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
+      removeJob(bind.repoPath, runId, process.pid)
     },
   })
 
-  // Before the pool, which takes real time: an operator whose lanes are being
-  // provisioned can already open the UI and watch them appear.
-  announce(daemon, io)
   io.out(`Daemon log: ${logging.path}`)
+
+  // A cancel is a kill followed by a drain, and the drain is only as quick as
+  // the slowest effect noticing its process died. This is the bound on it.
+  let forceCancel = (): void => {}
+  const forced = new Promise<'forced'>((resolve_) => {
+    forceCancel = () => resolve_('forced')
+  })
+  let deadline: NodeJS.Timeout | undefined
 
   let started: StartedRun
   try {
@@ -323,9 +419,9 @@ export async function runCommand(
       ...(systemOne === undefined ? {} : { systemOne }),
       logger: log,
       ...(resumeId === undefined ? {} : { resume: true }),
-      ...(onFailure === undefined ? {} : { onFailure }),
-      ...(retries === undefined ? {} : { retries }),
-      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      ...(policy.onFailure === undefined ? {} : { onFailure: policy.onFailure }),
+      ...(policy.retries === undefined ? {} : { retries: policy.retries }),
+      ...(policy.retryAfterMs === undefined ? {} : { retryAfterMs: policy.retryAfterMs }),
       ...(deps.executor === undefined ? {} : { executor: deps.executor }),
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
       ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
@@ -334,12 +430,25 @@ export async function runCommand(
       // is the same one the monitor endpoint uses, so an intervention turn is
       // the same agent on the same model as the one an operator can ask.
       monitorFor: monitorFactory(journal, bind.repoPath, permission),
-      ...(parsed.values['no-intervene'] === true ? { intervene: false } : {}),
+      ...(policy.intervene ? {} : { intervene: false }),
+      onHalt: (mode) => {
+        log.info('run.halt_requested', { run: runId, mode })
+        io.out(
+          mode === 'paused'
+            ? `vinta-ai-maestro: pausing run ${runId} — running phases finish their current step first.`
+            : `vinta-ai-maestro: stopping run ${runId}.`,
+        )
+        if (mode === 'cancelled' && deadline === undefined) {
+          deadline = setTimeout(forceCancel, deps.cancelDeadlineMs ?? 30_000)
+          deadline.unref()
+        }
+      },
     })
     if (!result.ok) {
       log.error('run.provision_failed', { run: runId, reason: result.message })
       uninstallCrashHandlers()
       reportLogFailures(logging.sink, io)
+      removeJob(bind.repoPath, runId, process.pid)
       await daemon.close()
       journal.close()
       io.err(result.message)
@@ -350,6 +459,7 @@ export async function runCommand(
     log.error('run.start_threw', { run: runId, ...errorFields(error) })
     uninstallCrashHandlers()
     reportLogFailures(logging.sink, io)
+    removeJob(bind.repoPath, runId, process.pid)
     await daemon.close()
     journal.close()
     io.err(`vinta-ai-maestro: run ${runId} could not be started.`)
@@ -357,6 +467,7 @@ export async function runCommand(
   }
 
   for (const warning of warnings) io.err(warning)
+  record('running')
   io.out(
     resumeId === undefined
       ? `vinta-ai-maestro: run ${runId} started (${workflow.nodes.length} nodes).`
@@ -367,16 +478,19 @@ export async function runCommand(
   const signals = untilSignalled()
   // Declared out here because the `finally` has to know which way the race
   // below went — the two paths tear down differently.
-  let interrupted = false
+  let abandoned = false
   try {
-    // Whichever comes first. A run that finishes normally resolves on the left;
-    // an operator closing the terminal resolves on the right.
-    interrupted = await Promise.race([
-      started.finished.then(() => false),
-      signals.signalled.then(() => true),
+    // Whichever comes first. A run that ends on its own — settled, paused or
+    // stopped — resolves on the left; a signal or a cancel that would not
+    // drain resolves on the right.
+    const ended = await Promise.race([
+      started.finished.then(() => 'finished' as const),
+      signals.signalled.then(() => 'signalled' as const),
+      forced,
     ])
 
-    if (interrupted) {
+    if (ended !== 'finished') {
+      abandoned = true
       // **Written before anything is closed, and this is the whole point of
       // handling the signal at all.** The scheduler is still mid-run and will
       // never reach its own `run_ended`, because this process is about to end
@@ -385,13 +499,19 @@ export async function runCommand(
       // still in flight — and the operator has a zombie instead of something
       // they can pick up again.
       //
-      // `failed` rather than a status of its own: the run did not complete, and
-      // the node rows say exactly how far it got. `--resume` refuses only a
-      // `done` run, so this is precisely the state a resume expects to find.
-      journal.append({ runId, type: 'run_ended', payload: { status: 'failed' } })
-      log.warn('run.interrupted', { run: runId })
-      io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
-      io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
+      // A signal is `failed`: the run did not complete, and the node rows say
+      // exactly how far it got. `--resume` accepts it. A cancel that outlived
+      // its deadline is still a cancel.
+      const status = ended === 'forced' ? 'cancelled' : 'failed'
+      journal.append({ runId, type: 'run_ended', payload: { status } })
+      if (ended === 'forced') {
+        log.warn('run.cancel_forced', { run: runId })
+        io.err(`vinta-ai-maestro: run ${runId} stopped; some steps did not wind down in time.`)
+      } else {
+        log.warn('run.interrupted', { run: runId })
+        io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
+        io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
+      }
       return FAILED
     }
 
@@ -399,6 +519,16 @@ export async function runCommand(
     if (postMortem !== null) io.out(`vinta-ai-maestro: post-mortem written to ${postMortem}`)
     if (report === null) {
       io.err(`vinta-ai-maestro: run ${runId} aborted. Its journal is intact and can be inspected.`)
+      return FAILED
+    }
+
+    if (report.halted === 'paused') {
+      io.out(`vinta-ai-maestro: run ${runId} paused.`)
+      io.out(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
+      return FAILED
+    }
+    if (report.halted === 'cancelled') {
+      io.out(`vinta-ai-maestro: run ${runId} stopped.`)
       return FAILED
     }
 
@@ -434,20 +564,22 @@ export async function runCommand(
     // handlers go for the same reason — and only here, once the race is
     // decided, so an exception thrown during teardown is still recorded.
     signals.cancel()
+    if (deadline !== undefined) clearTimeout(deadline)
     uninstallCrashHandlers()
     reportLogFailures(logging.sink, io)
+    removeJob(bind.repoPath, runId, process.pid)
     // The run's own handles are closed by `started.finished`, which owns them
     // whether or not anyone awaits it. What is left is what *this process*
     // opened around the run: the port and the journal.
     await daemon.close()
-    // **Not closed on the interrupt path, and this is not an oversight.** The
+    // **Not closed on the abandoned paths, and this is not an oversight.** The
     // scheduler is still running there — nobody awaited `finished` — and it
     // holds this exact journal: closing it underneath a live run turns every
     // in-flight `releaseLease` into "the database connection is not open",
     // which is a crash report standing where an interruption should be. The
     // process is exiting within milliseconds either way, and SQLite commits per
     // transaction, so the `run_ended` written above is already durable.
-    if (!interrupted) journal.close()
+    if (!abandoned) journal.close()
   }
 }
 
