@@ -53,6 +53,8 @@ import { Integrator } from '../src/integration/integrator.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import { createScheduler, type RunReport } from '../src/scheduler/index.ts'
 import { SideEffectSchema, WorkflowSchema, type EffectId, type Workflow } from '../src/types.ts'
+import type { SystemOne } from '../src/system-one/config.ts'
+import { MockSystemOneAdapter } from '../src/system-one/mock.ts'
 
 // ---------------------------------------------------------------------------
 // Rig
@@ -214,6 +216,8 @@ function setup(
      * answer — `standard-phase`'s exhausted budget answers itself `stop` (§16.5).
      */
     readonly retryAfterMs?: number
+    /** The operator's classifier (§17). */
+    readonly systemOne?: SystemOne
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-executor-'))
@@ -291,6 +295,7 @@ function setup(
     lanes,
     notifier,
     ...(cache === undefined ? {} : { cache }),
+    ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
   })
 
   const harnesses = new Set<string>([workflow.defaults.harness])
@@ -1547,5 +1552,166 @@ describe('composed prompts, end to end', () => {
     // with its dependents blocked behind it.
     expect(report.statuses['p1']).toBe('failed')
     expect(report.statuses['p4']).toBe('blocked')
+  })
+}, REAL_RUN_TIMEOUT_MS)
+
+// ---------------------------------------------------------------------------
+// System One (§17): judge gates and gate triage
+// ---------------------------------------------------------------------------
+
+describe('System One in run_gate', () => {
+  const judged = (gates: Readonly<Record<string, unknown>>, nodeGates: readonly string[]) => (): Workflow =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'judged',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      gates,
+      nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: nodeGates }],
+    })
+
+  const assign = (rig: Rig): ExecutorLane => {
+    const lane = rig.lanes[0] as ExecutorLane
+    rig.journal.append({ runId: RUN_ID, nodeId: 'p1', type: 'node_assigned', payload: { lane: lane.name } })
+    return lane
+  }
+
+  const judgedRows = (rig: Rig) =>
+    rig.journal.events(RUN_ID).flatMap((event) => (event.type === 'system_one_judged' ? [event.payload] : []))
+
+  const LOGS_BODIES = {
+    judge: { question: 'Does this diff log request bodies?', fail_on: ['yes'], threshold: 0.6 },
+  }
+
+  it('fails a judge gate on the classifier answer, sends it the lane diff, and writes the finding to the log', async () => {
+    const adapter = new MockSystemOneAdapter(() => ({ yes: 0.8, no: 0.2 }))
+    const rig = setup(judged({ 'no-body-logs': LOGS_BODIES }, ['no-body-logs']), {
+      systemOne: { adapter, judges: {} },
+    })
+    const lane = assign(rig)
+    writeFileSync(join(lane.path, 'handler.py'), 'log(request.body)\n')
+
+    const outcome = await rig.invoke('p1', 'run_gate')
+    expect(outcome.facts?.gate?.['exit_code']).toBe(1)
+    expect(outcome.facts?.gate?.['status']).toBe('failed')
+
+    // The diff, untracked file included, against the base — and the plan's question verbatim.
+    expect(adapter.asked).toHaveLength(1)
+    expect(adapter.asked[0]?.input).toContain('log(request.body)')
+    expect(adapter.asked[0]?.question).toBe('Does this diff log request bodies?')
+
+    const log = readFileSync(String(outcome.facts?.gate?.['log_ref']), 'utf8')
+    expect(log).toContain('Does this diff log request bodies?')
+    expect(log).toContain('FAILED')
+
+    // Identifiers and numbers in the journal, never the diff.
+    const rows = judgedRows(rig)
+    expect(rows).toEqual([
+      expect.objectContaining({ judge: 'gate', subject: 'no-body-logs', outcome: 'answered', decision: 'failed', adapter: 'mock' }),
+    ])
+    expect(JSON.stringify(rig.journal.events(RUN_ID))).not.toContain('request.body')
+  })
+
+  it('passes a judge gate below its threshold', async () => {
+    const adapter = new MockSystemOneAdapter(() => ({ yes: 0.3, no: 0.7 }))
+    const rig = setup(judged({ 'no-body-logs': LOGS_BODIES }, ['no-body-logs']), {
+      systemOne: { adapter, judges: {} },
+    })
+    assign(rig)
+    expect((await rig.invoke('p1', 'run_gate')).facts?.gate?.['exit_code']).toBe(0)
+  })
+
+  it('never lets a passing judge gate cover for a red command gate', async () => {
+    const adapter = new MockSystemOneAdapter(() => ({ yes: 0, no: 1 }))
+    const rig = setup(
+      judged({ unit: { cmd: 'exit 1', timeout_s: 30 }, 'no-body-logs': LOGS_BODIES }, ['unit', 'no-body-logs']),
+      { systemOne: { adapter, judges: {} } },
+    )
+    assign(rig)
+    const outcome = await rig.invoke('p1', 'run_gate')
+    expect(outcome.facts?.gate?.['id']).toBe('unit')
+    expect(outcome.facts?.gate?.['exit_code']).toBe(1)
+    expect(adapter.asked).toHaveLength(0)
+  })
+
+  it('treats an unconfigured classifier as unavailable, under the gate\'s own on_unavailable', async () => {
+    const rig = setup(
+      judged(
+        {
+          advisory: LOGS_BODIES,
+          required: { judge: { ...LOGS_BODIES.judge, on_unavailable: 'fail' } },
+        },
+        ['advisory', 'required'],
+      ),
+    )
+    assign(rig)
+    const outcome = await rig.invoke('p1', 'run_gate')
+    expect(outcome.facts?.gate?.['id']).toBe('required')
+    expect(outcome.facts?.gate?.['exit_code']).toBe(1)
+    expect(judgedRows(rig).map((row) => [row.subject, row.outcome, row.decision])).toEqual([
+      ['advisory', 'unconfigured', 'passed'],
+      ['required', 'unconfigured', 'failed'],
+    ])
+  })
+
+  it('caches an answered judgement on the tree, and never an unavailable one', async () => {
+    let refuse = true
+    const adapter = new MockSystemOneAdapter(() => (refuse ? { refuse: 'unavailable' } : { yes: 0, no: 1 }))
+    const rig = setup(judged({ 'no-body-logs': LOGS_BODIES }, ['no-body-logs']), {
+      systemOne: { adapter, judges: {} },
+      cache: true,
+    })
+    assign(rig)
+    expect((await rig.invoke('p1', 'run_gate')).facts?.gate?.['cached']).toBe(false)
+    refuse = false
+    expect((await rig.invoke('p1', 'run_gate')).facts?.gate?.['cached']).toBe(false)
+    expect((await rig.invoke('p1', 'run_gate')).facts?.gate?.['cached']).toBe(true)
+    expect(adapter.asked).toHaveLength(2)
+  })
+
+  it('reruns a red command gate the triage judge calls flaky, and reports the triage', async () => {
+    const adapter = new MockSystemOneAdapter(() => ({ flaky: 0.9, real: 0.1 }))
+    const rig = setup(
+      // Says something first: an empty log gives the classifier nothing to sort, and is not triaged.
+      (root) =>
+        judged(
+          {
+            unit: {
+              cmd: `${process.platform === 'win32' ? 'echo port in use &' : 'echo port in use;'} ${flipOnceGate(join(root, 'flipped'))}`,
+              timeout_s: 30,
+            },
+          },
+          ['unit'],
+        )(),
+      {
+        systemOne: {
+          adapter,
+          judges: { gate_triage: { rerun_above: 0.8, max_reruns: 1, max_input_bytes: 32 * 1024 } },
+        },
+      },
+    )
+    assign(rig)
+    const outcome = await rig.invoke('p1', 'run_gate')
+    expect(outcome.facts?.gate?.['exit_code']).toBe(0)
+    expect(outcome.facts?.gate?.['triage']).toBe('flaky')
+    const results = rig.journal.events(RUN_ID).filter((event) => event.type === 'gate_result')
+    expect(results.map((event) => (event.payload as { exit_code: number }).exit_code)).toEqual([1, 0])
+    expect(judgedRows(rig)).toEqual([expect.objectContaining({ judge: 'gate_triage', decision: 'rerun' })])
+  })
+
+  it('leaves a real failure to the fixer', async () => {
+    const adapter = new MockSystemOneAdapter(() => ({ real: 0.95, flaky: 0.05 }))
+    const rig = setup(judged({ unit: { cmd: 'echo boom && exit 1', timeout_s: 30 } }, ['unit']), {
+      systemOne: {
+        adapter,
+        judges: { gate_triage: { rerun_above: 0.8, max_reruns: 1, max_input_bytes: 32 * 1024 } },
+      },
+    })
+    assign(rig)
+    const outcome = await rig.invoke('p1', 'run_gate')
+    expect(outcome.facts?.gate?.['exit_code']).toBe(1)
+    expect(outcome.facts?.gate?.['triage']).toBe('real')
+    expect(rig.journal.events(RUN_ID).filter((event) => event.type === 'gate_result')).toHaveLength(1)
   })
 }, REAL_RUN_TIMEOUT_MS)

@@ -55,6 +55,43 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.pr-review-install`) as the tool's and never diff or edit it. Refresh it
   with `pr-review upgrade`. `vinta-sync-ai-tools` offers the integration to
   existing projects as an `opt-in-offer`.
+- **Maestro: System One classifiers (SPEC §17).** A run can now consult a
+  fast classifier: one that answers yes/no or scores a fixed set of labels.
+  Three things use it.
+  - **Configuration.** `run`, `serve` and `doctor` take
+    `--system-one <config.json>`. The file lives on the operator's machine and
+    is never part of the plan. It names the classifier adapter: `http` (POST,
+    bearer key read from the env var you name) or `command` (a local process,
+    JSON on stdin and stdout). Out-of-tree adapters register through
+    `registerSystemOneAdapter`. The file also turns on the built-in judges.
+    This is the only API key the package uses; LLM harnesses still run on your
+    logged-in CLIs.
+  - **Judge gates.** A workflow gate can be
+    `{ "judge": { "question" | "question_ref", "labels", "fail_on",
+    "threshold", "on_unavailable" } }` instead of `{ "cmd": … }`. It asks the
+    plan's question about the lane's diff and reports exit 0 or 1, so
+    pipelines, the fix loop and the fixer prompt are unchanged. A judge gate
+    can only fail a phase, never pass one that a command gate failed. Agents
+    are not told to run judge gates. Without `--system-one`, a judge gate
+    falls back to its `on_unavailable` setting (`pass` by default).
+    `schemas/workflow.v1.schema.json` is regenerated (`gates` values are now
+    `anyOf` command | judge). The change is additive: existing gates are
+    unchanged.
+  - **Gate triage** (`judges.gate_triage`). When a command gate fails, the
+    classifier reads the end of its log. If it calls the failure flaky or
+    environmental, the gate is rerun once before a fixer is spent. The result
+    is exposed as `gate.triage`.
+  - **`--permission judged`** (claude-code only). Agents run without vendor
+    prompts. A `PreToolUse` hook asks the classifier about each judged tool
+    call (default `Bash`) through a new `POST /api/runs/:runId/permission`
+    endpoint. It fails closed at every step. It needs `judges.permission` in
+    the config. `doctor` refuses it for codex or opencode phases. This is a
+    speed trade-off, not a sandbox.
+
+  Every judgement is journalled as `system_one_judged`, with labels and
+  scores only, never the diff, log or command. With a hosted classifier,
+  diffs, gate logs and shell commands leave the machine. Use the `command`
+  adapter with a local model where that is not acceptable.
 - **Maestro: chores that run after the PR opens (`when: "after_pr"`).** A
   chore can now declare `when`. The default, `before_gate`, keeps today's
   `polish` timing. `after_pr` runs the chore at the end of `standard-phase`'s

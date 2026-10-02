@@ -40,7 +40,9 @@ import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
 import type { ResourcePools } from '../resources/pools.ts'
 import { AgentGateBroker } from '../resources/agent-gates.ts'
 import { laneHolders } from '../scheduler/crew.ts'
-import type { Gate, Workflow } from '../types.ts'
+import { isJudgeGate, type Workflow } from '../types.ts'
+import type { SystemOne } from '../system-one/config.ts'
+import { judgeHookCommand } from '../system-one/hook.ts'
 import { storeFor } from '../cli/paths.ts'
 import { projectSpec } from '../cli/project.ts'
 
@@ -146,6 +148,8 @@ export interface ProvisionOptions {
    * silently eat the work the resume was meant to save.
    */
   readonly adopt?: boolean
+  /** The operator's classifier (§17), for judge gates and gate triage. */
+  readonly systemOne?: SystemOne
 }
 
 /**
@@ -241,13 +245,17 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
      * bounds it.
      */
     verify: async (cwd: string): Promise<boolean> => {
-      const gates = [...new Set(workflow.nodes.flatMap((node) => node.gates))].filter(
-        (id) => workflow.gates[id] !== undefined,
-      )
-      for (const id of gates) {
+      // Command gates only. A judge gate's question is about one phase's diff,
+      // and a conflict resolution is not any phase's — asking it of the merge
+      // would judge a diff the question was never written for.
+      const gates = [...new Set(workflow.nodes.flatMap((node) => node.gates))].flatMap((id) => {
+        const gate = workflow.gates[id]
+        return gate === undefined || isJudgeGate(gate) ? [] : [[id, gate] as const]
+      })
+      for (const [id, gate] of gates) {
         const result = await executeGate({
           gateId: id,
-          gate: workflow.gates[id] as Gate,
+          gate,
           cwd,
           env: { ...integration.env, ...options.agentEnv },
           // Filed under the integration worktree's own pseudo-node, so a merge
@@ -295,6 +303,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       env: { ...env, ...options.agentEnv },
     })),
     cache,
+    ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
   })
 
   const rebasePlan = createRebaser({
@@ -502,8 +511,12 @@ export function defaultAdapters(
   workflow: Workflow,
   permission: AgentPermission,
   repoPath: string,
+  systemOne?: SystemOne,
 ): Record<string, HarnessAdapter> {
   const adapters: Record<string, HarnessAdapter> = {}
+  // §17.6. Built only when the mode asks for it and the operator configured a
+  // judge; otherwise absent, and a `judged` claude-code spawn refuses itself.
+  const judge = permission === 'judged' ? systemOne?.judges.permission : undefined
   for (const id of referencedHarnesses(workflow)) {
     adapters[id] =
       id === 'claude-code'
@@ -511,6 +524,9 @@ export function defaultAdapters(
             permission,
             readRoots: [repoPath],
             settingsDir: join(storeFor(repoPath), 'harness'),
+            ...(judge === undefined
+              ? {}
+              : { judgeHook: { command: judgeHookCommand(), tools: judge.tools, timeoutS: 60 } }),
           })
         : id === 'codex'
           ? new CodexAdapter({ permission })

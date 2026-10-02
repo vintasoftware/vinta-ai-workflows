@@ -163,7 +163,7 @@ export const GateTuningSchema = z
       'is not the monitor’s to touch.',
   )
 
-export const GateSchema = z.strictObject({
+export const CommandGateSchema = z.strictObject({
   cmd: z.string().min(1).describe('Shell command run in the node’s lane. Not an agent.'),
   requires: z
     .array(Id)
@@ -173,6 +173,97 @@ export const GateSchema = z.strictObject({
   tuning: GateTuningSchema.optional(),
   description: z.string().optional(),
 })
+
+// ---------------------------------------------------------------------------
+// Judge gates — a gate whose verdict is a System One classifier's (§17.4)
+//
+// A command gate asks the tree a question a program can answer. A judge gate
+// asks one a program cannot — "does this diff log a request body", "is this a
+// schema change" — of a fast classifier, and turns the answer into the same
+// exit code a command gate reports. That is the whole integration: the
+// pipeline, the fix loop and the fixer's prompt treat it as any other gate.
+//
+// **It can only make a phase redder.** A node's gates run in order and the
+// first red one is the answer, so a judge gate that passes changes nothing a
+// command gate decided. The asymmetry is structural rather than a rule anybody
+// has to remember: there is no field here that lets a classifier wave a
+// failing suite through.
+//
+// The question is the plan's, which is why this lives in the workflow and the
+// classifier does not. Whether a run may send its diff to one at all is the
+// operator's (`--system-one`), and a run started without one passes every
+// judge gate as unavailable — journalled, never silent.
+// ---------------------------------------------------------------------------
+
+export const JUDGE_INPUTS = ['diff'] as const
+
+export const JudgeSchema = z.strictObject({
+  question: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('The question, inline. Exactly one of `question` and `question_ref` is required.'),
+  question_ref: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Where the question lives, in `prompt_ref` form (`ai-plans/PLAN.md#no-phi-in-logs`), ' +
+        'resolved off the lane like a phase brief.',
+    ),
+  labels: z
+    .array(z.string().min(1))
+    .min(2)
+    .default(['yes', 'no'])
+    .describe('The closed set the classifier chooses among. The default makes it a yes/no question.'),
+  fail_on: z
+    .array(z.string().min(1))
+    .min(1)
+    .describe(
+      'The labels that fail the gate. Their combined score is compared against `threshold`, ' +
+        'so `["architectural", "schema"]` fails on the two together and not on either alone.',
+    ),
+  threshold: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.5)
+    .describe('The gate fails when the `fail_on` labels together score at least this much.'),
+  input: z
+    .enum(JUDGE_INPUTS)
+    .default('diff')
+    .describe('What is judged. `diff` is the lane against the phase’s base, uncommitted work included.'),
+  max_input_bytes: z
+    .number()
+    .int()
+    .min(1024)
+    .default(200 * 1024)
+    .describe(
+      'A larger input is not sent. The gate then counts as unavailable — a truncated diff ' +
+        'would be judged on the part that happened to fit.',
+    ),
+  on_unavailable: z
+    .enum(['pass', 'fail'])
+    .default('pass')
+    .describe(
+      'What a question nobody answered means: no classifier configured, unreachable, or an ' +
+        'oversized input. `pass` — the default — keeps a judge gate advisory; `fail` is for a ' +
+        'check the phase must not merge without.',
+    ),
+})
+
+export const JudgeGateSchema = z.strictObject({
+  judge: JudgeSchema,
+  requires: z
+    .array(Id)
+    .default([])
+    .describe('Resource pool ids acquired before the gate runs. Rarely needed: a judge holds no lane resource.'),
+  description: z.string().optional(),
+})
+
+export const GateSchema = z
+  .union([CommandGateSchema, JudgeGateSchema])
+  .describe('A command gate (`cmd`) or a judge gate (`judge`).')
 
 // ---------------------------------------------------------------------------
 // Chores — a declared agent turn inside a phase, for work that is neither
@@ -729,6 +820,9 @@ export type WorkflowInput = z.input<typeof WorkflowSchema>
 export type Node = z.infer<typeof NodeSchema>
 export type Dependency = z.infer<typeof DependencySchema>
 export type Gate = z.infer<typeof GateSchema>
+export type CommandGate = z.infer<typeof CommandGateSchema>
+export type JudgeGate = z.infer<typeof JudgeGateSchema>
+export type Judge = z.infer<typeof JudgeSchema>
 export type Chore = z.infer<typeof ChoreSchema>
 export type GateTuning = z.infer<typeof GateTuningSchema>
 export type Project = z.infer<typeof ProjectSchema>
@@ -742,3 +836,8 @@ export type SideEffect = z.infer<typeof SideEffectSchema>
 export type HarnessId = (typeof HARNESS_IDS)[number]
 export type EffectId = (typeof EFFECT_IDS)[number]
 export type AgentRole = (typeof AGENT_ROLES)[number]
+
+/** Narrows a gate to its judge form. Every consumer of `cmd` asks this first. */
+export function isJudgeGate(gate: Gate): gate is JudgeGate {
+  return 'judge' in gate
+}

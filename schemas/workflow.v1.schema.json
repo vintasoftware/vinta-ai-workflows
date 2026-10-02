@@ -496,56 +496,155 @@
         "pattern": "^[a-z0-9][a-z0-9-]*$"
       },
       "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "cmd": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Shell command run in the node’s lane. Not an agent."
-          },
-          "requires": {
-            "default": [],
-            "description": "Resource pool ids acquired before the gate runs, in canonical order.",
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[a-z0-9][a-z0-9-]*$"
-            }
-          },
-          "timeout_s": {
-            "default": 1800,
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 9007199254740991
-          },
-          "tuning": {
+        "anyOf": [
+          {
             "type": "object",
             "properties": {
-              "allowed_flags": {
-                "minItems": 1,
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Shell command run in the node’s lane. Not an agent."
+              },
+              "requires": {
+                "default": [],
+                "description": "Resource pool ids acquired before the gate runs, in canonical order.",
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                }
+              },
+              "timeout_s": {
+                "default": 1800,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "tuning": {
+                "type": "object",
+                "properties": {
+                  "allowed_flags": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "Flags the monitor may ADD to this gate’s command, verbatim and whole. Matched as exact argv tokens, so `--reuse-db` permits `--reuse-db` and nothing else — not `--reuse-db-and-more`, and not a flag that merely starts the same way. A flag taking a separate value (`-n auto`) is written as the two tokens it is. Removing or rewriting an existing token is never permitted, whatever is listed here: the proposed command must be this one’s tokens, in order, plus additions."
+                  }
                 },
-                "description": "Flags the monitor may ADD to this gate’s command, verbatim and whole. Matched as exact argv tokens, so `--reuse-db` permits `--reuse-db` and nothing else — not `--reuse-db-and-more`, and not a flag that merely starts the same way. A flag taking a separate value (`-n auto`) is written as the two tokens it is. Removing or rewriting an existing token is never permitted, whatever is listed here: the proposed command must be this one’s tokens, in order, plus additions."
+                "required": [
+                  "allowed_flags"
+                ],
+                "additionalProperties": false,
+                "description": "What an autonomous retune of this gate may do. Absent — the default — means the command is not the monitor’s to touch."
+              },
+              "description": {
+                "type": "string"
               }
             },
             "required": [
-              "allowed_flags"
+              "cmd"
             ],
-            "additionalProperties": false,
-            "description": "What an autonomous retune of this gate may do. Absent — the default — means the command is not the monitor’s to touch."
+            "additionalProperties": false
           },
-          "description": {
-            "type": "string"
+          {
+            "type": "object",
+            "properties": {
+              "judge": {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "description": "The question, inline. Exactly one of `question` and `question_ref` is required.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "question_ref": {
+                    "description": "Where the question lives, in `prompt_ref` form (`ai-plans/PLAN.md#no-phi-in-logs`), resolved off the lane like a phase brief.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "labels": {
+                    "default": [
+                      "yes",
+                      "no"
+                    ],
+                    "description": "The closed set the classifier chooses among. The default makes it a yes/no question.",
+                    "minItems": 2,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "fail_on": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "The labels that fail the gate. Their combined score is compared against `threshold`, so `[\"architectural\", \"schema\"]` fails on the two together and not on either alone."
+                  },
+                  "threshold": {
+                    "default": 0.5,
+                    "description": "The gate fails when the `fail_on` labels together score at least this much.",
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "input": {
+                    "default": "diff",
+                    "description": "What is judged. `diff` is the lane against the phase’s base, uncommitted work included.",
+                    "type": "string",
+                    "enum": [
+                      "diff"
+                    ]
+                  },
+                  "max_input_bytes": {
+                    "default": 204800,
+                    "description": "A larger input is not sent. The gate then counts as unavailable — a truncated diff would be judged on the part that happened to fit.",
+                    "type": "integer",
+                    "minimum": 1024,
+                    "maximum": 9007199254740991
+                  },
+                  "on_unavailable": {
+                    "default": "pass",
+                    "description": "What a question nobody answered means: no classifier configured, unreachable, or an oversized input. `pass` — the default — keeps a judge gate advisory; `fail` is for a check the phase must not merge without.",
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail"
+                    ]
+                  }
+                },
+                "required": [
+                  "fail_on"
+                ],
+                "additionalProperties": false
+              },
+              "requires": {
+                "default": [],
+                "description": "Resource pool ids acquired before the gate runs. Rarely needed: a judge holds no lane resource.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                }
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "judge"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "cmd"
         ],
-        "additionalProperties": false
+        "description": "A command gate (`cmd`) or a judge gate (`judge`)."
       }
     },
     "chores": {

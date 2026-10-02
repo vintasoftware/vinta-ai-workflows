@@ -31,7 +31,7 @@ import {
   spawnOptionsFor,
 } from '../platform/platform.ts'
 import type { ResourcePools } from '../resources/pools.ts'
-import type { Gate } from '../types.ts'
+import type { CommandGate } from '../types.ts'
 
 export type GateStatus = 'passed' | 'failed' | 'timed_out'
 
@@ -81,7 +81,7 @@ export interface TimeoutFacts {
 
 export interface RunGateOptions {
   readonly gateId: string
-  readonly gate: Gate
+  readonly gate: CommandGate
   /** The lane checkout, or any directory. The runner does not create it. */
   readonly cwd: string
   /** Overlaid on the daemon's own environment. */

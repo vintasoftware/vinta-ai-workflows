@@ -642,6 +642,7 @@ export class Journal {
       case 'gate_result':
       case 'chore_result':
       case 'agent_lease':
+      case 'system_one_judged':
         // History, deliberately not a projection. `leases` is the *current*
         // holder set and must not survive a restart, so folding these into it
         // would resurrect capacity no live process holds; `analytics.ts` and

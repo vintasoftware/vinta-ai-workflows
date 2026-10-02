@@ -63,11 +63,13 @@ import { Monitor, monitorModel } from '../monitor/monitor.ts'
 import { preflightRun, startRun } from '../run/index.ts'
 import type { Workflow } from '../types.ts'
 import { parseWorkflow } from '../validate.ts'
+import { loadSystemOne, SystemOneConfigError, type SystemOne } from '../system-one/config.ts'
 import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 
 export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host <host>] [--port <n>]
-                              [--permission <ask|auto|full>]
+                              [--permission <ask|auto|full|judged>]
+                              [--system-one <config.json>]
                               [--on-failure <stop|retry|ask>] [--retries <n>]
                               [--retry-after <15m>]
                               [--log-level <debug|info|warn|error>] [--log-stderr]
@@ -144,7 +146,18 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  lane is for. ask makes every tool use need approval, and
                  nothing answers those in a headless run. full removes the
                  checks entirely; both CLIs recommend that only for a sandbox
-                 with no network, which a lane is not.
+                 with no network, which a lane is not. judged is full with a
+                 System One classifier asked about every shell command before
+                 it runs, and anything it cannot clear denied — faster than
+                 auto's vendor checks, and not a sandbox. It needs
+                 --system-one with a permission judge, and claude-code.
+  --system-one   The operator's System One classifier: which adapter, how to
+                 reach it, the environment variable holding its key, and which
+                 built-in judges consult it (gate triage, the permission
+                 judge). A JSON file on this machine, never part of the plan.
+                 Without it a plan's judge gates answer as unavailable. With it,
+                 diffs, gate logs and commands are sent to that classifier —
+                 point it at a local one where that must not happen.
   --no-intervene Execute the plan exactly as written, whatever it costs.
                  By default a run that is dragging wakes its monitor, which
                  reads the gate logs and may amend how the run *executes* — a
@@ -153,6 +166,38 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro serve [--repo <dir>] [--host
                  gate's own tuning.allowed_flags, and a run gets three such
                  amendments in its life. Pass this to turn it off entirely.
                  The operator sets this, never the workflow document.`
+
+/**
+ * `--system-one`, loaded and checked against `--permission`. Shared by `serve`
+ * and `run` so the two cannot disagree about what a usable config is.
+ *
+ * `undefined` is "not configured", `null` a usage error already reported.
+ * `judged` without a permission judge is refused here, at the command line,
+ * rather than at the first spawn of the first phase.
+ */
+export function toSystemOne(
+  path: string | undefined,
+  permission: AgentPermission,
+  io: Io,
+): SystemOne | undefined | null {
+  let systemOne: SystemOne | undefined
+  if (path !== undefined) {
+    try {
+      systemOne = loadSystemOne(path)
+    } catch (error) {
+      io.err(`vinta-ai-maestro: --system-one: ${error instanceof SystemOneConfigError ? error.message : 'could not be loaded'}`)
+      return null
+    }
+  }
+  if (permission === 'judged' && systemOne?.judges.permission === undefined) {
+    io.err(
+      'vinta-ai-maestro: --permission judged needs --system-one with a `judges.permission` block — ' +
+        'without one nothing would judge the calls it lets through',
+    )
+    return null
+  }
+  return systemOne
+}
 
 /** The bind and store settings `serve` and `run` share. */
 export interface Bind {
@@ -280,6 +325,7 @@ export async function serveCommand(
         host: { type: 'string' },
         port: { type: 'string' },
         permission: { type: 'string' },
+        'system-one': { type: 'string' },
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
         'retry-after': { type: 'string' },
@@ -307,6 +353,9 @@ export async function serveCommand(
     return USAGE
   }
   const permission = requested ?? DEFAULT_PERMISSION
+
+  const systemOne = toSystemOne(parsed.values['system-one'], permission, io)
+  if (systemOne === null) return USAGE
 
   // Parsed at last. Both flags have been in `SERVE_USAGE` since `run` and
   // `serve` started sharing it, and until this command could host a run they
@@ -382,6 +431,7 @@ export async function serveCommand(
       daemon,
       repoPath: bind.repoPath,
       permission,
+      ...(systemOne === undefined ? {} : { systemOne }),
       logger: log,
       warn: (message) => io.err(message),
       ...(onFailure === undefined ? {} : { onFailure }),
@@ -459,6 +509,8 @@ interface StarterOptions {
   readonly daemon: Daemon
   readonly repoPath: string
   readonly permission: AgentPermission
+  /** `--system-one`, loaded once at startup and shared by every run this daemon hosts. */
+  readonly systemOne?: SystemOne
   readonly onFailure?: 'stop' | 'retry' | 'ask'
   readonly retries?: number
   readonly retryAfterMs?: number
@@ -575,6 +627,8 @@ export function runStarter(options: StarterOptions): RunHost {
         // decides `startRun`'s `resume` below.
         ...(request.kind === 'resume' ? { resumeRunId: runId } : {}),
         ...(options.doctor === undefined ? {} : { doctor: options.doctor }),
+        permission,
+        ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
       })
       if (!preflight.ok) {
         // A preflight refusal is the most common way a run does not happen,
@@ -596,6 +650,7 @@ export function runStarter(options: StarterOptions): RunHost {
         daemon,
         repoPath,
         permission,
+        ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
         logger: log,
         ...(request.kind === 'resume' ? { resume: true } : {}),
         ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
@@ -709,7 +764,9 @@ export function monitorFactory(
     return new Monitor({
       // It answers questions; it does not touch the repository. The lane's read
       // grant and write guard are not its concern, and it is given neither.
-      adapter: new ClaudeCodeAdapter({ permission }),
+      // `judged` needs a hook only a run's lanes are given (§17.6); the monitor
+      // never writes, so it runs at `auto` rather than refusing to start.
+      adapter: new ClaudeCodeAdapter({ permission: permission === 'judged' ? 'auto' : permission }),
       model: monitorModel(workflow),
       cwd: repoPath,
       // The conversation is written here, so it survives the tab it was had in.

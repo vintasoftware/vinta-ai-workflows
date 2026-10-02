@@ -234,6 +234,8 @@ async function refusal(response: Response, gateId: string): Promise<string> {
       return 'this phase has no lane assigned, so there is nothing to run the gate against.'
     case 'gate_needs_lane':
       return `gate "${gateId}" requires the lane resource your own phase is holding, so it cannot be run from inside this turn — the gate node runs it after your turn ends.`
+    case 'judge_gate':
+      return `gate "${gateId}" is judged by a classifier, which the gate node asks once your turn ends — there is nothing to run from inside it.`
     case 'run_not_live':
       return 'the run is no longer live, so it can run nothing.'
     case 'gates_unavailable':

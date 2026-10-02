@@ -60,6 +60,8 @@ import { projectSpec } from '../cli/project.ts'
 import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
 import { startSupervisor, type Supervisor } from '../intervention/supervisor.ts'
 import type { Monitor } from '../monitor/monitor.ts'
+import type { SystemOne } from '../system-one/config.ts'
+import { createPermissionJudge } from '../system-one/permission.ts'
 
 export interface StartRunOptions {
   /** The frozen snapshot to execute. On a resume, read back from the journal. */
@@ -116,6 +118,12 @@ export interface StartRunOptions {
   readonly watchdog?: { readonly phaseThresholdMs?: number; readonly gateCostCeilingMs?: number }
   /** Autonomous amendments this run may make in total. */
   readonly interventionBudget?: number
+  /**
+   * The operator's classifier (§17), from `--system-one`. Absent: judge gates
+   * answer as unavailable, no built-in judge runs, and `judged` is refused by
+   * the preflight before this is reached.
+   */
+  readonly systemOne?: SystemOne
 }
 
 /**
@@ -144,6 +152,9 @@ export interface PreflightOptions {
    */
   readonly resumeRunId?: string
   readonly doctor?: DoctorOverrides
+  /** Checked by the doctor: a `judged` run needs a harness that can host it (§17.6). */
+  readonly permission?: AgentPermission
+  readonly systemOne?: SystemOne
 }
 
 export type PreflightResult =
@@ -179,6 +190,8 @@ export async function preflightRun(options: PreflightOptions): Promise<Preflight
     // though docker were irrelevant to it.
     project,
     ...(options.resumeRunId === undefined ? {} : { resumeRunId: options.resumeRunId }),
+    ...(options.permission === undefined ? {} : { permission: options.permission }),
+    ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
     ...options.doctor,
   })
   if (!report.ok) {
@@ -237,7 +250,8 @@ export type StartRunResult = StartedRun | StartRunRefusal
 export async function startRun(options: StartRunOptions): Promise<StartRunResult> {
   const { workflow, runId, journal, daemon, repoPath, permission } = options
   const resume = options.resume === true
-  const adapters = options.adapters ?? defaultAdapters(workflow, permission, repoPath)
+  const adapters =
+    options.adapters ?? defaultAdapters(workflow, permission, repoPath, options.systemOne)
   const laneRoot = laneRootFor(repoPath)
   // Freezes the snapshot and journals `run_started` plus one `node_registered`
   // per node — the log the projections are rebuilt from (§5.3). Skipped on a
@@ -264,6 +278,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
             // The lanes are still on disk from the attempt that died, and the
             // uncommitted work inside them is the thing being resumed.
             adopt: resume,
+            ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
             agentEnv: {
               [MAESTRO_URL_ENV]: daemon.url,
               [MAESTRO_TOKEN_ENV]: daemon.token,
@@ -354,6 +369,13 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
           },
         }
 
+  // §17.6: only under `judged`. A judge registered for any other mode would
+  // answer a hook nobody installed, which is harmless and also meaningless.
+  const permissionJudge =
+    permission === 'judged' && options.systemOne !== undefined
+      ? createPermissionJudge({ systemOne: options.systemOne, journal, runId })
+      : undefined
+
   const registered: DaemonRun = {
     runId,
     control: runControl(scheduler),
@@ -364,6 +386,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     // verb refuses rather than running a gate against a directory it guessed.
     ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
     ...(amend === undefined ? {} : { amend }),
+    ...(permissionJudge === undefined ? {} : { permissionJudge }),
   }
   daemon.register(registered)
 

@@ -70,6 +70,9 @@ export type GatePoolPhase = 'requested' | 'granted' | 'released'
  */
 export type AgentLeasePhase = 'acquired' | 'released'
 
+/** Which System One judge a `system_one_judged` row came from. */
+export type SystemOneJudge = 'gate' | 'gate_triage' | 'permission'
+
 /** The gate runner's verdict, as journalled. Mirrors `GateStatus` in `gates/runner.ts`. */
 export type GateStatus = 'passed' | 'failed' | 'timed_out'
 
@@ -632,6 +635,30 @@ interface NodePayloads {
     readonly phase: AgentLeasePhase
     readonly lease_id: string
     readonly resources: readonly string[]
+  }
+  /**
+   * One System One judgement (§17): which judge asked, about what, and what it
+   * decided.
+   *
+   * Every judge writes one, including the ones that decided nothing because
+   * nobody answered. A classifier that silently stopped answering otherwise
+   * looks exactly like one that kept approving — the same statuses, the same
+   * merges — and `outcome` is the only field that tells them apart.
+   *
+   * `subject` is an identifier: a gate id, or a tool name for the permission
+   * judge. Labels and scores are the classifier's own vocabulary and numbers.
+   * What was judged — the diff, the gate log, the command — never reaches this
+   * payload (§11); the gate log and the transcript already hold it.
+   */
+  system_one_judged: {
+    readonly judge: SystemOneJudge
+    readonly subject: string
+    readonly adapter: string | null
+    readonly outcome: 'answered' | 'unavailable' | 'invalid' | 'oversized' | 'unconfigured'
+    readonly decision: string
+    readonly top?: string
+    readonly score?: number
+    readonly latency_ms?: number
   }
 }
 

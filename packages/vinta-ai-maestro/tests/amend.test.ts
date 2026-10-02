@@ -31,7 +31,11 @@ import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import { createScheduler, type Scheduler } from '../src/scheduler/index.ts'
-import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { WorkflowSchema, isJudgeGate, type Gate, type Workflow } from '../src/types.ts'
+
+/** A gate's command, or undefined for a judge gate or a missing one. */
+const commandOf = (gate: Gate | undefined): string | undefined =>
+  gate === undefined || isJudgeGate(gate) ? undefined : gate.cmd
 
 const HARNESS = 'claude-code'
 const RUN_ID = 'run-1'
@@ -570,7 +574,7 @@ describe('amending a live run', () => {
     // table, which it resolves per gate run rather than at its spawn.
     expect(result.applied).toEqual(['b'])
     // The durable side moved, which is what a resume and every later gate read.
-    expect(rig.journal.readWorkflow(RUN_ID).gates['unit']?.cmd).toBe('pytest --reuse-db')
+    expect(commandOf(rig.journal.readWorkflow(RUN_ID).gates['unit'])).toBe('pytest --reuse-db')
 
     rig.stall.release()
     await rig.finished

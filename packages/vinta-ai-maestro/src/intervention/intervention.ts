@@ -76,7 +76,7 @@
  */
 import { z } from 'zod'
 
-import type { Workflow } from '../types.ts'
+import { isJudgeGate, type Workflow } from '../types.ts'
 import type { ValidationIssue } from '../validate.ts'
 
 export const INTERVENTION_SCHEMA_URL =
@@ -297,6 +297,9 @@ function retuneGate(workflow: Workflow, verb: z.infer<typeof RetuneGateSchema>):
   if (gate === undefined) {
     return refuse('unknown_gate', at, `no gate "${verb.gate}" is declared by this workflow`)
   }
+  if (isJudgeGate(gate)) {
+    return refuse('gate_not_tunable', at, `gate "${verb.gate}" is a judge gate and has no command to change`)
+  }
   if (gate.tuning === undefined) {
     return refuse(
       'gate_not_tunable',
@@ -353,6 +356,10 @@ function retimeGate(workflow: Workflow, verb: z.infer<typeof RetimeGateSchema>):
   const gate = workflow.gates[verb.gate]
   if (gate === undefined) {
     return refuse('unknown_gate', at, `no gate "${verb.gate}" is declared by this workflow`)
+  }
+  // A judge has no process to time out: its wait is the classifier's, set by the operator.
+  if (isJudgeGate(gate)) {
+    return refuse('no_effect', at, `gate "${verb.gate}" is a judge gate and has no timeout to change`)
   }
   if (gate.timeout_s === verb.timeout_s) {
     return refuse('no_effect', [...at, 'timeout_s'], `gate "${verb.gate}" already has this timeout`)

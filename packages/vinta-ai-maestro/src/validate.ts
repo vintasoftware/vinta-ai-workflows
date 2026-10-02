@@ -8,7 +8,7 @@
  */
 import { findCycle } from './graph.ts'
 import { BUILT_IN_PIPELINES } from './pipeline/standard.ts'
-import { type Workflow, WorkflowSchema } from './types.ts'
+import { isJudgeGate, type Judge, type Workflow, WorkflowSchema } from './types.ts'
 
 export interface ValidationIssue {
   /** JSON path to the offending value, e.g. `['nodes', 2, 'depends_on', 0, 'node']`. */
@@ -67,6 +67,7 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
         })
       }
     })
+    if (isJudgeGate(gate)) issues.push(...judgeIssues(gateId, gate.judge))
   }
 
   // A chore with neither instruction is an agent turn with nothing to do, and a
@@ -260,6 +261,43 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
     }
   }
 
+  return issues
+}
+
+/**
+ * A judge gate's own consistency. The same "exactly one of two" rule a chore's
+ * instruction follows, plus the one a classifier makes necessary: `fail_on`
+ * may only name labels the classifier is offered, because a label it is never
+ * asked about scores zero and the gate would pass for ever.
+ */
+function judgeIssues(gateId: string, judge: Judge): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const at = ['gates', gateId, 'judge']
+  const declared = [judge.question, judge.question_ref].filter((text) => text !== undefined).length
+  if (declared !== 1) {
+    issues.push({
+      path: at,
+      message: 'a judge gate needs exactly one of `question` and `question_ref`',
+    })
+  }
+  if (new Set(judge.labels).size !== judge.labels.length) {
+    issues.push({ path: [...at, 'labels'], message: 'labels must be distinct' })
+  }
+  const labels = new Set(judge.labels)
+  judge.fail_on.forEach((label, i) => {
+    if (!labels.has(label)) {
+      issues.push({
+        path: [...at, 'fail_on', i],
+        message: `"${label}" is not one of this judge's labels`,
+      })
+    }
+  })
+  if (judge.fail_on.length === judge.labels.length && labels.size === judge.labels.length) {
+    issues.push({
+      path: [...at, 'fail_on'],
+      message: 'fail_on names every label, so the gate could never pass',
+    })
+  }
   return issues
 }
 

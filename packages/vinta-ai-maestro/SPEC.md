@@ -56,7 +56,7 @@ The standing cost is two implementations of one spec. The mitigation is directio
 
 | Constraint | Consequence |
 |---|---|
-| No API keys — subscription/OAuth auth only | Adapters are process supervisors driving already-authenticated CLIs, never API clients. Preflight verifies login; if absent, the user logs in themselves. The daemon never prompts for, stores, or forwards a credential. |
+| No API keys for LLM harnesses — subscription/OAuth auth only | Harness adapters are process supervisors driving already-authenticated CLIs, never API clients. Preflight verifies login; if absent, the user logs in themselves. The daemon never prompts for, stores, or forwards a harness credential. The one exception is a System One classifier (§17.3): its key is read from an environment variable the operator names, sent only to the endpoint the operator configured, and never stored. |
 | The root CLI's zero-runtime-deps property is load-bearing | `vinta-ai-maestro` is a separate package. Nothing it needs may enter the root `dependencies`, and the root `files` whitelist must continue to exclude `packages/`. |
 | Vinta operates as a HIPAA Business Associate on some engagements | Agent transcripts and gate logs capture repository contents verbatim. They are a new data-at-rest surface: stored **inside the project directory**, gitignored, never in a global cache, with an explicit retention/purge command. No PHI in structured log fields. |
 | Runs last hours and outlive laptop sleep, crashes, and daemon restarts | Event-sourced journal; all in-memory state is a projection and is rebuilt on boot. Git is the durable record of work; SQLite is a cache of what the branches already prove. |
@@ -839,3 +839,127 @@ A review is the step between a plan and its merge, so it is not tied to the tier
 - **The skills path.** `review-layers.md` and the plan-execution partials still describe the three-layer review. §1 says a semantic change is decided here and then written into the partial; that rewrite is a follow-up, not part of this change.
 - **The pause report.** The skill's fifth-iteration pause carries the fixer's own view of whether more work is worth it. `exhausted` points the operator at the transcript — the remaining blockers and the fixer's last report — rather than spending a turn to compose one.
 - **Untracked reviewer writes** (§16.1).
+
+---
+
+## 17. System One
+
+A **System One** model is a fast classifier: given a text and a closed set of labels, it says how likely each label is. A yes/no question is the two-label case. It writes nothing, edits nothing, runs no tools and keeps no session. That is why it is not a harness adapter (§7). There is no turn to admit, no transcript to drain and no lane to sandbox. One request costs one round trip.
+
+The daemon asks one wherever it would otherwise hard-code a decision or spend a frontier-model turn on it. Every place it asks is a **judge**: a question, a label set, a threshold, and a rule for what an *unanswered* question means.
+
+### 17.1 The adapter seam
+
+```ts
+interface SystemOneAdapter {
+  readonly id: string
+  preflight(): Promise<{ ready: boolean; hint?: string }>   // offline: no question is sent
+  classify(q: { question: string; labels: readonly string[]; input: string }): Promise<SystemOneOutcome>
+}
+type SystemOneOutcome =
+  | { ok: true; scores: Record<string, number>; latencyMs: number }   // a distribution over exactly `labels`
+  | { ok: false; kind: 'unavailable' | 'invalid'; message: string }   // never throws
+```
+
+`normalizeScores` runs once, in shared code, for every adapter. It accepts `{ scores }` for any label set and `{ yes }` for a yes/no question. It refuses a label nobody asked about. A label the vendor left out scores zero, and the result is rescaled to sum to one. Every judge compares a *sum* of scores against a threshold, and that comparison only means the same thing across vendors if their numbers do.
+
+Adapters are a **registry**, not a switch. Each one owns the schema of its own config block (`registerSystemOneAdapter`). Two ship with the package:
+
+- `http` — one POST per question. The body is `{ kind, question, labels, input }`, and the answer is `{ scores }` or `{ yes }`. A vendor that speaks something else gets a shim in front of it rather than an adapter in here.
+- `command` — one local process per question, with the same JSON on stdin and stdout and no shell. This is for a classifier that must not see repository content leave the machine.
+
+A `mock` adapter exists for tests.
+
+### 17.2 What a judge may never do
+
+- **Make a phase greener.** A judge gate can only turn a gate red. Gate triage can only add a rerun. The permission judge can only deny what `full` would have allowed. None of them can pass something that would otherwise have failed.
+- **Put what it judged into the journal.** `system_one_judged` carries the judge, a subject id, the adapter id, the outcome, the decision, the top label, the score and the latency. It never carries the diff, the log or the command. The gate log is the one place a judge writes prose (the question and the answer), because that is where the fixer reads why a gate went red, and it is already a file of repository content (§5.3).
+- **Fail silently.** Every judgement writes a row, including the ones nobody answered. A classifier that stopped answering otherwise looks exactly like one that kept approving.
+
+### 17.3 Configuration: the operator's, not the plan's
+
+`--system-one <config.json>` on `run`, `serve` and `doctor`:
+
+```jsonc
+{
+  "adapter": { "type": "http", "url": "https://classifier.internal/v1", "api_key_env": "S1_API_KEY", "timeout_ms": 10000 },
+  "judges": {
+    "gate_triage": { "rerun_above": 0.8, "max_reruns": 1, "max_input_bytes": 32768 },
+    "permission":  { "tools": ["Bash"], "allow_above": 0.9 }
+  }
+}
+```
+
+This amends §2's no-API-keys constraint. That constraint still holds for every **LLM harness**, which keeps driving the user's logged-in CLI. A System One adapter may use a key, under four conditions:
+
+- The key is read from the environment variable the operator named.
+- It is never stored or written.
+- It is registered for redaction in the daemon log.
+- It is removed from the daemon's own environment once the adapter has read it, so no agent, gate or hook process inherits it.
+- It is never read from a workflow document.
+
+The file lives on the operator's machine for the reason `permissions.ts` gives. A committed document may say which model writes a phase. It may not say where a stranger's machine sends its diffs, or what an agent may do on it. A block that is present enables its judge; an absent one disables it.
+
+**Data handling (§11).** A configured classifier receives repository content: diffs, the end of gate logs, and shell commands. On an engagement where that must not leave the machine, the `command` adapter pointed at a local model is the supported answer. Whether a hosted classifier is acceptable is a compliance decision for the project lead, not something this package can settle.
+
+### 17.4 Judge gates
+
+A gate in the workflow's `gates` map is now one of two shapes: a command gate (`cmd`, as before) or a judge gate (`judge`). A judge gate asks the plan's own question of the lane's diff:
+
+```jsonc
+"no-body-logs": {
+  "judge": {
+    "question_ref": "ai-plans/PLAN.md#no-request-bodies-in-logs",   // or "question": "…"
+    "labels": ["yes", "no"],          // default
+    "fail_on": ["yes"],
+    "threshold": 0.6,                 // fails when fail_on's labels together score ≥ this
+    "input": "diff",                  // the lane against the phase's base, uncommitted work included
+    "max_input_bytes": 204800,        // larger is unavailable, never a truncated judgement
+    "on_unavailable": "pass"          // default: advisory. "fail" for a check the phase must not merge without.
+  }
+}
+```
+
+The judge gate reports exit code 0 or 1, so `standard-phase`'s `gate.exit_code` guards, the fix loop and the fixer's prompt all work unchanged. Its log holds the question, the scores and the verdict. A node's gates run in declaration order and stop at the first red one, so a judge gate cannot cover for a failing command gate. Put judge gates after command gates, and the classifier is only asked about a tree that already builds.
+
+The cache (§13.4) keys a judge gate on the tree hash plus a hash of the judge spec, the resolved question and the adapter id. Only an *answered* judgement is stored. An outage is a fact about the network, not about the tree.
+
+A judge gate is left out of everything agents are told to run. The `gate` verb refuses one (`judge_gate`), and so does the integration worktree's conflict verification: a merge resolution is not the phase diff the question was written for. `retune_gate` and `retime_gate` refuse one too, since there is no command to change and no process to time out.
+
+Without `--system-one`, a judge gate answers as `unconfigured` under its own `on_unavailable`. `doctor` warns about advisory judge gates and fails on required ones.
+
+### 17.5 Gate triage
+
+When a **command** gate goes red on a fresh run (not a cache hit, not a timeout), the triage judge reads the end of its log. It sorts the failure into `real`, `flaky`, `environment` or `pre_existing`.
+
+- If `flaky` plus `environment` together reach `rerun_above`, the gate runs again (skipping the cache, then storing the new result), up to `max_reruns` times, before a fixer is spent on it.
+- Anything else, including no answer, takes the ordinary path. A missing hint must cost nothing.
+
+The top label is exposed as `gate.triage` for authored pipelines. `standard-phase` does not branch on it yet. Routing `pre_existing` to a human instead of a fixer is the obvious next guard.
+
+### 17.6 `--permission judged`
+
+`judged` is `full` with a check. claude-code runs with `bypassPermissions`, so no vendor prompt fires. The per-lane settings file (§7) installs a `PreToolUse` hook on the judged tools (default `Bash`). The hook is this package's own binary, by absolute path, under the daemon's node: `vinta-ai-maestro judge-hook`. It reads the call on stdin and posts it to `POST /api/runs/:runId/permission` with the run's token. The daemon asks the classifier whether the call is `safe` or `unsafe`, and the call runs only at or above `allow_above` on `safe`.
+
+It **fails closed** at every link:
+
+| Failure | Result |
+|---|---|
+| No hook configured, or the settings file cannot be written | the spawn is refused (`fatal`) |
+| The hook process dies before it can decide | the `\|\| exit 2` wrapper turns the exit into claude-code's blocking code |
+| The daemon is unreachable, refuses, or answers with no boolean | deny |
+| The classifier is unavailable or answers invalidly | deny |
+
+The settings file also asserts `disableAllHooks: false` at the highest precedence. The agent can write a `settings.local.json` in its own lane, and that must not switch the judge off for the next session.
+
+Decisions are remembered per run, keyed on lane, tool and input, bounded at 512. Only answered decisions are remembered. An agent runs the same test command dozens of times a phase.
+
+What `judged` is **not** is a sandbox. A classifier reads one command line and cannot see what a script it names will do. The editing tools are not judged; they keep the sibling-lane deny rules `auto` has. So `judged` narrows `full` without approaching `auto`: it trades a vendor prompt nobody would answer for one round trip per command. Only claude-code can host it, because neither codex nor opencode offers a per-call hook. `doctor` refuses `judged` for a plan that dispatches elsewhere, and for a config with no `permission` judge. The monitor, which never writes, runs at `auto` under `judged`.
+
+### 17.7 Not done here
+
+- **Review-tier routing.** Classify a phase's diff (mechanical / architectural / schema) and pick the reviewer's model from that, instead of from the tier the plan staffed. This needs a model choice per review turn in the scheduler.
+- **Fix-loop repetition.** Ask whether round N's findings repeat round N−1's, and escalate to the fresh last round (§15.5) early.
+- **Refusal classification.** Classify spawn refusals the regex patterns miss (§7's "unrecognized is fatal"), with `fatal` below the threshold.
+- **opencode's permission API.** It could host `judged` through its session permission events instead of a hook.
+- **Plan time.** `plan-feature` does not emit judge gates. That is deliberate for now; judge gates are hand-authored.

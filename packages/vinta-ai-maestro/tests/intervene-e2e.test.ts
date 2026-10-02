@@ -19,7 +19,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { intervene } from '../src/intervention/index.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { Monitor } from '../src/monitor/monitor.ts'
-import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { WorkflowSchema, isJudgeGate, type Gate, type Workflow } from '../src/types.ts'
+
+/** A gate's command, or undefined for a judge gate or a missing one. */
+const commandOf = (gate: Gate | undefined): string | undefined =>
+  gate === undefined || isJudgeGate(gate) ? undefined : gate.cmd
 
 const RUN_ID = 'run-1'
 
@@ -123,10 +127,10 @@ describe('a run tuning itself', () => {
 
     expect(outcome.kind).toBe('amended')
     if (outcome.kind !== 'amended') throw new Error(outcome.kind)
-    expect(outcome.workflow.gates['unit']?.cmd).toBe('pytest --reuse-db')
+    expect(commandOf(outcome.workflow.gates['unit'])).toBe('pytest --reuse-db')
     // The durable side moved: this is what the next gate run reads, and what a
     // resume reads.
-    expect(journal.readWorkflow(RUN_ID).gates['unit']?.cmd).toBe('pytest --reuse-db')
+    expect(commandOf(journal.readWorkflow(RUN_ID).gates['unit'])).toBe('pytest --reuse-db')
 
     // Journalled as the run's own act, with what it touched — which is what
     // the cooldown is folded from.
@@ -162,7 +166,7 @@ describe('a run tuning itself', () => {
     })
 
     expect(outcome.kind).toBe('refused')
-    expect(journal.readWorkflow(RUN_ID).gates['unit']?.cmd).toBe('pytest')
+    expect(commandOf(journal.readWorkflow(RUN_ID).gates['unit'])).toBe('pytest')
     expect(journal.events(RUN_ID).filter((e) => e.type === 'workflow_amended')).toEqual([])
   })
 
@@ -201,7 +205,7 @@ describe('a run tuning itself', () => {
     })
 
     expect(outcome.kind).toBe('unreadable')
-    expect(journal.readWorkflow(RUN_ID).gates['unit']?.cmd).toBe('pytest')
+    expect(commandOf(journal.readWorkflow(RUN_ID).gates['unit'])).toBe('pytest')
   })
 
   it('reads a proposal the model wrapped in a code fence', async () => {

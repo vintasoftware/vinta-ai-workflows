@@ -22,7 +22,7 @@
  * has a permission *mode* and the other a *sandbox* plus an approval policy.
  */
 
-export const AGENT_PERMISSIONS = ['ask', 'auto', 'full'] as const
+export const AGENT_PERMISSIONS = ['ask', 'auto', 'full', 'judged'] as const
 
 export type AgentPermission = (typeof AGENT_PERMISSIONS)[number]
 
@@ -53,7 +53,26 @@ export type AgentPermission = (typeof AGENT_PERMISSIONS)[number]
  * committed document.
  */
 
+/**
+ * `judged` — `full`, with a System One classifier asked about every call to a
+ * judged tool before it runs (§17.6).
+ *
+ * The trade is speed for a check: the vendor's own prompt is gone, so nothing
+ * stops for a human, and each judged call costs one classifier round trip
+ * instead. What it is *not* is a sandbox. A classifier reads one command line
+ * and cannot see what a script it names will do, so `judged` narrows `full`
+ * rather than approaching `auto`. It needs `--system-one` with a `permission`
+ * judge, and only claude-code can host it — the check is a `PreToolUse` hook,
+ * which neither codex nor opencode offers — so `doctor` refuses it for a plan
+ * that dispatches anywhere else. **Fails closed**: a hook that cannot reach the
+ * daemon, a classifier that cannot answer, and a settings file that cannot be
+ * written all end in a refusal, never in an unchecked call.
+ */
+
 export const DEFAULT_PERMISSION: AgentPermission = 'auto'
+
+/** The harnesses that can host `judged`. */
+export const JUDGED_HARNESSES: readonly string[] = ['claude-code']
 
 export function isAgentPermission(value: unknown): value is AgentPermission {
   return (AGENT_PERMISSIONS as readonly unknown[]).includes(value)
@@ -87,6 +106,9 @@ export function claudeCodeArgs(permission: AgentPermission): readonly string[] {
     case 'auto':
       return ['--permission-mode', 'acceptEdits']
     case 'full':
+    case 'judged':
+      // `judged` runs unprompted too: the check is the hook the settings file
+      // installs (`claude-code.ts`), not the vendor's prompt.
       return ['--allow-dangerously-skip-permissions', '--permission-mode', 'bypassPermissions']
   }
 }
@@ -112,6 +134,11 @@ export function codexArgs(permission: AgentPermission): readonly string[] {
       return ['--approve-for-me']
     case 'full':
       return ['--dangerously-bypass-approvals-and-sandbox']
+    case 'judged':
+      // codex has no per-call hook to judge with, and `doctor` refuses the
+      // pairing. Reaching here anyway gets the narrowest policy codex has
+      // rather than the widest — the wrong way round would be silent.
+      return ['--sandbox', 'workspace-write']
   }
 }
 
