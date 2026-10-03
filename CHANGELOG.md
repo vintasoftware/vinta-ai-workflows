@@ -393,6 +393,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`open-pr.sh` posts inline comments on macOS and reports why a comment
+  failed.** Four bugs in the `open-pr-from-context` script, all seen while
+  publishing a stacked plan from a Mac:
+  - Trimming trailing blank lines from `# Title`, `# Description` and
+    `# Comments` used a GNU-only `sed` idiom. BSD `sed` fails on it with
+    "unused label" and trims nothing. A portable `awk` helper does it now.
+  - A comment with lowercase `side: right` got "422 Validation Failed" from
+    GitHub, so failures looked random across files. The script now converts
+    `side` to upper case and falls back to `RIGHT` for any other value. The
+    `prs-context-comments` schema still only allows `LEFT` / `RIGHT`.
+  - The `gh api` call threw away its stderr, so a run of failed comments
+    gave no reason. The CLI's error now prints on one line above each
+    `FAILED` line, and the comment still counts toward exit `1`. The
+    `glab api` call for GitLab had the same problem and gets the same fix.
+  - Adding entries to an existing `## Publish log` section passed several
+    lines through `awk -v`, which BSD `awk` rejects ("newline in string").
+    The entries go through the environment now.
+
+  Projects that patched their own copy can re-sync with `vinta-sync-ai-tools`.
+
 - **`check-ai-models` no longer mistakes sibling models for snapshots of a
   cited id.** The id matcher used substring matching, so `claude-sonnet-5`
   matched `claude-sonnet-5-5` (hiding the newer Sonnet and Opus releases).

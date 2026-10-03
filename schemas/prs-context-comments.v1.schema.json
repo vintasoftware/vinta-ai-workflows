@@ -25,7 +25,7 @@
         "minimum": 1
       },
       "side": {
-        "description": "Which side of the diff the comment attaches to. `RIGHT` = post-change (default). `LEFT` = pre-change (rare; for comments on removed code).",
+        "description": "Which side of the diff the comment attaches to. `RIGHT` = post-change (default). `LEFT` = pre-change (rare; for comments on removed code). Write it in upper case. `open-pr.sh` also accepts lower case and sends `RIGHT` for any other value, but that is only tolerance in the script: this schema still rejects anything other than `LEFT` / `RIGHT`.",
         "type": "string",
         "enum": ["LEFT", "RIGHT"],
         "default": "RIGHT"
