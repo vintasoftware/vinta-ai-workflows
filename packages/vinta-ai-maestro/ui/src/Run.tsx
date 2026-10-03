@@ -42,6 +42,7 @@ import { cacheShare } from '../../src/usage/usage.ts'
 import { Chip } from './Chip.tsx'
 import type { Client } from './client.ts'
 import { DagView } from './Dag.tsx'
+import { Explain } from './Explain.tsx'
 import { Live } from './Live.tsx'
 import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import { nodeLabel, nodeTone, runTone } from './status.ts'
@@ -469,7 +470,12 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
             : `${percent(reuse.reused / reuse.turns)} of ${reuse.turns} turns continued a session.`}
         </DescriptionDetails>
 
-        <DescriptionTerm>Cache</DescriptionTerm>
+        <DescriptionTerm className="flex items-center gap-1">
+          Cache
+          <Explain label="How the cache share is calculated">
+            <CacheExplanation cache={usage.cache} />
+          </Explain>
+        </DescriptionTerm>
         <DescriptionDetails data-cache>
           {share === undefined
             ? 'Not reported by this run’s harnesses.'
@@ -478,13 +484,23 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
               }.`}
         </DescriptionDetails>
 
-        <DescriptionTerm>Tokens</DescriptionTerm>
+        <DescriptionTerm className="flex items-center gap-1">
+          Tokens
+          <Explain label="How tokens are counted">
+            <TokensExplanation usage={usage} />
+          </Explain>
+        </DescriptionTerm>
         <DescriptionDetails className="font-mono text-xs" data-tokens>
           {compact(usage.inputTokens)} in · {compact(usage.outputTokens)} out ·{' '}
           {usage.sessions} {usage.sessions === 1 ? 'session' : 'sessions'}
         </DescriptionDetails>
 
-        <DescriptionTerm>Cost</DescriptionTerm>
+        <DescriptionTerm className="flex items-center gap-1">
+          Cost
+          <Explain label="Where the cost comes from">
+            <CostExplanation cost={usage.cost} sessions={usage.sessions} />
+          </Explain>
+        </DescriptionTerm>
         <DescriptionDetails className="font-mono text-xs" data-cost>
           {cost(usage.cost)}
         </DescriptionDetails>
@@ -580,6 +596,96 @@ function cost(total: RunUsageResponse['cost']): string {
   }
   return 'Not reported by this run’s harnesses.'
 }
+
+/*
+ * The explanations behind the rollup's info icons. Each states where its figure
+ * comes from and then the exact counts it was built from — the row shows a
+ * rounded figure, and an operator who doubts it has to be able to redo the sum.
+ * They say nothing the daemon did not report, under the same rule as the rows.
+ */
+
+function TokensExplanation({ usage }: { readonly usage: RunUsageResponse }) {
+  const { cache } = usage
+  return (
+    <>
+      <p>
+        Counted, not estimated. Each agent session — every implementer, reviewer and fixer turn —
+        reports one token total when it ends, and this is the sum of those reports.
+      </p>
+      <p>
+        <strong>In</strong> is the prompt the model processed fresh. Prompt tokens read from or
+        written to the prompt cache are counted under Cache instead, so the full prompt was larger
+        {cache.status === 'complete' && cache.promptTokens > 0
+          ? `: ${exact(cache.promptTokens)} tokens in all.`
+          : '.'}
+      </p>
+      <p>
+        <strong>Out</strong> is what the model generated, reasoning and tool calls included.
+      </p>
+      <p className="font-mono" data-explain-tokens>
+        {exact(usage.inputTokens)} in · {exact(usage.outputTokens)} out, over {usage.sessions}{' '}
+        {usage.sessions === 1 ? 'session' : 'sessions'}
+      </p>
+      <p className="text-muted-foreground">
+        A session still running is not in the total until it ends. Refreshed every{' '}
+        {USAGE_REFRESH_MS / 1_000} seconds.
+      </p>
+    </>
+  )
+}
+
+function CostExplanation({
+  cost: total,
+  sessions,
+}: {
+  readonly cost: RunUsageResponse['cost']
+  readonly sessions: number
+}) {
+  return (
+    <>
+      <p>
+        Maestro prices nothing itself. Each session’s harness reports its own dollar figure when it
+        ends, and this is their sum.
+      </p>
+      <p>
+        Claude Code and OpenCode report one, estimated from the session’s tokens at the model’s
+        API list price. On a subscription plan that is what the work would cost at API rates, not
+        what you are billed. Codex reports tokens only, so its sessions carry no cost — shown as
+        not reported, never as $0.
+      </p>
+      <p className="font-mono" data-explain-cost>
+        {sessions === 0
+          ? 'No session has finished yet.'
+          : total.status === 'complete'
+            ? `All ${total.reportedSessions} sessions reported a cost, $${total.usd.toFixed(4)} in total.`
+            : total.status === 'partial'
+              ? `${total.reportedSessions} of ${total.reportedSessions + total.missingSessions} sessions reported a cost, $${total.usdSoFar.toFixed(4)} between them. The other ${total.missingSessions} cost an unknown amount more, so this is a lower bound.`
+              : `None of the ${total.missingSessions} sessions reported a cost.`}
+      </p>
+    </>
+  )
+}
+
+function CacheExplanation({ cache }: { readonly cache: RunUsageResponse['cache'] }) {
+  return (
+    <>
+      <p>
+        The share of prompt tokens served from the prompt cache rather than processed fresh: cache
+        reads ÷ (fresh input + cache reads + cache writes). Cache reads are billed at a fraction of
+        fresh input, so a higher share is a cheaper run.
+      </p>
+      <p className="font-mono" data-explain-cache>
+        {cache.status === 'complete'
+          ? `${exact(cache.readTokens)} read ÷ ${exact(cache.promptTokens)} prompt tokens (${exact(cache.writeTokens)} written to cache).`
+          : cache.status === 'partial'
+            ? `${exact(cache.readTokensSoFar)} read ÷ ${exact(cache.promptTokensSoFar)} prompt tokens (${exact(cache.writeTokensSoFar)} written), over the ${cache.reportedSessions} of ${cache.reportedSessions + cache.missingSessions} sessions that reported cache figures. The rest are left out of both sides rather than counted as misses.`
+            : 'No session reported cache figures, so there is no share to state.'}
+      </p>
+    </>
+  )
+}
+
+const exact = (tokens: number): string => tokens.toLocaleString('en-US')
 
 const percent = (value: number): string => `${Math.round(value * 100)}%`
 
