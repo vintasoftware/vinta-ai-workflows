@@ -47,7 +47,7 @@ Pass through whatever the user explicitly asked for; otherwise no flags.
 Read the script's stdout + exit code:
 
 - **Exit 0** — PR opened (or pre-existing detected); all comments posted. File rewritten to `status: published` + `pr_url`. Surface the URL to the user; you're done.
-- **Exit 1** — PR opened, but one or more inline comments failed. The script's stderr lists which `(file:line)` failed. Forward the failures verbatim. Most common cause: a force-push between branch push and now invalidated the line position — re-run after pushing.
+- **Exit 1** — PR opened, but one or more inline comments failed. The script's stderr lists which `(file:line)` failed, each one after a `gh error:` / `glab error:` line that holds the API's message (for example `422 Validation Failed`). Forward both verbatim. Most common cause: a force-push between branch push and now invalidated the line position — re-run after pushing.
 - **Exit 2** — Hard failure (file invalid, branch not pushed, CLI missing/unauthed, missing dependency). Forward the script's error message; do **not** improvise (don't push the branch, don't install CLIs, don't auth on the user's behalf).
 
 ## Inputs the script expects

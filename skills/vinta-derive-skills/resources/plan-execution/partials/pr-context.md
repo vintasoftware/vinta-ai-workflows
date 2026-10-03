@@ -54,7 +54,7 @@ Two project-level signals decide the actual behavior:
    The script opens the PR (or detects an existing one), posts each inline comment, rewrites the file's frontmatter to `status: published` + populated `pr_url`, appends a publish log. Exit codes:
 
    - `0` — PR up, all comments (if any) posted. Capture `pr_url` for the user update.
-   - `1` — PR up, ≥1 comment failed. Surface the failed `(file:line)` list to the user; continue to the tracking step.
+   - `1` — PR up, ≥1 comment failed. Surface the failed `(file:line)` list to the user, with the `gh error:` / `glab error:` line the script printed above each one; continue to the tracking step.
    - `2` — Hard failure (deps missing, branch not pushed, CLI unauthed, file invalid). Surface the script's stderr; treat the phase as having no PR. The file stays `status: pending` so the user can re-run after fixing the gap.
 
    When policy = "branches only": **don't run the script.** File stays `status: pending`.
