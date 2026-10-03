@@ -209,7 +209,7 @@
           "enum": ["enabled", "disabled"]
         },
         "prepare-worktree": {
-          "description": "Provision a fully-runnable git worktree for parallel feature work — symlinks dep dirs, copies env files, forks dev / test DBs, namespaces docker-compose project + network, drops a summary YAML for mechanical teardown. Copy-verbatim foundation skill (bucket A). When `enabled`, project-level defaults (worktree root, deps strategy, compose network strategy) live under `skills.prepare-worktree`. Consumed by `implement-plan` when its Step 0 question (c) opts in — the orchestrator runs `prepare-worktree` once at the start of a plan run and threads the worktree path through every subagent's prompt so phases all stack inside the same isolated checkout.",
+          "description": "Provision a fully-runnable git worktree for parallel feature work — gives each worktree its own copy of the dep dirs, copies env files, forks dev / test DBs, namespaces docker-compose project + network, drops a summary YAML for mechanical teardown. Copy-verbatim foundation skill (bucket A). When `enabled`, project-level defaults (worktree root, deps strategy, compose network strategy) live under `skills.prepare-worktree`. Consumed by `implement-plan` when its Step 0 question (c) opts in — the orchestrator runs `prepare-worktree` once at the start of a plan run and threads the worktree path through every subagent's prompt so phases all stack inside the same isolated checkout.",
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
@@ -421,7 +421,7 @@
           }
         },
         "prepare-worktree": {
-          "description": "Configuration for the `prepare-worktree` foundation skill. Optional when `foundation_skills.prepare-worktree` is `enabled` — every field has a sensible default. Consumed by the skill at runtime to bias the per-worktree symlink-vs-copy-vs-fork decisions.",
+          "description": "Configuration for the `prepare-worktree` foundation skill. Optional when `foundation_skills.prepare-worktree` is `enabled` — every field has a sensible default. Consumed by the skill at runtime to bias the per-worktree copy-vs-reinstall-vs-fork decisions.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -431,10 +431,10 @@
               "minLength": 1
             },
             "deps_strategy": {
-              "description": "Default strategy for dep dirs (`node_modules/`, `vendor/`, `venv/`) when the active plan does NOT install new deps. `symlink` reuses main's install (fast, safe for read-only); `copy` clones it (safe for pnpm-style relative-symlink stores, fails for yarn PnP); `reinstall` runs the package manager fresh in the worktree. The skill flips to `reinstall` automatically when it detects dep churn in the plan body.",
+              "description": "Default strategy for dep dirs (`node_modules/`, `vendor/`, `venv/`). Every worktree owns its dep dirs; they are never symlinked back to the main checkout. `copy` makes a copy-on-write clone of main's install, close to free on disk on APFS / btrfs / XFS; it is safe for pnpm-style relative-link stores and falls back to a plain copy elsewhere. `reinstall` runs the package manager fresh in the worktree. The skill always reinstalls virtualenvs and yarn PnP, because their trees store absolute paths into the main checkout, and it adds an install on top of the copy when the plan adds deps. `symlink` is deprecated and read as `copy`; it stays in the enum only so existing configs keep validating.",
               "type": "string",
-              "enum": ["symlink", "copy", "reinstall"],
-              "default": "symlink"
+              "enum": ["copy", "reinstall", "symlink"],
+              "default": "copy"
             },
             "compose_network": {
               "description": "Default docker-compose networking strategy for the worktree. `per-worktree` spins a fresh isolated network (safest, doubles infra); `shared-external` joins an externally-declared network so the worktree can talk to main's compose services (queues, caches, search); `host` uses host networking when the project already does. Skill writes the chosen strategy into the worktree's `docker-compose.override.yml` (or equivalent) when `compose_change` is set.",

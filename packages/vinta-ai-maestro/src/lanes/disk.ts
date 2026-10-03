@@ -28,8 +28,9 @@ export class DiskProbeError extends Error {
 }
 
 /**
- * Apparent size of a directory tree. Symlinks are not followed, which is the
- * point: a lane that symlinks its dependency tree costs nothing for it.
+ * Apparent size of a directory tree. Symlinks are not followed: a linked tree
+ * is not copied into a lane, and following links would count pnpm's store
+ * once per link into it.
  */
 export async function measureBytes(root: string): Promise<number> {
   const entry = await lstat(root)
