@@ -1344,12 +1344,12 @@ const laneRoot = (dir: string): string => join(dir, '.vinta-ai-maestro', 'lanes'
  *
  * The dependency tree is symlinked rather than installed, which is what lets
  * the fixture's scripts resolve `better-sqlite3`, and what `LanePool` then
- * links on into every lane.
+ * mirrors into every lane as the same link rather than copying through it.
  */
 const sqliteRepo = (): string => {
   const dir = makeTemp()
   cpSync(join(HERE, 'fixtures', 'repo'), dir, { recursive: true })
-  // A *junction* on Windows, exactly as `LanePool.#linkDeps` does it: a plain
+  // A *junction* on Windows, exactly as `LanePool.#copyDeps` mirrors it: a plain
   // directory symlink there needs SeCreateSymbolicLinkPrivilege, so an
   // unelevated run would fail to build the fixture rather than to test it.
   symlinkSync(
