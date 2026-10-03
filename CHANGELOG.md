@@ -207,6 +207,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro` node view: steering is a chat input, and every control
+  says what it does.** The separate Steering card is gone. Its message box now
+  sits at the bottom of the Transcript panel and follows it to full page. Add
+  context and Redirect are a toggle over one Send button, which also sends on
+  Ctrl/⌘+Enter. The sentence under the box says what will happen for this
+  node's status and harness before you press it. Pause, Take over, Abort and
+  Retry phase moved to the page header beside the node's status, and only the
+  ones that apply are shown. Abort now asks for confirmation. A new **How
+  steering works** panel documents each control: when it is available, what
+  happens in practice, how to undo it, and what the node's harness supports.
 - **`plan-feature` AI model tiers pick up the late-September releases.**
   `plan-feature/resources/ai-models.yaml` now cites `claude-sonnet-5-5`
   (tier 2, was `claude-sonnet-5`) and `gpt-6.1-sol` (tier 3, was
