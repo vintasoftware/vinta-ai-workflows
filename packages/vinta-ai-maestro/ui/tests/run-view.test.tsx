@@ -1,4 +1,4 @@
-import { cleanup, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { afterEach, expect, test } from 'vitest'
 import {
   harness,
@@ -297,6 +297,55 @@ test('a partial cost says so, and names how many sessions are missing', async ()
   // A floor, and labelled as one — the run cost at least this much.
   expect(textOf(container, '[data-cost]')).toContain('$0.80 so far')
   expect(textOf(container, '[data-cost]')).toContain('3 of 8')
+})
+
+test('each rollup figure explains itself, down to the counts it was summed from', async () => {
+  const stub = await startStubDaemon({ ...oneNode(), usage: { [RUN_ID]: runUsage() } })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-cost]')).not.toBe(null))
+
+  // A click pins it open; the popover renders through a portal.
+  fireEvent.click(container.querySelector('[data-explain="How tokens are counted"]')!)
+  await waitFor(() => expect(document.body.querySelector('[data-explain-tokens]')).not.toBe(null))
+  // Exact, where the row rounds to 12.4k — the sum has to be checkable.
+  expect(textOf(document.body, '[data-explain-tokens]')).toContain('12,400 in')
+  expect(textOf(document.body, '[data-explain-tokens]')).toContain('over 8 sessions')
+  expect(document.body.textContent).toContain('100,000 tokens in all')
+
+  // A second click on the same icon unpins and closes it.
+  fireEvent.click(container.querySelector('[data-explain="How tokens are counted"]')!)
+  await waitFor(() => expect(document.body.querySelector('[data-explain-tokens]')).toBe(null))
+
+  fireEvent.click(container.querySelector('[data-explain="Where the cost comes from"]')!)
+  await waitFor(() => expect(document.body.querySelector('[data-explain-cost]')).not.toBe(null))
+  expect(textOf(document.body, '[data-explain-cost]')).toContain('All 8 sessions reported a cost')
+  expect(document.body.textContent).toContain('API list price')
+
+  fireEvent.click(container.querySelector('[data-explain="How the cache share is calculated"]')!)
+  await waitFor(() => expect(document.body.querySelector('[data-explain-cache]')).not.toBe(null))
+  expect(textOf(document.body, '[data-explain-cache]')).toContain('61,000 read ÷ 100,000')
+})
+
+test('a partial cost explains which sessions are missing from it', async () => {
+  const stub = await startStubDaemon({
+    ...oneNode(),
+    usage: {
+      [RUN_ID]: runUsage({
+        cost: { status: 'partial', usdSoFar: 0.8, reportedSessions: 5, missingSessions: 3 },
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-cost]')).not.toBe(null))
+  fireEvent.click(container.querySelector('[data-explain="Where the cost comes from"]')!)
+  await waitFor(() => expect(document.body.querySelector('[data-explain-cost]')).not.toBe(null))
+
+  expect(textOf(document.body, '[data-explain-cost]')).toContain('5 of 8 sessions reported a cost')
+  expect(textOf(document.body, '[data-explain-cost]')).toContain('lower bound')
 })
 
 test('a run that asked for no reuse says so, rather than reporting 0%', async () => {

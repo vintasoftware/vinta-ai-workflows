@@ -107,6 +107,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `NodeDetail.question` gains `ask`. The implementer prompt now teaches the
     `NEEDS_INPUT` block. `MockAdapter` takes `scripts`, one per session.
 
+
+- **The run view's token, cost and cache figures explain themselves.** Each
+  row in *Sessions and cost* now has an info icon. Hover over it for a quick
+  look, or click to keep it open. It says where the figure comes from and
+  shows the exact counts it was summed from. Token totals are summed from what
+  each harness reports when a session ends. Fresh input is shown apart from
+  cached input. Cost is the harness's own estimate at API list prices, not
+  your bill on a subscription plan. Codex sessions report no cost. Sessions
+  still running are not counted yet. `vinta-design-system` gains a `popover`
+  component.
 - **PR Review Canvas integration (`integrations.pr-review-canvas`).** The
   bootstrap now offers [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
   as its first *integration*: an external tool that installs its own skill.
@@ -284,6 +294,55 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Maestro: the node view's right-hand column stays short.** Gate logs open
+  in a dialog instead of an inline accordion. The dialog opens at the end of
+  the log, keeps up with a running gate's output, numbers the lines, and has
+  ← / → to switch gates and a copy button. The question card's gate reference
+  opens the same dialog. Agent sessions are now a timeline with the newest
+  turn first, showing the latest five. The turn that is currently running
+  pulses and counts up. The full history opens in a dialog. The Changes card
+  lists five files instead of ten.
+
+- **`vinta-ai-maestro` node view: steering is a chat input, and every control
+  says what it does.** The separate Steering card is gone. Its message box now
+  sits at the bottom of the Transcript panel and follows it to full page. Add
+  context and Redirect are a toggle over one Send button, which also sends on
+  Ctrl/⌘+Enter. The sentence under the box says what will happen for this
+  node's status and harness before you press it. Pause, Take over, Abort and
+  Retry phase moved to the page header beside the node's status, and only the
+  ones that apply are shown. Abort now asks for confirmation. A new **How
+  steering works** panel documents each control: when it is available, what
+  happens in practice, how to undo it, and what the node's harness supports.
+
+- **Worktrees now get their own copy of the dependency dirs, never a
+  symlink.** A symlinked `node_modules` / `vendor/` / `venv/` sent writes
+  back into the main checkout, because tools resolve real paths: bundler and
+  test-runner caches, `postinstall` output and installs all landed there.
+  Parallel worktrees then raced on that one tree, and the filesystem sandbox
+  blocked those writes in the middle of a run.
+  - **`prepare-worktree`** copies every dep dir with a copy-on-write clone
+    (`cp -ac` on macOS, `cp -a --reflink=auto` on Linux). On APFS, btrfs and
+    XFS that is close to free on disk. It reinstalls virtualenvs and yarn PnP
+    instead, because their trees store absolute paths into the main checkout.
+    When the plan adds deps, it runs an install on top of the copy. In a
+    workspace it copies every member's `node_modules/`, not only the root's.
+    The summary's `state.deps.strategy` is now `copy | reinstall`.
+  - **Config:** `skills.prepare-worktree.deps_strategy` now defaults to
+    `copy`, where it used to default to `symlink`. `symlink` stays in the
+    schema enum so existing configs still validate, but it is deprecated and
+    read as `copy`. The bootstrap interview no longer offers it.
+  - **Maestro:** `LanePool` copies (clones) the main checkout's
+    `node_modules` into each lane instead of linking it. The lane summary
+    records `deps.strategy: copy`. A lane keeps its own tree across recycles,
+    so a project whose phases change deps should run its install in
+    `setup_cmd`. If the main checkout's `node_modules` is itself a link, the
+    lane gets the same link (a junction on Windows). When a resumed lane still
+    holds a link from an older version, that link is replaced with a copy.
+  - **Consumers:** re-sync to pick up the new `prepare-worktree` body. To
+    stop the interview default from being re-emitted, change
+    `deps_strategy: symlink` to `copy` (or `reinstall`) in
+    `.vinta-ai-workflows.yaml`. Worktrees that already exist keep their links
+    until they are re-provisioned.
 - **`plan-feature` AI model tiers pick up the late-September releases.**
   `plan-feature/resources/ai-models.yaml` now cites `claude-sonnet-5-5`
   (tier 2, was `claude-sonnet-5`) and `gpt-6.1-sol` (tier 3, was

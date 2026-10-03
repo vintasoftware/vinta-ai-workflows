@@ -72,7 +72,7 @@ Dark mode is a `dark` class on `<html>`. `lib/theme.ts` owns it: `useTheme(stora
 
 `src/ui/` — shadcn/ui, installed with the CLI (`components.json` in this directory, aliases `@/ui` and `@/lib/utils`) and then made relative-import. Stock unless noted:
 
-`alert` · `badge` (**+ six tone variants, `BadgeDot`, `TONE_VARIANTS`**) · `button` · `card` · `checkbox` · `dialog` · `empty` · `field` · `input` · `kbd` · `label` · `native-select` · `progress` · `scroll-area` · `separator` · `sheet` · `skeleton` · `slider` · `table` · `tabs` · `textarea` · `tooltip`
+`alert` · `badge` (**+ six tone variants, `BadgeDot`, `TONE_VARIANTS`**) · `button` · `card` · `checkbox` · `dialog` · `empty` · `field` · `input` · `kbd` · `label` · `native-select` · `popover` · `progress` · `scroll-area` · `separator` · `sheet` · `skeleton` · `slider` · `table` · `tabs` · `textarea` · `tooltip`
 
 `native-select` is deliberate: a real `<select>` keeps keyboard and form semantics and stays drivable by a test's `change` event; the Radix popover `select` is not shipped.
 

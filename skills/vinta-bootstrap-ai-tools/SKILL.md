@@ -113,7 +113,7 @@ Seven skills are part of the foundation set but aren't always needed. Ask explic
 
    **Follow-up only when `prepare-worktree` = Yes — worktree defaults.** Three short questions land under `skills.prepare-worktree.*`:
    - **Worktree root.** `AskUserQuestion`: `.claude/worktrees` (claude-code convention; the runtime's `EnterWorktree` puts them there), `../<repo-name>-wt-` (sibling dirs of the main checkout — survives across runtimes; relative-path tooling that walks up still works). Auto-pick the first when claude-code is the only selected vendor; ask when multiple vendors are in the **Scope** group's vendor coverage answer.
-   - **Default deps strategy when the plan does NOT install new deps.** `AskUserQuestion`: `symlink` (fastest, reuses main's `node_modules` / `vendor/` / `venv/`), `copy` (defensive; safe for pnpm + npm + cargo + go; risky for yarn PnP + venv), `reinstall` (slowest, always correct). Recommend `symlink` for pnpm / npm / cargo / go projects; `reinstall` for poetry / yarn PnP.
+   - **Default deps strategy.** Every worktree gets its own dependency dirs and never symlinks main's. `AskUserQuestion`: `copy` (copy-on-write clone of main's `node_modules` / `vendor/` — fast and close to free on disk on APFS / btrfs / XFS; right for npm / pnpm / cargo / go / bundler), `reinstall` (run the package manager fresh in the worktree — slower, but always correct). Recommend `copy`, except `reinstall` for poetry / uv / venv / yarn PnP projects, whose trees store absolute paths into the main checkout. The skill reinstalls virtualenvs and yarn PnP regardless of this default.
    - **Default test-DB strategy.** `AskUserQuestion`: `fork-on-schema-change` (default — only forks when the plan body shows migrations), `always-fork` (defensive — every worktree gets its own test DB regardless), `share` (only safe for solo work; flaky cross-worktree test runs are the cost).
 
    **Follow-up — `implement-plan` default for worktree opt-in.** `AskUserQuestion`: should the `implement-plan` Step 0 question (c) — "run phases in a worktree?" — default to `Yes` or `No`? Lands in `run_options.implement-plan.use_worktree`. Recommend `No` for solo projects + short plans; `Yes` for teams that already use worktrees as part of their workflow.
@@ -355,7 +355,7 @@ skills:
   # Only emit this block when foundation_skills.prepare-worktree = enabled.
   prepare-worktree:
     worktree_root: <prepare-worktree follow-up — `.claude/worktrees` | `../<repo>-wt-`>
-    deps_strategy: <prepare-worktree follow-up — symlink | copy | reinstall>
+    deps_strategy: <prepare-worktree follow-up — copy | reinstall>
     compose_network: per-worktree
     test_db_strategy: <prepare-worktree follow-up — fork-on-schema-change | always-fork | share>
     summary_dir: .vinta-ai-workflows/worktrees

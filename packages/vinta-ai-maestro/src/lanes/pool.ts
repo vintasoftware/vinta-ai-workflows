@@ -23,8 +23,20 @@
  * went wrong, and the skill's teardown steps reverse them from the summary.
  */
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { copyFile, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { constants, existsSync } from 'node:fs'
+import {
+  copyFile,
+  cp,
+  lstat,
+  mkdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
 import { basename, delimiter, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { isWindows, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
@@ -601,9 +613,12 @@ export class LanePool {
    *
    * Read from the summary rather than from `lane`, for the same reason the
    * reset decision is: the file is the contract, so a lane the skill
-   * provisioned and a lane the pool provisioned recycle identically. The linked
+   * provisioned and a lane the pool provisioned recycle identically. The lane's
    * dependency tree is excluded from the clean because it is state a lane
-   * cannot run a gate without and never a leftover of the phase.
+   * cannot run a gate without, and re-copying it on every hand-off would cost
+   * more than the rest of the recycle together. A phase that changes
+   * dependencies leaves its tree to the next one; a project whose plans do
+   * that puts its install in `setup_cmd`, which runs on every recycle.
    */
   async #restoreWorktree(lane: Lane, summary: WorktreeSummary): Promise<void> {
     try {
@@ -753,11 +768,11 @@ export class LanePool {
    * lets the scheduler, the executor and `recycle` stay unaware that resume
    * exists at all.
    *
-   * `#linkDeps` is the one skipped-looking step that is not skipped, and it is
-   * deliberate: it already swallows "there is one there", so on an adopted lane
-   * it costs a failed `symlink` — and on the lane that died *between* its
-   * `worktree add` and its link it is the difference between a resumed phase
-   * and one whose every gate cannot resolve a dependency.
+   * `#copyDeps` is the one skipped-looking step that is not skipped, and it is
+   * deliberate: it keeps a tree that is already there, so on an adopted lane
+   * it costs an `lstat` — and on the lane that died *between* its `worktree
+   * add` and its copy it is the difference between a resumed phase and one
+   * whose every gate cannot resolve a dependency.
    */
   async #provisionWorktree(
     name: string,
@@ -771,7 +786,7 @@ export class LanePool {
 
     await mkdir(poolRoot, { recursive: true })
     if (!adopt) await this.#git(['worktree', 'add', '-b', branch, path, baseRef])
-    await this.#linkDeps(path)
+    await this.#copyDeps(path)
     await this.#configureHooks(path)
     if (!adopt) await this.#copyEnvFiles(name, path)
 
@@ -1087,25 +1102,58 @@ export class LanePool {
   }
 
   /**
-   * The dependency tree is symlinked rather than copied: no phase in a run adds
-   * a dependency without the plan saying so, and N copies of `node_modules` is
-   * the single largest thing a pool can waste.
+   * The dependency tree is copied, never linked: each lane owns its own
+   * `node_modules`. A link into the main checkout looked free and was not.
+   * Every tool that resolves a real path (bundlers, test runners, type
+   * checkers, and their caches under `node_modules/.cache`) followed it back
+   * into main. A lane's writes landed there, the write guard refused the ones
+   * it saw, and two lanes installing or caching at once raced on one directory.
    *
-   * The link type is the one place this differs by platform, and it is not
-   * cosmetic. Node defaults to a *file* symlink on Windows, which for a
-   * directory produces a link nothing can traverse; and a real directory
-   * symlink needs `SeCreateSymbolicLinkPrivilege`, which means Developer Mode
-   * or an elevated shell. A junction needs neither and behaves like the
-   * directory link POSIX gives for free. It is only valid for an absolute local
-   * path, which `source` is.
+   * Cloned rather than byte-copied where the filesystem can (`FICLONE` on
+   * APFS, btrfs, XFS and ReFS), so N lanes cost close to one tree on disk until
+   * a lane changes something. Elsewhere it falls back to an ordinary copy,
+   * which the disk probe already budgets for: it measures the main checkout
+   * with its `node_modules`. Symlinks inside the tree are copied verbatim.
+   * pnpm's layout is relative links, and resolving them would point every lane
+   * back at main's `.pnpm`.
+   *
+   * Staged under a temporary name and renamed into place, so a lane that died
+   * mid-copy is never adopted with half a tree: the leftover staging dir is
+   * discarded and the copy starts over. An existing tree is kept, because on an
+   * adopted lane it is the resumed phase's own. The exception is a link left
+   * by a version that still linked, which is replaced.
+   *
+   * A main checkout whose `node_modules` is itself a link (a project pointing
+   * it at a shared install on purpose) gets the same link, not a copy of what
+   * it points at. On Windows that link is a junction: a directory symlink needs
+   * `SeCreateSymbolicLinkPrivilege`, meaning Developer Mode or an elevated
+   * shell, and a junction needs neither.
    */
-  async #linkDeps(lanePath: string): Promise<void> {
+  async #copyDeps(lanePath: string): Promise<void> {
     const source = join(this.#options.repoPath, 'node_modules')
-    try {
-      await symlink(source, join(lanePath, 'node_modules'), isWindows() ? 'junction' : undefined)
-    } catch {
-      // No dependency tree in the main checkout, or one already linked in.
+    const destination = join(lanePath, 'node_modules')
+    const sourceEntry = await lstat(source).catch(() => null)
+    if (sourceEntry === null) return
+
+    const existing = await lstat(destination).catch(() => null)
+    if (existing?.isSymbolicLink()) await unlink(destination)
+    else if (existing !== null) return
+
+    if (sourceEntry.isSymbolicLink()) {
+      await symlink(await realpath(source), destination, isWindows() ? 'junction' : undefined)
+      return
     }
+
+    // A sibling of the lane, not a child: a leftover inside the worktree would
+    // be an untracked directory a phase could commit.
+    const staging = `${lanePath}.node_modules-copy`
+    await rm(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    await cp(source, staging, {
+      recursive: true,
+      verbatimSymlinks: true,
+      mode: constants.COPYFILE_FICLONE,
+    })
+    await rename(staging, destination)
   }
 
   async #writeSummary(lane: Lane): Promise<void> {
@@ -1129,7 +1177,7 @@ export class LanePool {
       base_ref: this.#options.baseRef,
       created_at: new Date().toISOString(),
       state: {
-        deps: { strategy: 'symlink', paths: ['node_modules'] },
+        deps: { strategy: 'copy', paths: ['node_modules'] },
         dev_db: db('dev'),
         test_db: db('test'),
         services: lane.services.map((service) => ({

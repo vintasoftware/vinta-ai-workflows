@@ -207,9 +207,14 @@ test('a terminal opened on a live link attaches without waiting for a reconnect'
 test('take over is offered where the harness declares a pty', async () => {
   const { container } = await openNode(CLAUDE_CODE_CAPABILITIES)
   await waitFor(() => expect(container.querySelector('[data-op="takeover"]')).not.toBe(null))
-  expect(container.querySelector('[data-takeover]')?.textContent).toContain(
-    'interrupts the headless session',
+  fireEvent.click(container.querySelector('[data-action="steering-guide"]') as Element)
+  await waitFor(() =>
+    expect(document.body.querySelector('[data-takeover]')?.textContent).toContain(
+      'interrupts the headless session',
+    ),
   )
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+  await waitFor(() => expect(document.body.querySelector('[data-steering-guide]')).toBe(null))
   // And it is a toggle, not a fire-and-forget: the terminal is the detach.
   fireEvent.click(container.querySelector('[data-op="takeover"]') as Element)
   await waitFor(() => expect(container.querySelector('[data-terminal="impl"]')).not.toBe(null))
@@ -218,8 +223,10 @@ test('take over is offered where the harness declares a pty', async () => {
 
 test('the limitation is still stated where the harness declares none', async () => {
   const { container } = await openNode(PTY_LESS)
+  await waitFor(() => expect(container.querySelector('[data-action="steering-guide"]')).not.toBe(null))
+  fireEvent.click(container.querySelector('[data-action="steering-guide"]') as Element)
   await waitFor(() =>
-    expect(container.querySelector('[data-takeover]')?.textContent).toContain(
+    expect(document.body.querySelector('[data-takeover]')?.textContent).toContain(
       'has no interactive takeover',
     ),
   )
@@ -229,8 +236,10 @@ test('the limitation is still stated where the harness declares none', async () 
 
 test('a harness that declared nothing gets the limitation, never the button', async () => {
   const { container } = await openNode(null)
+  await waitFor(() => expect(container.querySelector('[data-action="steering-guide"]')).not.toBe(null))
+  fireEvent.click(container.querySelector('[data-action="steering-guide"]') as Element)
   await waitFor(() =>
-    expect(container.querySelector('[data-takeover]')?.textContent).toContain(
+    expect(document.body.querySelector('[data-takeover]')?.textContent).toContain(
       'assumed absent',
     ),
   )

@@ -30,7 +30,7 @@ branch there; commit straight to it.
 ## Read first
 1. AGENTS.md — repo conventions.
 2. {{PLAN_DIR}}/{plan-filename}, the **Goals + Non-goals**, **Guiding Decisions**, **Data Model Changes** sections and YOUR phase body inside **Phased Rollout**.
-{If run_options.use_worktree = true:} 3. `WORKTREE.md` at the worktree root — fork map (which dirs symlink to main vs are independent copies).
+{If run_options.use_worktree = true:} 3. `WORKTREE.md` at the worktree root — fork map (what is forked, copied, or shared with main). Dependency dirs are always this worktree's own copy. Install / cache writes there never reach main.
 
 ## Plan-level decisions (from Goals + Non-goals + Guiding Decisions)
 {Goals + Non-goals verbatim}
