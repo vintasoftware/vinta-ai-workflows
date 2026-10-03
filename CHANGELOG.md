@@ -30,6 +30,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The run view's token, cost and cache figures explain themselves.** Each
+  row in *Sessions and cost* now has an info icon. Hover over it for a quick
+  look, or click to keep it open. It says where the figure comes from and
+  shows the exact counts it was summed from. Token totals are summed from what
+  each harness reports when a session ends. Fresh input is shown apart from
+  cached input. Cost is the harness's own estimate at API list prices, not
+  your bill on a subscription plan. Codex sessions report no cost. Sessions
+  still running are not counted yet. `vinta-design-system` gains a `popover`
+  component.
 - **PR Review Canvas integration (`integrations.pr-review-canvas`).** The
   bootstrap now offers [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
   as its first *integration*: an external tool that installs its own skill.
