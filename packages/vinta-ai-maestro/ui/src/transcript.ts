@@ -66,7 +66,7 @@ const AGENT_KINDS = [
  * with no member here. Folding them together would have made both halves mean
  * "some kind, somewhere", which is not a check.
  */
-const EXTRA_KINDS = ['gate_run'] as const satisfies readonly Exclude<
+const EXTRA_KINDS = ['gate_run', 'agent_question'] as const satisfies readonly Exclude<
   TranscriptEntry['type'],
   AgentEvent['type']
 >[]
@@ -105,6 +105,20 @@ const EntrySchema = z.discriminatedUnion('type', [
     exitCode: z.number(),
     status: z.string(),
     cached: z.boolean(),
+  }),
+  z.object({
+    type: z.literal('agent_question'),
+    effectId: z.string(),
+    source: z.enum(['report', 'tool']),
+    blockedOn: z.string().optional(),
+    questions: z.array(
+      z.object({
+        header: z.string(),
+        question: z.string(),
+        multiSelect: z.boolean(),
+        options: z.array(z.object({ label: z.string(), description: z.string().optional() })),
+      }),
+    ),
   }),
 ])
 
@@ -608,7 +622,25 @@ function build(raw: unknown): EntryView {
         entry.exitCode === 0 ? 'ok' : 'error',
         `Gate \u00b7 ${entry.gate}`,
       )
+    // The record of what was asked. The card that answers it is the node
+    // view's pending question, which reads this same entry from the daemon.
+    case 'agent_question':
+      return row(entry.type, 'agent', askBody(entry), 'attention', 'Question for the operator')
   }
+}
+
+/** The questions as markdown: each one bold-headed, its options listed under it. */
+function askBody(entry: Extract<Entry, { type: 'agent_question' }>): string {
+  const lines: string[] = []
+  if (entry.blockedOn !== undefined) lines.push(`Blocked on: ${entry.blockedOn}`, '')
+  for (const question of entry.questions) {
+    lines.push(`**${question.header}** — ${question.question}`)
+    for (const option of question.options) {
+      lines.push(`- ${option.label}${option.description === undefined ? '' : ` — ${option.description}`}`)
+    }
+    lines.push('')
+  }
+  return lines.join('\n')
 }
 
 function row(

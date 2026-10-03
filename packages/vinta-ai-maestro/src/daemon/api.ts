@@ -44,6 +44,7 @@ import {
   type Logger,
 } from '../log/index.ts'
 import { MONITOR_ROLE } from '../journal/transcript.ts'
+import { type AgentAsk, AgentAskSchema, encodeAnswers } from '../questions/agent-questions.ts'
 import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
 import type { Workflow } from '../types.ts'
 import { collectRunCrew } from '../usage/crew.ts'
@@ -133,6 +134,13 @@ const EventPageQuerySchema = z.object({
 
 /** How much of a monitor conversation is served. Long enough to be a history. */
 const MONITOR_HISTORY = 200
+
+/**
+ * How far back the node view looks for the transcript entry an agent question
+ * parked on. The entry is the last thing written before the park, so this only
+ * has to outlast what a resumed session or an operator writes after it.
+ */
+const AGENT_ASK_WINDOW = 500
 
 /**
  * `/api/logs`, in both its modes.
@@ -870,7 +878,13 @@ export function createApi(options: ApiOptions): Hono {
 
   app.post('/api/runs/:runId/nodes/:nodeId/answer', (c) =>
     operate(c, AnswerRequestSchema, (run, nodeId, body) =>
-      run.control.answer(nodeId, { human: { answer: body.answer } }),
+      run.control.answer(nodeId, {
+        human: {
+          // An agent's answers travel as one encoded string, so the journal
+          // and the guard context carry them the way they carry any answer.
+          answer: body.answers === undefined ? (body.answer ?? null) : encodeAnswers(body.answers),
+        },
+      }),
     ),
   )
 
@@ -1105,12 +1119,33 @@ export function createApi(options: ApiOptions): Hono {
     // The journal is authoritative and survives the daemon; the live control
     // port is the escape hatch for a host that parked a node without
     // journalling the pause, and a finished run simply has none.
-    const raw =
-      journal.pendingQuestion(runId, node.node_id)?.question ??
-      run?.control.question?.(node.node_id)
+    const pending = journal.pendingQuestion(runId, node.node_id)
+    const raw = pending?.question ?? run?.control.question?.(node.node_id)
     if (raw === undefined) return null
     const parsed = HumanQuestionSchema.safeParse(raw)
-    return parsed.success ? parsed.data : null
+    if (!parsed.success) return null
+    if (parsed.data.kind !== 'agent' || pending === undefined) return parsed.data
+    const ask = agentAsk(runId, node.node_id, pending.effectId)
+    return ask === null ? parsed.data : { ...parsed.data, ask }
+  }
+
+  /**
+   * What the agent asked, read back from the `agent_question` transcript
+   * entry the scheduler wrote just before it parked (`src/questions`). The
+   * newest entry with the pause's effect id wins; one that no longer parses,
+   * or fell out of the window, leaves the card to its free-text fallback.
+   */
+  function agentAsk(runId: string, nodeId: string, effectId: string): AgentAsk | null {
+    const entries = journal.tailTranscript(runId, nodeId, AGENT_ASK_WINDOW)
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index]
+      if (typeof entry !== 'object' || entry === null) continue
+      const { type, effectId: id, by: _by, ...rest } = entry as Record<string, unknown>
+      if (type !== 'agent_question' || id !== effectId) continue
+      const ask = AgentAskSchema.safeParse(rest)
+      return ask.success ? ask.data : null
+    }
+    return null
   }
 
   /**

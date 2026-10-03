@@ -1744,6 +1744,93 @@ describe('human gates', () => {
     expect(journal.leases()).toEqual([])
   })
 
+  it('serves an agent’s questions from the transcript and resumes it with the answers', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-daemon-agent-question-'))
+    const journal = openJournal(dir)
+    const workflow = makeWorkflow('solo')
+    journal.createRun(RUN_ID, workflow)
+
+    const pools = new ResourcePools(workflow.resources, { agingMs: 0 })
+    const admission = new AdmissionControl({ journal, runId: RUN_ID, ceilings: { [HARNESS]: 4 } })
+    const adapter = new MockAdapter({
+      id: HARNESS,
+      scripts: [
+        {
+          events: [
+            {
+              type: 'assistant_text',
+              text:
+                'status: NEEDS_INPUT\nblocked_on: storage\nquestions:\n' +
+                '  - header: Storage\n    question: Which table?\n    options:\n' +
+                '      - label: Existing (Recommended)\n        description: No migration.\n' +
+                '      - label: New\n',
+            },
+          ],
+          result: 'ok',
+        },
+      ],
+    })
+    const scheduler: Scheduler = createScheduler({
+      workflow,
+      runId: RUN_ID,
+      journal,
+      pools,
+      admission,
+      adapters: { [HARNESS]: adapter },
+      executor: { execute: async () => ({}) },
+      laneRoot: join(dir, 'lanes'),
+    })
+    const daemon = await startDaemon({ journal, pollMs: 5 })
+    daemon.register({ runId: RUN_ID, control: runControl(scheduler), pools, admission })
+    cleanups.push(async () => {
+      await daemon.close()
+      admission.close()
+      journal.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    const running = scheduler.run()
+    await until(() => (scheduler.statuses['a'] === 'awaiting_human' ? true : undefined), 'node a to ask')
+
+    const parked = await call(daemon, `/api/runs/${RUN_ID}/nodes/a`)
+    expect(NodeDetailSchema.parse(parked.body).question).toEqual({
+      question: 'The agent stopped to ask for a decision.',
+      kind: 'agent',
+      ask: {
+        source: 'report',
+        blockedOn: 'storage',
+        questions: [
+          {
+            header: 'Storage',
+            question: 'Which table?',
+            multiSelect: false,
+            options: [{ label: 'Existing (Recommended)', description: 'No migration.' }, { label: 'New' }],
+          },
+        ],
+      },
+    })
+
+    // Exactly one of the two answer shapes.
+    const both = await call(daemon, `/api/runs/${RUN_ID}/nodes/a/answer`, {
+      method: 'POST',
+      body: { answer: 'x', answers: [{ selected: [0] }] },
+    })
+    expect(both.status).toBe(400)
+
+    const answered = await call(daemon, `/api/runs/${RUN_ID}/nodes/a/answer`, {
+      method: 'POST',
+      // Typed into Other: the operator's own answer, no option with it.
+      body: { answers: [{ selected: [], text: 'a view over both tables' }] },
+    })
+    expect(answered.status).toBe(200)
+
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(adapter.spawned[1]?.resumeSessionId).toBe(`${HARNESS}-session-1`)
+    expect(adapter.spawned[1]?.prompt).toContain('1. Storage — Which table?\n   Answer: a view over both tables')
+    expect(journal.pendingQuestions(RUN_ID)).toEqual([])
+  })
+
   it('drives the four §9 operations against a real scheduler over the API', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-daemon-ops-'))
     const journal = openJournal(dir)
@@ -2271,6 +2358,9 @@ describe('notification delivery across a restart', () => {
     expect(Object.keys(HumanQuestionSchema.shape)).toEqual([
       'question',
       'kind',
+      // An agent's questions, read from the transcript at serve time — not a
+      // delivery flag, and not stored on the question row.
+      'ask',
       'choices',
       'context',
     ])

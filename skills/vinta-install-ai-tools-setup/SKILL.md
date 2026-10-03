@@ -63,7 +63,7 @@ For projects without a Node toolchain (pure Python / Go / Rust / etc): the agent
 - (a) Add a minimal `package.json` at the repo root with just `{"devDependencies": {"yaml": "^2.8.0"}}` and run `npm install` in CI / dev setup.
 - (b) Bundle `yaml` as a vendored copy under `ai-tools/scripts/node_modules/yaml/` (heavier, but no Node ecosystem footprint elsewhere).
 
-Default to (a). Confirm with the user.
+Default to (a). Confirm via `AskUserQuestion`, with (a) first and marked ` (Recommended)`.
 
 ### 5. Configure vendor selection (optional)
 

@@ -19,12 +19,15 @@ For finite-set answers, **list options**. Provide one-sentence **why** so they u
 
 ### Use `AskUserQuestion` for finite-choice questions
 
-Every interview question with discrete answer set — yes/no, named option, finite enum, hypothesis-vs-known-requirement, idempotency mode, concurrency rule — **must** issue via `AskUserQuestion` tool. Use plain prose only when answer genuinely open-ended (problem narrative, walking through journey, free-form motivation, hard deadline date).
+Every interview question with discrete answer set — yes/no, named option, finite enum, hypothesis-vs-known-requirement, idempotency mode, concurrency rule — **must** issue via `AskUserQuestion` tool. `AskUserQuestion` = Claude Code's name; on other harnesses use the equivalent structured question tool (OpenCode `question`, Codex `request_user_input`, Cursor `AskQuestion`, Copilot `askQuestions`, Gemini `ask_user` — see **Asking the human** in [AGENTS.md](../../../AGENTS.md)).
+
+Open-ended questions ride the tool too whenever you can propose 2–4 candidate answers from the prompt, codebase, or earlier answers; the free-text field covers the rest. Plain prose only when no candidate exists (problem narrative, walking through journey, hard deadline date) — one question per message.
 
 Pattern per group:
 
 - One `AskUserQuestion` call per group, batch multiple questions into same call when tool supports (each question carry own option set).
-- Short label per option; rationale ("default: per-user — confirm or override") goes in question header, not option label.
+- Short label per option; rationale ("default: per-user — confirm or override") goes in question text, not option label. Default option first, label ends ` (Recommended)`. No "Other" option — the tool adds free text.
+- Max 4 questions per call (3 on Codex); split bigger groups into consecutive calls.
 - Open-ended sub-questions in same group → fall back to plain prose for those, send closed-form ones via `AskUserQuestion`. Don't force finite list when genuinely free text.
 
 If `AskUserQuestion` in deferred-tool list + not yet schema-loaded, call anyway — tool name fixed + harness surfaces it. **Never** flatten ten questions into one prose paragraph because tool not pre-loaded; that failure mode this skill exists to prevent.

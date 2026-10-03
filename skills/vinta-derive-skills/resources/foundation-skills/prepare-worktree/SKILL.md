@@ -52,7 +52,7 @@ Use `AskUserQuestion` for every finite-choice question. Open prose only when the
    - `Plan-driven — point me at a plan file` → ask for path; read it in the **Plan inspection** step below.
    - `Freeform — just isolate the env, no plan to consult` → skip **Plan inspection**; default every "does the feature do X?" question to "unsure → fork to be safe".
 
-2. **Worktree name** (used as the dir name + as the suffix appended to DB names / docker project names). Default = kebab(plan's feature name) when plan-driven; else ask the user.
+2. **Worktree name** (used as the dir name + as the suffix appended to DB names / docker project names). Default = kebab(plan's feature name) when plan-driven; else ask via `AskUserQuestion`, offering kebab(current branch name) and kebab(the task the user described) as candidates (free text covers any other name).
 
 3. **Worktree root**. Default = `.claude/worktrees/<name>/` when the runtime (claude-code, codex) writes worktrees there; else `../<repo-name>-wt-<name>/` (a sibling dir of the main checkout, so relative-path tooling that walks up keeps working). Read `.vinta-ai-workflows.yaml` → `run_options.prepare-worktree.worktree_root` for a project override.
 
@@ -197,7 +197,7 @@ If `test_infra_change = true` → fork the test DB unconditionally. If `false` a
 
 When the plan has migrations: run them once now against the forked DB so subsequent agent runs in the worktree don't surprise the user. Use the project's standard migration command (`pnpm migrate`, `python manage.py migrate`, `alembic upgrade head`, `prisma migrate dev`, `knex migrate:latest`).
 
-Failure → surface the error, leave the DB un-migrated, ask the user how to proceed (skip, retry, drop and recreate the DB).
+Failure → leave the DB un-migrated and ask via `AskUserQuestion` (header `Migrations`), quoting the error line: `Retry (Recommended)`, `Drop and recreate the DB`, `Skip — leave un-migrated`.
 
 ## Step 4 — Docker / compose isolation (when `compose_change = true` OR project uses compose)
 

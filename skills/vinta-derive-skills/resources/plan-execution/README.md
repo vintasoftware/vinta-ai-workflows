@@ -52,6 +52,17 @@ One rule, two shapes, because it has to hold at both ends of the unit: **the age
 
 The cost this prevents is not duplicated orchestration — it is lost context. A phase agent is reused (review findings, a chore over its own diff, often the next phase), and that reuse only buys anything because the session that read the codebase is the session that gets the next turn. A sub-agent's reading dies with the sub-agent, leaving the parent holding a summary and every later turn starting cold.
 
+## The needs-input seam (`implementer-prompt.md#NEEDS_INPUT` + `partials/relay-questions.md`)
+
+A dispatched agent cannot reach the human: Claude Code and Codex refuse their question tool outside the root session, and a question written into a report is lost in the transcript. So the question travels as data, in the shape of the harness tool's own input.
+
+| Block | Consumed by | What it owns |
+|---|---|---|
+| `implementer-prompt.md#NEEDS_INPUT` | the composed prompt in `implement-phase` (via `FULL`) and `amend-plan` 4b | Tells the phase agent to stop at a clean point and return `status: NEEDS_INPUT` with a `questions:` block (header, question, options with label + description, multi-select) instead of guessing or asking in prose. |
+| `relay-questions.md#RELAY` | `implement-phase`, `review-phase`, `amend-plan` | The orchestrator passes the block to `AskUserQuestion` unchanged, records the answer in tracking, and continues the same agent with it. |
+
+The shape is defined once, in the **Asking the human** section every project's `AGENTS.md` carries ([source](../../../vinta-write-agents-md/resources/asking-the-human.md)). [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) parses the same block from a dispatched agent's report and renders it as a question card, so a plan run under the daemon and one run under the skills unblock the same way.
+
 ## The parallel-lanes seam (`partials/parallel-lanes.md`)
 
 The plan gives every phase a `**Depends on**:` line. The conductor turns those into a DAG and dispatches a phase the moment its dependencies are green and a lane is free. Six blocks:

@@ -11,7 +11,7 @@ Pick:
 3. **Filter to what's actually available in the runtime.** Different harnesses expose different sets.
 4. From the survivors, **pick the cheapest / fastest** the runner can use, and translate it to whatever form the runner's spawning tool expects.
 5. Tier with no runtime-available vendor → step one tier up and say so once. Never hard-fail a phase over a model-selection miss.
-6. `**Assigned to**:` missing or naming an agent the **Crew** table does not list → **ask the user**. Don't silently re-derive a tier from the phase body; the roster is the plan's arithmetic about how many agents this feature needs, and inventing a member changes it.
+6. `**Assigned to**:` missing or naming an agent the **Crew** table does not list → **ask the user** via `AskUserQuestion` (header `Crew`), quoting the line as found, one option per **Crew** member (id + tier), the likeliest fit first with ` (Recommended)`. Don't silently re-derive a tier from the phase body; the roster is the plan's arithmetic about how many agents this feature needs, and inventing a member changes it.
 
 **A legacy plan carries `**Suggested AI model**:` and no Crew table.** Read the tier straight off that line and continue — same resolution, one less indirection. Don't invent a roster for it.
 
@@ -29,7 +29,7 @@ Start cold instead when any of these hold:
 
 Record which of those applied, so a phase that was unexpectedly slow can be read later without guessing.
 
-**Retry escalation (no user prompt):** the picked model fails on a clear capability gap → step **one tier up** and retry once. After Tier 4 fails, STOP. Update tracking with `❌`, post the agent's report to the user, ask how to proceed.
+**Retry escalation (no user prompt):** the picked model fails on a clear capability gap → step **one tier up** and retry once. After Tier 4 fails, STOP. Update tracking with `❌` and hand the failure back to the conductor, which asks the user how to proceed with a structured question (see its **Model escalation** rule).
 
 Record the **model actually used**, the **crew member** it came from, and **whether that member is the one the plan assigned** — a phase run by a covering peer is the difference between a run that cost what the plan said and one that did not.
 <!-- block-end: MODEL_PICK -->

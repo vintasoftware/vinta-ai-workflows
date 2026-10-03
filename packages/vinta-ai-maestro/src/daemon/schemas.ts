@@ -27,6 +27,7 @@
 import { z } from 'zod'
 import type { HarnessCapabilities } from '../harness/adapter.ts'
 import type { NodeStatus, RunStatus } from '../journal/events.ts'
+import { AgentAnswersSchema, AgentAskSchema } from '../questions/shape.ts'
 import { WorkflowSchema } from '../types.ts'
 import { PtyServerFrameSchema } from './pty-frames.ts'
 
@@ -110,10 +111,22 @@ export const PermissionRequestSchema = z.strictObject({
   cwd: z.string(),
 })
 
-/** §9.1 — the answer lands in the guard context as `human.answer`. */
-export const AnswerRequestSchema = z.strictObject({
-  answer: z.union([z.string(), z.number(), z.boolean(), z.null()]),
-})
+/**
+ * §9.1 — the answer lands in the guard context as `human.answer`.
+ *
+ * Exactly one of the two. `answer` is the scalar a pipeline's question takes;
+ * `answers` is one entry per question an agent asked, in order — option
+ * indices plus free text — and is what a `kind: 'agent'` question is answered
+ * with (`src/questions`).
+ */
+export const AnswerRequestSchema = z
+  .strictObject({
+    answer: z.union([z.string(), z.number(), z.boolean(), z.null()]).optional(),
+    answers: AgentAnswersSchema.optional(),
+  })
+  .refine((body) => (body.answer === undefined) !== (body.answers === undefined), {
+    message: 'send exactly one of "answer" and "answers"',
+  })
 
 /**
  * `POST /api/runs` — start a plan, or pick an interrupted run back up.
@@ -339,10 +352,19 @@ export const RunSnapshotSchema = z.strictObject({
   harnesses: z.array(HarnessStateSchema),
 })
 
-/** §9.1's question, rendered inline in the node view with its context. */
+/**
+ * §9.1's question, rendered inline in the node view with its context.
+ *
+ * `kind: 'agent'` is a question the agent asked rather than the pipeline. Its
+ * `question` is a fixed sentence, and `ask` holds what the agent actually
+ * asked — read from the transcript, where agent prose lives (§11), not from
+ * the journal row. Absent when that entry cannot be found, and the UI then
+ * falls back to a free-text answer.
+ */
 export const HumanQuestionSchema = z.strictObject({
   question: z.string(),
-  kind: z.enum(['confirm', 'choice', 'text']),
+  kind: z.enum(['confirm', 'choice', 'text', 'agent']),
+  ask: AgentAskSchema.optional(),
   choices: z.array(z.string()).optional(),
   context: z
     .strictObject({

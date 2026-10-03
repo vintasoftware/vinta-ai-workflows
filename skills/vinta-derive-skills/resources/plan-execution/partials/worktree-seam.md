@@ -25,10 +25,10 @@ Resolve three values **once per lane**, before any phase runs, and record them i
    - `worktree_summary` — `.vinta-ai-workflows/worktrees/<name>.yaml` (read by teardown).
    - `sandbox_tier` → `SANDBOX_TIER`: `enforced` (the [Filesystem sandbox](../prepare-worktree/SKILL.md#step-55--filesystem-sandbox-os-level-write-guard) step found `sandbox-exec` / `bwrap` and will OS-block main-checkout writes) or `none` (no sandbox tool — prevention degrades to the review-phase stray-write backstop).
 4. **Persist to tracking.** Write `run_options.worktree_path`, `run_options.worktree_branch`, `run_options.worktree_summary`, `run_options.sandbox_tier` into `{{PLAN_DIR}}/TRACKING_{plan-id}/run.md`. All later phases read them — never re-provision mid-plan.
-5. **Report to user.** Quote the prepare-worktree summary back: which dirs copied vs reinstalled vs forked (dependency dirs are always copied or reinstalled, never symlinked); which DB(s) forked + their names; compose project name; teardown command. Hold here until the user confirms (`AskUserQuestion`: `Looks good — start phase 1`, `Stop — let me adjust`).
+5. **Report to user.** Quote the prepare-worktree summary back: which dirs copied vs reinstalled vs forked (dependency dirs are always copied or reinstalled, never symlinked); which DB(s) forked + their names; compose project name; teardown command. Hold here until the user confirms (`AskUserQuestion`: `Looks good — start phase 1 (Recommended)`, `Stop — let me adjust`).
 
 Failure modes:
-- **prepare-worktree returns an error** (disk full, branch exists, DB clone failed) → surface to the user; do NOT fall back to "just run in the main checkout" silently — that defeats the opt-in. Ask: `Retry`, `Run in main checkout instead (flip use_worktree to false)`, `Stop`.
+- **prepare-worktree returns an error** (disk full, branch exists, DB clone failed) → surface to the user; do NOT fall back to "just run in the main checkout" silently — that defeats the opt-in. Ask via `AskUserQuestion` (header `Worktree`), quoting the error line: `Retry (Recommended)`, `Run in main checkout instead (flip use_worktree to false)`, `Stop`.
 - **User cancels at the confirmation gate** → tear the worktree down (run the teardown command from prepare-worktree's report) before exiting, so the next run starts clean.
 <!-- block-end: WORKROOT_RESOLUTION -->
 

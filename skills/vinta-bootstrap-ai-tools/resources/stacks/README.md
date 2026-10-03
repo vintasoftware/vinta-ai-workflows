@@ -3,7 +3,7 @@
 Each subdirectory here defines a **stack** — a set of detection signals + a description of what kinds of skills + sub-agents typically belong to that stack. The bootstrap flow uses these to:
 
 1. Detect (via [vinta-analyze-codebase](../../../vinta-analyze-codebase/SKILL.md)) which stacks the target project matches.
-2. Ask the user "I detected stack X; do you have skill / sub-agent templates for it? Point me at them" — bootstrap doesn't ship pre-baked content.
+2. Ask the user via `AskUserQuestion` "I detected stack X; do you have skill / sub-agent templates for it?" (`Yes — I'll give the path` with the path typed into the free-text field, `No — record as gap`) — bootstrap doesn't ship pre-baked content.
 3. Copy + adapt the user-provided templates into the target's `ai-tools/skills/` and `ai-tools/agents/`.
 
 This keeps the bootstrap skill **infrastructure only**. Specific skill content (e.g. "how to add a Medplum bot") lives wherever the user keeps their personal / team skill library, not here.

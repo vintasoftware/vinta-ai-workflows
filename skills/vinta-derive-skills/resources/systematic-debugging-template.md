@@ -43,10 +43,10 @@ For every server in `{{OBSERVABILITY_MCP_LIST}}`:
 1. **Read** the cache entry for the server.
 2. **Cache hit (`status: ok`)** → log one line `cache hit: <server> (<tools_count> tools, verified <relative-time> ago)` and skip to "Discover the right calls" below for this server. No tool listing, no extra calls.
 3. **Cache miss / `dirty` / `missing` / `auth-error` / `unreachable`** → run a fresh preflight:
-   - Check that an MCP server with that identifier is connected. If not, **stop and tell the user verbatim**: *"systematic-debugging requires the `<name>` MCP server, but it is not connected in this session. Connect it, run with `local-only`, or remove it from `skills.systematic-debugging.observability_mcp_servers` in `.vinta-ai-workflows.yaml`."* Write `status: missing`, `error_message: "not connected"` to the cache and stop.
-   - Confirm at least one tool from that server can be invoked. Auth error / expired token / missing API key → same hard-stop, with the upstream error message quoted verbatim. Cache as `status: auth-error`, `error_message: "<verbatim>"`.
+   - Check that an MCP server with that identifier is connected. If not, **stop and tell the user verbatim**: *"systematic-debugging requires the `<name>` MCP server, but it is not connected in this session. Connect it, run with `local-only`, or remove it from `skills.systematic-debugging.observability_mcp_servers` in `.vinta-ai-workflows.yaml`."* Write `status: missing`, `error_message: "not connected"` to the cache, then ask via `AskUserQuestion` (header `MCP server`): `I connected it — retry preflight (Recommended)`, `Continue local-only this run`, `Stop`. Any answer other than retry leaves the cache entry as written.
+   - Confirm at least one tool from that server can be invoked. Auth error / expired token / missing API key → same hard-stop and same question (`I fixed auth — retry preflight (Recommended)`, …), with the upstream error message quoted verbatim. Cache as `status: auth-error`, `error_message: "<verbatim>"`.
    - On success: write `status: ok`, `verified_at: <now>`, `tools_count: <n>` to the cache.
-4. Do **not** silently fall back to a different server, to local logs, or to "investigate without observability". A configured-but-broken server is a configuration bug; surface it. The user can choose to re-run with `local-only` once they see the failure.
+4. Do **not** silently fall back to a different server, to local logs, or to "investigate without observability". A configured-but-broken server is a configuration bug; surface it. `Continue local-only` is the user's call, made through the question above — never yours.
 
 If `{{OBSERVABILITY_MCP_LIST}}` is `none configured`, the cache is irrelevant — skip the preflight and use the no-tools fallback rendered below. Warn once if the bug appears production-only: *"This bug looks production-only and no observability MCP server is configured. Re-run with `local-only` to silence this warning, or wire up an observability MCP server first."*
 
@@ -64,7 +64,7 @@ A successful tool call against a server that's currently marked anything other t
 
 ### Discover the right calls at runtime
 
-**Do not assume tool names from training data — they go stale.** For each cache-hit server (and each server that just passed a fresh preflight), list the tools it exposes, then map them to the evidence categories below by reading their descriptions and parameter names. If a server claims to cover a category but no listed tool matches, ask the user before falling back to "no evidence available".
+**Do not assume tool names from training data — they go stale.** For each cache-hit server (and each server that just passed a fresh preflight), list the tools it exposes, then map them to the evidence categories below by reading their descriptions and parameter names. If a server claims to cover a category but no listed tool matches, ask via `AskUserQuestion` before falling back to "no evidence available" — offer the 2–4 closest-matching tools as options, plus `No tool covers it`.
 
 {{OBSERVABILITY_MCP_BLOCK}}
 
@@ -133,7 +133,7 @@ Goal: ship the fix at the right level of abstraction with the right safety net.
 
 ## Stop conditions — count your attempts
 
-If you reach **three failed fix attempts** on the same bug, the architecture is suspect, not the next line you were about to change. Stop and escalate:
+If you reach **three failed fix attempts** on the same bug, the architecture is suspect, not the next line you were about to change. Stop and escalate — summarize the three attempts in 3 lines, then ask via `AskUserQuestion` (header `3 attempts`): `Restart from Phase 1 (Recommended)`, `Bring a second reviewer` (spawn a fresh agent with the symptom only), `Keep going with attempt 4`, `Stop and hand off` (write a handoff). The questions below shape the restart:
 
 - Re-read the original report. Has the symptom drifted as you patched things?
 - Are the three attempts each fixing a different file? That is a sign the contract between layers is wrong, not any single layer.

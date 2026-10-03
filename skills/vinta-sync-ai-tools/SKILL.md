@@ -199,9 +199,24 @@ Then re-enter step 1 of the main flow.
    grep -rn "ai-tools/AGENTS.md" --exclude-dir=node_modules --exclude-dir=.git .
    ```
 
-   Historical records (`ai-plans/*.md`, changelogs, past plan docs) are dated snapshots — leave them. Surface the list to the user and let them decide.
+   Historical records (`ai-plans/*.md`, changelogs, past plan docs) are dated snapshots — leave them. Show the list, then ask via `AskUserQuestion`: `Leave historical records (Recommended)`, `Rewrite them too`.
 
 **Order matters**: run this migration *before* `setup-ai-tools.mjs`. Running the new script against the old layout leaves `.github/copilot-instructions.md` pointing at `../AGENTS.md`, which resolves through the surviving root symlink — it works, but hides the fact that the migration hasn't happened.
+
+### Structured questions + sub-agent `NEEDS_INPUT` (0.7.0)
+
+**Detect**: `grep -c 'asking-the-human:start' AGENTS.md` prints `0`. A project bootstrapped on 0.7.0 or later already has the section — skip.
+
+**Why**: skills and sub-agents used to stop for input with a prose question at the end of a long report, so the user had to find it in the transcript and type the answer. The **Asking the human** section tells every agent to ask through the harness's structured question tool (clickable options plus free text). It also defines the `NEEDS_INPUT` block that sub-agents return, since sub-agents cannot call that tool. The re-rendered `implement-phase` / `review-phase` / `amend-plan` relay that block, so the agent YAMLs must emit it.
+
+**Steps** — one `AskUserQuestion` for the whole migration (`Apply (Recommended)`, `Show diff`, `Skip`):
+
+1. Append the block between the `asking-the-human:start` / `asking-the-human:end` markers of [vinta-write-agents-md/resources/asking-the-human.md](../vinta-write-agents-md/resources/asking-the-human.md) to the root `AGENTS.md`, markers included. Place it after the **Dependency licenses** section when there is one, else before **Key Documentation**, else at the end. When the doc already has a hand-written section about asking the user, show both and ask which to keep.
+2. For every `ai-tools/agents/*.yaml` with `access: read-write` whose body doesn't mention `NEEDS_INPUT`, add a **When you need a human decision** section to the body, per the [Needs-input contract](../vinta-derive-subagents/SKILL.md#needs-input-contract-every-read-write-agent-body). Show each body diff; this is project-tailored prose, so don't batch-apply it silently.
+3. Re-render the plan-execution skills (`implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`) and the template-rendered skills that gained structured questions (`systematic-debugging` when enabled), plus the verbatim foundation skills that changed (`plan-feature`, `create-spec`, `create-qa-use-cases`, `prepare-worktree`, `handoff`, `add-one-off-script`). These ride the normal `affects-project` flow; this migration only makes sure they're proposed together with steps 1–2, since a re-rendered `implement-phase` that relays `NEEDS_INPUT` is only useful when the agents emit it.
+4. Re-run the setup script so the vendor agent files regenerate from the edited YAMLs.
+
+**Optional, per harness** — mention once, don't apply: Codex only offers `request_user_input` in Plan mode unless the user sets `[features] default_mode_request_user_input = true` in `~/.codex/config.toml`. OpenCode agents other than `build` / `plan` need `"permission": { "question": "allow" }`.
 
 ## Pitfalls
 
@@ -222,3 +237,4 @@ Then re-enter step 1 of the main flow.
 5. **Bootstrap from missing config**: `.vinta-ai-workflows.yaml` written with reverse-extracted values; user confirms before main flow runs.
 6. **Orphan diff**: changelog has no entry for a real file change; sync surfaces it at the end without applying.
 7. **Layout migration applied**: `AGENTS.md` is a regular file at the root, `ai-tools/AGENTS.md` is gone, `grep -rn "ai-tools/AGENTS.md"` returns only historical records, and both link checks in "One-time migrations" print nothing.
+8. **Structured-questions migration applied**: `grep -c 'asking-the-human:start' AGENTS.md` prints `1`; every `access: read-write` agent YAML mentions `NEEDS_INPUT`; the re-rendered `implement-phase` contains a "Relay a sub-agent's questions" section.

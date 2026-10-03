@@ -24,10 +24,11 @@ Write the doc's internal links as **repo-root-relative paths** (`ai-tools/rules/
    - **Replace from scratch** — discard the old content; draft fresh from inventory + interview. Note the discarded files in the run summary so the user can verify nothing important was lost.
 3. Interview answers (Step 0 below).
 4. `.vinta-ai-workflows.yaml` (`policies.dependency_licenses`) — drives the **Dependency licenses** section. The bootstrap interview captures enforcement + forbidden SPDX list + per-package overrides + free-form notes; this skill only reads and renders. Don't re-interview the user about license policy — if the config block is missing, route the user back to [vinta-bootstrap-ai-tools](../vinta-bootstrap-ai-tools/SKILL.md) Step 0 (Project conventions → license policy).
+5. [resources/asking-the-human.md](resources/asking-the-human.md) — the canonical **Asking the human** section. Copied verbatim, not interviewed.
 
 ## Step 0 — Interview before drafting
 
-The analysis tells you the *shape* of the repo. The interview tells you *intent* — conventions humans hold but don't surface in code. Use `AskUserQuestion` for finite-choice; iterate plain prose for narrative.
+The analysis tells you the *shape* of the repo. The interview tells you *intent* — conventions humans hold but don't surface in code. Ask every question through `AskUserQuestion` (your harness's structured question tool — see [asking-the-human](resources/asking-the-human.md)), so the user clicks instead of typing. Seed open questions with candidates you inferred from the inventory (README summary, detected environments, observed branch names); the free-text field covers anything else. Plain prose only when you have no candidate at all, one question per message.
 
 ### A. Project framing
 
@@ -62,7 +63,7 @@ The analysis tells you the *shape* of the repo. The interview tells you *intent*
 1. **Things AGENTS.md should explicitly NOT cover** — internal API tokens, customer data, security secrets that don't belong in a public-ish doc.
 2. **Topics handled elsewhere** — if there's a `docs/ARCHITECTURE.md` or `docs/RBAC.md` already, reference it instead of duplicating.
 
-After interview: read back load-bearing decisions in one paragraph; final `AskUserQuestion` `Looks good` / `Some corrections` / `More to clarify` / `Stop, rethink`. Loop until `Looks good`.
+After interview: read back load-bearing decisions in one paragraph; final `AskUserQuestion` `Looks good (Recommended)` / `Some corrections` / `More to clarify` / `Stop, rethink`. Loop until `Looks good`.
 
 ## Structure
 
@@ -143,15 +144,15 @@ VAR_TWO
 
 {Rendered from `policies.dependency_licenses` in `.vinta-ai-workflows.yaml`. Skip when the block is absent. When `enforcement: off`, render a single line: "No license check enforced." When `enforcement: block` or `warn`, render:}
 
-**Enforcement:** {`block` — refuse install + ask user before override / `warn` — proceed but flag in phase report}.
+**Enforcement:** {`block` — refuse install + ask the user (structured question, see **Asking the human**) before any override / `warn` — proceed but flag in phase report}.
 
 **Forbidden SPDX licenses** (any new third-party dep matching these must be checked before install):
 
 {Bullet list of `forbidden_spdx` entries as inline SPDX IDs.}
 
-**Pre-install check.** Before running `npm add` / `pnpm add` / `pip install` / `poetry add` / `uv add` / `cargo add` / `go get` (or equivalent) for any new dep, look up the package's declared license (`npm view <pkg> license`, PyPI metadata, `cargo metadata`, the package's repo `LICENSE`) and compare to the list above. If the license is in the list and the `(package, license)` pair is not in **Approved overrides**, stop and surface the conflict to the user.
+**Pre-install check.** Before running `npm add` / `pnpm add` / `pip install` / `poetry add` / `uv add` / `cargo add` / `go get` (or equivalent) for any new dep, look up the package's declared license (`npm view <pkg> license`, PyPI metadata, `cargo metadata`, the package's repo `LICENSE`) and compare to the list above. If the license is in the list and the `(package, license)` pair is not in **Approved overrides**, stop and ask the user per **Asking the human**: options `Use an alternative (Recommended)` (name the candidate), `Implement without it`, `Record an override`. Sub-agents return `NEEDS_INPUT` with that question instead.
 
-**Unknown / undeclared license.** When the lookup returns no license, an empty value, `UNKNOWN`, `SEE LICENSE IN <file>`, or only an unstructured `LICENSE` file with no SPDX identifier, **stop and ask the user** regardless of the enforcement mode above. Don't guess, don't fall back to "assume MIT" — the package may be all-rights-reserved by default. The user picks one of: skip the dep, treat as forbidden, or record an `allowed_overrides` entry with the SPDX they independently confirmed off-channel.
+**Unknown / undeclared license.** When the lookup returns no license, an empty value, `UNKNOWN`, `SEE LICENSE IN <file>`, or only an unstructured `LICENSE` file with no SPDX identifier, **stop and ask the user** per **Asking the human**, regardless of the enforcement mode above. Don't guess, don't fall back to "assume MIT" — the package may be all-rights-reserved by default. Options: `Find alternative (Recommended)`, `Treat as forbidden`, `Record an override` (only with an SPDX the user confirmed off-channel, recorded in `allowed_overrides`). Sub-agents return `NEEDS_INPUT` with that question instead.
 
 {When `allowed_overrides` is non-empty:}
 
@@ -162,6 +163,8 @@ VAR_TWO
 | {package} | {SPDX} | {reason} |
 
 {When `notes` is non-empty, render verbatim under a `**Notes.**` paragraph.}
+
+{Asking the human — always rendered. Copy the block between the `asking-the-human:start` / `asking-the-human:end` markers of resources/asking-the-human.md verbatim, markers included (they let vinta-sync-ai-tools refresh the section later). Don't tailor it; it is the same in every project.}
 
 ## Error / Exception Tracking
 
@@ -189,6 +192,7 @@ VAR_TWO
 - **Plain English.** Read by humans + agents + new hires. Acronyms expanded on first use.
 - **No code beyond what's necessary.** If a 5-line snippet captures the convention, use it. Don't paste 50 lines of context.
 - **No marketing language.** "Robust", "seamless", "delightful" — strike. State what it does.
+- **Always include the Asking the human section, verbatim.** It is the one section every skill and sub-agent leans on to stop for input; tailoring it per project breaks the cross-skill contract.
 - **No `§N` shorthand for cross-references.** When AGENTS.md points at other docs, name the section (`See the **Multi-tenancy** section in docs/ARCHITECTURE.md`). `§4.2` is unreadable for humans and breaks when section numbering shifts.
 
 ## What NOT to put in AGENTS.md
@@ -209,7 +213,7 @@ After writing:
 
 1. Re-read the document end-to-end — does it answer "what is this codebase, how do I work in it, what conventions matter"?
 2. Every claim cites a file or convention source.
-3. Section headings match the skeleton above (or skipped sections are explicit).
+3. Section headings match the skeleton above (or skipped sections are explicit). `grep -c 'asking-the-human:start' AGENTS.md` prints `1`.
 4. Length: 200–400 lines for a typical project. Shorter = probably under-specified. Longer = probably duplicating docs/ content.
 5. Every relative link in the doc resolves **from the repo root** — the script that checks it, run from the root, prints nothing:
 

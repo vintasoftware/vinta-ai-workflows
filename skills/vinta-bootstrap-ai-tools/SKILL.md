@@ -26,7 +26,7 @@ This orchestrator runs six sub-skills in order. Each is its own SKILL.md so it c
 5. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) — copy the canonical `setup-ai-tools.mjs` into `ai-tools/scripts/`, wire the package script alias, run setup, verify all vendor paths resolve. Then install the skills of any enabled integration (D.2) through that tool's own CLI.
 6. [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md) — find any pre-existing implementation plans / feature specs scattered across the repo (`docs/`, `specs/`, `plans/`, root markdown, etc.) and propose moving them to the canonical layout `ai-plans/YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md`. Read-only by default; every rename is gated on per-file user approval. Skipped automatically when the analysis finds no candidates.
 
-Each sub-skill returns a short status report. Don't run the next sub-skill until the previous finished cleanly. If a sub-skill fails or surfaces ambiguity, surface that to the user and resolve before continuing.
+Each sub-skill returns a short status report. Don't run the next sub-skill until the previous finished cleanly. If a sub-skill fails or surfaces ambiguity, resolve it with the user before continuing — as an `AskUserQuestion` with concrete options (e.g. `Retry <sub-skill> (Recommended)`, `Skip it, continue`, `Stop`), never as a prose question at the end of the status report.
 
 ### Sibling skill — `create-qa-use-cases`
 
@@ -47,7 +47,7 @@ If the repo already has an `AGENTS.md` (at the root, or at the legacy `ai-tools/
 
 ## Interview (Step 0 — before any sub-skill runs)
 
-Use `AskUserQuestion` for finite-choice questions; iterate plain prose for open-ended ones. Same convention as [plan-feature](../plan-feature/SKILL.md) and [create-spec](../create-spec/SKILL.md).
+Every question goes through `AskUserQuestion` — the harness's structured question tool, which renders clickable options plus a free-text field. On harnesses other than Claude Code, use the equivalent tool listed in [asking-the-human](../vinta-write-agents-md/resources/asking-the-human.md), and follow its shape rules: 2–4 options, recommended first with ` (Recommended)`, no "Other" option, up to 4 questions per call (3 on Codex). For open-ended questions, offer the candidates the analysis found (detected commands, paths, environments, branch names) as options; the free-text field covers the rest. Plain prose only when there is no candidate at all, one question per message.
 
 ### A. Scope
 
@@ -124,7 +124,7 @@ Seven skills are part of the foundation set but aren't always needed. Ask explic
 
    Both are skipped, and `parallel_phases` is emitted as `false`, when `prepare-worktree` = No — parallel execution has a hard worktree requirement and `implement-plan` refuses rather than degrading.
 
-   **Follow-up only when `systematic-debugging` = Yes — observability MCP server inventory.** Open prose, not multi-select. Ask the user to name every MCP server already wired up that exposes observability data, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. Cross-check the answers against any MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.) — if a server is configured but the user didn't mention it, ask whether it carries observability data. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
+   **Follow-up only when `systematic-debugging` = Yes — observability MCP server inventory.** First read the MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.). Then ask a multi-select `AskUserQuestion` (header `MCP servers`): *"Which of these MCP servers expose observability data (errors, traces, logs, metrics)?"*, one option per configured server (up to 4; split into further calls when there are more). The free-text field takes any server not listed, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). When nothing is configured, ask the same thing in prose. The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
 
    **Cache scaffolding.** Preflight state lives at `.vinta-ai-workflows/cache.yaml` ([`mcp-preflight-cache.v1`](../../schemas/mcp-preflight-cache.v1.schema.json)). The bootstrap orchestrator must:
 
@@ -216,9 +216,9 @@ Rules:
 - When in doubt, reference DESIGN.md — do not invent new values
 ```
 
-Globs may need tuning for the project's actual UI file extensions (Svelte-only projects, RN `.tsx`, etc.). Ask the user once if the analysis surfaced a UI framework not covered by the default glob list; otherwise ship the defaults.
+Globs may need tuning for the project's actual UI file extensions (Svelte-only projects, RN `.tsx`, etc.). When the analysis surfaced a UI framework not covered by the default glob list, ask once via `AskUserQuestion`: `Add <framework> globs (Recommended)` (name the globs you'd add), `Ship the defaults`. Otherwise ship the defaults.
 
-After Step 0: read back the captured decisions (including every per-artifact disposition), confirm via `AskUserQuestion` (`Looks good`, `Some corrections (I'll list)`, `Stop, rethink`).
+After Step 0: read back the captured decisions (including every per-artifact disposition), confirm via `AskUserQuestion` (`Looks good (Recommended)`, `Some corrections (I'll list)`, `Stop, rethink`).
 
 The dispositions become inputs to:
 
@@ -488,7 +488,8 @@ Stack-specific skills + agents land in the target only when the user provides te
 
 - **Read before write.** Always check what's in the target repo first. Don't clobber existing AGENTS.md / skills / agents without an explicit confirmation in Step 0.
 - **Stack templates are starting points, not finals.** Each copied skill / agent must be reviewed against the actual project (interview the user about specifics) and edited where the template's assumptions don't fit.
-- **Don't fabricate conventions.** If `vinta-analyze-codebase` doesn't find a thing, ask the user. Don't write "Use bulk_create instead of loop+save" into AGENTS.md just because Django was detected — confirm the team actually follows it.
+- **Every stop for input is a structured question.** See [asking-the-human](../vinta-write-agents-md/resources/asking-the-human.md). A prose question at the end of a long report is the failure mode — the user has to hunt for it and type the answer.
+- **Don't fabricate conventions.** If `vinta-analyze-codebase` doesn't find a thing, ask the user (`AskUserQuestion`, offering what you did find as candidates). Don't write "Use bulk_create instead of loop+save" into AGENTS.md just because Django was detected — confirm the team actually follows it.
 - **Foundation skills are universal.** Every project gets `add-env-var`, `add-e2e-test`, `plan-feature`, `implement-plan`, `create-spec`, `create-qa-use-cases`. The bodies need light per-project edits (test commands, branch conventions) — `vinta-derive-skills` handles that.
 - **Foundation agents are universal.** `implementer` / `reviewer` / `fixer` always. Stack specialists (`deploy-author` for Medplum, `migration-author` for Django) only when the stack matches.
 - **Don't run install-ai-tools-setup until AGENTS.md + agents YAMLs + skills exist.** The setup script reads these files; running it on an empty `ai-tools/` produces nothing useful.
