@@ -22,7 +22,7 @@ export function Chip({ tone, children }: { readonly tone: Tone; readonly childre
 }
 
 /** Solid-colour classes per tone, for a mark that is not a badge. */
-const DOT: Readonly<Record<Tone, string>> = {
+export const TONE_DOT: Readonly<Record<Tone, string>> = {
   idle: 'bg-tone-idle',
   active: 'bg-tone-active',
   wait: 'bg-tone-wait',
@@ -41,5 +41,5 @@ const DOT: Readonly<Record<Tone, string>> = {
  * already in the sentence next to it.
  */
 export function ToneDot({ tone }: { readonly tone: Tone }) {
-  return <BadgeDot className={`chip dot ${DOT[tone]}`} data-tone={tone} aria-hidden="true" />
+  return <BadgeDot className={`chip dot ${TONE_DOT[tone]}`} data-tone={tone} aria-hidden="true" />
 }

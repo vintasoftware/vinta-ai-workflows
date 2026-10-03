@@ -122,6 +122,31 @@ state-machine-editor {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* A gate log's gutter. Counters rather than text, so the numbers never end up
+   in what the operator selects and copies; a wrapped line keeps one number and
+   hangs under its own text, not under the gutter. */
+.gate-log {
+  counter-reset: gate-line;
+}
+.gate-line {
+  display: block;
+  position: relative;
+  padding-left: 3.75rem;
+}
+.gate-line:hover {
+  background: color-mix(in oklch, var(--foreground) 5%, transparent);
+}
+.gate-line::before {
+  counter-increment: gate-line;
+  content: counter(gate-line);
+  position: absolute;
+  left: 0;
+  width: 2.75rem;
+  text-align: right;
+  color: var(--muted-foreground);
+  opacity: 0.6;
+  user-select: none;
+}
 .entry-body.markdown,
 .entry-body .markdown {
   white-space: normal;

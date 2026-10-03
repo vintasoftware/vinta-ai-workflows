@@ -10,6 +10,7 @@
 import { act, cleanup, fireEvent, waitFor, type RenderResult } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest'
 import { ENTRY_KINDS_COVERED, TRANSCRIPT_KINDS } from '../src/transcript.ts'
+import { SESSIONS_SHOWN } from '../src/Sessions.tsx'
 import { TRANSCRIPT_WINDOW } from '../src/Transcript.tsx'
 import {
   CLAUDE_CODE_CAPABILITIES,
@@ -388,7 +389,7 @@ test('a pending question renders with its context and is answerable in all three
   })
 })
 
-test('the gate panel names each verdict, and opens one log at a time', async () => {
+test('the gate panel names each verdict, and reads a log in a dialog', async () => {
   const parked = node('impl', 'awaiting_human')
   const stub = await startStubDaemon({
     runs: [runSummary()],
@@ -426,22 +427,34 @@ test('the gate panel names each verdict, and opens one log at a time', async () 
   expect(toneOfGate(container, 'unit')).toBe('error')
   expect(textOf(container, '[data-gate="lint"]')).toContain('passed')
   expect(textOf(container, '[data-gate="unit"]')).toContain('failed')
+  expect(textOf(container, '[data-gate-summary]')).toBe('1 failed · 1 passed')
 
   // What each one cost: the live-clock shape past a minute, one decimal under
   // it, and the re-run count where a gate ran more than once.
   expect(textOf(container, '[data-gate="lint"] .gate-time')).toBe('2.4s')
   expect(textOf(container, '[data-gate="unit"] .gate-time')).toBe('1m 36s×3')
 
-  // The panel opens on the gate the question asks about, and only that log is
-  // mounted — the point of the accordion is that the other two are not there
-  // to be scrolled past.
-  expect(textOf(container, '[data-gate-log="unit"]')).toContain('invoices › totals')
-  expect(container.querySelector('[data-gate-log="lint"]')).toBe(null)
+  // No log is on the page itself: the panel is headlines, however long the
+  // logs behind them are.
+  expect(document.querySelector('[data-gate-log]')).toBe(null)
 
-  fireEvent.click(container.querySelector('[data-gate="lint"] [data-slot="accordion-trigger"]')!)
-  await waitFor(() => expect(container.querySelector('[data-gate-log="lint"]')).not.toBe(null))
-  expect(textOf(container, '[data-gate-log="lint"]')).toContain('0 problems')
-  expect(container.querySelector('[data-gate-log="unit"]')).toBe(null)
+  fireEvent.click(container.querySelector('[data-gate="lint"] [data-action="open-gate-log"]')!)
+  await waitFor(() => expect(document.querySelector('[data-gate-log="lint"]')).not.toBe(null))
+  expect(textOf(document.body, '[data-gate-log="lint"]')).toContain('0 problems')
+  expect(document.querySelector('[data-gate-log="unit"]')).toBe(null)
+
+  // → steps to the next gate without closing the dialog.
+  fireEvent.keyDown(document.querySelector('[data-gate-dialog]')!, { key: 'ArrowRight' })
+  await waitFor(() => expect(document.querySelector('[data-gate-log="unit"]')).not.toBe(null))
+  expect(textOf(document.body, '[data-gate-log="unit"]')).toContain('invoices › totals')
+  expect(textOf(document.body, '[data-gate-dialog]')).toContain('3 runs on this phase')
+
+  fireEvent.keyDown(document.querySelector('[data-gate-dialog]')!, { key: 'Escape' })
+  await waitFor(() => expect(document.querySelector('[data-gate-dialog]')).toBe(null))
+
+  // The question names the gate it is asking about, and opens its log too.
+  fireEvent.click(container.querySelector('[data-context="gate"] [data-action="open-gate-log"]')!)
+  await waitFor(() => expect(document.querySelector('[data-gate-log="unit"]')).not.toBe(null))
 
   // The reference — branch, base, lane — stays on the changes card beside the
   // description (`changes-view.test.tsx` covers the description itself).
@@ -642,8 +655,8 @@ const TURNS = [
 test('the session panel says which turns continued a session, and why the rest did not', async () => {
   const stub = await startStubDaemon({
     runs: [runSummary()],
-    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
-    details: { [`${RUN_ID}/impl`]: nodeDetail({ sessions: TURNS }) },
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'done')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail({ node: node('impl', 'done'), sessions: TURNS }) },
   })
   daemon = stub
   const { container } = open(stub, 'impl')
@@ -654,31 +667,97 @@ test('the session panel says which turns continued a session, and why the rest d
   // failure mode this panel exists to make visible.
   expect(textOf(container, '[data-session-summary]')).toContain('1 of 4 turns')
 
+  // Newest first: the turn that matters most is the one at the top.
   const rows = [...container.querySelectorAll('.sessions li')]
+  expect(rows.map((row) => row.getAttribute('data-session-turn'))).toEqual(['4', '3', '2', '1'])
   expect(rows.map((row) => row.getAttribute('data-session-slot'))).toEqual([
     'main',
-    'review',
     'main',
+    'review',
     'main',
   ])
 
   // A cold turn states its reason in words, not as a journal token.
-  expect(rows[0]?.textContent).toContain('First turn on this slot')
-  expect(rows[0]?.textContent).not.toContain('no_prior_session')
+  expect(rows[3]?.textContent).toContain('First turn on this slot')
+  expect(rows[3]?.textContent).not.toContain('no_prior_session')
 
   // The deliberate escalation reads as deliberate rather than as a fault.
-  expect(rows[3]?.textContent).toContain('Last fix round')
+  expect(rows[0]?.textContent).toContain('Last fix round')
+
+  // A settled node has nothing running.
+  expect(container.querySelector('.sessions [data-running]')).toBe(null)
 
   // The continued turn names the session it continued, truncated, with the
   // whole id on hover — an id is for telling two sessions apart, not reading.
-  const reusedId = rows[2]?.querySelector('[title]')
-  expect(reusedId?.getAttribute('title')).toBe('claude-code-session-0001')
+  const reusedId = rows[1]?.querySelector('[title="claude-code-session-0001"]')
+  expect(reusedId).not.toBe(null)
   expect(reusedId?.textContent).not.toBe('claude-code-session-0001')
   // The *distinguishing* end. Truncating from the left would show the vendor
   // prefix every session on this harness shares and drop the unique part,
   // which is the only reason the id is on the row at all.
   expect(reusedId?.textContent).toContain('session-0001')
   expect(reusedId?.textContent).not.toContain('claude-code')
+})
+
+test('the newest turn of a node in an agent turn is marked as running', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail({ sessions: TURNS }) },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelectorAll('.sessions li')).toHaveLength(4))
+  const running = [...container.querySelectorAll('.sessions [data-running]')]
+  expect(running.map((row) => row.getAttribute('data-session-turn'))).toEqual(['4'])
+  expect(textOf(container, '[data-session-live]')).toContain('running')
+})
+
+test('a node waiting on its gates has no turn running', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({
+        sessions: TURNS,
+        gates: [gate('unit', { status: 'running', startedAt: 1_000, durationMs: null })],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelectorAll('.sessions li')).toHaveLength(4))
+  expect(container.querySelector('.sessions [data-running]')).toBe(null)
+})
+
+test('a long history shows the latest turns and opens the rest in a dialog', async () => {
+  const many = Array.from({ length: SESSIONS_SHOWN + 3 }, (_, index) => ({
+    slot: 'main',
+    disposition: 'reused' as const,
+    sessionId: `claude-code-session-${index}`,
+    at: 1_000 * (index + 1),
+  }))
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail({ sessions: many }) },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-action="all-sessions"]')).not.toBe(null))
+  const rows = [...container.querySelectorAll('.sessions li')]
+  expect(rows).toHaveLength(SESSIONS_SHOWN)
+  expect(rows[0]?.getAttribute('data-session-turn')).toBe(String(many.length))
+  expect(textOf(container, '[data-action="all-sessions"]')).toContain('3 earlier turns')
+
+  fireEvent.click(container.querySelector('[data-action="all-sessions"]')!)
+  await waitFor(() => expect(document.querySelector('[data-sessions-dialog]')).not.toBe(null))
+  const all = [...document.querySelectorAll('[data-sessions-dialog] li')]
+  expect(all).toHaveLength(many.length)
+  expect(all.at(-1)?.getAttribute('data-session-turn')).toBe('1')
 })
 
 test('a cold turn is not dressed as a failure, and only a lost session is amber', async () => {
@@ -705,7 +784,7 @@ test('a cold turn is not dressed as a failure, and only a lost session is amber'
   // Most cold turns are correct — a first turn has nothing to continue and the
   // last fix round is escalated on purpose. Painting them red would train an
   // operator to ignore the panel.
-  expect(tones).toEqual(['idle', 'idle', 'ok', 'idle', 'wait'])
+  expect(tones).toEqual(['wait', 'idle', 'ok', 'idle', 'idle'])
   // Nothing here is ever an error: a lost session cost a spawn, not the run.
   expect(tones).not.toContain('error')
 })
