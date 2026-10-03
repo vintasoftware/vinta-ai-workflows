@@ -113,7 +113,7 @@ test('the card lists each changed file with its status and counts, and the way t
   expect(textOf(container, '[data-diff-lane]')).toBe('lane-1')
 })
 
-test('past ten files the card counts the rest rather than listing them', async () => {
+test('past five files the card counts the rest rather than listing them', async () => {
   const many = Array.from({ length: 14 }, (_, index) => changedFile(`src/file-${index}.ts`))
   const stub = await startStubDaemon({
     runs: [runSummary()],
@@ -126,7 +126,7 @@ test('past ten files the card counts the rest rather than listing them', async (
 
   await waitFor(() => expect(container.querySelector('[data-changes-rest]')).not.toBe(null))
   expect(container.querySelectorAll('[data-changed-files] li')).toHaveLength(CHANGES_SHOWN)
-  expect(textOf(container, '[data-changes-rest]')).toBe('and 4 more files')
+  expect(textOf(container, '[data-changes-rest]')).toBe('and 9 more files')
   expect(textOf(container, '[data-changes-summary]')).toContain('14 files changed')
 })
 

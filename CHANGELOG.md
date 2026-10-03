@@ -216,6 +216,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Maestro: the node view's right-hand column stays short.** Gate logs open
+  in a dialog instead of an inline accordion. The dialog opens at the end of
+  the log, keeps up with a running gate's output, numbers the lines, and has
+  ← / → to switch gates and a copy button. The question card's gate reference
+  opens the same dialog. Agent sessions are now a timeline with the newest
+  turn first, showing the latest five. The turn that is currently running
+  pulses and counts up. The full history opens in a dialog. The Changes card
+  lists five files instead of ten.
+
 - **`vinta-ai-maestro` node view: steering is a chat input, and every control
   says what it does.** The separate Steering card is gone. Its message box now
   sits at the bottom of the Transcript panel and follows it to full page. Add
@@ -226,6 +235,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ones that apply are shown. Abort now asks for confirmation. A new **How
   steering works** panel documents each control: when it is available, what
   happens in practice, how to undo it, and what the node's harness supports.
+
 - **Worktrees now get their own copy of the dependency dirs, never a
   symlink.** A symlinked `node_modules` / `vendor/` / `venv/` sent writes
   back into the main checkout, because tools resolve real paths: bundler and

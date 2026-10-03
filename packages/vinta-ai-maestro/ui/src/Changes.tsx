@@ -32,7 +32,7 @@ import { EmptyNote, Hint, Panel } from './Panel.tsx'
 import { useNow } from './time.ts'
 
 /** How many files the card lists before it counts the rest. */
-export const CHANGES_SHOWN = 10
+export const CHANGES_SHOWN = 5
 
 /** The slow clock. Five times the transcript's, for the reason the header gives. */
 const REFRESH_MS = 10_000

@@ -34,9 +34,13 @@
  * gates, the sessions. On a narrow window the columns stack in that order.
  * The node's lifecycle controls sit in the header beside its status; see
  * `Steering.tsx` for why messages and controls were split.
+ *
+ * The right-hand column stays short on purpose: each of its panels shows a
+ * bounded headline, and the long reads behind them — a gate's log, the whole
+ * session history — open in dialogs rather than inline.
  */
-import { ChevronLeftIcon } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { ChevronLeftIcon, ScrollTextIcon } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import {
   HStack,
   PageHeader,
@@ -45,12 +49,6 @@ import {
   PageHeaderMeta,
   PageHeaderTitle,
 } from 'vinta-design-system/layout'
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from 'vinta-design-system/ui/accordion'
 import { Button } from 'vinta-design-system/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'vinta-design-system/ui/card'
 import { Textarea } from 'vinta-design-system/ui/textarea'
@@ -58,12 +56,14 @@ import type { NodeDetail } from '../../src/daemon/schemas.ts'
 import { Changes } from './Changes.tsx'
 import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
+import { Gates } from './Gates.tsx'
 import { Live } from './Live.tsx'
-import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
-import { nodeLabel, nodeTone, type Tone } from './status.ts'
+import { EmptyNote, ErrorNote, Hint } from './Panel.tsx'
+import { Sessions } from './Sessions.tsx'
+import { nodeLabel, nodeTone } from './status.ts'
 import { capabilitiesOf, Composer, NodeControls, SteeringGuide } from './Steering.tsx'
 import { TerminalView } from './Terminal.tsx'
-import { duration, elapsed, useNow } from './time.ts'
+import { useNow } from './time.ts'
 import { Transcript } from './Transcript.tsx'
 import { useRun } from './useRun.ts'
 
@@ -92,6 +92,9 @@ export function NodeView({
   const [busy, setBusy] = useState(false)
   const [takingOver, setTakingOver] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
+  // Which gate's log is open. Here and not in the panel, because the question
+  // card opens the gate it is asking about too.
+  const [gateLog, setGateLog] = useState<string | null>(null)
   const cursor = projection.cursor
 
   useEffect(() => {
@@ -199,6 +202,7 @@ export function NodeView({
         <Pending
           question={detail.question}
           busy={busy}
+          onOpenGate={detail.gates.some((gate) => gate.gateId === failingGate) ? setGateLog : null}
           onAnswer={(answer) => void operate('answer', { answer }, 'Answered. The node resumes.')}
         />
       )}
@@ -222,8 +226,11 @@ export function NodeView({
         </div>
         <div className="panels flex flex-col gap-4">
           <Changes client={client} runId={runId} nodeId={nodeId} ref={detail.diff} cursor={cursor} pullRequest={detail.pullRequest} />
-          <Gates gates={detail.gates} failing={failingGate} />
-          <Sessions sessions={detail.sessions} />
+          <Gates gates={detail.gates} failing={failingGate} open={gateLog} onOpen={setGateLog} />
+          <Sessions
+            sessions={detail.sessions}
+            live={status === 'running' && !detail.gates.some((gate) => gate.status === 'running')}
+          />
         </div>
       </div>
 
@@ -249,10 +256,13 @@ export function NodeView({
 function Pending({
   question,
   busy,
+  onOpenGate,
   onAnswer,
 }: {
   readonly question: Question
   readonly busy: boolean
+  /** Opens a gate's log; null when the gate it names has no log to open yet. */
+  readonly onOpenGate: ((gateId: string) => void) | null
   readonly onAnswer: (answer: Answer) => void
 }) {
   const [text, setText] = useState('')
@@ -279,7 +289,21 @@ function Pending({
             )}
             {context.gateLogRef !== undefined && (
               <li data-context="gate">
-                Gate log <span className="font-mono">{context.gateLogRef}</span>
+                {onOpenGate === null ? (
+                  <>
+                    Gate log <span className="font-mono">{context.gateLogRef}</span>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    data-action="open-gate-log"
+                    className="inline-flex items-center gap-1 rounded-sm text-tone-attention-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    onClick={() => onOpenGate(context.gateLogRef!)}
+                  >
+                    <ScrollTextIcon aria-hidden="true" className="size-3.5" />
+                    Read the <span className="font-mono">{context.gateLogRef}</span> gate log
+                  </button>
+                )}
               </li>
             )}
             {context.transcriptCursor !== undefined && (
@@ -362,278 +386,6 @@ function Pending({
       </CardContent>
     </Card>
   )
-}
-
-/**
- * The phase's gates: one disclosure row each, with its verdict and what it
- * cost, and the log of whichever one is open.
- *
- * **It is a list of headlines, not a wall of logs.** The panel used to render
- * every gate's log at once, each in its own 13rem box with its own scrollbar.
- * Three of those in a third of a grid row is a column of letterbox slots, and
- * a wheel event inside one of them is swallowed by that box rather than
- * scrolling the page — so the page appeared to freeze wherever the pointer
- * happened to be. Collapsed rows fix both at once: nothing scrolls inside the
- * panel, and the panel itself is short enough to read.
- *
- * **One open at a time** (`type="single"`). Gate logs are the kind of content
- * you compare against the transcript beside them rather than against each
- * other, and two open at once puts the second one below a screen of the
- * first, which is the state the old panel was permanently in.
- *
- * **The open log does not scroll, on either axis.** It is tail-truncated by
- * the daemon at 64 KiB, so its height is bounded already, and a scroller
- * inside a panel inside a page is the trap this rewrite exists to remove.
- * Long lines wrap rather than overflow, which is the same call the diff
- * panel above it makes and for the same reason: a stack trace that runs off
- * the edge of a third-of-a-row panel is one nobody can read without
- * selecting blind.
- *
- * **The verdict is off the wire now.** `NodeDetailSchema` carries each gate's
- * status, its duration and whether the cache served it, so the row says what
- * happened rather than leaving it to §9.1's question to name the one failing
- * gate. `failing` survives as what it always was — the gate the question
- * points at — and is what the panel opens on, because it is the reason the
- * operator is on this page.
- */
-function Gates({
-  gates,
-  failing,
-}: {
-  readonly gates: NodeDetail['gates']
-  readonly failing: string | null
-}) {
-  // Whichever gate wants reading: the one the question names, else the first
-  // that is not passing, else nothing open. `useState` and not a derived
-  // value — once the operator has opened a row, a refresh must not move it.
-  const [open, setOpen] = useState(() => initialGate(gates, failing))
-
-  return (
-    <Panel title="Gates" data-gates expandable>
-      {gates.length === 0 ? (
-        <EmptyNote>No gate has run yet.</EmptyNote>
-      ) : (
-        <Accordion
-          type="single"
-          collapsible
-          value={open}
-          onValueChange={setOpen}
-          className="gates -my-1"
-        >
-          {gates.map((gate) => (
-            <AccordionItem key={gate.gateId} value={gate.gateId} data-gate={gate.gateId}>
-              <AccordionTrigger className="hover:no-underline">
-                <span className="flex min-w-0 flex-1 items-center gap-2">
-                  <span className="truncate font-mono text-[13px] font-medium">{gate.gateId}</span>
-                  <Chip tone={gateTone(gate.status)}>{GATE_LABELS[gate.status]}</Chip>
-                  {gate.gateId === failing && <Chip tone="attention">asked about</Chip>}
-                </span>
-                <GateTiming gate={gate} />
-              </AccordionTrigger>
-              <AccordionContent>
-                {gate.log === '' ? (
-                  <EmptyNote>This gate has written nothing yet.</EmptyNote>
-                ) : (
-                  <pre
-                    className="gate-log m-0 whitespace-pre-wrap break-words rounded-md bg-muted px-3 py-2 font-mono text-xs"
-                    data-gate-log={gate.gateId}
-                  >
-                    {gate.log}
-                  </pre>
-                )}
-              </AccordionContent>
-            </AccordionItem>
-          ))}
-        </Accordion>
-      )}
-    </Panel>
-  )
-}
-
-/** The gate the panel opens on, or `''` for none — the accordion's "closed". */
-function initialGate(gates: NodeDetail['gates'], failing: string | null): string {
-  if (failing !== null && gates.some((gate) => gate.gateId === failing)) return failing
-  return gates.find((gate) => gate.status !== 'passed')?.gateId ?? ''
-}
-
-const GATE_LABELS: Readonly<Record<NodeDetail['gates'][number]['status'], string>> = {
-  running: 'running',
-  passed: 'passed',
-  failed: 'failed',
-  timed_out: 'timed out',
-}
-
-/**
- * A timed-out gate is `error` and not `wait` on purpose. §6.1's patience is
- * about capacity the system will get back on its own; a gate the runner had
- * to kill is a result, and a human decides what happens next.
- */
-function gateTone(status: NodeDetail['gates'][number]['status']): Tone {
-  if (status === 'running') return 'active'
-  return status === 'passed' ? 'ok' : 'error'
-}
-
-/**
- * How long the gate has been going, or how long it took.
- *
- * The live case ticks off `useNow` against the daemon's `startedAt`, so a tab
- * left open on a slow suite keeps counting and a tab opened halfway through
- * shows the true figure rather than starting from zero. The finished case is
- * the runner's own measurement, which is why a cached verdict can report a
- * duration at all — it is what the gate cost when it last ran, and the row
- * says `cached` beside it so the number is not read as time this run spent.
- */
-function GateTiming({ gate }: { readonly gate: NodeDetail['gates'][number] }) {
-  if (gate.status === 'running') {
-    // A component of its own, so the second-by-second clock exists only where
-    // something is actually moving. Inlining the hook here would give every
-    // settled row its own interval for a number that will never change again.
-    return gate.startedAt === null ? (
-      <GateTime>running</GateTime>
-    ) : (
-      <RunningFor since={gate.startedAt} />
-    )
-  }
-  return (
-    <GateTime>
-      {gate.durationMs !== null && <span>{duration(gate.durationMs)}</span>}
-      {gate.cached && <span>cached</span>}
-      {gate.runs > 1 && <span>×{gate.runs}</span>}
-    </GateTime>
-  )
-}
-
-function RunningFor({ since }: { readonly since: number }) {
-  return <GateTime>{elapsed(since, useNow(1000))}</GateTime>
-}
-
-/** The right-hand end of a gate's row. Tabular figures, so it does not jitter. */
-function GateTime({ children }: { readonly children: ReactNode }) {
-  return (
-    <span className="gate-time flex shrink-0 items-baseline gap-1.5 font-mono text-xs tabular-nums text-muted-foreground">
-      {children}
-    </span>
-  )
-}
-
-
-/**
- * §15's session reuse, as the operator sees it: one row per agent turn, saying
- * which slot it ran on and whether it continued that slot's session.
- *
- * The panel exists because reuse fails *quietly*. A run whose sessions stopped
- * being reused looks exactly like one that never reused — same statuses, same
- * transcripts, same result, just more tokens and a slower fix loop. The reason
- * token is the whole point of the row: without it "fresh" is an observation
- * nobody can act on.
- *
- * **Fresh is not a failure, and the colours say so.** Most cold turns are
- * correct — the first turn on a slot has nothing to continue, and the last fix
- * round is deliberately handed to an agent that has not seen the work (§15.5).
- * Only `stale_session` gets the waiting tone, because it is the one that cost
- * something nobody asked for: a spawn spent being told the session was gone.
- */
-function Sessions({ sessions }: { readonly sessions: NodeDetail['sessions'] }) {
-  const reused = sessions.filter((turn) => turn.disposition === 'reused').length
-
-  return (
-    <Panel
-      title="Agent sessions"
-      data-sessions
-      description={
-        sessions.length === 0 ? undefined : (
-          <span data-session-summary>
-            {reused} of {sessions.length} {sessions.length === 1 ? 'turn' : 'turns'} continued a
-            session.
-          </span>
-        )
-      }
-    >
-      {sessions.length === 0 ? (
-        <EmptyNote>No agent turn has run yet.</EmptyNote>
-      ) : (
-        <ul className="sessions divide-y">
-          {sessions.map((turn, index) => (
-            // The index is the key because a slot legitimately repeats: `main`
-            // is every implementer and fixer turn on this node, and the rows
-            // are an append-only sequence that nothing reorders or removes.
-            <li
-              key={index}
-              data-session-slot={turn.slot}
-              className="flex flex-col gap-0.5 py-2 first:pt-0 last:pb-0"
-            >
-              <p className="entry-head flex items-center gap-2">
-                <Chip tone={sessionTone(turn)}>{turn.disposition}</Chip>
-                <span className="entry-author text-[13px] font-semibold">{turn.slot}</span>
-                {turn.sessionId !== undefined && (
-                  <span
-                    className="muted font-mono text-xs text-muted-foreground"
-                    title={turn.sessionId}
-                  >
-                    {shortId(turn.sessionId)}
-                  </span>
-                )}
-              </p>
-              {turn.reason !== undefined && (
-                <p className="muted entry-body text-xs text-muted-foreground">
-                  {sessionReason(turn.reason)}
-                </p>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </Panel>
-  )
-}
-
-/** Reused is good news, cold is usually correct, and one case cost a spawn. */
-function sessionTone(turn: NodeDetail['sessions'][number]): Tone {
-  if (turn.disposition === 'reused') return 'ok'
-  return turn.reason === 'stale_session' ? 'wait' : 'idle'
-}
-
-/**
- * The daemon's closed reason vocabulary, in words.
- *
- * An unrecognised token falls through to itself rather than to "unknown": a
- * browser served by a newer daemon should show the operator the thing it was
- * told, which is ugly and true, instead of hiding it behind wording this build
- * happens to know.
- */
-function sessionReason(reason: string): string {
-  switch (reason) {
-    case 'no_prior_session':
-      return 'First turn on this slot — there was nothing to continue.'
-    case 'harness_changed':
-      return 'The slot’s session belongs to a different harness.'
-    case 'lane_changed':
-      return 'The node is in a different lane than the session ran in.'
-    case 'no_resume_capability':
-      return 'This harness cannot continue a session.'
-    case 'turn_ceiling':
-      return 'The slot reached its turn limit, so the context starts over.'
-    case 'final_fix_round':
-      return 'Last fix round — deliberately an agent that has not seen the work.'
-    case 'stale_session':
-      return 'The harness had forgotten the session. The turn was retried cold.'
-    case 'no_slot':
-      return 'This step asked for a fresh session.'
-    default:
-      return reason
-  }
-}
-
-/**
- * Enough of an id to tell two sessions apart; the full one is on hover.
- *
- * The **tail**, not the head. A session id is a vendor prefix followed by the
- * unique part — `claude-code-01J8ZQ4M7X2K` — so truncating from the left shows
- * the twelve characters every session on this harness shares and hides the only
- * ones that differ. An id is on this row to be compared, not read.
- */
-function shortId(sessionId: string): string {
-  return sessionId.length <= 14 ? sessionId : `…${sessionId.slice(-12)}`
 }
 
 /** Errors from `client.ts` name an endpoint and a status; nothing else is relayed. */

@@ -38,3 +38,16 @@ export function duration(ms: number): string {
   if (ms < 60_000) return `${(Math.max(0, ms) / 1000).toFixed(1)}s`
   return elapsed(0, ms)
 }
+
+/**
+ * `just now`, `40s ago`, `12m ago`, `3h ago`, `2d ago` — how far back a row
+ * is, at the precision a glance wants. The exact moment belongs on hover.
+ */
+export function ago(atMs: number, nowMs: number): string {
+  const seconds = Math.max(0, Math.floor((nowMs - atMs) / 1000))
+  if (seconds < 10) return 'just now'
+  if (seconds < 60) return `${seconds}s ago`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`
+  return `${Math.floor(seconds / 86_400)}d ago`
+}
