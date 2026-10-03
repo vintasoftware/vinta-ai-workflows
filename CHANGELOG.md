@@ -30,6 +30,83 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Agents stop for input with clickable questions instead of prose.** When a
+  skill or a sub-agent needs a decision from you, it now asks through your
+  harness's structured question tool, so you get the options as buttons plus
+  a free-text field, rather than a question buried at the end of a long
+  report. The tools are Claude Code's `AskUserQuestion`, OpenCode's
+  `question`, Codex's `request_user_input`, Cursor's `AskQuestion`, VS Code
+  Copilot's `askQuestions` and Gemini CLI's `ask_user`.
+  - **`AGENTS.md` gains an "Asking the human" section.** Its canonical text is
+    in [`vinta-write-agents-md/resources/asking-the-human.md`](skills/vinta-write-agents-md/resources/asking-the-human.md),
+    which `vinta-write-agents-md` copies verbatim between
+    `asking-the-human:start/end` markers. The section maps the tool name per
+    harness and sets the question shape. Every question has 2–4 concrete
+    options with descriptions, the recommended one first and marked
+    ` (Recommended)`, and no "Other" option. Questions are batched up to 4 per
+    call (3 on Codex). Open-ended questions still offer the candidates the
+    agent found. Confirmation gates are questions, never "reply go". It also
+    gives the fallback when no tool is available.
+  - **Sub-agents return `status: NEEDS_INPUT`.** Claude Code and Codex do not
+    let a sub-agent call the question tool. A phase agent that hits a decision
+    it should not make alone now stops at a clean point and returns a
+    `questions:` block in the tool's own shape. The new
+    `plan-execution/partials/relay-questions.md` is included by
+    `implement-phase`, `review-phase` and `amend-plan`. It turns that block
+    into an `AskUserQuestion` call, records the answer in tracking, and
+    continues the same agent. `implementer-prompt.md#NEEDS_INPUT` carries the
+    contract into every composed implementer prompt, and
+    `vinta-derive-subagents` puts it in every read-write agent body. The
+    dependency-license block, which used to tell a sub-agent to "ask via
+    `AskUserQuestion`", now returns `NEEDS_INPUT`.
+  - **Prose stop points became option questions** across the plan-execution
+    unit, the foundation skills and the bootstrap skills. Examples:
+    - choosing the plan file;
+    - the start-run gate, which replaces "wait for go";
+    - the Tier-4 failure: amend the plan, retry with guidance, skip the
+      phase, or stop;
+    - resuming a run;
+    - a missing worktree;
+    - graph and crew validation;
+    - wave-merge conflicts;
+    - rebase failures, co-authored branches and merged phases in `amend-plan`;
+    - review findings that need a human decision;
+    - migration failures in `prepare-worktree`;
+    - mismatches when `handoff` resumes;
+    - the three-failed-attempts stop and MCP preflight failures in
+      `systematic-debugging`;
+    - the unclear-file, date and sidecar questions in
+      `vinta-migrate-plans-specs`.
+  - **Consumers:** `vinta-sync-ai-tools` adds a one-time migration. It
+    appends the section to an existing `AGENTS.md`, adds the needs-input
+    contract to read-write agent YAMLs, and re-renders the affected skills
+    together.
+- **`vinta-ai-maestro` shows an agent's questions as a card you click.**
+  - **Detection.** The scheduler reads every agent turn as it drains
+    (`src/questions`). It takes a `NEEDS_INPUT` block in the agent's last
+    message, or a question tool call (`AskUserQuestion` / `question` /
+    `request_user_input`) that was its last act. Either one parks the node on
+    a new `kind: 'agent'` question.
+  - **The card.** It shows each option as a button with its description, and
+    marks the recommended one. The last choice is always **Other**, which
+    holds a free-text field. On a single-choice question it is exclusive:
+    typing in it deselects the picked option, and picking an option deselects
+    it. The daemon applies the same rule to an API answer. A single single-choice question
+    answers on the click. Several questions run as a wizard: one step per
+    question, with picking an option moving on and number keys to pick, then
+    a review step and Send.
+  - **The answer resumes the agent's own session.** The turn's effect returns
+    only once the agent stops asking. Under `--retry-after`, an unanswered
+    question takes the recommended options and is journalled as `unattended`.
+  - **§11 still holds.** The questions are written to the transcript as an
+    `agent_question` entry. The journal row carries a fixed sentence and the
+    effect id, and the answer is journalled as option indices plus the
+    operator's words.
+  - **API.** `POST …/answer` accepts `answers` (one
+    `{ selected, text? }` per question) as well as the scalar `answer`.
+    `NodeDetail.question` gains `ask`. The implementer prompt now teaches the
+    `NEEDS_INPUT` block. `MockAdapter` takes `scripts`, one per session.
+
 - **PR Review Canvas integration (`integrations.pr-review-canvas`).** The
   bootstrap now offers [PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas)
   as its first *integration*: an external tool that installs its own skill.
