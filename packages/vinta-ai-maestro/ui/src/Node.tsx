@@ -1,6 +1,6 @@
 /**
  * The node view (§10): the transcript, the gate logs, what the phase changed,
- * the steering box, the pending question, and the five operations of §9.
+ * the message composer, the pending question, and the five operations of §9.
  *
  * What makes this screen different from the run view is that it is the only
  * one that *writes*. Three rules follow from that.
@@ -22,20 +22,20 @@
  *   means something moved, and a slow tick covers transcript growth, which
  *   journals no event of its own.
  *
- * PTY takeover — §9's fifth verb — is now a button where `capabilities.pty` is
- * true and a stated limitation where it is false. That is the same rule as the
- * other four and the same rule `Runs.tsx` set: an action the harness cannot
- * perform does not belong on a control. The capability is read off the wire,
- * never assumed, so a harness that declares nothing gets the sentence rather
- * than the button.
+ * PTY takeover — §9's fifth verb — is a button where `capabilities.pty` is
+ * true and a stated limitation in the steering guide where it is false. An
+ * action the harness cannot perform does not belong on a control, the same
+ * rule `Runs.tsx` set. The capability is read off the wire, never assumed.
  *
  * The page is two columns above a large window: what the operator *does* on
- * the left — the question, then the transcript with the steering box under
- * it the way a chat puts its composer under the conversation, then the
- * terminal — and what they *check* on the right — the changes, the gates,
- * the sessions. On a narrow window the columns stack in that order.
+ * the left — the question, then the transcript with the message composer
+ * inside its panel the way a chat seats its input under the conversation,
+ * then the terminal — and what they *check* on the right — the changes, the
+ * gates, the sessions. On a narrow window the columns stack in that order.
+ * The node's lifecycle controls sit in the header beside its status; see
+ * `Steering.tsx` for why messages and controls were split.
  */
-import { ChevronLeftIcon, TerminalIcon } from 'lucide-react'
+import { ChevronLeftIcon } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import {
   HStack,
@@ -54,14 +54,14 @@ import {
 import { Button } from 'vinta-design-system/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'vinta-design-system/ui/card'
 import { Textarea } from 'vinta-design-system/ui/textarea'
-import type { NodeDetail, RunSnapshot } from '../../src/daemon/schemas.ts'
+import type { NodeDetail } from '../../src/daemon/schemas.ts'
 import { Changes } from './Changes.tsx'
 import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
 import { Live } from './Live.tsx'
 import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
-import type { NodeStatus } from './projection.ts'
 import { nodeLabel, nodeTone, type Tone } from './status.ts'
+import { capabilitiesOf, Composer, NodeControls, SteeringGuide } from './Steering.tsx'
 import { TerminalView } from './Terminal.tsx'
 import { duration, elapsed, useNow } from './time.ts'
 import { Transcript } from './Transcript.tsx'
@@ -70,32 +70,8 @@ import { useRun } from './useRun.ts'
 /** Covers transcript growth, which journals no event to ride in on. */
 const REFRESH_MS = 2000
 
-type Capabilities = NonNullable<RunSnapshot['harnesses'][number]['capabilities']>
 type Question = NonNullable<NodeDetail['question']>
 
-/**
- * What an undeclared harness is assumed to be able to do: nothing it has not
- * claimed, except resume, which every adapter must support to be scheduled at
- * all. The cost of this assumption is a note saying "queued" about a message
- * that was in fact delivered live; the cost of the opposite is telling the
- * operator their steering landed in a turn that never received it.
- *
- * It is also what a snapshot that has not arrived yet reads as, which is the
- * conservative way round.
- */
-const ASSUMED: Capabilities = {
-  inject: false,
-  interrupt: false,
-  resume: true,
-  pty: false,
-  permissionControl: false,
-  autoCompact: false,
-}
-
-/** §7's block for this node's harness, off the wire. Null when undeclared. */
-function capabilitiesOf(snapshot: RunSnapshot | null, harness: string): Capabilities | null {
-  return snapshot?.harnesses.find((state) => state.id === harness)?.capabilities ?? null
-}
 type Answer = OperationBody<'answer'>['answer']
 
 export function NodeView({
@@ -115,6 +91,7 @@ export function NodeView({
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [takingOver, setTakingOver] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(false)
   const cursor = projection.cursor
 
   useEffect(() => {
@@ -165,6 +142,14 @@ export function NodeView({
   const status = projection.statuses.get(nodeId) ?? detail.node.status
   const failingGate = detail.question?.context?.gateLogRef ?? null
   const runHref = `#/runs/${encodeURIComponent(runId)}`
+  const harness = detail.node.harness
+  const capabilities = capabilitiesOf(snapshot, harness)
+  const openGuide = (): void => setGuideOpen(true)
+  const onOperate = <K extends NodeOperation>(
+    operation: K,
+    body: OperationBody<K>,
+    done: string,
+  ): void => void operate(operation, body, done)
 
   return (
     <section className="node flex flex-col gap-5">
@@ -190,6 +175,15 @@ export function NodeView({
           <PageHeaderActions className="run-meta">
             <Chip tone={nodeTone(status)}>{nodeLabel(status)}</Chip>
             <Live connected={connected} />
+            <NodeControls
+              capabilities={capabilities}
+              status={status}
+              busy={busy}
+              takingOver={takingOver}
+              onTakeOver={() => setTakingOver((open) => !open)}
+              onOperate={onOperate}
+              onHelp={openGuide}
+            />
           </PageHeaderActions>
         </PageHeader>
       </div>
@@ -211,15 +205,18 @@ export function NodeView({
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="flex flex-col gap-4">
-          <Transcript entries={detail.transcript.entries} />
-          <Steering
-            harness={detail.node.harness}
-            capabilities={capabilitiesOf(snapshot, detail.node.harness)}
-            status={status}
-            busy={busy}
-            takingOver={takingOver}
-            onTakeOver={() => setTakingOver((open) => !open)}
-            onOperate={(operation, body, done) => void operate(operation, body, done)}
+          <Transcript
+            entries={detail.transcript.entries}
+            composer={
+              <Composer
+                harness={harness}
+                capabilities={capabilities}
+                status={status}
+                busy={busy}
+                onOperate={onOperate}
+                onHelp={openGuide}
+              />
+            }
           />
           {takingOver && <TerminalView nodeId={nodeId} link={pty} />}
         </div>
@@ -229,6 +226,14 @@ export function NodeView({
           <Sessions sessions={detail.sessions} />
         </div>
       </div>
+
+      <SteeringGuide
+        open={guideOpen}
+        onOpenChange={setGuideOpen}
+        harness={harness}
+        capabilities={capabilities}
+        status={status}
+      />
     </section>
   )
 }
@@ -357,165 +362,6 @@ function Pending({
       </CardContent>
     </Card>
   )
-}
-
-/**
- * The steering box and the four operations that take one (§9). What the note
- * says is decided by the harness's capabilities *and* the node's status,
- * because both decide it in the scheduler: a message is injected only into a
- * turn that is live, on an adapter that can be written to. Everything else is
- * queued for the next resume — which is fine, and is what the box says.
- */
-function Steering({
-  harness,
-  capabilities,
-  status,
-  busy,
-  takingOver,
-  onTakeOver,
-  onOperate,
-}: {
-  readonly harness: string
-  /** The adapter's own declaration, or null for a harness that made none. */
-  readonly capabilities: Capabilities | null
-  readonly status: NodeStatus
-  readonly busy: boolean
-  readonly takingOver: boolean
-  readonly onTakeOver: () => void
-  readonly onOperate: <K extends NodeOperation>(
-    operation: K,
-    body: OperationBody<K>,
-    done: string,
-  ) => void
-}) {
-  const [text, setText] = useState('')
-  const declared = capabilities ?? ASSUMED
-  const settled = status === 'done' || status === 'failed'
-  const empty = text.trim() === ''
-  const send = <K extends NodeOperation>(operation: K, body: OperationBody<K>, done: string) => {
-    onOperate(operation, body, done)
-    setText('')
-  }
-
-  return (
-    <Panel
-      expandable
-      title="Steering"
-      className="steering"
-      description={<span data-delivery>{delivery(harness, status, declared.inject)}</span>}
-    >
-      <Textarea
-        aria-label="Message to the agent"
-        data-field="steering"
-        placeholder="Message to the agent…"
-        rows={3}
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        disabled={settled}
-      />
-      {!declared.interrupt && !settled && (
-        <Hint className="muted" data-redirect-note>
-          {harness} cannot interrupt a running turn, so a redirect also lands at the next resume.
-        </Hint>
-      )}
-      <div className="controls flex flex-wrap items-center justify-between gap-2">
-        <HStack gap={2} wrap>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            data-op="context"
-            disabled={busy || settled || empty}
-            onClick={() => send('context', { text }, 'Context accepted.')}
-          >
-            Add context
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            data-op="redirect"
-            disabled={busy || settled || empty}
-            onClick={() => send('redirect', { instruction: text }, 'Redirect accepted.')}
-          >
-            Redirect
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            data-op="pause"
-            disabled={busy || status !== 'running'}
-            onClick={() => onOperate('pause', {}, 'Pause requested after the current turn.')}
-          >
-            Pause
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="text-tone-error-foreground hover:bg-tone-error-soft hover:text-tone-error-foreground"
-            data-op="abort"
-            disabled={busy || settled}
-            onClick={() => onOperate('abort', {}, 'Abort requested.')}
-          >
-            Abort node
-          </Button>
-          {/* Only for a phase that has stopped, because that is the only state
-              it means anything in — and the only one where the operator is
-              otherwise left with "re-run the whole plan". */}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            data-op="retry"
-            disabled={busy || status !== 'failed'}
-            onClick={() => onOperate('retry', {}, 'Retrying this phase, and unblocking what it held up.')}
-          >
-            Retry phase
-          </Button>
-        </HStack>
-        {declared.pty && (
-          <Button
-            type="button"
-            variant={takingOver ? 'secondary' : 'outline'}
-            size="sm"
-            data-op="takeover"
-            disabled={settled}
-            onClick={onTakeOver}
-          >
-            <TerminalIcon />
-            {takingOver ? 'Detach' : 'Take over'}
-          </Button>
-        )}
-      </div>
-      {declared.pty ? (
-        <Hint className="muted" data-takeover>
-          Take over interrupts the headless session, opens {harness} in a terminal on the same
-          session, and resumes it headless when you detach.
-        </Hint>
-      ) : (
-        <Hint className="muted" data-takeover>
-          Take over: {harness} has no interactive takeover.
-          {capabilities === null
-            ? ' Capabilities for this harness are unknown and assumed absent.'
-            : ''}
-        </Hint>
-      )}
-    </Panel>
-  )
-}
-
-function delivery(harness: string, status: NodeStatus, inject: boolean): string {
-  if (status === 'done' || status === 'failed') {
-    return 'This node has settled. Steering it now would be ignored.'
-  }
-  if (status !== 'running') {
-    return 'This node is not in a turn: your message is queued and delivered on the next resume.'
-  }
-  return inject
-    ? `Delivered straight into the running ${harness} session.`
-    : `${harness} cannot join a running turn: your message is queued and delivered on the next resume.`
 }
 
 /**
