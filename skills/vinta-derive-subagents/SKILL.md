@@ -61,7 +61,8 @@ body: |
   - Before writing (read AGENTS.md, plan body, neighbor code).
   - Conventions (pulled from AGENTS.md — code style, separation of concerns, tenancy, framework rules).
   - Loop (inner: lint → scoped tests → typecheck/build; outer: full build + full tests + e2e for UI).
-  - Report shape.
+  - When you need a human decision (see "Needs-input contract" below).
+  - Report shape (status SUCCESS | FAILURE | NEEDS_INPUT).
   - Will not (branch, push, PR, co-author trailer, skip outer gate, ...).
 ```
 
@@ -110,9 +111,20 @@ body: |
   Sections:
   - Task shapes (reviewer finding verbatim, or test/gate failure).
   - Loop (read surrounding, narrowest change, inner loop, outer gate).
-  - Report (changes, did NOT touch, out-of-scope spotted, notes).
+  - When you need a human decision (see "Needs-input contract" below).
+  - Report (status SUCCESS | FAILURE | NEEDS_INPUT; changes, did NOT touch, out-of-scope spotted, notes).
   - Will not (silence tests, downgrade asserts, scope expansion, ...).
 ```
+
+### Needs-input contract (every read-write agent body)
+
+Sub-agents cannot call the harness's question tool — Claude Code and Codex block it outside the root session — and a question written into a report gets lost in the transcript. Every read-write agent body (implementer, fixer, every stack specialist) therefore carries a **When you need a human decision** section that says, in the project's words:
+
+- Don't guess on decisions the plan or task doesn't settle (ambiguous requirement, license-blocked dependency, out-of-scope change, destructive step), and don't end with a prose question.
+- Stop at a clean point and return `status: NEEDS_INPUT` with `blocked_on`, `done_so_far`, and a `questions:` block: 1–4 questions, each with a `header` of 12 characters or fewer, the full `question` carrying its evidence (`file:line`, package, error), `multi_select`, and 2–4 `options` (`label` of 1–5 words + `description` of the consequence; recommended first with ` (Recommended)`; no "Other" option).
+- The orchestrator relays the block as a clickable prompt and resumes the agent with the answers.
+
+Copy the shape from the **Asking the human** section of the project's `AGENTS.md` rather than paraphrasing it — the orchestrating skills (`implement-phase`, `review-phase`, `amend-plan`) parse that exact shape.
 
 ## Stack-specific specialists (user-supplied)
 
@@ -122,8 +134,8 @@ For each stack the inventory matched, surface to the user:
 
 > Detected stack `<X>`. Notes for this stack list these agent categories: A, B, C. Do you have existing agent templates for any of these? If yes, point me at the path / URL. If no, we'll record them as known gaps.
 
-Use `AskUserQuestion`-style prompts:
-- *"Do you have an agent template for `<category>` (e.g. `deploy-author` for Medplum, `migration-author` for Django)?"* → `Yes — at this path/URL`, `No — record as gap`, `Skip for now`.
+Ask via `AskUserQuestion` (your harness's structured question tool — see [asking-the-human](../vinta-write-agents-md/resources/asking-the-human.md)), batching up to 4 categories per call:
+- *"Do you have an agent template for `<category>` (e.g. `deploy-author` for Medplum, `migration-author` for Django)?"* → `Yes — I'll give the path/URL` (the free-text field takes the path), `No — record as gap`, `Skip for now`.
 
 When the user provides a path:
 1. Read the source agent YAML (or `.md` if the user's library uses Claude-style markdown — convert to the YAML schema documented above before saving).
@@ -164,6 +176,7 @@ The setup script ([vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup
 - **`access` matches reality.** Reviewer is `read-only`. Implementer / fixer / deploy-author / migration-author are `read-write` (they need to edit code).
 - **No PR creation by any agent.** Per Step 0 interview policy. The "Will not" section in every agent body must say so explicitly.
 - **No AI co-author trailers in commits.** Per Step 0 interview policy. Repeat in every read-write agent body.
+- **Every read-write agent body carries the needs-input contract.** See [Needs-input contract](#needs-input-contract-every-read-write-agent-body). An agent without it ends blocked runs with a prose question nobody sees.
 - **Stack templates are starting points.** Customize aggressively to the target project; don't ship copy-pasted Vinta AI Workflow-specific paths.
 - **No `§N` shorthand in any agent body, prompt, or "look for" list.** Reference plan or spec sections by their full name (`Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `Phased Rollout`, etc.). `§N` references are unreadable for humans and shift when section numbering changes.
 
@@ -190,3 +203,4 @@ After writing all YAMLs:
 2. `node ai-tools/scripts/setup-ai-tools.mjs` — runs cleanly, generates vendor copies.
 3. Open each generated vendor file (Claude / Cursor / Copilot / Codex), spot-check that body content + frontmatter look right.
 4. Read each YAML body end-to-end: does it tell the agent what to do in this project? Specific commands? Specific conventions? Specific violations to flag?
+5. Every `access: read-write` YAML mentions `NEEDS_INPUT` in its body; read-only agents (e.g. `reviewer`) don't need to.

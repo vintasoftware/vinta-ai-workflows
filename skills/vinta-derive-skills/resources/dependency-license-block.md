@@ -24,28 +24,27 @@ Quick lookup:
 If the license is in the forbidden list AND the `(package, license)` pair is **not** listed under **Approved overrides** in AGENTS.md:
 
 1. Stop. Do not run the install command.
-2. Surface the violation to the user with: package name, SPDX identifier, why it's forbidden, link to the upstream license.
-3. Offer alternatives (search the ecosystem for an MIT / Apache-2.0 / BSD-licensed equivalent) before asking for an override.
+2. Search the ecosystem for an MIT / Apache-2.0 / BSD-licensed equivalent first, so the question can name one.
+3. Ask the human (see **Asking the human** in [AGENTS.md](../../../AGENTS.md)). As a sub-agent you cannot ask directly: return `status: NEEDS_INPUT` with one question. Its text carries the package name, SPDX identifier, why it's forbidden, and the upstream license link. Options: `Use <alternative> (Recommended)` (omit when none was found), `Implement without it`, `Record an override`. The orchestrator shows it as a clickable prompt and resumes you with the answer.
 4. If the user grants a one-off override, the orchestrator must record it in `policies.dependency_licenses.allowed_overrides[]` of `.vinta-ai-workflows.yaml` (package + SPDX + one-line reason) before re-running the install. Undocumented overrides leak into the diff and the reviewer agent will flag them.
 
 **License unknown / undeclared.** When the lookup above returns no license, an empty value, `UNKNOWN`, `SEE LICENSE IN <file>`, or only an unstructured `LICENSE` file in the repo with no SPDX identifier, treat it as a **policy decision the user owns** — don't guess, don't auto-infer, don't fall back to "assume MIT". The package may be unlicensed (all-rights-reserved by default in most jurisdictions), proprietary, or simply missing metadata.
 
 1. Stop. Do not run the install command.
-2. Surface to the user: package name, what was found (e.g. "the `license` field is absent in `package.json`", "PyPI metadata returned `UNKNOWN`", "no LICENSE file in the repo"), the upstream repo / registry URL so the user can verify.
-3. Ask via `AskUserQuestion`: `Skip — find a licensed alternative`, `Treat as forbidden — refuse install`, `Treat as allowed — record an override` (the third option only when the user has independently confirmed the license off-channel; record the resolved SPDX in `allowed_overrides[]` with the source in the `reason` field, e.g. `"unlicensed but author confirmed MIT via GitHub issue #42"`).
-4. Don't add the dep until the user picks one of the three.
+2. Ask the human. As a sub-agent, return `status: NEEDS_INPUT` with one question (the orchestrator relays it as a clickable prompt; see **Asking the human** in [AGENTS.md](../../../AGENTS.md)). The question text carries the package name, what was found (e.g. "the `license` field is absent in `package.json`", "PyPI metadata returned `UNKNOWN`", "no LICENSE file in the repo"), and the upstream repo / registry URL so the user can verify. Options: `Find alternative (Recommended)`, `Treat as forbidden`, `Record an override` (only when the user has independently confirmed the license off-channel; record the resolved SPDX in `allowed_overrides[]` with the source in the `reason` field, e.g. `"unlicensed but author confirmed MIT via GitHub issue #42"`).
+3. Don't add the dep until the user picks one of the three.
 
 Transitive deps follow the same rule, but checking every transitive license at install time is impractical — the project's CI (or a separate license-audit run) handles the deep walk. The subagent's responsibility is the **direct** add.
 ```
 
 ### `enforcement: warn`
 
-Identical body, with two edits to the **forbidden-license** branch:
+Identical body, with these edits to the **forbidden-license** branch:
 
 - Step 1 changes to: *"Proceed with the install, but record the violation."*
-- Step 4 reframes the override entry as *"the team should still review and either record an `allowed_overrides` entry or remove the dep."*
+- Step 3 is skipped (no question — the install goes ahead), and step 4 reframes the override entry as *"the team should still review and either record an `allowed_overrides` entry or remove the dep."*
 
-The **License unknown / undeclared** branch is **unchanged** — even in `warn` mode the subagent must stop and ask. Unknown ≠ permissive, and the project has no way to record an override without a confirmed SPDX identifier; treating unknown as "warn + proceed" would silently take on potentially-proprietary code.
+The **License unknown / undeclared** branch is **unchanged** — even in `warn` mode the subagent must stop and return `NEEDS_INPUT`. Unknown ≠ permissive, and the project has no way to record an override without a confirmed SPDX identifier; treating unknown as "warn + proceed" would silently take on potentially-proprietary code.
 
 ### `enforcement: off`
 

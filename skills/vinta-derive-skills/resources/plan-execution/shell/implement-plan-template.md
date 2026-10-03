@@ -36,7 +36,7 @@ Execution counterpart to [plan-feature](../plan-feature/SKILL.md). Plan = contra
 
 Parse once, reuse for every phase:
 
-1. **Identify plan file.** Ask user which plan (path or feature name). Feature name: `ls {{PLAN_DIR}}/` + grep; confirm before proceeding.
+1. **Identify plan file.** When the user's prompt names a path, use it. Otherwise `ls -t {{PLAN_DIR}}/*_IMPLEMENTATION_PLAN.md` (grep for the feature name when one was given) and ask via `AskUserQuestion` (header `Plan file`), offering the 2–4 best matches, most recent first, each described by its feature name + date + whether a `TRACKING_*.md` exists. The free-text field covers any other path. A single unambiguous match still gets the question, with that plan as the only option plus `Cancel`.
 2. **Extract structured fields**, in order:
    - **Feature name** + **plan id** — derived from filename's `FEATURE_NAME` portion only: strip `YYYY-MM-DD-` prefix + `_IMPLEMENTATION_PLAN.md` suffix. Kebab variant for branch names.
    - **Goals + Non-goals** section — verbatim, used in every phase prompt.
@@ -46,7 +46,7 @@ Parse once, reuse for every phase:
    - **Risk & Rollout Notes**, **Open Questions**, **Touch List** sections — keep available; include in phase prompts only when relevant. The **Touch List** additionally feeds the file-overlap warning in the graph step below.
 3. **Classify each phase**: `is_cross_repo`, `is_flag_removal` — the conductor does NOT auto-execute these (see [Cross-repo phases](#cross-repo-phases) + [Flag-removal phase](#flag-removal-phase-always-out-of-scope)).
 4. **Build the dependency graph** — see [Build the phase dependency graph](#build-the-phase-dependency-graph) below. Do this before the opt-in questions: the answer to the parallel-execution question depends on whether the graph has any wave wider than one phase.
-5. **Ask the user the opt-in questions** via `AskUserQuestion`. Defaults are project-specific (see below); record every answer in tracking under `run_options`:
+5. **Ask the user the opt-in questions** via `AskUserQuestion`, batched into as few calls as the tool allows (Claude Code takes 4 questions per call; Codex takes 3). Put each question's default first with ` (Recommended)` on its label. Defaults are project-specific (see below); record every answer in tracking under `run_options`:
 
    a. **Pause between phases?** *"Do you want me to pause and wait for confirmation after each phase, before starting the next one? Lets you review the diff / branch / PR / tracking summary before moving on."* Options: `Auto-flow (default) — keep going phase to phase`, `Pause between phases — wait for go after each one`.
 
@@ -70,7 +70,7 @@ Parse once, reuse for every phase:
 
 6. **Confirm with user before starting.** Show plan path, phase list (id + title + tier + cross-repo/flag-removal flags + e2e flag), phases this skill will execute vs defer, **the wave schedule** (which phases run together, and what each one waits on), {{BRANCH_NAMING_PATTERN_SUMMARY}}, captured `run_options.pause_between_phases` + `run_options.generate_inline_comments` + `run_options.use_worktree` + `run_options.full_test_suite` + `run_options.parallel_phases` + `run_options.max_parallel_lanes`{{E2E_RUN_OPTION_CONFIRM}}{{COMMIT_STRATEGY_CONFIRM_NOTE}}{{PR_REMINDER_LINE}}.
 
-   Wait for "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`. Worktree isolation follows `run_options.use_worktree`. Outer-gate test scope follows `run_options.full_test_suite`. Concurrency follows `run_options.parallel_phases` + `run_options.max_parallel_lanes`.{{E2E_RUN_OPTION_TRAILER}}{{COMMIT_STRATEGY_STEP0_TRAILER}}
+   Then ask via `AskUserQuestion` (header `Start run`): `Start the run (Recommended)` (name the phases the scheduler dispatches first), `Change run options` (re-ask the opt-in questions, then show this summary again), `Cancel` (exit; nothing written). Never ask the user to type "go". After that, the per-phase pause behavior follows `run_options.pause_between_phases`. Inline-comment drafting follows `run_options.generate_inline_comments`. Worktree isolation follows `run_options.use_worktree`. Outer-gate test scope follows `run_options.full_test_suite`. Concurrency follows `run_options.parallel_phases` + `run_options.max_parallel_lanes`.{{E2E_RUN_OPTION_TRAILER}}{{COMMIT_STRATEGY_STEP0_TRAILER}}
 
 <!-- include: partials/parallel-lanes.md#DAG_PARSE -->
 
@@ -104,7 +104,9 @@ Invoke [implement-phase](../implement-phase/SKILL.md), passing the phase record,
 
 **Prior-phase context is dependency-scoped, not chronological.** A lane must not be told about a sibling phase that happens to have finished first — that work is not in its base branch, so describing it as "already implemented" makes the implementer code against files it cannot see. Pass the `phase-{id}.md` summaries for the phase's **transitive dependency closure**, and nothing else. A wave-1 phase gets "Nothing yet — this phase starts from `<BASE_BRANCH>`."
 
-**Model escalation.** implement-phase escalates one tier + retries once on a clear capability gap. After Tier 4 fails, it stops and hands back the failure — update tracking with `❌`, post the report to the user, ask how to proceed. Don't silently re-derive tier.
+**Model escalation.** implement-phase escalates one tier + retries once on a clear capability gap. After Tier 4 fails, it stops and hands back the failure — update tracking with `❌`, post a 3–5 line digest of the report (what failed, last gate output, files touched), then ask via `AskUserQuestion` (header `Phase fail`): `Amend the plan (Recommended)` (hand over to [amend-plan](../amend-plan/SKILL.md) to split or reshape the phase), `Retry with guidance` (the free-text answer is appended to the phase prompt as `## Guidance from the human`), `Skip phase` (mark deferred in tracking, continue — only when later phases don't depend on it), `Stop the run`. Don't silently re-derive tier.
+
+**Sub-agent questions.** implement-phase and review-phase relay any `status: NEEDS_INPUT` report as a clickable prompt before they return (see [Relay a sub-agent's questions](../implement-phase/SKILL.md#relay-a-sub-agents-questions-needs_input)). The conductor never sees a prose question from a sub-agent; if one slips through (a report that ends in a question without the `NEEDS_INPUT` block), apply the same relay: turn it into an `AskUserQuestion` call with 2–4 options drawn from the report, never forward it as prose.
 
 ### 1b. Review
 
@@ -167,13 +169,13 @@ User invokes the skill against a partially-done plan:
 1. Read `{{PLAN_DIR}}/TRACKING_{plan-id}/run.md` plus every `phase-*.md` beside it. Extract `run_options.*` — including the lane pool and the resolved dependency graph. Never re-prompt the Step 0 opt-in questions on resume; the original answers stick. **Legacy single-file tracking** (`TRACKING_{plan-id}.md`) → migrate it into the directory first, per [Tracking directory](#1d-update-tracking).
 2. **Rebuild the graph from the plan file and diff it against the recorded one.** The plan may have been edited between runs. A changed `**Depends on**:` line on a phase that is already `done` is a warning (its branch is already based on the old graph — surface it); on a pending phase it simply takes effect.
 3. **Lane pool resume.** When `run_options.use_worktree = true`, for **every** lane in the pool plus the integration worktree:
-   - Confirm it still exists (`git worktree list | grep <workroot>`). Missing → ask the user: `Reprovision that lane`, `Shrink the pool and carry on with fewer lanes`, `Stop`.
+   - Confirm it still exists (`git worktree list | grep <workroot>`). Missing → ask via `AskUserQuestion`: `Reprovision that lane`, `Shrink the pool and carry on with fewer lanes`, `Stop`.
    - Confirm its summary file still parses; if not, regenerate from the existing worktree state.
    - **Re-probe `SANDBOX_TIER`** (`command -v sandbox-exec || command -v bwrap`) — a resume may run on a different machine than the original provisioning. Update each lane's `sandbox_tier` in `run.md` before spawning; the implement-phase spawn wrapping follows the re-probed value.
    - **Reset each lane's DB before reuse**, exactly as a mid-run reassignment would ([Resetting a lane worktree between phases](#resetting-a-lane-worktree-between-phases)). A lane resumed with a half-applied migration set is the single most likely way a resumed run goes wrong.
    - Never grow the pool on resume beyond what `run.md` recorded — a wider pool changes the schedule the user approved.
 4. `git -C <integ.workroot> branch -a | grep plan/{plan-id-kebab}` to detect already-pushed phase, `integ-`, and `wave-` branches. A phase whose branch exists and whose `phase-{id}.md` says `done` is green; a phase whose branch exists without a `phase-{id}.md` was interrupted mid-flight — treat it as **not** done, delete the branch, and re-run it.
-5. Cross-reference with the plan's phase list, recompute the ready set, and confirm the resumption point with the user — showing which phases are done, which are blocked by a failure, and what the scheduler will dispatch first.
+5. Cross-reference with the plan's phase list, recompute the ready set, and confirm the resumption point via `AskUserQuestion` (header `Resume`) — the question shows which phases are done, which are blocked by a failure, and what the scheduler will dispatch first. Options: `Resume (Recommended)`, `Re-run <phase id>` (when a phase was interrupted or failed), `Stop`. Decisions already recorded in tracking (the `decisions` lists from relayed sub-agent questions) are not asked again.
 
 ## Step 2 — Final report
 
@@ -203,6 +205,7 @@ After the scheduler loop exits — every executable phase is `done`, `failed`, o
 - **Feature flags = gates, not toggles for tests.**
 - **Never remove a feature flag from this skill.**
 - **Stop on Tier-4 failure.**
+- **Every stop for human input is a structured question.** Use `AskUserQuestion` (see **Asking the human** in [AGENTS.md](../../../AGENTS.md)) with 2–4 concrete options, the recommended one first. Never end a turn with a prose question or "reply go". Sub-agents return `NEEDS_INPUT`; the orchestrator relays it.
 - **Honor opt-in flags.** `run_options.pause_between_phases` controls the [pause gate](#1g-pause-gate-opt-in); `run_options.generate_inline_comments` controls whether {{INTEGRATE_PHASE_DISPATCH}} drafts inline comments (always writes the file when that step runs at all — empty comments when off); `run_options.use_worktree` controls whether the [Resolve WORKROOT step](#step-05--resolve-workroot) provisions worktrees and thus what `WORKROOT` / `SANDBOX_TIER` resolve to; `run_options.full_test_suite` controls the outer-gate test scope ([Implement](#1a-implement) + [Review](#1b-review) Layer 1) — scoped suite by default, full repo suite when `true`; `run_options.parallel_phases` + `run_options.max_parallel_lanes` control how many phases the [scheduler](#dispatch-loop) keeps in flight.{{E2E_RUN_OPTION_RULE}}
 - **The graph decides order, not the plan's numbering.** Never run a phase before every id in its `**Depends on**:` set is green, and never serialize two phases the graph says are independent just because one has a lower number.
 - **A lane only ever knows its own dependencies.** Pass a phase the tracking summaries of its transitive dependency closure and nothing more. Telling a lane about a sibling's work that is not in its base branch makes it code against files it cannot see.
@@ -232,5 +235,6 @@ After the scheduler loop exits — every executable phase is `done`, `failed`, o
 - [ ] `TRACKING_{plan-id}/phase-{id}.md` written on this phase's own branch; `run.md` updated by the conductor only; no lane touched another lane's file.
 - [ ] Wave branch built + `waves/wave-{N}.md` written when this phase completed its wave; merge conflicts resolved by a fixer, never by the conductor, and the outer gate re-run on the merged tree.
 - [ ] One-paragraph user update sent per phase completion (PR URL or pending-file path included; lane named; what the scheduler picked up next).
+- [ ] Every `NEEDS_INPUT` report relayed as an `AskUserQuestion` prompt; answers recorded in tracking; no prose question left at the end of a turn.
 - [ ] If `run_options.pause_between_phases = true`: stopped dispatching, let in-flight lanes drain, prompted user (`Continue` / `Pause` / `Stop`); honored answer. Else: next ready phase dispatched immediately.
 - [ ] On run end: final wave branch built; tracking directory deleted; plan PR opened (final wave branch → `<BASE_BRANCH>`, every phase + integration PR listed in merge order) when every phase is done and the strategy opens per-phase PRs; final summary leads with the plan PR URL and lists wave + phase branches{{FINAL_CHECKLIST_PR_NOTE}}, failed phases with the dependents they blocked, every lane's teardown command; any `status: pending` PR-context files listed with publish command; `/schedule` offer for flag-removal if applicable.

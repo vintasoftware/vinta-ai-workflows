@@ -19,19 +19,21 @@ Drop irrelevant groups; don't drop questions inside relevant group:
 
 ### Use `AskUserQuestion` for finite-choice questions
 
-Every question in groups B–J with discrete answer set — yes/no, named option, finite enum — **must** go through `AskUserQuestion` tool, not free-form prose. Why:
+Every question in groups B–J with discrete answer set — yes/no, named option, finite enum — **must** go through `AskUserQuestion` tool, not free-form prose. `AskUserQuestion` = Claude Code's name; on other harnesses use the equivalent structured question tool (OpenCode `question`, Codex `request_user_input`, Cursor `AskQuestion`, Copilot `askQuestions`, Gemini `ask_user` — see **Asking the human** in [AGENTS.md](../../../AGENTS.md)). Why:
 
 - User picks; no retyping context.
 - Multiple related questions ride one `AskUserQuestion` call (tool accepts list of questions, each own option set). Batch per group: one call for the **Data model & storage** group, one for the **API surface** group, etc.
-- Short option label per choice; rationale ("default: per-user — confirm or override") goes in question header, not option labels.
+- Short option label per choice; rationale ("default: per-user — confirm or override") goes in question text, not option labels. Default option first, label ends ` (Recommended)`.
+- Max 4 questions per call (3 on Codex) — split bigger groups into consecutive calls.
+- No "Other" option — tool always adds free-text field.
 
-Plain prose (no tool) **only** when answer genuinely open-ended: "walk me through user journey", "what success look like in your words", "what deadline driver". Group A mostly prose; B–J mostly closed-choice.
+**Open-ended questions ride the tool too when you can propose candidates.** Spec, codebase, or earlier answers usually suggest 2–4 plausible answers ("Primary actor?" → roles found in code; "Success metric?" → metrics the spec names). Offer those; free-text field covers the rest. Plain prose (no tool) **only** when no candidate exists at all: "walk me through user journey", "what deadline driver". Group A often prose; B–J closed-choice.
 
 ### Iterative asking when no `AskUserQuestion` (or question open-ended)
 
 Two cases force iterative single-question mode:
 
-1. **`AskUserQuestion` genuinely unavailable** (harness errored on call, not deferred). Try once — confirm actually missing, not schema-deferred.
+1. **No structured question tool** (harness errored on call, not deferred). Try once — confirm actually missing, not schema-deferred. Then each closed-choice question becomes numbered option list ending "Reply with option number, or type your own answer".
 2. **Question genuinely open-ended** (no finite option set — narrative, journey, free-form motivation, deadline date).
 
 Both cases: **ask one question at a time, wait for answer, then ask next.** Don't dump 5 open questions in one paragraph — user reads three, answers two, third gets lost. Iterate:

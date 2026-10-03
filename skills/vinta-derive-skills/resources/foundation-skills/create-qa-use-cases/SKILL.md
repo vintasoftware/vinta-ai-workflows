@@ -35,7 +35,7 @@ For everything **not** answered by the active spec/plan, ask via `AskUserQuestio
 
 **A. App boundaries**
 1. How many apps does this project have, and what are their names? (e.g. `Patient App`, `Provider App`, `Admin Console`, single SaaS app named `<Product>`.)
-2. ID prefix per app — typically a 2-letter abbreviation. Defaults: `PA` for "patient/public app", `PR` for "provider/admin app". Confirm or override.
+2. ID prefix per app — typically a 2-letter abbreviation. `AskUserQuestion` per app with the derived abbreviation first (` (Recommended)`), e.g. `PA` for "patient/public app", `PR` for "provider/admin app"; free text overrides.
 3. Does any app have unauthenticated routes that need use-case entries (registration, public referral, marketing landing)? Those entries note `(unauthenticated)` in the role.
 
 **B. Roles**
@@ -49,7 +49,7 @@ For everything **not** answered by the active spec/plan, ask via `AskUserQuestio
 
 **D. ID assignment**
 1. Order: append in the order use cases appear in the active spec (**Decisions → Use-cases** first, then any plan-only phases). Don't reshuffle.
-2. Default starting numbers `PA001` / `PR001`. Confirm or override.
+2. Starting numbers: `AskUserQuestion` with `Start at 001 (Recommended)` and, when existing ids were found elsewhere (spec filenames, tickets), `Continue after <highest id>`.
 
 ### Clarity loop
 
@@ -211,7 +211,7 @@ or reuse a retired ID. The e2e spec filenames mirror these IDs one-to-one.
 ## Pitfalls
 
 - **Overwriting an existing file.** Bootstrap is one-shot. If the file exists, append via add-e2e-test, don't regenerate — existing ids are referenced by spec filenames + bug tickets and can't move.
-- **Inventing use cases from project name alone.** If the spec/plan doesn't describe a flow, don't add a stub. Empty checklist + no real flow = noise. Ask the user; if they don't have one, leave it out.
+- **Inventing use cases from project name alone.** If the spec/plan doesn't describe a flow, don't add a stub. Empty checklist + no real flow = noise. Ask via `AskUserQuestion` (`Leave it out (Recommended)`, `I'll describe the flow`); if they don't have one, leave it out.
 - **Mixing role-coded admin with project-admin.** Many systems have both (a "Clinical Ops" role + a flag like `ProjectMembership.admin === true`). List both rows in the role table if both apply — they map to different storage states / permission paths in tests.
 - **Putting implementation details in steps.** "Create QuestionnaireResponse with linkId=first-name" reads to QA as gibberish. "Fill out the intake form" is the right level. Implementation details belong in the e2e spec or seed helper, not here.
 - **Numbering by importance.** Numbers reflect order of arrival, not priority. PA047 isn't more important than PA003 — it just came later. Don't try to keep "core" use cases at low numbers; that path leads to renumbering.

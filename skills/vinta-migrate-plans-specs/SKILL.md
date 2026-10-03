@@ -70,7 +70,7 @@ Search the repo for plan/spec-shaped markdown. Prioritize signal over recall —
 - Generated docs (`docs/api/`, `docs/generated/`).
 - Files already at the canonical path *and* canonical format — they're done.
 
-Output a candidate list. If empty → report "no plan/spec docs found" and stop. If the user expected something to be there, ask them where to look.
+Output a candidate list. If empty → report "no plan/spec docs found" and stop. If the user expected something to be there, ask where to look via `AskUserQuestion`, offering the 2–4 likeliest doc directories you saw while scanning (`docs/`, `wiki/`, …); the free-text field takes any other path.
 
 ### 3. Classify each candidate (PLAN vs SPEC)
 
@@ -85,7 +85,7 @@ For each candidate, decide its bucket. Heuristics:
 | Both signals strongly present | `unclear — ask` |
 | Neither | `unclear — ask` |
 
-Don't guess on `unclear — ask`. Surface it to the user with a snippet of the file and let them pick.
+Don't guess on `unclear — ask`. Show a short snippet of the file, then ask via `AskUserQuestion` (header `Doc type`, the file path in the question): `PLAN`, `SPEC`, `Skip — leave it in place`, with the likelier class first and marked ` (Recommended)`. Batch up to 4 unclear files per call.
 
 ### 4. Derive the date prefix
 
@@ -95,7 +95,7 @@ For each candidate, prefer in this order:
 2. **Date in the doc body** (e.g. `Date: 2025-11-15`, `Authored: ...` block).
 3. **Git log first-commit date for the file** (`git log --diff-filter=A --follow --format=%aI -- <path> | tail -1`).
 4. **File mtime** as a last resort.
-5. **Ask the user** if the result still looks wrong (e.g. mtime is today because the file got touched by a `find -exec` last week).
+5. **Ask the user** via `AskUserQuestion` if the result still looks wrong (e.g. mtime is today because the file got touched by a `find -exec` last week) — one option per date you found, with its source in the description; the free-text field takes any other date.
 
 Always show the chosen date + its source in the proposal so the user can override before accepting the move.
 
@@ -178,10 +178,10 @@ For each accepted candidate:
 2. `git mv <old> ai-plans/<new>` (or plain `mv` if not in a git repo).
 3. Search the repo for inbound references (`grep -rln "<old-relative-path>" --exclude-dir={node_modules,.git,dist,build}`). For each hit:
    - Rewrite the path text to the new path.
-   - Show the rewrite diff inline; ask once whether to apply (default `yes`, `no`, `edit`).
+   - Show the rewrite diff inline; ask once via `AskUserQuestion` whether to apply: `Apply (Recommended)`, `Skip`, `Edit` (the free-text field takes the corrected text).
 4. Log: `[moved] <old> → ai-plans/<new>`.
 
-If the source file had a sidecar (e.g. `docs/features/checkout/diagram.png` next to the spec): ask the user whether to move it alongside (sub-folder `ai-plans/2025-11-15-CHECKOUT/`) or leave in place. Default: leave in place — the canonical layout is flat markdown.
+If the source file had a sidecar (e.g. `docs/features/checkout/diagram.png` next to the spec): ask via `AskUserQuestion`: `Leave in place (Recommended)` (the canonical layout is flat markdown), `Move alongside` (sub-folder `ai-plans/2025-11-15-CHECKOUT/`).
 
 ### 9. Final report
 
@@ -213,8 +213,8 @@ When invoked without explicit dry-run intent, still default to **showing all pro
 - **Wrong date prefix.** mtime is the worst source — anything that touched the file (a sweep, a format-on-save) clobbers it. Prefer git log first-commit date. Always show the source so the user can override.
 - **Breaking inbound references.** Wikis, READMEs, prior PRs, and CHANGELOG entries reference plan/spec paths. Run grep for inbound refs *before* moving, show the user what else will change. Apply rewrites in the same batch as the move.
 - **Splitting a paired spec + plan.** When a folder has both, lock the `FEATURE_NAME` so they share the prefix. Don't let the user accidentally rename `spec.md` → `CHECKOUT_FLOW_SPEC.md` and `plan.md` → `CHECKOUT_PLAN.md` (different names break grouping).
-- **Touching ADRs that are decision records, not specs.** `docs/adr/` is its own genre. Default to skip; ask the user before reclassifying.
-- **Renaming inside a feature branch.** Concurrent branches that haven't rebased will hit messy conflicts on next merge. Surface this risk to the user before applying — they may want to coordinate or do migration on `main` first.
+- **Touching ADRs that are decision records, not specs.** `docs/adr/` is its own genre. Default to skip; ask (`AskUserQuestion`: `Skip (Recommended)`, `Reclassify as SPEC`) before reclassifying.
+- **Renaming inside a feature branch.** Concurrent branches that haven't rebased will hit messy conflicts on next merge. Ask via `AskUserQuestion` before applying: `Migrate on main first (Recommended)`, `Migrate on this branch anyway`.
 - **Generated docs.** OpenAPI, Storybook MDX, Typedoc output, etc. — exclude by path, don't classify.
 - **Stale `_IMPLEMENTATION_PLAN` suffix.** Some Vinta projects historically used `_IMPLEMENTATION_PLAN.md`. The new standard is `_PLAN.md`. Migrate during this run; flag the foundation skill bodies (project's `ai-tools/skills/plan-feature/SKILL.md`) for alignment if they still mention the old suffix.
 

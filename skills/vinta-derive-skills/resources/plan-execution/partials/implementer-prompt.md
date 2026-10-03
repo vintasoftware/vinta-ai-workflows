@@ -1,4 +1,4 @@
-<!-- Partial: implementer-prompt — the token-efficient per-phase prompt. FULL = the forward-implementation prompt used by implement-phase. INNER_OUTER_LOOP = the read→edit→inner→outer verification steps (1–6), reused verbatim by amend-plan's 4b (which appends its own amend-specific commit / no-push tail instead of the commit-strategy block). The {If run_options.use_worktree = true:} and {If run_options.parallel_phases = true:} markers are runtime gates the agent reads at execution time; derive-skills strips both entirely when foundation_skills.prepare-worktree is disabled (use_worktree can only ever be false, and parallel execution requires a worktree). -->
+<!-- Partial: implementer-prompt — the token-efficient per-phase prompt. FULL = the forward-implementation prompt used by implement-phase. NEEDS_INPUT = the "return your questions, don't ask in prose" contract every phase-work subagent prompt carries (FULL includes it; amend-plan's 4b includes it on its own). INNER_OUTER_LOOP = the read→edit→inner→outer verification steps (1–6), reused verbatim by amend-plan's 4b (which appends its own amend-specific commit / no-push tail instead of the commit-strategy block). The {If run_options.use_worktree = true:} and {If run_options.parallel_phases = true:} markers are runtime gates the agent reads at execution time; derive-skills strips both entirely when foundation_skills.prepare-worktree is disabled (use_worktree can only ever be false, and parallel execution requires a worktree). -->
 
 <!-- block-begin: FULL -->
 ```
@@ -55,11 +55,13 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 
 {{DEPENDENCY_LICENSE_BLOCK}}
 
+<!-- include: partials/implementer-prompt.md#NEEDS_INPUT -->
+
 <!-- include: partials/implementer-prompt.md#INNER_OUTER_LOOP -->
 {{PER_PHASE_COMMIT_BLOCK}}
 
 ## Required output (single final report)
-- Status: SUCCESS or FAILURE (and why).
+- Status: SUCCESS, FAILURE (and why), or NEEDS_INPUT (with the `questions:` block above).
 - Files created/modified (paths only).
 - 5–15 line summary of what you implemented and key decisions.
 {{E2E_REPORT_FIELD}}
@@ -69,6 +71,36 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 
 **Don't** dump the full plan into every prompt. Dependency-closure tracking summaries replace prior phases as context. Always include the **Goals + Non-goals** and **Guiding Decisions** sections plus the relevant **Data Model Changes** subsection — load-bearing decisions; phases reach back frequently.
 <!-- block-end: FULL -->
+
+<!-- block-begin: NEEDS_INPUT -->
+## When you need a human decision
+You run as a subagent. You cannot reach the human, and a question written into
+your report gets lost in the transcript. When you hit a decision the plan does not
+settle and you should not make alone, do not guess and do not finish with a prose
+question. Examples: an ambiguous or contradictory requirement, a dependency the
+license policy blocks, a change outside this phase's scope, a destructive or
+irreversible step.
+
+Stop at a clean point. Finished, verified work may stay committed; leave
+unfinished work uncommitted. Then return this as your whole final report:
+
+    status: NEEDS_INPUT
+    blocked_on: <one line: the decision you need>
+    done_so_far: <one line: what is finished, and which files it touched>
+    questions:        # 1-4 questions; each must make sense without the transcript
+      - header: <12 chars max, e.g. "License">
+        question: <full question ending in "?", with the evidence needed to answer it: file:line, package, error line>
+        multi_select: false
+        options:      # 2-4 options; recommended first, its label ending in " (Recommended)"
+          - label: <1-5 words>
+            description: <what happens if the human picks this>
+          - label: <1-5 words>
+            description: <what happens if the human picks this>
+
+Do not add an "Other" option. The human always gets a free-text field. The
+orchestrator shows your questions as a clickable prompt, then resumes you (or
+spawns a new agent) with the answers.
+<!-- block-end: NEEDS_INPUT -->
 
 <!-- block-begin: INNER_OUTER_LOOP -->
 ## Working instructions

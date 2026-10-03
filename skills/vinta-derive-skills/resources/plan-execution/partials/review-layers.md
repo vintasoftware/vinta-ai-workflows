@@ -76,6 +76,17 @@ the brief again.
    has not seen the work before escalating a tier or stopping.
 4. After the fixer returns, redo Layer 1 in full + the affected portion of Layer 2.
 5. Loop until Layers 1, 2, 3 are all clean.
+6. **A fixing agent that returns `NEEDS_INPUT`** — the implementer or a fixer
+   — relay it (see [Relay a sub-agent's questions](#relay-a-sub-agents-questions-needs_input)),
+   then continue it with the answers.
+7. **Findings no fixing agent should settle alone** need a human decision: a
+   BLOCKER that contradicts the plan, a fix that needs scope outside this phase,
+   or a finding that survived step 3's fresh fixer. Ask via `AskUserQuestion`
+   (header `Review`), quoting the finding with `file:line`. Options:
+   `Fix in this phase (Recommended)` (continue the fix with the scope widened as
+   the finding says), `Defer to follow-up` (tracking note + follow-up issue, the
+   phase proceeds), `Amend the plan` (stop; hand over to amend-plan). Never park
+   the decision in a prose summary.
 
 **The reviewer is never the implementer.** Continuing the *reviewer* across
 rounds — and across phases — is fine and remembers what it flagged, but the

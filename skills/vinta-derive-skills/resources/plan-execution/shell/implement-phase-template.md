@@ -47,6 +47,8 @@ A phase that combines shapes → the agent type stays `implementer`, and the pro
 
 **Concurrent invocations are expected.** The conductor may have several lanes in flight, each running its own copy of this skill against a different phase. Nothing here is shared: the prompt, the model pick, the spawn, and the returned report all belong to one phase in one `WORKROOT`. Never read another lane's worktree, branch, or tracking entry — if this phase needs something from another phase, that is a dependency edge the plan should have declared.
 
+<!-- include: partials/relay-questions.md#RELAY -->
+
 ## Output
 
-Return the implementer's single final report verbatim to the conductor (status, files, summary, deviations, blockers). The conductor — not this skill — writes tracking from the git diff + the report.
+When the implementer returns `NEEDS_INPUT`, relay it (above) and resume until it returns `SUCCESS` or `FAILURE`. Then return the implementer's single final report verbatim to the conductor (status, files, summary, deviations, blockers), plus the relayed decisions so the conductor can record them in tracking. The conductor — not this skill — writes tracking from the git diff + the report.

@@ -31,7 +31,7 @@ Before drafting any new SKILL.md, walk through every entry in `existing_ai_artif
 
 For each name in the foundation set: only emit it (verbatim copy / generate from template / interview-draft) when no existing skill of that name is being migrated or kept. If the user said `Migrate` or `Keep` for an existing `plan-feature/SKILL.md`, **do not overwrite**.
 
-For project-custom skills: never auto-generate something the user already has under a different name. If the user has `<their-name>/SKILL.md` covering ground a stack template would also cover, ask before adding the stack-template version.
+For project-custom skills: never auto-generate something the user already has under a different name. If the user has `<their-name>/SKILL.md` covering ground a stack template would also cover, ask (`AskUserQuestion`) before adding the stack-template version.
 
 ## Foundation set
 
@@ -137,6 +137,8 @@ Shells under `plan-execution/shell/` are thin — most content lives in `plan-ex
 **The `WORKROOT` seam.** The conductor resolves `WORKROOT` / `BASE_BRANCH` / `SANDBOX_TIER` once per lane (`partials/worktree-seam.md#WORKROOT_RESOLUTION`) and every sub-skill uses them as data — this is why the rendered skills carry no scattered `if use_worktree` branches. `<WORKROOT>` / `<BASE_BRANCH>` / `<main_checkout>` / `<pool_root>` / `<phase.base_branch>` / `<RESOLVED>` are **angle-bracket runtime slots the agent fills at execution time**, not `{{...}}` derive-time placeholders — leave them verbatim in the shipped file.
 
 **The parallel-lanes seam.** `partials/parallel-lanes.md` carries the DAG scheduler: the graph parse (`DAG_PARSE`), the worktree pool (`LANE_WORKTREE_POOL`), the dependency-derived branch topology (`LANE_TOPOLOGY`), the dispatch loop (`LANE_SCHEDULER`), the tracking-directory schema (`TRACKING_DIR`), and the sibling-lane write guard (`SIBLING_LANE_ISOLATION`, included by `worktree-seam.md#STRAY_WRITE_CHECK`). All six blocks are project-agnostic and carry no new `{{...}}` placeholders of their own beyond ones the shells already substitute (`{{PLAN_DIR}}`, `{{BUILD_CMD}}`, `{{E2E_RUN_OPTION_TRACKING}}`, `{{TRACKING_BRANCH_FIELD}}`, `{{TRACKING_PHASE_BRANCH_FIELD}}`).
+
+**The needs-input seam.** A dispatched agent cannot call the harness's question tool, so it returns its questions as data. `implementer-prompt.md#NEEDS_INPUT` is prompt text (spliced into `FULL` and into `amend-plan` 4b) telling the phase agent to stop and return `status: NEEDS_INPUT` with a `questions:` block. `partials/relay-questions.md#RELAY` is included by `implement-phase`, `review-phase` and `amend-plan`, and turns that block into an `AskUserQuestion` call, records the answer, and continues the agent. The block's shape is the **Asking the human** section of the project's `AGENTS.md` ([source](../vinta-write-agents-md/resources/asking-the-human.md)). Both blocks are project-agnostic and take no `{{...}}` placeholders.
 
 **The dispatched-agent seam.** `partials/dispatched-agent.md` carries the one rule that spans both directions of the unit: the agent doing a phase never dispatches. `CONDUCTOR_ENTRY_GUARD` goes near the top of all four conductors (`implement-plan`, `implement-phase`, `review-phase`, `amend-plan`) and stops an agent that was itself handed one phase — by another conductor, or by [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) — from re-entering the orchestrator one level down. `NO_NESTED_DISPATCH` is prompt text, spliced into `implementer-prompt.md#INNER_OUTER_LOOP`, so every composed implementer prompt (forward and amend) carries it. Both blocks are project-agnostic and take no `{{...}}` placeholders.
 
@@ -358,7 +360,7 @@ Length: 100–300 lines. Shorter = under-specified. Longer = should probably spl
 - **Forgetting to substitute placeholders (or expand includes) in the plan-execution skills.** A surviving `{{TEST_CMD}}` or `<!-- include: … -->` is a runtime confusion. Expand every include, substitute every `{{…}}`, and validate before saving. (Angle-bracket runtime slots like `<WORKROOT>` are meant to stay.)
 - **Copying foundation skills and forgetting to scrub source-project paths.** Bundled copies may still carry source-repo paths (e.g. `<source-repo>/ai-plans/`, `apps/<service>/`). Replace with the target's paths.
 - **Asking too many questions for optional skills.** If `vinta-analyze-codebase` shows no e2e dir and the user clearly has no e2e setup, it's OK to skip the question and not ship `add-e2e-test`. Use judgment.
-- **Skipping the foundation copy because "the user already has them".** They probably don't. Confirm by reading the target's `ai-tools/skills/` (if it exists at all). If it does have these, ask the user "refresh from bundled copies, or keep what you have?".
+- **Skipping the foundation copy because "the user already has them".** They probably don't. Confirm by reading the target's `ai-tools/skills/` (if it exists at all). If it does have these, ask via `AskUserQuestion`: `Refresh from bundled copies (Recommended)`, `Keep what you have`.
 
 ## Verification
 

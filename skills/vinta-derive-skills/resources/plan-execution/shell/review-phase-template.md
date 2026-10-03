@@ -47,6 +47,8 @@ Feed that effective tier into the resolution below (it turns a tier into a concr
 
 <!-- include: partials/review-layers.md#LAYERS -->
 
+<!-- include: partials/relay-questions.md#RELAY -->
+
 ## Output
 
 Return to the conductor: `PASS` (all three layers clean) with a one-line note, or the list of BLOCKER / SHOULD-FIX findings and what the fix loop applied. The conductor owns branch / push / PR — this skill hands back a clean (or annotated) working tree in `WORKROOT`.

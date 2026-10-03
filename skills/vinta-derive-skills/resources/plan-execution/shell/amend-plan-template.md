@@ -43,7 +43,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
 
 ## Step 0 — Understand the change + parse the plan
 
-1. **Identify the plan file.** Same logic as the [implement-plan "Locate + parse plan" step](../implement-plan/SKILL.md#step-0--locate--parse-plan): ask the user (path or feature name); `ls {{PLAN_DIR}}/` + grep; confirm before proceeding.
+1. **Identify the plan file.** Same logic as the [implement-plan "Locate + parse plan" step](../implement-plan/SKILL.md#step-0--locate--parse-plan): an `AskUserQuestion` (header `Plan file`) offering the 2–4 best-matching plans from `ls -t {{PLAN_DIR}}/` (most recent first; the free-text field covers any other path).
 
 2. **Capture the requested change.** The user's prompt is the source. If vague, interview via `AskUserQuestion`:
    - *"Which phases are affected?"* — enumerate phase ids from the plan's **Phased Rollout** section.
@@ -130,7 +130,7 @@ Always the first write. Plan file is durable; commits get rewritten next.
 2. **Inserts** — choose a new id. Two conventions are common:
    - Decimal: `1.5` between `1` and `2` (matches existing patterns in some Vinta plans). Branch becomes `plan/{plan-id-kebab}/phase-1.5`.
    - Letter: `1b` between `1` (relabeled `1a`) and `2`. Requires renaming `1` → `1a` inside **Phased Rollout** + updating downstream references.
-   Ask the user. Default: decimal — no rename of existing ids.
+   Ask via `AskUserQuestion` (header `Phase id`): `Decimal id (Recommended)` (no rename of existing ids), `Letter id` (relabels the neighbouring phase).
 
 3. **Appends** — new `## Phase N+1` block at end of **Phased Rollout**. Same shape as siblings: Goal, **Assigned to**, optional Review models, reusable_skills, Changes, Tests, Acceptance. An appended phase is staffed off the existing **Crew** table; adding a member is a change to the plan's staffing arithmetic and needs the same `Takes`-column update as any other.
 
@@ -164,7 +164,7 @@ Phases in `not-started` state are deferred to [implement-plan](../implement-plan
 
 Before any write to remote, **block on these conditions**:
 
-1. **Phase merged to `{{DEFAULT_BRANCH}}`.** History on `{{DEFAULT_BRANCH}}` is immutable in practice. Tell the user: "Phase X already merged to `{{DEFAULT_BRANCH}}`. The amendment must be a new phase appended to the plan, not a rewrite. Re-run with classification `append-new` and execute via [implement-plan](../implement-plan/SKILL.md)."
+1. **Phase merged to `{{DEFAULT_BRANCH}}`.** History on `{{DEFAULT_BRANCH}}` is immutable in practice. Explain that the amendment must be a new phase appended to the plan, not a rewrite, then ask via `AskUserQuestion` (header `Merged`): `Re-classify as append-new (Recommended)` (continue this run with classification `append-new`; execute it later via [implement-plan](../implement-plan/SKILL.md)), `Stop`.
 
 2. **Branch's PR was reviewed and approved.** Force-pushing destroys reviewer context. Surface: list approved PRs by URL, ask `AskUserQuestion`:
    - `Proceed — I'll re-request review after force-push`
@@ -172,7 +172,7 @@ Before any write to remote, **block on these conditions**:
 
 3. **Branch protection rules block force-push.** `gh api repos/{owner}/{repo}/branches/{branch}/protection` (or `glab` equivalent). If the branch is protected, force-push will fail noisily — surface the rule, stop.
 
-4. **Multiple authors on the branch.** `git -C <WORKROOT> log --pretty=format:%ae <base>..<branch> | sort -u | wc -l` > 1 → other developers committed too. Force-push erases their local state. Surface, require explicit `Yes, I've coordinated with <names>` confirmation.
+4. **Multiple authors on the branch.** `git -C <WORKROOT> log --pretty=format:%ae <base>..<branch> | sort -u | wc -l` > 1 → other developers committed too. Force-push erases their local state. Ask via `AskUserQuestion` (header `Co-authors`), naming the other authors: `Stop — convert to a forward phase (Recommended)`, `I've coordinated with <names>`.
 
 If any block triggers and the user can't dismiss it: stop. Don't proceed further. Tell the user the rewrite path is unavailable; suggest an `append-new` phase as the fallback.
 
@@ -226,7 +226,10 @@ Use `git commit --amend` ONLY when:
 {{DEPENDENCY_LICENSE_BLOCK}}
 ```
 
-Then splice in the shared inner/outer verification loop verbatim:
+Then splice in the shared "return your questions" contract and the inner/outer verification loop verbatim:
+
+<!-- include: partials/implementer-prompt.md#NEEDS_INPUT -->
+
 
 <!-- include: partials/implementer-prompt.md#INNER_OUTER_LOOP -->
 
@@ -239,11 +242,13 @@ Then splice in the shared inner/outer verification loop verbatim:
 10. **Do NOT push. Do NOT force-push.** The orchestrator owns the remote.
 
 ## Required output
-- Status: SUCCESS or FAILURE.
+- Status: SUCCESS, FAILURE, or NEEDS_INPUT (with the `questions:` block).
 - New commit SHA(s) added (or amended SHA).
 - 5–15 line summary.
 - Deviations from new body + reasoning.
 ```
+
+When the amend implementer (or any fixer below) returns `NEEDS_INPUT`, relay it as a clickable prompt before continuing — see [Relay a sub-agent's questions](#relay-a-sub-agents-questions-needs_input).
 
 For `change_kind = rebase-only` (downstream phase whose parent moved): skip the agent. The work is purely git topology.
 
@@ -268,13 +273,13 @@ Conflicts:
 2. Fixer resolves, runs inner + outer gate (in `<WORKROOT>`).
 3. Orchestrator continues the rebase: `git -C <WORKROOT> rebase --continue`.
 
-Repeat until the rebase finishes clean. If the fixer can't resolve after one retry → stop. Surface to user; do not push a half-rebased branch.
+Repeat until the rebase finishes clean. If the fixer can't resolve after one retry → stop; do not push a half-rebased branch. Show the conflicting files and ask via `AskUserQuestion` (header `Rebase`): `Abort rebase, stop the run (Recommended)` (`git rebase --abort`; branch stays as it was), `Retry with guidance` (the free-text answer goes into a new fixer prompt), `I'll resolve it by hand` (leave the rebase in progress and exit).
 
 ### 4e. Force-push (with confirmation)
 
 `AskUserQuestion`:
 
-- `Force-push <branch> now (was authorized in Step 0)`
+- `Force-push <branch> now (Recommended)` (was authorized in Step 0)
 - `Pause — let me look at the local state first`
 
 On confirm:
@@ -330,6 +335,8 @@ After every queue entry processes:
 3. List any phases blocked from rewrite (Step 3 refusals) with the recommended forward path.
 4. Reminder: reviewers on existing PRs need a re-review request — force-push erases context. Send a short comment on each affected PR (the orchestrator can do this via the PR CLI if the project's PR policy = "agents create PRs"; otherwise hand off to the human).
 
+<!-- include: partials/relay-questions.md#RELAY -->
+
 ## Important rules
 
 - **Never `--force`. Always `--force-with-lease`.** Protects against silent overwrites.
@@ -338,6 +345,7 @@ After every queue entry processes:
 - **Never use `§N` shorthand to point at sections** — neither in this skill body, the rewritten plan body, the amendment log entry, nor any prs-context refresh. Always use the section's full name (and link when possible).
 - **Phases merged to `{{DEFAULT_BRANCH}}` are immutable.** Convert to `append-new` phases. Refuse to attempt rewrites.
 - **Confirm every force-push individually.** No batch "confirm all".
+- **Every stop for human input is a structured question.** `AskUserQuestion` with 2–4 concrete options, the recommended (safest) one first — see **Asking the human** in [AGENTS.md](../../../AGENTS.md). Never end a turn with a prose question. Sub-agents return `NEEDS_INPUT`; the orchestrator relays it.
 - **`WORKROOT` is resolved once, used everywhere.** Every `git` call takes `git -C <WORKROOT>`; no per-step worktree branching.
 - **Three-layer review on every rewritten branch.** Same standard as [implement-plan](../implement-plan/SKILL.md) — via [review-phase](../review-phase/SKILL.md). The amendment isn't done until Layer 3 passes.
 - **PR-context file is a derived artifact.** Refresh it after the rewrite; never edit the file as a substitute for fixing the diff.
