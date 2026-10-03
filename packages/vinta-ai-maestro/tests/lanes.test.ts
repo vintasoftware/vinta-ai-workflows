@@ -1,7 +1,19 @@
 import Database from 'better-sqlite3'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { cp, mkdir, mkdtemp, realpath, rm, statfs, symlink, writeFile } from 'node:fs/promises'
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readlink,
+  realpath,
+  rm,
+  statfs,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,9 +38,10 @@ const PACKAGE_ROOT = join(HERE, '..')
 /**
  * Materializes `tests/fixtures/repo/` into a temp dir as a real git repo.
  *
- * The dependency tree is symlinked in rather than installed — the same decision
- * `prepare-worktree` makes for a worktree that adds no dependencies, and what
- * lets the fixture's `node scripts/migrate.mjs` resolve `better-sqlite3`.
+ * The dependency tree is symlinked in rather than installed, which is what lets
+ * the fixture's `node scripts/migrate.mjs` resolve `better-sqlite3` without an
+ * install per test. A linked tree is mirrored into each lane as a link, so the
+ * pool never copies this package's whole `node_modules`.
  */
 async function materializeFixtureRepo(root: string): Promise<string> {
   const repo = join(root, 'source')
@@ -290,7 +303,7 @@ describe('lane pool', () => {
 
     // The phase branch itself survives: integration still has to merge it.
     expect(git('rev-parse', '--verify', 'phase/a')).toMatch(/^[0-9a-f]{40}$/)
-    // And the lane can still run: its linked dependency tree was not cleaned
+    // And the lane can still run: its dependency tree was not cleaned
     // away with the phase's leftovers.
     expect(existsSync(join(lane.path, 'node_modules'))).toBe(true)
     execFileSync('node', ['tests/widgets.mjs'], {
@@ -861,6 +874,60 @@ describe('lane pool', () => {
         stdio: 'ignore',
       }),
     ).toThrow()
+  })
+
+  describe('the dependency tree', () => {
+    /** Swaps the fixture's linked `node_modules` for a real one, with a pnpm-style relative link. */
+    const realDependencyTree = async (): Promise<void> => {
+      const deps = join(repo, 'node_modules')
+      await unlink(deps)
+      await mkdir(join(deps, '.store', 'pkg'), { recursive: true })
+      await writeFile(join(deps, '.store', 'pkg', 'index.js'), 'module.exports = 1\n')
+      if (process.platform !== 'win32') await symlink(join('.store', 'pkg'), join(deps, 'pkg'))
+    }
+
+    it('gives every lane its own copy, so a lane’s writes never reach the main checkout', async () => {
+      await realDependencyTree()
+      const pool = await provision({ migrateCmd: 'true', databases: {} }, 2)
+
+      for (const lane of pool.lanes) {
+        const deps = join(lane.path, 'node_modules')
+        expect((await lstat(deps)).isSymbolicLink()).toBe(false)
+        expect(readFileSync(join(deps, '.store', 'pkg', 'index.js'), 'utf8')).toContain('1')
+        // Verbatim: still relative, so it resolves inside the lane's own tree.
+        if (process.platform !== 'win32') {
+          expect(await readlink(join(deps, 'pkg'))).toBe(join('.store', 'pkg'))
+        }
+        await writeFile(join(deps, '.cache-from-lane'), lane.name)
+      }
+
+      expect(existsSync(join(repo, 'node_modules', '.cache-from-lane'))).toBe(false)
+      // Staged outside the worktree, and nothing of the staging left behind.
+      for (const lane of pool.lanes) {
+        expect(existsSync(`${lane.path}.node_modules-copy`)).toBe(false)
+      }
+    })
+
+    it('keeps the lane’s own tree across a recycle', async () => {
+      await realDependencyTree()
+      const pool = await provision({ migrateCmd: 'true', databases: {} }, 1)
+      const lane = pool.lanes[0] as Lane
+      await writeFile(join(lane.path, 'node_modules', 'installed-by-phase'), '')
+
+      await pool.recycle(lane.name)
+
+      expect(existsSync(join(lane.path, 'node_modules', 'installed-by-phase'))).toBe(true)
+    })
+
+    it('mirrors a main checkout whose tree is itself a link, instead of copying through it', async () => {
+      const pool = await provision({ migrateCmd: 'true', databases: {} }, 1)
+      const lane = pool.lanes[0] as Lane
+
+      expect((await lstat(join(lane.path, 'node_modules'))).isSymbolicLink()).toBe(true)
+      expect(await realpath(join(lane.path, 'node_modules'))).toBe(
+        await realpath(join(repo, 'node_modules')),
+      )
+    })
   })
 
   it('refuses on the N× disk probe before provisioning anything', async () => {
