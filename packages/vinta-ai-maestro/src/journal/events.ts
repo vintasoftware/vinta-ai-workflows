@@ -33,7 +33,7 @@ export type NodeStatus =
  * flag would survive a restart while the thing the operator has to answer
  * would not, which is the same as not surviving at all.
  */
-export type HumanQuestionKind = 'confirm' | 'choice' | 'text'
+export type HumanQuestionKind = 'confirm' | 'choice' | 'text' | 'agent'
 
 export interface HumanQuestion {
   readonly question: string

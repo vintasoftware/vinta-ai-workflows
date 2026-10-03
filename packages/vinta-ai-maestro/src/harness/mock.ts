@@ -47,6 +47,12 @@ export interface MockAdapterOptions {
   readonly id?: string
   readonly capabilities?: Partial<HarnessCapabilities>
   readonly script?: MockScript
+  /**
+   * Consumed one per session handed out; `script` (or the default) plays once
+   * they run out. For a test whose sessions must differ — an agent that asks a
+   * question, and the resumed session that acts on the answer.
+   */
+  readonly scripts?: readonly MockScript[]
   readonly preflight?: PreflightResult
   /**
    * Consumed one per `spawn`. A kind refuses with it; `'ok'` spawns a session.
@@ -234,6 +240,7 @@ export class MockAdapter implements HarnessAdapter {
   readonly #stale: ReadonlySet<string>
   #forced: SpawnRefusalKind | null = null
   #sessions = 0
+  #scripts: MockScript[]
   /** Handed to the first session and then spent. See `midTurnRefusal`. */
   #midTurn: TurnRefusal | undefined
 
@@ -241,6 +248,7 @@ export class MockAdapter implements HarnessAdapter {
     this.id = options.id ?? 'mock'
     this.capabilities = { ...DEFAULT_CAPABILITIES, ...options.capabilities }
     this.#plan = [...(options.spawns ?? [])]
+    this.#scripts = [...(options.scripts ?? [])]
     this.#stale = new Set(options.staleSessions ?? [])
     this.#midTurn = options.midTurnRefusal
   }
@@ -284,7 +292,7 @@ export class MockAdapter implements HarnessAdapter {
       id,
       this.id,
       this.capabilities,
-      this.options.script ?? DEFAULT_SCRIPT,
+      this.#scripts.shift() ?? this.options.script ?? DEFAULT_SCRIPT,
       this.#midTurn,
     )
     this.#midTurn = undefined

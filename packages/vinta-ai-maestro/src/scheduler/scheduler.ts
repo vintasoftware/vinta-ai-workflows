@@ -90,7 +90,12 @@ import type {
   OperatorOp,
 } from '../journal/events.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
-import { attribute, type Attribution } from '../journal/transcript.ts'
+import {
+  type AgentQuestionEvent,
+  attribute,
+  type Attribution,
+  OPERATOR_ROLE,
+} from '../journal/transcript.ts'
 import { GitCommandError } from '../integration/git.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
@@ -120,12 +125,35 @@ import {
   type Reorientation,
 } from '../prompts/index.ts'
 import { choresFor } from '../chores.ts'
+import {
+  AGENT_QUESTION_TEXT,
+  decodeAnswers,
+  encodeAnswers,
+  formatAnswers,
+  QuestionWatch,
+  recommendedAnswers,
+} from '../questions/agent-questions.ts'
 import { killLiveGates } from '../gates/runner.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
 import type { ChoreTiming, Node, Pipeline, SideEffect, Workflow } from '../types.ts'
 
 /** The pool a node is dispatched into. Required of every workflow (§5.1). */
 const LANE = 'lane'
+
+/**
+ * One agent turn's fixed facts, shared by its first session and by every
+ * resume an agent question causes (`#drain`, `#agentQuestions`).
+ */
+interface Turn {
+  readonly adapter: HarnessAdapter
+  readonly cwd: string
+  readonly plan: SessionPlan
+  readonly role: unknown
+  readonly by: Attribution
+  readonly priority: AdmitOptions
+  /** The task that resumes `resumeSessionId` with `prompt` as its whole message. */
+  readonly task: (prompt: string, resumeSessionId: string) => AgentTask
+}
 
 /** The answers `#offerRetry` understands. `retry with ` carries a member id. */
 const RETRY = 'retry'
@@ -558,6 +586,8 @@ interface NodeState {
   autoRetries: number
   /** Login questions asked, for a unique effect id per ask (§6.1). */
   loginAsks: number
+  /** Questions agents on this node stopped to ask. Keeps their effect ids apart. */
+  agentQuestions: number
   /**
    * Failure questions this node answered for itself because nobody did. Its own
    * counter rather than `autoRetries`: the two are spent in different places
@@ -851,6 +881,7 @@ export class Scheduler {
       reviewerEdits: 0,
       autoRetries: 0,
       loginAsks: 0,
+      agentQuestions: 0,
       unattended: 0,
       quickFailures: 0,
       attemptStartedAt: 0,
@@ -2472,7 +2503,7 @@ export class Scheduler {
     chore?: ChorePrompt,
   ): Promise<EffectOutcome> {
     const { params } = invocation.effect
-    const { workflow, runId, journal, admission } = this.#options
+    const { workflow, runId, journal } = this.#options
     const adapter = this.#adapter(this.#harnessOf(state, params['harness'], params['role']))
 
     // §9's queue, on its way to the agent. Carried as its own field rather
@@ -2603,10 +2634,6 @@ export class Scheduler {
     this.#session(state, plan)
     this.#remember(state, plan, adapter, outcome.session.id, params['role'])
 
-    // The registry: exactly as long-lived as the turn it points at, so a §9
-    // operation can never reach a session whose stream has already ended.
-    state.live = { session: outcome.session, adapter }
-    const withdraw = this.#offer(state, outcome.session, adapter, cwd, plan.slot)
     // Every spawn on this node appends to the same file, whatever its role, so
     // without this the implementer's output, the reviewer's and three fix
     // rounds' are one undifferentiated stream. Both facts are already here and
@@ -2617,16 +2644,69 @@ export class Scheduler {
       // Three chores on one slot are one stretch of transcript without it.
       ...(chore === undefined ? {} : { chore: chore.id }),
     }
+    const turn: Turn = {
+      adapter,
+      cwd,
+      plan,
+      role: params['role'],
+      by,
+      priority,
+      // An answer resumes the session it was asked in, with the answer as the
+      // whole message: the session already holds the brief.
+      task: (prompt, resumeSessionId) => ({
+        nodeId: state.node.id,
+        cwd,
+        prompt,
+        model: this.#modelFor(state, params),
+        ...(Object.keys(env).length === 0 ? {} : { env }),
+        resumeSessionId,
+      }),
+    }
+    const watch = new QuestionWatch()
+    const sessionId = await this.#drain(state, outcome, turn, watch)
+    await this.#agentQuestions(state, turn, watch, sessionId)
+
+    // A fix round is a fixer turn, not a state called `fix`.
+    if (params['role'] === 'fixer') state.fixRounds += 1
+
+    return await this.#options.executor.execute(invocation)
+  }
+
+  /**
+   * One granted session, drained into the transcript; returns the id its
+   * next resume has to name.
+   *
+   * Shared by a turn's first session and every resume an agent question
+   * causes, because both are the same thing to everything else in the node:
+   * the registry an operation reaches, the takeover offer, the ledger, the
+   * harness slot and the mid-turn refusal.
+   */
+  async #drain(
+    state: NodeState,
+    outcome: Extract<AdmissionOutcome, { status: 'admitted' }>,
+    turn: Turn,
+    watch: QuestionWatch,
+  ): Promise<string> {
+    const { runId, journal, admission } = this.#options
+    const { adapter, plan, by } = turn
+    let sessionId = outcome.session.id
+
+    // The registry: exactly as long-lived as the turn it points at, so a §9
+    // operation can never reach a session whose stream has already ended.
+    state.live = { session: outcome.session, adapter }
+    const withdraw = this.#offer(state, outcome.session, adapter, turn.cwd, plan.slot)
     try {
       for await (const event of outcome.session.events) {
         journal.appendTranscript(runId, state.node.id, { ...event, by: attribute(event, by) })
+        watch.observe(event)
         if (event.type === 'session_started') {
+          sessionId = event.sessionId
           this.#assign(state, { session_id: event.sessionId })
           // The authoritative id. `AgentSession.id` is what the adapter knew
           // before the CLI spoke; a harness that mints its own on resume
           // reports it here, and the ledger must hold the one the *next*
           // resume has to name.
-          this.#remember(state, plan, adapter, event.sessionId, params['role'])
+          this.#remember(state, plan, adapter, event.sessionId, turn.role)
         }
       }
     } finally {
@@ -2654,11 +2734,116 @@ export class Scheduler {
       const parked = admission.refusedMidTurn(adapter.id, state.node.id, closed)
       if (parked.status === 'retry') throw new CapacityRetry(parked.wait)
     }
+    return sessionId
+  }
 
-    // A fix round is a fixer turn, not a state called `fix`.
-    if (params['role'] === 'fixer') state.fixRounds += 1
+  /**
+   * §9.1 for a question the *agent* asked (`src/questions`): park on it, and
+   * resume the same session with the answer, for as long as the agent keeps
+   * stopping to ask.
+   *
+   * The turn is not over while it does. The effect that spawned it returns
+   * only once the agent ends a session without a question, so the pipeline's
+   * guards read the work the answer led to — not a report that said "I need a
+   * decision", which a reviewer would rightly fail.
+   *
+   * The questions are agent prose, so they go into the transcript as an
+   * `agent_question` entry, and the journal's row is the fixed sentence plus
+   * the effect id the API uses to find that entry (§11). The answer is
+   * journalled as option indices plus the operator's own words, and reaches
+   * the agent as a `user_message` restating each question with its answer.
+   *
+   * An unattended run answers with the recommended options after
+   * `retryAfterMs`, through the same `answer` path a click takes. A harness
+   * that cannot resume has no way to deliver an answer, so its question is left
+   * in the transcript and the turn ends as it would have.
+   */
+  async #agentQuestions(
+    state: NodeState,
+    turn: Turn,
+    first: QuestionWatch,
+    firstSessionId: string,
+  ): Promise<void> {
+    const { runId, journal } = this.#options
+    let watch = first
+    let sessionId = firstSessionId
+    for (;;) {
+      const ask = watch.result()
+      if (ask === null) return
+      if (!turn.adapter.capabilities.resume) {
+        this.#log.warn('node.agent_question_unanswerable', {
+          node: state.node.id,
+          harness: turn.adapter.id,
+        })
+        return
+      }
 
-    return await this.#options.executor.execute(invocation)
+      state.agentQuestions += 1
+      const effectId = `agent-question:${state.node.id}:${state.agentQuestions}`
+      const entry: AgentQuestionEvent = { type: 'agent_question', effectId, ...ask }
+      journal.appendTranscript(runId, state.node.id, { ...entry, by: turn.by })
+      this.#log.info('node.agent_question', {
+        node: state.node.id,
+        source: ask.source,
+        questions: ask.questions.length,
+      })
+      this.#ask(state, effectId, { question: AGENT_QUESTION_TEXT, kind: 'agent' })
+      state.parkedEffectId = effectId
+      state.unattendedAnswer = encodeAnswers(recommendedAnswers(ask))
+
+      const cancel = this.#armUnattendedAnswer(state)
+      let facts: GuardContext
+      try {
+        facts = await this.#park(state)
+      } finally {
+        cancel()
+      }
+
+      const answers = decodeAnswers(facts.human?.['answer'], ask)
+      const message = formatAnswers(ask, answers, { unattended: facts.human?.['unattended'] === true })
+      // The adapter hands `prompt` to the CLI without echoing it, so the
+      // answer is written here — under the operator, like their steering.
+      journal.appendTranscript(runId, state.node.id, {
+        type: 'user_message',
+        text: message,
+        by: { role: OPERATOR_ROLE },
+      })
+
+      const granted = await this.#admitAnswer(state, turn, message, sessionId)
+      watch = new QuestionWatch()
+      sessionId = await this.#drain(state, granted, turn, watch)
+    }
+  }
+
+  /**
+   * Admission for the session that carries an answer.
+   *
+   * A capacity wait is waited out here rather than thrown as `CapacityRetry`:
+   * that would re-drive the node from its initial state and throw away the
+   * session the question was asked in, and with it the work that led there.
+   * The node keeps its lane across the wait, which §9.1 already lets a parked
+   * node do. A session the vendor has forgotten cannot be answered at all, so
+   * that fails the node, where `onFailure` decides what happens next.
+   */
+  async #admitAnswer(
+    state: NodeState,
+    turn: Turn,
+    prompt: string,
+    sessionId: string,
+  ): Promise<Extract<AdmissionOutcome, { status: 'admitted' }>> {
+    for (;;) {
+      const outcome = await this.#admitLoggedIn(
+        state,
+        turn.adapter,
+        () => turn.task(prompt, sessionId),
+        turn.priority,
+      )
+      if (outcome.status === 'admitted') return outcome
+      if (outcome.status !== 'retry') throw new SpawnFatal(outcome.message)
+      await outcome.wait()
+      if (state.aborted) throw new Aborted()
+      if (this.#halt !== null) throw new Halted()
+    }
   }
 
   /**

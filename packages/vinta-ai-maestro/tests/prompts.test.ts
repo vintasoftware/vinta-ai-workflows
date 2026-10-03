@@ -812,8 +812,34 @@ This is what a human reads on the pull request, so write it for them rather
 than for the orchestrator. If you leave the placeholders in, it is discarded
 and the PR falls back to a summary built from gate results.
 
+## When you need a human decision
+Some decisions are not yours: a requirement the brief leaves ambiguous or
+contradicts, a dependency whose license is unclear, a change outside this
+phase, a destructive or irreversible step. Do not guess, and do not end with a
+question in prose — nobody reads it. Do not call a question tool either
+(AskUserQuestion and the like): nobody is attached to this session to answer it.
+Commit what is finished and verified, then end your turn with this block and
+nothing after it:
+
+\`\`\`yaml
+status: NEEDS_INPUT
+blocked_on: <one line: the decision you need>
+done_so_far: <one line: what is finished and committed>
+questions:            # 1 to 4; each must make sense without the transcript
+  - header: <12 characters at most, e.g. "Storage">
+    question: <the full question, with the evidence needed to answer it: file:line, error>
+    multi_select: false
+    options:          # 2 to 4; the one you recommend first, ending " (Recommended)"
+      - label: <1 to 5 words>
+        description: <what happens if the operator picks it>
+      - label: <1 to 5 words>
+        description: <what happens if the operator picks it>
+\`\`\`
+Do not add an "Other" option: the operator can always type their own answer.
+This session resumes with the answers, and you continue from where you stopped.
+
 ## Required output (a single final report)
-- Status: SUCCESS or FAILURE, and why.
+- Status: SUCCESS or FAILURE, and why — or the NEEDS_INPUT block above, alone.
 - Files created or modified, paths only.
 - A 5–15 line summary of what you implemented and the decisions you took.
 - Deviations from the phase body above, and your reasoning.

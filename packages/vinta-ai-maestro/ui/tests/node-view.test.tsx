@@ -64,6 +64,20 @@ const ALL_KINDS = [
   // transcript holds the thing that judged it as well as the agents that
   // worked on it (`journal/transcript.ts`).
   entry({ type: 'gate_run', gate: 'unit', exitCode: 1, status: 'failed', cached: false }),
+  // Written by the scheduler when an agent stops to ask (`src/questions`).
+  entry({
+    type: 'agent_question',
+    effectId: 'agent-question:impl:1',
+    source: 'report',
+    questions: [
+      {
+        header: 'Storage',
+        question: 'Keep invoices in the existing table?',
+        multiSelect: false,
+        options: [{ label: 'Existing table (Recommended)' }, { label: 'New table' }],
+      },
+    ],
+  }),
 ]
 
 test('every normalized event kind renders, and the operator’s own message is attributed to them', async () => {
@@ -386,6 +400,132 @@ test('a pending question renders with its context and is answerable in all three
     operation: 'answer',
     body: { answer: 'use the queue' },
   })
+})
+
+test('an agent’s question is answered by clicking its options, with free text beside them', async () => {
+  const parked = (nodeId: string) => node(nodeId, 'awaiting_human')
+  const storage = {
+    header: 'Storage',
+    question: 'Keep invoices in the existing table?',
+    multiSelect: false,
+    options: [
+      { label: 'Existing table (Recommended)', description: 'No migration.' },
+      { label: 'New table', description: 'Adds a migration.' },
+    ],
+  }
+  const apps = {
+    header: 'Apps',
+    question: 'Which apps get the flag?',
+    multiSelect: true,
+    options: [{ label: 'web' }, { label: 'admin' }],
+  }
+  const agentQuestion = (questions: readonly (typeof storage | typeof apps)[]) => ({
+    question: 'The agent stopped to ask for a decision.',
+    kind: 'agent' as const,
+    ask: { source: 'report' as const, blockedOn: 'where invoices are stored', questions: [...questions] },
+  })
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [parked('one'), parked('many'), parked('lost')] }) },
+    details: {
+      [`${RUN_ID}/one`]: nodeDetail({ node: parked('one'), question: agentQuestion([storage]) }),
+      [`${RUN_ID}/many`]: nodeDetail({ node: parked('many'), question: agentQuestion([storage, apps]) }),
+      // The transcript entry could not be found: the card still takes words.
+      [`${RUN_ID}/lost`]: nodeDetail({
+        node: parked('lost'),
+        question: { question: 'The agent stopped to ask for a decision.', kind: 'agent' },
+      }),
+    },
+  })
+  daemon = stub
+
+  // One single-choice question: a click is the whole answer.
+  const one = open(stub, 'one')
+  await waitFor(() => expect(one.container.querySelector('[data-agent-questions]')).not.toBe(null))
+  expect(textOf(one.container, '[data-blocked-on]')).toContain('where invoices are stored')
+  expect(textOf(one.container, '[data-option="0"]')).toContain('No migration.')
+  // The recommendation is a mark, not part of the label.
+  expect(one.container.querySelector('[data-option="0"] [data-recommended]')).not.toBe(null)
+  expect(textOf(one.container, '[data-option="0"]')).not.toContain('(Recommended)')
+  // Other is a choice like the rest: typing in it selects it, and on a
+  // single-choice question picking an option deselects it again — the agent
+  // gets one answer, never an option with a sentence beside it.
+  const checked = (selector: string) => one.container.querySelector(selector)?.getAttribute('aria-checked')
+  fireEvent.change(one.container.querySelector('[data-field="agent-answer"]') as HTMLElement, {
+    target: { value: 'a view over both' },
+  })
+  expect(checked('[data-option="other"]')).toBe('true')
+  expect(stub.posts).toHaveLength(0)
+  // The option wins and Other's text is not sent with it.
+  fireEvent.click(one.container.querySelector('[data-option="0"]') as HTMLElement)
+  await waitFor(() => expect(stub.posts).toHaveLength(1))
+  expect(stub.posts[0]).toEqual({
+    runId: RUN_ID,
+    nodeId: 'one',
+    operation: 'answer',
+    body: { answers: [{ selected: [0] }] },
+  })
+
+  // Several questions: pick per question, then send them together.
+  const many = open(stub, 'many')
+  await waitFor(() => expect(many.container.querySelector('[data-agent-questions]')).not.toBe(null))
+  const shown = () =>
+    [...many.container.querySelectorAll('[data-agent-question]')].map((el) => el.getAttribute('data-agent-question'))
+  const option = (question: number, choice: number) =>
+    many.container.querySelector(`[data-agent-question="${question}"] [data-option="${choice}"]`) as HTMLElement
+  const control = (op: string) =>
+    many.container.querySelector(`[data-agent-questions] [data-op="${op}"]`) as HTMLButtonElement
+  expect(shown()).toEqual(['0'])
+  expect(textOf(many.container, '[data-step-count]')).toContain('Question 1 of 2')
+  expect((many.container.querySelector('[data-step="review"]') as HTMLButtonElement).disabled).toBe(true)
+
+  // Picking an option first and then typing in Other leaves Other as the
+  // answer: the option is deselected.
+  fireEvent.click(option(0, 0))
+  await waitFor(() => expect(shown()).toEqual(['1']))
+  fireEvent.click(many.container.querySelector('[data-step="0"]') as HTMLElement)
+  await waitFor(() => expect(shown()).toEqual(['0']))
+  expect(option(0, 0).getAttribute('aria-checked')).toBe('true')
+  fireEvent.change(many.container.querySelector('[data-field="agent-answer"]') as HTMLElement, {
+    target: { value: 'a view over both' },
+  })
+  expect(option(0, 0).getAttribute('aria-checked')).toBe('false')
+  expect(
+    many.container.querySelector('[data-agent-question="0"] [data-option="other"]')?.getAttribute('aria-checked'),
+  ).toBe('true')
+  fireEvent.click(control('next'))
+  await waitFor(() => expect(shown()).toEqual(['1']))
+  expect(many.container.querySelector('[data-step="0"]')?.getAttribute('data-done')).toBe('true')
+  expect(stub.posts).toHaveLength(1)
+
+  // A multi-choice step waits for Next; the number keys pick too.
+  expect(control('next').disabled).toBe(true)
+  fireEvent.keyDown(option(1, 0), { key: '1' })
+  fireEvent.click(option(1, 1))
+  expect(option(1, 0).getAttribute('aria-checked')).toBe('true')
+  expect(option(1, 1).getAttribute('aria-checked')).toBe('true')
+  expect(control('next').textContent).toBe('Review answers')
+  fireEvent.click(control('next'))
+
+  // The review shows every answer, and only its Send sends.
+  await waitFor(() => expect(many.container.querySelector('[data-review]')).not.toBe(null))
+  const reviewed = [...many.container.querySelectorAll('[data-review-answer]')].map((el) => el.textContent)
+  expect(reviewed).toEqual(['Other: a view over both', 'web, admin'])
+  expect(stub.posts).toHaveLength(1)
+  fireEvent.click(control('answer'))
+  await waitFor(() => expect(stub.posts).toHaveLength(2))
+  expect(stub.posts[1]?.body).toEqual({
+    answers: [{ selected: [], text: 'a view over both' }, { selected: [0, 1] }],
+  })
+
+  const lost = open(stub, 'lost')
+  await waitFor(() => expect(lost.container.querySelector('[data-question]')).not.toBe(null))
+  fireEvent.change(lost.container.querySelector('[data-field="answer"]') as HTMLElement, {
+    target: { value: 'use the existing table' },
+  })
+  fireEvent.click(lost.container.querySelector('[data-op="answer"]') as HTMLElement)
+  await waitFor(() => expect(stub.posts).toHaveLength(3))
+  expect(stub.posts[2]?.body).toEqual({ answers: [{ selected: [], text: 'use the existing table' }] })
 })
 
 test('the gate panel names each verdict, and opens one log at a time', async () => {

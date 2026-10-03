@@ -28,7 +28,7 @@ import type {
   HarnessCapabilities,
   SpawnRefusalKind,
 } from '../src/harness/adapter.ts'
-import { MockAdapter } from '../src/harness/mock.ts'
+import { MockAdapter, type MockScript } from '../src/harness/mock.ts'
 import type { TurnRefusal } from '../src/harness/adapter.ts'
 import type { NodeStatus } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
@@ -243,6 +243,8 @@ function rig(
     /** Holds every session open after `session_started`, for the §9 operations. */
     readonly stall?: boolean
     readonly capabilities?: Partial<HarnessCapabilities>
+    /** One per session, in spawn order (`MockAdapterOptions.scripts`). */
+    readonly scripts?: readonly MockScript[]
     /** `LanePool.recycle`'s seam: called as a used lane is handed on (§8). */
     readonly recycleLane?: (name: string) => Promise<void>
     /** Session ids this harness has forgotten (§15.4). */
@@ -299,6 +301,7 @@ function rig(
     id: HARNESS,
     ...(options.spawns === undefined ? {} : { spawns: options.spawns }),
     ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+    ...(options.scripts === undefined ? {} : { scripts: options.scripts }),
     ...(options.staleSessions === undefined ? {} : { staleSessions: options.staleSessions }),
     ...(options.midTurnRefusal === undefined ? {} : { midTurnRefusal: options.midTurnRefusal }),
   })
@@ -4236,5 +4239,112 @@ describe('halt', () => {
 
     expect(report.halted).toBe('cancelled')
     expect(runEnded(r)).toEqual([{ status: 'cancelled' }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// An agent stops to ask (`src/questions`)
+// ---------------------------------------------------------------------------
+
+describe('an agent that stops to ask', () => {
+  const ASKING: MockScript = {
+    events: [
+      { type: 'tool_use', name: 'Read', input: { path: 'src/widget.ts' }, id: 'tool-1' },
+      { type: 'tool_result', id: 'tool-1', ok: true, summary: '42 lines' },
+      {
+        type: 'assistant_text',
+        text: [
+          'I need a decision before going on.',
+          '',
+          '```yaml',
+          'status: NEEDS_INPUT',
+          'blocked_on: where invoices are stored',
+          'done_so_far: parser committed',
+          'questions:',
+          '  - header: Storage',
+          '    question: Keep invoices in the existing table?',
+          '    multi_select: false',
+          '    options:',
+          '      - label: Existing table (Recommended)',
+          '        description: No migration.',
+          '      - label: New table',
+          '        description: Adds a migration.',
+          '```',
+        ].join('\n'),
+      },
+    ],
+    result: 'ok',
+  }
+  const DONE: MockScript = { events: [{ type: 'assistant_text', text: 'Status: SUCCESS' }], result: 'ok' }
+
+  const questionsOf = (r: Rig) =>
+    r.journal.events('run-1').filter((event) => event.type === 'human_question').map((event) => event.payload)
+  const answersOf_ = (r: Rig) =>
+    r.journal.events('run-1').filter((event) => event.type === 'human_answered').map((event) => event.payload)
+
+  it('parks on the question, and resumes the same session with the answer', async () => {
+    const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE] })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
+
+    // The journal holds a fixed sentence and the effect id — never the agent's
+    // words (§11). Those are in the transcript, under the same id.
+    const [asked] = questionsOf(r)
+    expect(asked).toEqual({
+      question: 'The agent stopped to ask for a decision.',
+      kind: 'agent',
+      effect_id: 'agent-question:a:1',
+    })
+    const entry = transcriptOf(r, 'a').find((line) => line.type === 'agent_question') as
+      | { effectId: string; questions: { header: string }[]; by?: { role: string } }
+      | undefined
+    expect(entry?.effectId).toBe('agent-question:a:1')
+    expect(entry?.questions[0]?.header).toBe('Storage')
+    expect(entry?.by?.role).toBe('implementer')
+    // The effect that spawned the turn has not returned: the turn is not over.
+    expect(r.calls.filter((call) => call.effect === 'e-work')).toHaveLength(0)
+
+    r.scheduler.answer('a', { human: { answer: JSON.stringify([{ selected: [1] }]) } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(2)
+    const resumed = r.adapter.spawned[1]
+    expect(resumed?.resumeSessionId).toBe(`${HARNESS}-session-1`)
+    expect(resumed?.prompt).toContain('1. Storage — Keep invoices in the existing table?\n   Answer: New table')
+    // The answer is in the record as the operator's, and in the journal as
+    // indices plus their own words.
+    const operator = transcriptOf(r, 'a').find((line) => line.type === 'user_message')
+    expect(operator?.by?.role).toBe('operator')
+    expect(answersOf_(r)).toEqual([
+      { effect_id: 'agent-question:a:1', answer: '[{"selected":[1]}]' },
+    ])
+    expect(r.calls.filter((call) => call.effect === 'e-work')).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('answers itself with the recommended options under --retry-after, on the record as unattended', async () => {
+    const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE], retryAfterMs: 60_000 })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
+
+    await r.advance(60_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(answersOf_(r)).toEqual([
+      { effect_id: 'agent-question:a:1', answer: '[{"selected":[0]}]', unattended: true },
+    ])
+    expect(r.adapter.spawned[1]?.prompt).toMatch(/^Nobody answered your questions/)
+    expect(r.adapter.spawned[1]?.prompt).toContain('Answer: Existing table (Recommended)')
+  })
+
+  it('does not park on a harness that cannot resume, since nothing could deliver the answer', async () => {
+    const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING], capabilities: { resume: false } })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(questionsOf(r)).toEqual([])
+    expect(r.adapter.spawned).toHaveLength(1)
   })
 })

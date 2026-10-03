@@ -55,6 +55,8 @@ import { Button } from 'vinta-design-system/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'vinta-design-system/ui/card'
 import { Textarea } from 'vinta-design-system/ui/textarea'
 import type { NodeDetail, RunSnapshot } from '../../src/daemon/schemas.ts'
+import type { AgentAnswer } from '../../src/questions/shape.ts'
+import { AgentQuestions } from './AgentQuestions.tsx'
 import { Changes } from './Changes.tsx'
 import { Chip } from './Chip.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
@@ -206,6 +208,7 @@ export function NodeView({
           question={detail.question}
           busy={busy}
           onAnswer={(answer) => void operate('answer', { answer }, 'Answered. The node resumes.')}
+          onAnswers={(answers) => void operate('answer', { answers }, 'Answered. The agent resumes.')}
         />
       )}
 
@@ -240,15 +243,22 @@ export function NodeView({
  *
  * It is the one card on the page with a ring: it is the reason the operator
  * was called here, and it must read before anything else does.
+ *
+ * An agent's question (`kind: 'agent'`) renders as `AgentQuestions`: its
+ * options as buttons and a free-text answer per question. When the daemon
+ * could not find what the agent asked, the card still takes a typed answer,
+ * which reaches the agent as free text.
  */
 function Pending({
   question,
   busy,
   onAnswer,
+  onAnswers,
 }: {
   readonly question: Question
   readonly busy: boolean
   readonly onAnswer: (answer: Answer) => void
+  readonly onAnswers: (answers: AgentAnswer[]) => void
 }) {
   const [text, setText] = useState('')
   const context = question.context
@@ -331,7 +341,11 @@ function Pending({
           </HStack>
         )}
 
-        {question.kind === 'text' && (
+        {question.kind === 'agent' && question.ask !== undefined && (
+          <AgentQuestions ask={question.ask} busy={busy} onSubmit={onAnswers} />
+        )}
+
+        {(question.kind === 'text' || (question.kind === 'agent' && question.ask === undefined)) && (
           <>
             <Textarea
               aria-label="Answer"
@@ -347,7 +361,9 @@ function Pending({
                 size="sm"
                 data-op="answer"
                 disabled={busy || text.trim() === ''}
-                onClick={() => onAnswer(text)}
+                onClick={() =>
+                  question.kind === 'agent' ? onAnswers([{ selected: [], text: text.trim() }]) : onAnswer(text)
+                }
               >
                 Answer
               </Button>

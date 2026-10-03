@@ -27,6 +27,7 @@
  *   second copy of the repository's test output in a second place.
  */
 import type { AgentEvent } from '../harness/adapter.ts'
+import type { AgentAsk } from '../questions/shape.ts'
 
 /**
  * Who produced a line.
@@ -71,8 +72,24 @@ export interface GateRunEvent {
   readonly cached: boolean
 }
 
+/**
+ * An agent stopped to ask the operator something (`src/questions`).
+ *
+ * Written by the scheduler, not the harness: the agent said it in a report or
+ * a tool call, and this is the reading of that the node parked on. Here rather
+ * than in the journal because the questions are the agent's prose (§11) — the
+ * journal's `human_question` row carries `effectId` and a fixed sentence, and
+ * the API finds this entry by that id to render the card.
+ */
+export interface AgentQuestionEvent extends AgentAsk {
+  readonly type: 'agent_question'
+  readonly effectId: string
+}
+
 /** One line of `transcript.jsonl`. */
-export type TranscriptEntry = (AgentEvent | GateRunEvent) & { readonly by?: Attribution }
+export type TranscriptEntry = (AgentEvent | GateRunEvent | AgentQuestionEvent) & {
+  readonly by?: Attribution
+}
 
 /** The roles the daemon itself writes, for the ones no workflow declares. */
 export const GATE_ROLE = 'gate'

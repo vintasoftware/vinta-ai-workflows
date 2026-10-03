@@ -273,6 +273,17 @@ An unstaffed review runs on `defaults.reviewer_model` if the workflow sets one,
 otherwise on the harness's top tier (`opus` on claude-code), otherwise on the
 phase's own model.
 
+## When an agent stops to ask
+
+An implementer that hits a decision it should not make alone ends its turn with a `NEEDS_INPUT` block. This is the same protocol the shipped skills teach, and the implementer prompt spells it out. A question tool call that was the agent's last act counts too: `AskUserQuestion`, opencode's `question`, Codex's `request_user_input`. Either way the node parks as **Awaiting human**, you get a notification, and the node view shows a card:
+
+- each option is a button, with the agent's description of what it does under it and its recommendation marked;
+- the last choice is always **Other**, a text field for an answer no option covers. On a single-choice question it is exclusive: typing in it deselects the option you picked, and picking an option deselects it. On a multi-choice question it is one more box to tick;
+- one single-choice question is answered by clicking an option;
+- several questions are a wizard: one step each, number keys to pick, then a review step and **Send answers**.
+
+The answer resumes the agent's own session, so it carries on from where it stopped with its context intact. Under `--retry-after`, nobody answering means the recommended options are taken after the interval, and the answer is marked unattended. The questions stay in the transcript, and the journal records only that the node paused and which options were picked (see [SPEC.md §9.1](SPEC.md)).
+
 ## Walkthrough — two phases in parallel
 
 A repository with two phases that depend on nothing, so both belong to wave 1 and both run at once.
