@@ -234,6 +234,8 @@ test('each of the five operations posts to its own endpoint with a body the daem
     body: { text: 'check the invoice serializer' },
   })
 
+  // Redirect is the composer's other mode, sent from the same button.
+  fireEvent.click(container.querySelector('[data-mode="redirect"]') as HTMLElement)
   type('drop the cache layer instead')
   await press('redirect')
   await waitFor(() => expect(stub.posts).toHaveLength(2))
@@ -248,7 +250,10 @@ test('each of the five operations posts to its own endpoint with a body the daem
   await waitFor(() => expect(stub.posts).toHaveLength(3))
   expect(stub.posts[2]).toEqual({ runId: RUN_ID, nodeId: 'impl', operation: 'pause', body: {} })
 
+  // Abort asks first: it fails the node and blocks its dependents.
   await press('abort')
+  expect(stub.posts).toHaveLength(3)
+  await press('abort-confirm')
   await waitFor(() => expect(stub.posts).toHaveLength(4))
   expect(stub.posts[3]).toEqual({ runId: RUN_ID, nodeId: 'impl', operation: 'abort', body: {} })
 
@@ -295,13 +300,13 @@ test('a harness that cannot inject says the message waits for the next resume', 
   await waitFor(() => expect(textOf(parked.container, '[data-delivery]')).not.toBe(''))
   // §7: greying out beats failing at the moment the operator presses the button.
   expect(textOf(parked.container, '[data-delivery]')).toContain(
-    'queued and delivered on the next resume',
+    'queued and given to the agent at the start of its next turn',
   )
   expect(textOf(parked.container, '[data-delivery]')).toContain('codex')
 
   const live = open(stub, 'claude')
   await waitFor(() => expect(textOf(live.container, '[data-delivery]')).not.toBe(''))
-  expect(textOf(live.container, '[data-delivery]')).not.toContain('next resume')
+  expect(textOf(live.container, '[data-delivery]')).not.toContain('next turn')
   expect(textOf(live.container, '[data-delivery]')).not.toContain('queued')
   expect(textOf(live.container, '[data-delivery]')).toContain('running claude-code session')
 })
@@ -317,7 +322,7 @@ test('a node that is not in a turn queues steering whatever its harness can do',
   const { container } = open(stub, 'impl')
 
   await waitFor(() => expect(textOf(container, '[data-delivery]')).not.toBe(''))
-  expect(textOf(container, '[data-delivery]')).toContain('next resume')
+  expect(textOf(container, '[data-delivery]')).toContain('next turn')
   // Pause is meaningless on a node with no turn to finish; it is greyed, not offered.
   expect(container.querySelector('[data-op="pause"]')).toHaveProperty('disabled', true)
   expect(container.querySelector('[data-op="abort"]')).toHaveProperty('disabled', false)
@@ -626,9 +631,13 @@ test('a harness the daemon declares nothing for is assumed to do nothing', async
   daemon = stub
   const { container } = open(stub, 'impl')
 
-  await waitFor(() => expect(textOf(container, '[data-takeover]')).toContain('assumed absent'))
-  expect(textOf(container, '[data-delivery]')).toContain('next resume')
-  expect(textOf(container, '[data-takeover]')).toContain('no interactive takeover')
+  await waitFor(() => expect(textOf(container, '[data-delivery]')).toContain('next turn'))
+  expect(container.querySelector('[data-op="takeover"]')).toBe(null)
+  // The limitation is stated in the guide, which renders into a portal.
+  fireEvent.click(container.querySelector('[data-action="steering-guide"]') as HTMLElement)
+  await waitFor(() => expect(textOf(document.body, '[data-takeover]')).toContain('assumed absent'))
+  expect(textOf(document.body, '[data-takeover]')).toContain('no interactive takeover')
+  expect(document.body.querySelectorAll('[data-capability="no"]')).toHaveLength(3)
 })
 
 test('the UI has no capability table of its own left to drift', () => {
@@ -821,4 +830,146 @@ test('a node whose agents have not run says so, rather than showing an empty lis
   await waitFor(() => expect(container.querySelector('[data-sessions]')).not.toBe(null))
   expect(textOf(container, '[data-sessions] .empty')).toContain('No agent turn has run yet')
   expect(container.querySelector('[data-session-summary]')).toBe(null)
+})
+
+// ---------------------------------------------------------------------------
+// The composer and the node controls (`Steering.tsx`).
+// ---------------------------------------------------------------------------
+
+test('the composer sits inside the transcript panel, under the conversation', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-composer]')).not.toBe(null))
+  expect(container.querySelector('.transcript [data-composer]')).not.toBe(null)
+  // The lifecycle controls are not in the composer: they carry no message.
+  const composer = container.querySelector('[data-composer]') as HTMLElement
+  for (const op of ['pause', 'abort', 'retry', 'takeover']) {
+    expect(composer.querySelector(`[data-op="${op}"]`)).toBe(null)
+  }
+  expect(container.querySelector('[data-node-controls] [data-op="pause"]')).not.toBe(null)
+})
+
+test('redirect says whether the current turn is stopped before it is sent', async () => {
+  const codex = { ...node('impl', 'running'), harness: 'codex' }
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: {
+      [RUN_ID]: snapshot({
+        nodes: [codex, node('claude', 'running')],
+        harnesses: [
+          harness('codex', 2, 1, null, { ...CODEX_CAPABILITIES, interrupt: false }),
+          harness('claude-code', 2, 1, null, CLAUDE_CODE_CAPABILITIES),
+        ],
+      }),
+    },
+    details: {
+      [`${RUN_ID}/impl`]: nodeDetail({ node: codex }),
+      [`${RUN_ID}/claude`]: nodeDetail({ node: node('claude', 'running') }),
+    },
+  })
+  daemon = stub
+
+  const stoppable = open(stub, 'claude')
+  await waitFor(() => expect(stoppable.container.querySelector('[data-mode="redirect"]')).not.toBe(null))
+  fireEvent.click(stoppable.container.querySelector('[data-mode="redirect"]') as HTMLElement)
+  expect(textOf(stoppable.container, '[data-delivery]')).toContain('Stops the current claude-code turn now')
+  expect(textOf(stoppable.container, '[data-op="redirect"]')).toBe('Redirect')
+
+  const unstoppable = open(stub, 'impl')
+  await waitFor(() => expect(unstoppable.container.querySelector('[data-mode="redirect"]')).not.toBe(null))
+  fireEvent.click(unstoppable.container.querySelector('[data-mode="redirect"]') as HTMLElement)
+  expect(textOf(unstoppable.container, '[data-delivery]')).toContain('the current turn finishes first')
+})
+
+test('a settled node offers only the controls that still apply', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('broke', 'failed'), node('fine', 'done')] }) },
+    details: {
+      [`${RUN_ID}/broke`]: nodeDetail({ node: node('broke', 'failed') }),
+      [`${RUN_ID}/fine`]: nodeDetail({ node: node('fine', 'done') }),
+    },
+  })
+  daemon = stub
+
+  const failed = open(stub, 'broke')
+  await waitFor(() => expect(failed.container.querySelector('[data-op="retry"]')).not.toBe(null))
+  for (const op of ['pause', 'abort', 'takeover']) {
+    expect(failed.container.querySelector(`[data-op="${op}"]`)).toBe(null)
+  }
+  expect(failed.container.querySelector('[data-field="steering"]')).toHaveProperty('disabled', true)
+  expect(textOf(failed.container, '[data-delivery]')).toContain('can no longer reach it')
+
+  const done = open(stub, 'fine')
+  await waitFor(() => expect(done.container.querySelector('[data-action="steering-guide"]')).not.toBe(null))
+  expect(done.container.querySelector('[data-op="retry"]')).toBe(null)
+})
+
+test('abort can be called off before it is sent', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-op="abort"]')).not.toBe(null))
+  fireEvent.click(container.querySelector('[data-op="abort"]') as HTMLElement)
+  fireEvent.click(container.querySelector('[data-op="abort-cancel"]') as HTMLElement)
+  expect(container.querySelector('[data-op="abort"]')).not.toBe(null)
+  expect(stub.posts).toHaveLength(0)
+})
+
+test('the keyboard shortcut sends from the composer', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-field="steering"]')).not.toBe(null))
+  const box = container.querySelector('[data-field="steering"]') as HTMLElement
+  fireEvent.change(box, { target: { value: 'look at the retry helper' } })
+  // A bare Enter is a newline, not a send.
+  fireEvent.keyDown(box, { key: 'Enter' })
+  expect(stub.posts).toHaveLength(0)
+  fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
+  await waitFor(() => expect(stub.posts).toHaveLength(1))
+  expect(stub.posts[0]).toMatchObject({ operation: 'context', body: { text: 'look at the retry helper' } })
+})
+
+test('the guide documents every control against this node', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: {
+      [RUN_ID]: snapshot({
+        nodes: [node('impl', 'running')],
+        harnesses: [harness('claude-code', 2, 1, null, CLAUDE_CODE_CAPABILITIES)],
+      }),
+    },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-action="steering-guide-inline"]')).not.toBe(null))
+  // Reachable from the composer as well as the header.
+  fireEvent.click(container.querySelector('[data-action="steering-guide-inline"]') as HTMLElement)
+  await waitFor(() => expect(document.body.querySelector('[data-steering-guide]')).not.toBe(null))
+  for (const op of ['context', 'redirect', 'pause', 'takeover', 'abort', 'retry']) {
+    expect(document.body.querySelector(`[data-guide="${op}"]`)).not.toBe(null)
+  }
+  // Availability is read off the node: a running node can be paused, not retried.
+  expect(textOf(document.body, '[data-guide="pause"]')).toContain('available now')
+  expect(textOf(document.body, '[data-guide="retry"]')).toContain('not now')
+  expect(document.body.querySelectorAll('[data-capability="yes"]')).toHaveLength(3)
 })

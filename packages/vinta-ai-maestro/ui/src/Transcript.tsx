@@ -32,7 +32,7 @@
  * what they did. Each row opens on its own, and the header opens or closes a
  * whole kind at once.
  */
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from 'vinta-design-system/ui/button'
 import { CLOSED, Entries, FoldControls, type Folded } from './Entries.tsx'
 import { useFollowing } from './follow.ts'
@@ -45,7 +45,17 @@ export const TRANSCRIPT_WINDOW = 60
 /** Grow the window when the operator scrolls within this much of the top. */
 const SCROLL_MARGIN = 40
 
-export function Transcript({ entries }: { readonly entries: readonly unknown[] }) {
+export function Transcript({
+  entries,
+  composer,
+}: {
+  readonly entries: readonly unknown[]
+  /**
+   * The input under the conversation, the way a chat seats its composer. It
+   * lives inside this panel so it follows the transcript to full page.
+   */
+  readonly composer?: ReactNode
+}) {
   // The box's height is the panel's to decide (`Panel.tsx`): expanded it is a
   // screen, in the page it is what the window leaves after the header — the
   // transcript is what the operator came for — and the following below works
@@ -136,7 +146,13 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
             rows={rows}
             open={open}
             listRef={listRef}
-            className="max-h-[var(--panel-scroll,calc(100vh-18rem))] min-h-[320px] overflow-y-auto"
+            // With a composer seated under it, the list gives up that much
+            // height, so the input stays on screen rather than under the fold.
+            className={
+              composer === undefined
+                ? 'max-h-[var(--panel-scroll,calc(100vh-18rem))] min-h-[320px] overflow-y-auto'
+                : 'max-h-[calc(var(--panel-scroll,calc(100vh-18rem))-9rem)] min-h-[280px] overflow-y-auto'
+            }
             onScroll={(event) => {
               onScroll(event)
               if (hidden > 0 && event.currentTarget.scrollTop <= SCROLL_MARGIN) grow()
@@ -144,6 +160,7 @@ export function Transcript({ entries }: { readonly entries: readonly unknown[] }
           />
         </>
       )}
+      {composer}
     </Panel>
   )
 }
