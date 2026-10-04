@@ -154,9 +154,15 @@ export function diffWorkflows(before: Workflow, after: Workflow): WorkflowDiff {
     union,
     changes.filter((change) => TOPOLOGY_KINDS.has(change.kind)).map((change) => change.node),
   )
+  // A live-safe kind changes nothing a settled node built, so it is not a
+  // rewrite of one either: a gate command moving after a phase passed it is
+  // the next gate run's business, and refusing it for that phase would make a
+  // gate unretunable for the whole second half of a run.
   const contentChanged = [
     ...new Set(
-      changes.filter((change) => !TOPOLOGY_KINDS.has(change.kind)).map((change) => change.node),
+      changes
+        .filter((change) => !TOPOLOGY_KINDS.has(change.kind) && !LIVE_SAFE_KINDS.has(change.kind))
+        .map((change) => change.node),
     ),
   ]
 
@@ -174,6 +180,47 @@ export function diffWorkflows(before: Workflow, after: Workflow): WorkflowDiff {
     blocking: sortBy([...blocking], order),
     contentChanged: sortBy(contentChanged, order),
   }
+}
+
+/**
+ * What an amendment changed, as the tokens `workflow_amended.targets` carries:
+ * `gate:<id>`, `node:<id>`, `chore:<id>`, `resource:<id>`, `crew:<id>`,
+ * `pipeline:<id>`, `defaults.<field>`, and the bare names of the top-level
+ * fields with no ids under them (`project`, `base_branch`, …).
+ *
+ * Coarser than a JSON-path diff on purpose. The one reader is a config reload
+ * deciding what to leave alone, and "this gate was changed in this run" is the
+ * unit a person thinks in: a retuned command and a retimed timeout on the same
+ * gate are one decision about that gate.
+ */
+export function targetsOf(before: Workflow, after: Workflow): string[] {
+  const targets: string[] = []
+  const byId = <T>(prefix: string, a: Readonly<Record<string, T>>, b: Readonly<Record<string, T>>) => {
+    for (const id of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      if (JSON.stringify(a[id]) !== JSON.stringify(b[id])) targets.push(`${prefix}:${id}`)
+    }
+  }
+  byId('gate', before.gates, after.gates)
+  byId('chore', before.chores, after.chores)
+  byId('resource', before.resources, after.resources)
+  byId('crew', before.crew, after.crew)
+  byId('pipeline', before.pipelines, after.pipelines)
+  byId(
+    'node',
+    Object.fromEntries(before.nodes.map((node) => [node.id, node])),
+    Object.fromEntries(after.nodes.map((node) => [node.id, node])),
+  )
+  const defaults = new Set([...Object.keys(before.defaults), ...Object.keys(after.defaults)])
+  for (const field of defaults) {
+    const key = field as keyof Workflow['defaults']
+    if (JSON.stringify(before.defaults[key]) !== JSON.stringify(after.defaults[key])) {
+      targets.push(`defaults.${field}`)
+    }
+  }
+  for (const field of ['project', 'base_branch', 'plan_ref', 'plan_context_refs', 'data'] as const) {
+    if (JSON.stringify(before[field]) !== JSON.stringify(after[field])) targets.push(field)
+  }
+  return targets
 }
 
 /**

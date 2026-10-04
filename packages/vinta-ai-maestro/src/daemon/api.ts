@@ -51,7 +51,9 @@ import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
 import { AgentGateRefusal } from '../resources/agent-gates.ts'
-import { parseWorkflow } from '../validate.ts'
+import { loadProjectConfig } from '../config/project-config.ts'
+import { ownDocument } from '../config/own.ts'
+import { resolveWorkflow } from '../config/resolve.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import {
   UnsupportedOperation,
@@ -64,6 +66,7 @@ import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
   AgentGateRequestSchema,
+  GuardRequestSchema,
   PermissionRequestSchema,
   AgentLeaseRequestSchema,
   AnswerRequestSchema,
@@ -227,7 +230,9 @@ export interface ApiOptions {
 
 export function createApi(options: ApiOptions): Hono {
   const { journal, runs } = options
-  const workflows = new Map<string, Workflow>()
+  /** Each run's snapshot, with the mtime it was read at. See `workflow`. */
+  const workflows = new Map<string, { readonly mtimeMs: number; readonly workflow: Workflow }>()
+  const repoDir = dirname(journal.root)
   // `Journal.root` is `<project>/.vinta-ai-maestro`, so its parent is the checkout.
   // Derived rather than passed because every caller already agrees on the
   // journal, and a second `repoPath` parameter would be a second chance to
@@ -649,6 +654,28 @@ export function createApi(options: ApiOptions): Hono {
     return c.json({ allow: decided.allow, reason: decided.reason })
   })
 
+  /**
+   * The gate guard: may this Bash line run, or is it a gate or a pooled
+   * command that should go through the daemon? Anything but a `200` with
+   * `allow: false` is read by the hook as "go ahead" — it fails open — so the
+   * refusals here only have to say why.
+   */
+  app.post('/api/runs/:runId/guard', async (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    if (run.gateGuard === undefined) return c.json({ allow: true })
+
+    const body = await readBody(c, GuardRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    if (!journal.nodes(runId).some((node) => node.node_id === body.value.holderNode)) {
+      return fail(c, 400, 'invalid_holder')
+    }
+    const decided = run.gateGuard.check(body.value)
+    return c.json(decided.allow ? { allow: true } : { allow: false, reason: decided.reason ?? '' })
+  })
+
   app.get('/api/runs/:runId/nodes/:nodeId', (c) => {
     const found = resolveNode(c)
     if ('response' in found) return found.response
@@ -1014,7 +1041,7 @@ export function createApi(options: ApiOptions): Hono {
     } satisfies WorkflowListResponse)
   })
 
-  app.get('/api/workflows/:id', (c) => {
+  app.get('/api/workflows/:id', async (c) => {
     const id = c.req.param('id') ?? ''
     if (!isWorkflowId(id)) return fail(c, 404, 'unknown_workflow')
 
@@ -1027,7 +1054,12 @@ export function createApi(options: ApiOptions): Hono {
           ])
     }
 
-    const parsed = parseWorkflow(read.value)
+    // The *resolved* workflow — the project's gate commands, pools and defaults
+    // under the plan's own — because that is what a run would execute. A save
+    // writes back only what changed (`ownDocument`).
+    const config = await loadProjectConfig(repoDir)
+    if (!config.ok) return fail(c, 409, 'invalid_config', toWireIssues(config.issues))
+    const parsed = resolveWorkflow(read.value, config.config)
     if (!parsed.ok) return fail(c, 409, 'invalid_workflow', toWireIssues(parsed.issues))
     if (parsed.workflow.id !== id) {
       return fail(c, 409, 'invalid_workflow', [
@@ -1051,13 +1083,20 @@ export function createApi(options: ApiOptions): Hono {
       ])
     }
 
-    const parsed = parseWorkflow(raw)
+    const config = await loadProjectConfig(repoDir)
+    if (!config.ok) return fail(c, 409, 'invalid_config', toWireIssues(config.issues))
+    const parsed = resolveWorkflow(raw, config.config)
     if (!parsed.ok) return fail(c, 400, 'invalid_workflow', toWireIssues(parsed.issues))
     if (parsed.workflow.id !== id) {
       return fail(c, 400, 'invalid_workflow', [
         { path: 'id', code: 'id_mismatch', message: 'Workflow id does not match the path' },
       ])
     }
+    // What goes to disk: the stored file with only the edited values changed.
+    // The posted document is the resolved one the editor displayed, and
+    // writing it whole would freeze the project's values into the plan.
+    const stored = store.read(id)
+    const own = ownDocument(parsed.workflow, stored.ok ? stored.value : undefined, config.config)
     // §9's amend. A run in flight has its own frozen snapshot and its own
     // rules about which nodes may still change, so a save that reaches one is
     // routed through `src/amend/` rather than refused: it classifies what
@@ -1077,10 +1116,8 @@ export function createApi(options: ApiOptions): Hono {
       if (!result.ok) {
         return fail(c, 409, result.code, toWireIssues(result.issues, result.code))
       }
-      // The run's definition moved, so the cached snapshot has to.
-      workflows.set(live.id, result.workflow)
       try {
-        store.write(id, result.workflow)
+        store.write(id, own)
       } catch {
         return fail(c, 409, 'write_failed')
       }
@@ -1096,7 +1133,7 @@ export function createApi(options: ApiOptions): Hono {
     }
 
     try {
-      store.write(id, parsed.workflow)
+      store.write(id, own)
     } catch {
       // A code, never the path or the bytes (§11).
       return fail(c, 409, 'write_failed')
@@ -1162,12 +1199,27 @@ export function createApi(options: ApiOptions): Hono {
     return { statuses: () => run.control.statuses, ...run.amend }
   }
 
+  /**
+   * A run's snapshot, re-read when the file moved.
+   *
+   * It used to be cached for good on the grounds that a snapshot is frozen,
+   * and it is not: every amendment replaces it, and only the editor's own save
+   * remembered to refresh the cache. A monitor retune or a config reload in
+   * the run's process left this serving the definition from before it. An
+   * mtime check costs a `stat` and is right for every author at once.
+   */
   function workflow(runId: string): Workflow {
+    const path = join(journal.root, 'runs', runId, 'workflow.json')
+    let mtimeMs = -1
+    try {
+      mtimeMs = statSync(path).mtimeMs
+    } catch {
+      // Unreadable is `readWorkflow`'s to report.
+    }
     const cached = workflows.get(runId)
-    if (cached !== undefined) return cached
-    // Frozen at run start (§5.3), so caching it cannot go stale.
+    if (cached !== undefined && cached.mtimeMs === mtimeMs) return cached.workflow
     const read = journal.readWorkflow(runId)
-    workflows.set(runId, read)
+    workflows.set(runId, { mtimeMs, workflow: read })
     return read
   }
 

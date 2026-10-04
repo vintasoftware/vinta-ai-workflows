@@ -146,6 +146,16 @@ export interface IntegratorOptions {
   readonly onConflict?: (conflict: ReportedConflict) => void
   /** Overridden in tests so `gh` is never invoked against a real remote. */
   readonly ghPath?: string
+  /**
+   * The run's plan branch (`src/run/plan-branch.ts`): what dependency-free
+   * nodes branch from and what the wave spine starts at. Absent means
+   * `base_branch` plays both parts, as it did before runs had a plan branch.
+   *
+   * Never a pull-request base. Every PR still targets `base_branch`; the plan
+   * branch only adds the commits made on it during the run, and those reach
+   * `base_branch` inside the plan's own PRs.
+   */
+  readonly runBase?: string
 }
 
 /** A settled conflict, plus which merge it came out of. */
@@ -227,9 +237,14 @@ export class Integrator {
     return `plan/${this.#plan.id}/integ-${id}`
   }
 
-  /** `wave-0` is `base_branch` itself: the spine starts at what the run branched from. */
+  /** `wave-0` is the run's base itself: the spine starts at what the run branched from. */
   waveBranch(wave: number): string {
-    return wave === 0 ? this.#plan.base_branch : `plan/${this.#plan.id}/wave-${wave}`
+    return wave === 0 ? this.#runBase() : `plan/${this.#plan.id}/wave-${wave}`
+  }
+
+  /** The plan branch when the run has one, and `base_branch` when it does not. */
+  #runBase(): string {
+    return this.#options.runBase ?? this.#plan.base_branch
   }
 
   // -------------------------------------------------------------------------
@@ -240,7 +255,7 @@ export class Integrator {
   base(nodeId: string): BaseRef {
     const deps = this.#node(nodeId).depends_on.map((dep) => dep.node)
     const [first] = deps
-    if (first === undefined) return { kind: 'base_branch', branch: this.#plan.base_branch }
+    if (first === undefined) return { kind: 'base_branch', branch: this.#runBase() }
     if (deps.length === 1) {
       return { kind: 'dependency', branch: this.nodeBranch(first), node: first }
     }
@@ -416,6 +431,12 @@ export class Integrator {
     const cwd = this.#options.integrationPath
     const branch = this.waveBranch(wave)
     await git(cwd, ['checkout', '-B', branch, this.waveBranch(wave - 1)])
+    // Wave 1 starts at the plan branch's tip, so it already has every commit
+    // made there. A later wave starts at the wave before it, which was cut
+    // before anything committed to the plan branch since — a config change
+    // pushed mid-run — so that is merged first, or the plan PR would ship
+    // without the change the run has been running under.
+    if (wave > 1 && this.#options.runBase !== undefined) await this.#catchUp(cwd, branch)
 
     const merged: string[] = []
     const conflicts: ConflictRecord[] = []
@@ -431,6 +452,23 @@ export class Integrator {
       merged.push(nodeId)
     }
     return { wave, branch, merged, conflicts }
+  }
+
+  /** Merges the plan branch into `branch` when it has commits `branch` lacks. */
+  async #catchUp(cwd: string, branch: string): Promise<void> {
+    const runBase = this.#runBase()
+    if (await gitOk(cwd, ['merge-base', '--is-ancestor', runBase, 'HEAD'])) return
+    try {
+      await git(cwd, ['merge', '--no-ff', '-m', `Merge ${runBase} into ${branch}`, runBase])
+    } catch {
+      // A plan-branch commit is configuration, and configuration that
+      // conflicts with a phase's work is a decision about which one is right.
+      // The fixer is for phases colliding with each other, not for that.
+      await gitOk(cwd, ['merge', '--abort'])
+      throw new Error(
+        `merging ${runBase} into ${branch} conflicted — resolve it on ${runBase} and resume the run`,
+      )
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -455,6 +493,7 @@ export class Integrator {
     options: { readonly draft?: boolean; readonly text?: PrText } = {},
   ): Promise<PrResult> {
     const node = this.#node(nodeId)
+    const base = this.base(nodeId)
     // Composed by the caller, which is where the journal is: what a phase cost
     // — gates, attempts, conflicts — is the run's record and not the graph's,
     // and this class deliberately holds only the graph. Absent, the PR falls
@@ -462,7 +501,10 @@ export class Integrator {
     return await openPullRequest({
       cwd: this.#options.integrationPath,
       nodeId,
-      base: this.base(nodeId).branch,
+      // A dependency-free phase targets `base_branch`, not the plan branch it
+      // was cut from: the plan branch is the run's, and a PR into it would be
+      // merged somewhere nobody reviews from.
+      base: base.kind === 'base_branch' ? this.#plan.base_branch : base.branch,
       head: this.nodeBranch(nodeId),
       title: options.text?.title ?? node.name,
       body: options.text?.body ?? node.prompt_ref,

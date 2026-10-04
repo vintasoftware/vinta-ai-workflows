@@ -446,7 +446,7 @@ Sandbox denies the whole pool root and allows back only the running lane, so an 
 
 They are a separate registry rather than a second kind of gate because sharing one would be wrong three ways: a chore invalidates the gate cache key (§13.4) by running, it contends for a harness slot rather than a `test-suite` pool, and it must not be the thing standing between a phase and its merge. A chore that fails is journalled and the phase continues to its gates; `on_failure: 'fail'` is for one the phase is not correct without. A capacity refusal skips it for the same reason — re-driving a finished phase to fit in a polish turn costs more than the polish is worth.
 
-**Integration.** Branch topology follows dependencies, not plan order: no dependencies cuts from `base_branch`; exactly one cuts from that node's branch; several cut from an `integ-<id>` merge of them, merged in `depends_on` declaration order so the result is deterministic and derivable from the node alone. `wave-0` *is* `base_branch`; each later wave merges into `wave-<N>`. Merge conflicts are handed to a conflict-fixer agent in the dedicated integration worktree and re-enter the gate.
+**Integration.** Branch topology follows dependencies, not plan order: no dependencies cuts from `base_branch`; exactly one cuts from that node's branch; several cut from an `integ-<id>` merge of them, merged in `depends_on` declaration order so the result is deterministic and derivable from the node alone. `wave-0` *is* the run's plan branch (`plan/<id>/base`, §18.2), which starts at `base_branch`; each later wave merges into `wave-<N>`, merging the plan branch's newer commits first. Every pull request still targets `base_branch`. Merge conflicts are handed to a conflict-fixer agent in the dedicated integration worktree and re-enter the gate.
 
 **Every branch a plan lands through has a PR.** Three kinds, all opened by `open_pr` and journalled whether or not they opened (`node_pr` with `kind`, and `run_pr`):
 
@@ -1002,3 +1002,48 @@ What `judged` is **not** is a sandbox. A classifier reads one command line and c
 - **Refusal classification.** Classify spawn refusals the regex patterns miss (§7's "unrecognized is fatal"), with `fatal` below the threshold.
 - **opencode's permission API.** It could host `judged` through its session permission events instead of a hook.
 - **Plan time.** `plan-feature` does not emit judge gates. That is deliberate for now; judge gates are hand-authored.
+
+## 18. Project configuration
+
+### 18.1 Layers
+
+A plan's workflow file is resolved over the project's `.vinta-ai-workflows.yaml` before it is validated (`src/config/resolve.ts`). The layers, lowest first: `commands.*` (shared with `implement-plan`), `maestro.*`, the workflow file, and the run's own amendments. Maps keyed by id merge per id, with the higher entry replacing the lower one whole. A typed gate (`type: test | lint | typecheck | e2e`) is the exception and merges field by field. Lists replace, and plain objects merge per field. Every gate type the project has a command for is available under the type's own name.
+
+`WorkflowSchema` describes the *resolved* document: what a run freezes, executes and amends. `AuthoredWorkflowSchema` describes the file, in which a typed gate may omit `cmd` and `base_branch` may be omitted. The generated `workflow.v1.schema.json` is the authored one. `runs/<id>/sources.json` keeps the layers a run was resolved from, because a resolved document cannot be re-resolved.
+
+The editor shows the resolved document and saves a patch (`src/config/own.ts`). The stored file is resolved the same way, the two resolved documents are diffed, and only what changed is written back to the file. Writing the resolved document would freeze the project's values into the plan.
+
+### 18.2 The plan branch
+
+`startRun` ensures `plan/<workflow-id>/base` before it creates anything (`src/run/plan-branch.ts`):
+
+- **Missing:** cut from `base_branch`.
+- **Contains `base_branch`:** reused.
+- **Only behind:** moved forward, unless a worktree has it checked out.
+- **Diverged:** refused.
+
+A resume reuses the branch as it is. Lanes, the integration worktree and dependency-free phases use the branch as their base (`IntegratorOptions.runBase`), and the PR bases do not change.
+
+`src/config/reload.ts` polls the branch. When new commits touch the config file or the plan's workflow file, it reads both at the new commit, resolves them, and submits the result to `amendRun` as author `config` with the commit as `source`. Before submitting, the proposal is pinned:
+
+- every target of an `operator` or `monitor` amendment in this run keeps the run's value;
+- every started node keeps its definition;
+- `base_branch` never moves.
+
+A `nodes_in_flight` refusal is retried on the next tick. Any other refusal is journalled as `config_reload` and the commit is passed over. Every `workflow_amended` row now carries `targets`, computed for non-monitor authors, which is what the pinning reads.
+
+A gate-table change is live-safe for a node that is `done` as well as for one in flight. It changes nothing the node built, so it is not a rewrite of that node.
+
+### 18.3 Scoped gates
+
+A command gate may carry `scoped_cmd` with `{changed_files}` / `{touches}`. Under `defaults.gate_scope: scoped`, phase gates run it, both the gate node and an agent's `gate` verb (`src/gates/scope.ts`). Each placeholder is filled shell-quoted. When a placeholder would be empty, the gate runs `cmd`. After a wave merges, the full `cmd` of every gate its members ran narrowed runs once in the integration worktree, without pools and uncached, and is journalled as `wave_gate_result`. If it is red, the merge fails with `WaveGateError`.
+
+### 18.4 The gate guard
+
+A claude-code `PreToolUse` hook (`guard-hook`) is installed for every spawn in every permission mode, through the per-lane `--settings` file. It asks the daemon (`POST /api/runs/:runId/guard`), which matches the Bash line against two things: the gates' full commands, and the `match` patterns of semaphore pools that are not leased through `with` (`src/guard/match.ts`). Scoped forms are not matched as gates, because they are indistinguishable from inner-loop work. A hit is refused with the verb to use and journalled as `bare_gate_blocked`. The hook fails open and never answers "allow". On codex and opencode the scheduler checks each `tool_use` after it ran and journals `bare_gate_detected`. `doctor` reports each harness as `gate-guard:<harness>`.
+
+### 18.5 Not done here
+
+- **opencode enforcement.** Its plugin API could host the guard before a call runs.
+- **A plan branch on a remote.** The reload reads the local ref, and a commit pushed from another machine is not fetched.
+- **Retuning `scoped_cmd`.** The monitor's `retune_gate` changes `cmd` only.

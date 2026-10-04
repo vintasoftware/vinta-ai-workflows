@@ -30,6 +30,53 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Project defaults for maestro in `.vinta-ai-workflows.yaml`.** A new
+  `maestro:` section holds what every plan's `.workflow.json` used to repeat:
+  per-type gate defaults, resource pools, chores, run defaults and the
+  `project` block. Maestro layers each plan over it. The project's
+  `commands.*` come first, then `maestro.*`, then the plan, then the run's own
+  amendments. A plan now states only what is different, and editing the
+  project file reaches every plan that did not override it.
+  - **Gate types.** A gate with `"type": "test" | "lint" | "typecheck" |
+    "e2e"` takes its command from `maestro.gates.<type>`, else from
+    `commands.test_unit` / `lint` / `build` / `e2e`. A `maestro.gates.<type>.cmd`
+    gives maestro its own line, and `implement-plan` keeps running
+    `commands.*`. Every type the project has a command for is available under
+    the type's name, so a node can list `["typecheck", "test"]` with no gate
+    table.
+  - **`defaults.gates`**, the gates every phase runs unless it names its own.
+    `defaults.harness` and `defaults.pipeline` now default to `claude-code`
+    and `standard-phase`, and `base_branch` defaults to
+    `project.default_branch`.
+  - **The bootstrap asks for these** (interview item C.11) and writes the
+    section. `plan-feature` reads it and emits only plan-specific values.
+- **Scoped and full gates.** A gate can carry a `scoped_cmd` with
+  `{changed_files}` / `{touches}`. Phase gates run it, and the full `cmd` runs
+  once on each wave's merged tree. A failure there is a regression between
+  phases, and it fails the merge (`defaults.gate_scope: scoped`, the default;
+  `full` runs `cmd` everywhere). `commands.test_unit_scoped` and the new
+  `commands.lint_scoped` are inherited as scoped commands when they contain a
+  placeholder. `implement-plan`'s scoped suite fills the same placeholders.
+- **Every maestro run works on a plan branch, `plan/<workflow-id>/base`.**
+  It is cut from `base_branch` at start, and phases and waves build on it.
+  Pull requests still target `base_branch`. Commit a change to
+  `.vinta-ai-workflows.yaml` or the plan's `.workflow.json` on that branch,
+  and the running plan picks it up as a `config` amendment that names the
+  commit. A config change never undoes a change an operator or the monitor
+  made in the run, never rewrites a phase that has started, and ships with
+  the plan's PR. `run` warns when the checkout's config file differs from
+  what is committed on the plan branch.
+- **The gate guard.** On claude-code, every maestro agent gets a
+  `PreToolUse` hook, in every permission mode, through the per-lane settings
+  file only. It refuses two things: a gate's full command typed by hand
+  (answer: `vinta-ai-maestro gate <id>`), and a command matching a pool's new
+  `match` patterns when run without the lease (answer:
+  `vinta-ai-maestro with <pool> --`). Refusals are journalled as
+  `bare_gate_blocked`. The hook fails open and never auto-approves anything.
+  On codex and opencode a matching command is recorded after the fact as
+  `bare_gate_detected`. `doctor` reports which you get as
+  `gate-guard:<harness>`.
+
 - **Provision worktrees with your own script instead of the `prepare-worktree`
   skill.** Set `commands.worktree_prepare` in `.vinta-ai-workflows.yaml` (and
   optionally `commands.worktree_teardown`), and `implement-plan` runs that
@@ -336,6 +383,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Maestro: every `workflow_amended` row carries `targets`.** Operator and
+  config amendments get them too, computed from the snapshot and the
+  proposal. Before, only monitor amendments had them.
+- **Maestro: a gate command can be amended after a phase that uses it is
+  done.** Changing a gate table no longer counts as rewriting a finished
+  phase. Before, such an amendment was refused as `body_changed_after_done`.
+- **Maestro: the editor saves only what you changed.** It shows the workflow
+  resolved over the project config, and on save it writes back only the
+  edited values. A first save no longer copies every default, or the
+  project's values, into the plan file.
+
 - **Maestro: the node view's right-hand column stays short.** Gate logs open
   in a dialog instead of an inline accordion. The dialog opens at the end of
   the log, keeps up with a running gate's output, numbers the lines, and has
@@ -434,6 +492,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   being fixed at 380px.
 
 ### Fixed
+
+- **Maestro: wave merges again use the membership the executor counted.**
+  `RecordingIntegrator.mergeWave` dropped it, so in production a merge fell
+  back to the integrator's own reading of the wave. That reading could differ
+  from the count if an amendment landed in between.
+- **Maestro: the gate run on a conflict resolution uses the amended gate
+  commands.** It used the workflow from the start of the run.
+- **Maestro: the API serves a run's definition as amended.** It cached the
+  snapshot forever, so a monitor retune made in the run's own process never
+  reached the UI.
+- **Maestro: saving in the editor during a run no longer reports a failure.**
+  The amendment response failed the client's schema check even though the
+  save had gone through.
 
 - **`implement-plan`'s final report no longer suggests `docker compose down -v`
   to tear down a lane.** `down -v` also deletes the compose volumes a worktree

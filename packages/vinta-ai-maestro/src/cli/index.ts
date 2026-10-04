@@ -15,6 +15,7 @@
  * thing they ran, because a caller asking whether the gate passed wants the
  * gate's answer and not this process's opinion of how the request went.
  */
+import { guardHookMain } from '../guard/hook.ts'
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
 import { GATE_USAGE, gateCommand } from './gate.ts'
@@ -53,6 +54,8 @@ usage: vinta-ai-maestro <command> [options]
                              turn's lane, leased and cached by the daemon.
   judge-hook                 Internal: the safety hook --permission judged
                              installs. Reads one tool call on stdin.
+  guard-hook                 Internal: the gate guard every run installs for
+                             claude-code. Reads one tool call on stdin.
 
   -h, --help                 Print this.
 
@@ -130,6 +133,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
         err: io.err,
         env: process.env,
       })
+    case 'guard-hook':
+      return await guardHookMain({ stdin: readStdin, out: io.out, env: process.env })
     default:
       // The unknown word is echoed back because a typo is the likely cause and
       // seeing it is how the reader spots one. It is an argument, never a path

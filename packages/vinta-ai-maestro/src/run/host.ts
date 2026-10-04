@@ -11,6 +11,7 @@
  * thing through `startRun`, so a run submitted to a daemon cannot drift into
  * being a second, subtly different kind of run.
  */
+import { guardHookCommand } from '../guard/hook.ts'
 import { join } from 'node:path'
 
 import type { AmendRunner } from '../amend/amend.ts'
@@ -121,8 +122,11 @@ export interface HostWiring {
 class RecordingIntegrator extends Integrator {
   readonly records: IntegrationWaveRecord[] = []
 
-  override async mergeWave(wave: number): Promise<WaveResult> {
-    const result = await super.mergeWave(wave)
+  // `members` is passed through: dropping it here made every production merge
+  // fall back to the integrator's own reading of the wave, which is the window
+  // `mergeWave`'s note says an amendment can land in.
+  override async mergeWave(wave: number, members?: readonly string[]): Promise<WaveResult> {
+    const result = await super.mergeWave(wave, members)
     // Identifiers only, as `ConflictRecord` already is: node ids, paths, rounds.
     this.records.push({ wave: result.wave, conflicts: result.conflicts })
     return result
@@ -150,6 +154,11 @@ export interface ProvisionOptions {
   readonly adopt?: boolean
   /** The operator's classifier (§17), for judge gates and gate triage. */
   readonly systemOne?: SystemOne
+  /**
+   * The run's plan branch. Lanes and the integration worktree are cut from it
+   * and reset to it, and it is the wave spine's start. Absent: `base_branch`.
+   */
+  readonly planBranch?: string
 }
 
 /**
@@ -180,7 +189,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // lane is one of these worktrees rather than a directory nobody made.
     laneCount: crewLanes.length > 0 ? crewLanes.length : (workflow.resources['lane']?.capacity ?? 1),
     ...(crewLanes.length === 0 ? {} : { laneNames: crewLanes }),
-    baseRef: workflow.base_branch,
+    baseRef: options.planBranch ?? workflow.base_branch,
     // With no `project` block a lane is a worktree and nothing else, and
     // `migrateCmd` is never reached — templates are built per declared role.
     project: projectSpec(workflow.project),
@@ -200,10 +209,15 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   // failure than a stale pair, and harder to see.
   const integration = pool.integration
   const integrationPath = integration.path
+  // The definition as amended, for the one reader below that is a closure
+  // rather than an object with an `adopt`: `verify` captured the snapshot the
+  // run was provisioned with and kept gating merges on it.
+  let current = workflow
   const integrator = new RecordingIntegrator({
     // `Workflow` satisfies `IntegrationPlan` structurally.
     plan: workflow,
     integrationPath,
+    ...(options.planBranch === undefined ? {} : { runBase: options.planBranch }),
     fixer: conflictFixer(
       workflow,
       adapters,
@@ -248,8 +262,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       // Command gates only. A judge gate's question is about one phase's diff,
       // and a conflict resolution is not any phase's — asking it of the merge
       // would judge a diff the question was never written for.
-      const gates = [...new Set(workflow.nodes.flatMap((node) => node.gates))].flatMap((id) => {
-        const gate = workflow.gates[id]
+      const gates = [...new Set(current.nodes.flatMap((node) => node.gates))].flatMap((id) => {
+        const gate = current.gates[id]
         return gate === undefined || isJudgeGate(gate) ? [] : [[id, gate] as const]
       })
       for (const [id, gate] of gates) {
@@ -303,11 +317,13 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       env: { ...env, ...options.agentEnv },
     })),
     cache,
+    integrationEnv: { ...integration.env, ...options.agentEnv },
     ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
   })
 
   const rebasePlan = createRebaser({
     integrationPath,
+    ...(options.planBranch === undefined ? {} : { runBase: options.planBranch }),
     // The base the run recorded, not the one the amended graph implies: it is
     // the fork point the rebase replays from.
     baseOf: (nodeId) =>
@@ -331,6 +347,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // flight in that directory.
     rebase: async (request) => await executor.integration(() => rebasePlan(request)),
     adopt: (amended: Workflow) => {
+      current = amended
       executor.adopt(amended)
       integrator.adopt(amended)
       for (const broker of brokers) broker.adopt(amended)
@@ -527,6 +544,9 @@ export function defaultAdapters(
             ...(judge === undefined
               ? {}
               : { judgeHook: { command: judgeHookCommand(), tools: judge.tools, timeoutS: 60 } }),
+            // The gate guard, in every mode (`src/guard/`). The run registers
+            // the daemon side in `startRun`; without it the hook allows.
+            guardHook: { command: guardHookCommand(), timeoutS: 10 },
           })
         : id === 'codex'
           ? new CodexAdapter({ permission })

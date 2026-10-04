@@ -235,8 +235,15 @@ export type AmendmentKind =
  * whether this gate has already been retuned, whether a change about to be
  * made would undo one the monitor made itself. A `boolean` would answer all
  * three and read like an afterthought in the one place the history is audited.
+ *
+ * `config` is the project's configuration moving under the run: a commit on
+ * the run's plan branch that changed `.vinta-ai-workflows.yaml` or the plan's
+ * workflow file, re-resolved and applied (`src/config/reload.ts`). Not the
+ * run's own decision and not a person's at the console, so it is neither of
+ * the other two — and the intervention budget, which folds `monitor` rows only,
+ * is not spent by it.
  */
-export type AmendmentAuthor = 'operator' | 'monitor'
+export type AmendmentAuthor = 'operator' | 'monitor' | 'config'
 
 /** One node and one way it moved. Both fields are identifiers. */
 export interface AmendmentChange {
@@ -264,6 +271,22 @@ interface RunPayloads {
    * failed from one that ran twice because the machine rebooted underneath it.
    */
   run_resumed: { readonly attempt: number }
+  /**
+   * A plan-branch commit the run could not take, or could not take yet
+   * (`src/config/reload.ts`). An applied one is a `workflow_amended` row with
+   * `author: 'config'` and needs nothing more.
+   *
+   * `deferred` is a node §9 says is in flight: the commit is retried on the
+   * next tick, and the row is written once per commit rather than per tick.
+   * `refused` passes the commit over. `issues` are the same located messages a
+   * refused amendment or an invalid workflow reports — ids and paths.
+   */
+  config_reload: {
+    readonly source: string
+    readonly outcome: 'deferred' | 'refused'
+    readonly code: string
+    readonly issues: readonly { readonly path: readonly string[]; readonly message: string }[]
+  }
   /**
    * The plan-level PR: the final wave branch into `base_branch`, opened once
    * the last wave merges. `node_pr`'s fields, for `node_pr`'s reasons — and no
@@ -307,8 +330,16 @@ interface RunPayloads {
      */
     readonly author?: AmendmentAuthor
     /**
-     * What an autonomous amendment changed, as `gate:<id>` / `node:<id>`
-     * tokens. Present only on a `monitor` row.
+     * What the amendment changed, as `gate:<id>` / `node:<id>` / `chore:<id>` /
+     * `resource:<id>` / `crew:<id>` / `defaults.<field>` / `project` tokens.
+     * On a `monitor` row they are the verbs' targets; on every other row they
+     * are computed from the snapshot and the proposal. Absent on rows written
+     * before operator rows carried them.
+     *
+     * A config reload reads them back to leave alone whatever a person or the
+     * monitor already changed in this run (`src/config/reload.ts`): the
+     * project's configuration is the layer *under* a run's own amendments,
+     * and a commit to it must not quietly undo a retune somebody made.
      *
      * The cooldown is keyed on these, so they are journalled rather than
      * recomputed: the proposal that produced them is a file on disk beside the
@@ -318,6 +349,8 @@ interface RunPayloads {
      * belongs (§11).
      */
     readonly targets?: readonly string[]
+    /** On a `config` row: the plan-branch commit the configuration was read at. */
+    readonly source?: string
   }
 }
 
@@ -569,6 +602,42 @@ interface NodePayloads {
    * restart between the start and the result. `cached` is what stops the
    * figure being read as time this run spent.
    */
+  /**
+   * The gate guard (`src/guard/`) refused a Bash line before it ran: it was a
+   * gate's own command, or a command a pool's `match` names, run without going
+   * through the daemon. `rule` says which, and the id says which gate or pool —
+   * never the command, which is repository content (§11).
+   */
+  bare_gate_blocked: {
+    readonly rule: 'gate' | 'pool'
+    readonly gate?: string
+    readonly pool?: string
+    readonly harness: string
+  }
+  /**
+   * The same, seen in the transcript after it ran, on a harness the guard
+   * cannot stop a call on (codex has no per-call hook; opencode's is not
+   * wired). A record of what happened rather than a prevention.
+   */
+  bare_gate_detected: {
+    readonly rule: 'gate' | 'pool'
+    readonly gate?: string
+    readonly pool?: string
+    readonly harness: string
+  }
+  /**
+   * The full form of a gate, run once on a wave's merged tree because the
+   * wave's phases ran it narrowed (`defaults.gate_scope: scoped`). Filed
+   * against the node whose merge built the wave; its log is the integration
+   * worktree's, under `wave-<N>-<gate>`.
+   */
+  wave_gate_result: {
+    readonly wave: number
+    readonly gate: string
+    readonly exit_code: number
+    readonly status: GateStatus
+    readonly duration_ms: number
+  }
   gate_result: {
     readonly gate: string
     readonly exit_code: number

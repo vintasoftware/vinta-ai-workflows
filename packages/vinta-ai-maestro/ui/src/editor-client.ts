@@ -14,6 +14,7 @@
  * validator's own paths and messages — never the workflow's contents.
  */
 import {
+  AmendResponseSchema,
   ErrorResponseSchema,
   OkResponseSchema,
   WorkflowListResponseSchema,
@@ -65,7 +66,9 @@ export function createWorkflowClient(origin: string, token: string): WorkflowCli
         body: JSON.stringify(workflow),
       })
       if (!response.ok) throw await refusal(response)
-      if (!OkResponseSchema.safeParse(await response.json()).success) {
+      // A save that reached a live run is an amendment, and answers with what
+      // the amendment did rather than a bare `ok`. Both are a successful save.
+      if (!OkResponseSchema.or(AmendResponseSchema).safeParse(await response.json()).success) {
         throw new Error(`${path}: response did not match the daemon schema`)
       }
     },

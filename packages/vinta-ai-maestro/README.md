@@ -97,7 +97,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 | `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
 
-There is also `judge-hook`, which is internal: it is the hook `--permission judged` installs, and claude-code runs it, not you.
+There are also `judge-hook` and `guard-hook`, which are internal: they are the hooks `--permission judged` and [the gate guard](#the-gate-guard) install, and claude-code runs them, not you.
 
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
 
@@ -169,6 +169,189 @@ up under. Where that output varies run to run — a timestamp, a duration, a run
 id — the gate invalidates itself every time and nothing is ever cached. Add
 those paths to `.gitignore`: ignored files are deliberately outside the key,
 and that is the whole fix.
+
+### The gate guard
+
+The prompts ask for `vinta-ai-maestro gate <id>`; on claude-code the guard
+makes it stick. Every agent a run starts gets a `PreToolUse` hook, in every
+`--permission` mode, that refuses two kinds of Bash line before they run:
+
+- **A gate's full command, typed by hand.** The agent is told the `gate` line
+  to use instead.
+- **A command matching a pool's `match` pattern without the pool's lease.**
+  The agent is told to run it under `vinta-ai-maestro with <pool> --`.
+
+```jsonc
+"resources": {
+  "test-suite": { "capacity": 1, "kind": "semaphore", "match": ["pytest*", "uv run pytest*"] }
+}
+```
+
+A gate's *scoped* form is not refused as a gate: `pytest app/a.py` is also what
+an agent running one test file in its inner loop types, which is the work. It
+owes the pool's lease, and the `match` rule asks for exactly that.
+
+The hook is installed through the per-lane settings file the adapter passes
+with `--settings` for that one spawn. It never touches the repository's
+`.claude/settings.json`, so your own sessions and `implement-plan` are not
+affected. It asks the run's daemon, which matches against the gate commands as
+they stand now (a retuned gate is matched on its new command), and journals each
+refusal as `bare_gate_blocked`. It fails open: no daemon, no answer, unreadable
+input, and the call goes ahead as if there were no hook. It never answers
+"allow", so it cannot skip a permission prompt your mode asks for.
+
+It compares command lines. `bash -c "…"`, a script that runs the suite, or the
+same tool spelled differently are not seen. It is a guardrail against habit, not
+a sandbox.
+
+codex has no per-call hook and opencode's is not wired, so on those harnesses a
+matching command is only recorded after it ran, as `bare_gate_detected`. `doctor`
+says which you are getting, per harness, as `gate-guard:<harness>`.
+
+## Project configuration — `.vinta-ai-workflows.yaml`
+
+Most of a workflow repeats from plan to plan: the test, lint and typecheck
+gates, the pool the suite contends for, the comment-hygiene chore, the `project`
+block a lane is provisioned from. Put those in `.vinta-ai-workflows.yaml` at the
+repository root, and each plan states only what is different. The file is the
+one the bootstrap writes; maestro reads two parts of it.
+
+```yaml
+commands:                       # shared with implement-plan
+  build: uv run mypy .
+  test_unit: uv run pytest
+  test_unit_scoped: uv run pytest --testmon {changed_files}
+
+maestro:
+  defaults:
+    gates: [typecheck, test]    # what every phase runs unless it names its own
+  gates:
+    test:                       # maestro's own line; implement-plan keeps commands.test_unit
+      cmd: uv run pytest --reuse-db -n auto
+      requires: [test-suite]
+  resources:
+    test-suite: { capacity: 1, kind: semaphore, match: ['pytest*', 'uv run pytest*'] }
+  chores:
+    deslop: { skill: deslop-comments, prompt_ref: ai-plans/CHORES.md#deslop }
+  project:
+    migrate_cmd: uv run python manage.py migrate
+```
+
+A plan over that file can be this small. Every node runs `typecheck` and `test`
+with the project's commands:
+
+```jsonc
+{
+  "schema_version": 1,
+  "id": "widget-tags",
+  "defaults": { "model": "claude-sonnet-5" },
+  "resources": { "lane": { "capacity": 2, "kind": "worktree" } },
+  "nodes": [ /* … */ ]
+}
+```
+
+**The layers, lowest first**, each overriding the one before:
+
+1. `commands.*`: the lines `implement-plan` runs.
+2. `maestro.*`: what maestro does differently, or what every plan would repeat.
+3. The plan's `.workflow.json`.
+4. The run's own amendments (an operator's edit, the monitor's retune). A config
+   change never undoes one of these.
+
+**The merge rules are the workflow's own.** Maps keyed by id (`resources`,
+`chores`, `project.databases`, `project.services`) merge per id, and the higher
+layer's entry replaces the lower one's whole. Lists replace (`defaults.gates`,
+`defaults.chores`, a node's `gates`), so `[]` still opts out. Plain objects
+(`defaults`, `project`, `project.commands`) merge field by field. A plan with no
+`base_branch` takes `project.default_branch`. `defaults.harness` and
+`defaults.pipeline` default to `claude-code` and `standard-phase`.
+
+### Gate types
+
+A gate with a `type` (`test`, `lint`, `typecheck` or `e2e`) takes any field it
+does not set from the project: first `maestro.gates.<type>`, then the
+`commands.*` line for that type (`test_unit`, `lint`, `build`, `e2e`). Each type
+the project has a command for is also available under the type's own name, which
+is why the nodes above can say `typecheck` and `test` with no `gates` table.
+
+```jsonc
+"gates": {
+  "test":   { "type": "test", "timeout_s": 3600 },  // the project's command, a longer timeout
+  "smoke":  { "cmd": "./scripts/smoke.sh" }         // untyped: entirely the plan's
+}
+```
+
+A typed gate merges field by field. An untyped entry replaces whatever the
+project had under that id.
+
+### Scoped and full gates
+
+A gate may carry two commands. `cmd` is the full check. `scoped_cmd` is the
+same check narrowed to what the phase changed, with `{changed_files}` (the
+files the lane changed against the phase's base, uncommitted work included,
+deletions excluded) or `{touches}` (the node's Touch List) in it:
+
+```jsonc
+"unit": { "cmd": "pnpm vitest run", "scoped_cmd": "pnpm vitest related {changed_files} --run" }
+```
+
+Under `defaults.gate_scope: scoped`, the default, phase gates run `scoped_cmd`.
+Those are the gates the implementer, the reviewer and every fixer round ask for.
+The full `cmd` then runs **once per wave, on the merged tree**, after the wave's
+branches are merged. A red full run there is a regression *between* phases. It
+fails the merge and names the wave and the gate. `gate_scope: full` runs `cmd`
+everywhere and skips the wave run. A gate with no `scoped_cmd`, or a
+placeholder with nothing to substitute, runs `cmd`.
+
+The command must accept any path it is given. A source file with no tests of its
+own is a normal member of `{changed_files}`. `vitest related` and
+`jest --findRelatedTests` are built for this; `pytest` needs a plugin such as
+`pytest-testmon`, or a wrapper. A `commands.test_unit_scoped` line is inherited
+only when it has a placeholder. A fixed `pnpm test:patient` is a line for an
+agent to interpret, and the daemon has no agent to do that.
+
+## The plan branch — changing a run while it runs
+
+Every run works on its own branch, `plan/<workflow-id>/base`, cut from
+`base_branch` when the run starts. Dependency-free phases branch from it, lanes
+are reset to it, and the wave spine starts from it. Pull requests still target
+`base_branch`. If the branch already exists and contains `base_branch`, it is
+used as is, so a config change can be committed there before the run starts.
+If it is only behind, it is moved forward. If it has diverged, the run refuses
+to start.
+
+**Commit to the plan branch to change the run.** The run checks the branch every
+few seconds. When new commits touch `.vinta-ai-workflows.yaml` or the plan's own
+`.workflow.json`, both are read *at the new commit*, resolved exactly as at
+start, and applied to the live run as an amendment authored `config`. The
+journal's `workflow_amended` row names the commit.
+
+```console
+$ git switch plan/widget-tags/base        # or a worktree of it
+$ $EDITOR .vinta-ai-workflows.yaml        # e.g. add --reuse-db to maestro.gates.test.cmd
+$ git commit -am "maestro: reuse the test db" && git switch -
+```
+
+What a config change may not do:
+
+- **Undo a change made in this run.** A gate, node, chore or pool that an
+  operator or the monitor amended keeps the run's value.
+- **Rewrite a phase that has started.** Its definition stays as it was. A gate
+  *command* change reaches every phase at its next gate run, including phases
+  already done.
+- **Retarget the plan.** `base_branch` is fixed for the run.
+
+A change the amend rules refuse because a node is in flight is retried on the
+next check. Anything else that is refused, such as a file that does not parse
+or a workflow that does not validate, is journalled as a `config_reload` row and
+passed over.
+
+Only commits count. An uncommitted edit in your checkout reaches no run, and an
+edit committed on `main` reaches no run already going. A run *starts* from the
+checkout's file, and `run` warns when that file differs from what is committed
+on the plan branch, because the next config commit would replace those edits.
+The commits ship with the plan: each later wave merges the plan branch in, so
+the plan PR carries them to `base_branch` for review with everything else.
 
 ## Chores — the other thing a phase runs
 

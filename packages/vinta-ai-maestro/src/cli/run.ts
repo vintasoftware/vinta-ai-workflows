@@ -45,10 +45,10 @@ import { launchJob, removeJob, writeJob, type LaunchResult } from '../job/job.ts
 import { openJournal, type Journal } from '../journal/journal.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
-import { preflightRun, startRun, type StartedRun } from '../run/index.ts'
+import { preflightRun, startRun, type RunSourcesInput, type StartedRun } from '../run/index.ts'
 import type { RunStop } from '../scheduler/index.ts'
 import type { DoctorOverrides } from './doctor.ts'
-import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
+import { FAILED, OK, USAGE, loadPlan, loadWorkflow, type Io } from './io.ts'
 import { errorFields, installCrashHandlers, redactValue } from '../log/index.ts'
 import { reportLogFailures, toLogSetup, type LogValues } from './logging.ts'
 import { jobArgs, resumeRefusal, toRunPolicy, type JobTarget, type RunPolicy } from './policy.ts'
@@ -219,7 +219,7 @@ async function launchRun(request: RunRequest): Promise<number> {
   const { bind, policy, io, deps } = request
   let target: JobTarget
   if (request.resumeId === undefined) {
-    const workflow = await loadWorkflow(request.path as string, io)
+    const workflow = await loadWorkflow(request.path as string, io, bind.repoPath)
     if (workflow === null) return FAILED
     target = {
       kind: 'workflow',
@@ -281,10 +281,12 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
   let workflow
   let runId: string
   let resumeJournal: Journal | undefined
+  let sources: RunSourcesInput | undefined
   if (resumeId === undefined) {
-    const loaded = await loadWorkflow(request.path as string, io)
+    const loaded = await loadPlan(request.path as string, io, bind.repoPath)
     if (loaded === null) return FAILED
-    workflow = loaded
+    workflow = loaded.workflow
+    sources = { path: request.path as string, authored: loaded.authored, config: loaded.config }
     runId = request.runId ?? deps.runId ?? `${workflow.id}-${Date.now().toString(36)}`
   } else {
     resumeJournal = openJournal(bind.repoPath)
@@ -419,6 +421,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       ...(systemOne === undefined ? {} : { systemOne }),
       logger: log,
       ...(resumeId === undefined ? {} : { resume: true }),
+      ...(sources === undefined ? {} : { sources }),
       ...(policy.onFailure === undefined ? {} : { onFailure: policy.onFailure }),
       ...(policy.retries === undefined ? {} : { retries: policy.retries }),
       ...(policy.retryAfterMs === undefined ? {} : { retryAfterMs: policy.retryAfterMs }),

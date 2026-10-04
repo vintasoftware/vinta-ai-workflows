@@ -1,0 +1,54 @@
+# A project that runs plans with vinta-ai-maestro and keeps what every plan
+# would otherwise repeat here: typed gate defaults (maestro runs its own test
+# command, implement-plan keeps commands.test_unit), a scoped test template,
+# the pool the suite contends for, and the gates every phase runs.
+schema_version: 1
+vinta_ai_workflows_version: 0.7.0-alpha25
+project:
+  name: acme
+  default_branch: main
+  code_host: github
+  stack_summary: Django + React
+  ai_plans_dir: ai-plans
+commands:
+  lint: uv run ruff check
+  lint_scoped: uv run ruff check {changed_files}
+  build: uv run mypy .
+  test_unit: uv run pytest
+  test_unit_scoped: uv run pytest --testmon {changed_files}
+policies:
+  pr_creation: agents-create
+  ai_coauthor: allowed
+  commit_style: conventional
+  stage_pattern: git add <paths>
+vendors: [claude]
+foundation_skills:
+  plan-feature: enabled
+foundation_agents:
+  implementer: enabled
+maestro:
+  defaults:
+    gates: [typecheck, lint, test]
+    gate_scope: scoped
+    chores: [deslop]
+  gates:
+    test:
+      cmd: uv run pytest --reuse-db -n auto
+      requires: [test-suite]
+      timeout_s: 1800
+      tuning:
+        allowed_flags: [--reuse-db]
+    typecheck:
+      timeout_s: 600
+  resources:
+    test-suite:
+      capacity: 1
+      kind: semaphore
+      match: ['pytest*', 'uv run pytest*']
+  chores:
+    deslop:
+      skill: deslop-comments
+      prompt: Run the deslop-comments skill over this phase's diff.
+  project:
+    migrate_cmd: uv run python manage.py migrate
+    env_files: [.env]

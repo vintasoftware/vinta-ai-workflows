@@ -557,6 +557,71 @@ describe('wave merges', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The plan branch
+// ---------------------------------------------------------------------------
+
+describe('a run with a plan branch', () => {
+  async function withPlanBranch(): Promise<{ repo: Repo; integrator: Integrator; ghPath: string }> {
+    const repo = await makeRepo()
+    run(repo.main, 'branch', 'plan/wf/base', 'main')
+    const gh = stubGh(repo.root)
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b', ['a'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+      ghPath: gh.path,
+      runBase: 'plan/wf/base',
+    })
+    return { repo, integrator, ghPath: gh.path }
+  }
+
+  /** A commit on the plan branch, made the way a person would: in a worktree of it. */
+  async function commitOnPlanBranch(repo: Repo, files: Record<string, string>, message: string): Promise<void> {
+    const path = join(repo.root, `plan-${message.replace(/\W+/g, '-')}`)
+    run(repo.main, 'worktree', 'add', path, 'plan/wf/base')
+    await repo.commit(path, files, message)
+    run(repo.main, 'worktree', 'remove', '--force', path)
+  }
+
+  it('branches dependency-free phases and starts the wave spine from it', async () => {
+    const { repo, integrator } = await withPlanBranch()
+    await commitOnPlanBranch(repo, { '.vinta-ai-workflows.yaml': 'commands: {}\n' }, 'config before')
+    expect(integrator.base('a')).toEqual({ kind: 'base_branch', branch: 'plan/wf/base' })
+    expect(integrator.waveBranch(0)).toBe('plan/wf/base')
+
+    const lane = await repo.lane('lane-1')
+    await integrator.startNode('a', lane)
+    expect(subjects(lane, 'plan/wf/phase-a')).toContain('config before')
+  })
+
+  it('carries a commit made on it mid-run into every later wave', async () => {
+    const { repo, integrator } = await withPlanBranch()
+    const lane = await repo.lane('lane-1')
+    await integrator.startNode('a', lane)
+    await repo.commit(lane, { 'a.ts': 'a\n' }, 'phase a: unit')
+    const wave1 = await integrator.mergeWave(1, ['a'])
+
+    // A config change lands after wave 1 was built.
+    await commitOnPlanBranch(repo, { '.vinta-ai-workflows.yaml': 'commands: {}\n' }, 'config mid-run')
+    await integrator.startNode('b', lane)
+    await repo.commit(lane, { 'b.ts': 'b\n' }, 'phase b: unit')
+    const wave2 = await integrator.mergeWave(2, ['b'])
+
+    expect(subjects(repo.integ, wave1.branch)).not.toContain('config mid-run')
+    expect(subjects(repo.integ, wave2.branch)).toContain('config mid-run')
+    expect(isAncestor(repo.integ, 'plan/wf/base', wave2.branch)).toBe(true)
+  })
+
+  it.runIf(FAKE_BIN_VIA_EXECFILE)('still targets base_branch with every pull request', async () => {
+    const { repo, integrator } = await withPlanBranch()
+    const lane = await repo.lane('lane-1')
+    await integrator.startNode('a', lane)
+    await repo.commit(lane, { 'a.ts': 'a\n' }, 'phase a: unit')
+    expect(await integrator.openPr('a')).toMatchObject({ opened: true, base: 'main', head: 'plan/wf/phase-a' })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Amendments
 // ---------------------------------------------------------------------------
 

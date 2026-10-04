@@ -116,6 +116,17 @@ export const ResourceSchema = z.strictObject({
   kind: z
     .enum(['worktree', 'semaphore'])
     .describe('`worktree` pools are provisioned lanes; `semaphore` pools are pure counters.'),
+  match: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'Command patterns that need this pool — `pytest*`, `pnpm test*`. `*` matches any run of ' +
+        'characters and the rest is literal, compared against the whole command line with ' +
+        'whitespace collapsed. On a harness that can enforce it, an agent running a matching ' +
+        'command without `vinta-ai-maestro with <pool> --` in front of it is refused and told ' +
+        'to take the lease. A guardrail against habit, not a sandbox: `bash -c` or a script ' +
+        'that runs the same suite is not seen. Only meaningful on a `semaphore` pool.',
+    ),
   description: z.string().optional(),
 })
 
@@ -163,8 +174,56 @@ export const GateTuningSchema = z
       'is not the monitor’s to touch.',
   )
 
+/**
+ * What kind of check a gate is. A type is what lets a gate inherit its command
+ * from the project instead of every plan repeating it — `test` reads
+ * `commands.test_unit` out of `.vinta-ai-workflows.yaml`, the same line
+ * `implement-plan` runs — and what `maestro.gates.<type>` there overrides for
+ * maestro alone. See `src/config/`.
+ */
+export const GATE_TYPES = ['test', 'lint', 'typecheck', 'e2e'] as const
+export type GateType = (typeof GATE_TYPES)[number]
+
+/**
+ * Which of a gate's two commands a phase gate runs. `scoped` — the default —
+ * runs `scoped_cmd` where a gate has one, and the full `cmd` on the gate that
+ * re-runs after a wave merge, where the regressions between phases show up.
+ * `full` runs `cmd` everywhere.
+ */
+export const GATE_SCOPES = ['scoped', 'full'] as const
+export type GateScope = (typeof GATE_SCOPES)[number]
+
+/** What `scoped_cmd` may name. Substituted shell-quoted, space-separated. */
+export const SCOPE_PLACEHOLDERS = ['{changed_files}', '{touches}'] as const
+
 export const CommandGateSchema = z.strictObject({
-  cmd: z.string().min(1).describe('Shell command run in the node’s lane. Not an agent.'),
+  type: z
+    .enum(GATE_TYPES)
+    .optional()
+    .describe(
+      'What kind of check this is. A typed gate takes any field it does not set — `cmd`, ' +
+        '`scoped_cmd`, `requires`, `timeout_s` — from the project: `maestro.gates.<type>` in ' +
+        '`.vinta-ai-workflows.yaml`, then the matching `commands.*` line there (`test` → ' +
+        '`test_unit`, `lint` → `lint`, `typecheck` → `build`, `e2e` → `e2e`). A field set here ' +
+        'wins over both.',
+    ),
+  cmd: z
+    .string()
+    .min(1)
+    .describe('Shell command run in the node’s lane. Not an agent. The full check.'),
+  scoped_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The same check narrowed to what the phase changed, run by a phase gate under ' +
+        '`defaults.gate_scope: scoped`. `{changed_files}` is the files the lane changed against ' +
+        'the phase’s base and `{touches}` the node’s Touch List, each substituted shell-quoted ' +
+        'and space-separated. The command must accept any path it is given — `vitest related ' +
+        '{changed_files} --run`, `jest --findRelatedTests {changed_files}` — because a source ' +
+        'file with no tests is a normal member of the list. When a placeholder would substitute ' +
+        'nothing, `cmd` runs instead.',
+    ),
   requires: z
     .array(Id)
     .default([])
@@ -719,9 +778,24 @@ export const ProjectSchema = z
   )
 
 export const DefaultsSchema = z.strictObject({
-  harness: z.enum(HARNESS_IDS),
+  harness: z.enum(HARNESS_IDS).default('claude-code'),
   model: z.string().min(1),
-  pipeline: Id,
+  pipeline: Id.default('standard-phase'),
+  gates: z
+    .array(Id)
+    .optional()
+    .describe(
+      'The gates every phase must pass unless it names its own. Resolved into each node when ' +
+        'the workflow is loaded, with the same override rule as `chores`: a node’s own list — ' +
+        '`[]` included — replaces this one.',
+    ),
+  gate_scope: z
+    .enum(GATE_SCOPES)
+    .default('scoped')
+    .describe(
+      '`scoped` — the default — runs a gate’s `scoped_cmd` on phase gates and its full `cmd` on ' +
+        'the gate that re-runs after a wave merge. `full` runs `cmd` everywhere.',
+    ),
   chores: z
     .array(Id)
     .default([])
@@ -814,6 +888,45 @@ export const WorkflowSchema = z
     'An executable plan: the phase DAG, the pipelines phases run through, the capacity ' +
       'pools they contend for, and the gates they must pass.',
   )
+
+// ---------------------------------------------------------------------------
+// The authored document — the file a plan commits, before the project's
+// configuration is layered under it
+//
+// `WorkflowSchema` is the *resolved* workflow: what the executor runs, what a
+// run freezes, what an amendment is diffed against. Every gate in it has its
+// command. A plan file need not: a gate that says only `"type": "test"` takes
+// its command from `.vinta-ai-workflows.yaml`, and a plan whose base is the
+// project's default branch need not name it. This is the shape such a file is
+// checked against before that resolution — the one the generated JSON Schema
+// describes, because it is the one people and `plan-feature` write.
+// ---------------------------------------------------------------------------
+
+export const AuthoredCommandGateSchema = CommandGateSchema.partial({ cmd: true })
+
+export const AuthoredWorkflowSchema = WorkflowSchema.extend({
+  base_branch: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'What dependency-free nodes branch from, and what the plan PR targets. Absent takes ' +
+        '`project.default_branch` from `.vinta-ai-workflows.yaml`.',
+    ),
+  gates: z
+    .record(Id, z.union([AuthoredCommandGateSchema, JudgeGateSchema]))
+    .default({})
+    .describe(
+      'Gates by id. A command gate with a `type` may omit `cmd` and inherit it from the ' +
+        'project. Gates the project configures by type (`maestro.gates.<type>`, or a ' +
+        '`commands.*` line) are also available under the type’s name without being declared ' +
+        'here.',
+    ),
+}).describe(
+  'An executable plan: the phase DAG, the pipelines phases run through, the capacity ' +
+    'pools they contend for, and the gates they must pass. Layered over the project’s own ' +
+    'configuration (`.vinta-ai-workflows.yaml`) when it is loaded.',
+)
 
 export type Workflow = z.infer<typeof WorkflowSchema>
 export type WorkflowInput = z.input<typeof WorkflowSchema>

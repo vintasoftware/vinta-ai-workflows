@@ -76,6 +76,9 @@ const REFUSALS: Readonly<Record<string, string>> = {
 /** What the daemon's refusal codes mean to a person. */
 const CODES: Readonly<Record<string, string>> = {
   invalid_workflow: 'The daemon refused this workflow.',
+  invalid_config:
+    'The project’s .vinta-ai-workflows.yaml is not valid, so no workflow can be resolved over it.',
+  nodes_in_flight: 'A phase this change reaches is running. Try again once it settles.',
   run_in_progress:
     'A run of this workflow is still going. Changing a live run is the amend path, not the editor.',
   unknown_workflow: 'No workflow with that id.',

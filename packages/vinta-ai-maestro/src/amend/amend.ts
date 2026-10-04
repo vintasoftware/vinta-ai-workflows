@@ -59,7 +59,7 @@ import type { AmendmentAuthor, AmendmentChange, NodeStatus } from '../journal/ev
 import type { Journal } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
 import { parseWorkflow, type ValidationIssue } from '../validate.ts'
-import { diffWorkflows, type WorkflowDiff } from './diff.ts'
+import { diffWorkflows, targetsOf, type WorkflowDiff } from './diff.ts'
 
 /** Started and not settled. §9's "running", read across §5.2's whole vocabulary. */
 const IN_FLIGHT: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
@@ -141,8 +141,13 @@ export interface AmendOptions {
    * predates the run being able to amend itself.
    */
   readonly author?: AmendmentAuthor
-  /** What an autonomous amendment changed, as `gate:<id>` / `node:<id>` tokens. */
+  /**
+   * What the amendment changed. The monitor names its verbs' targets; every
+   * other caller leaves it out and gets `targetsOf` — see `workflow_amended`.
+   */
   readonly targets?: readonly string[]
+  /** On a `config` amendment: the commit its layers were read at. */
+  readonly source?: string
 }
 
 /**
@@ -213,7 +218,8 @@ export async function amendRun(options: AmendOptions): Promise<AmendResult> {
       rebased: rebase,
       superseded,
       author: options.author ?? 'operator',
-      ...(options.targets === undefined ? {} : { targets: [...options.targets] }),
+      targets: [...(options.targets ?? targetsOf(snapshot, proposed))],
+      ...(options.source === undefined ? {} : { source: options.source }),
     },
   })
   registerNodes(journal, runId, proposed, status, diff)

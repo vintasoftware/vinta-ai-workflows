@@ -69,13 +69,18 @@
       "properties": {
         "lint": { "type": "string" },
         "format": { "type": "string" },
+        "lint_scoped": {
+          "description": "Lint narrowed to what a phase changed, as a template with `{changed_files}` or `{touches}` (e.g. `pnpm eslint {changed_files}`). `vinta-ai-maestro` inherits it as the `scoped_cmd` of `lint`-typed gates; see `test_unit_scoped` for how the placeholders are filled.",
+          "type": "string",
+          "minLength": 1
+        },
         "build": {
           "description": "Type-check / build gate. Often the same as the test command on Python projects.",
           "type": "string"
         },
         "test_unit": { "type": "string" },
         "test_unit_scoped": {
-          "description": "Per-package or per-app scoped suite (e.g. `pnpm test:patient`).",
+          "description": "Per-package or per-app scoped suite (e.g. `pnpm test:patient`). `implement-plan` reads it as guidance for the outer gate's scoped run. When it contains `{changed_files}` (the files the phase changed against its base) or `{touches}` (the phase's Touch List), it is also a template: `implement-plan` substitutes them, and `vinta-ai-maestro` inherits it as the `scoped_cmd` of `test`-typed gates — e.g. `pnpm vitest related {changed_files} --run`. A line without a placeholder is not inherited by maestro, which has no agent to decide what to scope it to.",
           "type": "string"
         },
         "test_unit_new_pattern": {
@@ -316,6 +321,314 @@
       "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true,
       "default": []
+    },
+    "maestro": {
+      "description": "Project-wide defaults for `vinta-ai-maestro` runs, layered UNDER every plan's `ai-plans/*.workflow.json`: a plan's own value wins, and a run's mid-run amendments win over both. Maps keyed by id (`resources`, `chores`, `project.databases`, `project.services`) merge per id with the plan's entry replacing the project's whole; a typed gate merges field by field; lists replace. Shapes are the workflow schema's (`workflow.v1.schema.json`) — maestro validates them strictly at load. A run follows its plan branch (`plan/<workflow-id>/base`): committing a change to this file on that branch applies it to the live run. Absent: every plan carries everything itself.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defaults": {
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `reviewer_model`, `max_session_turns`.",
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "enum": [
+                "claude-code",
+                "codex",
+                "opencode"
+              ]
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pipeline": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "chores": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              }
+            },
+            "gates": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              }
+            },
+            "gate_scope": {
+              "type": "string",
+              "enum": [
+                "scoped",
+                "full"
+              ]
+            },
+            "reviewer_model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "max_session_turns": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "gates": {
+          "description": "Per gate type. Each type with a command is also available to every plan under the type's own name (`gates: [typecheck, test]` on a node, with no gate table).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "test": {
+              "description": "Defaults a gate of this type inherits, over the matching `commands.*` line. Any field a plan's own gate sets wins over these.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cmd": {
+                  "description": "The full check maestro runs for this type. Overrides the `commands.*` line for maestro only — `implement-plan` keeps running `commands.*`.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "scoped_cmd": {
+                  "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requires": {
+                  "description": "Resource pools the gate holds while it runs, e.g. `[test-suite]`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  }
+                },
+                "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "tuning": {
+                  "description": "Flags the monitor may add to `cmd` when it retunes the gate mid-run. Same shape as a workflow gate's `tuning`.",
+                  "type": "object",
+                  "properties": {
+                    "allowed_flags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    }
+                  },
+                  "required": [
+                    "allowed_flags"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "lint": {
+              "description": "Defaults a gate of this type inherits, over the matching `commands.*` line. Any field a plan's own gate sets wins over these.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cmd": {
+                  "description": "The full check maestro runs for this type. Overrides the `commands.*` line for maestro only — `implement-plan` keeps running `commands.*`.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "scoped_cmd": {
+                  "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requires": {
+                  "description": "Resource pools the gate holds while it runs, e.g. `[test-suite]`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  }
+                },
+                "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "tuning": {
+                  "description": "Flags the monitor may add to `cmd` when it retunes the gate mid-run. Same shape as a workflow gate's `tuning`.",
+                  "type": "object",
+                  "properties": {
+                    "allowed_flags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    }
+                  },
+                  "required": [
+                    "allowed_flags"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "typecheck": {
+              "description": "Defaults a gate of this type inherits, over the matching `commands.*` line. Any field a plan's own gate sets wins over these.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cmd": {
+                  "description": "The full check maestro runs for this type. Overrides the `commands.*` line for maestro only — `implement-plan` keeps running `commands.*`.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "scoped_cmd": {
+                  "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requires": {
+                  "description": "Resource pools the gate holds while it runs, e.g. `[test-suite]`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  }
+                },
+                "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "tuning": {
+                  "description": "Flags the monitor may add to `cmd` when it retunes the gate mid-run. Same shape as a workflow gate's `tuning`.",
+                  "type": "object",
+                  "properties": {
+                    "allowed_flags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    }
+                  },
+                  "required": [
+                    "allowed_flags"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "e2e": {
+              "description": "Defaults a gate of this type inherits, over the matching `commands.*` line. Any field a plan's own gate sets wins over these.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cmd": {
+                  "description": "The full check maestro runs for this type. Overrides the `commands.*` line for maestro only — `implement-plan` keeps running `commands.*`.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "scoped_cmd": {
+                  "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requires": {
+                  "description": "Resource pools the gate holds while it runs, e.g. `[test-suite]`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  }
+                },
+                "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "tuning": {
+                  "description": "Flags the monitor may add to `cmd` when it retunes the gate mid-run. Same shape as a workflow gate's `tuning`.",
+                  "type": "object",
+                  "properties": {
+                    "allowed_flags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    }
+                  },
+                  "required": [
+                    "allowed_flags"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "description": "Capacity pools by id, e.g. a `test-suite` semaphore. `match` lists command patterns (`pytest*`) an agent must run under `vinta-ai-maestro with <pool> --`.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "capacity",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "capacity": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "worktree",
+                  "semaphore"
+                ]
+              },
+              "match": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "chores": {
+          "description": "Chore definitions by id (`prompt` or `prompt_ref`, `skill`, `session`, `model`, `when`, `on_failure`) — the workflow schema's `chores` entries.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "project": {
+          "description": "The workflow schema's `project` block (`migrate_cmd`, `databases`, `env_files`, `commands`, `hooks`, `services`, `compose`, `prepare_cmd`, `setup_cmd`), merged under a plan's own field by field. `project.commands` additionally inherits `lint`, `typecheck` (from `commands.build`) and `test` (from `commands.test_unit`).",
+          "type": "object"
+        }
+      }
     },
     "run_options": {
       "description": "Per-skill run-option defaults. Skills override via per-invocation prompts; values here are the defaults shown.",

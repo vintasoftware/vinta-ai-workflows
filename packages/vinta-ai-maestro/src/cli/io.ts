@@ -17,7 +17,9 @@
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline/promises'
 
-import { formatIssues, parseWorkflow } from '../validate.ts'
+import { loadProjectConfig, PROJECT_CONFIG_FILE, type ProjectConfig } from '../config/project-config.ts'
+import { resolveWorkflow } from '../config/resolve.ts'
+import { formatIssues, type ValidationIssue } from '../validate.ts'
 import type { Workflow } from '../types.ts'
 
 export interface Io {
@@ -51,8 +53,18 @@ export function processIo(): Io {
   }
 }
 
+/** A plan as loaded: what runs, and the two layers it was resolved from. */
+export interface LoadedPlan {
+  readonly workflow: Workflow
+  /** The workflow file's own JSON, unparsed. */
+  readonly authored: unknown
+  /** `.vinta-ai-workflows.yaml` as written, or null when the project has none. */
+  readonly config: ProjectConfig | null
+}
+
 /**
- * Reads and validates a workflow file, or reports why it could not.
+ * Reads a workflow file, layers it over the project's configuration and
+ * validates the result — or reports why it could not.
  *
  * Every failure here is the operator's to fix, so every failure is a located
  * message rather than a stack trace: `nodes[2].depends_on[0].node: unknown node
@@ -60,8 +72,12 @@ export function processIo(): Io {
  * not. Nothing from the file's *contents* reaches the output — only the path
  * that failed and the reason — because a workflow lives in the repository and
  * §11 keeps repository contents out of messages.
+ *
+ * `repoPath` is where `.vinta-ai-workflows.yaml` is read from. A plan is never
+ * validated without it: a gate that says only `"type": "test"` is complete in a
+ * project that configures its tests and incomplete in one that does not.
  */
-export async function loadWorkflow(path: string, io: Io): Promise<Workflow | null> {
+export async function loadPlan(path: string, io: Io, repoPath: string): Promise<LoadedPlan | null> {
   let raw: string
   try {
     raw = await readFile(path, 'utf8')
@@ -70,9 +86,9 @@ export async function loadWorkflow(path: string, io: Io): Promise<Workflow | nul
     return null
   }
 
-  let json: unknown
+  let authored: unknown
   try {
-    json = JSON.parse(raw)
+    authored = JSON.parse(raw)
   } catch {
     // The parser's message quotes the offending source line, which is file
     // content. The path and the fact of the failure are enough.
@@ -80,11 +96,27 @@ export async function loadWorkflow(path: string, io: Io): Promise<Workflow | nul
     return null
   }
 
-  const result = parseWorkflow(json)
-  if (result.ok) return result.workflow
+  const config = await loadProjectConfig(repoPath)
+  if (!config.ok) {
+    report(io, PROJECT_CONFIG_FILE, 'configuration', config.issues)
+    return null
+  }
 
-  const count = result.issues.length
-  io.err(`vinta-ai-maestro: ${path} is not a valid workflow (${count} issue${count === 1 ? '' : 's'})`)
-  for (const line of formatIssues(result.issues).split('\n')) io.err(`  ${line}`)
-  return null
+  const result = resolveWorkflow(authored, config.config)
+  if (!result.ok) {
+    report(io, path, 'workflow', result.issues)
+    return null
+  }
+  return { workflow: result.workflow, authored, config: config.config }
+}
+
+/** `loadPlan`, for the callers that only run what it resolves to. */
+export async function loadWorkflow(path: string, io: Io, repoPath: string): Promise<Workflow | null> {
+  return (await loadPlan(path, io, repoPath))?.workflow ?? null
+}
+
+function report(io: Io, path: string, what: string, issues: readonly ValidationIssue[]): void {
+  const count = issues.length
+  io.err(`vinta-ai-maestro: ${path} is not a valid ${what} (${count} issue${count === 1 ? '' : 's'})`)
+  for (const line of formatIssues(issues).split('\n')) io.err(`  ${line}`)
 }

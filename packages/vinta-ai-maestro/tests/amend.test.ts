@@ -580,6 +580,24 @@ describe('amending a live run', () => {
     await rig.finished
   })
 
+  it('retunes a gate a finished phase declared, without calling it a rewrite of that phase', async () => {
+    // Half a run in, most phases that use `unit` are done. A gate command is
+    // not part of what a done phase built, so it is not refused as one — the
+    // case a config commit mid-run lands in almost every time.
+    const { journal } = store()
+    const wf = workflow([{ id: 'a', gates: ['unit'] }, { id: 'b', deps: ['a'], gates: ['unit'] }], 'solo', {
+      unit: { cmd: 'pytest' },
+    })
+    journal.createRun(RUN_ID, wf)
+    journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'done' } })
+
+    const result = await amendRun({ journal, runId: RUN_ID, proposed: retune(wf, 'unit', 'pytest -x') })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.code)
+    expect(result.rebased).toEqual([])
+    expect(commandOf(journal.readWorkflow(RUN_ID).gates['unit'])).toBe('pytest -x')
+  })
+
   it('still refuses to add a gate to a running node’s declared list', async () => {
     // The other half of the same distinction: the table may move under a
     // running phase, the phase's own list may not. A phase that gained `lint`
@@ -862,6 +880,10 @@ describe('journalling an amendment', () => {
         // is an operator's; a run tuning itself writes `monitor` and the
         // targets its ledger is folded from (`src/intervention/`).
         author: 'operator',
+        // An operator's row carries what it changed too, computed from the
+        // snapshot and the proposal: a config reload reads them back so it
+        // does not undo what a person decided in this run.
+        targets: ['node:c'],
       },
     ])
 

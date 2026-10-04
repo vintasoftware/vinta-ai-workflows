@@ -76,6 +76,7 @@
  * notification body.
  */
 import { laneTreeHash, type GateCache } from '../gates/cache.ts'
+import { phaseGate } from '../gates/scope.ts'
 import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from '../gates/runner.ts'
 import { computeWaves } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
@@ -154,7 +155,41 @@ export interface RunExecutorOptions {
    * judge runs.
    */
   readonly systemOne?: SystemOne
+  /**
+   * The integration worktree's environment, agent overlay included — what the
+   * wave gate runs with, for the reason the conflict fixer gets it: without it
+   * a suite resolves to the main checkout's database and compose project.
+   */
+  readonly integrationEnv?: Readonly<Record<string, string>>
 }
+
+/**
+ * A wave merged cleanly and the full form of a gate its phases only ran
+ * narrowed failed on the result. Ids and an exit code (§11); the gate's log is
+ * where its output is.
+ */
+export class WaveGateError extends Error {
+  constructor(
+    readonly wave: number,
+    readonly gateId: string,
+    readonly exitCode: number,
+    readonly logPath: string,
+  ) {
+    super(
+      `wave ${wave} merged, but gate "${gateId}" failed on the merged tree (exit ${exitCode}) — ` +
+        'the phases each passed it narrowed to their own changes, so this is a regression ' +
+        `between them. Log: ${logPath}`,
+    )
+    this.name = 'WaveGateError'
+  }
+}
+
+/**
+ * Where a wave gate's log is filed: the integration worktree's own pseudo-node,
+ * the one the conflict loop's `verify` already logs under, so a wave's full
+ * suite never overwrites a phase's log for the same gate id.
+ */
+const WAVE_GATE_NODE = '_integration'
 
 /** How many transcript entries back to look for the verdict or the fixer's block. */
 const TRANSCRIPT_WINDOW = 50
@@ -438,12 +473,21 @@ export class RunEffectExecutor implements EffectExecutor {
     logPath: string,
     rerun = false,
   ): Promise<{ readonly result: GateResult; readonly cached: boolean }> {
+    // The line that runs: the gate's scoped form when the run gates phases
+    // narrowed and the gate has one, its full `cmd` otherwise. Resolved per run
+    // of the gate, because the files the lane changed move with every fix.
+    const node = this.#node(nodeId)
+    const effective = await phaseGate(gate, this.#workflow.defaults.gate_scope, {
+      lanePath: lane.path,
+      base: this.#row(nodeId)?.base_branch ?? this.#options.integrator.base(nodeId).branch,
+      touches: node?.touches ?? [],
+    })
     return await this.#gate(
       gateId,
       lane,
       {
         gateId,
-        gate,
+        gate: effective,
         cwd: lane.path,
         env: lane.env,
         logPath,
@@ -707,6 +751,7 @@ export class RunEffectExecutor implements EffectExecutor {
     const final = wave === this.#finalWave()
     await this.#integration(async () => {
       const result = await this.#options.integrator.mergeWave(wave, members)
+      await this.#waveGates(nodeId, wave, members)
       // Pushed, because the plan PR is opened from the last one and a PR needs
       // a head the forge has seen. The rest are pushed for the same reason the
       // skills always pushed them: they are what a person resuming or landing
@@ -718,6 +763,59 @@ export class RunEffectExecutor implements EffectExecutor {
     // before the last phase's PR exists and could not list it.
     if (final) this.#planPrDue = { wave, by: nodeId }
     return {}
+  }
+
+  /**
+   * The full form of every gate this wave's phases ran narrowed, once, on the
+   * merged tree in the integration worktree.
+   *
+   * Only those gates. A gate with no `scoped_cmd` already ran in full on every
+   * phase, and running it again here would be a second full suite per wave
+   * bought to answer a question that was already answered for each phase —
+   * the cross-phase case it would add is real, and is what `gate_scope: full`
+   * plus this wave gate are not trying to be. What *was* skipped is the full
+   * suite itself, and this is where it is paid back.
+   *
+   * Without the scheduler's pools, for `verify`'s reason: the node running this
+   * is inside its own `integrate` step and may still hold the pool a suite
+   * would ask for. Not cached either: a merge produces a tree no lane has had.
+   *
+   * Red fails the merge, and with it the node that built the wave — the wave
+   * branch is left as it is for whoever picks it up.
+   */
+  async #waveGates(nodeId: string, wave: number, members: readonly string[]): Promise<void> {
+    if (this.#workflow.defaults.gate_scope !== 'scoped') return
+    const ids = [...new Set(members.flatMap((member) => this.#node(member)?.gates ?? []))]
+    for (const gateId of ids) {
+      const gate = this.#workflow.gates[gateId]
+      if (gate === undefined || isJudgeGate(gate) || gate.scoped_cmd === undefined) continue
+      const logPath = this.#options.journal.gateLogPath(
+        this.#options.runId,
+        WAVE_GATE_NODE,
+        `wave-${wave}-${gateId}`,
+      )
+      const result = await executeGate({
+        gateId,
+        gate,
+        cwd: this.#options.integrationPath,
+        env: this.#options.integrationEnv ?? {},
+        logPath,
+      })
+      const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        nodeId,
+        type: 'wave_gate_result',
+        payload: {
+          wave,
+          gate: gateId,
+          exit_code: exitCode,
+          status: result.status,
+          duration_ms: result.durationMs,
+        },
+      })
+      if (exitCode !== 0) throw new WaveGateError(wave, gateId, exitCode, logPath)
+    }
   }
 
   /** The highest wave in the plan as it stands — the branch carrying every phase. */

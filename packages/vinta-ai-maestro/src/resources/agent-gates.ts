@@ -41,6 +41,7 @@
  */
 import { runGateCached, type GateCache } from '../gates/cache.ts'
 import { TIMEOUT_EXIT } from '../gates/runner.ts'
+import { phaseGate } from '../gates/scope.ts'
 import type { Journal } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import { isJudgeGate, type Workflow } from '../types.ts'
@@ -240,13 +241,27 @@ export class AgentGateBroker {
     // through a gate's `requires` instead of through an agent's request.
     if (gate.requires.includes(LANE)) throw new AgentGateRefusal('gate_needs_lane')
 
-    const laneName = journal.nodes(runId).find((row) => row.node_id === holderNode)?.lane
+    const row = journal.nodes(runId).find((candidate) => candidate.node_id === holderNode)
+    const laneName = row?.lane
     if (laneName === null || laneName === undefined) throw new AgentGateRefusal('no_lane')
     const lane = this.#options.lane(laneName)
 
+    // The same line the gate node will run for this phase — scoped or full by
+    // the same rule — so "I ran the unit gate" in a report is still a claim
+    // about the command the gate node runs, and its result is still a hit for
+    // it on an unchanged tree.
+    const effective =
+      row?.base_branch === null || row?.base_branch === undefined
+        ? gate
+        : await phaseGate(gate, this.#workflow.defaults.gate_scope, {
+            lanePath: lane.path,
+            base: row.base_branch,
+            touches: this.#workflow.nodes.find((node) => node.id === holderNode)?.touches ?? [],
+          })
+
     const result = await runGateCached({
       gateId,
-      gate,
+      gate: effective,
       cwd: lane.path,
       env: lane.env,
       logPath: journal.gateLogPath(runId, holderNode, gateId),

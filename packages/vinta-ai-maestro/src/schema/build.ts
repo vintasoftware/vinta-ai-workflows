@@ -3,12 +3,13 @@
  * and the generator CLI can both import it.
  */
 import { z } from 'zod'
-import { WorkflowSchema } from '../types.ts'
+import { AuthoredWorkflowSchema } from '../types.ts'
 
 export function buildSchema(): Record<string, unknown> {
-  // `io: 'input'` so fields with defaults stay optional — this schema validates
-  // documents people and skills write, not the parsed result.
-  const generated = z.toJSONSchema(WorkflowSchema, { target: 'draft-2020-12', io: 'input' })
+  // `io: 'input'` so fields with defaults stay optional, and the *authored*
+  // schema so a gate may inherit its command — this schema validates documents
+  // people and skills write, not the resolved workflow a run executes.
+  const generated = z.toJSONSchema(AuthoredWorkflowSchema, { target: 'draft-2020-12', io: 'input' })
 
   // Drop zod's own $schema and description: the first is re-set below to the
   // canonical URL, the second is folded into the fuller one the repo convention

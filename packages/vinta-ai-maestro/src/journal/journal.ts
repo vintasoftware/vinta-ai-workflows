@@ -642,6 +642,9 @@ export class Journal {
       case 'gate_pool':
       case 'gate_started':
       case 'gate_result':
+      case 'wave_gate_result':
+      case 'bare_gate_blocked':
+      case 'bare_gate_detected':
       case 'chore_result':
       case 'agent_lease':
       case 'system_one_judged':
