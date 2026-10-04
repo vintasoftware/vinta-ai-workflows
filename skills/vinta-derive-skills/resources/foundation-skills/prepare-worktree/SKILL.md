@@ -26,6 +26,7 @@ The output is a worktree that is the **same shape as the main checkout** from th
 ## When NOT to use
 
 - A small branch switch with no dep churn / no DB writes — `git switch -c …` is enough.
+- Inside an [implement-plan](../implement-plan/SKILL.md) run when `.vinta-ai-workflows.yaml` sets `commands.worktree_prepare`. The conductor runs the project's own command instead, and only comes back to this skill as a fallback when that command fails.
 - The project has no ignored runnable state (rare — usually means the project is so simple a worktree adds friction with no upside).
 - The user is on a filesystem that doesn't support symlinks (Windows non-NTFS volumes, some corporate fileshares). Fall back to copy-only and warn the user up front.
 
