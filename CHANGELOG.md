@@ -502,6 +502,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Maestro: the API serves a run's definition as amended.** It cached the
   snapshot forever, so a monitor retune made in the run's own process never
   reached the UI.
+- **Maestro: an editor save from `ui` now reaches the run's job.** `ui`
+  is a separate process from the job hosting a run. A save to a running
+  plan's workflow used to replace the run's frozen snapshot from `ui` with no
+  runner: nothing adopted the change, and an amendment that needed a rebase
+  was refused. The job kept running the old definition until a resume. The
+  save is now sent to the job (`POST /api/runs/<id>/amend`), which applies it
+  under the usual amend rules, and `ui` writes the plan file only once the
+  job has accepted it. If the job does not answer, the save is refused
+  (`run_host_unreachable`) and nothing is written.
 - **Maestro: saving in the editor during a run no longer reports a failure.**
   The amendment response failed the client's schema check even though the
   save had gone through.

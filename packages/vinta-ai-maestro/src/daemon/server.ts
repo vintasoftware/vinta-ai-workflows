@@ -148,6 +148,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     ...(options.monitorFor === undefined ? {} : { monitorFor: options.monitorFor }),
     ...(options.leaseWaitMs === undefined ? {} : { leaseWaitMs: options.leaseWaitMs }),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
+    ...(options.upstream === undefined ? {} : { upstream: options.upstream }),
   })
   const stream = new EventStream(options.journal, options.pollMs ?? DEFAULT_POLL_MS)
   const sockets = new WebSocketServer({ noServer: true })

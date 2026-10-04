@@ -54,6 +54,7 @@ import { AgentGateRefusal } from '../resources/agent-gates.ts'
 import { loadProjectConfig } from '../config/project-config.ts'
 import { ownDocument } from '../config/own.ts'
 import { resolveWorkflow } from '../config/resolve.ts'
+import type { Upstream, UpstreamFor } from './proxy.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import {
   UnsupportedOperation,
@@ -77,6 +78,8 @@ import {
   StartRunRequestSchema,
   toIssues,
   toWireIssues,
+  AmendResponseSchema,
+  ErrorResponseSchema,
   type AmendResponse,
   type AgentGateResultResponse,
   type AgentGateWaitingResponse,
@@ -226,6 +229,14 @@ export interface ApiOptions {
    * parameter is a second chance to disagree about which project is open.
    */
   readonly logDir?: string
+  /**
+   * The job hosting a run this process does not, for `ui` (`proxy.ts`). The
+   * server forwards `/api/runs/<id>/*` there by itself; this is for the one
+   * route outside that prefix that has to reach a live run — the editor's save
+   * (`PUT /api/workflows/:id`), which amends whichever run is executing the
+   * workflow it writes.
+   */
+  readonly upstream?: UpstreamFor
 }
 
 export function createApi(options: ApiOptions): Hono {
@@ -660,6 +671,35 @@ export function createApi(options: ApiOptions): Hono {
    * `allow: false` is read by the hook as "go ahead" — it fails open — so the
    * refusals here only have to say why.
    */
+  /**
+   * §9's amend, addressed to the run rather than to its workflow file.
+   *
+   * The editor's save is a `/api/workflows/` route, which `ui` answers itself
+   * — and `ui` does not host the run. Amending from there touched the frozen
+   * snapshot and nothing else: no live statuses, no integration worktree to
+   * rebase in, no `adopt`, so the scheduler, the executor and the gate broker
+   * in the job carried on with the old definition until a resume. This route
+   * lives under the prefix `ui` forwards to the job, so the editor's save
+   * reaches the process that can actually apply it. Only the host answers it:
+   * an amendment that cannot be adopted is not one.
+   */
+  app.post('/api/runs/:runId/amend', async (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    let proposed: unknown
+    try {
+      proposed = JSON.parse(await c.req.text())
+    } catch {
+      return fail(c, 400, 'invalid_workflow', [
+        { path: '', code: 'invalid_json', message: 'Body is not valid JSON' },
+      ])
+    }
+    const outcome = await amendHere(runId, proposed, run)
+    return outcome.ok ? c.json(outcome.body) : fail(c, 409, outcome.code, outcome.issues)
+  })
+
   app.post('/api/runs/:runId/guard', async (c) => {
     const runId = c.req.param('runId')
     if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
@@ -1106,30 +1146,35 @@ export function createApi(options: ApiOptions): Hono {
     // refused would be a plan the editor shows and the daemon is not running.
     const live = journal.runs().find((row) => row.workflow_id === id && row.status === 'running')
     if (live !== undefined) {
-      const runner = amendRunner(runs.get(live.id))
-      const result = await amendRun({
-        journal,
-        runId: live.id,
-        proposed: parsed.workflow,
-        ...(runner === undefined ? {} : { runner }),
-      })
-      if (!result.ok) {
-        return fail(c, 409, result.code, toWireIssues(result.issues, result.code))
+      // The run is amended where it runs. A run hosted by another process — a
+      // job, seen from `ui` — is asked over its own API. One hosted here, or
+      // one the journal says is running with no job left to ask (a crash the
+      // next resume picks up), is amended here.
+      const remote = runs.has(live.id) ? null : (options.upstream?.(live.id) ?? null)
+      if (remote !== null) {
+        const forwarded = await amendThere(remote, live.id, parsed.workflow)
+        if (forwarded.kind === 'unreachable') {
+          // Nothing is written: a saved document the run never took would be
+          // a plan the editor shows and the job is not running.
+          return c.json({ error: 'run_host_unreachable', issues: null }, 502)
+        }
+        if (forwarded.kind === 'refused') return c.json(forwarded.body, forwarded.status)
+        try {
+          store.write(id, own)
+        } catch {
+          return fail(c, 409, 'write_failed')
+        }
+        return c.json(forwarded.body)
       }
+
+      const outcome = await amendHere(live.id, parsed.workflow, runs.get(live.id))
+      if (!outcome.ok) return fail(c, 409, outcome.code, outcome.issues)
       try {
         store.write(id, own)
       } catch {
         return fail(c, 409, 'write_failed')
       }
-      return c.json({
-        ok: true,
-        amendment: result.amendment,
-        runId: live.id,
-        changes: result.changes.map((change) => ({ node: change.node, kind: change.kind })),
-        affected: [...result.affected],
-        applied: [...result.applied],
-        rebased: [...result.rebased],
-      } satisfies AmendResponse)
+      return c.json(outcome.body)
     }
 
     try {
@@ -1208,6 +1253,71 @@ export function createApi(options: ApiOptions): Hono {
    * the run's process left this serving the definition from before it. An
    * mtime check costs a `stat` and is right for every author at once.
    */
+  /** One amendment, applied in this process with whatever runner the run registered. */
+  async function amendHere(
+    runId: string,
+    proposed: unknown,
+    run: DaemonRun | undefined,
+  ): Promise<
+    | { readonly ok: true; readonly body: AmendResponse }
+    | { readonly ok: false; readonly code: string; readonly issues: Issue[] }
+  > {
+    const runner = amendRunner(run)
+    const result = await amendRun({ journal, runId, proposed, ...(runner === undefined ? {} : { runner }) })
+    if (!result.ok) return { ok: false, code: result.code, issues: toWireIssues(result.issues, result.code) }
+    return {
+      ok: true,
+      body: {
+        ok: true,
+        amendment: result.amendment,
+        runId,
+        changes: result.changes.map((change) => ({ node: change.node, kind: change.kind })),
+        affected: [...result.affected],
+        applied: [...result.applied],
+        rebased: [...result.rebased],
+      },
+    }
+  }
+
+  /**
+   * One amendment, asked of the job hosting the run. The job's own refusal is
+   * passed back as it came — its codes and located issues are the ones the
+   * editor already knows — and anything that is neither an amendment nor an
+   * error body counts as the job being unreachable.
+   */
+  async function amendThere(
+    remote: Upstream,
+    runId: string,
+    proposed: unknown,
+  ): Promise<
+    | { readonly kind: 'applied'; readonly body: AmendResponse }
+    | { readonly kind: 'refused'; readonly status: 400 | 404 | 409; readonly body: unknown }
+    | { readonly kind: 'unreachable' }
+  > {
+    let response: Response
+    try {
+      response = await fetch(new URL(`/api/runs/${encodeURIComponent(runId)}/amend`, remote.url), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${remote.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(proposed),
+      })
+    } catch (error) {
+      log.warn('editor.amend_unreachable', { run: runId, ...errorFields(error) })
+      return { kind: 'unreachable' }
+    }
+    const body: unknown = await response.json().catch(() => null)
+    if (response.ok) {
+      const parsed = AmendResponseSchema.safeParse(body)
+      return parsed.success ? { kind: 'applied', body: parsed.data } : { kind: 'unreachable' }
+    }
+    const status = response.status
+    if ((status === 400 || status === 404 || status === 409) && ErrorResponseSchema.safeParse(body).success) {
+      return { kind: 'refused', status, body }
+    }
+    log.warn('editor.amend_failed', { run: runId, status })
+    return { kind: 'unreachable' }
+  }
+
   function workflow(runId: string): Workflow {
     const path = join(journal.root, 'runs', runId, 'workflow.json')
     let mtimeMs = -1

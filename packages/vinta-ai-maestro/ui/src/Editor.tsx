@@ -22,9 +22,9 @@
  * Saving is refused locally when the document is invalid and refused again by
  * the daemon; the second refusal is the boundary, and both are shown.
  *
- * §9's amend — changing a run already in flight — is not this screen. The
- * daemon refuses a save whose workflow has a running run, and the refusal is
- * surfaced verbatim rather than worked around.
+ * A save whose workflow has a running run is §9's amend. The daemon routes it
+ * to the process hosting the run, which applies it or refuses it under §9's
+ * rules; a refusal is surfaced verbatim rather than worked around.
  *
  * Layout: the canvas and the forms that act on the whole workflow on the
  * left; the selected node's fields in an inspector column on the right, where
@@ -79,6 +79,8 @@ const CODES: Readonly<Record<string, string>> = {
   invalid_config:
     'The project’s .vinta-ai-workflows.yaml is not valid, so no workflow can be resolved over it.',
   nodes_in_flight: 'A phase this change reaches is running. Try again once it settles.',
+  run_host_unreachable:
+    'A run of this workflow is live, but the process hosting it did not answer. Nothing was saved.',
   run_in_progress:
     'A run of this workflow is still going. Changing a live run is the amend path, not the editor.',
   unknown_workflow: 'No workflow with that id.',
