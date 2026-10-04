@@ -18,6 +18,7 @@ import { startConfigReloader } from '../src/config/reload.ts'
 import { resolveWorkflow } from '../src/config/resolve.ts'
 import { changedFiles, phaseGate } from '../src/gates/scope.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
+import { shellQuote } from '../src/platform/platform.ts'
 import { ensurePlanBranch, planBranchName } from '../src/run/plan-branch.ts'
 import { readSources, writeSources, type RunSources } from '../src/run/sources.ts'
 import { isJudgeGate, type CommandGate, type Workflow } from '../src/types.ts'
@@ -301,7 +302,8 @@ describe('the scoped gate line', () => {
 
     const scoped = await phaseGate(gate, 'scoped', context)
     expect(scoped.cmd).toMatch(/^npx vitest related .* --run$/)
-    expect(scoped.cmd).toContain("'new file.ts'")
+    // Quoted the platform's way: `'…'` for sh, `"…"` for cmd.exe.
+    expect(scoped.cmd).toContain(shellQuote('new file.ts'))
     expect((await phaseGate(gate, 'full', context)).cmd).toBe('npx vitest run')
   })
 
@@ -310,7 +312,7 @@ describe('the scoped gate line', () => {
     expect((await phaseGate(gate, 'scoped', { lanePath: dir, base: 'main', touches: [] })).cmd).toBe('npx vitest run')
     const touches = { ...gate, scoped_cmd: 'npx vitest related {touches} --run' }
     expect((await phaseGate(touches, 'scoped', { lanePath: dir, base: 'main', touches: ['src/a.ts'] })).cmd).toBe(
-      "npx vitest related 'src/a.ts' --run",
+      `npx vitest related ${shellQuote('src/a.ts')} --run`,
     )
   })
 })
