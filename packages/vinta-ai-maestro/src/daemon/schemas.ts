@@ -100,6 +100,15 @@ export const AgentGateRequestSchema = z.strictObject({
 })
 
 /**
+ * The gate guard's hook asking about one Bash line (`src/guard/`). The command
+ * is matched and dropped; only the verdict's ids are journalled.
+ */
+export const GuardRequestSchema = z.strictObject({
+  holderNode: z.string().min(1),
+  command: z.string(),
+})
+
+/**
  * §17.6 — one tool call a `judged` session's hook asks about. `input` is the
  * call's own input, repository-shaped content, and is passed to the classifier
  * and nowhere else.

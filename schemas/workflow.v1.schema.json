@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
   "title": "vinta-ai-maestro workflow",
-  "description": "An executable plan: the phase DAG, the pipelines phases run through, the capacity pools they contend for, and the gates they must pass. Lives at `ai-plans/<feature-kebab>.workflow.json` in a target project, emitted by `plan-feature` alongside the human-readable plan and executed by `vinta-ai-maestro`. GENERATED from packages/vinta-ai-maestro/src/types.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "description": "An executable plan: the phase DAG, the pipelines phases run through, the capacity pools they contend for, and the gates they must pass. Layered over the project’s own configuration (`.vinta-ai-workflows.yaml`) when it is loaded. Lives at `ai-plans/<feature-kebab>.workflow.json` in a target project, emitted by `plan-feature` alongside the human-readable plan and executed by `vinta-ai-maestro`. GENERATED from packages/vinta-ai-maestro/src/types.ts — edit there, not here. See schemas/README.md for versioning rules.",
   "type": "object",
   "properties": {
     "$schema": {
@@ -34,9 +34,9 @@
       }
     },
     "base_branch": {
+      "description": "What dependency-free nodes branch from, and what the plan PR targets. Absent takes `project.default_branch` from `.vinta-ai-workflows.yaml`.",
       "type": "string",
-      "minLength": 1,
-      "description": "What dependency-free nodes branch from."
+      "minLength": 1
     },
     "project": {
       "type": "object",
@@ -352,6 +352,7 @@
       "type": "object",
       "properties": {
         "harness": {
+          "default": "claude-code",
           "type": "string",
           "enum": [
             "claude-code",
@@ -364,9 +365,28 @@
           "minLength": 1
         },
         "pipeline": {
+          "default": "standard-phase",
           "type": "string",
           "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "gates": {
+          "description": "The gates every phase must pass unless it names its own. Resolved into each node when the workflow is loaded, with the same override rule as `chores`: a node’s own list — `[]` included — replaces this one.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "gate_scope": {
+          "default": "scoped",
+          "description": "`scoped` — the default — runs a gate’s `scoped_cmd` on phase gates and its full `cmd` on the gate that re-runs after a wave merge. `full` runs `cmd` everywhere.",
+          "type": "string",
+          "enum": [
+            "scoped",
+            "full"
+          ]
         },
         "chores": {
           "default": [],
@@ -392,9 +412,7 @@
         }
       },
       "required": [
-        "harness",
-        "model",
-        "pipeline"
+        "model"
       ],
       "additionalProperties": false
     },
@@ -475,6 +493,14 @@
             ],
             "description": "`worktree` pools are provisioned lanes; `semaphore` pools are pure counters."
           },
+          "match": {
+            "description": "Command patterns that need this pool — `pytest*`, `pnpm test*`. `*` matches any run of characters and the rest is literal, compared against the whole command line with whitespace collapsed. On a harness that can enforce it, an agent running a matching command without `vinta-ai-maestro with <pool> --` in front of it is refused and told to take the lease. A guardrail against habit, not a sandbox: `bash -c` or a script that runs the same suite is not seen. Only meaningful on a `semaphore` pool.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
           "description": {
             "type": "string"
           }
@@ -489,6 +515,7 @@
     },
     "gates": {
       "default": {},
+      "description": "Gates by id. A command gate with a `type` may omit `cmd` and inherit it from the project. Gates the project configures by type (`maestro.gates.<type>`, or a `commands.*` line) are also available under the type’s name without being declared here.",
       "type": "object",
       "propertyNames": {
         "type": "string",
@@ -500,10 +527,25 @@
           {
             "type": "object",
             "properties": {
+              "type": {
+                "description": "What kind of check this is. A typed gate takes any field it does not set — `cmd`, `scoped_cmd`, `requires`, `timeout_s` — from the project: `maestro.gates.<type>` in `.vinta-ai-workflows.yaml`, then the matching `commands.*` line there (`test` → `test_unit`, `lint` → `lint`, `typecheck` → `build`, `e2e` → `e2e`). A field set here wins over both.",
+                "type": "string",
+                "enum": [
+                  "test",
+                  "lint",
+                  "typecheck",
+                  "e2e"
+                ]
+              },
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Shell command run in the node’s lane. Not an agent."
+                "description": "Shell command run in the node’s lane. Not an agent. The full check."
+              },
+              "scoped_cmd": {
+                "description": "The same check narrowed to what the phase changed, run by a phase gate under `defaults.gate_scope: scoped`. `{changed_files}` is the files the lane changed against the phase’s base and `{touches}` the node’s Touch List, each substituted shell-quoted and space-separated. The command must accept any path it is given — `vitest related {changed_files} --run`, `jest --findRelatedTests {changed_files}` — because a source file with no tests is a normal member of the list. When a placeholder would substitute nothing, `cmd` runs instead.",
+                "type": "string",
+                "minLength": 1
               },
               "requires": {
                 "default": [],
@@ -544,9 +586,6 @@
                 "type": "string"
               }
             },
-            "required": [
-              "cmd"
-            ],
             "additionalProperties": false
           },
           {
@@ -643,8 +682,7 @@
             ],
             "additionalProperties": false
           }
-        ],
-        "description": "A command gate (`cmd`) or a judge gate (`judge`)."
+        ]
       }
     },
     "chores": {
@@ -1188,7 +1226,6 @@
   "required": [
     "schema_version",
     "id",
-    "base_branch",
     "defaults",
     "resources",
     "nodes"

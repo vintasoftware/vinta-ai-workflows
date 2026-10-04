@@ -1746,7 +1746,15 @@ anyone asks; the machine capacity it needs is queued for rather than taken out
 from under the other lanes; and what runs is the command this plan declares —
 the same one the orchestrator will run to judge this phase. Something you ran
 that resembles the gate is not the gate, and reporting it as one is how a
-phase passes review and fails its gate afterwards.
+phase passes review and fails its gate afterwards. Where the harness allows
+it, a gate’s own command typed by hand is refused before it runs, with the
+\`vinta-ai-maestro gate\` line to use instead — follow it rather than working
+around it.
+
+The gate may run narrowed to the files this phase changed; the full suite
+runs once the phases are merged. Running a single test file of your own in
+the inner loop is fine — it is the gate’s whole command that goes through
+the orchestrator.
 
 Waiting is the expected outcome, not a failure: it queues for capacity and then
 runs a suite. Let it finish — do not interrupt it, add a timeout, or retry it
@@ -1925,7 +1933,15 @@ anyone asks; the machine capacity it needs is queued for rather than taken out
 from under the other lanes; and what runs is the command this plan declares —
 the same one the orchestrator will run to judge this phase. Something you ran
 that resembles the gate is not the gate, and reporting it as one is how a
-phase passes review and fails its gate afterwards.
+phase passes review and fails its gate afterwards. Where the harness allows
+it, a gate’s own command typed by hand is refused before it runs, with the
+\`vinta-ai-maestro gate\` line to use instead — follow it rather than working
+around it.
+
+The gate may run narrowed to the files this phase changed; the full suite
+runs once the phases are merged. Running a single test file of your own in
+the inner loop is fine — it is the gate’s whole command that goes through
+the orchestrator.
 
 Waiting is the expected outcome, not a failure: it queues for capacity and then
 runs a suite. Let it finish — do not interrupt it, add a timeout, or retry it

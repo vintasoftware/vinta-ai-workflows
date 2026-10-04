@@ -845,6 +845,39 @@ export async function checkSystemOne(
   return checks
 }
 
+// ---------------------------------------------------------------------------
+// The gate guard
+// ---------------------------------------------------------------------------
+
+/**
+ * How each harness this run uses is held to running gates through the daemon
+ * (`src/guard/`). Nothing to report when there is nothing to guard: no command
+ * gates and no pool that names a pattern.
+ *
+ * A warning rather than a failure where it can only be detected: the run is
+ * still correct — the `gate` node runs every gate itself — and the cost of a
+ * bare suite run is time, not a wrong verdict. The operator should know which
+ * of the two they are getting, not be stopped over it.
+ */
+export function checkGateGuard(workflow: Workflow): CheckResult[] {
+  const guarded =
+    Object.values(workflow.gates).some((gate) => !isJudgeGate(gate)) ||
+    Object.values(workflow.resources).some((pool) => (pool.match?.length ?? 0) > 0)
+  if (!guarded) return []
+  return referencedHarnesses(workflow).map((id) =>
+    id === 'claude-code'
+      ? pass(`gate-guard:${id}`, `gate guard on ${id}: a gate run bare is refused before it runs`)
+      : flag(
+          `gate-guard:${id}`,
+          `gate guard on ${id}: a gate run bare is only recorded after it ran`,
+          'warn',
+          id === 'codex'
+            ? 'codex has no per-call hook; the prompts ask for `vinta-ai-maestro gate <id>`, and bare runs are journalled as bare_gate_detected'
+            : 'the guard is not wired for this harness yet; bare runs are journalled as bare_gate_detected',
+        ),
+  )
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const { workflow, repoPath } = options
   const gitBin = options.bins?.git ?? 'git'
@@ -885,6 +918,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
 
   const checks = [
     ...harnesses,
+    ...checkGateGuard(workflow),
     ...systemOne,
     git,
     worktrees,

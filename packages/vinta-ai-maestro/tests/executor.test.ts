@@ -55,6 +55,7 @@ import { createScheduler, type RunReport } from '../src/scheduler/index.ts'
 import { SideEffectSchema, WorkflowSchema, type EffectId, type Workflow } from '../src/types.ts'
 import type { SystemOne } from '../src/system-one/config.ts'
 import { MockSystemOneAdapter } from '../src/system-one/mock.ts'
+import { renderGate } from './support/gate-script.ts'
 
 // ---------------------------------------------------------------------------
 // Rig
@@ -1206,6 +1207,49 @@ describe('the git verbs', () => {
     const wave1 = waveBranch(rig.workflow, 1)
     expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p1'), wave1)).toBe(true)
     expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p2'), wave1)).toBe(true)
+  })
+
+  /** `twoPeers` with one gate that has a scoped form: what the wave gate is for. */
+  const scopedPeers = (fullGate: string) => (): Workflow =>
+    WorkflowSchema.parse({
+      ...twoPeers(),
+      gates: { unit: { cmd: fullGate, scoped_cmd: 'echo {changed_files}' } },
+      nodes: twoPeers().nodes.map((node) => ({ ...node, gates: ['unit'] })),
+    })
+
+  it('runs the full form of a gate the wave’s phases ran narrowed, once, on the merged tree', async () => {
+    const counter = join(mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-wave-gate-')), 'ran')
+    cleanups.push(() => rmSync(dirname(counter), { recursive: true, force: true }))
+    const rig = setup(scopedPeers(renderGate({ append: { path: counter, line: 'full' } })))
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    await rig.invoke('p1', 'git_merge')
+    await rig.invoke('p2', 'git_merge')
+
+    expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
+    const rows = rig.journal.events(RUN_ID).filter((event) => event.type === 'wave_gate_result')
+    expect(rows.map((row) => ({ node: row.nodeId, ...row.payload }))).toEqual([
+      { node: 'p2', wave: 1, gate: 'unit', exit_code: 0, status: 'passed', duration_ms: expect.any(Number) },
+    ])
+  })
+
+  it('fails the merge when the full form is red, naming the wave and the gate', async () => {
+    const rig = setup(scopedPeers(renderGate({ exit: 3 })))
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    await rig.invoke('p1', 'git_merge')
+    await expect(rig.invoke('p2', 'git_merge')).rejects.toThrow(/wave 1 merged, but gate "unit" failed/)
+  })
+
+  it('runs no wave gate when phases already ran the full command', async () => {
+    const rig = setup(() =>
+      WorkflowSchema.parse({ ...scopedPeers('true')(), defaults: { ...twoPeers().defaults, gate_scope: 'full' } }),
+    )
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    await rig.invoke('p1', 'git_merge')
+    await rig.invoke('p2', 'git_merge')
+    expect(rig.journal.events(RUN_ID).some((event) => event.type === 'wave_gate_result')).toBe(false)
   })
 
   it('produces the expected ancestry, and degrades cleanly with no gh', async () => {

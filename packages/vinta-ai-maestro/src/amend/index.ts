@@ -9,5 +9,5 @@ export {
   type AmendRunner,
   type RebaseRequest,
 } from './amend.ts'
-export { diffWorkflows, topoOrder, type WorkflowDiff } from './diff.ts'
+export { diffWorkflows, targetsOf, topoOrder, type WorkflowDiff } from './diff.ts'
 export { createRebaser, RebaseConflictError, type RebaserOptions } from './rebase.ts'

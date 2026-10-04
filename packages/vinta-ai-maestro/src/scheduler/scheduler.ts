@@ -72,6 +72,8 @@
  * Identifiers only in every journalled field and every error message. Agent
  * output goes to the transcript file, which is where §5.3 puts it.
  */
+import { ids as guardIds } from '../guard/guard.ts'
+import { checkCommand, shellLineOf } from '../guard/match.ts'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -2681,6 +2683,25 @@ export class Scheduler {
    * the registry an operation reaches, the takeover offer, the ledger, the
    * harness slot and the mid-turn refusal.
    */
+  /**
+   * The gate guard, after the fact, on a harness it cannot stop a call on
+   * (`src/guard/`). claude-code's calls were already put to its hook before
+   * they ran; codex has no per-call hook and opencode's is not wired, so all
+   * this can do is say it happened — journalled against the node, ids only.
+   */
+  #detectBareGate(state: NodeState, harness: string, name: string, input: unknown): void {
+    const line = shellLineOf(harness, name, input)
+    if (line === null) return
+    const hit = checkCommand(this.#workflow, line)
+    if (hit === null) return
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'bare_gate_detected',
+      payload: { ...guardIds(hit), harness },
+    })
+  }
+
   async #drain(
     state: NodeState,
     outcome: Extract<AdmissionOutcome, { status: 'admitted' }>,
@@ -2699,6 +2720,7 @@ export class Scheduler {
       for await (const event of outcome.session.events) {
         journal.appendTranscript(runId, state.node.id, { ...event, by: attribute(event, by) })
         watch.observe(event)
+        if (event.type === 'tool_use') this.#detectBareGate(state, adapter.id, event.name, event.input)
         if (event.type === 'session_started') {
           sessionId = event.sessionId
           this.#assign(state, { session_id: event.sessionId })

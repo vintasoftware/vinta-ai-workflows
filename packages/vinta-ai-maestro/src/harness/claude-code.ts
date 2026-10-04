@@ -623,6 +623,12 @@ class ClaudeCodeSession implements AgentSession {
  * the agent nothing and forbids it nothing, and a run told to skip every check
  * is still a run that must not die of a full context window.
  *
+ * Every mode — `full` included — also gets the gate guard's hook when the run
+ * supplies one (`src/guard/`). It is not a permission rule either: it never
+ * allows anything, it only refuses a gate's own command run bare and tells the
+ * agent which verb to use, and it fails open. A run with every check off still
+ * should not run its test suite five times outside the pool that rations it.
+ *
  * Which is why the early return for the "nothing to say" case is gone. There is
  * no such case any more — every spawn has at least one thing to put in the file
  * (`compaction.ts`), so every spawn writes one.
@@ -638,6 +644,7 @@ function readAccessArgs(
   lane: string,
   settingsDir: string,
   judgeHook: JudgeHook | undefined,
+  guardHook?: GuardHook,
 ): readonly string[] | null {
   const grant: ReadGrant = { roots, lane }
   const dirs = roots.length === 0 ? [] : addDirArgs(grant)
@@ -670,7 +677,7 @@ function readAccessArgs(
   // `judged` with no hook to install is `full` with the check missing. That is
   // the one combination this refuses outright rather than degrading.
   if (permission === 'judged' && hook === undefined) return null
-  const settings = writeSettings(settingsDir, lane, allow, deny, hook)
+  const settings = writeSettings(settingsDir, lane, allow, deny, hook, guardHook)
   // And for the same reason a `judged` spawn whose settings could not be
   // written does not start: the hook lives in that file and nowhere else.
   if (permission === 'judged' && settings === null) return null
@@ -708,6 +715,7 @@ function writeSettings(
   allow: readonly string[],
   deny: readonly string[],
   judgeHook?: JudgeHook,
+  guardHook?: GuardHook,
 ): string | null {
   const name = `${lane.split(/[/\\]/).filter(Boolean).pop() ?? 'lane'}.settings.json`
   const path = join(dir, name)
@@ -719,20 +727,27 @@ function writeSettings(
   // precedence because the agent writes in the lane: a `settings.local.json`
   // there turning hooks off would otherwise switch the judge off for the next
   // session started in it. Rewritten on every spawn, like everything here.
-  const hooks =
-    judgeHook === undefined
-      ? {}
-      : {
-          disableAllHooks: false,
-          hooks: {
-            PreToolUse: [
-              {
-                matcher: judgeHook.tools.join('|'),
-                hooks: [{ type: 'command', command: judgeHook.command, timeout: judgeHook.timeoutS }],
-              },
-            ],
+  // The judge first and the guard after: claude-code runs both, and a denial
+  // from either stands.
+  const preToolUse = [
+    ...(judgeHook === undefined
+      ? []
+      : [
+          {
+            matcher: judgeHook.tools.join('|'),
+            hooks: [{ type: 'command', command: judgeHook.command, timeout: judgeHook.timeoutS }],
           },
-        }
+        ]),
+    ...(guardHook === undefined
+      ? []
+      : [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: guardHook.command, timeout: guardHook.timeoutS }],
+          },
+        ]),
+  ]
+  const hooks = preToolUse.length === 0 ? {} : { disableAllHooks: false, hooks: { PreToolUse: preToolUse } }
   // The compaction assertion sits beside the permissions rather than inside
   // them because it is not one: it grants nothing and denies nothing. It is
   // here at all because this file is the only thing the adapter layers on top
@@ -796,6 +811,15 @@ export interface JudgeHook {
   readonly timeoutS: number
 }
 
+/**
+ * The gate guard's hook (`src/guard/hook.ts`): Bash only, in every mode. A
+ * command line for the reason `JudgeHook` is one.
+ */
+export interface GuardHook {
+  readonly command: string
+  readonly timeoutS: number
+}
+
 export interface ClaudeCodeAdapterOptions {
   /** Overrides `VINTA_AI_MAESTRO_CLAUDE_BIN`, which overrides `"claude"`. */
   readonly bin?: string
@@ -836,6 +860,11 @@ export interface ClaudeCodeAdapterOptions {
    * `judged` spawn without one is refused rather than run unchecked.
    */
   readonly judgeHook?: JudgeHook
+  /**
+   * The gate guard's hook, installed whatever the permission mode. Absent: no
+   * guard, which is what a host with no daemon to answer it supplies.
+   */
+  readonly guardHook?: GuardHook
   /** How long a spawn may go without an init frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
@@ -915,6 +944,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       task.cwd,
       this.options.settingsDir ?? tmpdir(),
       this.options.judgeHook,
+      this.options.guardHook,
     )
     // Only `judged` returns null, and only when its hook could not be put in
     // place. `fatal`, because waiting changes nothing about either cause.

@@ -67,6 +67,8 @@ export interface RebaserOptions {
    * as `node_assigned`, beside the `workflow_amended` row.
    */
   readonly onRebased?: (nodeId: string, base: string) => void
+  /** The run's plan branch, which dependency-free nodes are based on. See `IntegratorOptions.runBase`. */
+  readonly runBase?: string
 }
 
 /**
@@ -81,6 +83,7 @@ export function createRebaser(options: RebaserOptions): NonNullable<AmendRunner[
     const integrator = new Integrator({
       plan: planOf(request.workflow),
       integrationPath: cwd,
+      ...(options.runBase === undefined ? {} : { runBase: options.runBase }),
       // The amend path never authors code and never resolves a conflict: a
       // conflicting rebase stops and is reported. A fixer here would be the
       // orchestrator editing someone else's branch without a review.
@@ -92,7 +95,7 @@ export function createRebaser(options: RebaserOptions): NonNullable<AmendRunner[
     const forks = new Map<string, string>()
     for (const nodeId of request.nodes) {
       const branch = integrator.nodeBranch(nodeId)
-      const from = options.baseOf(nodeId) ?? request.workflow.base_branch
+      const from = options.baseOf(nodeId) ?? options.runBase ?? request.workflow.base_branch
       forks.set(nodeId, (await git(cwd, ['merge-base', from, branch])).trim())
     }
 

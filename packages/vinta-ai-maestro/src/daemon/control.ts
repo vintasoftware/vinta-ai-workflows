@@ -21,6 +21,7 @@
  * objects satisfy them with no adapter and a stub satisfies them with three
  * methods.
  */
+import type { GateGuardPort } from '../guard/guard.ts'
 import type { AmendRunner } from '../amend/amend.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
@@ -206,6 +207,13 @@ export interface DaemonRun {
    * denial, never as permission.
    */
   readonly permissionJudge?: PermissionJudgePort
+  /**
+   * The gate guard's daemon side (`src/guard/`): whether a Bash line an agent
+   * is about to run is a gate or a pooled command run bare. Absent on a host
+   * with no gates to guard, and the endpoint then allows everything — the hook
+   * fails open, so an absent guard is no guard rather than a blocked agent.
+   */
+  readonly gateGuard?: GateGuardPort
   /**
    * Ends the run before its DAG does — `pause` drains it to a resumable stop,
    * `stop` kills its live turns and cancels it. Resolves once the request is

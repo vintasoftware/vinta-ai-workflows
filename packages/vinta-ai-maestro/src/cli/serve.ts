@@ -62,7 +62,8 @@ import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
 import { Monitor, monitorModel } from '../monitor/monitor.ts'
 import type { Workflow } from '../types.ts'
-import { parseWorkflow } from '../validate.ts'
+import { loadProjectConfig } from '../config/project-config.ts'
+import { resolveWorkflow } from '../config/resolve.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { jobArgs, resumeRefusal, toRunPolicy, type JobTarget, type RunPolicy } from './policy.ts'
 
@@ -438,7 +439,12 @@ export function jobStarter(options: StarterOptions): RunStartPort {
             ? { ok: false, code: 'unknown_workflow', message: 'no such workflow' }
             : { ok: false, code: 'invalid_workflow', message: 'workflow file is not valid JSON' }
         }
-        const parsed = parseWorkflow(read.value)
+        // Resolved over the project the same way the job will resolve it, so a
+        // plan the job would refuse is refused here, before a process starts.
+        const config = await loadProjectConfig(repoPath)
+        const parsed = config.ok
+          ? resolveWorkflow(read.value, config.config)
+          : { ok: false as const, issues: config.issues }
         if (!parsed.ok || parsed.workflow.id !== request.workflowId) {
           return { ok: false, code: 'invalid_workflow', message: 'workflow is not valid' }
         }

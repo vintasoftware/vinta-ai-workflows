@@ -28,6 +28,7 @@
  * was mid-turn when the process died runs again from the top of its pipeline,
  * because the turn it was in the middle of belonged to a process that is gone.
  */
+import { createGateGuard } from '../guard/guard.ts'
 import { AdmissionControl } from '../admission/admission.ts'
 import type { AmendRunner } from '../amend/amend.ts'
 import type { Daemon, DaemonRun } from '../daemon/index.ts'
@@ -59,6 +60,12 @@ import { laneRootFor } from '../cli/paths.ts'
 import { projectSpec } from '../cli/project.ts'
 import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
 import { startSupervisor, type Supervisor } from '../intervention/supervisor.ts'
+import { startConfigReloader, type ConfigReloader } from '../config/reload.ts'
+import { commitOf, ensurePlanBranch, planBranchName } from './plan-branch.ts'
+import { PROJECT_CONFIG_FILE, readFileAt } from '../config/project-config.ts'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { readSources, repoRelative, writeSources, type RunSources, type RunSourcesInput } from './sources.ts'
 import type { Monitor } from '../monitor/monitor.ts'
 import type { SystemOne } from '../system-one/config.ts'
 import { createPermissionJudge } from '../system-one/permission.ts'
@@ -130,6 +137,16 @@ export interface StartRunOptions {
    * take to wind down.
    */
   readonly onHalt?: (mode: 'paused' | 'cancelled') => void
+  /**
+   * The layers a fresh run's workflow was resolved from. With them the run
+   * keeps watching its plan branch and applies committed configuration changes
+   * (`src/config/reload.ts`); without them — a test host, an out-of-tree one —
+   * it runs the definition it was given and nothing moves it but an amendment.
+   * A resume reads them back from the run's own directory instead.
+   */
+  readonly sources?: RunSourcesInput
+  /** How often the plan branch is checked for new commits. */
+  readonly configReloadMs?: number
 }
 
 /**
@@ -211,7 +228,39 @@ export async function preflightRun(options: PreflightOptions): Promise<Preflight
   const warnings = report.checks
     .filter((check) => check.status === 'warn')
     .map((check) => `vinta-ai-maestro: ${check.label}`)
+  if (options.resumeRunId === undefined) {
+    const drift = await uncommittedConfig(repoPath, workflow)
+    if (drift !== null) warnings.push(drift)
+  }
   return { ok: true, warnings }
+}
+
+/**
+ * A run starts from the configuration in the checkout and from then on follows
+ * its plan branch. When the two differ, the first config commit on the branch
+ * re-resolves from the committed file and the uncommitted edits quietly stop
+ * applying — worth saying at the one moment it can still be fixed.
+ */
+async function uncommittedConfig(repoPath: string, workflow: Workflow): Promise<string | null> {
+  try {
+    const branch = planBranchName(workflow.id)
+    const ref = (await commitOf(repoPath, `refs/heads/${branch}`)) ?? workflow.base_branch
+    const committed = await readFileAt(repoPath, ref, PROJECT_CONFIG_FILE)
+    let local: string | null = null
+    try {
+      local = await readFile(join(repoPath, PROJECT_CONFIG_FILE), 'utf8')
+    } catch {
+      local = null
+    }
+    if (local === committed) return null
+    return (
+      `vinta-ai-maestro: ${PROJECT_CONFIG_FILE} has changes that are not committed on ${branch}. ` +
+      'The run starts with them; a later config commit on that branch is read as committed, ' +
+      'and replaces them.'
+    )
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -259,6 +308,22 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   const adapters =
     options.adapters ?? defaultAdapters(workflow, permission, repoPath, options.systemOne)
   const laneRoot = laneRootFor(repoPath)
+
+  // The plan branch, before anything else is created: a refusal here — a
+  // branch that diverged from its base — must leave the store as it found it.
+  // An injected executor owns its own git, and gets no branch.
+  let planBranch: { readonly branch: string; readonly head: string } | undefined
+  if (options.executor === undefined) {
+    let ensured
+    try {
+      ensured = await ensurePlanBranch(repoPath, workflow.id, workflow.base_branch, { resume })
+    } catch {
+      return { ok: false, message: `vinta-ai-maestro: could not create the plan branch for "${workflow.id}".` }
+    }
+    if (!ensured.ok) return { ok: false, message: ensured.message }
+    planBranch = ensured
+  }
+
   // Freezes the snapshot and journals `run_started` plus one `node_registered`
   // per node — the log the projections are rebuilt from (§5.3). Skipped on a
   // resume, where all of that is already written: `createRun` would rewrite the
@@ -268,6 +333,22 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     journal.append({ runId, type: 'run_resumed', payload: { attempt: attemptOf(journal, runId) } })
   } else {
     journal.createRun(runId, workflow)
+  }
+
+  let sources: RunSources | null = null
+  if (planBranch !== undefined) {
+    if (resume) {
+      sources = readSources(journal, runId)
+    } else if (options.sources !== undefined) {
+      sources = {
+        workflow_path: repoRelative(repoPath, options.sources.path),
+        plan_branch: planBranch.branch,
+        head: planBranch.head,
+        authored: options.sources.authored,
+        config: options.sources.config,
+      }
+      writeSources(journal, runId, sources)
+    }
   }
 
   let host: HostWiring
@@ -284,6 +365,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
             // The lanes are still on disk from the attempt that died, and the
             // uncommitted work inside them is the thing being resumed.
             adopt: resume,
+            ...(planBranch === undefined ? {} : { planBranch: planBranch.branch }),
             ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
             agentEnv: {
               [MAESTRO_URL_ENV]: daemon.url,
@@ -393,6 +475,9 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
     ...(amend === undefined ? {} : { amend }),
     ...(permissionJudge === undefined ? {} : { permissionJudge }),
+    // Read through `current`, so a gate retuned mid-run is guarded on the
+    // command it runs now rather than the one the run started with.
+    gateGuard: createGateGuard({ journal, runId, workflow: () => current }),
     halt: async (mode) => {
       options.onHalt?.(mode)
       await scheduler.halt(mode)
@@ -420,6 +505,25 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
             : { budget: options.interventionBudget }),
         })
 
+  // The plan branch's watcher. Off without an `AmendRunner` for the reason the
+  // supervisor is, and off for a run that recorded no sources to re-resolve.
+  const reloader: ConfigReloader | null =
+    amend === undefined || sources === null
+      ? null
+      : startConfigReloader({
+          repoPath,
+          journal,
+          runId,
+          sources,
+          workflow: () => current,
+          // The live statuses too: a node the scheduler has just dispatched is
+          // in flight a moment before the journal says so, and a reload that
+          // pins started nodes must see it.
+          runner: { statuses: () => registered.control.statuses, ...amend },
+          ...(options.configReloadMs === undefined ? {} : { tickMs: options.configReloadMs }),
+          ...(options.logger === undefined ? {} : { logger: options.logger }),
+        })
+
   // Started, not awaited. The promise carries its own teardown so that the one
   // caller who never looks at it — the daemon — still gets it.
   const finished = (async (): Promise<RunOutcome> => {
@@ -437,6 +541,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
       // Everything closed here is a handle this run opened. The lanes are
       // deliberately absent — see `HostWiring.close`.
       supervisor?.stop()
+      reloader?.stop()
       admission.close()
       agentLeases.close()
       host.close()

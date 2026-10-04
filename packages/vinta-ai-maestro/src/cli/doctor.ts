@@ -84,10 +84,10 @@ export async function doctorCommand(
     }
   }
 
-  const workflow = await loadWorkflow(path, io)
+  const repoPath = resolve(parsed.values.repo ?? process.cwd())
+  const workflow = await loadWorkflow(path, io, repoPath)
   if (workflow === null) return FAILED
 
-  const repoPath = resolve(parsed.values.repo ?? process.cwd())
   const resumeRunId = parsed.values['resume']
   const report = await runDoctor({
     workflow,

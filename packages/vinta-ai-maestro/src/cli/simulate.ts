@@ -13,17 +13,22 @@
  * A projection is not a prediction, and `formatSimulation` says so in its own
  * closing paragraph — nothing needs repeating here.
  */
+import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { formatSimulation, simulate } from '../simulate/index.ts'
 import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 
-export const SIMULATE_USAGE = 'usage: vinta-ai-maestro simulate <workflow.json>'
+export const SIMULATE_USAGE = 'usage: vinta-ai-maestro simulate <workflow.json> [--repo <dir>]'
 
 export async function simulateCommand(argv: readonly string[], io: Io): Promise<number> {
   let parsed
   try {
-    parsed = parseArgs({ args: [...argv], options: {}, allowPositionals: true })
+    parsed = parseArgs({
+      args: [...argv],
+      options: { repo: { type: 'string' } },
+      allowPositionals: true,
+    })
   } catch {
     io.err(SIMULATE_USAGE)
     return USAGE
@@ -35,7 +40,8 @@ export async function simulateCommand(argv: readonly string[], io: Io): Promise<
     return USAGE
   }
 
-  const workflow = await loadWorkflow(path, io)
+  // The project whose `.vinta-ai-workflows.yaml` the plan is layered over.
+  const workflow = await loadWorkflow(path, io, resolve(parsed.values.repo ?? process.cwd()))
   if (workflow === null) return FAILED
 
   let report

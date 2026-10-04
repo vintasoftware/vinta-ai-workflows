@@ -935,6 +935,45 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
   })
 
   /**
+   * The gate guard rides in the same per-lane file, in every mode — `full`
+   * included, since it is not a permission rule — and after the judge where
+   * both are installed. It reaches this spawn and no other: the file is the
+   * adapter's, passed with `--settings`, never the repository's own.
+   */
+  it('installs the gate guard hook in every mode, after the judge', async () => {
+    const dir = makeTemp()
+    const lane = join(dir, 'lanes', 'mine')
+    mkdirSync(lane, { recursive: true })
+    const guard = { matcher: 'Bash', hooks: [{ type: 'command', command: 'guard-me', timeout: 10 }] }
+
+    for (const permission of ['ask', 'auto', 'full', 'judged'] as const) {
+      const out = `${permission}.json`
+      const outcome = await new ClaudeCodeAdapter({
+        bin: argvRecordingCli(dir, `claude-${permission}`, out),
+        permission,
+        readRoots: [dir],
+        settingsDir: join(dir, 'settings'),
+        guardHook: { command: 'guard-me', timeoutS: 10 },
+        ...(permission === 'judged' ? { judgeHook: { command: 'judge-me', tools: ['Bash'], timeoutS: 60 } } : {}),
+      }).spawn({ ...task(), cwd: lane })
+      expect(outcome.ok).toBe(true)
+      if (!outcome.ok) return
+      for await (const _event of outcome.session.events) void _event
+
+      const settings = settingsOf(dir, out) as Settings & {
+        disableAllHooks?: boolean
+        hooks?: { PreToolUse: unknown[] }
+      }
+      expect(settings.disableAllHooks).toBe(false)
+      expect(settings.hooks?.PreToolUse).toEqual(
+        permission === 'judged'
+          ? [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'judge-me', timeout: 60 }] }, guard]
+          : [guard],
+      )
+    }
+  })
+
+  /**
    * No roots means no grant — but `auto` still writes a policy, because the
    * shell allowance lives in it and has nothing to do with the grant. Without
    * it `acceptEdits` refuses every command the phase needs to run.
