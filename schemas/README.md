@@ -6,7 +6,7 @@ JSON Schema (Draft 2020-12) contracts for every YAML or JSON payload the vinta-a
 
 | Artifact | YAML location in target project | Schema file | Authored by | Read by |
 |---|---|---|---|---|
-| Project config | `.vinta-ai-workflows.yaml` (repo root) | [`vinta-ai-workflows-config.v1.schema.json`](vinta-ai-workflows-config.v1.schema.json) | `vinta-bootstrap-ai-tools` (initial) → `vinta-sync-ai-tools` (updates) | every builder skill, every template render, every meta-skill |
+| Project config | `.vinta-ai-workflows.yaml` (repo root) | [`vinta-ai-workflows-config.v1.schema.json`](vinta-ai-workflows-config.v1.schema.json) | `vinta-bootstrap-ai-tools` (initial) → `vinta-sync-ai-tools` (updates) | every builder skill, every template render, every meta-skill ; `vinta-ai-maestro` reads `commands` + `maestro` and layers every workflow over them |
 | Sub-agent definition | `ai-tools/agents/<name>.yaml` | [`sub-agent.v1.schema.json`](sub-agent.v1.schema.json) | `vinta-derive-subagents` | `setup-ai-tools.mjs` (emits per-vendor copies) |
 | PR-context frontmatter | top-of-file YAML in `.vinta-ai-workflows/prs-context/{feature-kebab}/phase-{phase.id}.md` | [`prs-context-frontmatter.v1.schema.json`](prs-context-frontmatter.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |
 | PR-context inline comments | YAML inside the ` ```yaml ... ``` ` fence under `# Comments` of the same file | [`prs-context-comments.v1.schema.json`](prs-context-comments.v1.schema.json) | `implement-plan` / `amend-plan` | `open-pr.sh` |

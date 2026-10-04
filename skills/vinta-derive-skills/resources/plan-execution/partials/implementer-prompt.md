@@ -113,7 +113,7 @@ spawns a new agent) with the answers.
 4. Iterate 2–3 until **new tests pass individually** and the scoped suite is green. Do **not** advance to step 5 with red scoped tests.
 5. **Outer gate — local verification, only after step 4 is green.** All MUST pass before staging:
    a. **Type / build:** `{{BUILD_CMD}}` — repo-wide, always.
-   b. **Tests:** by default run only the **scoped suite** `{{SCOPED_TEST_PATTERN}}` for the apps/files you touched — the new tests already passed individually in step 4b, so this re-confirms the touched surface without paying for the whole repo.
+   b. **Tests:** by default run only the **scoped suite** `{{SCOPED_TEST_PATTERN}}` for the apps/files you touched — the new tests already passed individually in step 4b, so this re-confirms the touched surface without paying for the whole repo. When that line contains `{changed_files}` or `{touches}`, it is a template: replace `{changed_files}` with the files this phase changed against its base (`git diff --name-only --diff-filter=d <base>...HEAD` plus uncommitted and untracked work) and `{touches}` with the phase's Touch List, each path shell-quoted and space-separated. If a placeholder would be empty, run `{{TEST_CMD}}` instead.
       {If run_options.full_test_suite = true:} run the **full test suite** `{{TEST_CMD}}` instead of the scoped suite — this phase guards against regressions in untouched code too.
    {{E2E_OUTER_GATE_LINE}}
 6. Outer gate fails → return step 2 (fix regression), re-run inner loop, then 5a/5b/5c. **Never** commit, push, or proceed while any gate is red.

@@ -96,6 +96,16 @@ These bleed across sub-skills, so capture once now:
 
 10. **Agent model tiers (optional).** The plan-execution family picks the **implementer** model per phase from the plan itself, but the **reviewer**, **fixer**, and the mechanical steps (**worktree prep**, **opening the PR / integrate**) have no model input unless the project sets one. Offer to pin each to a **tier** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml` — so review runs on a capable model while cheap mechanical work runs on a cheap one. `AskUserQuestion`: `Use recommended defaults (reviewer 3, fixer 2, worktree prep 1, integrate 1)`, `Customize each`, `Leave unset — every spawn uses the runtime default`. On `Customize each`, ask a per-role tier (1–4) for `reviewer` / `fixer` / `worktree_prep` / `integrate`. Land the chosen tiers in `.vinta-ai-workflows.yaml` `agent_models`; omit any role the user leaves unset (unset → runtime default). Recommend the defaults for most teams; recommend `Leave unset` only when the runtime exposes a single model anyway. Note `worktree_prep` is a no-op unless `prepare-worktree` is enabled, and setting `worktree_prep` / `integrate` makes `implement-plan` delegate those steps to a cheap subagent instead of running them inline.
 
+11. **`vinta-ai-maestro` defaults (optional).** Every plan `plan-feature` writes ships a `.workflow.json` that [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) executes, and most of what is in it repeats from plan to plan: which gates every phase runs, the pool the test suite contends for, the comment-hygiene chore. A `maestro:` section here holds those once, and each plan states only what is different. `AskUserQuestion` (header `Maestro`): `Set project defaults (Recommended)`, `Skip — plans carry everything themselves`. Recommend skipping only when the team does not run maestro.
+
+   On `Set project defaults`, capture:
+   - **Gates every phase runs.** Multi-select `AskUserQuestion` over the types the commands above give a command for: `typecheck` (from `commands.build`), `lint`, `test` (from `commands.test_unit`), and `e2e` only when `add-e2e-test` is enabled. → `maestro.defaults.gates`.
+   - **A different command for maestro.** `AskUserQuestion` per selected type: `Same as commands.* (Recommended)`, `Different for maestro (I'll give it)`. Teams pick a different one when lanes need a flag the inner loop does not, e.g. `pytest --reuse-db -n auto`. → `maestro.gates.<type>.cmd`. `implement-plan` keeps running `commands.*`.
+   - **Scoped gates.** Only when `test` (or `lint`) is selected: should a phase's gate run narrowed to the files the phase changed, with the full command run once per merged wave? `AskUserQuestion`: `Yes — scoped per phase, full per wave (Recommended)`, `No — full command every phase`. On `Yes`, propose a template with `{changed_files}` for the detected runner (`vitest related {changed_files} --run`, `jest --findRelatedTests {changed_files}`, `pytest --testmon {changed_files}`, `ruff check {changed_files}`) and confirm it. It lands in `commands.test_unit_scoped` / `commands.lint_scoped`, where `implement-plan` reads it too. `No` sets `maestro.defaults.gate_scope: full`.
+   - **A test-suite pool.** `AskUserQuestion`: `One suite at a time (Recommended for DB-backed suites)`, `Two at a time`, `No limit`. A limit emits `maestro.resources.test-suite` (`kind: semaphore`, `capacity` 1 or 2) and `maestro.gates.test.requires: [test-suite]`. Then offer the runner's command patterns as the pool's `match` (`pytest*`, `uv run pytest*`, `pnpm test*`), which makes agents take the lease before running tests by hand.
+
+   Everything here is a default under every plan. A plan's own `.workflow.json` overrides any of it, and a commit to this file on a running plan's branch (`plan/<workflow-id>/base`) is applied to that run.
+
 ### D. Optional foundation skills
 
 Seven skills are part of the foundation set but aren't always needed. Ask explicitly:
@@ -267,7 +277,8 @@ commands:
   format: <derived>
   build: <derived>
   test_unit: <Project conventions → Test framework(s)>
-  test_unit_scoped: <derived from monorepo shape>
+  test_unit_scoped: <C.11 scoped-gates template with {changed_files} when confirmed; else derived from monorepo shape>
+  lint_scoped: <C.11 scoped lint template; omit unless confirmed>
   test_unit_new_pattern: <derived>
   e2e: <only when foundation_skills.add-e2e-test = enabled>
   # Only when the prepare-worktree answer was "own script/command" or "generate".
@@ -343,6 +354,24 @@ run_options:
     max_parallel_lanes: <parallel-execution follow-up → lane cap, default 3; omit when parallel_phases is false>
   amend-plan:
     blast_radius_signal_threshold: 2
+
+# Only emit on C.11 → "Set project defaults". Omit the whole block on "Skip".
+# Defaults UNDER every plan's .workflow.json: the plan wins wherever it says
+# something. Emit only the keys the user answered; nothing here repeats a
+# value maestro would derive from `commands` on its own.
+maestro:
+  defaults:
+    gates: <C.11 → gates every phase runs, e.g. [typecheck, lint, test]>
+    gate_scope: <C.11 → omit for "scoped" (the default); `full` on "No — full command every phase">
+  gates:
+    test:
+      cmd: <C.11 → maestro-only test command; omit to use commands.test_unit>
+      requires: [test-suite]  # only with a test-suite pool
+  resources:
+    test-suite:  # only on a pool limit
+      capacity: <1 | 2>
+      kind: semaphore
+      match: <C.11 → runner command patterns, e.g. ['pytest*', 'uv run pytest*']>
 
 skills:
   # Only emit this block when foundation_skills.systematic-debugging = enabled.

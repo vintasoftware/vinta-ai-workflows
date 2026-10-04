@@ -1,0 +1,28 @@
+# `maestro.gates` is keyed by gate type, and `smoke` is not one: the types are
+# test, lint, typecheck and e2e, each of which reads a `commands.*` line.
+schema_version: 1
+vinta_ai_workflows_version: 0.7.0-alpha25
+project:
+  name: acme
+  default_branch: main
+  code_host: github
+  stack_summary: Django
+  ai_plans_dir: ai-plans
+commands:
+  lint: ruff check
+  build: mypy .
+  test_unit: pytest
+policies:
+  pr_creation: agents-create
+  ai_coauthor: allowed
+  commit_style: conventional
+  stage_pattern: git add <paths>
+vendors: [claude]
+foundation_skills:
+  plan-feature: enabled
+foundation_agents:
+  implementer: enabled
+maestro:
+  gates:
+    smoke:
+      cmd: ./smoke.sh
