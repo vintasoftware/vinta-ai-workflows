@@ -2649,6 +2649,89 @@ describe('workflow editing', () => {
     ).toBe('B, amended')
   })
 
+  /**
+   * `ui` and a run's job are two processes. The editor's save is answered by
+   * `ui`, which hosts no run, so it used to amend the frozen snapshot with no
+   * runner at all: nothing adopted the change, and the job ran on with the old
+   * definition until a resume. Here the rig's daemon plays the job, with an
+   * amend runner registered, and a second daemon on the same store plays `ui`.
+   */
+  async function uiForJob(upstream: () => { url: string; token: string } | null) {
+    const r = await rig()
+    const adopted: Workflow[] = []
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      agentLeases: r.agentLeases,
+      amend: { adopt: (workflow) => adopted.push(workflow) },
+    })
+    const ui = await startDaemon({ journal: r.journal, pollMs: 5, warn: () => {}, upstream })
+    cleanups.push(async () => await ui.close())
+    return { r, ui, adopted }
+  }
+
+  it('sends a save from `ui` to the job hosting the run, which adopts it', async () => {
+    let job: { url: string; token: string } | null = null
+    const { r, ui, adopted } = await uiForJob(() => job)
+    job = { url: r.daemon.url, token: r.daemon.token }
+    const base = r.journal.readWorkflow(RUN_ID)
+    const amended = { ...base, nodes: [base.nodes[0], { ...base.nodes[1], name: 'B, from ui' }] }
+
+    const result = await call(ui, '/api/workflows/daemon-flow', { method: 'PUT', body: amended })
+    expect(result.status).toBe(200)
+    expect(AmendResponseSchema.parse(result.body)).toMatchObject({ runId: RUN_ID, applied: ['b'] })
+    // The job's runner took it — the part that was missing.
+    expect(adopted.map((workflow) => workflow.nodes[1]?.name)).toEqual(['B, from ui'])
+    // And `ui` wrote the source document once the run had accepted it.
+    expect(
+      JSON.parse(readFileSync(join(workflowsDir(r.dir), 'daemon-flow.workflow.json'), 'utf8')).nodes[1].name,
+    ).toBe('B, from ui')
+  })
+
+  it('passes the job’s refusal back as it came, and writes nothing', async () => {
+    let job: { url: string; token: string } | null = null
+    const { r, ui, adopted } = await uiForJob(() => job)
+    job = { url: r.daemon.url, token: r.daemon.token }
+    // Removing `a`, which is running.
+    const result = await call(ui, '/api/workflows/daemon-flow', {
+      method: 'PUT',
+      body: { ...EDITABLE, id: 'daemon-flow' },
+    })
+    expect(result.status).toBe(409)
+    expect(ErrorResponseSchema.parse(result.body).error).toBe('nodes_in_flight')
+    expect(adopted).toEqual([])
+    expect(existsSync(join(workflowsDir(r.dir), 'daemon-flow.workflow.json'))).toBe(false)
+  })
+
+  it('refuses a save it cannot deliver rather than amending a snapshot nobody adopts', async () => {
+    // A job that is alive by its pid file and answers nothing.
+    const { r, ui, adopted } = await uiForJob(() => ({ url: 'http://127.0.0.1:9', token: 'nope' }))
+    const base = r.journal.readWorkflow(RUN_ID)
+    const result = await call(ui, '/api/workflows/daemon-flow', {
+      method: 'PUT',
+      body: { ...base, nodes: [base.nodes[0], { ...base.nodes[1], name: 'lost' }] },
+    })
+    expect(result.status).toBe(502)
+    expect(ErrorResponseSchema.parse(result.body).error).toBe('run_host_unreachable')
+    expect(adopted).toEqual([])
+    expect(r.journal.readWorkflow(RUN_ID).nodes[1]?.name).not.toBe('lost')
+    expect(existsSync(join(workflowsDir(r.dir), 'daemon-flow.workflow.json'))).toBe(false)
+  })
+
+  it('answers the amend route only where the run is hosted', async () => {
+    const r = await rig()
+    const elsewhere = await startDaemon({ journal: r.journal, pollMs: 5, warn: () => {} })
+    cleanups.push(async () => await elsewhere.close())
+    const result = await call(elsewhere, `/api/runs/${RUN_ID}/amend`, {
+      method: 'POST',
+      body: r.journal.readWorkflow(RUN_ID),
+    })
+    expect(result.status).toBe(409)
+    expect(ErrorResponseSchema.parse(result.body).error).toBe('run_not_live')
+  })
+
   it('refuses an amendment that is not a valid workflow, with paths, before touching the run', async () => {
     const r = await rig()
     const base = r.journal.readWorkflow(RUN_ID)
