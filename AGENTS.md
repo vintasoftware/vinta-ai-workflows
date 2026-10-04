@@ -54,6 +54,7 @@ The **skills side** of this repo (`skills/`, `dev-skills/`, `schemas/`, `vinta-a
 | Change touches | Verification |
 |---|---|
 | `skills/vinta-install-ai-tools-setup/resources/setup-ai-tools.mjs` | `npm test` runs the generator against a temporary target project and checks its generated files. |
+| `skills/vinta-bootstrap-ai-tools/resources/worktree-command/*-template.sh` | `npm test` renders the templates into a temporary git repo and drives the `commands.worktree_prepare` contract end to end: dry run, provision, the conductor's post-checks, teardown, re-provision, the dirty-worktree refusal and the database guards. Keep the scripts Bash 3.2 compatible (macOS's system bash). |
 | `vinta-ai-workflows.mjs` | `node vinta-ai-workflows.mjs list` from repo root must succeed. `node vinta-ai-workflows.mjs install --tool claude-code --target /tmp/scratch --dry-run` must print a plausible plan. |
 | any `*.json` under `schemas/` | `pnpm install` once, then `npm run validate-schemas` — compiles every schema (Ajv, strict 2020-12) and checks `tests/schema-fixtures/<schema-stem>/{valid,invalid}/`. A changed rule gets fixtures proving it: one `valid/` payload it allows, one `invalid/` payload per thing it forbids. |
 | any Python in `skills/.../resources/*.py` | `python3 -m py_compile <path>`. These files are templates copied into target projects, but they must be syntactically valid Python so consumers don't get a broken paste. |

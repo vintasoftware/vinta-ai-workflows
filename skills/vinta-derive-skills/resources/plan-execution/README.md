@@ -37,7 +37,9 @@ The conductor resolves three values **once per lane** (see `partials/worktree-se
 |---|---|---|
 | `WORKROOT` | `<main_checkout>` | `<worktree_path>` — this lane's, when a pool is provisioned |
 | `BASE_BRANCH` | `{{DEFAULT_BRANCH}}` | `<worktree_branch>` |
-| `SANDBOX_TIER` | `none` | `enforced` \| `none` (probed by prepare-worktree, per lane) |
+| `SANDBOX_TIER` | `none` | `enforced` \| `none` (probed per lane) |
+
+Worktrees come from one of two **provisioners**, picked once per run: the project's own `commands.worktree_prepare` when it is set, else the `prepare-worktree` skill. The command gets a fixed `VINTA_WORKTREE_*` environment and must create a runnable worktree at the given path and branch. It may also write the summary YAML; the conductor then post-checks it with git. Both provisioners yield the same `worktree_path` / `worktree_branch` / `worktree_summary` / `sandbox_tier`, so nothing downstream of `WORKROOT_RESOLUTION` knows which one ran. The full contract lives in that block.
 
 Every `git` / lint / test / build call in every sub-skill uses `git -C <WORKROOT>` **uniformly** — no `if use_worktree` inside them. Only two genuine conditionals remain, each local and data-driven: the `SANDBOX_TIER`-gated spawn wrap in `implement-phase`, and the `WORKROOT != main_checkout`-gated stray-write check in `review-phase`.
 

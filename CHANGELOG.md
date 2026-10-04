@@ -30,6 +30,48 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Provision worktrees with your own script instead of the `prepare-worktree`
+  skill.** Set `commands.worktree_prepare` in `.vinta-ai-workflows.yaml` (and
+  optionally `commands.worktree_teardown`), and `implement-plan` runs that
+  command for the shared worktree, every lane and the integration worktree.
+  No LLM step and no `agent_models.worktree_prep` delegate are involved.
+  Worktrees, and therefore parallel phases, are now available when the skill
+  is enabled **or** the command is set. When both are set the command wins,
+  and the skill is offered as a fallback if the command fails.
+  - **The contract.** The command runs from the repo root with
+    `VINTA_WORKTREE_NAME`, `_PATH`, `_BRANCH`, `_BASE_REF`, `_KIND`
+    (`single` | `lane` | `integration`), `VINTA_MAIN_CHECKOUT`,
+    `VINTA_PLAN_PATH` and `VINTA_WORKTREE_SUMMARY` set. It must create a
+    runnable worktree at that path, on that new branch, and exit non-zero on
+    failure. The conductor then checks the result with git rather than
+    trusting the exit code: the right branch, the worktree registered, and
+    the main checkout's status unchanged. Writing the summary YAML is
+    optional. A summary carrying `reset_cmd`s lets a lane be reused across a
+    migration boundary. Without one the lane is re-provisioned (teardown,
+    then prepare again) instead. Lanes are provisioned one at a time, because
+    the command runs `git worktree add` itself.
+  - **Sandbox tier.** The conductor probes the tier itself. With the skill
+    disabled, its `sandbox-run.sh` is not installed, so the tier is `none` and
+    the review-phase stray-write check is the guard.
+  - **Bootstrap.** The `prepare-worktree` question gains a
+    `Yes — we provision with our own script/command` option.
+    `vinta-analyze-codebase` now records existing worktree scripts in
+    `commands.worktree_candidates`, and the interview offers them as the
+    command. Existing configs need no change.
+  - **The bootstrap can write the script for you.** A fourth answer,
+    `Yes — generate a provisioning script for this project`, adds an optional
+    step after `vinta-derive-skills`. It writes `prepare.sh`, `teardown.sh`
+    and a shared `lib.sh` (default `scripts/worktree/`) from bundled
+    templates, and points `commands.worktree_prepare` / `_teardown` at them.
+    The templates carry the contract: `--dry-run`, sanity checks, rollback of
+    a half-made worktree, generic compose isolation, the full summary YAML,
+    and a teardown that refuses a dirty worktree, drops only `*_wt_<name>`
+    databases and never runs `down -v`. They also refuse to fork or drop a
+    database on a non-local host. The bootstrap fills only the project's
+    dependency, env, database and service steps from the inventory, then
+    verifies with `bash -n`, a dry run, and an optional real smoke test. The
+    scripts are the project's to commit and edit; humans can run
+    `prepare.sh <name>` / `teardown.sh <name>` directly too.
 - **Agents stop for input with clickable questions instead of prose.** When a
   skill or a sub-agent needs a decision from you, it now asks through your
   harness's structured question tool, so you get the options as buttons plus
@@ -393,6 +435,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`implement-plan`'s final report no longer suggests `docker compose down -v`
+  to tear down a lane.** `down -v` also deletes the compose volumes a worktree
+  deliberately shares with the main checkout (`shared_volumes`, such as a
+  dependency cache). The report now prints the same sequence the
+  `prepare-worktree` skill documents: `docker compose -p <project> down`, then
+  `docker volume rm` for each volume the worktree forked, then removal of the
+  generated compose override.
 - **`open-pr.sh` posts inline comments on macOS and reports why a comment
   failed.** Four bugs in the `open-pr-from-context` script, all seen while
   publishing a stacked plan from a Mac:
