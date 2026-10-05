@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interview</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --surface: #ffffff; --surface-2: #f1efe8; --text: #1f1f1d; --text-2: #5f5e5a; --text-3: #8a8983;
+    --border: #e0ded6; --border-strong: #b9b7ae; --accent: #3b5bdb; --accent-bg: #e8edfb; --accent-text: #2b43a8;
+    --warn-bg: #faeeda; --warn-text: #854f0b; --ok-bg: #e1f5ee; --ok-text: #0f6e56; --danger: #a32d2d;
+    --radius: 8px; --radius-lg: 12px; --rail: 260px; --side: 340px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161614; --surface: #1f1f1d; --surface-2: #2a2a27; --text: #ecece8; --text-2: #b4b2a9; --text-3: #85847d;
+      --border: #34332f; --border-strong: #55544e; --accent: #7f9bf0; --accent-bg: #22294a; --accent-text: #b5c4f6;
+      --warn-bg: #3a2a10; --warn-text: #fac775; --ok-bg: #0f3a2e; --ok-text: #9fe1cb; --danger: #f09595;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  button { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 8px 14px; cursor: pointer; }
+  button:hover { background: var(--surface-2); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.quiet { border-color: transparent; background: transparent; color: var(--text-2); }
+  button:disabled { opacity: .5; cursor: default; }
+  textarea, input[type=text] { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 8px 10px; width: 100%; }
+  textarea { min-height: 72px; resize: vertical; }
+  a { color: var(--accent-text); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+  pre { background: var(--surface-2); padding: 10px 12px; border-radius: var(--radius); overflow: auto; }
+  .sr-only { position: absolute; left: -9999px; }
+
+  header.top { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 5; }
+  header.top h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  header.top .meta { color: var(--text-2); font-size: 13px; }
+  header.top .spacer { flex: 1; }
+  .progress { width: 160px; height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+  .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  select { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 6px 8px; }
+
+  .layout { display: grid; grid-template-columns: var(--rail) minmax(0, 1fr) var(--side); min-height: calc(100vh - 57px); }
+  @media (max-width: 1100px) { .layout { grid-template-columns: var(--rail) minmax(0, 1fr); } aside.side { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--border); } }
+  @media (max-width: 760px) { .layout { grid-template-columns: minmax(0, 1fr); } nav.rail { border-right: 0; border-bottom: 1px solid var(--border); } }
+
+  nav.rail { border-right: 1px solid var(--border); padding: 16px 12px; background: var(--surface); overflow-y: auto; }
+  nav.rail .group { margin-bottom: 14px; }
+  nav.rail .group-title { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); padding: 4px 8px; }
+  nav.rail .item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: var(--radius); cursor: pointer; font-size: 13.5px; color: var(--text-2); border: 1px solid transparent; }
+  nav.rail .item:hover { background: var(--surface-2); }
+  nav.rail .item.current { background: var(--surface-2); color: var(--text); border-color: var(--border); font-weight: 500; }
+  nav.rail .item .dot { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--border-strong); flex: none; margin-top: 3px; display: grid; place-items: center; font-size: 10px; }
+  nav.rail .item.done .dot { background: var(--ok-bg); border-color: var(--ok-text); color: var(--ok-text); }
+  nav.rail .item.waived .dot { background: var(--surface-2); border-style: dashed; }
+  nav.rail .item.missing .dot { border-color: var(--danger); }
+
+  main.pane { padding: 24px 32px 120px; overflow-y: auto; }
+  main .crumb { color: var(--text-3); font-size: 13px; }
+  main h2 { font-size: 24px; line-height: 1.25; margin: 6px 0 14px; font-weight: 600; }
+  .md { max-width: 820px; }
+  .md p, .md ul, .md ol, .md table { margin: 0 0 .8em; }
+  .md h1, .md h2, .md h3, .md h4 { margin: 1.2em 0 .4em; line-height: 1.3; }
+  .md h1 { font-size: 20px; } .md h2 { font-size: 18px; } .md h3 { font-size: 16px; } .md h4 { font-size: 15px; }
+  .md table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .md th, .md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  .md th { background: var(--surface-2); }
+  .md blockquote { margin: 0 0 .8em; padding: 6px 14px; border-left: 3px solid var(--border-strong); color: var(--text-2); }
+  .md img { max-width: 100%; }
+  .md .mermaid { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin: 0 0 1em; overflow-x: auto; }
+  .md .mermaid svg { max-width: 100%; height: auto; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 20px; margin: 0 0 16px; }
+  .card.context { border-left: 3px solid var(--border-strong); border-radius: 0 var(--radius-lg) var(--radius-lg) 0; }
+  .card .label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); margin-bottom: 6px; }
+  iframe.doc { width: 100%; min-height: 480px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: #fff; }
+
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 8px 0 16px; }
+  .opt { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
+  .opt:hover { border-color: var(--border-strong); }
+  .opt.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .opt.recommended::before { content: "Recommended"; position: absolute; top: -10px; left: 12px; background: var(--accent-bg); color: var(--accent-text); font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+  .opt .title { font-weight: 600; display: flex; gap: 10px; align-items: flex-start; }
+  .opt .title input { margin-top: 5px; accent-color: var(--accent); }
+  .opt .desc { color: var(--text-2); font-size: 14px; }
+  .opt .cons { font-size: 13px; padding-top: 6px; border-top: 1px dashed var(--border); color: var(--text-2); }
+  .opt .cons strong { color: var(--text); font-weight: 600; }
+  .opt .more { align-self: flex-start; font-size: 12.5px; padding: 2px 0; color: var(--accent-text); background: none; border: 0; }
+  .opt .detail { font-size: 14px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .opt input[type=text] { margin-top: 4px; }
+  .pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 10px; background: var(--surface-2); color: var(--text-2); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn-text); }
+  .pill.ok { background: var(--ok-bg); color: var(--ok-text); }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .field { margin: 0 0 14px; }
+  .field label { display: block; font-size: 13px; color: var(--text-2); margin-bottom: 4px; }
+  .waive { display: flex; gap: 8px; align-items: center; font-size: 14px; color: var(--text-2); }
+  .error { color: var(--danger); font-size: 13px; }
+
+  footer.bar { position: fixed; bottom: 0; left: var(--rail); right: var(--side); background: var(--surface); border-top: 1px solid var(--border); padding: 12px 32px; display: flex; gap: 10px; align-items: center; z-index: 4; }
+  @media (max-width: 1100px) { footer.bar { right: 0; } }
+  @media (max-width: 760px) { footer.bar { left: 0; } }
+  footer.bar .spacer { flex: 1; }
+  footer.bar .status { color: var(--text-2); font-size: 13px; }
+
+  aside.side { border-left: 1px solid var(--border); background: var(--surface); padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  aside h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); margin: 0; font-weight: 600; }
+  .msg { border-radius: var(--radius); padding: 10px 12px; font-size: 14px; }
+  .msg.you { background: var(--surface-2); }
+  .msg.agent { background: var(--accent-bg); color: var(--accent-text); }
+  .msg .who { font-size: 11.5px; opacity: .75; margin-bottom: 4px; }
+  .msg .md p:last-child { margin: 0; }
+  .msg .del { float: right; font-size: 11px; background: none; border: 0; padding: 0 2px; color: inherit; opacity: .6; }
+  .hint { font-size: 12.5px; color: var(--text-3); }
+  .empty { color: var(--text-3); font-size: 13.5px; font-style: italic; }
+  .center { display: grid; place-items: center; min-height: 60vh; text-align: center; color: var(--text-2); padding: 40px; }
+  .center h2 { font-size: 20px; }
+  .spin { width: 22px; height: 22px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .banner { background: var(--warn-bg); color: var(--warn-text); padding: 8px 12px; border-radius: var(--radius); font-size: 13.5px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1 id="title">Interview</h1>
+  <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <span class="meta" id="progress-label"></span>
+  <div class="progress"><div id="progress"></div></div>
+  <select id="round-select" title="Round" aria-label="Round"></select>
+</header>
+<div class="layout">
+  <nav class="rail" id="rail" aria-label="Decisions"></nav>
+  <main class="pane" id="pane"></main>
+  <aside class="side" id="side"></aside>
+</div>
+<footer class="bar" id="bar"></footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const isDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
+
+  if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: isDark() ? 'dark' : 'neutral', securityLevel: 'strict' });
+
+  // ── markdown ────────────────────────────────────────────────
+  let mermaidSeq = 0;
+  function renderMd(src) {
+    if (!src) return '';
+    if (!window.marked) return `<pre>${esc(src)}</pre>`;
+    const renderer = new marked.Renderer();
+    const baseCode = renderer.code.bind(renderer);
+    renderer.code = (code, lang, escaped) => {
+      const text = typeof code === 'object' ? code.text : code;
+      const language = typeof code === 'object' ? code.lang : lang;
+      if ((language || '').trim() === 'mermaid') return `<pre class="mermaid" data-raw="${esc(text)}">${esc(text)}</pre>`;
+      return typeof code === 'object' ? baseCode(code) : baseCode(text, language, escaped);
+    };
+    const html = marked.parse(src, { renderer, gfm: true, breaks: false });
+    return window.DOMPurify ? DOMPurify.sanitize(html, { ADD_ATTR: ['data-raw', 'target'] }) : html;
+  }
+  async function runMermaid(root) {
+    if (!window.mermaid) return;
+    const nodes = [...root.querySelectorAll('pre.mermaid:not([data-done])')];
+    for (const node of nodes) {
+      node.setAttribute('data-done', '1');
+      const raw = node.getAttribute('data-raw') || node.textContent;
+      try {
+        const { svg } = await mermaid.render(`mm-${++mermaidSeq}`, raw);
+        const box = document.createElement('div'); box.className = 'mermaid'; box.innerHTML = svg;
+        node.replaceWith(box);
+      } catch (e) {
+        node.insertAdjacentHTML('beforebegin', `<p class="error">Diagram failed to render: ${esc(e.message || e)}</p>`);
+      }
+    }
+  }
+
+  // ── state ───────────────────────────────────────────────────
+  const S = { state: null, round: null, roundNo: null, answers: null, decisions: [], idx: 0, draft: null, readOnly: false, submitting: false, docCache: new Map(), sse: null };
+  const draftKey = () => `interview-ui:${S.round?.interview?.slug || 'interview'}:${S.roundNo}`;
+
+  const api = async (path, opts) => {
+    const r = await fetch(path, opts);
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `${r.status} ${r.statusText}`);
+    return body;
+  };
+
+  function flatten(round) {
+    const out = [];
+    for (const g of round.groups || []) for (const d of g.decisions || []) out.push({ ...d, group: g });
+    return out;
+  }
+  function emptyDraft() {
+    return { schema_version: 1, round: S.roundNo, answers: {}, questions: [], general_note: '' };
+  }
+  function loadDraft() {
+    try { const raw = localStorage.getItem(draftKey()); if (raw) return JSON.parse(raw); } catch { /* ignore */ }
+    return emptyDraft();
+  }
+  function saveDraft() { try { localStorage.setItem(draftKey(), JSON.stringify(S.draft)); } catch { /* ignore */ } }
+  function ans(d) { return S.draft.answers[d.id] || (S.draft.answers[d.id] = { status: 'skipped', values: [], other: '', text: '', note: '' }); }
+  function isDone(d) { const a = S.draft.answers[d.id]; return !!a && (a.status === 'waived' || (a.status === 'answered' && hasValue(d, a))); }
+  function hasValue(d, a) {
+    const t = d.input?.type || 'single';
+    if (t === 'text') return !!(a.text || '').trim();
+    return (a.values || []).length > 0 || !!(a.other || '').trim();
+  }
+  function missing() { return S.decisions.filter((d) => d.required !== false && !isDone(d)); }
+
+  // ── loading ─────────────────────────────────────────────────
+  async function refreshState() {
+    S.state = await api('/api/state');
+    renderRoundSelect();
+    const target = S.roundNo ?? S.state.current ?? S.state.latest;
+    const current = S.state.rounds.find((r) => r.round === S.roundNo);
+    if (S.roundNo === null || (current?.answered && S.state.current && S.state.current !== S.roundNo)) {
+      await loadRound(S.state.current ?? target);
+    } else if (S.roundNo !== null && !S.round) {
+      await loadRound(S.roundNo);
+    }
+  }
+  async function loadRound(n) {
+    if (n === null || n === undefined) { S.round = null; S.roundNo = null; renderAll(); return; }
+    S.roundNo = n;
+    const info = S.state.rounds.find((r) => r.round === n);
+    if (info?.error) { S.round = null; renderAll(info.error); return; }
+    S.round = await api(`/api/rounds/${n}`);
+    S.decisions = flatten(S.round);
+    S.readOnly = !!info?.answered;
+    S.answers = S.readOnly ? await api(`/api/answers/${n}`).catch(() => null) : null;
+    S.draft = S.readOnly && S.answers ? fromAnswers(S.answers) : loadDraft();
+    S.idx = 0;
+    const firstOpen = S.decisions.findIndex((d) => !isDone(d));
+    if (!S.readOnly && firstOpen > 0) S.idx = firstOpen;
+    document.title = `${S.round.interview?.title || 'Interview'} · round ${n}`;
+    renderAll();
+  }
+  function fromAnswers(a) {
+    const d = emptyDraft();
+    for (const x of a.answers || []) d.answers[x.decision_id] = { status: x.status, values: x.values || [], other: x.other || '', text: x.text || '', note: x.note || '' };
+    d.questions = a.questions || []; d.general_note = a.general_note || '';
+    return d;
+  }
+  function toAnswers() {
+    return {
+      schema_version: 1, round: S.roundNo,
+      interview: S.round.interview?.slug,
+      answers: S.decisions.map((d) => {
+        const a = ans(d); const t = d.input?.type || 'single';
+        const out = { decision_id: d.id, status: a.status === 'waived' ? 'waived' : (hasValue(d, a) ? 'answered' : 'skipped') };
+        if (out.status === 'answered') {
+          if (t === 'text') out.text = a.text.trim();
+          else { out.values = a.values; if ((a.other || '').trim()) out.other = a.other.trim(); }
+        }
+        if ((a.note || '').trim()) out.note = a.note.trim();
+        return out;
+      }),
+      questions: S.draft.questions,
+      general_note: (S.draft.general_note || '').trim() || undefined,
+    };
+  }
+
+  // ── render: header + rail ───────────────────────────────────
+  function renderRoundSelect() {
+    const sel = $('round-select');
+    sel.innerHTML = (S.state?.rounds || []).map((r) => `<option value="${r.round}" ${r.round === S.roundNo ? 'selected' : ''}>Round ${r.round}${r.answered ? ' · submitted' : ''}${r.error ? ' · invalid' : ''}</option>`).join('');
+    sel.style.display = (S.state?.rounds || []).length > 1 ? '' : 'none';
+  }
+  function renderHeader() {
+    $('title').textContent = S.round?.interview?.title || S.round?.title || 'Interview';
+    const kind = S.round?.kind === 'readback' ? 'Read-back' : 'Decisions';
+    $('meta').textContent = S.round ? `Round ${S.roundNo} · ${kind}${S.round.interview?.skill ? ` · ${S.round.interview.skill}` : ''}` : '';
+    const total = S.decisions.length, done = S.decisions.filter(isDone).length;
+    $('progress').style.width = total ? `${Math.round(done / total * 100)}%` : '0';
+    $('progress-label').textContent = total ? `${done} / ${total}` : '';
+  }
+  function renderRail() {
+    const rail = $('rail');
+    if (!S.round) { rail.innerHTML = ''; return; }
+    const miss = new Set(missing().map((d) => d.id));
+    let i = 0;
+    rail.innerHTML = (S.round.groups || []).map((g) => `
+      <div class="group">
+        <div class="group-title">${esc(g.title || g.id)}</div>
+        ${(g.decisions || []).map((d) => {
+          const k = i++; const a = S.draft.answers[d.id];
+          const cls = ['item', k === S.idx ? 'current' : '', isDone(d) ? (a.status === 'waived' ? 'waived done' : 'done') : '', S.showMissing && miss.has(d.id) ? 'missing' : ''].join(' ');
+          return `<div class="${cls}" data-idx="${k}" role="button" tabindex="0"><span class="dot">${isDone(d) && a.status !== 'waived' ? '✓' : ''}</span><span>${esc(d.short || d.title)}</span></div>`;
+        }).join('')}
+      </div>`).join('');
+    rail.querySelectorAll('.item').forEach((el) => {
+      const go = () => { S.idx = Number(el.dataset.idx); renderAll(); };
+      el.addEventListener('click', go);
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+    });
+  }
+
+  // ── render: main pane ───────────────────────────────────────
+  function explainerHtml(x, id) {
+    if (!x) return '';
+    if (typeof x === 'string') return `<div class="md" data-md>${renderMd(x)}</div>`;
+    if (x.markdown) return `<div class="md" data-md>${renderMd(x.markdown)}</div>`;
+    if (x.path) {
+      const url = `/api/docs/${encodeURI(x.path.replace(/^docs\//, ''))}`;
+      if (/\.html?$/i.test(x.path)) return `<iframe class="doc" sandbox="allow-scripts allow-popups" src="${url}" title="${esc(x.title || 'Explainer')}"></iframe>`;
+      return `<div class="md" data-doc="${esc(x.path)}" id="${id}"><p class="hint">Loading ${esc(x.path)}…</p></div>`;
+    }
+    return '';
+  }
+  async function hydrateDocs(root) {
+    for (const el of root.querySelectorAll('[data-doc]')) {
+      const path = el.getAttribute('data-doc');
+      try {
+        let text = S.docCache.get(path);
+        if (text === undefined) {
+          const r = await fetch(`/api/docs/${encodeURI(path.replace(/^docs\//, ''))}`);
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+          text = await r.text(); S.docCache.set(path, text);
+        }
+        el.innerHTML = renderMd(text);
+        await runMermaid(el);
+      } catch (e) { el.innerHTML = `<p class="error">Could not load ${esc(path)}: ${esc(e.message)}</p>`; }
+    }
+  }
+
+  function renderPane(errorMsg) {
+    const pane = $('pane');
+    if (errorMsg) { pane.innerHTML = `<div class="center"><div><h2>Round file is invalid</h2><p class="error">${esc(errorMsg)}</p><p class="hint">Ask the agent to fix it; this page refreshes on its own.</p></div></div>`; return; }
+    if (!S.round) {
+      pane.innerHTML = `<div class="center"><div><div class="spin"></div><h2>Waiting for the first round</h2><p>The agent is preparing the interview. This page updates on its own.</p></div></div>`;
+      return;
+    }
+    if (!S.decisions.length) { pane.innerHTML = `<div class="center"><div><h2>Nothing to decide in this round</h2></div></div>`; return; }
+    const d = S.decisions[S.idx]; const a = ans(d); const t = d.input?.type || 'single';
+    const pos = `${S.idx + 1} of ${S.decisions.length}`;
+    const groupPos = (() => { const list = d.group.decisions || []; return `Decision ${list.indexOf(list.find((x) => x.id === d.id)) + 1} of ${list.length}`; })();
+    const replies = (S.round.replies || []).filter((r) => r.decision_id === d.id);
+
+    let html = '';
+    if (S.readOnly) html += `<div class="banner">This round was submitted${S.answers?.submitted_at ? ` on ${new Date(S.answers.submitted_at).toLocaleString()}` : ''}. Answers are read-only here; the agent reads them from the answers file.</div>`;
+    if (S.idx === 0 && S.round.intro) html += `<div class="card"><div class="label">From the agent</div><div class="md" data-md>${renderMd(S.round.intro)}</div></div>`;
+    if (S.idx === 0 && S.round.kind === 'readback' && S.round.summary) html += `<div class="card"><div class="label">Read-back of what was decided</div><div class="md" data-md>${renderMd(S.round.summary)}</div></div>`;
+
+    html += `<div class="crumb">${esc(d.group.title || d.group.id)} · ${groupPos} · ${pos}</div><h2>${esc(d.title)}</h2>`;
+    if (d.why) html += `<p class="hint" style="margin:-6px 0 14px">Why this matters: ${esc(d.why)}</p>`;
+    if (d.context) html += `<div class="card context"><div class="label">What we know so far</div><div class="md" data-md>${renderMd(d.context)}</div></div>`;
+    if (d.explainer) html += `<div class="card"><div class="label">${esc(d.explainer?.title || 'Explainer')}</div>${explainerHtml(d.explainer, `exp-${esc(d.id)}`)}</div>`;
+    if (replies.length) html += `<div class="card"><div class="label">Agent replies to your questions</div>${replies.map((r) => `<div class="msg you" style="margin-bottom:8px"><div class="who">You asked</div>${esc(r.question)}</div><div class="msg agent" style="margin-bottom:12px"><div class="who">Agent</div><div class="md" data-md>${renderMd(r.answer)}</div></div>`).join('')}</div>`;
+
+    const dis = S.readOnly ? 'disabled' : '';
+    const waived = a.status === 'waived';
+    if (t === 'text') {
+      html += `<div class="field"><label for="txt">${esc(d.input?.label || 'Your answer')}</label><textarea id="txt" ${dis} ${waived ? 'disabled' : ''} placeholder="${esc(d.input?.placeholder || '')}">${esc(a.text)}</textarea></div>`;
+    } else {
+      const multi = t === 'multi';
+      html += `<div class="options" ${waived ? 'style="opacity:.5;pointer-events:none"' : ''}>`;
+      for (const o of d.input?.options || []) {
+        const sel = a.values.includes(o.value);
+        html += `<label class="opt ${sel ? 'selected' : ''} ${o.recommended ? 'recommended' : ''}" data-value="${esc(o.value)}">
+          <div class="title"><input type="${multi ? 'checkbox' : 'radio'}" name="opt" value="${esc(o.value)}" ${sel ? 'checked' : ''} ${dis}><span>${esc(o.label)}</span></div>
+          ${o.description ? `<div class="desc">${esc(o.description)}</div>` : ''}
+          ${o.consequences ? `<div class="cons"><strong>If you pick this:</strong> ${esc(o.consequences)}</div>` : ''}
+          ${o.tags?.length ? `<div class="row">${o.tags.map((tg) => `<span class="pill ${esc(tg.tone || '')}">${esc(tg.label || tg)}</span>`).join('')}</div>` : ''}
+          ${o.explainer ? `<button type="button" class="more" data-more="${esc(o.value)}">${S.open?.[o.value] ? 'Hide details' : 'Show details'}</button>${S.open?.[o.value] ? `<div class="detail">${explainerHtml(o.explainer, `exp-${esc(d.id)}-${esc(o.value)}`)}</div>` : ''}` : ''}
+        </label>`;
+      }
+      if (d.input?.allow_other !== false && (d.input?.allow_other || !(d.input?.options || []).length)) {
+        const selOther = !!(a.other || '').trim();
+        html += `<label class="opt ${selOther ? 'selected' : ''}" data-value="__other">
+          <div class="title"><input type="${multi ? 'checkbox' : 'radio'}" name="opt" value="__other" ${selOther ? 'checked' : ''} ${dis}><span>${esc(d.input?.other_label || 'Something else')}</span></div>
+          <input type="text" id="other" ${dis} placeholder="${esc(d.input?.other_placeholder || 'Describe it')}" value="${esc(a.other)}"></label>`;
+      }
+      html += `</div>`;
+    }
+    if (d.waivable !== false) {
+      html += `<label class="waive"><input type="checkbox" id="waive" ${waived ? 'checked' : ''} ${dis}> ${esc(d.waive_label || 'Not applicable to this feature — skip this decision')}</label>`;
+    }
+    html += `<div class="field" style="margin-top:14px"><label for="note">Note for the agent about this decision (optional)</label><textarea id="note" ${dis} placeholder="Nuance the options don't capture, a condition, a caveat…" style="min-height:56px">${esc(a.note)}</textarea></div>`;
+    pane.innerHTML = html;
+    pane.scrollTop = 0; window.scrollTo(0, 0);
+
+    // wiring
+    pane.querySelectorAll('.opt').forEach((el) => el.addEventListener('click', (e) => {
+      if (S.readOnly) return;
+      if (e.target.tagName === 'BUTTON' || e.target.id === 'other') return;
+      // The card is a <label>: without this the browser fires a second,
+      // synthetic click on the inner input and a multi-select toggles twice.
+      e.preventDefault();
+      const v = el.dataset.value; const multi = t === 'multi';
+      if (v === '__other') { if (!multi) a.values = []; a.status = 'answered'; setTimeout(() => $('other')?.focus(), 0); update(); return; }
+      if (multi) a.values = a.values.includes(v) ? a.values.filter((x) => x !== v) : [...a.values, v];
+      else { a.values = [v]; a.other = ''; }
+      a.status = 'answered'; update();
+    }));
+    $('other')?.addEventListener('input', (e) => { a.other = e.target.value; a.status = 'answered'; if (t !== 'multi' && a.other.trim()) a.values = []; saveDraft(); renderHeader(); renderRail(); });
+    $('other')?.addEventListener('click', (e) => e.stopPropagation());
+    $('txt')?.addEventListener('input', (e) => { a.text = e.target.value; a.status = 'answered'; saveDraft(); renderHeader(); renderRail(); });
+    $('note')?.addEventListener('input', (e) => { a.note = e.target.value; saveDraft(); });
+    $('waive')?.addEventListener('change', (e) => { a.status = e.target.checked ? 'waived' : (hasValue(d, a) ? 'answered' : 'skipped'); update(); });
+    pane.querySelectorAll('[data-more]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); S.open = S.open || {}; S.open[b.dataset.more] = !S.open[b.dataset.more]; renderPane(); }));
+
+    runMermaid(pane); hydrateDocs(pane);
+  }
+  function update() { saveDraft(); renderHeader(); renderRail(); renderPane(); renderBar(); }
+
+  // ── render: side (questions) ────────────────────────────────
+  function renderSide() {
+    const side = $('side');
+    if (!S.round) { side.innerHTML = ''; return; }
+    const d = S.decisions[S.idx];
+    const mine = S.draft.questions.filter((q) => d && q.decision_id === d.id);
+    const general = S.draft.questions.filter((q) => !q.decision_id);
+    // Replies to decisions that are not re-asked this round have no screen of their own; show them here.
+    const ids = new Set(S.decisions.map((x) => x.id));
+    const generalReplies = (S.round.replies || []).filter((r) => !r.decision_id || !ids.has(r.decision_id));
+    const dis = S.readOnly ? 'disabled' : '';
+    side.innerHTML = `
+      <h3>Questions for the agent</h3>
+      <p class="hint">Decisions go in the form. Use this to ask what you need to decide well; the agent answers in the next round.</p>
+      ${d ? `<div><div class="hint" style="margin-bottom:6px">About “${esc(d.short || d.title)}”</div>
+        ${mine.map((q) => `<div class="msg you" style="margin-bottom:6px"><div class="who">You${S.readOnly ? '' : ` <button class="del" data-del="${esc(q.id)}" title="Remove">remove</button>`}</div>${esc(q.body)}</div>`).join('') || ''}
+        ${S.readOnly ? '' : `<textarea id="q-this" placeholder="Ask about this decision…" style="min-height:60px"></textarea><div class="row" style="margin-top:6px"><button id="q-this-add">Add question</button></div>`}
+      </div>` : ''}
+      <div><div class="hint" style="margin-bottom:6px">General</div>
+        ${generalReplies.map((r) => `<div class="msg you" style="margin-bottom:6px"><div class="who">You asked${r.decision_id ? ` about ${esc(r.decision_id)}` : ''}</div>${esc(r.question)}</div><div class="msg agent" style="margin-bottom:8px"><div class="who">Agent</div><div class="md">${renderMd(r.answer)}</div></div>`).join('')}
+        ${general.map((q) => `<div class="msg you" style="margin-bottom:6px"><div class="who">You${S.readOnly ? '' : ` <button class="del" data-del="${esc(q.id)}" title="Remove">remove</button>`}</div>${esc(q.body)}</div>`).join('')}
+        ${S.readOnly ? '' : `<textarea id="q-gen" placeholder="Anything else the agent should know or answer…" style="min-height:60px"></textarea><div class="row" style="margin-top:6px"><button id="q-gen-add">Add question</button></div>`}
+      </div>
+      <div><div class="hint" style="margin-bottom:6px">Note for the whole round (optional)</div><textarea id="gen-note" ${dis} style="min-height:56px" placeholder="Context the agent should carry into the spec">${esc(S.draft.general_note || '')}</textarea></div>`;
+    const add = (ta, decisionId) => {
+      const body = (ta.value || '').trim(); if (!body) { ta.focus(); return; }
+      S.draft.questions.push({ id: `q-${Date.now().toString(36)}`, decision_id: decisionId || null, body });
+      saveDraft(); renderSide();
+    };
+    $('q-this-add')?.addEventListener('click', () => add($('q-this'), d.id));
+    $('q-gen-add')?.addEventListener('click', () => add($('q-gen'), null));
+    $('gen-note')?.addEventListener('input', (e) => { S.draft.general_note = e.target.value; saveDraft(); });
+    side.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => { S.draft.questions = S.draft.questions.filter((q) => q.id !== b.dataset.del); saveDraft(); renderSide(); }));
+    runMermaid(side);
+  }
+
+  // ── render: footer ──────────────────────────────────────────
+  function renderBar() {
+    const bar = $('bar');
+    if (!S.round || !S.decisions.length) { bar.innerHTML = ''; return; }
+    const last = S.idx === S.decisions.length - 1;
+    const miss = missing();
+    let status = '';
+    if (S.readOnly) status = S.state?.current && S.state.current !== S.roundNo ? `Round ${S.state.current} is open.` : 'Waiting for the agent to prepare the next round…';
+    else if (S.submitting) status = 'Submitting…';
+    else if (miss.length) status = `${miss.length} decision${miss.length > 1 ? 's' : ''} still open`;
+    else status = 'All decisions answered. Submit when ready.';
+    bar.innerHTML = `
+      <button id="prev" class="quiet" ${S.idx === 0 ? 'disabled' : ''}>← Back</button>
+      <button id="next" ${last ? 'disabled' : ''}>Next decision →</button>
+      <span class="spacer"></span>
+      <span class="status">${esc(status)}</span>
+      ${S.readOnly ? (S.state?.current && S.state.current !== S.roundNo ? `<button id="go-current" class="primary">Open round ${S.state.current}</button>` : '') : `<button id="submit" class="primary" ${S.submitting ? 'disabled' : ''}>Submit round ${S.roundNo}</button>`}`;
+    $('prev')?.addEventListener('click', () => { S.idx = Math.max(0, S.idx - 1); renderAll(); });
+    $('next')?.addEventListener('click', () => { S.idx = Math.min(S.decisions.length - 1, S.idx + 1); renderAll(); });
+    $('go-current')?.addEventListener('click', () => loadRound(S.state.current));
+    $('submit')?.addEventListener('click', submit);
+  }
+
+  async function submit() {
+    const miss = missing();
+    if (miss.length) {
+      S.showMissing = true;
+      S.idx = S.decisions.indexOf(miss[0]);
+      renderAll();
+      $('bar').querySelector('.status').innerHTML = `<span class="error">Answer or skip the highlighted decisions first.</span>`;
+      return;
+    }
+    S.submitting = true; renderBar();
+    try {
+      await api(`/api/answers/${S.roundNo}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(toAnswers()) });
+      try { localStorage.removeItem(draftKey()); } catch { /* ignore */ }
+      S.submitting = false;
+      await refreshState();
+      await loadRound(S.roundNo);
+    } catch (e) {
+      S.submitting = false; renderBar();
+      $('bar').querySelector('.status').innerHTML = `<span class="error">Submit failed: ${esc(e.message)}</span>`;
+    }
+  }
+
+  function renderAll(errorMsg) { renderHeader(); renderRail(); renderPane(errorMsg); renderSide(); renderBar(); renderRoundSelect(); }
+
+  // ── live updates ────────────────────────────────────────────
+  function connect() {
+    try {
+      S.sse = new EventSource('/api/events');
+      S.sse.addEventListener('state', async (e) => {
+        const next = JSON.parse(e.data); const prev = S.state; S.state = next;
+        renderRoundSelect();
+        const newRound = next.current !== null && next.current !== prev?.current && (S.roundNo === null || S.readOnly);
+        if (newRound) { await loadRound(next.current); return; }
+        if (S.roundNo !== null && !S.round) { await loadRound(S.roundNo); return; }
+        renderBar();
+      });
+      S.sse.onerror = () => { S.sse.close(); setTimeout(connect, 3000); };
+    } catch { setInterval(refreshState, 4000); }
+  }
+  setInterval(() => { if (!S.round || S.readOnly) refreshState().catch(() => {}); }, 5000);
+
+  $('round-select').addEventListener('change', (e) => loadRound(Number(e.target.value)));
+  document.addEventListener('keydown', (e) => {
+    if (!e.altKey || !S.decisions.length) return;
+    if (e.key === 'ArrowRight') { S.idx = Math.min(S.decisions.length - 1, S.idx + 1); renderAll(); }
+    if (e.key === 'ArrowLeft') { S.idx = Math.max(0, S.idx - 1); renderAll(); }
+  });
+
+  refreshState().then(connect).catch((e) => { $('pane').innerHTML = `<div class="center"><div><h2>Cannot reach the interview server</h2><p class="error">${esc(e.message)}</p></div></div>`; });
+})();
+</script>
+</body>
+</html>
