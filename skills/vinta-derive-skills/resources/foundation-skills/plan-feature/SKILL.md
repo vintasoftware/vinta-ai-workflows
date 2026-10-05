@@ -1,6 +1,6 @@
 ---
 name: plan-feature
-description: Author a phased implementation plan for a new feature following the repo's `ai-plans/` conventions — including the dependency graph that lets independent phases be implemented in parallel. Use when the user asks to "plan", "design", "scope", or "break down" a feature, write an implementation plan / IMPLEMENTATION_PLAN.md, or turn a spec/idea into a phased roadmap. Always interrogates the requester before drafting.
+description: Author a phased implementation plan for a new feature following the repo's `ai-plans/` conventions — including the dependency graph that lets independent phases be implemented in parallel. Use when the user asks to "plan", "design", "scope", or "break down" a feature, write an implementation plan / IMPLEMENTATION_PLAN.md, or turn a spec/idea into a phased roadmap. Always interrogates the requester before drafting. Validates the emitted workflow with `vinta-ai-maestro validate` when maestro is installed, then hands the plan to the human for review — on maestro's review page (graph, per-phase prompts and gates, comments, and a chat the agent answers through `vinta-ai-maestro review wait|reply`) or in chat.
 ---
 
 # Plan Feature
@@ -8,6 +8,8 @@ description: Author a phased implementation plan for a new feature following the
 Plans live in `ai-plans/` as `YYYY-MM-DD-FEATURE_NAME_IMPLEMENTATION_PLAN.md` (uppercase + underscores). `..._SPEC.md` sibling exists → **read first**. Plan translates spec into phased delivery, doesn't re-derive requirements. No spec? Point at [create-spec](../create-spec/SKILL.md) first; plan without spec = plausible-sounding but unverified. Spec/plan pair share `YYYY-MM-DD-FEATURE_NAME` prefix.
 
 Every plan ships **two** files: the markdown above, and its executable sibling `ai-plans/{TODAY}-<feature-kebab>.workflow.json` — same date prefix, the same phase graph in the form an orchestrator runs. See "Emit the executable workflow". Written every time; never gated on a question.
+
+Once both are written, the workflow is validated ("Validate the workflow with vinta-ai-maestro", when it is installed) and the plan goes to the human for review ("Review the plan with the human"). A review on maestro's page adds a third file, `ai-plans/{TODAY}-<feature-kebab>.review.json`, which holds the comments and the conversation.
 
 ## Step 0 — Interrogate before drafting (NON-NEGOTIABLE)
 
@@ -1023,6 +1025,109 @@ No node names a reviewer. Every phase is read by `reviewer`, the only member on 
 
 The lane pool is **three**: one desk per implementer, kept for the whole run so each one's session has a directory to come back to. Only two are ever busy at once — the graph is never wider than that — and the third idle desk is the price of `tier1`'s session. `reviewer` has no desk at all; it reads whichever lane it is reviewing, changes still uncommitted, which is what lets a finding be fixed before the commit rather than after it. The `project` block is what lets those worktrees exist at once. `bookmarks_test` is forked per lane from a template that `uv run python manage.py migrate` builds once, so `p2` and `p3` run `uv run pytest` against separate rows instead of the same ones; `test-suite` stays at capacity 1 because three suites at once melt the machine, not because they would corrupt each other. `dev` and `test` name two different databases, which is what keeps their forks from being the same database under two roles.
 
+## Validate the workflow with vinta-ai-maestro
+
+The `$schema` line catches a typo in an editor. It cannot catch a `prompt_ref` anchor that names a heading the plan does not have, a dependency cycle, or a gate that requires a pool nobody declared. `vinta-ai-maestro validate` catches all three, plus everything a run checks when it loads the file. It spawns nothing and writes nothing. **When maestro is installed, run it on every workflow you write, and again after every edit to the plan or the workflow.**
+
+**Find it, never install it.** Try these in order and use the first that works:
+
+```bash
+command -v vinta-ai-maestro                      # on PATH
+test -x node_modules/.bin/vinta-ai-maestro       # a project devDependency → run it by that path
+npx --no-install vinta-ai-maestro --help         # installed or cached, without downloading
+```
+
+None works: maestro is not installed. Skip validation, and say so once in your final message ("the workflow was checked against its `$schema` only — `vinta-ai-maestro` is not installed"). Do not install it, and do not run `npx vinta-ai-maestro@…` without `--no-install`: that downloads a package the team did not choose. If the human asks how to get it, give them the install command and let them run it.
+
+**Run it from the repository root:**
+
+```bash
+vinta-ai-maestro validate ai-plans/{TODAY}-<feature-kebab>.workflow.json --json
+```
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| `0` | Valid. The JSON says how many phases and waves. | Check the wave count against the **Execution graph** table, then move on. |
+| `1` | Not valid. `issues` lists each problem as `{source, path, message}`. | Fix every issue (see below) and run it again. Do not hand the plan over while it exits `1`. |
+| `2` | Bad command line. An older maestro without `validate` also answers `2` with `unknown command`. | For the older maestro, treat it as not installed and say which version would add the check. |
+
+Fix each issue by its `source`:
+
+- **`reference`**: a `plan_ref`, `prompt_ref` or `plan_context_refs` anchor names no heading in the plan. The plan is the source of truth. Usually a phase heading was renamed or renumbered and the workflow was not updated. Fix whichever side is wrong, then check that the two still agree.
+- **`workflow`**: the document's shape or graph, such as an unknown node, a cycle, an undeclared pool, a crew member that cannot take its phase, or an id that does not match the filename. Re-derive the field from the plan. If the plan itself is wrong (a cycle in its `**Depends on**:` lines), fix the plan first.
+- **`config`**: `.vinta-ai-workflows.yaml` does not parse. That file is the project's, not the plan's. Do not edit it to make the plan pass. Tell the human what is wrong and where.
+
+## Review the plan with the human
+
+A plan is cheapest to change before anything runs. Once both files are written and the workflow validates, hand the plan over for review. Ask with `AskUserQuestion`: header `Review`, question "The plan and its workflow are written — `<plan path>` and `<workflow path>`. How do you want to review it?"
+
+| Option | Offer it when | Description |
+|---|---|---|
+| `Review page (Recommended)` | maestro is installed | "Open a page with the phase graph, each phase's real prompts and gates, the plan, and its projected schedule. Comment on anything, and chat with me while I revise it." |
+| `Review here in chat` | always (`(Recommended)` when maestro is not installed) | "I read the plan back here, and you tell me what to change." |
+| `Done for now` | always | "Stop here. The plan can be reviewed later." |
+
+When maestro is not installed, add one line before the question: a visual review page with comments and a chat comes with `vinta-ai-maestro`. Do not install it.
+
+### The review page
+
+The page is maestro's UI, opened on this plan. The person reads the graph, each phase's brief, prompts and gates, and the plan itself. They comment on any of it and send the comments to you as a batch, and they can message you directly. You answer from here, with two commands, and they see your edits to the plan as you make them.
+
+1. **Serve the page** in the background. It is a long-running server, so use your harness's background mode, or `nohup … &`:
+
+   ```bash
+   vinta-ai-maestro review open ai-plans/{TODAY}-<feature-kebab>.workflow.json
+   ```
+
+   Read its output for the line starting `http://`. That URL opens on this plan's page. **It carries the page's access token**, so give it to the human in your reply and nowhere else: not in the plan, a commit, a PR or a log.
+
+2. **Open the conversation.** Post one short message as the opening of the review. Say what the plan does, how many phases and waves it has, and the two or three decisions you are least sure of. Those are where the review should look first.
+
+   ```bash
+   vinta-ai-maestro review reply ai-plans/{TODAY}-<feature-kebab>.workflow.json --as <your harness> -m "…"
+   ```
+
+3. **Wait for the person.** This blocks until they send something, then prints it as one JSON object:
+
+   ```bash
+   vinta-ai-maestro review wait ai-plans/{TODAY}-<feature-kebab>.workflow.json --timeout 110
+   ```
+
+   Keep `--timeout` under your harness's limit for one command (110 seconds fits a two-minute limit). Act on `kind`:
+
+   - **`timeout`**: nothing arrived. Run `wait` again, and post nothing. After about 30 minutes of timeouts in a row, stop waiting. Leave the page running, and tell the human in the terminal how to bring you back: "say *check the review* and I'll pick up what you sent". Their comments are kept until then.
+   - **`messages`**: one entry per message they sent. Each entry has a `body` and the `comments` it sent. A comment carries `where` (what it is about, in words), its `anchor`, the `quote` the person selected, its `body`, and the replies so far. Handle each one (see below), then run `wait` again.
+   - **`approved`**: the person approved the plan. The loop is over. Stop the page's server, then tell the human in the terminal what was approved and what comes next (`implement-plan`, or a maestro run).
+
+4. **Handle each comment.** Read it against the thing it is about. Then:
+
+   - **It asks for a change you agree with:** edit the **markdown plan first**, re-derive the workflow from it, and run `validate` again. The two files are one graph, so never edit just one. Then answer on the thread with what changed and where. Add `--resolve` only when your edit fully does what the comment asked:
+
+     ```bash
+     vinta-ai-maestro review reply <workflow.json> --comment c3 --resolve --as <your harness> -m "Split into Phase 2a (endpoint) and 2b (tests) …"
+     ```
+
+   - **It asks a question, or you disagree:** answer on the thread without `--resolve`. Give your reasoning and what it would cost to do it their way. The person resolves it.
+   - **It needs a decision only the person can make:** ask it in the conversation, with the options and your recommendation. While the review page is open, the page is where the person is, and its chat is the structured channel for the loop. A question asked through `AskUserQuestion` in the terminal would wait unseen.
+
+   Finish each round with one message in the conversation that sums up what changed. Every edit you make shows on the page within seconds. The page tells the person the plan changed, so they can re-read it before replying.
+
+5. **The review is a file**: `ai-plans/{TODAY}-<feature-kebab>.review.json`, beside the plan, validated by `plan-review.v1.schema.json`. Never edit it by hand. Comments, replies, delivery and approval all go through `review wait` / `review reply` and the page, which share a lock. It is committed with the plan, so the next reader can see what was questioned and what changed.
+
+If the human answers in the terminal instead of on the page, that is fine. Handle it the same way, and post a line in the conversation so the page's history stays whole.
+
+### Review in chat
+
+Read the plan back in one message:
+
+- the phases, by wave, each with its agent tier and model;
+- the gates each phase must pass;
+- the feature flag and how it is removed;
+- the open questions;
+- the decisions you are least sure of.
+
+Then ask with `AskUserQuestion`: header `Plan`, question "Anything to change before the plan is final?", options `Looks good (Recommended)`, `Some corrections`, `Stop, rethink`. On `Some corrections`, edit the plan, re-derive the workflow, validate, and ask again. On `Looks good`, finish.
+
 ## What to avoid
 
 - **No `§N` shorthand for section references — anywhere in the plan body.** Use section names: `Goals + Non-goals`, `Guiding Decisions`, `Data Model Changes`, `API Design`, `Phased Rollout`, `Risk & Rollout Notes`, `Open Questions`, `Touch List`. Readers shouldn't have to count headings to follow a cross-reference, and section numbering shifts when the spec/plan evolves. Same rule applies to citing SPEC sections (`Use-cases`, `Acceptance scenarios`, etc.) — name them.
@@ -1037,6 +1142,8 @@ The lane pool is **three**: one desk per implementer, kept for the whole run so 
 - **No phase assigned to a reviewer, and no reviewer that also implements.** The roles are disjoint so that an agent reading its own diff is not something the document can say.
 - **No `model` on a node of a staffed workflow.** The member carries it; a node with both is refused rather than one quietly outranking the other.
 - **No repeating a defect a post-mortem already recorded.** A `wave_conflicts` entry on those paths, or a `missing_dependencies` entry between those layers, means the last run already paid for the lesson; drawing the same graph again wastes it.
+- **No handing over a workflow `vinta-ai-maestro validate` rejects**, when maestro is installed. And never install it yourself to run the check.
+- **No editing the plan or the workflow alone during a review.** A comment that changes one changes both, then `validate` runs again.
 - **No plan without its `.workflow.json` sibling, and no sibling that disagrees with the plan.** Different nodes, different edges, different waves, a `prompt_ref` pointing at a phase that was renumbered — all of them mean the two files were edited separately instead of derived from the same `**Depends on**:` lines.
 - **No phase requiring manual `kubectl` / SSH / "remember to run X"** without Risk & Rollout Notes checklist.
 - **No assuming user wants what they asked for.** Watch for "wait, also…" + update plan.
@@ -1097,3 +1204,5 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 - [ ] `deslop` is declared and named in `defaults.chores` — here, or by the project's `maestro:` section — so every phase's diff gets the comment pass before it is gated. No node carries its own `chores` unless that phase genuinely needs a different set.
 - [ ] `chores.review-canvas` (with `"when": "after_pr"`) is declared and in `defaults.chores` **if and only if** `.vinta-ai-workflows.yaml` has `integrations.pr-review-canvas: enabled`.
 - [ ] `pipelines` is omitted — `defaults.pipeline: standard-phase` is enough, and the executor supplies it.
+- [ ] **Validated with `vinta-ai-maestro validate --json`, exit `0`**, when maestro is installed, and again after every edit made during review. When it is not installed, the final message says the workflow was checked against its `$schema` only, and nothing was installed.
+- [ ] **Review offered** with `AskUserQuestion` (review page / in chat / done for now). On the review page: the URL went to the human and nowhere else, every sent comment got an answer on its own thread, and the loop ended on `approved` or on the human stopping it, with the page's server stopped. The `.review.json` beside the plan was written only by `review reply` and the page.
