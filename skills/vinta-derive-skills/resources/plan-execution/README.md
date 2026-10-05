@@ -5,7 +5,7 @@ Source-of-truth fragments for the **plan-execution skill family** that
 
 - `implement-plan` (conductor) — parse → classify → build the dependency graph → resolve a `WORKROOT` per lane → scheduler loop (several phases at a time) → wave integration → track → report.
 - `implement-phase` — compose prompt + pick model + spawn implementer (one phase).
-- `review-phase` — three-layer review + fix loop (shared by all three conductors).
+- `review-phase` — the thermo-nuclear review loop over one phase's diff, hosted by the conductor (shared by all three conductors).
 - `integrate-phase` — push + open PR via context file (commit-strategy-resolved).
 - `amend-plan` (conductor) — history-rewriting topology; reuses `review-phase` + the implementer-prompt partial.
 
@@ -76,7 +76,7 @@ The plan gives every phase a `**Depends on**:` line. The conductor turns those i
 | `LANE_TOPOLOGY` | `implement-plan` (linked, not included, from `integrate-phase`) | per-phase base branch from `depends_on`, `integ-{id}` merge bases, `wave-{N}` integration branches, merge-conflict handling |
 | `LANE_SCHEDULER` | `implement-plan` Step 1 | the dispatch loop, tie-breaking, failure containment, the pause gate under concurrency |
 | `TRACKING_DIR` | `implement-plan` | the `TRACKING_{plan-id}/` directory + its ownership rules |
-| `SIBLING_LANE_ISOLATION` | `worktree-seam.md#STRAY_WRITE_CHECK` → `review-phase` | the stray-write guard extended across sibling lanes |
+| `SIBLING_LANE_ISOLATION` | `worktree-seam.md#STRAY_WRITE_CHECK` → `implement-phase` (re-run by `review-phase` after each fix round) | the stray-write guard extended across sibling lanes |
 
 **Sequential execution is `max_parallel_lanes = 1`**, running the same blocks — there is no separate sequential code path to keep in sync.
 

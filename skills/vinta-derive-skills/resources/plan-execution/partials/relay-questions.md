@@ -1,4 +1,4 @@
-<!-- Partial: relay-questions — what the orchestrator does when a spawned sub-agent (implementer / fixer / amend implementer / integrate delegate) returns `status: NEEDS_INPUT`. Included by implement-phase, review-phase, and amend-plan. Sub-agents cannot call the harness's structured question tool (Claude Code and Codex block it outside the root session), so the orchestrator is the only place a question can become a clickable prompt. -->
+<!-- Partial: relay-questions — what the orchestrator does when a spawned sub-agent (implementer / fixer / amend implementer / integrate delegate) returns `status: NEEDS_INPUT` — including the implementer answering the review loop's findings. Included by implement-phase, review-phase, and amend-plan. Sub-agents cannot call the harness's structured question tool (Claude Code and Codex block it outside the root session), so the orchestrator is the only place a question can become a clickable prompt. -->
 
 <!-- block-begin: RELAY -->
 ## Relay a sub-agent's questions (`NEEDS_INPUT`)

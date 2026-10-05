@@ -18,9 +18,7 @@ The plan's **Phased Rollout** section opens with an **Execution graph** table an
    - **An `**Assigned to**:` naming an agent the table does not list** → stop and ask. Don't invent a member: the roster is the plan's answer to "how many agents does this feature need", and adding one changes it.
    - **A phase with no `**Assigned to**:` line in a plan that has a Crew table** → stop and ask, for the same reason. Half a roster means two staffing rules running at once.
    - **A declared member assigned no phase** → stop and ask. That is an agent the plan budgeted for and never uses.
-   - **A phase assigned to a reviewer, or a reviewer that also takes phases** → stop and ask. The two roles are disjoint precisely so that an agent reviewing its own work is unrepresentable.
-   - **A reviewer below every phase on the plan** → stop and ask. A reviewer's tier is a floor too, so one below the cheapest phase would never be picked.
-   - **No reviewer at all** → not an error. Reviews fall back to `agent_models.reviewer`, cold, one session per phase. Say so once in the pool report so nobody reads the roster and assumes otherwise.
+   - **Reviewer rows on the table** (a plan written for the older review) → not an error. Reviews now run one tier above each phase's implementer, so those rows staff nothing: leave them out of the roster, and say so once in the pool report.
    - **A wave the roster cannot staff** → warn. Sort the wave's assigned tiers and the roster's tiers, compare one for one: a wave of two Tier 3 phases needs two members at Tier 3 or above, and a Tier 1 member on the roster does not help because the floor forbids handing them one. Such a wave still runs — it serializes — so say so now rather than letting it look like a slow machine later.
    - **A plan with no Crew table at all** is a legacy plan. Read each phase's `**Suggested AI model**:` tier instead and skip every check above.
 6. **Record the resolved graph and the roster** in `run.md` (see [Update tracking](#1d-update-tracking)) so a resume rebuilds the identical schedule and the identical staffing without re-asking anything.
@@ -37,15 +35,13 @@ Parallel execution **requires** a worktree provisioner: the project's `commands.
 
 **Pool, don't provision per phase.** Provisioning a runnable worktree costs a dep install plus a DB fork. A plan with 14 phases must not pay that 14 times. Provision **`max_parallel_lanes` worktrees once** and reuse each one across the phases assigned to it:
 
-1. **Size the pool by the roster: one worktree per *implementer***, named for the member rather than numbered. Reviewers get none — see below. A plan with no **Crew** table falls back to `lanes = min(run_options.max_parallel_lanes, widest_wave)`.
+1. **Size the pool by the roster: one worktree per *implementer***, named for the member rather than numbered. A plan with no **Crew** table falls back to `lanes = min(run_options.max_parallel_lanes, widest_wave)`.
 
    **An implementer keeps their worktree for the whole run**, and that is the point rather than a detail. A sub-agent can only be continued into a directory it is already standing in, so a member that moved between phases would have to start cold every time — which is most of a phase's first turn spent rediscovering a codebase the same agent read an hour ago. Pinning the directory is what makes "reuse the agent" possible at all.
 
    It costs a checkout and a set of forked databases per implementer, including for members idle in most waves. That is the trade, and it is worth stating to the user in the pool report rather than discovering on a full disk.
 
-   **Reviewers work in the lane they are reviewing.** A reviewer reads the phase's `WORKROOT` directly — the implementer's own worktree, with that phase's changes still uncommitted in it. That is deliberate and is the whole reason review sits where it does in the phase: findings are fixed **before the commit**, in the working tree, rather than recorded as a mistake and then a correction on top of it. A reviewer with a checkout of its own would be reading a committed snapshot, which is strictly less than what is there and too late to act on.
-
-   The cost is that a reviewer's directory moves from phase to phase, so its session carries only when two consecutive reviews happen to land in the same lane. Nothing to configure: the runtime decides per turn, the same way it decides for anyone whose lane changed.
+   **The reviewer works in the lane it is reviewing.** [review-phase](../review-phase/SKILL.md) spawns it per phase, in that phase's `WORKROOT`, and it gets no worktree of its own.
 2. **Provision each lane.** Run the provisioner once per lane, plan-driven, with worktree name `plan-{plan-id-kebab}-crew-{implementer-id}` (or `plan-{plan-id-kebab}-lane-{i}` on a plan with no roster).
    - **Skill:** this is the mechanical `worktree_prep` step. Delegate all of them per the [Delegate a mechanical step to a configured model](#delegate-a-mechanical-step-to-a-configured-model) pattern when `agent_models.worktree_prep` is set, and **dispatch the provisioning calls concurrently**, because they are independent.
    - **Command:** run `commands.worktree_prepare` inline with `VINTA_WORKTREE_KIND=lane`, **one lane at a time**, and post-check each one per [Provisioning with the project's command](#provisioning-with-the-projects-command).
@@ -182,11 +178,7 @@ while PENDING or RUNNING:
 2. **Otherwise the cheapest free member at or above that member's tier.** A wave should not serialize behind one agent when a qualified peer is idle. Reach for the *cheapest* qualified one, not the best available — covering for a peer must not quietly promote the phase to the top tier, or a busy wave silently runs every Tier 2 phase on the Tier 4 member's model.
 3. **Otherwise nobody, and the phase waits** — even with a lane free. This is the one place staffing costs throughput, and it is deliberate: a phase run below its tier does not fail cleanly. It produces plausible code that fails review two rounds later, by which point nothing points back at the staffing decision.
 
-An implementer is held for the **whole phase**, not one turn of it: the fixer answering a review finding is the implementer continuing its own session, so handing the phase to someone else mid-flight would hand it to an agent with no session to continue. Release it when the phase settles.
-
-**A reviewer is claimed per review turn, not per phase.** It has one session ledger, so two reviews running as the same reviewer would either resume one session twice or overwrite each other's record of it. Claim it when the review starts, release it when the verdict is in — holding it for a whole phase would make a plan with one reviewer and three implementers run three phases strictly in series. A phase whose reviewer is busy waits, and that wait cannot deadlock: reviewers never take phases, so it is always waiting on a review already in flight. A plan that finds one reviewer too serialising staffs a second.
-
-Pick the reviewer the same way: the **cheapest reviewer on the roster at or above the phase's tier**. Never the phase's own implementer — the roles are disjoint, so that is not a rule to remember but a state the plan cannot describe.
+An implementer is held for the **whole phase**, not one turn of it: answering the review's findings is the implementer continuing its own session, so handing the phase to someone else mid-flight would hand it to an agent with no session to continue. Release it when the phase settles.
 
 **The wait cannot deadlock.** The floor is the assigned member's own tier, so a waiting phase is always waiting on somebody who is *holding another phase* — never on a qualification nobody on the roster has. If you find yourself with every agent idle and a phase that cannot be staffed, the plan assigned it to a member the **Crew** table does not list; stop and ask.
 
@@ -225,7 +217,7 @@ Tracking lives in a **directory**, not a single file: `{{PLAN_DIR}}/TRACKING_{pl
 
 **`run.md`** carries: feature name, plan path, started / last-updated dates, optional feature-flag info, **run options** (`pause_between_phases`, `generate_inline_comments`, `full_test_suite`{{E2E_RUN_OPTION_TRACKING}}, `use_worktree`, `parallel_phases`, `max_parallel_lanes`), the **resolved dependency graph** (phase id → `depends_on` + computed wave), the **lane pool** (per lane: `workroot`, `branch`, `worktree_summary`, `sandbox_tier`, `current_phase`), the **crew roster** (per member: id, role, tier, resolved model, its worktree for an implementer, the phases the plan assigned them, and the phases they actually took), the integration worktree, {{TRACKING_BRANCH_FIELD}}, and per-phase status (`done` / `running` / `blocked` / `failed` / `deferred`) with the lane each ran on.
 
-**`phase-{id}.md`** carries: status, the crew member that took it + the model actually used + whether that member is the one the plan assigned + whether its session was continued from an earlier phase or started cold (and why, when cold) + the reviewer that read it{{TRACKING_PHASE_BRANCH_FIELD}}, base branch, wave, `depends_on`, e2e + screenshots if any, and the 5–15 line summary the conductor writes **from the git diff plus the agent's report** — not from the agent's narration.
+**`phase-{id}.md`** carries: status, the crew member that took it + the model actually used + whether that member is the one the plan assigned + whether its session was continued from an earlier phase or started cold (and why, when cold) + the reviewer's model, the review iterations, the rejected findings and the settled decisions{{TRACKING_PHASE_BRANCH_FIELD}}, base branch, wave, `depends_on`, e2e + screenshots if any, and the 5–15 line summary the conductor writes **from the git diff plus the agent's report** — not from the agent's narration.
 
 **`waves/wave-{N}.md`** carries: which lane branches were merged, in what order, any conflicts and how they were resolved, and the outer-gate result on the merged tree.
 
@@ -235,10 +227,10 @@ Tracking lives in a **directory**, not a single file: `{{PLAN_DIR}}/TRACKING_{pl
 <!-- block-end: TRACKING_DIR -->
 
 <!-- block-begin: SIBLING_LANE_ISOLATION -->
-**Sibling-lane writes — only when the pool has more than one lane.** A reviewer is bound by this too, and is the likeliest agent to trip it: it works in somebody else's `WORKROOT` by design, so "your own lane" for a review turn means *the lane under review*, not one it read last phase. The main checkout is not the only tree an agent can wander into: with a pool provisioned, `<lane-2>/app/models.py` is as reachable from lane 1 as the main checkout is, and a write there is worse than a stray main-checkout write — it lands in a tree another agent is actively editing and testing. The same guard covers both: everything outside the lane's own `WORKROOT` is off-limits.
+**Sibling-lane writes — only when the pool has more than one lane.** The reviewer is bound by this too: it works in the `WORKROOT` of the phase under review, and that lane is the only one it may touch, and only to read. The main checkout is not the only tree an agent can wander into: with a pool provisioned, `<lane-2>/app/models.py` is as reachable from lane 1 as the main checkout is, and a write there is worse than a stray main-checkout write — it lands in a tree another agent is actively editing and testing. The same guard covers both: everything outside the lane's own `WORKROOT` is off-limits.
 
 - **Sandbox** (`SANDBOX_TIER = enforced`): the `--deny` / `--allow` set for a lane denies the **worktree root that holds the pool**, not just the main checkout, and allows only that lane's `WORKROOT` (plus `<main_checkout>/.git` and `<main_checkout>/.vinta-ai-workflows`). One `--deny <pool-root>` covers every sibling.
-- **Backstop check** (`SANDBOX_TIER = none`, or as the cheap confirmation when enforced): after every implementer and fixer returns, run the stray-write check against the main checkout **and every sibling lane's workroot**:
+- **Backstop check** (`SANDBOX_TIER = none`, or as the cheap confirmation when enforced): after every implementer, every review fix round and every conflict fixer returns, run the stray-write check against the main checkout **and every sibling lane's workroot**:
 
   ```bash
   for tree in <main_checkout> <every lane workroot except this lane's>; do

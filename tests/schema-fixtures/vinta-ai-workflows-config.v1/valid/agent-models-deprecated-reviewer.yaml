@@ -1,0 +1,32 @@
+# A config written before 0.7.0 still validates: `agent_models.reviewer` is
+# deprecated and ignored (the review runs one tier above the implementer), but
+# the key stays in the schema so existing configs keep loading.
+schema_version: 1
+vinta_ai_workflows_version: 0.6.0
+project:
+  name: acme
+  default_branch: main
+  code_host: github
+  stack_summary: Django
+  ai_plans_dir: ai-plans
+commands:
+  lint: ruff check
+  build: mypy .
+  test_unit: pytest
+policies:
+  pr_creation: agents-create
+  ai_coauthor: allowed
+  commit_style: conventional
+  stage_pattern: git add <paths>
+vendors: [claude]
+foundation_skills:
+  plan-feature: enabled
+foundation_agents:
+  implementer: enabled
+  reviewer: enabled
+  fixer: enabled
+agent_models:
+  reviewer: 3
+  fixer: 2
+  worktree_prep: 1
+  integrate: 1

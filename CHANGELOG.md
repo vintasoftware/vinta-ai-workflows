@@ -106,8 +106,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   standard. Questions only the human can settle (unreachable scenarios,
   requirement ambiguity, destructive operations) go to them instead of being
   assumed. Always shipped and copied verbatim (new
-  `foundation_skills.thermo-nuclear-review-loop`), because every maestro
-  workflow `plan-feature` writes names it in its `review` chore. Also
+  `foundation_skills.thermo-nuclear-review-loop`), because `review-phase`
+  runs it and every maestro workflow `plan-feature` writes names it in its
+  `review` chore. Also
   invokable on its own. **Consumers**: re-sync to pick it up.
 - **Project defaults for maestro in `.vinta-ai-workflows.yaml`.** A new
   `maestro:` section holds what every plan's `.workflow.json` used to repeat:
@@ -462,6 +463,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`review-phase` runs the thermo-nuclear review loop.** On the skills path
+  (`implement-plan`, `amend-plan`, `systematic-debugging`), each phase is now
+  reviewed by `thermo-nuclear-review-loop`, the loop maestro's `review` chore
+  runs. The conductor hosts it, because a sub-agent cannot spawn sub-agents of
+  its own. It spawns one reviewer sub-agent one tier above the tier the
+  phase's implementer ran at (a Tier 4 phase is reviewed at Tier 4), and hands
+  each round of findings to the phase's own implementer. The implementer
+  verifies each finding, fixes the justified ones, rejects the rest with
+  counter-evidence, and commits the round. Questions only a person can settle
+  come to you as structured questions. The phase passes only when the
+  reviewer explicitly approves. After 20 passes that still return blockers,
+  the conductor asks whether to continue for 20 more, stop the phase
+  unapproved, or amend the plan. **Consumers**: re-sync to re-render the
+  plan-execution skills.
 - **Maestro: a phase's review is now the `review` chore.** Once the phase's
   gates are green, the implementer's own session runs
   `thermo-nuclear-review-loop`: it spawns one reviewer sub-agent and fixes or
@@ -469,9 +484,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the gates run once more on the final tree. A red gate still goes to the
   fixer. A review turn that ends unapproved asks the operator to continue or
   stop. `plan-feature` now emits the `review`
-  chore and `defaults.chores: ["review", "deslop"]`, and transcribes only the
-  implementer rows of the Crew table (the reviewers there still staff
-  `review-phase` on the skills path).
+  chore and `defaults.chores: ["review", "deslop"]`, and transcribes the
+  Crew table's implementers into `crew`.
 - **Maestro: chore `when` is now `review`, `after_review` (the default) or
   `after_pr`.** `review` chores must end with `VERDICT: pass` or
   `VERDICT: fail`, and the phase continues only on pass. `after_review`
@@ -591,8 +605,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and never selects text. The host box follows the window's height instead of
   being fixed at 380px.
 
+### Deprecated
+
+- **`agent_models.reviewer` is ignored.** The review runs one tier above the
+  phase's implementer, so no configured tier is read. The key stays in the v1
+  config schema so existing configs still validate; drop it at your next
+  edit. Bootstrap no longer asks for it. `agent_models.fixer` now sets only
+  the merge-conflict fixer's tier, since the phase's implementer fixes review
+  findings at its own tier.
+
 ### Removed
 
+- **The three-layer phase review.** `review-phase` no longer runs the
+  mechanical checks (including the review-time secret scan, dependency-license
+  check and co-author trailer check), the plan-compliance walkthrough
+  (including the comment-hygiene check), the crew reviewer, or a separate
+  fixer per finding. The implementer's own install-time license check and
+  co-author rules are unchanged.
+- **Reviewers on the plan.** `plan-feature`'s Crew table loses its `Role`
+  column and its reviewer rows, and phases lose the optional
+  `**Review models**:` line. **Migration:** plans written with reviewer rows,
+  a `Role` column or `**Review models**:` lines still run; `implement-plan`
+  ignores them.
 - **Maestro: the reviewer role and its review loop.** Crew members are
   implementers only, and the crew `role` field is gone. Also gone:
   `defaults.reviewer_model` (in the workflow file and in the

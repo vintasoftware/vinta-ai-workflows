@@ -70,14 +70,16 @@ The body **must reference real commands** for this project (`pnpm test:patient`,
 
 ### `reviewer.yaml`
 
-Adversarial reviewer. Reads phase body + diff + AGENTS.md + relevant SKILL.md. Outputs BLOCKER / SHOULD-FIX / NIT findings with file:line. Read-only — `access: read-only`.
+Adversarial reviewer for the reviews the team asks for by hand. Reads phase body + diff + AGENTS.md + relevant SKILL.md. Outputs BLOCKER / SHOULD-FIX / NIT findings with file:line. Read-only — `access: read-only`.
+
+The plan-execution review does not spawn this type. `review-phase` runs the `thermo-nuclear-review-loop` skill, whose reviewer is a general-purpose sub-agent applying one standard (the project's `REVIEW.md`, or the loop's Review Standard); an agent body with review rules of its own would give it two. Keep the body's "Look for" sweeps project-specific all the same: they are what makes a hand-run review worth more than a generic one.
 
 YAML shape:
 ```yaml
 name: reviewer
 description: |
   Adversarial code reviewer for one phase of an ai-plans/ implementation.
-  Read-only by design. Outputs severity-tagged findings; orchestrator dispatches a fixer.
+  Read-only by design. Outputs severity-tagged findings; the caller decides who fixes them.
 access: read-only
 body: |
   # Reviewer
@@ -96,20 +98,20 @@ body: |
 
 ### `fixer.yaml`
 
-Applies one finding from the reviewer (or one named test failure). Smallest correct change. Re-runs inner + outer gate. Reports.
+Resolves one merge conflict between phases (`implement-plan`'s wave integration, `amend-plan`'s rebase of a child phase), applies one review finding handed over cold when the phase's own implementer cannot be continued, or fixes one named test failure. Smallest correct change. Re-runs inner + outer gate. Reports.
 
 YAML shape:
 ```yaml
 name: fixer
 description: |
-  Applies a narrowly-scoped fix to one reviewer finding or one named failure.
+  Applies a narrowly-scoped fix: one merge conflict, one review finding, or one named failure.
   Like the implementer: never branches, pushes, or opens PRs. Never adds AI co-author trailers.
 access: read-write
 body: |
   # Fixer
   
   Sections:
-  - Task shapes (reviewer finding verbatim, or test/gate failure).
+  - Task shapes (merge conflict with both phases' bodies, review finding verbatim, or test/gate failure).
   - Loop (read surrounding, narrowest change, inner loop, outer gate).
   - When you need a human decision (see "Needs-input contract" below).
   - Report (status SUCCESS | FAILURE | NEEDS_INPUT; changes, did NOT touch, out-of-scope spotted, notes).

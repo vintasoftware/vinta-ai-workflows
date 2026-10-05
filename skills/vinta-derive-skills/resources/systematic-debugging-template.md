@@ -126,7 +126,7 @@ Goal: ship the fix at the right level of abstraction with the right safety net.
    - `{{BUILD_CMD}}`
    - `{{TEST_CMD}}`{{SCOPED_TEST_NOTE}}
    {{E2E_OUTER_GATE_LINE}}
-4. **Route the fix diff through the shared review gate.** Invoke [review-phase](../review-phase/SKILL.md) — the same three-layer review (mechanical checks, plan/intent-compliance walkthrough, independent reviewer subagent) + fix loop that [implement-plan](../implement-plan/SKILL.md) and [amend-plan](../amend-plan/SKILL.md) use — passing the fix diff, the one-sentence root cause + the new failing-then-passing test as the "body" to walk against, and `WORKROOT` = the current checkout. A bug fix is not done until review-phase returns clean. (When this skill runs *inside* implement-plan's inner/outer loop, the enclosing phase's review-phase already covers this — don't double-review; the standalone invocation is for bugs debugged outside a plan.)
+4. **Route the fix diff through the shared review gate.** Invoke [review-phase](../review-phase/SKILL.md) — the same thermo-nuclear review loop [implement-plan](../implement-plan/SKILL.md) and [amend-plan](../amend-plan/SKILL.md) use — passing the fix diff, the one-sentence root cause + the new failing-then-passing test as the stated requirement, the branch the fix started from as the baseline, and `WORKROOT` = the current checkout. You wrote the fix in this session, so there is no implementer sub-agent to continue: you are the loop's fixer yourself, exactly as the skill is written, and the reviewer runs at Tier 4. A bug fix is not done until the reviewer explicitly approves. (When this skill runs *inside* implement-plan's inner/outer loop, the enclosing phase's review-phase already covers this — don't double-review; the standalone invocation is for bugs debugged outside a plan.)
 5. **Verify on the observability side after deploy.** The error fingerprint from Phase 0 should stop firing. If the platform supports it, mark the issue resolved in the source MCP tool so a regression re-opens it instead of creating a duplicate.
 6. **Document if the fix is non-obvious.** A comment is justified only when the *why* would surprise the next reader — a hidden invariant, a workaround for a known upstream bug, a constraint not visible from the call site. Don't narrate the change.
 7. **When no test can cover the regression**, say so in the PR and leave a comment with the reason. This is the exception to item 6.
@@ -159,7 +159,7 @@ These are not debugging — they are guessing with extra steps. Stop and re-ente
 
 When this skill runs inside [implement-plan](../implement-plan/SKILL.md) (the inner / outer test loop), the implementer agent invokes systematic-debugging on every red gate and reports the Phase-1 cause in its report. The orchestrator never overrides the Iron Law — a phase that can't name the cause is not allowed to land.
 
-For the review gate in Phase 4, this skill shares [review-phase](../review-phase/SKILL.md) with implement-plan and amend-plan — one review implementation across all three, so a bug fix meets the same three-layer bar as any planned phase.
+For the review gate in Phase 4, this skill shares [review-phase](../review-phase/SKILL.md) with implement-plan and amend-plan — one review implementation across all three, so a bug fix meets the same bar as any planned phase.
 
 For new test scaffolding, defer to the project's test conventions captured in [AGENTS.md](../../../AGENTS.md). For env / config issues uncovered in Phase 0, route to the project's `add-env-var` skill if shipped (`{{PROJECT_SKILLS_LIST}}`).
 
@@ -169,5 +169,5 @@ For new test scaffolding, defer to the project's test conventions captured in [A
 2. Root cause stated in one sentence in the PR description.
 3. New failing-then-passing test cited by file:line. It fails before the fix, and reverting the fix makes it fail again.
 4. Full local gate green: `{{LINT_CMD}}` + `{{BUILD_CMD}}` + `{{TEST_CMD}}`{{E2E_OUTER_GATE_CHECKLIST}}.
-5. [review-phase](../review-phase/SKILL.md) run on the fix diff and returned clean (unless the fix landed inside an implement-plan phase already covered by its review-phase).
+5. [review-phase](../review-phase/SKILL.md) run on the fix diff and the reviewer explicitly approved (unless the fix landed inside an implement-plan phase already covered by its review-phase).
 6. Observability source updated post-deploy (issue resolved / alert acknowledged) so a recurrence pages instead of silently re-opening.
