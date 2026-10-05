@@ -123,7 +123,7 @@ describe('the review document', () => {
     review = addComment(review, { anchor: { kind: 'phase', node: 'p1' }, body: 'split it', author: HUMAN }, T0)
     review = addComment(
       review,
-      { anchor: { kind: 'prompt', node: 'p2', role: 'reviewer' }, body: 'check the flag', author: HUMAN },
+      { anchor: { kind: 'prompt', node: 'p2', role: 'fixer' }, body: 'check the flag', author: HUMAN },
       T0,
     )
     expect(unsentThreads(review).map((comment) => comment.id)).toEqual(['c1', 'c2'])
@@ -278,9 +278,10 @@ describe('the plan view', () => {
     expect(p2?.brief).toContain('a `FolderViewSet` mirroring `TagViewSet`')
     expect(p2?.prompts.implementer).toContain('a `FolderViewSet` mirroring `TagViewSet`')
     expect(p2?.prompts.implementer).toContain('Users can group bookmarks into folders')
-    expect(p2?.prompts.reviewer).toBeTruthy()
     expect(p2?.prompts.fixer).toBeTruthy()
-    expect(Object.keys(p2?.chores ?? {})).toEqual(['deslop'])
+    // The review is a chore (§16), so its prompt is among the chores'.
+    expect(Object.keys(p2?.chores ?? {})).toEqual(['review', 'deslop'])
+    expect(p2?.chores['review']).toContain('VERDICT: pass')
   })
 
   it('still draws a plan whose graph is wrong, and lists why', async () => {
@@ -379,9 +380,9 @@ describe('vinta-ai-maestro review', () => {
       addComment(
         review,
         {
-          anchor: { kind: 'prompt', node: 'p2', role: 'reviewer' },
+          anchor: { kind: 'prompt', node: 'p2', role: 'fixer' },
           body: 'make it check the flag-off path',
-          quote: 'Read the full diff',
+          quote: 'Read the gate’s output before the code',
           author: HUMAN,
         },
         T0,
@@ -402,8 +403,8 @@ describe('vinta-ai-maestro review', () => {
           comments: [
             {
               id: 'c1',
-              where: 'the reviewer prompt of phase p2',
-              quote: 'Read the full diff',
+              where: 'the fixer prompt of phase p2',
+              quote: 'Read the gate’s output before the code',
               body: 'make it check the flag-off path',
             },
           ],

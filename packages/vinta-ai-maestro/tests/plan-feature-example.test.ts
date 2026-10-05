@@ -208,11 +208,8 @@ describe('plan-feature worked example', () => {
       perWave.set(wave, (perWave.get(wave) ?? 0) + 1)
     }
     const widest = Math.max(...perWave.values())
-    const built = Object.values(workflow.crew).filter(
-      (member) => member.role === 'implementer',
-    ).length
 
-    expect(built).toBeGreaterThanOrEqual(widest)
+    expect(Object.keys(workflow.crew).length).toBeGreaterThanOrEqual(widest)
   })
 
   /**
@@ -248,50 +245,23 @@ describe('plan-feature worked example', () => {
     }
   })
 
-  it('assigns a phase to every implementer, and staffs a reviewer for all of them', () => {
+  it('assigns a phase to every member of the crew', () => {
     const workflow = parsed()
     const assigned = new Set(workflow.nodes.map((node) => node.crew))
-    const entries = Object.entries(workflow.crew)
 
-    for (const [id, member] of entries) {
-      if (member.role === 'implementer') expect(assigned.has(id)).toBe(true)
-    }
-
-    // The roles are disjoint, which is what makes an agent reading its own diff
-    // unrepresentable rather than merely unlikely.
-    const reviewersOnRoster = entries.filter(([, member]) => member.role === 'reviewer')
-    expect(reviewersOnRoster.length).toBeGreaterThan(0)
-    for (const [id] of reviewersOnRoster) expect(assigned.has(id)).toBe(false)
-
-    // A reviewer's tier is a floor too: one below the hardest phase could never
-    // be picked for it, and the plan would silently fall back to the project
-    // default for that phase.
-    const hardest = Math.max(
-      ...workflow.nodes.map((node) => workflow.crew[node.crew ?? '']?.tier ?? 0),
-    )
-    expect(Math.max(...reviewersOnRoster.map(([, member]) => member.tier))).toBeGreaterThanOrEqual(
-      hardest,
-    )
+    for (const id of Object.keys(workflow.crew)) expect(assigned.has(id)).toBe(true)
   })
 
   /**
-   * An implementer keeps one worktree — and therefore one session — for the
-   * whole run, so the pool is sized by how many implementers there are rather
-   * than by how many phases can run at once. The idle desks are the price of
-   * the sessions the busy ones carry, and this example is deliberately a case
-   * where the two numbers differ.
-   *
-   * Reviewers add nothing to it: a review runs in the lane it is reviewing, so
-   * that it reads the working tree before anything is committed.
+   * A member keeps one worktree — and therefore one session — for the whole
+   * run, so the pool is sized by how many members there are rather than by how
+   * many phases can run at once. The idle desks are the price of the sessions
+   * the busy ones carry.
    */
-  it('gives a desk to every implementer and none to the reviewer', () => {
+  it('gives a desk to every member', () => {
     const workflow = parsed()
-    const built = Object.values(workflow.crew).filter(
-      (member) => member.role === 'implementer',
-    ).length
 
-    expect(workflow.resources['lane']?.capacity).toBe(built)
-    expect(built).toBeLessThan(Object.keys(workflow.crew).length)
+    expect(workflow.resources['lane']?.capacity).toBe(Object.keys(workflow.crew).length)
   })
 
   /**
@@ -311,17 +281,21 @@ describe('plan-feature worked example', () => {
   })
 
   /**
-   * The comment pass reaches every phase through the run-wide default rather
-   * than through a `chores` line repeated on each node — which is what the
-   * default is for, and what stops one phase quietly missing it.
+   * The review and the comment pass reach every phase through the run-wide
+   * default rather than through a `chores` line repeated on each node — which
+   * is what the default is for, and what stops one phase quietly going
+   * unreviewed.
    */
-  it('runs the comment chore on every phase, from the run-wide default', () => {
+  it('reviews every phase and then runs the comment chore, from the run-wide default', () => {
     const workflow = parsed()
 
-    expect(workflow.defaults.chores).toEqual(['deslop'])
+    expect(workflow.defaults.chores).toEqual(['review', 'deslop'])
+    expect(workflow.chores['review']?.when).toBe('review')
+    expect(workflow.chores['review']?.skill).toBe('thermo-nuclear-review-loop')
+    expect(workflow.chores['deslop']?.when).toBe('after_review')
     expect(workflow.chores['deslop']?.skill).toBe('deslop-comments')
     for (const node of workflow.nodes) {
-      expect(choreIdsFor(workflow, node)).toEqual(['deslop'])
+      expect(choreIdsFor(workflow, node)).toEqual(['review', 'deslop'])
     }
   })
 })
@@ -346,13 +320,21 @@ describe('plan-feature review-canvas chore', () => {
     'SKILL.md',
   )
 
-  const snippet = (): Record<string, unknown> => {
+  const snippet = (heading = '### The review-canvas chore'): Record<string, unknown> => {
     const text = readFileSync(SKILL, 'utf8')
-    const section = text.slice(text.indexOf('### The review-canvas chore'))
+    const section = text.slice(text.indexOf(heading))
     const block = /```json\n([\s\S]*?)\n```/.exec(section)?.[1]
-    if (block === undefined) throw new Error('no json block under "The review-canvas chore"')
+    if (block === undefined) throw new Error(`no json block under "${heading}"`)
     return JSON.parse(`{${block}}`) as Record<string, unknown>
   }
+
+  // The worked example carries the review chore, so the block the skill tells a
+  // plan to emit and the example that demonstrates it must be the same chore.
+  it('emits the review chore the worked example carries', () => {
+    const doc = example() as { chores: Record<string, unknown> }
+
+    expect(snippet('### The review chore')).toEqual({ review: doc.chores['review'] })
+  })
 
   it('parses as an after_pr chore beside deslop in the worked example', () => {
     const doc = example() as {

@@ -62,9 +62,10 @@ export interface CrewSource {
  * caller back to `defaults`, because a fixer on the wrong model still resolves
  * conflicts and a fixer that never spawns resolves none.
  *
- * Reviewer rows are skipped. A reviewer read the phase; the implementer wrote
- * the code that is in conflict, and it is the writing that this is selecting
- * for.
+ * Rows from journals written while the roster still had a reviewer seat
+ * (§16) carry `role: 'reviewer'` and are skipped. A reviewer read the phase;
+ * the implementer wrote the code that is in conflict, and it is the writing
+ * that this is selecting for.
  */
 export function highestTierImplementer(
   rows: readonly StoredEvent[],
@@ -85,8 +86,7 @@ export function highestTierImplementer(
     if (!wanted.has(row.nodeId)) continue
     const payload = row.payload as Record<string, unknown> | undefined
     if (payload === undefined) continue
-    // Absent `role` means implementer — rows written before reviewers were
-    // members read as what they were.
+    // Absent `role` is an implementer's row, which is every row written now.
     if (payload['role'] !== undefined && payload['role'] !== 'implementer') continue
     const member = payload['member']
     if (typeof member !== 'string' || member === '') continue

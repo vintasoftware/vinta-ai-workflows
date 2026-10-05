@@ -74,8 +74,8 @@ export const DEFAULT_GATE_MS = 5 * 60_000
  * What a simulated run is told to cost. Everything is virtual milliseconds.
  *
  * The unit is an **agent turn**, not a node: a node's duration is however many
- * turns its pipeline spawns, and `standard-phase` spawns two on the clean path
- * (implementer, then reviewer). Charging per turn keeps the estimate a thing
+ * turns its pipeline spawns, and `standard-phase` spawns one per declared chore
+ * besides the implementer on the clean path (the review, then the polish). Charging per turn keeps the estimate a thing
  * the caller can state about a phase without also having to know which pipeline
  * it runs.
  */
@@ -297,7 +297,7 @@ class SimulationExecutor implements EffectExecutor {
     })
 
     if (verb === 'run_gate') return { facts: { gate: { exit_code: 0 } } }
-    if (verb === 'spawn_agent' && invocation.effect.params['role'] === 'reviewer') {
+    if (verb === 'spawn_agent' && invocation.effect.params['verdict'] === true) {
       return { facts: { review: { verdict: 'pass' } } }
     }
     return {}

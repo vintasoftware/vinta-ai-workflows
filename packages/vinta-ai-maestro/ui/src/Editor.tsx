@@ -504,8 +504,14 @@ function NodeFields({
             data-field="max_fix_rounds"
             type="number"
             min={0}
-            value={node.max_fix_rounds}
-            onChange={(e) => onPatch({ max_fix_rounds: Number.parseInt(e.target.value, 10) })}
+            placeholder="no limit"
+            value={node.max_fix_rounds ?? ''}
+            onChange={(e) =>
+              onPatch({
+                max_fix_rounds:
+                  e.target.value === '' ? undefined : Number.parseInt(e.target.value, 10),
+              })
+            }
           />
         </Field>
       </div>

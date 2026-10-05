@@ -12,7 +12,6 @@
  * invisible in the run it happens in and fatal three phases later, so it is
  * checked on the happy paths and on the failure paths alike.
  */
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -152,15 +151,15 @@ async function until(read: () => boolean, label: string): Promise<void> {
 }
 
 /**
- * Runs a `standard-phase` workflow and answers its exhausted-budget question
- * (§16.5) with `stop` for every node that reaches it — the answer that ends the
- * phase the way an exhausted budget always did, so the assertions after it are
- * about the failure rather than about the question in front of it.
+ * Runs a `standard-phase` workflow and answers the question each named node
+ * stops on — an exhausted fix budget or an unapproved review (§16) — with
+ * `stop`: the answer that ends the phase, so the assertions after it are about
+ * the failure rather than about the question in front of it.
  */
-async function runStoppingAtExhaustion(r: Rig, ...nodeIds: readonly string[]): Promise<RunReport> {
+async function runAnsweringStop(r: Rig, ...nodeIds: readonly string[]): Promise<RunReport> {
   const running = r.scheduler.run()
   for (const nodeId of nodeIds) {
-    await until(() => r.scheduler.statuses[nodeId] === 'awaiting_human', `${nodeId} to exhaust its budget`)
+    await until(() => r.scheduler.statuses[nodeId] === 'awaiting_human', `${nodeId} to ask`)
     r.scheduler.answer(nodeId, { human: { answer: 'stop' } })
   }
   return await running
@@ -427,6 +426,11 @@ function expectDrained(rig_: Rig): void {
 
 const dep = (id: string) => ({ node: id, artifact: `${id}'s artifact` })
 
+/**
+ * A node with a fix budget of 4, so a test whose gate never goes green ends.
+ * The shipped default is no budget at all; the tests that exercise it pass
+ * `max_fix_rounds: undefined`.
+ */
 const node = (
   id: string,
   deps: readonly string[] = [],
@@ -436,6 +440,7 @@ const node = (
   name: id,
   depends_on: deps.map(dep),
   prompt_ref: `plan.md#${id}`,
+  max_fix_rounds: 4,
   ...extra,
 })
 
@@ -486,8 +491,8 @@ const EXPLODE = {
 const LONG = {
   states: [
     { id: 's1', name: 'S1', position: { x: 0, y: 0 }, onEnter: [spawn('e-1', 'implementer')] },
-    { id: 's2', name: 'S2', position: { x: 200, y: 0 }, onEnter: [spawn('e-2', 'reviewer')] },
-    { id: 's3', name: 'S3', position: { x: 400, y: 0 }, onEnter: [spawn('e-3', 'reviewer')] },
+    { id: 's2', name: 'S2', position: { x: 200, y: 0 }, onEnter: [spawn('e-2', 'implementer')] },
+    { id: 's3', name: 'S3', position: { x: 400, y: 0 }, onEnter: [spawn('e-3', 'implementer')] },
     { id: 'done', name: 'Done', position: { x: 600, y: 0 }, data: { outcome: 'done' } },
   ],
   transitions: [
@@ -514,7 +519,7 @@ const GATE_WORK = {
         spawn('e-work', 'implementer'),
       ],
     },
-    { id: 'wrap', name: 'Wrap', position: { x: 200, y: 0 }, onEnter: [spawn('e-wrap', 'reviewer')] },
+    { id: 'wrap', name: 'Wrap', position: { x: 200, y: 0 }, onEnter: [spawn('e-wrap', 'implementer')] },
     { id: 'done', name: 'Done', position: { x: 400, y: 0 }, data: { outcome: 'done' } },
   ],
   transitions: [
@@ -575,7 +580,10 @@ const REUSE = {
   finalStateIds: ['done'],
 }
 
-/** Two slots that must never cross: the shape `standard-phase` actually uses. */
+/**
+ * Two slots that must never cross: the implementer's `main`, and a slot of its
+ * own between two of its turns — what a chore declaring `session: audit` gets.
+ */
 const SLOTS = {
   states: [
     {
@@ -585,10 +593,10 @@ const SLOTS = {
       onEnter: [slotSpawn('e-work', 'implementer', 'main')],
     },
     {
-      id: 'review',
-      name: 'Review',
+      id: 'audit',
+      name: 'Audit',
       position: { x: 200, y: 0 },
-      onEnter: [slotSpawn('e-review', 'reviewer', 'review')],
+      onEnter: [slotSpawn('e-audit', 'chore', 'audit')],
     },
     {
       id: 'rework',
@@ -599,8 +607,8 @@ const SLOTS = {
     { id: 'done', name: 'Done', position: { x: 600, y: 0 }, data: { outcome: 'done' } },
   ],
   transitions: [
-    { id: 't-review', from: 'work', to: 'review' },
-    { id: 't-rework', from: 'review', to: 'rework' },
+    { id: 't-audit', from: 'work', to: 'audit' },
+    { id: 't-rework', from: 'audit', to: 'rework' },
     { id: 't-done', from: 'rework', to: 'done' },
   ],
   initialStateIds: ['work'],
@@ -1568,80 +1576,96 @@ describe('the loop', () => {
 // The shipped pipeline, end to end
 // ---------------------------------------------------------------------------
 
-const standardWorkflow = (nodes: readonly Record<string, unknown>[]): Workflow =>
+/** The review chore a `plan-feature` plan declares (§16). */
+const REVIEW_CHORE = {
+  prompt: 'Run the thermo-nuclear-review-loop skill over this phase’s diff until its reviewer approves it.',
+  skill: 'thermo-nuclear-review-loop',
+  when: 'review',
+}
+
+/** A polish chore, on the default `after_review` timing. */
+const DESLOP_CHORE = { prompt: 'Rewrite the comments.' }
+
+/** What a review chore's turn ended on, as the host read it back from its `VERDICT:` line. */
+const verdict = (said: 'pass' | 'fail'): EffectOutcome => ({ facts: { review: { verdict: said } } })
+
+const exited = (code: number): EffectOutcome => ({ facts: { gate: { id: 'unit', exit_code: code } } })
+
+/**
+ * Green gates, both times they run, and a review that approves.
+ *
+ * The review chore's turn is keyed `e-review:review`: `#chores` gives each
+ * chore's spawn the pipeline effect's id and the chore's own, and the host
+ * reads that spawn's verdict — which is the seam a recorder answers at.
+ */
+const APPROVED = {
+  'e-gate': exited(0),
+  'e-verify': exited(0),
+  'e-review:review': verdict('pass'),
+}
+
+const standardWorkflow = (
+  nodes: readonly Record<string, unknown>[],
+  chores: Record<string, unknown> = {},
+): Workflow =>
   makeWorkflow(nodes, {
     resources: {
       lane: { capacity: 2, kind: 'worktree' },
       'test-suite': { capacity: 1, kind: 'semaphore' },
     },
     gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+    chores,
     pipelines: { 'standard-phase': STANDARD_PHASE },
     pipeline: 'standard-phase',
   })
 
-describe('standard-phase under the scheduler', () => {
-  it('runs implement → review → polish → gate → integrate → done', async () => {
-    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-
-    const report = await r.scheduler.run()
-
-    expect(report.statuses).toEqual({ a: 'done' })
-    expect(r.calls.map((call) => call.verb)).toEqual([
-      'git_branch',
-      'spawn_agent',
-      'spawn_agent',
-      // Between the passing review and the gate: a chore edits the tree, so
-      // the gates after it are what check what it did — and a node that
-      // declares none passes through here having spawned nothing.
-      'run_chore',
-      'run_gate',
-      // Tracking before the merge: the phase record has to be in the commit
-      // the wave branch merges — see the `integrate` state in `standard.ts`.
-      'write_tracking',
-      'git_merge',
-      'git_push',
-      'open_pr',
-      // The `after_pr` chores, once the PR is open. None declared: a no-op.
-      'run_chore',
-    ])
-    expectDrained(r)
+/** One `standard-phase` node with the review chore, and optionally the polish one. */
+const reviewedWorkflow = (chores: readonly string[] = ['review']): Workflow =>
+  standardWorkflow([node('a', [], { gates: ['unit'], chores })], {
+    review: REVIEW_CHORE,
+    deslop: DESLOP_CHORE,
   })
 
-  it('runs its chores on the diff that merges, after the review and before the gate', async () => {
-    const r = rig(
-      makeWorkflow([node('a', [], { gates: ['unit'], chores: ['deslop'] })], {
-        resources: {
-          lane: { capacity: 2, kind: 'worktree' },
-          'test-suite': { capacity: 1, kind: 'semaphore' },
-        },
-        gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
-        chores: { deslop: { prompt: 'Rewrite the comments.' } },
-        pipelines: { 'standard-phase': STANDARD_PHASE },
-        pipeline: 'standard-phase',
-      }),
-      {
-        outcomes: {
-          'e-review': { facts: { review: { verdict: 'pass' } } },
-          'e-gate': { facts: { gate: { exit_code: 0 } } },
-        },
-      },
-    )
+/** Every `human_answered` row this run journalled, payload only. */
+const answersOf = (r: Rig): unknown[] =>
+  r.journal
+    .events('run-1')
+    .filter((event) => event.type === 'human_answered')
+    .map((event) => event.payload)
+
+/** How many times an effect ran, by its pipeline id. */
+const countOf = (r: Rig, effect: string): number =>
+  r.calls.filter((call) => call.effect === effect).length
+
+/** The effects that ran, in order, kept to the ones named. */
+const orderOf = (r: Rig, effects: readonly string[]): string[] =>
+  r.calls.map((call) => call.effect).filter((effect) => effects.includes(effect))
+
+describe('standard-phase under the scheduler', () => {
+  it('runs implement → gate → review → polish → verify → integrate → done', async () => {
+    const r = rig(reviewedWorkflow(), { outcomes: APPROVED })
 
     const report = await r.scheduler.run()
 
     expect(report.statuses).toEqual({ a: 'done' })
-    // Implementer, reviewer, then the chore — and the gate after all three, so
-    // what the chore wrote is what the gate ran against.
-    expect(r.adapter.spawned).toHaveLength(3)
-    const verbs = r.calls.map((call) => call.verb)
-    expect(verbs.indexOf('run_chore')).toBeLessThan(verbs.indexOf('run_gate'))
-    expect(choresOf(r, 'a')).toEqual([
-      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
+    expect(r.calls.map((call) => call.effect)).toEqual([
+      'e-branch',
+      'e-implement',
+      'e-gate',
+      // The review chore's turn, then the `run_chore` it ran under.
+      'e-review:review',
+      'e-review',
+      // No polish chore declared: the state is a no-op, and spawns nothing.
+      'e-chores',
+      'e-verify',
+      // Tracking before the merge: the phase record has to be in the commit
+      // the wave branch merges — see the `integrate` state in `standard.ts`.
+      'e-tracking',
+      'e-merge',
+      'e-push',
+      'e-pr',
+      // The `after_pr` chores, once the PR is open. None declared: a no-op.
+      'e-pr-chores',
     ])
     expectDrained(r)
   })
@@ -1649,70 +1673,98 @@ describe('standard-phase under the scheduler', () => {
   it('counts a fixer turn as a fix round and fails the node when they run out', async () => {
     const r = rig(
       standardWorkflow([node('a', [], { gates: ['unit'] }), node('b', ['a'])]),
-      {
-        outcomes: {
-          'e-review': { facts: { review: { verdict: 'fail' } } },
-          'e-gate': { facts: { gate: { exit_code: 0 } } },
-        },
-      },
+      { outcomes: { 'e-gate': exited(2) } },
     )
 
-    const report = await runStoppingAtExhaustion(r, 'a')
+    const report = await runAnsweringStop(r, 'a')
 
-    // `max_fix_rounds` defaults to 4, and `fix_rounds` is the count of fixer
-    // turns taken — so four fixers run, the fifth round is put to the operator,
-    // and `stop` fails the phase.
-    expect(r.calls.filter((call) => call.effect === 'e-fix')).toHaveLength(4)
-    expect(r.calls.filter((call) => call.effect === 'e-exhausted')).toHaveLength(1)
+    // A budget of 4, and `fix_rounds` is the count of fixer turns taken — so
+    // four fixers run, the fifth red gate is put to the operator, and `stop`
+    // fails the phase.
+    expect(countOf(r, 'e-fix')).toBe(4)
+    expect(countOf(r, 'e-exhausted')).toBe(1)
     expect(report.statuses).toEqual({ a: 'failed', b: 'blocked' })
-    expect(r.calls.some((call) => call.effect === 'e-failed')).toBe(true)
+    expect(countOf(r, 'e-failed')).toBe(1)
     expectDrained(r)
+  })
+
+  it('keeps fixing a red gate with no budget set, and never asks', async () => {
+    const r = rig(
+      standardWorkflow([node('a', [], { gates: ['unit'], max_fix_rounds: undefined })]),
+      { outcomes: { ...APPROVED, 'e-gate': [...Array(6).fill(exited(2)), exited(0)] } },
+    )
+
+    const report = await r.scheduler.run()
+
+    // Past the old default of four, with nobody asked: the fixer works until
+    // the gate is green.
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(countOf(r, 'e-fix')).toBe(6)
+    expect(countOf(r, 'e-exhausted')).toBe(0)
+    expectDrained(r)
+  })
+
+  it('names no budget in a failure reason when the node set none', async () => {
+    const r = rig(
+      standardWorkflow(
+        [node('a', [], { gates: ['unit'], chores: ['review'], max_fix_rounds: undefined })],
+        { review: REVIEW_CHORE },
+      ),
+      { outcomes: { ...APPROVED, 'e-review:review': verdict('fail') } },
+    )
+
+    const report = await runAnsweringStop(r, 'a')
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    const reasons = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_error')
+      .map((event) => (event.payload as { reason?: string }).reason)
+    expect(reasons).toEqual([
+      'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; 0 fix rounds spent',
+    ])
   })
 
   /**
    * Every spawn on a node appends to the same transcript file whatever its
-   * role, so a phase that took two fix rounds holds five agents' output in one
-   * stream. Both facts needed to tell them apart — the role and the session
-   * slot — were in scope at the append and simply not written down, and the one
-   * question the file could not answer was who said what.
+   * role, so a phase that took a fix round and a review holds three agents'
+   * output in one stream. Both facts needed to tell them apart — the role and
+   * the session slot — were in scope at the append and simply not written
+   * down, and the one question the file could not answer was who said what.
    */
   it('records which agent wrote each transcript entry, and on which slot', async () => {
-    const r = rig(
-      standardWorkflow([node('a', [], { gates: ['unit'] })]),
-      {
-        outcomes: {
-          'e-review': { facts: { review: { verdict: 'fail' } } },
-          'e-gate': { facts: { gate: { exit_code: 0 } } },
-        },
-      },
-    )
+    const r = rig(reviewedWorkflow(), {
+      outcomes: { ...APPROVED, 'e-gate': [exited(2), exited(0)] },
+    })
 
-    await runStoppingAtExhaustion(r, 'a')
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
 
     const attributions = r.journal
       .tailTranscript('run-1', 'a', 200)
-      .map((entry) => (entry as { by?: { role: string; slot?: string } }).by)
+      .map((entry) => (entry as { by?: { role: string; slot?: string; chore?: string } }).by)
 
     // Not one entry unattributed, and the roles are the pipeline's own.
     expect(attributions.every((by) => by !== undefined)).toBe(true)
     expect(new Set(attributions.map((by) => by?.role))).toEqual(
-      new Set(['implementer', 'reviewer', 'fixer']),
+      new Set(['implementer', 'fixer', 'chore']),
     )
-    // §15's slots: the fixer continues the implementer's, the reviewer holds
-    // its own — which is exactly what the transcript now says out loud.
+    // §15's slots: the fixer and the review both continue the implementer's,
+    // which is exactly what the transcript now says out loud.
     const slotFor = (role: string): Set<string | undefined> =>
       new Set(attributions.filter((by) => by?.role === role).map((by) => by?.slot))
     expect(slotFor('implementer')).toEqual(new Set(['main']))
     expect(slotFor('fixer')).toEqual(new Set(['main']))
-    expect(slotFor('review')).toEqual(new Set())
-    expect(slotFor('reviewer')).toEqual(new Set(['review']))
+    expect(slotFor('chore')).toEqual(new Set(['main']))
+    expect(
+      new Set(attributions.filter((by) => by?.role === 'chore').map((by) => by?.chore)),
+    ).toEqual(new Set(['review']))
   })
 
   /**
    * The complaint a real 14-hour run produced: three `node_error` events, all
    * three reading `pipeline ended in state "failed"`, which is the name of a
-   * state and not a cause. `standard-phase` has two edges into `failed` — a red
-   * gate with the budget spent, and a reviewer that kept saying no — and from
+   * state and not a cause. `standard-phase` has two ways into `failed` — a red
+   * gate with the budget spent, and a review that never approved — and from
    * the state id alone they are the same sentence. An operator learned that a
    * phase failed twice and nothing about why, which is the complaint the event
    * was added to answer one level out.
@@ -1728,37 +1780,30 @@ describe('standard-phase under the scheduler', () => {
         .filter((event) => event.type === 'node_error' && event.nodeId === nodeId)
         .map((event) => String((event.payload as { reason: unknown }).reason))
 
-    // A gate that stays red under a reviewer that keeps passing: review → gate
-    // → fix until the budget is spent, then the operator says `stop`.
-    const red = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { id: 'unit', exit_code: 2 } } },
-      },
-    })
-    expect((await runStoppingAtExhaustion(red, 'a')).statuses).toEqual({ a: 'failed' })
+    // A gate that stays red: gate → fix until the budget is spent, then the
+    // operator says `stop`. The review never runs.
+    const red = rig(reviewedWorkflow(), { outcomes: { 'e-gate': exited(2) } })
+    expect((await runAnsweringStop(red, 'a')).statuses).toEqual({ a: 'failed' })
 
-    // A reviewer that never passes: review → fix until the budget is spent. The
-    // gate never runs, so there is no gate to name.
-    const rejected = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
+    // A review that never approves, on gates that passed: the operator is
+    // asked once and says `stop`. No fixer ran, and the green gate that let
+    // the review start is not named against it.
+    const rejected = rig(reviewedWorkflow(), {
+      outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
     })
-    expect((await runStoppingAtExhaustion(rejected, 'a')).statuses).toEqual({ a: 'failed' })
+    expect((await runAnsweringStop(rejected, 'a')).statuses).toEqual({ a: 'failed' })
 
-    // Both now leave through the one `exhausted` question, so the edge is the
-    // same and the clauses are what tell them apart: the red gate in one, the
-    // failing verdict in the other.
     expect(reasonsFor(red, 'a')).toEqual([
       'pipeline ended in state "failed" via "t-stop"; gate "unit" exited 2; ' +
         '4 of 4 fix rounds spent',
     ])
     expect(reasonsFor(rejected, 'a')).toEqual([
-      'pipeline ended in state "failed" via "t-stop"; review verdict "fail"; ' +
-        '4 of 4 fix rounds spent',
+      'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; ' +
+        '0 of 4 fix rounds spent',
     ])
 
     // §11: a gate id and an exit code, never what the gate printed. The
-    // reviewer's own words are in the transcript and reach nothing here — the
+    // review's own words are in the transcript and reach nothing here — the
     // verdict is one of two fixed strings.
     for (const reason of [...reasonsFor(red, 'a'), ...reasonsFor(rejected, 'a')]) {
       expect(reason).not.toContain('log_ref')
@@ -1778,12 +1823,11 @@ describe('standard-phase under the scheduler', () => {
   it('says a gate timed out rather than quoting the runner’s exit convention', async () => {
     const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
       outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
         'e-gate': { facts: { gate: { id: 'unit', exit_code: 124, status: 'timed_out' } } },
       },
     })
 
-    expect((await runStoppingAtExhaustion(r, 'a')).statuses).toEqual({ a: 'failed' })
+    expect((await runAnsweringStop(r, 'a')).statuses).toEqual({ a: 'failed' })
     expect(
       r.journal
         .events('run-1')
@@ -1797,11 +1841,11 @@ describe('standard-phase under the scheduler', () => {
   })
 
   /**
-   * The stale-fact guard, on a pipeline of its own because `standard-phase`
-   * cannot reach the shape: a green gate there goes straight to `integrate`
-   * and the phase is done. Any pipeline that keeps going after a gate passes
-   * can reach it, and there the last gate that ran is a gate that had nothing
-   * to do with the failure — naming it would read as evidence.
+   * The stale-fact guard, on a pipeline that does nothing else, so the green
+   * gate is the only fact the reason could misread. Any pipeline that keeps
+   * going after a gate passes can reach the shape — `standard-phase` does on an
+   * unapproved review — and there the last gate that ran is a gate that had
+   * nothing to do with the failure: naming it would read as evidence.
    */
   it('leaves a gate that passed out of the reason', async () => {
     const workflow = makeWorkflow([node('a', [], { gates: ['unit'] })], {
@@ -1851,133 +1895,212 @@ describe('standard-phase under the scheduler', () => {
 })
 
 // ---------------------------------------------------------------------------
-// §16: the thermo-nuclear review loop, at the scheduler's seams
+// §16: the review, as a chore on the implementer's own session
 //
-// The prompts carry the loop's discipline; what the scheduler owns is the four
-// places the loop leaves the agents: the consult, its unattended answer, the
-// exhausted-budget question and the reviewer that edits. Each is driven
-// through the shipped pipeline rather than a pipeline written for the test.
+// The loop itself — one reviewer sub-agent, findings argued and fixed — runs
+// inside a single turn and is the prompt's business. What the scheduler owns is
+// where that turn sits in the phase, what its verdict decides, and the two
+// questions the pipeline puts to the operator: an unapproved review and an
+// exhausted fix budget. Each is driven through the shipped pipeline rather than
+// a pipeline written for the test.
 // ---------------------------------------------------------------------------
 
-/** Every `human_answered` row this run journalled, payload only. */
-const answersOf = (r: Rig): unknown[] =>
-  r.journal
-    .events('run-1')
-    .filter((event) => event.type === 'human_answered')
-    .map((event) => event.payload)
-
-/** How many times an effect ran, by its pipeline id. */
-const countOf = (r: Rig, effect: string): number =>
-  r.calls.filter((call) => call.effect === effect).length
-
-describe('§16 the review loop', () => {
-  it('puts gated findings to the operator once, files the answer, and reviews without a round', async () => {
-    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': [
-          { facts: { review: { verdict: 'fail' } } },
-          { facts: { review: { verdict: 'pass' } } },
-        ],
-        'e-fix': { facts: { review: { gated: 2 } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-
-    const running = r.scheduler.run()
-    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the consult')
-    const asked = r.journal.events('run-1').filter((event) => event.type === 'human_question')
-    expect(asked.map((event) => (event.payload as { effect_id: string }).effect_id)).toEqual([
-      'e-consult',
-    ])
-    expect(asked[0]?.payload).toMatchObject({ kind: 'text' })
-
-    r.scheduler.answer('a', { human: { answer: 'g1: reject; g2: in scope' } })
-    const report = await running
-
-    expect(report.statuses).toEqual({ a: 'done' })
-    // One fixer, and the consult did not cost another: it went straight to the
-    // reviewer, which read the round's fix with the decisions beside it.
-    expect(countOf(r, 'e-fix')).toBe(1)
-    const order = r.calls
-      .map((call) => call.effect)
-      .filter((effect) => ['e-fix', 'e-consult', 'e-record-decision', 'e-review'].includes(effect))
-    expect(order).toEqual(['e-review', 'e-fix', 'e-consult', 'e-record-decision', 'e-review'])
-    // `record_decision` is handed the answer it files.
-    const recorded = r.calls.find((call) => call.effect === 'e-record-decision')
-    expect(recorded?.context.human?.['answer']).toBe('g1: reject; g2: in scope')
-    expectDrained(r)
-  })
-
-  it('reaches the reviewer when the executor reports nothing about gating', async () => {
-    // An injected executor that predates `review.gated` must not strand a node
-    // in `fix`: the missing fact takes the door to the reviewer.
-    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': [
-          { facts: { review: { verdict: 'fail' } } },
-          { facts: { review: { verdict: 'pass' } } },
-        ],
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
+describe('§16 the review', () => {
+  it('runs the review only once the gates are green', async () => {
+    const r = rig(reviewedWorkflow(), {
+      outcomes: { ...APPROVED, 'e-gate': [exited(2), exited(0)] },
     })
 
     expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
-    expect(countOf(r, 'e-consult')).toBe(0)
-  })
-
-  it('answers a consult itself under --retry-after, with the defaults, on the record as unattended', async () => {
-    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      retryAfterMs: 60_000,
-      outcomes: {
-        'e-review': [
-          { facts: { review: { verdict: 'fail' } } },
-          { facts: { review: { verdict: 'pass' } } },
-        ],
-        'e-fix': { facts: { review: { gated: 1 } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-
-    const running = r.scheduler.run()
-    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the consult')
-    await r.advance(59_999)
-    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
-    await r.advance(1)
-    const report = await running
-
-    expect(report.statuses).toEqual({ a: 'done' })
-    expect(answersOf(r)).toEqual([{ effect_id: 'e-consult', answer: 'defaults', unattended: true }])
-    const recorded = r.calls.find((call) => call.effect === 'e-record-decision')
-    expect(recorded?.context.human).toMatchObject({ answer: 'defaults', unattended: true })
+    // The red gate went to a fixer, not to the review: a review of code that
+    // does not build is a review that has to happen again.
+    expect(orderOf(r, ['e-gate', 'e-fix', 'e-review:review'])).toEqual([
+      'e-gate',
+      'e-fix',
+      'e-gate',
+      'e-review:review',
+    ])
     expectDrained(r)
   })
 
-  it('waits for a person on a consult when no --retry-after was given', async () => {
+  it('reviews again after a red verify sends the tree back through a fix', async () => {
+    const r = rig(reviewedWorkflow(), {
+      outcomes: { ...APPROVED, 'e-verify': [exited(2), exited(0)] },
+    })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    // The fixer changed code the review had already approved, so the review
+    // reads it again before anything merges.
+    expect(orderOf(r, ['e-gate', 'e-review:review', 'e-verify', 'e-fix'])).toEqual([
+      'e-gate',
+      'e-review:review',
+      'e-verify',
+      'e-fix',
+      'e-gate',
+      'e-review:review',
+      'e-verify',
+    ])
+    expectDrained(r)
+  })
+
+  it('passes the review when the node runs no review chore', async () => {
     const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': [
-          { facts: { review: { verdict: 'fail' } } },
-          { facts: { review: { verdict: 'pass' } } },
-        ],
-        'e-fix': { facts: { review: { gated: 1 } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
+      outcomes: { 'e-gate': exited(0), 'e-verify': exited(0) },
+    })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    // The implementer is the only turn, and nobody was asked anything.
+    expect(r.adapter.spawned).toHaveLength(1)
+    expect(countOf(r, 'e-review')).toBe(1)
+    expect(countOf(r, 'e-unapproved')).toBe(0)
+    expect(choresOf(r, 'a')).toEqual([])
+    expectDrained(r)
+  })
+
+  it('runs the polish chores only once the review approved, and gates what they leave', async () => {
+    const r = rig(reviewedWorkflow(['review', 'deslop']), { outcomes: APPROVED })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    expect(orderOf(r, ['e-gate', 'e-review:review', 'e-chores:deslop', 'e-verify'])).toEqual([
+      'e-gate',
+      'e-review:review',
+      'e-chores:deslop',
+      'e-verify',
+    ])
+    // The implementer, the review and the polish pass: three turns.
+    expect(r.adapter.spawned).toHaveLength(3)
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'review', status: 'ran', duration_ms: expect.any(Number) },
+      { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
+    ])
+    expectDrained(r)
+  })
+
+  it('neither polishes nor verifies a phase whose review did not approve', async () => {
+    const r = rig(reviewedWorkflow(['review', 'deslop']), {
+      outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
+    })
+
+    expect((await runAnsweringStop(r, 'a')).statuses).toEqual({ a: 'failed' })
+    // A comment pass over code the review is about to send back is wasted.
+    expect(countOf(r, 'e-chores')).toBe(0)
+    expect(countOf(r, 'e-verify')).toBe(0)
+    expect(r.adapter.spawned).toHaveLength(2)
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'review', status: 'failed', duration_ms: expect.any(Number) },
+    ])
+    expectDrained(r)
+  })
+
+  it('asks when the review does not approve: continue reviews again, stop fails the phase', async () => {
+    const r = rig(reviewedWorkflow(), {
+      outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
     })
 
     const running = r.scheduler.run()
-    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the consult')
-    await r.advance(86_400_000)
-    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
-    expect(answersOf(r)).toEqual([])
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first unapproved review')
+    const asked = r.journal.events('run-1').filter((event) => event.type === 'human_question')
+    expect(asked.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ effect_id: 'e-unapproved', kind: 'choice', choices: ['continue', 'stop'] }),
+    ])
 
-    r.scheduler.answer('a', { human: { answer: 'defaults' } })
-    await running
+    r.scheduler.answer('a', { human: { answer: 'continue' } })
+    // Waited on by review count rather than by status: answering does not move
+    // the status synchronously, so `awaiting_human` would match the park the
+    // node was just told to leave.
+    await until(() => countOf(r, 'e-review:review') === 2, 'the second review')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second unapproved review')
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(countOf(r, 'e-unapproved')).toBe(2)
+    expect(report.failures['a']).toContain('via "t-review-stop"')
+    // An unapproved review is not a red gate: it costs no fix round.
+    expect(countOf(r, 'e-fix')).toBe(0)
+    // Both reviews continue the implementer's session, so the second picks the
+    // argument up where the first left it.
+    expect(sessionsOf(r, 'a').slice(1)).toEqual([
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
+      { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
+    ])
+    expectDrained(r)
+  })
+
+  it('answers the unapproved question with stop when nobody is there', async () => {
+    const r = rig(reviewedWorkflow(), {
+      retryAfterMs: 60_000,
+      outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the unapproved review')
+    await r.advance(60_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(countOf(r, 'e-review:review')).toBe(1)
+    expect(answersOf(r)).toEqual([{ effect_id: 'e-unapproved', answer: 'stop', unattended: true }])
+  })
+
+  /**
+   * `on_failure: continue` is every chore's default, and on a review it would
+   * merge a phase nobody approved. A review turn that broke is a review that
+   * did not approve, so it goes to the operator like any other.
+   */
+  it('reads a review turn that broke as unapproved, rather than failing the phase', async () => {
+    const r = rig(reviewedWorkflow(), {
+      outcomes: APPROVED,
+      // The implementer, then the review — refused twice, because a turn that
+      // carried a resume token gets §15.4's one cold retry before it is
+      // allowed to be a failure.
+      spawns: ['ok', 'fatal', 'fatal'],
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the unapproved review')
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question.choices).toEqual(['continue', 'stop'])
+
+    r.scheduler.answer('a', { human: { answer: 'continue' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'review', status: 'failed', duration_ms: expect.any(Number) },
+      { chore: 'review', status: 'ran', duration_ms: expect.any(Number) },
+    ])
+    expectDrained(r)
+  })
+
+  /**
+   * The one chore a capacity refusal does not skip. Skipping is right for a
+   * polish pass, which a phase can merge without; skipping a review merges a
+   * phase nobody reviewed. So the refusal re-drives the node, as it would for
+   * any other turn the phase needs.
+   */
+  it('re-drives the phase rather than skip a review the harness had no capacity for', async () => {
+    const r = rig(reviewedWorkflow(), {
+      outcomes: APPROVED,
+      spawns: ['ok', 'rate_limit'],
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'waiting_on_capacity', 'the refusal')
+    await r.advance(5_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(countOf(r, 'e-implement')).toBe(2)
+    expect(choresOf(r, 'a')).toEqual([
+      { chore: 'review', status: 'ran', duration_ms: expect.any(Number) },
+    ])
     expectDrained(r)
   })
 
   it('grants the budget again on continue, and fails the phase on stop', async () => {
     const r = rig(standardWorkflow([node('a', [], { gates: ['unit'], max_fix_rounds: 1 })]), {
-      outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
+      outcomes: { 'e-gate': exited(2) },
     })
 
     const running = r.scheduler.run()
@@ -1985,9 +2108,8 @@ describe('§16 the review loop', () => {
     expect(countOf(r, 'e-fix')).toBe(1)
 
     r.scheduler.answer('a', { human: { answer: 'continue' } })
-    // Waited on by fixer count rather than by status: answering does not move
-    // the status synchronously, so `awaiting_human` would match the park the
-    // node was just told to leave.
+    // Waited on by fixer count rather than by status, for the same reason as
+    // the unapproved review above.
     await until(() => countOf(r, 'e-fix') === 2, 'the granted round')
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second exhaustion')
     expect(countOf(r, 'e-grant')).toBe(1)
@@ -2006,7 +2128,7 @@ describe('§16 the review loop', () => {
   it('answers the exhausted question with stop when nobody is there', async () => {
     const r = rig(standardWorkflow([node('a', [], { gates: ['unit'], max_fix_rounds: 1 })]), {
       retryAfterMs: 60_000,
-      outcomes: { 'e-review': { facts: { review: { verdict: 'fail' } } } },
+      outcomes: { 'e-gate': exited(2) },
     })
 
     const running = r.scheduler.run()
@@ -2017,138 +2139,6 @@ describe('§16 the review loop', () => {
     expect(report.statuses).toEqual({ a: 'failed' })
     expect(countOf(r, 'e-grant')).toBe(0)
     expect(answersOf(r)).toEqual([{ effect_id: 'e-exhausted', answer: 'stop', unattended: true }])
-  })
-
-  /**
-   * A lane that is a real repository, so a reviewer turn can be caught moving
-   * it: one commit carrying the brief, on both slots the rig hands out.
-   */
-  const repository = (r: Rig): void => {
-    for (const slot of ['run-1-lane-1', 'run-1-lane-2']) {
-      const cwd = join(r.laneRoot, slot)
-      mkdirSync(cwd, { recursive: true })
-      writeFileSync(join(cwd, 'plan.md'), '## a\n\nAdd the Folder model.\n')
-      const run = (...args: string[]): void => {
-        execFileSync('git', args, { cwd, stdio: 'ignore' })
-      }
-      run('init', '-q', '-b', 'main')
-      run('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', 'plan.md')
-      run('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'seed')
-    }
-  }
-
-  /**
-   * `until`, on the wall clock. The lane check runs real `git` subprocesses,
-   * which take longer than the event-loop turns `until` counts.
-   */
-  const untilGit = async (read: () => boolean, label: string): Promise<void> => {
-    const deadline = Date.now() + 10_000
-    while (!read()) {
-      if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
-      await new Promise((resolve) => setTimeout(resolve, 5))
-    }
-  }
-
-  /** A reviewer that edits a tracked file during its turn — what a review must never do. */
-  const editingReviewer = (r: Rig) => (call: Call): void => {
-    if (call.effect !== 'e-review') return
-    for (const slot of ['run-1-lane-1', 'run-1-lane-2']) {
-      writeFileSync(join(r.laneRoot, slot, 'plan.md'), '## a\n\nRewritten by the reviewer.\n')
-    }
-  }
-
-  it('stops the loop and asks when the reviewer edits the lane, and fails on stop', async () => {
-    let r: Rig | undefined
-    r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      tap: (call) => editingReviewer(r as Rig)(call),
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-    repository(r)
-
-    const running = r.scheduler.run()
-    await untilGit(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the edit question')
-    const asked = r.journal.events('run-1').filter((event) => event.type === 'human_question')
-    expect(asked.at(-1)?.payload).toMatchObject({
-      effect_id: 'reviewer-edit:a:1',
-      kind: 'choice',
-      choices: ['keep', 'stop'],
-    })
-    // Nothing downstream of the review ran on the edited tree.
-    expect(countOf(r, 'e-gate')).toBe(0)
-
-    r.scheduler.answer('a', { human: { answer: 'stop' } })
-    const report = await running
-
-    expect(report.statuses).toEqual({ a: 'failed' })
-    expect(report.failures['a']).toContain('reviewer edited lane')
-    expectDrained(r)
-  })
-
-  it('carries on with the reviewer’s verdict when the operator keeps the edits', async () => {
-    let r: Rig | undefined
-    r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      tap: (call) => editingReviewer(r as Rig)(call),
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-    repository(r)
-
-    const running = r.scheduler.run()
-    await untilGit(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the edit question')
-    r.scheduler.answer('a', { human: { answer: 'keep' } })
-
-    expect((await running).statuses).toEqual({ a: 'done' })
-    expectDrained(r)
-  })
-
-  it('does not stop a reviewer that left the lane as it found it', async () => {
-    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-    repository(r)
-
-    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
-    expect(r.journal.events('run-1').some((event) => event.type === 'human_question')).toBe(false)
-  })
-
-  it('runs an unstaffed review on defaults.reviewer_model, not the phase’s model', async () => {
-    const base = standardWorkflow([node('a', [], { gates: ['unit'] })])
-    const workflow = WorkflowSchema.parse({
-      ...base,
-      defaults: { ...base.defaults, reviewer_model: 'top-tier' },
-    })
-    const r = rig(workflow, {
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-
-    await r.scheduler.run()
-
-    expect(r.adapter.spawned.map((task) => task.model)).toEqual(['opus', 'top-tier'])
-  })
-
-  it('falls back to the phase’s model when neither the workflow nor the harness names one', async () => {
-    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
-
-    await r.scheduler.run()
-
-    // The mock harness declares no `reviewModel`, so nothing outranks the node.
-    expect(r.adapter.spawned.map((task) => task.model)).toEqual(['opus', 'opus'])
   })
 })
 
@@ -2172,12 +2162,7 @@ function plant(r: Rig, body: string): void {
 
 describe('prompt composition', () => {
   it('hands each role a composed prompt rather than the bare reference', async () => {
-    const r = rig(standardWorkflow([node('a', [], { gates: ['unit'] })]), {
-      outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
-      },
-    })
+    const r = rig(reviewedWorkflow(), { outcomes: APPROVED })
     plant(r, '## a\n\nAdd the Folder model and its migration.\n')
 
     const report = await r.scheduler.run()
@@ -2187,7 +2172,9 @@ describe('prompt composition', () => {
     expect(prompts).toHaveLength(2)
     expect(prompts[0]).toContain('You are implementing a')
     expect(prompts[0]).toContain('Add the Folder model and its migration.')
-    expect(prompts[1]).toContain('You are the reviewer of a')
+    // The review chore: the loop's rules, and the line its verdict is read from.
+    expect(prompts[1]).toContain('This turn is the phase’s code review')
+    expect(prompts[1]).toContain('VERDICT: pass')
     expect(prompts.every((prompt) => prompt !== 'plan.md#a')).toBe(true)
     expectDrained(r)
   })
@@ -2656,16 +2643,15 @@ describe('session slots', () => {
     ])
   })
 
-  it('keeps the reviewer out of the session it is reviewing', async () => {
+  it('keeps a turn on another slot out of the implementer’s session', async () => {
     const r = rig(makeWorkflow([node('a', [], { pipeline: 'slots' })]))
     await r.scheduler.run()
 
-    const [work, review, rework] = r.adapter.spawned
+    const [work, audit, rework] = r.adapter.spawned
     expect(work?.resumeSessionId).toBeUndefined()
-    // A separate slot: the reviewer opens its own session rather than
-    // inheriting the implementer's and grading its own work from inside it.
-    expect(review?.resumeSessionId).toBeUndefined()
-    // ...and the implementer picks its own session back up, not the reviewer's.
+    // A separate slot opens its own session rather than inheriting `main`'s.
+    expect(audit?.resumeSessionId).toBeUndefined()
+    // ...and the implementer picks its own session back up, not the audit's.
     expect(rework?.resumeSessionId).toBe('claude-code-session-1')
     expectDrained(r)
   })
@@ -2756,40 +2742,37 @@ const choresOf = (rig_: Rig, nodeId: string): unknown[] =>
     .filter((event) => event.type === 'chore_result' && event.nodeId === nodeId)
     .map((event) => event.payload)
 
-/** A one-node standard-phase run with a `before_gate` and an `after_pr` chore. */
+/** A one-node standard-phase run with a review, a polish and an `after_pr` chore. */
 const prChoreRig = (prFacts: Readonly<Record<string, string | number | boolean>> | undefined) =>
   rig(
-    makeWorkflow([node('a', [], { chores: ['deslop', 'canvas'] })], {
-      chores: {
-        deslop: { prompt: 'Rewrite the comments.' },
-        canvas: { prompt: 'Post a review canvas.', skill: 'pr-review-canvas', when: 'after_pr' },
-      },
-      pipelines: { 'standard-phase': STANDARD_PHASE },
-      pipeline: 'standard-phase',
+    standardWorkflow([node('a', [], { gates: ['unit'], chores: ['review', 'deslop', 'canvas'] })], {
+      review: REVIEW_CHORE,
+      deslop: DESLOP_CHORE,
+      canvas: { prompt: 'Post a review canvas.', skill: 'pr-review-canvas', when: 'after_pr' },
     }),
     {
       outcomes: {
-        'e-review': { facts: { review: { verdict: 'pass' } } },
-        'e-gate': { facts: { gate: { exit_code: 0 } } },
+        ...APPROVED,
         ...(prFacts === undefined ? {} : { 'e-pr': { facts: { pr: prFacts } } }),
       },
     },
   )
 
 describe('after_pr chores', () => {
-  it('runs after the PR opens, not before the gate', async () => {
+  it('runs after the PR opens, not with the polish chores', async () => {
     const r = prChoreRig({ opened: true, url: 'https://github.com/acme/app/pull/7', number: 7 })
     const report = await r.scheduler.run()
 
     expect(report.statuses).toEqual({ a: 'done' })
     // The polish pass runs only `deslop`; `canvas` waits for the PR.
     expect(choresOf(r, 'a')).toEqual([
+      { chore: 'review', status: 'ran', duration_ms: expect.any(Number) },
       { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
       { chore: 'canvas', status: 'ran', duration_ms: expect.any(Number) },
     ])
     const verbs = r.calls.map((call) => call.verb)
     expect(verbs.lastIndexOf('run_chore')).toBeGreaterThan(verbs.indexOf('open_pr'))
-    // Implementer, reviewer, deslop, canvas.
+    // Implementer, review, deslop, canvas.
     expect(r.adapter.spawned).toHaveLength(4)
     expectDrained(r)
   })
@@ -2800,6 +2783,7 @@ describe('after_pr chores', () => {
 
     expect(report.statuses).toEqual({ a: 'done' })
     expect(choresOf(r, 'a')).toEqual([
+      { chore: 'review', status: 'ran', duration_ms: expect.any(Number) },
       { chore: 'deslop', status: 'ran', duration_ms: expect.any(Number) },
       { chore: 'canvas', status: 'skipped', duration_ms: expect.any(Number) },
     ])
@@ -3068,13 +3052,11 @@ describe('a session the vendor has forgotten (§15.4)', () => {
 
 describe('crew', () => {
   const CREW = {
-    tier1: { role: 'implementer', tier: 1, model: 'cheap' },
-    'tier2-1': { role: 'implementer', tier: 2, model: 'medium' },
-    'tier2-2': { role: 'implementer', tier: 2, model: 'medium' },
-    tier4: { role: 'implementer', tier: 4, model: 'dear' },
+    tier1: { tier: 1, model: 'cheap' },
+    'tier2-1': { tier: 2, model: 'medium' },
+    'tier2-2': { tier: 2, model: 'medium' },
+    tier4: { tier: 4, model: 'dear' },
   } as const
-
-  const CHECKER = { role: 'reviewer', tier: 4, model: 'checker' } as const
 
   /** Every spawn's model, in the order the harness was asked for them. */
   const modelsOf = (r: Rig): string[] => r.adapter.spawned.map((task) => task.model)
@@ -3159,108 +3141,18 @@ describe('crew', () => {
     expectDrained(r)
   })
 
-  /**
-   * `SLOTS` spawns implementer → reviewer → implementer, so the middle turn is
-   * the only one that should differ — and it should differ because a *different
-   * member* took it, not because a tier was borrowed.
-   */
-  it('sends the review to the reviewer and keeps the fix with the author', async () => {
+  it('runs every turn of a phase at its member’s own desk', async () => {
     const r = rig(
-      makeWorkflow([node('a', [], { crew: 'tier1', pipeline: 'slots' })], {
-        crew: { tier1: CREW.tier1, checker: CHECKER },
-      }),
-    )
-    await r.scheduler.run()
-
-    expect(modelsOf(r)).toEqual(['cheap', 'checker', 'cheap'])
-    const roles = crewEvents(r).map((event) => event['role'] ?? 'implementer')
-    expect(roles).toEqual(['implementer', 'reviewer'])
-    expectDrained(r)
-  })
-
-  it('reviews on the node’s own model when the roster staffs no reviewer', async () => {
-    // Every workflow written before reviewers were members. The review is still
-    // its own session; it simply has nobody of its own to run as.
-    const r = rig(
-      makeWorkflow([node('a', [], { crew: 'tier4', pipeline: 'slots' })], {
-        crew: { tier4: CREW.tier4 },
-      }),
-    )
-    await r.scheduler.run()
-
-    expect(modelsOf(r)).toEqual(['dear', 'dear', 'dear'])
-    expectDrained(r)
-  })
-
-  /**
-   * One reviewer, two phases running at once. The reviewer cannot read two
-   * diffs in one worktree, so the second review queues — and the run still
-   * completes, which is the half that would break if the wait could deadlock.
-   */
-  it('queues two phases behind a single reviewer without stalling', async () => {
-    const r = rig(
-      makeWorkflow(
-        [
-          node('a', [], { crew: 'tier2-1', pipeline: 'slots' }),
-          node('b', [], { crew: 'tier2-2', pipeline: 'slots' }),
-        ],
-        {
-          lanes: 2,
-          crew: { 'tier2-1': CREW['tier2-1'], 'tier2-2': CREW['tier2-2'], checker: CHECKER },
-        },
-      ),
-    )
-    const report = await r.scheduler.run()
-
-    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
-    expect(modelsOf(r).filter((model) => model === 'checker')).toHaveLength(2)
-    expectDrained(r)
-  })
-
-  /**
-   * The reviewer reads where the work is, uncommitted changes and all. Giving it
-   * a checkout of its own would mean reviewing a committed snapshot — strictly
-   * less than what is in the tree, and too late to fix anything before the
-   * commit that recorded it.
-   */
-  it('reviews in the implementer’s own lane, not a tree of its own', async () => {
-    const r = rig(
-      makeWorkflow([node('a', [], { crew: 'tier2-1', pipeline: 'slots' })], {
-        crew: { 'tier2-1': CREW['tier2-1'], checker: CHECKER },
+      makeWorkflow([node('a', [], { crew: 'tier2-1', pipeline: 'reuse' })], {
+        crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 },
       }),
     )
     await r.scheduler.run()
 
     const cwds = new Set(r.adapter.spawned.map((task) => task.cwd))
     expect(cwds.size).toBe(1)
-    // And it is the member's desk, named for them rather than numbered.
+    // Named for the member rather than numbered, so their session's paths hold.
     expect([...cwds][0]).toContain('tier2-1')
-    expectDrained(r)
-  })
-
-  it('gives desks to implementers only — a reviewer has no worktree', async () => {
-    const r = rig(
-      makeWorkflow([node('a', [], { crew: 'tier2-1', pipeline: 'slots' })], {
-        crew: { 'tier2-1': CREW['tier2-1'], checker: CHECKER },
-      }),
-    )
-    await r.scheduler.run()
-
-    expect(r.adapter.spawned.every((task) => !task.cwd.includes('checker'))).toBe(true)
-    expectDrained(r)
-  })
-
-  it('never lets the phase’s own author review it', async () => {
-    const r = rig(
-      makeWorkflow([node('a', [], { crew: 'tier4', pipeline: 'slots' })], {
-        crew: { tier4: CREW.tier4, checker: CHECKER },
-      }),
-    )
-    await r.scheduler.run()
-
-    const reviewTurns = crewEvents(r).filter((event) => event['role'] === 'reviewer')
-    expect(reviewTurns.map((event) => event['member'])).toEqual(['checker'])
-    expect(modelsOf(r)[1]).toBe('checker')
     expectDrained(r)
   })
 
@@ -3483,30 +3375,6 @@ describe('crew', () => {
   })
 
   /**
-   * Warmth is per slot, and a reviewer's session is filed under the reviewer.
-   * `SLOTS` spawns the implementer on `main` and the reviewer on `review`, so
-   * the checker being warm on `review` must not make it a candidate for a
-   * phase — the two roles are disjoint sets, and a staffing shortcut is exactly
-   * how that gets breached one layer down.
-   */
-  it('never lets a warm reviewer take a phase', async () => {
-    const r = rig(
-      makeWorkflow(
-        [
-          node('a', [], { crew: 'tier1', pipeline: 'slots' }),
-          node('b', ['a'], { crew: 'tier1', pipeline: 'slots' }),
-        ],
-        { crew: { tier1: CREW.tier1, checker: CHECKER }, lanes: 2 },
-      ),
-    )
-    await r.scheduler.run()
-
-    const phases = crewEvents(r).filter((event) => event['role'] !== 'reviewer')
-    expect(phases.map((event) => event['member'])).toEqual(['tier1', 'tier1'])
-    expectDrained(r)
-  })
-
-  /**
    * A failed phase's context is the context that failed. Carrying it forward
    * carries whatever wrong turn it took, and a wrong conclusion costs more to
    * inherit than a repository costs to re-read.
@@ -3640,8 +3508,8 @@ describe('the fix budget on a second attempt', () => {
 
 describe('a failed phase the operator can retry', () => {
   const ROSTER = {
-    tier1: { role: 'implementer', tier: 1, model: 'cheap' },
-    tier4: { role: 'implementer', tier: 4, model: 'dear' },
+    tier1: { tier: 1, model: 'cheap' },
+    tier4: { tier: 4, model: 'dear' },
   } as const
 
   /** Every spawn's model, in the order the harness was asked for them. */

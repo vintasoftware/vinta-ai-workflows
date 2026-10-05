@@ -26,7 +26,7 @@
     },
     "plan_context_refs": {
       "default": [],
-      "description": "Sections of the plan that bound every phase rather than any one of them — its Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the same resolver and handed to the implementer and the reviewer verbatim, marked as plan-level. Empty — the default — means the prompts carry the phase brief alone.",
+      "description": "Sections of the plan that bound every phase rather than any one of them — its Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the same resolver and handed to the implementer verbatim, marked as plan-level. Empty — the default — means the prompts carry the phase brief alone.",
       "type": "array",
       "items": {
         "type": "string",
@@ -398,11 +398,6 @@
             "pattern": "^[a-z0-9][a-z0-9-]*$"
           }
         },
-        "reviewer_model": {
-          "description": "The model review turns run on when no reviewer is staffed on the roster (§16.4). A review is the step standing between a plan and its merge, so it is not tied to the tier the phase was written at. Absent takes the harness’s own top tier where it names one, and the node’s model where it does not.",
-          "type": "string",
-          "minLength": 1
-        },
         "model_fallbacks": {
           "default": {},
           "description": "Model id → the model to run instead once the first is out of quota (§6.1). A `quota` refusal on a model listed here does not park the harness: the spawn is retried at once on the fallback, and every later spawn of that model on the same harness goes straight to the fallback until the vendor’s stated reset, or for the rest of the run when it stated none. Chains are followed; a fallback refused for quota too means the account is out, not the model, and the harness parks as it would have.",
@@ -441,15 +436,6 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "role": {
-            "default": "implementer",
-            "description": "Implementers take phases; reviewers read them. No member does both, which is what makes self-review unrepresentable rather than merely unlikely.",
-            "type": "string",
-            "enum": [
-              "implementer",
-              "reviewer"
-            ]
-          },
           "tier": {
             "type": "integer",
             "minimum": 1,
@@ -737,17 +723,18 @@
             "minLength": 1
           },
           "when": {
-            "default": "before_gate",
-            "description": "When the chore runs. `before_gate` — the default — runs it between a passing review and the gates, on the diff that is about to merge. `after_pr` runs it once the phase is merged, pushed and its pull request is open, for work about the PR rather than the diff (a review canvas, a PR comment). An `after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be `on_failure: fail`.",
+            "default": "after_review",
+            "description": "When the chore runs. `review` runs it once the phase’s gates are green, as the phase’s code review: the turn ends with a `VERDICT: pass` or `VERDICT: fail` line, and the phase moves on only when every review chore passed. `after_review` — the default — runs it once the review approved, before the gates run again on the final tree. `after_pr` runs it once the phase is merged, pushed and its pull request is open, for work about the PR rather than the diff (a review canvas, a PR comment). An `after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be `on_failure: fail`.",
             "type": "string",
             "enum": [
-              "before_gate",
+              "review",
+              "after_review",
               "after_pr"
             ]
           },
           "on_failure": {
             "default": "continue",
-            "description": "`continue` — the default — journals a failed chore and moves on to the gates. A chore is polish, and losing an implemented phase to one that timed out is the worse trade. `fail` is for a chore whose output the phase is not correct without.",
+            "description": "`continue` — the default — journals a failed chore and moves on. A chore is polish, and losing an implemented phase to one that timed out is the worse trade. `fail` is for a chore whose output the phase is not correct without. A `review` chore ignores it: a review that did not approve, for any reason, is put to the operator.",
             "type": "string",
             "enum": [
               "continue",
@@ -853,14 +840,13 @@
             "type": "string"
           },
           "crew": {
-            "description": "The implementer this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free implementer at that tier or above, never below. Its reviewer is not named here — it is the cheapest reviewer on the roster who is qualified for this phase, and it is never this member.",
+            "description": "The member this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free member at that tier or above, never below.",
             "type": "string",
             "minLength": 1,
             "pattern": "^[a-z0-9][a-z0-9-]*$"
           },
           "max_fix_rounds": {
-            "default": 4,
-            "description": "Fix rounds a phase may spend before the operator is asked whether to keep going (§16). A round is a fixer turn — one answer to a review that returned blockers or a gate that went red. It is measured in *rounds* rather than findings, so a first review raising four legitimate blockers spends one. When it runs out the shipped pipeline asks rather than fails: `continue` grants the same budget again, `stop` fails the phase and hands it to `--on-failure`.",
+            "description": "Fix rounds a phase may spend on red gates, and unsuccessful iterations each review turn may run, before the operator is asked whether to keep going (§16). Absent — the default — sets no limit: the fixer works until the gates are green and the review loop until the reviewer approves. A fix round is a fixer turn; a review iteration is one pass of the review loop that returned blockers. When a set budget runs out the shipped pipeline asks rather than fails: `continue` grants the same budget again, `stop` fails the phase and hands it to `--on-failure`.",
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
@@ -944,7 +930,6 @@
                           "write_tracking",
                           "await_human",
                           "notify",
-                          "record_decision",
                           "grant_fix_rounds"
                         ],
                         "description": "Which catalog verb this effect invokes."
@@ -1011,7 +996,6 @@
                           "write_tracking",
                           "await_human",
                           "notify",
-                          "record_decision",
                           "grant_fix_rounds"
                         ],
                         "description": "Which catalog verb this effect invokes."
@@ -1134,7 +1118,6 @@
                           "write_tracking",
                           "await_human",
                           "notify",
-                          "record_decision",
                           "grant_fix_rounds"
                         ],
                         "description": "Which catalog verb this effect invokes."

@@ -6,7 +6,7 @@
  * together: the brief the implementer gets, the prompts it is wrapped in, the
  * gates it has to pass, and who does the work. This puts them on one panel,
  * every piece of it commentable, so a remark lands on the exact thing it is
- * about — "the reviewer prompt does not mention the flag" — instead of on the
+ * about — "the fixer prompt does not mention the flag" — instead of on the
  * phase in general.
  */
 import {
@@ -20,7 +20,7 @@ import {
 import { type ReactNode, useEffect, useState } from 'react'
 import { Button } from 'vinta-design-system/ui/button'
 import type { PlanViewResponse } from '../../src/daemon/schemas.ts'
-import type { Anchor, PlanReview, PromptRole } from '../../src/review/document.ts'
+import { type Anchor, type PlanReview, PROMPT_ROLES, type PromptRole } from '../../src/review/document.ts'
 import { choresFor } from '../../src/chores.ts'
 import { isJudgeGate, type Gate, type Node, type Workflow } from '../../src/types.ts'
 import { Chip } from './Chip.tsx'
@@ -157,7 +157,7 @@ export function PhaseInspector({
         onChange={setTab}
         options={[
           { value: 'brief', label: 'Brief' },
-          ...(['implementer', 'reviewer', 'fixer'] as const).map((role) => ({
+          ...PROMPT_ROLES.map((role) => ({
             value: role,
             label: ROLE_LABELS[role].replace(' prompt', ''),
             count: count(promptAnchor(role)),
@@ -191,7 +191,7 @@ export function PhaseInspector({
           </Quotable>
         ))}
 
-      {(tab === 'implementer' || tab === 'reviewer' || tab === 'fixer') && (
+      {(tab === 'implementer' || tab === 'fixer') && (
         <PromptBody
           key={tab}
           text={materials?.prompts[tab] ?? null}
@@ -239,7 +239,7 @@ export function PhaseInspector({
   )
 }
 
-/** Wave, who implements, who reviews — one line under the title. */
+/** Wave, who implements, how it is reviewed — one line under the title. */
 function Staffing({
   workflow,
   node,
@@ -252,7 +252,7 @@ function Staffing({
   const member = node.crew === undefined ? undefined : workflow.crew[node.crew]
   const model = member?.model ?? node.model ?? workflow.defaults.model
   const harness = member?.harness ?? node.harness ?? workflow.defaults.harness ?? 'claude-code'
-  const reviewer = expectedReviewer(workflow, member?.tier ?? null)
+  const reviews = choresFor(workflow, node, 'review').length
   return (
     <span className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs" data-staffing>
       {wave !== null && <span>wave {wave}</span>}
@@ -265,26 +265,19 @@ function Staffing({
         </span>
       </span>
       <span>
-        reviews <span className="text-foreground">{reviewer}</span>
+        reviewed by{' '}
+        <span className="text-foreground">
+          {reviews === 0 ? 'nobody — no review chore' : 'its own review loop'}
+        </span>
       </span>
       <span>{harness}</span>
-      <span>≤ {node.max_fix_rounds} fix rounds</span>
+      <span>
+        {node.max_fix_rounds === undefined
+          ? 'no fix-round limit'
+          : `≤ ${node.max_fix_rounds} fix rounds`}
+      </span>
     </span>
   )
-}
-
-/**
- * Which reviewer a run would most likely give this phase: the cheapest one at
- * or above its tier, which is the scheduler's rule when nobody is warm. Said
- * as an expectation, because who is free at the time is a run's to know.
- */
-function expectedReviewer(workflow: Workflow, tier: number | null): string {
-  const eligible = Object.entries(workflow.crew)
-    .filter(([, member]) => member.role === 'reviewer' && (tier === null || member.tier >= tier))
-    .sort(([, a], [, b]) => a.tier - b.tier)
-  const first = eligible[0]
-  if (first !== undefined) return `${first[0]} · ${first[1].model}`
-  return workflow.defaults.reviewer_model ?? workflow.defaults.model
 }
 
 /**
@@ -312,12 +305,31 @@ function Pipeline({
       </p>
     )
   }
+  const reviews = choresFor(workflow, node, 'review').length
+  const polish = choresFor(workflow, node, 'after_review').length
+  const budget = node.max_fix_rounds
+  const gateList = gates === 0 ? 'none' : node.gates.join(', ')
+  // `chores` counts every timing; the strip splits them by where they run.
   const steps: { id: string; label: string; detail: string }[] = [
     { id: 'implement', label: 'Implement', detail: 'one agent, its own lane' },
-    { id: 'review', label: 'Review', detail: `fix loop ≤ ${node.max_fix_rounds}` },
-    { id: 'polish', label: 'Polish', detail: chores === 0 ? 'no chores' : `${chores} chore${chores === 1 ? '' : 's'}` },
-    { id: 'gate', label: 'Gates', detail: gates === 0 ? 'none' : node.gates.join(', ') },
-    { id: 'integrate', label: 'Integrate', detail: 'merge · push · PR' },
+    {
+      id: 'gate',
+      label: 'Gates',
+      detail: budget === undefined ? `${gateList} · fix until green` : `${gateList} · fix ≤ ${budget}`,
+    },
+    {
+      id: 'review',
+      label: 'Review',
+      detail:
+        reviews === 0
+          ? 'no review chore'
+          : budget === undefined
+            ? 'loop until approved'
+            : `loop ≤ ${budget} passes`,
+    },
+    { id: 'polish', label: 'Polish', detail: polish === 0 ? 'no chores' : `${polish} chore${polish === 1 ? '' : 's'}` },
+    { id: 'verify', label: 'Verify', detail: gates === 0 ? 'none' : 'the gates, on the final tree' },
+    { id: 'integrate', label: 'Integrate', detail: `merge · push · PR${chores > reviews + polish ? ' · PR chores' : ''}` },
   ]
   return (
     <ol className="flex flex-wrap items-stretch gap-1.5" data-pipeline="standard-phase" aria-label="Phase pipeline">

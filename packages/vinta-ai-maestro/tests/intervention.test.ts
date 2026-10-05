@@ -52,8 +52,8 @@ const workflow = (overrides: Partial<Workflow> = {}): Workflow =>
     defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
     resources: { lane: { capacity: 2, kind: 'worktree' } },
     crew: {
-      junior: { role: 'implementer', tier: 1, model: 'haiku' },
-      senior: { role: 'implementer', tier: 3, model: 'opus' },
+      junior: { tier: 1, model: 'haiku' },
+      senior: { tier: 3, model: 'opus' },
     },
     gates: {
       unit: { cmd: 'pytest', timeout_s: 600, tuning: { allowed_flags: ['--reuse-db', '-n', 'auto'] } },

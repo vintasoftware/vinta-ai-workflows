@@ -147,7 +147,7 @@ To avoid maintaining the same shape twice, **zod in `src/types.ts` is the source
 Two graphs, deliberately separate:
 
 - **The plan graph** (`nodes` + `depends_on`) is a DAG — which phases exist and what each needs. This is what the live view renders and what users edit most.
-- **The phase pipeline** (`pipelines`) is a state machine — implement → review → fix → gate → integrate, with guards and side effects. This is what `vinta-state-machine-editor` edits.
+- **The phase pipeline** (`pipelines`) is a state machine — implement → gate → review → polish → verify → integrate, with a fix loop on red gates, guards and side effects. This is what `vinta-state-machine-editor` edits.
 
 Expressing parallel phase execution inside a single state machine would require parallel regions and gets awkward immediately; keeping them separate keeps each editor simple.
 
@@ -221,18 +221,17 @@ The editor's design says hosts inject the side-effect catalog and treat guards a
 
 | Effect | Params | Notes |
 |---|---|---|
-| `spawn_agent` | `role`, `prompt_template`, `harness?`, `model?` | `role` ∈ implementer, reviewer, fixer, chore, conflict-fixer |
+| `spawn_agent` | `role`, `prompt_template`, `harness?`, `model?`, `session?`, `verdict?` | `role` ∈ implementer, fixer, chore, conflict-fixer. `verdict: true` reads the turn's closing `VERDICT:` line into `review.verdict` (§16) |
 | `run_gate` | `gate` | Acquires the gate's resources first |
-| `run_chore` | `chore?`, `when?` | One agent turn per chore the node runs; no `chore` takes the node's own list, narrowed to the chores whose `when` matches (`before_gate` by default, or `after_pr`) |
+| `run_chore` | `chore?`, `when?` | One agent turn per chore the node runs; no `chore` takes the node's own list, narrowed to the chores whose `when` matches (`review`, `after_review` by default, or `after_pr`). With `when: review` it states `review.verdict` (§16) |
 | `git_branch` | `from` | `from` resolves via the dependency-derived base rule |
 | `git_merge` | `branch`, `strategy` | `--no-ff` for lane merges; never squash |
 | `git_push` | — | |
 | `open_pr` | `base`, `draft` | States `pr.opened`, plus `pr.url` / `pr.number` when it opened |
 | `write_tracking` | `scope` | `run` / `phase` / `wave` |
-| `await_human` | `question`, `kind`, `choices`, `context`, `unattended_answer` | Releases gate resources immediately; lane retention per §6 and O3. `unattended_answer` is the plan saying what the question means when nobody is there (§16.5) |
+| `await_human` | `question`, `kind`, `choices`, `context`, `unattended_answer` | Releases gate resources immediately; lane retention per §6 and O3. `unattended_answer` is the plan saying what the question means when nobody is there (§16.3) |
 | `notify` | `channel`, `text` | |
-| `record_decision` | — | Files the answer the node just resumed from in its review ledger (§16.3) |
-| `grant_fix_rounds` | — | Gives the node its `max_fix_rounds` budget again; the scheduler owns the counter (§16.5) |
+| `grant_fix_rounds` | — | Gives the node its `max_fix_rounds` budget again; the scheduler owns the counter (§16.3) |
 
 Guards are expressions over a small documented context: `review.verdict`, `gate.exit_code`, `human.answer`, `fix_rounds`, `node.*`, `run.*`. Evaluated by a tiny hand-written evaluator — **never `eval` or `new Function`**. A guard is author-supplied data in a tool running with the developer's full permissions; treating it as code turns "someone edited my plan" into arbitrary code execution. Safety is structural rather than a blocklist: the root identifier is allowlisted at parse time, every path step goes through `Object.hasOwn`, and the grammar has no call syntax at all, so `f(x)` is a parse error rather than a sandbox to escape.
 
@@ -241,18 +240,19 @@ Guards are expressions over a small documented context: `review.verdict`, `gate.
 The default `standard-phase` pipeline ships with the package:
 
 ```
-implement ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
-                       │                                     └─ exit≠0 ──▶ fix
-                       └─ verdict=fail ──▶ fix ──┬─ nothing gated ──▶ review
-                                                 └─ gated ──▶ consult ──▶ review
-review / gate ── guard: fix_rounds >= node.max_fix_rounds ──▶ exhausted
-exhausted ──┬─ continue (grant_fix_rounds) ──▶ fix
-            └─ stop ──▶ failed
+implement ──▶ gate ──┬─ exit=0 ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ verify ──┬─ exit=0 ──▶ integrate ──▶ done
+                     │                      └─ otherwise ──▶ unapproved             └─ exit≠0 ──▶ fix
+                     └─ exit≠0 ──▶ fix ──▶ gate
+gate / verify ── guard: max_fix_rounds set and fix_rounds >= it ──▶ exhausted
+exhausted  ──┬─ continue (grant_fix_rounds) ──▶ fix
+             └─ stop ──▶ failed
+unapproved ──┬─ continue ──▶ review
+             └─ stop ──▶ failed
 ```
 
-The review/fix loop in that diagram is §16's.
+Each step runs on what the step before it passed. The gates run first because they are cheap next to a review, and a review of code that does not build is wasted. `review` runs the phase's review chores (§16) once the gates are green. `polish` runs the `after_review` chores (§8) once the review approved. `verify` runs the gates again on the tree that merges, because the review loop and the polish both edit it.
 
-`polish` runs the phase's **chores** (§8). It sits between the passing review and the gate on purpose: a chore edits the tree, so anywhere after the gate merges a diff the gates never ran against, and anywhere before the review has the fixer rewriting what the chore just did. A chore declared `when: after_pr` is the exception. It runs at the end of `integrate`, after `open_pr`, because it is about the PR rather than the diff. It must not edit the tree, it is skipped when no PR opened, and it cannot be `on_failure: fail`, because the phase is already merged.
+`polish` sits where it does on purpose: a chore edits the tree, so anywhere after the last gate merges a diff the gates never ran against, and anywhere before the review has the review rewriting what the chore just did. A chore declared `when: after_pr` is the exception. It runs at the end of `integrate`, after `open_pr`, because it is about the PR rather than the diff. It must not edit the tree, it is skipped when no PR opened, and it cannot be `on_failure: fail`, because the phase is already merged.
 
 ### 5.3 Journal and on-disk layout
 
@@ -334,7 +334,7 @@ Only `fatal` — a missing binary, a broken workflow — fails the node. Every c
 **Resources are released before waiting — but only while the lane is still empty.** The rule splits on whether the node has produced anything yet:
 
 - **Refused at dispatch**, before any agent has run: release the lane and every gate slot, and go back to pending. Nothing is lost, and holding a lane here starves the pool to do no work — with a shared quota it deadlocks the whole run, every lane held by a node that cannot start. This is the case §6.1 was written for.
-- **Refused mid-pipeline**, when a reviewer or fixer spawn is turned away after the implementer has already worked: **the lane is pinned and the node waits in place**, releasing only its gate slots. The lane *is* the work. Releasing it discards a completed implementation and makes the re-dispatched node redo it, so a transient rate limit would cost hours of model time — a far worse outcome than an idle worktree.
+- **Refused mid-pipeline**, when a fixer or review spawn is turned away after the implementer has already worked: **the lane is pinned and the node waits in place**, releasing only its gate slots. The lane *is* the work. Releasing it discards a completed implementation and makes the re-dispatched node redo it, so a transient rate limit would cost hours of model time — a far worse outcome than an idle worktree.
 
 These do not conflict. The dispatch-time deadlock is caused by nodes that have done *nothing* holding lanes; a node mid-pipeline is not waiting to start, it is waiting to continue, and its work has to live somewhere until it does. A run whose in-flight nodes are all waiting on a quota window is stalled either way — pinning only decides whether it resumes or restarts.
 
@@ -500,7 +500,7 @@ Delivery is **once per pause**. Reminders for an unanswered gate are **off by de
 - **The questions live in the transcript, not the journal.** They are agent prose (§11). The `human_question` row carries a fixed sentence and an effect id. An `agent_question` transcript entry with that id carries the questions, and the node endpoint reads it back as `question.ask`.
 - **The node view renders them as a card to click.** Each option is a button with its consequence under it and the recommended one marked. The last choice is always **Other**, a text field for an answer no option covers. On a single-choice question it is exclusive, since the agent should get one answer and not an option with a sentence that may contradict it. The daemon applies the same rule when it decodes an answer. On a multi-choice question Other is one more box to tick. A single single-choice question answers on the click. Several questions are a wizard: one step per question, then a review step, then Send.
 - **The answer resumes the same session.** It is journalled as option indices plus the operator's own words. It reaches the agent as one message that restates each question with its answer, and is recorded in the transcript as the operator's. The effect that spawned the turn returns only once the agent ends a session without asking, so the pipeline's guards read the work the answer led to.
-- **An unattended run answers itself.** Under `--retry-after` it picks each question's recommended option after the interval, and the row is marked `unattended`, as a consult is.
+- **An unattended run answers itself.** Under `--retry-after` it picks each question's recommended option after the interval, and the row is marked `unattended`, as a plan question's `unattended_answer` is.
 - **A harness that cannot resume** has no way to deliver an answer. Its question stays in the transcript and the turn ends as it would have.
 
 **A paused node keeps its lane** and releases its gate resources immediately. This resolves O3: the human is being asked about work in progress *in that lane*, the diff and log views read from it, and a takeover attaches to it. Releasing it would destroy the thing the question is about. Idle disk is the cheapest resource in the system; the gate slot, which is the expensive one, is freed at once.
@@ -740,9 +740,9 @@ Nothing blocking. New questions will land here as implementation surfaces them.
 
 ## 15. Session reuse
 
-A node's pipeline spawns several agent turns — implement, review, fix, review again. Until now every one of them was a cold session: a new process, a new context window, and a prompt that re-sent the phase brief, the plan-level framing and the whole dependency closure from scratch. On the fix path that is paid twice more per round.
+A node's pipeline spawns several agent turns — implement, fix, the review, the polish chores. Until now every one of them was a cold session: a new process, a new context window, and a prompt that re-sent the phase brief, the plan-level framing and the whole dependency closure from scratch. On the fix path that is paid twice more per round.
 
-Session reuse makes the fixer **continue the implementer's own session**, and the reviewer **continue its own across rounds**. The prompt for a continued turn is then a delta — the findings, and what to do about them — because everything else is already in the session. The saving is a prompt-cache hit on a prefix that was previously rebuilt from nothing.
+Session reuse makes the fixer and the chores **continue the implementer's own session**. The prompt for a continued turn is then a delta — the red gate, or the chore's instruction — because everything else is already in the session. The saving is a prompt-cache hit on a prefix that was previously rebuilt from nothing.
 
 Almost none of this is new machinery. `AgentTask.resumeSessionId` and `capabilities.resume` are §7 as originally specified, and all four shipped adapters implement them. What was missing was a *policy*: nothing ever set the field except an operator detaching from a PTY takeover (§9). This section is that policy.
 
@@ -755,7 +755,7 @@ A node keeps a **session ledger**: a map from slot name to `{ harnessId, session
 - **absent** — a fresh session, always. This is today's behaviour, so every workflow written before this section keeps its exact meaning.
 - **`session: '<slot>'`** — continue that slot's session where the ledger entry is valid, and otherwise start fresh and record the new id under it.
 
-`standard-phase` therefore reads: `implement` and `fix` both carry `session: 'main'`; `review` carries `session: 'review'`. Two lines of pipeline data are the whole feature at the authoring layer.
+`standard-phase` therefore reads: `implement` and `fix` both carry `session: 'main'`, and a chore's `session` defaults to `main` too. Pipeline data is the whole feature at the authoring layer.
 
 **A fix round remains a `spawn_agent` with `role: 'fixer'`.** Counting keys off the role, never off the session or the state id (§5.2), so sharing the implementer's session leaves `max_fix_rounds` untouched.
 
@@ -781,7 +781,7 @@ This puts one constraint on slot authoring. A continuation prompt tells the agen
 
 A continuation also **does not resolve `prompt_ref` or `plan_context_refs` at all** — a delta does not carry them, and reading a document only to fail a turn over a reference it will not use trades a working turn for nothing. The cold prompt that opened the session already validated both.
 
-One rule is load-bearing beyond token economy: **a reviewer continuation always restates the `VERDICT:` protocol.** `readVerdict` is exported from `src/prompts` and imported by the executor precisely so the protocol and its parser cannot drift; a continuation that dropped the marker would take the fail-closed default on every node and burn the fix budget on reviews nobody asked for.
+One rule is load-bearing beyond token economy: **a review chore's continuation always restates the `VERDICT:` protocol.** `readVerdict` is exported from `src/prompts` and imported by the executor precisely so the protocol and its parser cannot drift; a continuation that dropped the marker would take the fail-closed default on every node and send every phase to the operator unapproved.
 
 ### 15.4 A session the vendor has forgotten
 
@@ -797,7 +797,7 @@ An adapter may classify a refusal this way **only when the task actually carried
 
 A shared session across implement plus N fix rounds only ever grows. `max_fix_rounds` bounds it loosely; a per-slot turn ceiling bounds it directly, forcing the next spawn fresh and journalling why. Without one, a long node eventually dies on a context-window error that reads as a broken harness.
 
-The ceiling has a second, better-motivated sibling. Reusing the implementer's session means **the agent that wrote the bug is the agent fixing it**, with every original assumption intact. That is usually the point — it knows why the code is the way it is — and occasionally exactly wrong, because the assumption *was* the bug. So **the final fix round goes fresh**: if the author cannot fix it in the rounds before last, the work is handed to an agent that has not seen it. The cost is one cold prompt on the path that was already heading for `failed`, and it recovers reviewer-style independence in the one case where it demonstrably matters.
+The ceiling has a second, better-motivated sibling. Reusing the implementer's session means **the agent that wrote the bug is the agent fixing it**, with every original assumption intact. That is usually the point — it knows why the code is the way it is — and occasionally exactly wrong, because the assumption *was* the bug. So **the final fix round goes fresh**: if the author cannot fix it in the rounds before last, the work is handed to an agent that has not seen it. The cost is one cold prompt on the path that was already heading for `failed`, and it recovers an outsider's independence in the one case where it demonstrably matters.
 
 ### 15.6 Measuring it
 
@@ -832,51 +832,45 @@ The per-node rows come from the journal, not from a projection, over the existin
 
 ## 16. The review loop
 
-`standard-phase`'s review and fix states are the **thermo-nuclear review loop** Vinta runs by hand: one reviewer held to a demanding standard, a fixer that checks every finding before acting on it, scope questions sent to a person rather than assumed by either agent, and a loop that ends only on the reviewer's explicit approval. The skill it comes from runs both roles from one host session. Here the roles are the two §15 slots that already existed: **the reviewer is the `review` slot**, kept across rounds, and **the fixer is the implementer continuing `main`** — the agent that wrote the code is the one that verifies the findings against it.
+A phase's code review is the **thermo-nuclear review loop** Vinta runs by hand: one reviewer held to a demanding standard, a fixer that checks every finding before acting on it, scope questions sent to a person rather than assumed by either agent, and a loop that ends only on the reviewer's explicit approval. The skill it comes from, `thermo-nuclear-review-loop`, runs both roles from one host session — the host is the fixer and spawns the reviewer as a sub-agent. Maestro runs it the same way, as a **chore** on the implementer's own session.
 
-### 16.1 The reviewer
+**Correction: this used to be two pipeline roles.** An earlier design spread the loop across the state machine: a `reviewer` role on its own session slot, a `fix` state for its findings, a `consult` state for scope questions, a review ledger file carrying rejected findings and settled decisions between them, reviewer members on the roster, and a host check that the reviewer had not edited the lane. Every round was a cold spawn or a resume, a prompt rebuilt from the plan and the ledger, and a pass through the scheduler. It was too slow and too expensive to run on every phase. Inside one turn a round is a message to a warm reviewer, and the state the ledger carried between sessions is simply in the implementer's context.
 
-**The standard.** The reviewer is held to the shipped Review Standard (`src/prompts/review-standard.ts`) — stance, evidence bar, a ten-item priority order, preferred remedies, approval bar — unless the lane carries a project `REVIEW.md`, which replaces it wholesale. Wholesale, never merged: a standard written to be read alone, handed in beside another, is two contradicting rulebooks.
+### 16.1 The review chore
 
-**The stated requirement** is the phase brief and the plan-level sections, verbatim, as before. The reviewer still runs the gates itself and still reads the working tree as well as the diff.
+A chore with `when: review` (§8) runs in `standard-phase`'s `review` state, once the phase's gates are green. Its turn continues `main`, so the agent running the loop is the one that wrote the code and knows why each line is there. The prompt (`src/prompts`) gives it what only the orchestrator knows:
 
-**Approval is explicit.** `VERDICT: pass` is the reviewer approving; a turn that states nothing fails closed, as it always did. Questions the reviewer cannot answer — a scenario that is genuinely undecided — go under their own heading, apart from blockers; whether a person sees them is the fixer's call.
+- **the scope** — the phase's diff against its base — and **the stated requirement**: the phase brief and the plan-level sections, verbatim, to hand to the reviewer;
+- **the gates**, through `vinta-ai-maestro gate`, so each round's verification is on the run's cache and the `verify` state after it is usually a hit;
+- **one sub-agent, exactly**: the reviewer, spawned once at the harness's most capable tier and kept for the turn. Every other turn is told not to delegate at all (`soloTurn`); this one is told that the verification, the fixes and the commits stay in the session;
+- **the budget**: none by default — the loop runs until the reviewer approves. With `max_fix_rounds` set, at most that many passes return blockers, after which the loop stops and reports rather than pausing on its own — a headless turn that stops to ask whether to continue is a turn that ends;
+- **how a scope question reaches a person**: the `NEEDS_INPUT` block (§9.1), not the harness's question tool. The node parks, the operator answers in the node view, and the same session resumes with the answer. The reviewer may not survive the resume; the prompt says to spawn a fresh one and hand it the rejected findings and the decisions;
+- **the verdict**: the turn's last line is `VERDICT: pass` — the reviewer explicitly approved — or `VERDICT: fail`.
 
-**Pass two.** A re-review gets the fixer's report (a summary to check, not to trust), the ledger (§16.3), and the pass-two rules, restated every round: blockers only, each new one saying why the previous pass missed it, and nothing re-raised that was approved, rejected with counter-evidence, or settled — unless with new evidence it names.
+The skill the chore names carries the loop's own procedure and the reviewer's standard (a project `REVIEW.md` where there is one). Where the skill and the prompt disagree, the prompt wins.
 
-**The reviewer must not edit, and the host checks.** `HEAD` and the tracked diff of the lane are hashed before the review turn and after it. A change parks the node on a `keep` / `stop` question with the edits left in place — reverting them would destroy the evidence of what the reviewer did. There is no unattended answer: this is the one question about the loop's own integrity. Tracked files only, because the reviewer is told to run gates and gates leave untracked output behind; a reviewer that *creates* a file is therefore not caught, which is the price of a check that does not fire on every review.
+### 16.2 The verdict
 
-### 16.2 The fixer
+`run_chore` with `when: review` spawns each review chore with `verdict: true`, and the executor reads the turn's closing line with `readVerdict` — the same definition the prompt asks for. It states `review.verdict`:
 
-The fixer's prompt carries the skill's discipline, in both its cold and continued forms. Findings are leads, not orders: reproduce, check invariants and callers, decide correct, partial or unsupported. Choose the remedy that makes the bad state unreachable, then the simplest. Make the code keep the promises its text makes. Look for the project's pattern before adding machinery for a rare case. Poka-yoke over defence, cohesion over extraction, tests only where behaviour changed or a bug was verified, one commit per round.
+- `pass` when every review chore approved, and when the node runs none;
+- `fail` at the first review chore that did not, without running the rest. A turn that stated no verdict, errored or was refused by its harness for good reads as `fail`: a merge on a review's silence is the one failure a review exists to prevent. A capacity refusal is not skipped, as a polish chore's is — skipping it would merge a phase nobody reviewed.
 
-**What it will not decide, it gates.** Four triggers, closed: `unreachable` (a scenario nothing reaches), `defensive` (a check on data already validated), `ambiguity` (docs, tests and code disagree, or the requirement names a mechanism that defeats its own goal), `destructive` (deletes, migrations, production). It fixes everything else first, then lists the gated items, each with evidence, the reviewer's recommendation, its own, and the **default** taken if nobody answers — never the destructive option.
+The chore's `chore_result` row says `failed` for an unapproved review, so the post-run report counts it.
 
-**It ends on a machine-read block** — a fenced `review-ledger` JSON object of `rejected` and `gated` — exactly as the reviewer ends on `VERDICT:`. The block and its parser are one definition (`src/prompts/ledger.ts`). A block that does not parse is no block: nothing rejected, nothing gated, and the next review sees every finding again, which is the safe direction to be wrong in. The executor turns it into one fact, `review.gated`, the count a guard reads.
+### 16.3 Budget, and what an unattended run does
 
-### 16.3 The review ledger
+**`unapproved`** is an `await_human` choice of `continue` or `stop`. `continue` runs the review again; the new turn continues the same session, and the prompt tells it to pick the loop up where it stopped with a fresh budget. `stop` fails the phase into `--on-failure`.
 
-Two facts cross between the fixer and the reviewer and fit nowhere else: **rejected findings** with their counter-evidence, and **settled decisions** — a person's answer to a batch of gated items, dated. They live in `runs/<run-id>/nodes/<node-id>/review-ledger.jsonl`, one entry per fixer report and per answer, beside the transcript and for the same reason: they are agents' prose about the repository, and the event log is identifiers (§11). `purge` takes them with the run.
+**`max_fix_rounds` is both budgets, and is unset by default.** Unset, neither runs out: the fixer works until the gates are green and the review loop until the reviewer approves, and neither `exhausted` nor a budget-driven `unapproved` is reached. The scheduler states the unset budget to the guards as `node.max_fix_rounds == null` rather than leaving the fact out, since a missing fact makes every comparison false. Set, it bounds the fixer turns a phase spends on red gates before `exhausted` asks, and the passes each review turn may run before it stops unapproved. The cost of the default is that a phase that cannot converge keeps spending until an operator stops it (§9). `exhausted`'s `continue` runs `grant_fix_rounds` — the one verb that moves the scheduler's counter — and goes straight to a fixer. Under §15.5 the last fix round of each grant goes fresh; with no budget there is no last round, and the turn ceiling is what retires a session.
 
-`record_decision` files an answer, which pairs with the most recent report before it — the file's order guarantees that. Every later reviewer and fixer prompt renders the whole ledger, so a round that went fresh (a stale session, the turn ceiling, §15.5's final round) loses nothing a person decided.
+**Unattended, the plan supplies the answer and `--retry-after` supplies the moment.** A plan question may declare `unattended_answer`; with `--retry-after` set, the host answers it with that value once the window passes and journals the answer `unattended`. Both `exhausted` and `unapproved` declare `stop`, so an unattended run spends no more than its budgets. A scope question the review loop raises is an agent question, answered unattended with its recommended options (§9.1). A plan question that declares none still waits for a person.
 
-### 16.4 The reviewer's model
+### 16.4 Not done here
 
-A review is the step between a plan and its merge, so it is not tied to the tier the phase was written at. A staffed reviewer runs on its member's model, as before. An unstaffed one runs on `defaults.reviewer_model` when the workflow names one, then on the harness's own name for its top tier (`HarnessAdapter.reviewModel` — `opus` for claude-code; codex and opencode declare none, since neither has a tier alias that does not go stale), and only then on the node's model. Reasoning effort is not yet a harness parameter, so "highest effort" is whatever the CLI defaults to.
-
-### 16.5 Budget, consult, and what an unattended run does
-
-**`consult`** is an `await_human` with `kind: 'text'`: the whole batch at once, answered per item or with `defaults`. It is not a round. It goes straight back to the reviewer, which reads the round's fix with the decisions beside it; an in-scope answer is therefore implemented by the next fix round, which the reviewer asks for. The skill orders it slightly differently — its fixer applies the answers before the re-review — and the difference is deliberate: applying them here would need a fixer turn that is not a round, and the counter keys off the role (§15.1).
-
-**`max_fix_rounds` defaults to 4, and exhausting it asks rather than fails.** `exhausted` is a `continue` / `stop` question. `continue` runs `grant_fix_rounds` — the one verb that moves the scheduler's counter — and goes straight to a fixer, since the last thing that happened was a failure nobody has answered yet. `stop` fails the phase into `--on-failure` exactly as exhaustion used to. Under §15.5 the last round of each grant goes fresh, as it would have.
-
-**Unattended, the plan supplies the answer and `--retry-after` supplies the moment.** A plan question may declare `unattended_answer`; with `--retry-after` set, the host answers it with that value once the window passes and journals the answer `unattended`. `consult` declares `defaults`; `exhausted` declares `stop`, so an unattended run spends no more than it used to. A plan question that declares none — "is this migration safe to deploy" — still waits for a person: the orchestrator never overrules a plan, it only acts on what the plan said. Without `--retry-after` every question waits, which is the behaviour before this section existed.
-
-### 16.6 Not done here
-
-- **The skills path.** `review-layers.md` and the plan-execution partials still describe the three-layer review. §1 says a semantic change is decided here and then written into the partial; that rewrite is a follow-up, not part of this change.
-- **The pause report.** The skill's fifth-iteration pause carries the fixer's own view of whether more work is worth it. `exhausted` points the operator at the transcript — the remaining blockers and the fixer's last report — rather than spending a turn to compose one.
-- **Untracked reviewer writes** (§16.1).
+- **The skills path.** `review-layers.md` and the plan-execution partials still describe the three-layer review with a reviewer and fixer sub-agents. §1 says a semantic change is decided here and then written into the partial; that rewrite is a follow-up.
+- **Reviewer edits.** The prompt tells the implementer to check `HEAD` and `git status` around each pass and not to build on anything the reviewer changed. The host no longer checks it, because the reviewer is a sub-agent of the implementer's turn and the turn itself edits the tree.
+- **The reviewer's model.** The prompt asks for the harness's most capable tier. Reasoning effort and the tier itself are the harness's to resolve, not the scheduler's.
 
 ---
 
@@ -1000,7 +994,7 @@ What `judged` is **not** is a sandbox. A classifier reads one command line and c
 
 ### 17.7 Not done here
 
-- **Review-tier routing.** Classify a phase's diff (mechanical / architectural / schema) and pick the reviewer's model from that, instead of from the tier the plan staffed. This needs a model choice per review turn in the scheduler.
+- **Review-tier routing.** Classify a phase's diff (mechanical / architectural / schema) and pick the review loop's reviewer tier from that, instead of always asking for the most capable one.
 - **Fix-loop repetition.** Ask whether round N's findings repeat round N−1's, and escalate to the fresh last round (§15.5) early.
 - **Refusal classification.** Classify spawn refusals the regex patterns miss (§7's "unrecognized is fatal"), with `fatal` below the threshold.
 - **opencode's permission API.** It could host `judged` through its session permission events instead of a hook.
@@ -1063,13 +1057,13 @@ This does not make maestro a plan author, so the §1 non-goal stands. The agent 
 
 | Tab | Contents |
 |---|---|
-| Graph | `vinta-dag-editor` in read mode, wave-banded, with each node coloured by **review state** rather than run state. Four run statuses are borrowed for their tone and relabelled through the canvas's `strings`: no comments, open comments, comments resolved, has issues. Below the graph is the selected phase: staffing, the standard pipeline as a strip of steps, dependencies and dependents, touches, and tabs for its brief, its implementer, reviewer and fixer prompts, its gates and its chores |
+| Graph | `vinta-dag-editor` in read mode, wave-banded, with each node coloured by **review state** rather than run state. Four run statuses are borrowed for their tone and relabelled through the canvas's `strings`: no comments, open comments, comments resolved, has issues. Below the graph is the selected phase: staffing, the standard pipeline as a strip of steps, dependencies and dependents, touches, and tabs for its brief, its implementer and fixer prompts, its gates and its chores — the review chore's prompt among them (§16) |
 | Plan | The markdown cut at every `#`–`###` heading outside a code fence. Each section is commentable and each selection quotable. A phase's section links to its node |
 | Gates | A phase × gate matrix over the resolved workflow, then each gate's command, scoped command, timeout and pools, the resource pools, and the chores |
 | Schedule | §13.1's projection drawn as a timeline with the critical path marked. It reads `GET /api/plans/:id/schedule` |
 | Issues | `validate`'s issues, each linked to its node where it has one |
 
-**The prompts are composed, not described.** `GET /api/plans/:id` calls `composeSpawnPrompt` for every role over a journal with no history (`src/review/plan.ts`). What the page shows is therefore the cold prompt a run would send, with three exceptions. A run names its lane's path where the page names the checkout. Its branch line is the phase branch, not `HEAD`. And it appends each dependency's final report. A reference that leaves the repository, or a graph with a cycle, blocks composition. The brief still shows and the issue list says why.
+**The prompts are composed, not described.** `GET /api/plans/:id` calls `composeSpawnPrompt` for every role and every chore over a journal with no history (`src/review/plan.ts`). What the page shows is therefore the cold prompt a run would send, with three exceptions. A run names its lane's path where the page names the checkout. Its branch line is the phase branch, not `HEAD`. And it appends each dependency's final report. A reference that leaves the repository, or a graph with a cycle, blocks composition. The brief still shows and the issue list says why.
 
 **References are contained.** The page reads files named inside a document, on a browser's request, so every `plan_ref`, `prompt_ref` and `plan_context_refs` path is resolved inside the checkout, after following symlinks, before it is read. Anything else is an issue and is never opened (`src/review/references.ts`). Plan ids are the workflow schema's kebab-case, as on the editor's routes.
 

@@ -25,14 +25,13 @@ export const EFFECT_IDS = [
   'write_tracking',
   'await_human',
   'notify',
-  'record_decision',
   'grant_fix_rounds',
 ] as const
 
-export const AGENT_ROLES = ['implementer', 'reviewer', 'fixer', 'chore', 'conflict-fixer'] as const
+export const AGENT_ROLES = ['implementer', 'fixer', 'chore', 'conflict-fixer'] as const
 
 /** Where in a phase a chore runs. `run_chore`'s `when` param selects one. */
-export const CHORE_TIMINGS = ['before_gate', 'after_pr'] as const
+export const CHORE_TIMINGS = ['review', 'after_review', 'after_pr'] as const
 export type ChoreTiming = (typeof CHORE_TIMINGS)[number]
 
 const Id = z
@@ -392,21 +391,25 @@ export const ChoreSchema = z.strictObject({
     ),
   when: z
     .enum(CHORE_TIMINGS)
-    .default('before_gate')
+    .default('after_review')
     .describe(
-      'When the chore runs. `before_gate` — the default — runs it between a passing review and ' +
-        'the gates, on the diff that is about to merge. `after_pr` runs it once the phase is ' +
-        'merged, pushed and its pull request is open, for work about the PR rather than the ' +
-        'diff (a review canvas, a PR comment). An `after_pr` chore must not edit the tree, is ' +
-        'skipped when no PR opened, and cannot be `on_failure: fail`.',
+      'When the chore runs. `review` runs it once the phase’s gates are green, as the phase’s ' +
+        'code review: the turn ends with a `VERDICT: pass` or `VERDICT: fail` line, and the ' +
+        'phase moves on only when every review chore passed. `after_review` — the default — ' +
+        'runs it once the review approved, before the gates run again on the final tree. ' +
+        '`after_pr` runs it once the phase is merged, pushed and its pull request is open, ' +
+        'for work about the PR rather than the diff (a review canvas, a PR comment). An ' +
+        '`after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be ' +
+        '`on_failure: fail`.',
     ),
   on_failure: z
     .enum(['continue', 'fail'])
     .default('continue')
     .describe(
-      '`continue` — the default — journals a failed chore and moves on to the gates. A chore is ' +
-        'polish, and losing an implemented phase to one that timed out is the worse trade. ' +
-        '`fail` is for a chore whose output the phase is not correct without.',
+      '`continue` — the default — journals a failed chore and moves on. A chore is polish, ' +
+        'and losing an implemented phase to one that timed out is the worse trade. `fail` is ' +
+        'for a chore whose output the phase is not correct without. A `review` chore ignores ' +
+        'it: a review that did not approve, for any reason, is put to the operator.',
     ),
   description: z.string().optional(),
 })
@@ -443,22 +446,7 @@ export const DependencySchema = z.strictObject({
 // in, which is what §15.2's `lane_changed` refuses.
 // ---------------------------------------------------------------------------
 
-/**
- * What a member is on the team for. Disjoint on purpose: an agent that both
- * writes and reviews can be handed its own diff, and "the reviewer is never the
- * implementer" then depends on arithmetic going right every time rather than on
- * there being no way to express the mistake.
- */
-export const CREW_ROLES = ['implementer', 'reviewer'] as const
-
 export const CrewMemberSchema = z.strictObject({
-  role: z
-    .enum(CREW_ROLES)
-    .default('implementer')
-    .describe(
-      'Implementers take phases; reviewers read them. No member does both, which is ' +
-        'what makes self-review unrepresentable rather than merely unlikely.',
-    ),
   tier: z
     .number()
     .int()
@@ -502,23 +490,22 @@ export const NodeSchema = z.strictObject({
     .optional()
     .describe('Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.'),
   crew: Id.optional().describe(
-    'The implementer this phase is assigned to. Their tier is the floor for it: a busier ' +
-      'roster may hand the phase to a free implementer at that tier or above, never below. ' +
-      'Its reviewer is not named here — it is the cheapest reviewer on the roster who is ' +
-      'qualified for this phase, and it is never this member.',
+    'The member this phase is assigned to. Their tier is the floor for it: a busier roster ' +
+      'may hand the phase to a free member at that tier or above, never below.',
   ),
   max_fix_rounds: z
     .number()
     .int()
     .min(0)
-    .default(4)
+    .optional()
     .describe(
-      'Fix rounds a phase may spend before the operator is asked whether to keep going (§16). ' +
-        'A round is a fixer turn — one answer to a review that returned blockers or a gate ' +
-        'that went red. It is measured in *rounds* rather than findings, so a first review ' +
-        'raising four legitimate blockers spends one. When it runs out the shipped pipeline ' +
-        'asks rather than fails: `continue` grants the same budget again, `stop` fails the ' +
-        'phase and hands it to `--on-failure`.',
+      'Fix rounds a phase may spend on red gates, and unsuccessful iterations each review ' +
+        'turn may run, before the operator is asked whether to keep going (§16). Absent — ' +
+        'the default — sets no limit: the fixer works until the gates are green and the ' +
+        'review loop until the reviewer approves. A fix round is a fixer turn; a review ' +
+        'iteration is one pass of the review loop that returned blockers. When a set budget ' +
+        'runs out the shipped pipeline asks rather than fails: `continue` grants the same ' +
+        'budget again, `stop` fails the phase and hands it to `--on-failure`.',
     ),
 })
 
@@ -804,16 +791,6 @@ export const DefaultsSchema = z.strictObject({
         'comment pass, a changelog entry — and repeating them on every node is how one phase ' +
         'ends up quietly missing one.',
     ),
-  reviewer_model: z
-    .string()
-    .min(1)
-    .optional()
-    .describe(
-      'The model review turns run on when no reviewer is staffed on the roster (§16.4). A ' +
-        'review is the step standing between a plan and its merge, so it is not tied to the ' +
-        'tier the phase was written at. Absent takes the harness’s own top tier where it names ' +
-        'one, and the node’s model where it does not.',
-    ),
   model_fallbacks: z
     .record(z.string().min(1), z.string().min(1))
     .default({})
@@ -859,8 +836,8 @@ export const WorkflowSchema = z
         'Sections of the plan that bound every phase rather than any one of them — its ' +
           'Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference ' +
           'in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the ' +
-          'same resolver and handed to the implementer and the reviewer verbatim, marked as ' +
-          'plan-level. Empty — the default — means the prompts carry the phase brief alone.',
+          'same resolver and handed to the implementer verbatim, marked as plan-level. ' +
+          'Empty — the default — means the prompts carry the phase brief alone.',
       ),
     base_branch: z.string().min(1).describe('What dependency-free nodes branch from.'),
     project: ProjectSchema.optional(),

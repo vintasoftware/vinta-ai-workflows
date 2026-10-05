@@ -5,8 +5,8 @@
  * executor, so none of them ever exercised what a real agent is handed. That is
  * how `spawn_agent`'s `prompt_template` reached a release consumed by nothing
  * and every role received `node.prompt_ref` as its entire prompt — an
- * implementer copes, a reviewer never states the verdict the executor reads,
- * and the node burns its fix rounds on a review nobody asked for.
+ * implementer copes, a review never states the verdict the executor reads,
+ * and the phase goes to the operator over a review nobody could approve.
  *
  * Two assertions here are about correctness rather than wording:
  *
@@ -14,7 +14,7 @@
  *   below is the case: a wave-2 node is told about its own dependency and
  *   nothing about the phase running beside it, whose commits are not in its
  *   base branch.
- * - **The reviewer's verdict line is asserted against the executor's own
+ * - **The review chore's verdict line is asserted against the executor's own
  *   parser**, by feeding the exact line the prompt demands through
  *   `RunEffectExecutor`. A copy of the regex here would agree with itself
  *   forever while the two halves drifted apart.
@@ -32,9 +32,7 @@ import {
   composeConflictPrompt,
   composeSpawnPrompt,
   dependencyClosure,
-  LEDGER_FENCE,
   PromptError,
-  readFixerReport,
   readVerdict,
   resolveBrief,
   VERDICT_MARKER,
@@ -42,7 +40,6 @@ import {
   type PromptJournal,
   type Reorientation,
 } from '../src/prompts/index.ts'
-import { PASS_TWO, REVIEW_STANDARD } from '../src/prompts/review-standard.ts'
 import { ChoreSchema, SideEffectSchema, WorkflowSchema, type Workflow } from '../src/types.ts'
 
 const RUN_ID = 'run-1'
@@ -129,6 +126,17 @@ function diamondWithPlanContext(): Workflow {
   })
 }
 
+/** The diamond, with `api-layer`'s fix-round budget — and so its review budget — set. */
+function diamondWithFixRounds(rounds: number): Workflow {
+  const base = diamond()
+  return WorkflowSchema.parse({
+    ...base,
+    nodes: base.nodes.map((node) =>
+      node.id === 'api-layer' ? { ...node, max_fix_rounds: rounds } : node,
+    ),
+  })
+}
+
 /** A checkout holding the plan every `prompt_ref` above points at. */
 function workspace(sections: Readonly<Record<string, string>> = {}): string {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-prompts-'))
@@ -148,10 +156,8 @@ function workspace(sections: Readonly<Record<string, string>> = {}): string {
 function journalStub(options: {
   readonly reports?: Readonly<Record<string, string>>
   readonly rows?: readonly Partial<NodeRow>[]
-  readonly ledger?: Readonly<Record<string, readonly unknown[]>>
 }): PromptJournal {
   return {
-    reviewLedger: (_runId: string, nodeId: string): unknown[] => [...(options.ledger?.[nodeId] ?? [])],
     tailTranscript: (_runId: string, nodeId: string): unknown[] => {
       const report = options.reports?.[nodeId]
       return report === undefined ? [] : [{ type: 'assistant_text', text: report }]
@@ -188,8 +194,6 @@ function compose(
     readonly reorientation?: Reorientation
     /** The chore a `chore`-template turn is running. */
     readonly chore?: ChorePrompt
-    /** §16.3's review ledger, by node id, as the file holds it. */
-    readonly ledger?: Readonly<Record<string, readonly unknown[]>>
   } = {},
 ): string {
   const workflow = options.workflow ?? diamond()
@@ -203,7 +207,6 @@ function compose(
     journal: journalStub({
       ...(options.reports === undefined ? {} : { reports: options.reports }),
       ...(options.rows === undefined ? {} : { rows: options.rows }),
-      ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
     }),
     workspace: options.dir === undefined ? workspace() : options.dir,
     facts: options.facts ?? {},
@@ -218,6 +221,25 @@ const chore = (chore: Record<string, unknown>, id = 'deslop'): ChorePrompt => ({
   id,
   chore: ChoreSchema.parse(chore),
 })
+
+/** The instruction `plan-feature` writes into every plan's review chore. */
+const REVIEW_INSTRUCTION =
+  'Run the thermo-nuclear-review-loop skill over this phase’s diff until its reviewer approves it.'
+
+/** The phase's review (§16), as a plan declares it: a chore with `when: 'review'`. */
+const reviewChore = (fields: Record<string, unknown> = {}): ChorePrompt =>
+  chore(
+    { prompt: REVIEW_INSTRUCTION, skill: 'thermo-nuclear-review-loop', when: 'review', ...fields },
+    'review',
+  )
+
+/** A red gate, as `run_gate` states it. */
+const RED_GATE = {
+  gate: { id: 'unit', exit_code: 1, status: 'failed', log_ref: '/runs/run-1/gates/unit.log' },
+} as const
+
+/** The generic no-delegation sentence, which wraps mid-phrase in the rendered prompt. */
+const NO_SUB_AGENTS = /Do not spawn,\s+dispatch or delegate to a sub-agent/
 
 // ---------------------------------------------------------------------------
 // 1. The implementer gets the brief itself
@@ -275,7 +297,7 @@ describe('the implementer prompt', () => {
 /**
  * A phase ran four sessions, reported `## Status: SUCCESS` with a green inner
  * loop, and never once ran `git commit`. Its deliverables were untracked files.
- * The reviewer reads the committed diff, so it reported "phase not implemented
+ * The review reads the committed diff, so it reported "phase not implemented
  * at all"; the fixer re-implemented, also without committing; the fix rounds
  * ran out; and the lane was then recycled and the files deleted.
  *
@@ -311,24 +333,14 @@ describe('committing is part of the work', () => {
     }
   })
 
-  it('has the reviewer read the working tree, not only the diff', () => {
-    const prompt = compose('api-layer', 'reviewer')
-
-    expect(prompt).toContain('status --porcelain')
-    // The distinction that decides whether the fixer writes the code again or
-    // simply commits it — and getting it wrong costs every fix round there is.
-    expect(prompt).toContain('not "the phase was not')
-  })
-
   /**
    * The prompt used to say both "the turn is not complete until `git status` is
    * empty of your work" and "never commit while a gate is red". Whenever the
    * gate could not be turned green inside the turn — most of why fix rounds
    * exist — that is a contradiction with a `never` on one side, and agents
    * resolved it the way the stronger word points: they committed nothing. The
-   * reviewer then found a full tree and an empty diff and raised the BLOCKER it
-   * is told to raise, and a fix round went on re-implementing work that was
-   * already sitting on the disk.
+   * review then found a full tree and an empty diff, and a fix round went on
+   * re-implementing work that was already sitting on the disk.
    */
   describe('a red gate changes the report, not the decision to commit', () => {
     it.each(writers)('never forbids the %s from committing', (role) => {
@@ -343,26 +355,6 @@ describe('committing is part of the work', () => {
 
     it.each(writers)('tells the %s to commit a phase that failed', (role) => {
       expect(compose('api-layer', role)).toContain('Commit whether or not you succeeded')
-    })
-
-    /**
-     * The other half. "Where you find uncommitted work, that *is* the finding"
-     * made any unclean tree a BLOCKER — and a lane's tree is essentially never
-     * clean: the pool copies configuration in, links dependency trees, and the
-     * gates the reviewer was just asked to run leave caches and build output
-     * behind. The implementer is told by name not to stage any of it, so a
-     * phase could be implemented, committed and correct and still fail review
-     * for the files the harness itself created around it.
-     */
-    it('does not let the reviewer fail a committed phase over a dirty lane', () => {
-      for (const prompt of [
-        compose('api-layer', 'reviewer'),
-        compose('api-layer', 'reviewer', { continuation: true }),
-      ]) {
-        expect(prompt).toContain('not by itself a finding')
-        // The narrower failure it is actually for survives.
-        expect(prompt).toContain('missing from the diff')
-      }
     })
   })
 })
@@ -410,21 +402,24 @@ describe('background work', () => {
  * pull is a skill the runtime surfaced on its own: `implement-phase` ships into
  * these same repositories, its description matches "you are implementing P3 of
  * plan X", and its content is "spawn exactly one implementer subagent".
+ *
+ * The review chore is the one exception, and has its own tests below: it is
+ * allowed exactly one sub-agent, the reviewer.
  */
 describe('no sub-agents', () => {
-  const roles = ['implementer', 'reviewer', 'fixer', 'chore'] as const
+  const roles = ['implementer', 'fixer', 'chore'] as const
 
   const composeRole = (role: (typeof roles)[number], continuation: boolean): string =>
     compose('api-layer', role, {
       continuation,
       ...(role === 'chore' ? { chore: chore({ prompt: 'Tidy up.' }) } : {}),
-      ...(role === 'fixer' ? { facts: { review: { verdict: 'fail' } } } : {}),
     })
 
   it.each(roles)('forbids delegation to the %s, and says what it costs', (role) => {
     const prompt = composeRole(role, false)
 
     expect(prompt).toContain('Do this work in this session, yourself')
+    expect(prompt).toMatch(NO_SUB_AGENTS)
     expect(prompt).toContain('Task/Agent tool')
     // The reason, not only the rule. Without it the agent has no way to weigh
     // delegating a search, which is the form it takes once the work is banned.
@@ -439,34 +434,20 @@ describe('no sub-agents', () => {
   })
 })
 
-/**
- * A reused reviewer session reached a verdict in under four minutes without
- * running the project's test command at all. The prompt had asked it to confirm
- * the gate was green, which an agent can do by reading a report.
- */
-describe('the reviewer runs the gates', () => {
-  it('asks the cold reviewer to run them and report what they returned', () => {
-    const prompt = compose('api-layer', 'reviewer')
-
-    expect(prompt).toContain('## Run the gates yourself')
-    expect(prompt).toContain('is a claim, not evidence')
-    expect(prompt).toContain('Say in your report that you ran them')
-  })
-
-  it('asks again every round, because the tree has moved', () => {
-    const prompt = compose('api-layer', 'reviewer', { continuation: true })
-
-    expect(prompt).toContain('Run these again yourself, every round')
-    expect(prompt).toContain('`vinta-ai-maestro gate unit`')
-    // And the working tree with them: the round after a fix is the likeliest
-    // place to find work that was written and never committed.
-    expect(prompt).toContain('status --porcelain')
-  })
-})
-
 // ---------------------------------------------------------------------------
 // 1a. The project's own commands
 // ---------------------------------------------------------------------------
+
+/**
+ * Every agent that runs something in the lane, under the label a test name
+ * reads well with. The review chore is on the list: it fixes what its reviewer
+ * finds, so it runs the inner loop as much as anyone.
+ */
+const RUNNERS: readonly (readonly [string, string, { readonly chore?: ChorePrompt }])[] = [
+  ['implementer', 'implementer', {}],
+  ['fixer', 'fixer', {}],
+  ['review chore', 'chore', { chore: reviewChore() }],
+]
 
 /**
  * An agent told to "run the scoped suite" and given no command runs the one it
@@ -496,10 +477,8 @@ describe('the project’s commands', () => {
     })
   }
 
-  const roles = ['implementer', 'reviewer', 'fixer'] as const
-
-  it.each(roles)('hands them to the %s, which is who runs them', (role) => {
-    const prompt = compose('api-layer', role, { workflow: withCommands() })
+  it.each(RUNNERS)('hands them to the %s, which is who runs them', (_label, template, options) => {
+    const prompt = compose('api-layer', template, { ...options, workflow: withCommands() })
 
     expect(prompt).toContain('The project’s commands')
     expect(prompt).toContain('Lint: `make lint`')
@@ -542,9 +521,9 @@ describe('the project’s commands', () => {
 })
 
 describe('agent-held resource leases', () => {
-  it.each(['implementer', 'reviewer', 'fixer'] as const)(
+  it.each(RUNNERS)(
     'tells the %s how heavy inner-loop commands reach the pool',
-    (role) => {
+    (_label, template, options) => {
       const base = diamond()
       const workflow = WorkflowSchema.parse({
         ...base,
@@ -553,7 +532,7 @@ describe('agent-held resource leases', () => {
           'test-suite': { capacity: 1, kind: 'semaphore' },
         },
       })
-      const prompt = compose('api-layer', role, { workflow })
+      const prompt = compose('api-layer', template, { ...options, workflow })
 
       expect(prompt).toContain('Resource leases for heavy commands')
       expect(prompt).toContain('vinta-ai-maestro with test-suite -- <command>')
@@ -584,6 +563,9 @@ describe('agent-held resource leases', () => {
  * - **Labelled as the plan's.** Pasted next to a phase brief, "we are not
  *   building X" reads as "build X". So the block is under its own heading,
  *   ahead of the phase's tasks, and says which of the two it is.
+ *
+ * Two prompts carry it: the implementer's, and a cold review chore's, whose
+ * reviewer measures scope creep against the non-goals.
  */
 describe('plan-level context', () => {
   /** A checkout whose plan carries the phase bodies and the plan-level sections. */
@@ -624,36 +606,48 @@ describe('plan-level context', () => {
     expect(prompt.slice(tasks)).toContain('Add REST endpoints for folders.')
   })
 
-  it('gives the reviewer the same sections, framed as what scope creep is measured against', () => {
+  it('gives a cold review chore the same sections, framed as what scope creep is measured against', () => {
     const dir = planned()
-    const prompt = compose('api-layer', 'reviewer', {
+    const prompt = compose('api-layer', 'chore', {
       dir,
       workflow: diamondWithPlanContext(),
+      chore: reviewChore(),
     })
 
     expect(prompt).toContain(resolveBrief(dir, 'api-layer', GOALS_REF))
     expect(prompt).toContain(resolveBrief(dir, 'api-layer', DECISIONS_REF))
     expect(prompt).toContain('## Plan-level decisions — the whole plan’s, not this phase’s')
-    expect(prompt).toContain('A change serving a non-goal is scope creep')
-    // A reviewer that failed the phase for not delivering the whole plan would
-    // be worse than one with no non-goals at all.
-    expect(prompt).toContain('ask this diff to satisfy the whole plan')
+    expect(prompt).toContain('Hand them to the reviewer with the phase brief')
+    expect(prompt).toContain('a change serving a non-goal\nis scope creep')
+    // A review that failed the phase for not delivering the whole plan would be
+    // worse than one with no non-goals at all.
+    expect(prompt).toContain('the brief is all it was asked for')
     expect(prompt.indexOf('## Plan-level decisions')).toBeLessThan(
-      prompt.indexOf('## The standard'),
+      prompt.indexOf('## The stated requirement'),
     )
   })
 
-  it('does not give it to the fixer, whose brief is exactly one list of findings', () => {
-    const prompt = compose('api-layer', 'fixer', {
+  it('does not give it to an after_review chore, which only tidies the diff', () => {
+    const prompt = compose('api-layer', 'chore', {
       dir: planned(),
       workflow: diamondWithPlanContext(),
-      reports: { 'api-layer': 'BLOCKER: POST /folders does not validate parent_id.' },
-      facts: { review: { verdict: 'fail' } },
+      chore: chore({ prompt: 'Tidy up.' }),
     })
 
     expect(prompt).not.toContain('Plan-level decisions')
     expect(prompt).not.toContain('Sharing a folder with another user.')
-    expect(prompt).toContain('and nothing else')
+  })
+
+  it('does not give it to the fixer, whose brief is exactly one red gate', () => {
+    const prompt = compose('api-layer', 'fixer', {
+      dir: planned(),
+      workflow: diamondWithPlanContext(),
+      facts: RED_GATE,
+    })
+
+    expect(prompt).not.toContain('Plan-level decisions')
+    expect(prompt).not.toContain('Sharing a folder with another user.')
+    expect(prompt).toContain('Change nothing unrelated.')
   })
 
   it('composes exactly as before when the workflow names no plan-level context', () => {
@@ -768,7 +762,7 @@ Long commands are fine — run them and wait for them to return.
 
 ## Committing is part of the work, not after it
 Your phase is reviewed and merged **from the commits on \`HEAD\`**. The
-reviewer reads \`git diff main...HEAD\` and nothing else:
+review reads \`git diff main...HEAD\` and nothing else:
 a file you wrote and did not commit does not exist as far as the rest of this
 run is concerned, and the lane it sits in is reset before the next phase.
 
@@ -783,11 +777,10 @@ it.
 test you could not make pass, a phase you got half way through: none of them
 is a reason to end the turn with the work only on disk. Commit it and report
 FAILURE, saying what is still red. A commit is not a claim that the phase is
-finished — it is what makes the work exist for the reviewer, for the fixer who
-acts on their findings, and for the next turn on this branch. The alternative
-is not "a clean branch": it is a phase that is reviewed as though you had
-written nothing, fixed by someone writing it a second time, and then deleted
-with the lane.
+finished — it is what makes the work exist for the gates, for the review, and
+for the next turn on this branch. The alternative is not "a clean branch": it
+is a phase that is gated and reviewed as though you had written nothing, and
+then deleted with the lane.
 
 ## Write the pull request description
 Before your final report, write \`.vinta-ai-workflows/prs-context/bookmarks/phase-db-schema.md\`
@@ -975,63 +968,55 @@ describe('an unresolvable prompt_ref', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 4. The reviewer's protocol is the executor's parser
+// 4. The review chore's protocol is the executor's parser
 // ---------------------------------------------------------------------------
 
-describe('the reviewer prompt', () => {
-  it('says what to review: the phase diff against its own base', () => {
-    const dir = workspace()
-    const prompt = compose('api-layer', 'reviewer', {
-      dir,
-      rows: [
-        {
-          node_id: 'api-layer',
-          branch: 'plan/bookmarks/phase-api-layer',
-          base_branch: 'plan/bookmarks/phase-db-schema',
-        },
-      ],
+describe('the review verdict', () => {
+  for (const continuation of [false, true]) {
+    const form = continuation ? 'continued' : 'cold'
+
+    it(`asks the ${form} review for a line the executor’s own parser reads back as pass`, async () => {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
+      expect(await readBackVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
     })
 
-    expect(prompt).toContain(
-      `git -C ${dir} diff plan/bookmarks/phase-db-schema...plan/bookmarks/phase-api-layer`,
-    )
-    // Layer 2 is a walk of the diff against the phase body, so the body is here.
-    expect(prompt).toContain('Add REST endpoints for folders.')
-    expect(prompt).toContain('BLOCKER')
-    expect(prompt).toContain('you never edit')
-  })
+    it(`asks the ${form} review for a line the executor’s own parser reads back as fail`, async () => {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
+      expect(await readBackVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
+    })
 
-  it('asks for a verdict line the executor’s own parser reads back as pass', async () => {
-    const demanded = verdictLine(compose('api-layer', 'reviewer'), 'pass')
-    expect(await readBackVerdict(demanded)).toBe('pass')
-  })
+    it(`asks the ${form} review for a line the exported parser reads, in both outcomes`, () => {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
 
-  it('asks for a verdict line the executor’s own parser reads back as fail', async () => {
-    const demanded = verdictLine(compose('api-layer', 'reviewer'), 'fail')
-    expect(await readBackVerdict(demanded)).toBe('fail')
-  })
+      // Asserted through the exported marker, so a rename moves both halves.
+      expect(readVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
+      expect(readVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
+    })
+  }
 
-  it('fails closed when a reviewer says nothing — which is why the ask matters', async () => {
+  it('fails closed when a review says nothing — which is why the ask matters', async () => {
+    expect(readVerdict('I looked at the diff and it seems fine.')).toBeUndefined()
     expect(await readBackVerdict('I looked at the diff and it seems fine.')).toBe('fail')
   })
 })
 
-/** The exact line the composed prompt tells the reviewer to end on. */
+/** The exact line the composed prompt tells the review to end on. */
 function verdictLine(prompt: string, outcome: 'pass' | 'fail'): string {
   const line = prompt
     .split('\n')
     .map((candidate) => candidate.trim())
     .find((candidate) => candidate === `${VERDICT_MARKER} ${outcome}`)
   if (line === undefined) {
-    throw new Error(`the reviewer prompt never asks for "${VERDICT_MARKER} ${outcome}"`)
+    throw new Error(`the review prompt never asks for "${VERDICT_MARKER} ${outcome}"`)
   }
   return line
 }
 
 /**
- * What the production executor makes of a reviewer whose last words were
- * exactly `text` — the real `RunEffectExecutor`, over a real transcript, so
- * this is the parser itself rather than a copy of its regex.
+ * What the production executor makes of a review chore whose last words were
+ * exactly `text` — the real `RunEffectExecutor`, over a real transcript, with
+ * the invocation `run_chore` builds for a review chore, so this is the parser
+ * itself rather than a copy of its regex.
  */
 async function readBackVerdict(text: string): Promise<unknown> {
   const workflow = diamond()
@@ -1063,7 +1048,7 @@ async function readBackVerdict(text: string): Promise<unknown> {
     effect: SideEffectSchema.parse({
       id: 'e-review',
       definitionId: 'spawn_agent',
-      params: { role: 'reviewer', prompt_template: 'reviewer' },
+      params: { role: 'chore', prompt_template: 'chore', verdict: true },
     }),
     origin: { kind: 'onEnter', stateId: 'review' },
     context: { node: { id: 'api-layer' } },
@@ -1074,33 +1059,58 @@ async function readBackVerdict(text: string): Promise<unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The fixer is told what failed
+// 5. The fixer is told which gate failed, and only that
 // ---------------------------------------------------------------------------
 
 describe('the fixer prompt', () => {
-  it('quotes the review findings when the review is what failed', () => {
-    const prompt = compose('api-layer', 'fixer', {
-      reports: { 'api-layer': 'BLOCKER: POST /folders does not validate parent_id.' },
-      facts: { review: { verdict: 'fail' } },
-    })
-
-    expect(prompt).toContain('BLOCKER: POST /folders does not validate parent_id.')
-    expect(prompt).toContain('You are fixing api-layer')
-  })
-
   it('carries the gate’s log reference when a gate is what failed', () => {
     const prompt = compose('api-layer', 'fixer', {
-      // A red gate leaves the review that passed as the last thing in the
-      // transcript, so the facts of the turn decide, not the transcript.
+      // A transcript that ends on a review's verdict is not what this turn
+      // answers: the facts of the turn decide, never the transcript.
       reports: { 'api-layer': 'VERDICT: pass' },
-      facts: {
-        gate: { id: 'unit', exit_code: 1, status: 'failed', log_ref: '/runs/run-1/gates/unit.log' },
-      },
+      facts: RED_GATE,
     })
 
+    expect(prompt).toContain('You are fixing api-layer')
     expect(prompt).toContain('Gate unit failed with exit code 1')
     expect(prompt).toContain('/runs/run-1/gates/unit.log')
     expect(prompt).not.toContain('VERDICT: pass')
+  })
+
+  it('says so when the orchestrator did not record which gate failed, in both forms', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'fixer', { continuation })
+
+      expect(prompt).toContain('the orchestrator did not record which')
+      expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+    }
+  })
+
+  it('answers the red verify gate after a review that passed', () => {
+    // review → polish → verify red: the review's pass is still in the facts, and
+    // the gate after it is what this fixer is answering.
+    const prompt = compose('api-layer', 'fixer', {
+      facts: {
+        gate: { id: 'unit', exit_code: 2, log_ref: 'gates/unit.log' },
+        review: { verdict: 'pass' },
+      },
+    })
+
+    expect(prompt).toContain('Gate unit failed with exit code 2.')
+    expect(prompt).toContain('Its output is at gates/unit.log')
+  })
+
+  it('fixes the gate and nothing beside it: no findings, no review protocol', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'fixer', { continuation, facts: RED_GATE })
+
+      expect(prompt).toContain('Do not weaken, skip or')
+      expect(prompt).toContain('Change nothing unrelated.')
+      expect(prompt).toContain('message naming the gate it fixes')
+      expect(prompt).not.toContain('finding')
+      expect(prompt).not.toContain('review-ledger')
+      expect(prompt).not.toContain(VERDICT_MARKER)
+    }
   })
 
   it('carries the phase body, so a fix is checked against what was asked for', () => {
@@ -1161,10 +1171,29 @@ describe('the chore prompt', () => {
     expect(prompt).toContain('This is not another implementation')
   })
 
-  it('tells the chore not to run the gates the phase is about to run anyway', () => {
-    const prompt = compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })
+  /**
+   * `after_review` is the default timing — deslop and the like, run once the
+   * review approved and before the final gate run — and it keeps the rules a
+   * chore always had: the gates are not its business, and it decides nothing.
+   */
+  it('runs after the review by default, leaves the gates alone, and states no verdict', () => {
+    const tidy = chore({ prompt: 'Tidy up.' })
+    expect(tidy.chore.when).toBe('after_review')
 
-    expect(prompt).toContain("Do not run this phase's gates")
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: tidy })
+
+      expect(prompt).toContain("Do not run this phase's gates")
+      expect(prompt).not.toContain(VERDICT_MARKER)
+      expect(prompt).not.toContain('status: NEEDS_INPUT')
+      expect(prompt).not.toContain('Exactly one reviewer sub-agent')
+      // The review chore is what carries each of these, so the pair proves the
+      // absences above are a difference between timings and not dead strings.
+      const review = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
+      expect(review).toContain(VERDICT_MARKER)
+      expect(review).toContain('status: NEEDS_INPUT')
+      expect(review).not.toContain("Do not run this phase's gates")
+    }
   })
 
   it('names a skill when the chore declares one, with a fallback for harnesses that have none', () => {
@@ -1244,6 +1273,197 @@ describe('the after_pr chore prompt', () => {
       expect(prompt).toContain('Do not edit, stage, commit or push anything')
       expect(prompt).not.toContain('Committing is part of the work')
       expect(prompt).not.toContain("Do not run this phase's gates")
+      expect(prompt).not.toContain(VERDICT_MARKER)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5c. The review chore: the phase's review, run by the agent that wrote it (§16)
+// ---------------------------------------------------------------------------
+
+/**
+ * The review is a chore on the implementer's own session. It spawns exactly one
+ * reviewer, fixes what holds up, rejects what does not with evidence, and loops
+ * until the reviewer approves or its budget runs out — then ends on the
+ * `VERDICT:` line the executor reads. Every rule the other turns are held to
+ * that this one bends is bent here on purpose, and asserted.
+ */
+describe('the review chore prompt', () => {
+  const BRIEF = 'Add REST endpoints for folders.'
+  const rows = [
+    {
+      node_id: 'api-layer',
+      branch: 'plan/bookmarks/phase-api-layer',
+      base_branch: 'plan/bookmarks/phase-db-schema',
+    },
+  ] as const
+
+  const review = (
+    options: { readonly continuation?: boolean; readonly workflow?: Workflow; readonly chore?: ChorePrompt } = {},
+  ): string => compose('api-layer', 'chore', { rows, chore: reviewChore(), ...options })
+
+  it('opens cold as the phase’s review, with the brief as the stated requirement', () => {
+    const prompt = review()
+
+    expect(prompt).toContain('You are running the `review` chore over api-layer: API of plan bookmarks')
+    expect(prompt).toContain(REVIEW_INSTRUCTION)
+    expect(prompt).toContain('This turn is the phase’s code review')
+    expect(prompt).toContain('phase’s gates are already green')
+    expect(prompt).toContain('Passing gates are not approval.')
+    // The scope and the baseline, over the branches the journal recorded.
+    expect(prompt).toContain(
+      'git diff plan/bookmarks/phase-db-schema...plan/bookmarks/phase-api-layer',
+    )
+    expect(prompt).toContain('baseline `plan/bookmarks/phase-db-schema`')
+    // The requirement is printed, under its own heading, for the reviewer.
+    expect(prompt).toContain('The stated requirement is the phase brief printed below')
+    const requirement = prompt.indexOf('## The stated requirement')
+    expect(requirement).toBeGreaterThan(-1)
+    expect(prompt.slice(requirement)).toContain(BRIEF)
+  })
+
+  it('continues the implementer’s session without re-sending the brief', () => {
+    const cold = review()
+    const continued = review({ continuation: true })
+
+    expect(continued).toContain('same session — but a')
+    expect(continued).toContain('This turn is the `review` chore')
+    expect(continued).toContain(REVIEW_INSTRUCTION)
+    expect(continued).toContain('The stated requirement is the phase brief already in this session')
+    // Each absence paired with the cold prompt that carries it.
+    expect(cold).toContain(BRIEF)
+    expect(continued).not.toContain(BRIEF)
+    expect(cold).toContain('## The stated requirement')
+    expect(continued).not.toContain('## The stated requirement')
+  })
+
+  it('does not re-send the plan-level sections on a continuation', () => {
+    const options = { dir: workspace(PLAN_SECTIONS), workflow: diamondWithPlanContext() }
+    const cold = compose('api-layer', 'chore', { ...options, chore: reviewChore() })
+    const continued = compose('api-layer', 'chore', {
+      ...options,
+      continuation: true,
+      chore: reviewChore(),
+    })
+
+    expect(cold).toContain('- Sharing a folder with another user.')
+    expect(continued).not.toContain('- Sharing a folder with another user.')
+    expect(continued).not.toContain('Plan-level decisions')
+    expect(continued).toContain('with the plan-level decisions when you were given them')
+  })
+
+  it('names the skill when the chore sets one, and says this prompt wins', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('Use the `thermo-nuclear-review-loop` skill for this')
+      expect(prompt).toContain('Where the skill and this prompt disagree, this prompt wins.')
+      expect(prompt).toContain('If your')
+      expect(prompt).toContain('harness has no such skill')
+    }
+  })
+
+  it('runs the loop from the prompt alone when the chore names no skill', () => {
+    const prompt = review({ chore: chore({ prompt: REVIEW_INSTRUCTION, when: 'review' }, 'review') })
+
+    expect(prompt).not.toContain('skill for this')
+    expect(prompt).toContain('Spawn one reviewer')
+  })
+
+  it('lists the gates as the verb that runs them, and tells it to run them', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('## The outer gate — ask the orchestrator to run it')
+      expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+      expect(prompt).not.toContain('unit: `pnpm test`')
+      expect(prompt).toContain('After each round of fixes, run the inner loop')
+      expect(prompt).not.toContain("Do not run this phase's gates")
+    }
+  })
+
+  it('allows exactly one reviewer sub-agent and nothing else delegated', () => {
+    // The control: every other chore carries the generic no-delegation rule.
+    expect(compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })).toMatch(
+      NO_SUB_AGENTS,
+    )
+
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('Exactly one reviewer sub-agent for this whole turn')
+      expect(prompt).toContain('send every later pass to that same agent')
+      expect(prompt).toContain('The reviewer is the only sub-agent this turn may use')
+      expect(prompt).not.toMatch(NO_SUB_AGENTS)
+      expect(prompt).not.toContain('Do this work in this session, yourself')
+      // The conductor skills are still the pull, and still named.
+      expect(prompt).toContain('`review-phase`')
+      expect(prompt).toContain('never follow its spawn steps')
+    }
+  })
+
+  it('states the budget from max_fix_rounds, and to stop rather than ask', () => {
+    for (const continuation of [false, true]) {
+      // The schema sets no default: the loop runs until the reviewer approves.
+      const unbounded = review({ continuation })
+      expect(unbounded).toContain('No pass limit. Keep the loop going until the reviewer approves')
+      expect(unbounded).not.toContain('At most')
+
+      const prompt = review({ continuation, workflow: diamondWithFixRounds(2) })
+      expect(prompt).toContain('At most 2 passes that come back with blockers')
+      expect(prompt).toContain('do not ask whether to keep going')
+      expect(prompt).toContain('the orchestrator asks the operator')
+    }
+  })
+
+  it('makes a budget of zero one pass, not none', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation, workflow: diamondWithFixRounds(0) })
+
+      expect(prompt).toContain('One pass. If the reviewer does not approve on its first pass, stop there')
+      expect(prompt).toContain('the orchestrator asks')
+      expect(prompt).not.toContain('At most 0')
+    }
+  })
+
+  it('puts a decision that is not the agent’s to a person, through the NEEDS_INPUT block', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('## What goes to a person instead of into the code')
+      expect(prompt).toContain('the block under "When you need a human decision"')
+      expect(prompt).toContain('## When you need a human decision')
+      expect(prompt).toContain('status: NEEDS_INPUT')
+      expect(prompt).toContain('Do not call a question tool either')
+    }
+  })
+
+  it('commits each round, so the reviewer can read it', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('Commit each round as one commit whose message names the findings')
+      expect(prompt).toContain('Committing is part of the work')
+      expect(prompt).toContain('Run everything in the foreground')
+    }
+  })
+
+  it('ends on the VERDICT protocol, as the last section of the prompt', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+      const last = prompt.slice(prompt.lastIndexOf('\n## ') + 1)
+
+      expect(last.startsWith('## Required output')).toBe(true)
+      expect(last).toContain(`    ${VERDICT_MARKER} pass`)
+      expect(last).toContain(`    ${VERDICT_MARKER} fail`)
+      expect(last).toContain('means the reviewer explicitly approved the phase')
+      expect(last).toContain('a turn that ends')
+      expect(last).toContain('without it counts as a failed review')
+      expect(last).toContain('so it must be the last thing you write')
+      // A turn stopping for a decision ends on the NEEDS_INPUT block instead,
+      // which the same prompt also tells it to end on, alone.
+      expect(prompt.trimEnd().endsWith('the turn alone, with no verdict after it.')).toBe(true)
     }
   })
 })
@@ -1255,15 +1475,21 @@ describe('the after_pr chore prompt', () => {
 describe('prompt_template', () => {
   it('selects the role’s composition', () => {
     expect(compose('api-layer', 'implementer')).toContain('You are implementing api-layer')
-    expect(compose('api-layer', 'reviewer')).toContain('You are the reviewer of api-layer')
     expect(compose('api-layer', 'fixer')).toContain('You are fixing api-layer')
+    expect(compose('api-layer', 'chore', { chore: reviewChore() })).toContain(
+      'You are running the `review` chore over api-layer',
+    )
   })
 
   it('fails loudly on a template nothing composes', () => {
     expect(() => compose('api-layer', 'archaeologist')).toThrow(PromptError)
     expect(() => compose('api-layer', 'archaeologist')).toThrow(
-      /node "api-layer".*archaeologist.*implementer, reviewer, fixer/,
+      /node "api-layer".*archaeologist.*implementer, fixer, chore, conflict-fixer/,
     )
+  })
+
+  it('no longer composes a reviewer: the review is a chore', () => {
+    expect(() => compose('api-layer', 'reviewer')).toThrow(PromptError)
   })
 
   it('refuses a conflict-fixer template: a conflict is not a phase', () => {
@@ -1346,24 +1572,20 @@ describe('the conflict-fixer prompt', () => {
  * what the session already has.
  */
 describe('a continuation prompt', () => {
-  const findings = 'BLOCKER: POST /folders does not validate parent_id.'
-  const reports = { 'api-layer': findings }
-  const reviewFailed = { review: { verdict: 'fail' } } as const
-
   /** The phase brief text and a plan-level line, as the fixtures write them. */
   const BRIEF = 'Add REST endpoints for folders.'
   const NON_GOAL = '- Sharing a folder with another user.'
 
   describe('for the fixer, continuing the implementer’s own session', () => {
-    it('carries the findings and drops the brief the session already holds', () => {
+    it('carries the red gate and drops the brief the session already holds', () => {
       const dir = workspace(PLAN_SECTIONS)
-      const options = { dir, workflow: diamondWithPlanContext(), reports, facts: reviewFailed }
+      const options = { dir, workflow: diamondWithPlanContext(), facts: RED_GATE }
       const cold = compose('api-layer', 'fixer', options)
       const continued = compose('api-layer', 'fixer', { ...options, continuation: true })
 
-      // The delta still says what to change: findings are the whole point.
-      expect(continued).toContain(findings)
-      expect(continued).toContain('nothing else')
+      // The delta still says what to change: the red gate is the whole point.
+      expect(continued).toContain('Gate unit failed with exit code 1')
+      expect(continued).toContain('Change nothing unrelated.')
 
       // The cold half proves the brief is something this renderer emits, so the
       // absence below is a real difference rather than a string that was never
@@ -1377,15 +1599,15 @@ describe('a continuation prompt', () => {
     it('drops the plan-level sections too, and says why nothing is repeated', () => {
       const dir = workspace(PLAN_SECTIONS)
       const workflow = diamondWithPlanContext()
-      const options = { dir, workflow, reports, facts: reviewFailed }
+      const options = { dir, workflow, facts: RED_GATE }
       // The fixer has never had plan-level context, cold or continued (§ the
-      // module header). The reviewer is where those sections do reach a prompt,
-      // so it is the control that proves this fixture really carries them.
-      const reviewer = compose('api-layer', 'reviewer', options)
+      // module header). The implementer is where those sections do reach a
+      // prompt, so it is the control that proves this fixture carries them.
+      const implementer = compose('api-layer', 'implementer', options)
       const continued = compose('api-layer', 'fixer', { ...options, continuation: true })
 
-      expect(reviewer).toContain(NON_GOAL)
-      expect(reviewer).toContain('## Plan-level decisions')
+      expect(implementer).toContain(NON_GOAL)
+      expect(implementer).toContain('## Plan-level decisions')
       expect(continued).not.toContain(NON_GOAL)
       expect(continued).not.toContain('Plan-level')
       expect(continued).toContain('none of')
@@ -1395,9 +1617,7 @@ describe('a continuation prompt', () => {
     it('carries a red gate the same way the cold prompt does', () => {
       const continued = compose('api-layer', 'fixer', {
         reports: { 'api-layer': 'VERDICT: pass' },
-        facts: {
-          gate: { id: 'unit', exit_code: 1, status: 'failed', log_ref: '/runs/run-1/gates/unit.log' },
-        },
+        facts: RED_GATE,
         continuation: true,
       })
 
@@ -1406,69 +1626,6 @@ describe('a continuation prompt', () => {
       expect(continued).toContain('`vinta-ai-maestro gate unit`')
       // The gate, not the review that passed before it — same rule as cold.
       expect(continued).not.toContain('VERDICT: pass')
-    })
-
-    it('does not point at a phase body that is not on the page', () => {
-      // With no findings recorded the cold prompt says "the phase body below",
-      // which is a lie in a delta: there is no body below.
-      const continued = compose('api-layer', 'fixer', { facts: reviewFailed, continuation: true })
-
-      expect(compose('api-layer', 'fixer', { facts: reviewFailed })).toContain('phase body below')
-      expect(continued).not.toContain('below')
-      expect(continued).toContain('already above')
-    })
-  })
-
-  describe('for the reviewer, continuing its own session across rounds', () => {
-    const continued = (): string =>
-      compose('api-layer', 'reviewer', {
-        rows: [
-          {
-            node_id: 'api-layer',
-            branch: 'plan/bookmarks/phase-api-layer',
-            base_branch: 'plan/bookmarks/phase-db-schema',
-          },
-        ],
-        continuation: true,
-      })
-
-    it('says the fixer acted and asks for the new diff, without re-sending the brief', () => {
-      const prompt = continued()
-
-      expect(prompt).toContain('A fixer has acted on your last review')
-      // The diff command, over the branches the journal recorded for this node.
-      expect(prompt).toContain('plan/bookmarks/phase-db-schema...plan/bookmarks/phase-api-layer')
-      // It still reports rather than edits — the one standing rule of the role.
-      expect(prompt).toContain('report every issue, fix none of them')
-      expect(compose('api-layer', 'reviewer')).toContain(BRIEF)
-      expect(prompt).not.toContain(BRIEF)
-    })
-
-    it('restates the verdict protocol — the one thing a delta may never drop', () => {
-      const prompt = continued()
-
-      // Asserted through the exported marker, so a rename moves both halves.
-      expect(prompt).toContain(VERDICT_MARKER)
-      expect(prompt).toContain(`${VERDICT_MARKER} pass`)
-      expect(prompt).toContain(`${VERDICT_MARKER} fail`)
-      expect(prompt).toContain('a turn that ends without it is taken as a failure')
-    })
-
-    it('demands a line the exported parser reads back, in both outcomes', () => {
-      const prompt = continued()
-
-      expect(readVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
-      expect(readVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
-      // And what the parser makes of a reviewer that states nothing, which is
-      // what a delta with the protocol trimmed out would produce every round.
-      expect(readVerdict('The fix looks fine to me.')).toBeUndefined()
-    })
-
-    it('demands a line the executor itself reads back as the verdict', async () => {
-      const prompt = continued()
-
-      expect(await readBackVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
-      expect(await readBackVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
     })
   })
 
@@ -1526,167 +1683,29 @@ describe('a continuation prompt', () => {
 /**
  * `continuation` is a new branch through a module whose other branch was
  * already shipping. Section 1b pins the implementer's cold output byte for
- * byte; these pin the other two, because "unchanged" is a claim about every
- * character and the two renderers that grew a sibling are exactly the ones a
- * shared helper could quietly reword.
+ * byte; this pins the fixer's, because "unchanged" is a claim about every
+ * character and a renderer that grew a sibling is exactly the one a shared
+ * helper could quietly reword.
  */
 describe('the cold prompt', () => {
-  it('composes the reviewer exactly as before', () => {
-    const dir = workspace()
-    expect(compose('api-layer', 'reviewer', { dir })).toBe(COLD_REVIEWER(dir))
-  })
-
   it('composes the fixer exactly as before', () => {
     const dir = workspace()
-    const prompt = compose('api-layer', 'fixer', {
-      dir,
-      reports: FIXER_REPORTS,
-      facts: { review: { verdict: 'fail' } },
-    })
-    expect(prompt).toBe(COLD_FIXER(dir))
+    expect(compose('api-layer', 'fixer', { dir, facts: RED_GATE })).toBe(COLD_FIXER(dir))
   })
 
   it('treats an explicit continuation: false exactly as its absence', () => {
     const dir = workspace()
-    for (const template of ['implementer', 'reviewer', 'fixer']) {
+    const cases: readonly (readonly [string, { readonly chore?: ChorePrompt }])[] = [
+      ['implementer', {}],
+      ['fixer', {}],
+      ['chore', { chore: chore({ prompt: 'Tidy up.' }) }],
+      ['chore', { chore: reviewChore() }],
+    ]
+    for (const [template, options] of cases) {
       expect(
-        compose('api-layer', template, { dir, reports: FIXER_REPORTS, continuation: false }),
-      ).toBe(compose('api-layer', template, { dir, reports: FIXER_REPORTS }))
+        compose('api-layer', template, { ...options, dir, facts: RED_GATE, continuation: false }),
+      ).toBe(compose('api-layer', template, { ...options, dir, facts: RED_GATE }))
     }
-  })
-})
-
-// ---------------------------------------------------------------------------
-// §16: the thermo-nuclear review loop
-// ---------------------------------------------------------------------------
-
-describe('the review loop', () => {
-  const LEDGER = {
-    'api-layer': [
-      {
-        kind: 'report',
-        at: '2026-09-30T09:00:00.000Z',
-        rejected: [
-          {
-            finding: 'POST /folders should re-validate parent_id',
-            counter_evidence: 'schemas.py:12 validates it at the trust boundary',
-          },
-        ],
-        gated: [
-          {
-            id: 'g1',
-            trigger: 'unreachable',
-            finding: 'Handle a parent deleted mid-request',
-            evidence: 'models.py:8 cascades the delete',
-            reviewer_recommendation: 'Add a 404 branch',
-            recommendation: 'reject the finding',
-            default: 'reject the finding',
-          },
-        ],
-      },
-      { kind: 'decision', at: '2026-09-30T10:00:00.000Z', answer: 'g1: reject', unattended: false },
-    ],
-  } as const
-
-  it('holds the cold reviewer to the shipped standard when the project has none', () => {
-    const prompt = compose('api-layer', 'reviewer')
-    expect(prompt).toContain('## The standard')
-    expect(prompt).toContain(REVIEW_STANDARD[0])
-    expect(prompt).toContain('**code judo**')
-    expect(prompt).not.toContain('REVIEW.md')
-  })
-
-  it('hands the project’s REVIEW.md over instead, whole, and nothing of the shipped one', () => {
-    const dir = workspace()
-    writeFileSync(join(dir, 'REVIEW.md'), '# Our standard\n')
-    const prompt = compose('api-layer', 'reviewer', { dir })
-    expect(prompt).toContain(`Read \`${join(dir, 'REVIEW.md')}\` and apply it`)
-    expect(prompt).not.toContain(REVIEW_STANDARD[0])
-  })
-
-  it('asks the reviewer for explicit approval and for human questions apart from blockers', () => {
-    const prompt = compose('api-layer', 'reviewer')
-    expect(prompt).toContain('is your explicit approval')
-    expect(prompt).toContain('**questions for the human**')
-  })
-
-  it('re-reviews under the pass-two rules, with the fixer’s report and the ledger', () => {
-    const prompt = compose('api-layer', 'reviewer', {
-      continuation: true,
-      reports: { 'api-layer': 'FIXER REPORT: committed abc123.' },
-      ledger: LEDGER,
-    })
-    for (const line of PASS_TWO) expect(prompt).toContain(line)
-    expect(prompt).toContain('FIXER REPORT: committed abc123.')
-    expect(prompt).toContain('## Settled decisions')
-    expect(prompt).toContain('The operator answered: g1: reject')
-    expect(prompt).toContain('g1 (unreachable): Handle a parent deleted mid-request')
-    expect(prompt).toContain('POST /folders should re-validate parent_id')
-    expect(prompt).toContain('Counter-evidence: schemas.py:12 validates it at the trust boundary')
-  })
-
-  it('says a batch nobody answered took its defaults, rather than quoting an answer', () => {
-    const prompt = compose('api-layer', 'reviewer', {
-      continuation: true,
-      ledger: {
-        'api-layer': [
-          LEDGER['api-layer'][0],
-          { kind: 'decision', at: '2026-09-30T10:00:00.000Z', answer: 'defaults', unattended: true },
-        ],
-      },
-    })
-    expect(prompt).toContain('Nobody answered in time, so each item took its stated default.')
-    expect(prompt).not.toContain('The operator answered')
-  })
-
-  it('renders no ledger sections on a phase with no history', () => {
-    const prompt = compose('api-layer', 'reviewer', { continuation: true })
-    expect(prompt).not.toContain('## Settled decisions')
-    expect(prompt).not.toContain('Findings the fixer rejected')
-  })
-
-  for (const continuation of [false, true]) {
-    const form = continuation ? 'continued' : 'cold'
-    it(`tells the ${form} fixer to verify, gate, and end on a block the parser reads`, () => {
-      const prompt = compose('api-layer', 'fixer', {
-        continuation,
-        reports: FIXER_REPORTS,
-        facts: { review: { verdict: 'fail' } },
-        ledger: LEDGER,
-      })
-      expect(prompt).toContain('## Verify before fixing')
-      expect(prompt).toContain('## What goes to a person instead of into the code')
-      expect(prompt).toContain('```' + LEDGER_FENCE)
-      expect(prompt).toContain('## Settled decisions')
-      // The example in the prompt is the shape the parser accepts.
-      const example = prompt.slice(prompt.lastIndexOf('```' + LEDGER_FENCE))
-      expect(readFixerReport(example)?.gated).toHaveLength(1)
-    })
-  }
-
-  it('hands the fixer the failing review, not a red gate from an earlier round', () => {
-    // gate red → fix → review fails: the gate root still says exit 2, and the
-    // review that failed after it is what this fixer is answering.
-    const prompt = compose('api-layer', 'fixer', {
-      reports: FIXER_REPORTS,
-      facts: {
-        gate: { id: 'unit', exit_code: 2, log_ref: 'gates/unit.log' },
-        review: { verdict: 'fail' },
-      },
-    })
-    expect(prompt).toContain(FIXER_REPORTS['api-layer'])
-    expect(prompt).not.toContain('Gate unit failed')
-  })
-
-  it('still hands the fixer a red gate when the review before it passed', () => {
-    const prompt = compose('api-layer', 'fixer', {
-      reports: FIXER_REPORTS,
-      facts: {
-        gate: { id: 'unit', exit_code: 2, log_ref: 'gates/unit.log' },
-        review: { verdict: 'pass' },
-      },
-    })
-    expect(prompt).toContain('Gate unit failed with exit code 2.')
   })
 })
 
@@ -1694,224 +1713,6 @@ describe('the review loop', () => {
 const DEPENDENCY_REPORTS = {
   'db-schema': 'SCHEMA REPORT: added Folder with a parent_id column.',
 } as const
-
-/** The findings the cold fixer golden quotes back. */
-const FIXER_REPORTS = { 'api-layer': 'BLOCKER: POST /folders does not validate parent_id.' } as const
-
-const COLD_REVIEWER = (dir: string): string =>
-  `You are the reviewer of api-layer: API of plan bookmarks.
-You read, run and report; you never edit. A fixer acts on your findings after
-you, and this review loop ends only when you explicitly approve. The orchestrator
-records \`HEAD\` and the tracked diff before your turn and compares them after it:
-any edit or commit you make stops the loop and is put to the operator. Scratch
-work — a throwaway repository to check git behaviour, say — goes in a temporary
-directory outside this worktree.
-
-## What to review
-The diff of \`HEAD\` against its base \`main\`:
-    git -C ${dir} diff main...HEAD
-Read the full diff of every changed file, and the callers and context around
-it. Spot-checking is not a review.
-
-**Check the working tree too, before you conclude anything from an empty or a
-thin diff:**
-    git -C ${dir} status --porcelain
-An implementer that did the work and never committed it leaves a full tree and
-an empty diff. That is a real failure, and it is not "the phase was not
-implemented" — the difference decides whether the fixer writes the code again
-or simply commits it, and getting it wrong costs the phase every fix round it
-has. Where the phase’s work is in the tree and missing from the diff, that
-*is* the finding: name the paths, make it a BLOCKER, and say the work needs
-committing rather than writing again.
-
-An unclean tree is **not by itself a finding.** A lane carries files nobody is
-meant to commit — configuration the pool copied in, dependency trees it
-linked, caches and build output the gates you just ran produced — and the
-implementer is told by name not to stage them. If the diff holds the phase’s
-work, do not raise what is sitting in the tree beside it.
-
-## The outer gate — ask the orchestrator to run it
-This plan declares its gates, and the orchestrator runs them for you. Ask for
-one by id, from your own worktree:
-    vinta-ai-maestro gate unit
-It runs the plan’s own command for that gate, in your lane, and exits with the
-gate’s exit code — \`0\` is green. It prints the path to the gate’s output; read
-that file when a gate is red, rather than inferring what broke from the code.
-
-**Run gates this way rather than running their commands yourself.** Three
-things are true of a gate the orchestrator ran and none of them survive a
-command you typed: the result is cached against your lane’s contents, so a
-gate you have already run on an unchanged tree returns instantly the next time
-anyone asks; the machine capacity it needs is queued for rather than taken out
-from under the other lanes; and what runs is the command this plan declares —
-the same one the orchestrator will run to judge this phase. Something you ran
-that resembles the gate is not the gate, and reporting it as one is how a
-phase passes review and fails its gate afterwards. Where the harness allows
-it, a gate’s own command typed by hand is refused before it runs, with the
-\`vinta-ai-maestro gate\` line to use instead — follow it rather than working
-around it.
-
-The gate may run narrowed to the files this phase changed; the full suite
-runs once the phases are merged. Running a single test file of your own in
-the inner loop is fine — it is the gate’s whole command that goes through
-the orchestrator.
-
-Waiting is the expected outcome, not a failure: it queues for capacity and then
-runs a suite. Let it finish — do not interrupt it, add a timeout, or retry it
-in some other form. And if it refuses outright, that is the answer to the gate
-rather than permission to run the command by hand: say so in your report.
-
-## The stated requirement
-This diff implements the phase below. It is the requirement, verbatim: the code
-should do what it asks, not something adjacent.
-
-## api-layer
-
-Add REST endpoints for folders.
-
-## Run the gates yourself
-An implementer saying they were green is a claim, not evidence. Run each of
-these and read what it returns:
-   - \`vinta-ai-maestro gate unit\`
-Say in your report that you ran them and what they returned. If you could not
-run them, that is a finding. Running them again is cheap: an unchanged tree is
-served from cache.
-
-## The standard
-
-### Stance
-Perform a deep code quality audit of this phase in the current working tree against its
-base. Rethink how to structure the change to meaningfully improve code quality without
-changing intended behavior. Work to improve abstractions and modularity, reduce spaghetti,
-and improve succinctness and legibility. Be ambitious: assume there is often a **code judo**
-move, a reframing that uses the existing architecture so that whole branches, helpers,
-modes, or layers disappear. Prefer the solution that makes the code feel inevitable in
-hindsight. If you see a path to delete complexity rather than rearrange it, push hard for
-that path. Verify every claim against code, history, tests, and repository instructions.
-You make no edits. Be direct and demanding; state major problems as major problems.
-
-### Evidence bar
-No evidence, no finding. Every finding answers four questions: Can I cite the exact file
-and line? Can I describe the failure mode or the maintainability cost concretely? Have I
-read the surrounding context and callers? Is the severity defensible to a senior engineer?
-Attach a confidence from 0 to 100 and drop anything under 80. Behavior claims need a
-file:line citation, not an inference from naming.
-
-These are not findings: pre-existing issues outside this phase, issues a linter or type
-checker already catches, nits a senior engineer would skip, generic input validation
-without a proven impact, paths no current caller or data can reach, denial-of-service or
-rate-limiting concerns without a threat model, and handling for scenarios the project’s
-own patterns do not handle elsewhere. If a scenario is genuinely undecided, report it as a
-**question for the human** with your recommendation, separate from blockers.
-
-### What to review, in priority order
-1. **Correctness and security.** Logic errors, broken edge cases that current inputs can
-   reach, injection, missing or weakened authorization, unscoped queries in multi-tenant
-   code, secrets or PII in logs and error messages, unsafe deserialization, race conditions
-   with a concrete interleaving. Treat any logic alteration as high risk until shown
-   otherwise, refactors included. Count callers to size the blast radius; flag unchanged
-   callers that depend on changed behavior; \`git blame\` removed checks before accepting
-   their removal.
-2. **Consumer invariants.** For every rule, comparison, or key the change introduces, name
-   what downstream code assumes about the data (positions, identity, ordering, presence)
-   and check that the rule guarantees exactly that. A rule that is weaker than its
-   consumers’ assumption is a blocker, not a question for the human, even when every listed
-   case passes; state the consumer, the assumption, and the input that violates it. When
-   the change widens what a status, flag, or enum value means, list every reader of that
-   value with file:line and say for each whether it still holds; a reader written for the
-   old meaning is a blocker, and a reader you did not list is a gap in your review.
-3. **Destructive or irreversible operations.** Hard deletes where the project uses soft
-   deletes, migrations without a rollback step, scripts that touch production without a
-   dry run, non-atomic multi-step updates that can leave state half-applied, persisted
-   fields whose meaning changes without a migration or a note. For any rule that migrates,
-   re-keys, or carries persisted state forward, walk two consecutive transitions and state
-   what the second one reads; a rule verified on one move only is unverified.
-4. **Drift from project conventions and duplicated judgment.** Bespoke helpers where a
-   canonical one exists, re-implemented framework primitives, a decision (parse, validate,
-   classify) answered in two places, domain-language drift from the project’s own terms,
-   logic in the wrong layer or package, hand-edited generated artifacts.
-5. **Structural regressions and missed simplifications.** Ad-hoc conditionals bolted onto
-   unrelated flows, one-off booleans and nullable modes, feature logic leaking into shared
-   paths, thin wrappers and pass-through helpers, magic generic mechanisms hiding simple
-   data shapes, contract fields repeating data already exposed, refactors that move
-   complexity without deleting it. Also the reverse: splits that separate code which
-   changes together, trading cohesion for file count.
-6. **Hot-path cost.** List every path that reaches the changed code with file:line: page
-   load, poll, each write and per-item action, each command. For each, say what
-   subprocess, network or full-recomputation work it does per call now and what it did
-   before. Work added where the previous code used cached or in-memory data is a finding;
-   name the path and the multiplier.
-7. **Text that outruns the code.** Docs, config names, changelog lines, comments, and UI
-   copy must claim exactly what the code checks. The remedy to propose is the code keeping
-   the promise; propose weakening the text only when the promise is out of scope, and say
-   so.
-8. **Brittle or flaky tests.** Timing sleeps, order dependence, real network or clock,
-   assertions rewritten to match new behavior instead of the requirement, tests deleted or
-   skipped, thresholds lowered, tests that restate the implementation or pass vacuously. A
-   fake must derive the rule’s answer from the same inputs the real system uses; a fake
-   with a second table set to the desired answer, or a fixture describing a state the real
-   system cannot produce, is a finding. A test of persisted state that seeds the state
-   directly instead of entering through the real route or command hides the bugs that
-   live in the writer.
-9. **Boundary and type contracts.** Unnecessary optionality, \`any\`, \`unknown\`, casts, silent
-   fallbacks that degrade without logging, validation duplicated past the trust boundary,
-   ad-hoc object shapes where a typed model would remove branches.
-10. **Legibility.** Only after the above, and only when a senior engineer would stop on it.
-
-Also check **requirement fidelity**: the code does what the phase asked, not something
-adjacent, and dependency changes are intentional.
-
-### Preferred remedies
-Delete a layer of indirection rather than polishing it. Reframe the state model so
-conditionals disappear instead of getting centralized. Change the ownership boundary so the
-feature becomes a natural extension of an existing abstraction. Make the bad state
-unrepresentable (an exact comparison, a key derived by construction, a typed model) rather
-than detected. Reuse the canonical helper. Move logic to the layer that owns the concept. Do
-not be satisfied with "maybe rename this" when the real issue is structural, nor with a
-cleaner version of the same messy idea when a much simpler idea is visible.
-
-### Approval bar
-Approve when the phase has: no verified correctness or security defect, no rule weaker than
-its consumers assume, no unguarded destructive path, no duplicated judgment or drift the
-project’s patterns forbid, no structural regression or plausible code-judo move left on the
-table, no hot-path regression, no text claiming more than the code checks, no brittle test
-or answer-carrying fake, and no boundary churn obscuring the contract. Behavior that merely
-works is not enough.
-
-## Do this work in this session, yourself
-You are the agent that reviews this diff — not an orchestrator for one. Do not spawn,
-dispatch or delegate to a sub-agent (claude-code’s Task/Agent tool, or whatever
-your harness calls the same thing) for any part of it: not the work, not a
-search of the codebase, not a second opinion on your own output. Read, run and
-write yourself.
-This session is reused across phases and rounds, and a later turn will open by
-telling you that what you learned about this repository still holds. It holds
-only because this session is what learned it. A sub-agent’s reading of the code
-ends when the sub-agent does, so a delegated turn leaves you holding its summary
-and nothing else, and every turn after it pays for a cold start.
-A project skill that tells you to spawn an implementer, reviewer or fixer —
-\`implement-plan\`, \`implement-phase\`, \`review-phase\`, \`amend-plan\`, anything
-shaped like them — is written for the orchestrator that dispatches phases. That
-orchestrator is already running: it is what spawned you, and its job is not this
-turn’s. Take what such a skill says about this repository’s conventions, gates
-and commit rules; never follow its spawn steps.
-
-## How to report
-Prioritized findings first, each a BLOCKER with file:line evidence, its failure
-mode or cost, the remedy, and your confidence. Fewer high-conviction findings
-beat a long list. Then, under their own heading, **questions for the human**:
-scenarios that are genuinely undecided, each with your recommendation. Those are
-not blockers — the fixer decides whether to put them to a person.
-
-End your final message with one line, exactly:
-    VERDICT: pass
-or
-    VERDICT: fail
-\`VERDICT: pass\` is your explicit approval: nothing blocks and the phase meets
-the standard. Any blocker standing is \`VERDICT: fail\`. That line is read by the
-orchestrator; a turn that ends without it is taken as a failure, so it must be
-the last thing you write.
-`
 
 const COLD_FIXER = (dir: string): string =>
   `You are fixing api-layer: API of plan bookmarks.
@@ -1949,59 +1750,21 @@ in some other form. And if it refuses outright, that is the answer to the gate
 rather than permission to run the command by hand: say so in your report.
 
 ## What came back
-The reviewer reported:
-
-BLOCKER: POST /folders does not validate parent_id.
+Gate unit failed with exit code 1.
+Its output is at /runs/run-1/gates/unit.log — read it first; it says what broke.
 
 ## The phase this branch is implementing
 ## api-layer
 
 Add REST endpoints for folders.
 
-## Verify before fixing
-The findings are leads, not orders. For each one: reproduce or prove the claim
-from code and tests; check the repository’s invariants, the intended behaviour,
-the history and the current callers; then decide whether it is correct,
-partially correct or unsupported. Reject unsupported findings, issues outside
-this phase, and anything that fails the evidence bar — and keep the concrete
-counter-evidence, because the reviewer is shown it.
-
-Choosing the remedy is yours. Where a verified problem has several, pick the one
-that makes the bad state unreachable for every consumer of the data — a type, an
-exact comparison, a key derived by construction — and then the simplest. Where
-docs, names or copy promise more than the code does, make the code keep the
-promise; weaken the text only where a person has settled the case is out of
-scope. Before adding machinery for a rare case, look for the project’s existing
-pattern in its README, AGENTS.md, rules and neighbouring code: the pattern is
-the answer, and no pattern means asking, not assuming.
-
-## What goes to a person instead of into the code
-Do not fix a finding that depends on a decision that is not yours. Put it to the
-operator when it asks for:
-- \`unreachable\` — handling for a scenario no current caller, type or data reaches;
-- \`defensive\` — a check on data already typed or validated upstream;
-- \`ambiguity\` — docs, tests and code disagree about what is wanted and none is
-  clearly the bug, or the requirement names a mechanism that does not achieve its
-  own goal;
-- \`destructive\` — a delete, a migration, or anything touching production.
-Fix every other justified finding first. The orchestrator asks the operator about
-every gated item at once after your turn, and the review after that sees the
-answers. For \`unreachable\` and \`defensive\` your recommendation is normally "reject
-the finding". Every item states the default taken if nobody answers, and for a
-\`destructive\` one that default is never the destructive option.
-
 ## How to fix
-Address every verified finding as one coherent design change. Prefer changes
-that delete concepts, branches, duplicated state and boundary leaks, and keep
-intended behaviour unless a finding proves it wrong — when a fix changes
-documented behaviour, change the docs, names and copy in the same commit. Where a
-fix needs a guarantee, take the highest rung available: the illegal state made
-unrepresentable in types; a static check; a scripted check such as a test; one
-assertion at the trust boundary; a runtime check inside the flow, last. A new
-file needs a reason a reader would recognise, not a line count. Add a test only
-where a fix changes behaviour or a verified bug was found, enter through the
-real routes rather than seeding state, and delete tests a simplification made
-redundant. Change nothing unrelated: the next review reads every line.
+Read the gate’s output before the code: it says what broke. Find the cause and
+fix that, in the code this phase changed where you can. Do not weaken, skip or
+delete a test, loosen a lint rule, or narrow a check to make it pass — a gate
+that goes green that way has stopped checking the thing it was there for. If
+the failure is in code this phase did not touch, or the gate itself is broken,
+say so in your report rather than working around it. Change nothing unrelated.
 
 ## Verify
 Re-run the inner loop, then run each of these yourself:
@@ -2039,7 +1802,7 @@ Long commands are fine — run them and wait for them to return.
 
 ## Committing is part of the work, not after it
 Your phase is reviewed and merged **from the commits on \`HEAD\`**. The
-reviewer reads \`git diff main...HEAD\` and nothing else:
+review reads \`git diff main...HEAD\` and nothing else:
 a file you wrote and did not commit does not exist as far as the rest of this
 run is concerned, and the lane it sits in is reset before the next phase.
 
@@ -2054,33 +1817,19 @@ it.
 test you could not make pass, a phase you got half way through: none of them
 is a reason to end the turn with the work only on disk. Commit it and report
 FAILURE, saying what is still red. A commit is not a claim that the phase is
-finished — it is what makes the work exist for the reviewer, for the fixer who
-acts on their findings, and for the next turn on this branch. The alternative
-is not "a clean branch": it is a phase that is reviewed as though you had
-written nothing, fixed by someone writing it a second time, and then deleted
-with the lane.
+finished — it is what makes the work exist for the gates, for the review, and
+for the next turn on this branch. The alternative is not "a clean branch": it
+is a phase that is gated and reviewed as though you had written nothing, and
+then deleted with the lane.
 Keep this round to one commit where you can — a hook rewrite aside — with a
-message naming the findings it addresses, so the reviewer can read the round.
+message naming the gate it fixes.
 
 ## Required output
 - Status: SUCCESS or FAILURE, and why.
 - The commit this round made, by hash, and the files it changed, paths only.
 - Every gate you ran, by id, and what it returned. If you did not run one of
   the gates listed above, say so and say why rather than leaving it out.
-- Each finding: fixed (and how), rejected (and the counter-evidence), or gated.
-- The reason for each new file.
-
-Then end with exactly one fenced \`review-ledger\` block — the orchestrator reads it,
-and an item missing from it is one nobody downstream is told about:
-
-\`\`\`review-ledger
-{"rejected": [{"finding": "<the finding, one line>", "counter_evidence": "<file:line and why>"}],
- "gated": [{"id": "g1", "trigger": "unreachable", "finding": "<one line>",
-            "evidence": "<file:line>", "reviewer_recommendation": "<its words>",
-            "recommendation": "<yours>", "default": "<what happens if nobody answers>"}]}
-\`\`\`
-Use empty lists when there is nothing to put in them. \`trigger\` is one of
-\`unreachable\`, \`defensive\`, \`ambiguity\`, \`destructive\`.
+- What broke, and what you changed to fix it.
 `
 
 it('resolves every node of the diamond against the plan the fixture writes', () => {

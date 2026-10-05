@@ -46,7 +46,7 @@ import type {
   SpawnOutcome,
 } from '../src/harness/adapter.ts'
 import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
-import { LEDGER_FENCE, VERDICT_MARKER } from '../src/prompts/index.ts'
+import { VERDICT_MARKER } from '../src/prompts/index.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import { Integrator } from '../src/integration/integrator.ts'
@@ -373,10 +373,21 @@ const GOLDEN = JSON.parse(
  * test rather than the fixture's. The gates are re-pointed at commands that
  * cost milliseconds; everything else is the fixture verbatim.
  */
-function goldenWorkflow(gates: Readonly<Record<string, unknown>>): Workflow {
+function goldenWorkflow(
+  gates: Readonly<Record<string, unknown>>,
+  chores: Readonly<Record<string, unknown>> = {},
+): Workflow {
   const { pipelines: _shadowed, ...rest } = GOLDEN
-  return WorkflowSchema.parse({ ...rest, gates })
+  return WorkflowSchema.parse({
+    ...rest,
+    gates,
+    chores,
+    defaults: { ...(rest['defaults'] as object), chores: Object.keys(chores) },
+  })
 }
+
+/** The phase review every plan `plan-feature` writes carries, minus the skill. */
+const REVIEW_CHORE = { review: { prompt: 'Review this phase’s diff.', when: 'review' } }
 
 const branchOf = (workflow: Workflow, nodeId: string): string =>
   `plan/${workflow.id}/phase-${nodeId}`
@@ -508,8 +519,9 @@ describe('the fix loop', () => {
       schema_version: 1,
       id: 'fixloop',
       base_branch: 'main',
-      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
       resources: { lane: { capacity: 1, kind: 'worktree' } },
+      chores: REVIEW_CHORE,
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase', chores: ['review'] },
       gates: {
         unit: {
           // The marker lives outside every lane, so flipping it does not move a
@@ -537,64 +549,63 @@ describe('the fix loop', () => {
       ],
     })
 
-  it('red gate → fix → review → green gate → done', async () => {
+  /** Which turn a task was, read off the prompt it was handed. */
+  const turnOf = (task: AgentTask): string =>
+    task.prompt.includes(VERDICT_MARKER)
+      ? 'review'
+      : task.prompt.includes('You are fixing') || task.prompt.includes('## How to fix')
+        ? 'fixer'
+        : 'implementer'
+
+  it('red gate → fix → green gate → review → done', async () => {
     const rig = setup((root) => flakyGate(root, 2), { script: PASSING })
     const report = await within(60_000, rig.run(), 'the fix loop')
 
     expect(report.statuses['p1']).toBe('done')
     expect(report.statuses['p2']).toBe('done')
-    // implementer, reviewer, (gate red) fixer, reviewer — then the gate is green.
-    const spawned = rig.adapters['claude-code']?.spawned ?? []
-    expect(spawned.filter((task) => task.nodeId === 'p1')).toHaveLength(4)
+    // The review waits for a green gate: it never reads code that does not pass.
+    const p1 = (rig.adapters['claude-code']?.spawned ?? []).filter((task) => task.nodeId === 'p1')
+    expect(p1.map(turnOf)).toEqual(['implementer', 'fixer', 'review'])
   })
 
-  it('continues the implementer’s session for the fixer, and sends it a delta', async () => {
+  it('continues the implementer’s session for the fixer and the review, with a delta', async () => {
     // §15 end to end, with real worktrees and a real git history — the one
     // place the two halves of the feature are checked *together*. Resuming a
     // session while re-sending the whole brief wastes the saving; sending a
-    // delta into a session that was never opened asks an agent to fix findings
-    // it has never seen. Either half alone passes its own unit tests.
+    // delta into a session that was never opened asks an agent to fix a gate
+    // against work it has never seen. Either half alone passes its own unit
+    // tests.
     const rig = setup((root) => flakyGate(root, 2), { script: PASSING })
     await within(60_000, rig.run(), 'the fix loop')
 
-    const spawned = (rig.adapters['claude-code']?.spawned ?? []).filter(
+    const [implement, fix, review] = (rig.adapters['claude-code']?.spawned ?? []).filter(
       (task) => task.nodeId === 'p1',
     )
-    const [implement, review, fix, reReview] = spawned
 
-    // Both slots open cold; neither inherits anything.
     expect(implement?.resumeSessionId).toBeUndefined()
-    expect(review?.resumeSessionId).toBeUndefined()
-
-    // The fixer continues `main` — the session that wrote the code.
+    // Both continue `main` — the session that wrote the code.
     expect(fix?.resumeSessionId).toBeDefined()
-    // The re-review continues `review`, and the two are different sessions:
-    // the reviewer must never end up inside the session it is reviewing.
-    expect(reReview?.resumeSessionId).toBeDefined()
-    expect(fix?.resumeSessionId).not.toBe(reReview?.resumeSessionId)
+    expect(review?.resumeSessionId).toBeDefined()
 
     // And the prompts match the sessions. A continuation says so in as many
     // words and carries no brief; the cold prompt that opened the slot does.
     expect(fix?.prompt).toContain('same session')
+    expect(review?.prompt).toContain('same session')
     expect(implement?.prompt).not.toContain('same session')
-    // Neither of the two headings a brief is carried under: the delta restates
-    // how to fix, never what the phase was.
     expect(implement?.prompt).toContain('## Your tasks')
     expect(fix?.prompt).not.toContain('## Your tasks')
     expect(fix?.prompt).not.toContain('## The phase this branch is implementing')
 
-    // The one thing a reviewer continuation may never drop: without it the
-    // executor reads no verdict and takes the fail-closed default on a node
-    // that just passed (§15.3).
-    expect(reReview?.prompt).toContain(VERDICT_MARKER)
+    // The one thing a review continuation may never drop: without it the
+    // executor reads no verdict and the phase goes to the operator (§15.3).
+    expect(review?.prompt).toContain(VERDICT_MARKER)
   })
 
-  it('reviews the last fix rather than failing the phase unread', async () => {
+  it('gates and reviews the last fix rather than failing the phase unchecked', async () => {
     // `fix` used to go straight to `failed` once the budget was up, so the
-    // final fixer's work was never reviewed and never gated. Two phases in one
-    // run ended on a fixer reporting "all gates green, committed, tree clean"
-    // and were failed anyway — the work was done and nothing was asked to look
-    // at it.
+    // final fixer's work was never checked at all. Two phases in one run ended
+    // on a fixer reporting "all gates green, committed, tree clean" and were
+    // failed anyway.
     //
     // Here the gate flips green exactly once, on the attempt the old pipeline
     // never reached: the first gate is red, the fixer spends the only round,
@@ -604,25 +615,8 @@ describe('the fix loop', () => {
     const report = await within(60_000, rig.run(), 'the fix loop')
 
     expect(report.statuses['p1']).toBe('done')
-    // Matched against both prompt forms. `fix` shares the implementer's
-    // session, so a fixer turn is a *continuation* — its delta never says "You
-    // are fixing", and a classifier that only knew the cold wording read it as
-    // an implementer and made this test lie about what ran.
-    const roles = rig.adapters['claude-code']?.spawned
-      // p1 only: this fixture also carries a p2, whose own turns would
-      // otherwise land in the middle of the sequence under test.
-      .filter((task) => task.nodeId === 'p1')
-      .map((task) =>
-      task.prompt.includes('You are fixing') ||
-      task.prompt.includes('## Verify before fixing')
-        ? 'fixer'
-        : task.prompt.includes('You are the reviewer of') || task.prompt.includes('Still reviewing')
-          ? 'reviewer'
-          : 'implementer',
-    )
-    // The fixer's turn is followed by a review, and that review is what passes
-    // the phase. Under the old pipeline the list ended at the fixer.
-    expect(roles).toEqual(['implementer', 'reviewer', 'fixer', 'reviewer'])
+    const p1 = (rig.adapters['claude-code']?.spawned ?? []).filter((task) => task.nodeId === 'p1')
+    expect(p1.map(turnOf)).toEqual(['implementer', 'fixer', 'review'])
   })
 
   it('exhausted fix rounds fail the node and block its dependents', async () => {
@@ -654,91 +648,65 @@ describe('the fix loop', () => {
 }, REAL_RUN_TIMEOUT_MS)
 
 // ---------------------------------------------------------------------------
-// §16.3: the review ledger the fixer and the operator write into
+// §16: the verdict a review chore's turn states
 // ---------------------------------------------------------------------------
 
-describe('the review ledger', () => {
+describe('the review verdict', () => {
   const onePhase = (): Workflow =>
     WorkflowSchema.parse({
       schema_version: 1,
-      id: 'ledger',
+      id: 'verdict',
       base_branch: 'main',
       defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
       resources: { lane: { capacity: 1, kind: 'worktree' } },
       nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1' }],
     })
 
-  const gatedItem = {
-    id: 'g1',
-    trigger: 'defensive',
-    finding: 'Re-check parent_id in the view',
-    evidence: 'schemas.py:12 validates it',
-    reviewer_recommendation: 'Add the check',
-    recommendation: 'reject the finding',
-    default: 'reject the finding',
-  }
-
-  /** One finished fixer turn in the transcript, ending on `text`. */
-  const fixerTurn = (rig: Rig, text: string, result = 'ok'): void => {
+  /** One finished turn in the transcript, ending on `text`. */
+  const turn = (rig: Rig, text: string, result = 'ok'): void => {
     rig.journal.appendTranscript(RUN_ID, 'p1', { type: 'assistant_text', text })
     rig.journal.appendTranscript(RUN_ID, 'p1', { type: 'session_ended', result })
   }
 
-  const execute = (rig: Rig, verb: EffectId, params: Record<string, unknown>, human = {}) =>
+  const spawn = (rig: Rig, params: Record<string, unknown>) =>
     rig.executor.execute({
-      effect: SideEffectSchema.parse({ id: `e-${verb.replace(/_/g, '-')}`, definitionId: verb, params }),
+      effect: SideEffectSchema.parse({ id: 'e-spawn', definitionId: 'spawn_agent', params }),
       origin: { kind: 'onEnter', stateId: 'direct' },
-      context: { node: { id: 'p1' }, human },
+      context: { node: { id: 'p1' } },
     })
 
-  it('files the fixer’s block and reports how many findings it gated', async () => {
+  it('reads the verdict a review turn ended on', async () => {
     const rig = setup(onePhase)
-    fixerTurn(
-      rig,
-      'Fixed one.\n\n```' + LEDGER_FENCE + '\n' +
-        JSON.stringify({ rejected: [{ finding: 'A', counter_evidence: 'a.py:1' }], gated: [gatedItem] }) +
-        '\n```',
-    )
+    turn(rig, `Approved after two passes.\n${VERDICT_MARKER} pass`)
+    expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
+      review: { verdict: 'pass' },
+    })
 
-    const outcome = await execute(rig, 'spawn_agent', { role: 'fixer' })
-
-    expect(outcome.facts).toEqual({ review: { gated: 1 } })
-    const ledger = rig.journal.reviewLedger(RUN_ID, 'p1')
-    expect(ledger).toHaveLength(1)
-    expect(ledger[0]).toMatchObject({ kind: 'report', gated: [gatedItem], rejected: [{ finding: 'A' }] })
+    turn(rig, `One blocker left.\n${VERDICT_MARKER} fail`)
+    expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
+      review: { verdict: 'fail' },
+    })
   })
 
-  it('files nothing and gates nothing for a turn with no block, or one that errored', async () => {
+  it('fails closed on a review turn that stated nothing, or one that errored', async () => {
     const rig = setup(onePhase)
-    fixerTurn(rig, 'Fixed everything, trust me.')
-    expect((await execute(rig, 'spawn_agent', { role: 'fixer' })).facts).toEqual({ review: { gated: 0 } })
+    turn(rig, 'Looks good to me.')
+    expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
+      review: { verdict: 'fail' },
+    })
 
-    fixerTurn(rig, '```' + LEDGER_FENCE + '\n' + JSON.stringify({ gated: [gatedItem] }) + '\n```', 'error')
-    expect((await execute(rig, 'spawn_agent', { role: 'fixer' })).facts).toEqual({ review: { gated: 0 } })
-
-    expect(rig.journal.reviewLedger(RUN_ID, 'p1')).toEqual([])
+    turn(rig, `${VERDICT_MARKER} pass`, 'error')
+    expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
+      review: { verdict: 'fail' },
+    })
   })
 
-  it('files an answer as a decision, unattended or not', async () => {
+  it('states nothing for a turn that was not asked for a verdict', async () => {
     const rig = setup(onePhase)
-    await execute(rig, 'record_decision', {}, { answer: 'g1: reject' })
-    await execute(rig, 'record_decision', {}, { answer: 'defaults', unattended: true })
+    turn(rig, `${VERDICT_MARKER} pass`)
 
-    expect(rig.journal.reviewLedger(RUN_ID, 'p1')).toMatchObject([
-      { kind: 'decision', answer: 'g1: reject', unattended: false },
-      { kind: 'decision', answer: 'defaults', unattended: true },
-    ])
-  })
-
-  it('keeps the ledger out of the event log, which holds identifiers only', async () => {
-    const rig = setup(onePhase)
-    fixerTurn(rig, '```' + LEDGER_FENCE + '\n' + JSON.stringify({ gated: [gatedItem] }) + '\n```')
-    await execute(rig, 'spawn_agent', { role: 'fixer' })
-    await execute(rig, 'record_decision', {}, { answer: 'g1: reject' })
-
-    const logged = JSON.stringify(rig.journal.events(RUN_ID))
-    expect(logged).not.toContain(gatedItem.finding)
-    expect(logged).not.toContain('g1: reject')
+    expect((await spawn(rig, { role: 'chore' })).facts).toBeUndefined()
+    expect((await spawn(rig, { role: 'fixer' })).facts).toBeUndefined()
   })
 }, REAL_RUN_TIMEOUT_MS)
 
@@ -1563,8 +1531,8 @@ const answersThePrompt = (task: AgentTask): MockScript => {
 }
 
 describe('composed prompts, end to end', () => {
-  it('reaches done, because the reviewer was told the verdict protocol', async () => {
-    const rig = setup(() => goldenWorkflow(CLEAN_GATES), { reply: answersThePrompt })
+  it('reaches done, because the review was told the verdict protocol', async () => {
+    const rig = setup(() => goldenWorkflow(CLEAN_GATES, REVIEW_CHORE), { reply: answersThePrompt })
 
     const report = await within(60_000, rig.run(), 'the composed run')
 
@@ -1584,16 +1552,16 @@ describe('composed prompts, end to end', () => {
   })
 
   it('fails when the agent ignores its prompt — the run this bug produced', async () => {
-    const rig = setup(() => goldenWorkflow(CLEAN_GATES), {
+    const rig = setup(() => goldenWorkflow(CLEAN_GATES, REVIEW_CHORE), {
       reply: () => ({ events: [{ type: 'assistant_text', text: 'ok, done' }], result: 'ok' }),
       retryAfterMs: 10,
     })
 
     const report = await within(60_000, rig.run(), 'the run nobody told what to do')
 
-    // No verdict stated, so the reviewer's silence fails closed, the fix rounds
-    // run out, nobody answers the exhausted-budget question, and the node fails
-    // with its dependents blocked behind it.
+    // No verdict stated, so the review's silence fails closed, nobody answers
+    // the unapproved-review question, and the node fails with its dependents
+    // blocked behind it.
     expect(report.statuses['p1']).toBe('failed')
     expect(report.statuses['p4']).toBe('blocked')
   })

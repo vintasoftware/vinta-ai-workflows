@@ -162,8 +162,14 @@ describe('planSession — §15.5 the last fix round', () => {
     expect(plan.continuation).toBe(true)
   })
 
-  it('escalates only fixers — a reviewer on its last round keeps its session', () => {
-    const plan = planSession(input({ role: 'reviewer', fixRounds: 1, maxFixRounds: 2 }))
+  it('escalates only fixers — a chore on the last round keeps its session', () => {
+    const plan = planSession(input({ role: 'chore', fixRounds: 1, maxFixRounds: 2 }))
+
+    expect(plan.continuation).toBe(true)
+  })
+
+  it('has no last round when the node sets no budget', () => {
+    const plan = planSession(input({ role: 'fixer', fixRounds: 9, maxFixRounds: null }))
 
     expect(plan.continuation).toBe(true)
   })

@@ -3,84 +3,67 @@
  * names when a workflow does not author its own (§5.2).
  *
  * ```
- * implement ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ gate ──┬─ exit=0 ──▶ integrate ──▶ done
- *                        │                                     │             (merge, push, PR,
- *                        │                                     │              after_pr chores)
- *                        │                                     ├─ exit≠0, rounds left ──▶ fix
- *                        │                                     └─ exit≠0, none left ──▶ exhausted
- *                        ├─ verdict=fail, rounds left ──▶ fix ──┬─ nothing gated ──▶ review
- *                        │                                      └─ gated ──▶ consult ──▶ review
- *                        └─ verdict=fail, none left ──▶ exhausted
- * exhausted ──┬─ continue (budget granted again) ──▶ fix
- *             └─ stop ──▶ failed
+ * implement ──▶ gate ──┬─ exit=0 ──▶ review ──┬─ verdict=pass ──▶ polish ──▶ verify ──┬─ exit=0 ──▶ integrate ──▶ done
+ *                      │                      └─ otherwise ──▶ unapproved             │             (merge, push, PR,
+ *                      │                                                              │              after_pr chores)
+ *                      ├─ exit≠0, rounds left ──▶ fix ──▶ gate                         ├─ exit≠0, rounds left ──▶ fix
+ *                      └─ exit≠0, none left ──▶ exhausted                              └─ exit≠0, none left ──▶ exhausted
+ * exhausted  ──┬─ continue (budget granted again) ──▶ fix
+ *              └─ stop ──▶ failed
+ * unapproved ──┬─ continue ──▶ review
+ *              └─ stop ──▶ failed
  * ```
  *
- * **The review/fix loop is the thermo-nuclear review loop (§16).** The reviewer
- * holds the `review` slot across rounds and is held to the Review Standard (or
- * the project's `REVIEW.md`); the fixer is the implementer continuing `main`,
- * and it verifies every finding before acting on it. What it will not decide —
- * a scenario nothing reaches, a defensive check, a requirements ambiguity, a
- * destructive operation — it gates, and `consult` puts the whole batch to the
- * operator at once. The answer is filed in the review ledger by
- * `record_decision`, so every later review and fix sees it as settled. A
- * consult is not a round: it goes straight back to the reviewer, who reads the
- * fix the round made and the decisions beside it.
+ * **Each step runs only on what the step before it passed.** The gates run
+ * first, because they are cheap next to a review, and a review of code that
+ * does not build is wasted. The review runs once they are green, and the polish
+ * chores once the review approved, so a comment pass never tidies code the
+ * review is about to rewrite.
  *
- * `consult` answers itself under `--retry-after` with `defaults` — each item
- * takes the default the fixer stated for it — because the plan says so here,
- * in `unattended_answer`. `exhausted` answers itself with `stop`, which hands
- * the phase to `--on-failure` exactly as an exhausted budget did before this
- * question existed; an unattended run therefore spends no more than it used to.
+ * **The review is a chore, not a role (§16).** `review` runs the node's
+ * `when: review` chores — in a plan `plan-feature` writes, the thermo-nuclear
+ * review loop — on the implementer's own session. That agent spawns one
+ * reviewer sub-agent, checks each finding against the code, fixes what holds
+ * up, answers what does not, and repeats until the reviewer approves. The loop
+ * lives inside one turn, so a round costs a message to a warm reviewer rather
+ * than a cold spawn, a prompt rebuilt from the plan and a pass through this
+ * machine. The turn ends on a `VERDICT:` line, which is the `review.verdict`
+ * fact. A node that runs no review chore passes, the way a node declaring no
+ * gates does.
  *
- * **Why `polish` sits between the review and the gate**, rather than after the
- * gate or before the review. A chore edits the tree, so anywhere after the gate
- * is a diff that merges having never been gated — comment-only edits are
- * usually harmless, and `# type: ignore`, doctests and lint rules about comment
- * shape are exactly the cases where "usually" is not a guarantee. Before the
- * review is worse in the other direction: the fixer would rewrite what the
- * chore just tidied, round after round. Here it runs once, on the diff that is
- * actually going to merge, and the gates behind it check what it did. The tree
- * hash it changes is what makes those gates a real run rather than a cache hit
- * on the pre-chore tree, which is the point rather than a cost.
+ * **`unapproved` asks rather than fails.** With no `max_fix_rounds` the loop
+ * runs until the reviewer approves; with one, it stops after that many
+ * unsuccessful iterations and says so. Whether more rounds are
+ * worth it is the operator's call: `continue` runs the review again, and the
+ * new turn picks the argument up where the session left it. Unattended it
+ * answers `stop`, so the phase goes to `--on-failure`.
  *
- * A red gate sends the node to `fix` and back through `review` and `polish`, so
- * a phase that needs fixing runs its chores again. That is the price of having
- * them run on the final diff, and it is why a chore is expected to be
- * idempotent — a second pass over an already-tidied diff should change nothing.
+ * **`verify` runs the gates again, on the tree that merges.** The review loop
+ * and the polish chores both edit it. The loop runs the gates through the
+ * orchestrator as it goes (`vinta-ai-maestro gate`), on the same cache, so a
+ * tree it left green and the polish left alone is a cache hit here rather than
+ * a second run. A red `verify` goes back through `fix` and `gate` to the
+ * review, because the fix changed code after the reviewer approved it.
  *
- * **The budget is spent on the way *into* a fix, not on the way out of one.**
- * It used to be the other way round: `fix` went straight to `failed` once the
- * count was up, so the *last* fixer's work was never reviewed and never gated.
- * Two phases in one run ended on a fixer reporting "all gates green, committed,
- * tree clean" and were failed anyway — the work was done and nothing was ever
- * asked to look at it. Every fix is reviewed now, and the review that follows
- * the last one can still pass the phase.
- *
- * The cost is one extra review turn per exhausted phase. The alternative the
- * report offered — run the gates on exhaustion and integrate if they are green
- * — would merge a diff no reviewer ever approved, and gates catch what gates
- * catch. The review is the thing standing between a plan and its merge, so the
- * budget question belongs in front of the fixer rather than behind it.
- *
- * `max_fix_rounds` still means what it said: the number of fixers a phase may
- * spend before somebody is asked. `0` means none at all.
- *
- * **Exhaustion asks rather than fails.** A phase that is still being argued over
- * after four rounds is either diminishing returns or a real disagreement, and
- * neither is the orchestrator's to call. `continue` grants the budget again —
+ * **`fix` answers red gates only.** The fixer continues `main`, so it is the
+ * implementer with its own reasons for the code still in its context. The
+ * budget is spent on the way *into* a fix, and every fix is gated again before
+ * anything else happens to it. `max_fix_rounds` is the number of fixers a
+ * phase may spend before somebody is asked; `0` means none at all, and no value
+ * — the default — means no limit. **Exhaustion asks rather than fails**: `continue` grants the budget again —
  * `grant_fix_rounds`, the only verb that moves the counter — and goes straight
- * to a fixer, since the last thing that happened was a failure it has not yet
- * answered.
+ * to a fixer, since the last thing that happened was a red gate nobody has
+ * answered yet.
  *
- * The copy in `tests/fixtures/golden-workflow.json` is the same *graph* with
+ * `tests/fixtures/golden-workflow.json` carries a pipeline of the same kind with
  * almost no effects: it is a schema fixture, and a fixture that ran agents
  * would make every parser test wait on one. This one is the runnable article —
  * every state carries the effects that state actually performs — which is why
  * it lives in `src/` and is parsed through `PipelineSchema` here rather than
  * being an object literal shaped like a pipeline.
  *
- * Three conventions the scheduler reads, all of them data rather than special
- * cased ids, because the interpreter is general over author-chosen vocabulary:
+ * Conventions the scheduler reads, all of them data rather than special-cased
+ * ids, because the interpreter is general over author-chosen vocabulary:
  *
  * - **`data.outcome` on a final state** says whether reaching it means the node
  *   succeeded or failed. Absent means success. Without it a host would have to
@@ -88,16 +71,11 @@
  *   out of the interpreter.
  * - **A fix round is a `spawn_agent` with `role: 'fixer'`.** That is what the
  *   host counts into `fix_rounds`; the state happening to be called `fix` is
- *   not what makes it one. Note that this is why sharing the implementer's
- *   session below leaves `max_fix_rounds` untouched — the budget counts roles,
- *   not sessions.
- * - **`session` names a slot to continue** (§15). `implement` and `fix` share
- *   `main`, so the fixer continues the session that wrote the code rather than
- *   paying for a cold context that has to be re-told the brief; `review` keeps
- *   its own slot across rounds, so a re-review remembers what it flagged. The
- *   reviewer is deliberately *not* on `main`: a reviewer sharing the
- *   implementer's session would be grading its own work from inside its own
- *   context. Omitting `session` entirely is what a pipeline does to opt out.
+ *   not what makes it one.
+ * - **`session` names a slot to continue** (§15). `implement`, `fix` and the
+ *   chores all share `main`, so each turn continues the session that wrote the
+ *   code rather than paying for a cold context that has to be re-told the
+ *   brief. Omitting `session` entirely is what a pipeline does to opt out.
  * - **Effects resolve their own defaults** (`effects.ts`). `git_branch` with no
  *   `from` takes the dependency-derived base, `git_merge` with no `branch`
  *   merges the node's own phase branch, `run_gate` with no `gate` runs the
@@ -108,6 +86,28 @@ import { PipelineSchema, type Pipeline, type Workflow } from '../types.ts'
 
 /** The id `defaults.pipeline` and `node.pipeline` refer to. */
 export const STANDARD_PHASE_ID = 'standard-phase'
+
+/**
+ * A node with no `max_fix_rounds` has no budget to run out of. The scheduler
+ * states the fact as `null` rather than leaving it out, because a missing fact
+ * makes every comparison false; and the `||` short-circuits before a number
+ * comparison is asked of a `null`.
+ */
+const UNLIMITED = 'node.max_fix_rounds == null'
+
+/** `gate` and `verify` run the same check, on different trees. */
+const runGates = (id: string) => ({
+  id,
+  definitionId: 'run_gate',
+  description: 'The gates this node declared, in declaration order.',
+})
+
+/** A budget question: `continue` or `stop`, and `stop` when nobody is there. */
+const askToContinue = (id: string, question: string) => ({
+  id,
+  definitionId: 'await_human',
+  params: { question, kind: 'choice', choices: ['continue', 'stop'], unattended_answer: 'stop' },
+})
 
 export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
   states: [
@@ -128,21 +128,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
         },
       ],
     },
-    {
-      id: 'review',
-      name: 'Review',
-      position: { x: 200, y: 0 },
-      // On entry rather than on the incoming transitions: `review` is reached
-      // from both `implement` and `fix`, and a reviewer declared per edge is
-      // one edge away from being forgotten.
-      onEnter: [
-        {
-          id: 'e-review',
-          definitionId: 'spawn_agent',
-          params: { role: 'reviewer', prompt_template: 'reviewer', session: 'review' },
-        },
-      ],
-    },
+    { id: 'gate', name: 'Gate', position: { x: 200, y: 0 }, onEnter: [runGates('e-gate')] },
     {
       id: 'fix',
       name: 'Fix',
@@ -156,74 +142,62 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       ],
     },
     {
-      id: 'consult',
-      name: 'Consult',
+      id: 'exhausted',
+      name: 'Exhausted',
       position: { x: 200, y: 280 },
       onEnter: [
+        askToContinue(
+          'e-exhausted',
+          'This phase spent its fix rounds and its gates are still red. The transcript has ' +
+            'the gate output and the fixer’s last report. Continue for another round of the ' +
+            'same budget, or stop the phase?',
+        ),
+      ],
+    },
+    {
+      id: 'review',
+      name: 'Review',
+      position: { x: 400, y: 0 },
+      onEnter: [
         {
-          id: 'e-consult',
-          definitionId: 'await_human',
-          params: {
-            question:
-              'The fixer has scope questions it will not decide for you. Its last report, in the ' +
-              'transcript, lists each one with the evidence, the reviewer’s recommendation and ' +
-              'its own. Answer per item, e.g. "g1: reject; g2: in scope — handle it", or ' +
-              '"defaults" to take every item’s stated default.',
-            kind: 'text',
-            unattended_answer: 'defaults',
-          },
+          id: 'e-review',
+          definitionId: 'run_chore',
+          params: { when: 'review' },
+          description: 'The review chores this node runs, in order. None passes.',
         },
       ],
     },
     {
-      id: 'exhausted',
-      name: 'Exhausted',
+      id: 'unapproved',
+      name: 'Unapproved',
       position: { x: 400, y: 140 },
       onEnter: [
-        {
-          id: 'e-exhausted',
-          definitionId: 'await_human',
-          params: {
-            question:
-              'This phase spent its fix rounds and the review has not approved it. The ' +
-              'transcript has the remaining blockers and the fixer’s last report. Continue ' +
-              'for another round of the same budget, or stop the phase?',
-            kind: 'choice',
-            choices: ['continue', 'stop'],
-            unattended_answer: 'stop',
-          },
-        },
+        askToContinue(
+          'e-unapproved',
+          'The review loop ran its iterations and the reviewer has not approved this phase. ' +
+            'The transcript has the blockers that remain and the implementer’s report on ' +
+            'them. Continue the review for another round of the same budget, or stop the phase?',
+        ),
       ],
     },
     {
       id: 'polish',
       name: 'Polish',
-      position: { x: 300, y: -140 },
+      position: { x: 600, y: 0 },
       onEnter: [
         {
           id: 'e-chores',
           definitionId: 'run_chore',
-          params: { when: 'before_gate' },
-          description: 'The chores this node runs, in order. None is a no-op.',
+          params: { when: 'after_review' },
+          description: 'The chores this node runs once its review approved. None is a no-op.',
         },
       ],
     },
-    {
-      id: 'gate',
-      name: 'Gate',
-      position: { x: 400, y: 0 },
-      onEnter: [
-        {
-          id: 'e-gate',
-          definitionId: 'run_gate',
-          description: 'The gates this node declared, in declaration order.',
-        },
-      ],
-    },
+    { id: 'verify', name: 'Verify', position: { x: 800, y: 0 }, onEnter: [runGates('e-verify')] },
     {
       id: 'integrate',
       name: 'Integrate',
-      position: { x: 600, y: 0 },
+      position: { x: 1000, y: 0 },
       // Tracking first, and the order is load-bearing rather than tidy.
       //
       // `phase-<id>.md` is the lane's own file, committed *on the phase's own
@@ -250,7 +224,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
         },
       ],
     },
-    { id: 'done', name: 'Done', position: { x: 800, y: 0 }, data: { outcome: 'done' } },
+    { id: 'done', name: 'Done', position: { x: 1200, y: 0 }, data: { outcome: 'done' } },
     {
       id: 'failed',
       name: 'Failed',
@@ -267,58 +241,25 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
     },
   ],
   transitions: [
-    { id: 't-implemented', from: 'implement', to: 'review' },
-    { id: 't-review-pass', from: 'review', to: 'polish', guard: "review.verdict == 'pass'" },
-    // Unconditional, and the chores state nothing a guard could branch on: a
-    // chore is not allowed to be the thing standing between a phase and its
-    // merge, which is what the gates after it are for.
-    { id: 't-polished', from: 'polish', to: 'gate' },
+    { id: 't-implemented', from: 'implement', to: 'gate' },
+    { id: 't-gate-pass', from: 'gate', to: 'review', guard: 'gate.exit_code == 0' },
     // The budget is checked here, in front of the fixer, so that every fixer
-    // that does run is also reviewed. `max_fix_rounds: 2` allows two fixers:
-    // the count is of fixers already spent, so the third failing review is the
-    // one that ends the phase.
-    {
-      id: 't-review-fail',
-      from: 'review',
-      to: 'fix',
-      guard: "review.verdict == 'fail' && fix_rounds < node.max_fix_rounds",
-    },
-    {
-      id: 't-review-exhausted',
-      from: 'review',
-      to: 'exhausted',
-      guard: "review.verdict == 'fail' && fix_rounds >= node.max_fix_rounds",
-    },
-    { id: 't-gate-pass', from: 'gate', to: 'integrate', guard: 'gate.exit_code == 0' },
-    // The same check, because this is the *other* door into `fix`. Guarding
-    // only the review side left a red gate under a passing reviewer with no
-    // exit at all: review → gate → fix → review → gate → fix, forever, with the
-    // budget counting up and nothing reading it.
+    // that does run is also gated. `max_fix_rounds: 2` allows two fixers: the
+    // count is of fixers already spent, so the third red gate is the one that
+    // asks.
     {
       id: 't-gate-fail',
       from: 'gate',
       to: 'fix',
-      guard: 'gate.exit_code != 0 && fix_rounds < node.max_fix_rounds',
+      guard: `gate.exit_code != 0 && (${UNLIMITED} || fix_rounds < node.max_fix_rounds)`,
     },
     {
       id: 't-gate-exhausted',
       from: 'gate',
       to: 'exhausted',
-      guard: 'gate.exit_code != 0 && fix_rounds >= node.max_fix_rounds',
+      guard: `gate.exit_code != 0 && !${UNLIMITED} && fix_rounds >= node.max_fix_rounds`,
     },
-    // A fixer's work always goes back to a reviewer, which is the only thing
-    // that can say it worked — through `consult` first when it gated something.
-    // Written as a negation so that an executor reporting no `review.gated` at
-    // all reaches the reviewer rather than stranding the node: a missing fact
-    // makes every comparison false, and `!` turns that into the safe door.
-    { id: 't-fix-gated', from: 'fix', to: 'consult', guard: 'review.gated > 0' },
-    { id: 't-fix-reviewed', from: 'fix', to: 'review', guard: '!(review.gated > 0)' },
-    {
-      id: 't-consulted',
-      from: 'consult',
-      to: 'review',
-      effects: [{ id: 'e-record-decision', definitionId: 'record_decision' }],
-    },
+    { id: 't-fixed', from: 'fix', to: 'gate' },
     {
       id: 't-continue',
       from: 'exhausted',
@@ -327,6 +268,40 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       effects: [{ id: 'e-grant', definitionId: 'grant_fix_rounds' }],
     },
     { id: 't-stop', from: 'exhausted', to: 'failed', guard: "!(human.answer == 'continue')" },
+    { id: 't-review-pass', from: 'review', to: 'polish', guard: "review.verdict == 'pass'" },
+    // Written as a negation so that a review that stated no verdict at all
+    // reaches the operator rather than stranding the node: a missing fact makes
+    // every comparison false, and `!` turns that into the safe door.
+    { id: 't-review-fail', from: 'review', to: 'unapproved', guard: "!(review.verdict == 'pass')" },
+    {
+      id: 't-review-again',
+      from: 'unapproved',
+      to: 'review',
+      guard: "human.answer == 'continue'",
+    },
+    {
+      id: 't-review-stop',
+      from: 'unapproved',
+      to: 'failed',
+      guard: "!(human.answer == 'continue')",
+    },
+    // Unconditional, and the polish chores state nothing a guard could branch
+    // on: they are not allowed to stand between a phase and its merge, which is
+    // what the gates after them are for.
+    { id: 't-polished', from: 'polish', to: 'verify' },
+    { id: 't-verify-pass', from: 'verify', to: 'integrate', guard: 'gate.exit_code == 0' },
+    {
+      id: 't-verify-fail',
+      from: 'verify',
+      to: 'fix',
+      guard: `gate.exit_code != 0 && (${UNLIMITED} || fix_rounds < node.max_fix_rounds)`,
+    },
+    {
+      id: 't-verify-exhausted',
+      from: 'verify',
+      to: 'exhausted',
+      guard: `gate.exit_code != 0 && !${UNLIMITED} && fix_rounds >= node.max_fix_rounds`,
+    },
     { id: 't-integrated', from: 'integrate', to: 'done' },
   ],
   initialStateIds: ['implement'],

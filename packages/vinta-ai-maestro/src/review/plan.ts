@@ -80,11 +80,10 @@ export type PlanViewResult =
 /** The run id a cold prompt is composed under. It names nothing in the journal. */
 const PREVIEW_RUN = 'plan-review'
 
-/** A journal with no history: no branches, no transcripts, no review ledger. */
+/** A journal with no history: no branches, no transcripts. */
 const EMPTY_JOURNAL: PromptJournal = {
   nodes: () => [],
   tailTranscript: () => [],
-  reviewLedger: () => [],
 }
 
 export interface Inspection {

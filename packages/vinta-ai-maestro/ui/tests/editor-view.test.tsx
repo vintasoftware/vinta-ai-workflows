@@ -260,6 +260,22 @@ test('a node’s own fields, and each dependency’s artifact, are editable and 
   expect(daemon?.workflow(WORKFLOW_ID)).toEqual(saved)
 })
 
+test('clearing the fix-round budget removes it, which means no limit', async () => {
+  const { container } = await openEditor()
+
+  fireEvent.click(control(container, 'select-node', 'p2'))
+  await waitFor(() => expect(container.querySelector('[data-role="node-fields"]')).not.toBe(null))
+  const input = container.querySelector('[data-field="max_fix_rounds"]') as HTMLInputElement
+  fireEvent.change(input, { target: { value: '3' } })
+  fireEvent.change(input, { target: { value: '' } })
+
+  fireEvent.click(saveButton(container))
+  await waitFor(() => expect(daemon?.puts).toHaveLength(1))
+  const saved = daemon?.puts[0]?.workflow as Workflow
+  // Absent, not `NaN` and not `0`: zero is a budget of no fix rounds at all.
+  expect(saved.nodes[1]).not.toHaveProperty('max_fix_rounds')
+})
+
 test('an omitted pipeline is the shipped one, and an override is an explicit act', async () => {
   const { container } = await openEditor()
 

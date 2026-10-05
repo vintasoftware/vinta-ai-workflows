@@ -14,16 +14,3 @@ export {
   type Reorientation,
   type SpawnPromptRequest,
 } from './prompts.ts'
-export {
-  GATE_TRIGGERS,
-  LEDGER_FENCE,
-  parseLedger,
-  readFixerReport,
-  viewLedger,
-  type FixerReport,
-  type GatedFinding,
-  type LedgerEntry,
-  type LedgerView,
-  type RejectedFinding,
-  type SettledDecision,
-} from './ledger.ts'

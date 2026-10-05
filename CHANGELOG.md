@@ -35,9 +35,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   review open <workflow.json>` serves it and prints a link straight to the
   plan. The page shows:
   - **Graph.** The phase DAG, coloured by review state. Below it, the selected
-    phase's brief, its staffing and pipeline, and the implementer, reviewer
-    and fixer prompts. These are the real cold prompts a run would send,
-    composed by the scheduler's own function.
+    phase's brief, its staffing and pipeline, the implementer and fixer
+    prompts, and its chores' prompts (the review loop's among them). These are
+    the real cold prompts a run would send, composed by the scheduler's own
+    function.
   - **Plan.** The markdown, section by section, with an outline.
   - **Gates.** A phase × gate matrix of the commands a run would execute.
   - **Schedule.** A projected timeline with the critical path marked.
@@ -98,6 +99,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **`plan-feature` writes the map** into each plan's workflow from the
     crew's `fallback:` entries. The plan-execution skills (`implement-phase`,
     `review-phase`) follow the same rule when maestro isn't running them.
+- **`thermo-nuclear-review-loop` foundation skill.** A review-and-fix loop
+  over a change: the agent running it spawns one reviewer sub-agent, checks
+  each finding against the code, fixes the justified ones and answers the
+  rest, until the reviewer explicitly approves under a strict code-quality
+  standard. Questions only the human can settle (unreachable scenarios,
+  requirement ambiguity, destructive operations) go to them instead of being
+  assumed. Always shipped and copied verbatim (new
+  `foundation_skills.thermo-nuclear-review-loop`), because every maestro
+  workflow `plan-feature` writes names it in its `review` chore. Also
+  invokable on its own. **Consumers**: re-sync to pick it up.
 - **Project defaults for maestro in `.vinta-ai-workflows.yaml`.** A new
   `maestro:` section holds what every plan's `.workflow.json` used to repeat:
   per-type gate defaults, resource pools, chores, run defaults and the
@@ -451,6 +462,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Maestro: a phase's review is now the `review` chore.** Once the phase's
+  gates are green, the implementer's own session runs
+  `thermo-nuclear-review-loop`: it spawns one reviewer sub-agent and fixes or
+  answers its findings until the reviewer approves. Then `deslop` runs, and
+  the gates run once more on the final tree. A red gate still goes to the
+  fixer. A review turn that ends unapproved asks the operator to continue or
+  stop. `plan-feature` now emits the `review`
+  chore and `defaults.chores: ["review", "deslop"]`, and transcribes only the
+  implementer rows of the Crew table (the reviewers there still staff
+  `review-phase` on the skills path).
+- **Maestro: chore `when` is now `review`, `after_review` (the default) or
+  `after_pr`.** `review` chores must end with `VERDICT: pass` or
+  `VERDICT: fail`, and the phase continues only on pass. `after_review`
+  replaces `before_gate`.
+- **Maestro: `max_fix_rounds` has no default, and unset means no limit.** The
+  fixer works on a red gate until it is green, and the review loop runs until
+  the reviewer approves, without asking. Set `max_fix_rounds` on a node to get
+  the old behaviour back: after that many fix rounds or unsuccessful review
+  passes, the phase asks whether to continue or stop. **Migration:** a plan
+  that relied on the default of 4 now runs unbounded; add
+  `"max_fix_rounds": 4` to keep it.
 - **Maestro: every `workflow_amended` row carries `targets`.** Operator and
   config amendments get them too, computed from the snapshot and the
   proposal. Before, only monitor amendments had them.
@@ -558,6 +590,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arrives), the buttons, or the keys. Dragging the canvas shows a grab cursor
   and never selects text. The host box follows the window's height instead of
   being fixed at 380px.
+
+### Removed
+
+- **Maestro: the reviewer role and its review loop.** Crew members are
+  implementers only, and the crew `role` field is gone. Also gone:
+  `defaults.reviewer_model` (in the workflow file and in the
+  `.vinta-ai-workflows.yaml` `maestro.defaults`), the consult step and the
+  review ledger. **Migration:** a `.workflow.json` with a crew `role`, a
+  reviewer crew member, a `before_gate` chore or `reviewer_model` no longer
+  parses. Re-emit it with `plan-feature`, or edit it by hand: drop the
+  reviewer members and every `role`, rename `before_gate` to `after_review`,
+  delete `reviewer_model`, and add the `review` chore.
 
 ### Fixed
 

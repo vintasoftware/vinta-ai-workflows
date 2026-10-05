@@ -233,6 +233,11 @@
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
+        "thermo-nuclear-review-loop": {
+          "description": "Review-and-fix loop over a change: the running agent spawns one reviewer sub-agent, verifies its findings, fixes the justified ones and answers the rest, until the reviewer explicitly approves under a strict code-quality standard. Copy-verbatim foundation skill (bucket A), always shipped: every `vinta-ai-maestro` workflow `plan-feature` writes names it in its `review` chore, which runs on the implementer's session once a phase's gates are green. Set `disabled` only if a project deliberately opts out of maestro's phase review.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        },
         "deslop-comments": {
           "description": "Rewrite comments and doc blocks touched during the current task into Simple English — strip AI-slop vocabulary and negative framing, comment-only (no renames, no behavior change). Copy-verbatim foundation skill (bucket A), always shipped: the `review-phase` Layer 2 comment-hygiene check and fix loop depend on it. Set `disabled` only if a project deliberately opts out of the review flow's comment-hygiene step.",
           "type": "string",
@@ -328,7 +333,7 @@
       "additionalProperties": false,
       "properties": {
         "defaults": {
-          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `reviewer_model`, `model_fallbacks`, `max_session_turns`.",
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `model_fallbacks`, `max_session_turns`.",
           "type": "object",
           "properties": {
             "harness": {
@@ -367,10 +372,6 @@
                 "scoped",
                 "full"
               ]
-            },
-            "reviewer_model": {
-              "type": "string",
-              "minLength": 1
             },
             "model_fallbacks": {
               "description": "Model id → the model to run instead once the first is out of quota or credits. A `quota` refusal on a listed model retries on the fallback instead of parking the harness; later spawns of that model go straight to the fallback until the vendor's stated reset, or for the rest of the run. A plan's own map replaces this one whole.",
@@ -622,7 +623,7 @@
           }
         },
         "chores": {
-          "description": "Chore definitions by id (`prompt` or `prompt_ref`, `skill`, `session`, `model`, `when`, `on_failure`) — the workflow schema's `chores` entries.",
+          "description": "Chore definitions by id (`prompt` or `prompt_ref`, `skill`, `session`, `model`, `when`, `on_failure`) — the workflow schema's `chores` entries. `when` is `review` (runs once the phase's gates are green; the turn ends with `VERDICT: pass` or `VERDICT: fail` and the phase continues only on pass — e.g. a `thermo-nuclear-review-loop` chore), `after_review` (the default: runs after the review approved, before the final gate run — e.g. a `deslop-comments` chore) or `after_pr` (runs after the phase's PR is published).",
           "type": "object",
           "propertyNames": {
             "type": "string",

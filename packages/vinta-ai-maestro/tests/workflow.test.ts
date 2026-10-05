@@ -40,7 +40,8 @@ describe('golden workflow', () => {
 
     const p1 = result.workflow.nodes[0]
     expect(p1?.depends_on).toEqual([])
-    expect(p1?.max_fix_rounds).toBe(4)
+    // No budget unless the plan sets one: the fix and review loops run on.
+    expect(p1?.max_fix_rounds).toBeUndefined()
     expect(result.workflow.gates.types?.requires).toEqual([])
   })
 

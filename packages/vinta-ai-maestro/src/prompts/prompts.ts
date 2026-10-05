@@ -4,10 +4,9 @@
  * `spawn_agent` declares a `prompt_template` (§5.2) and, until this module
  * existed, nothing consumed it: every role was handed `node.prompt_ref` as its
  * entire prompt. An implementer copes with that — it is standing in the
- * repository and the reference names a file — but a reviewer handed the same
- * bare string is never told it is reviewing, never states the `VERDICT:` line
- * the executor reads back, and takes the fail-closed default. The node then
- * burns its fix rounds on a review that was never asked for.
+ * repository and the reference names a file — but a fixer handed the same bare
+ * string is never told which gate went red, and a review chore is never told
+ * to state the `VERDICT:` line the executor reads back.
  *
  * So `prompt_template` is the seam. It selects one of the renderers below and
  * parameterises it with the materials the scheduler already holds: the phase
@@ -27,48 +26,47 @@
  * `plan_context_refs` names the plan sections that bound every phase — Goals +
  * Non-goals, Guiding Decisions. An implementer who has not read the non-goals
  * scope-creeps and one who has not read the decisions re-litigates them, so
- * both they and the reviewer get those sections whole. They are also the two
- * roles that can act on them: the reviewer measures scope creep against the
- * non-goals, while the fixer is told to change exactly what a finding names and
- * nothing else, and handing it the plan's goals would only widen that.
+ * the implementer gets those sections whole, and so does a cold review chore,
+ * whose reviewer measures scope creep against the non-goals. The fixer is told
+ * to turn a named gate green and nothing else, and handing it the plan's goals
+ * would only widen that.
  *
- * **The reviewer's protocol and the executor's parser are one definition.**
+ * **The review's protocol and the executor's parser are one definition.**
  * `readVerdict` is exported from here and imported by `executor.ts`, and the
- * reviewer prompt asks for `VERDICT_MARKER`. A prompt that asked for a form the
- * parser does not accept would fail every node silently, so the two cannot be
- * allowed to drift apart.
+ * review chore's prompt asks for `VERDICT_MARKER`. A prompt that asked for a
+ * form the parser does not accept would fail every review silently, so the two
+ * cannot be allowed to drift apart.
  *
  * Every role has two forms of prompt, selected by `continuation` (§15.3): the
  * cold one, for a session that has never seen this phase, and a delta for one
  * that already holds the brief, the plan-level bounds and its own prior work.
  * The three rules above bind both — and the third binds the delta hardest,
- * because a reviewer continuation that dropped `VERDICT_MARKER` would look like
- * a harmless trim and fail every node it touched.
+ * because a review continuation that dropped `VERDICT_MARKER` would look like a
+ * harmless trim and send every phase it touched to the operator.
  *
  * **A prompt carries repository content; nothing else here may.** The brief,
- * the dependency summaries and the review findings are the *point* of a prompt
+ * the dependency summaries and the gate output are the *point* of a prompt
  * and are handed to the agent. They never reach a log line, an error message, a
  * journal payload or a process argument — every `PromptError` below names the
  * node id and the `prompt_ref` and stops there.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import { AGENT_ROLES, isJudgeGate, type AgentRole, type Chore, type ChoreTiming, type Node, type Workflow } from '../types.ts'
-import { GATE_TRIGGERS, LEDGER_FENCE, parseLedger, viewLedger, type LedgerView } from './ledger.ts'
-import { PASS_TWO, REVIEW_STANDARD } from './review-standard.ts'
 
-/** The line the reviewer is asked to end on, and the one `executor.ts` reads. */
+/** The line a review chore is asked to end on, and the one `executor.ts` reads. */
 export const VERDICT_MARKER = 'VERDICT:'
 
-/** Matched against the reviewer's own last words, never stored. */
+/** Matched against the review turn's own last words, never stored. */
 const VERDICT_PATTERN = /verdict\s*[:=]\s*(pass|fail)/i
 
 /**
  * The verdict a turn stated, or `undefined` when it stated none. The one
- * definition of the protocol: the reviewer prompt asks for what this accepts.
+ * definition of the protocol: the review chore's prompt asks for what this
+ * accepts.
  */
 export function readVerdict(text: string): 'pass' | 'fail' | undefined {
   const match = VERDICT_PATTERN.exec(text)
@@ -86,18 +84,11 @@ export class PromptError extends Error {}
 /** How much of an agent's final report is carried into the next prompt. */
 const SUMMARY_LIMIT = 4_000
 
-/**
- * The cap on a review or fix report handed across the loop. Larger than a
- * dependency summary because it *is* the work: a deep review routinely runs past
- * four thousand characters, and a fixer handed half the findings fixes half.
- */
-const FINDINGS_LIMIT = 24_000
-
 /** How far back in a transcript a final report is looked for. */
 const TRANSCRIPT_WINDOW = 50
 
 /** What the journal is asked for. Narrow, so a test double is two methods. */
-export type PromptJournal = Pick<Journal, 'tailTranscript' | 'nodes' | 'reviewLedger'>
+export type PromptJournal = Pick<Journal, 'tailTranscript' | 'nodes'>
 
 /** One member of a phase's dependency closure, as the implementer is told it. */
 export interface DependencyContext {
@@ -139,18 +130,18 @@ export interface SpawnPromptRequest {
    * branch, because a lane is provisioned before a node is dispatched into it.
    */
   readonly workspace: string | null
-  /** The guard context of this invocation: the gate that failed, the verdict. */
+  /** The guard context of this invocation: the gate that failed. */
   readonly facts: GuardContext
   /**
    * True where this turn **continues a session that already ran** (§15.3): the
-   * fixer picking up the implementer's session, or the reviewer picking up its
-   * own across rounds. The scheduler decides this — it owns the ledger and
+   * fixer or a chore picking up the implementer's session. The scheduler
+   * decides this — it owns the ledger and
    * knows whether the entry was usable — and this module only decides what a
    * continued turn is told.
    *
    * Absent or false is the cold prompt, byte for byte as before, and that is
    * the only safe default: a delta sent into a session that does not carry the
-   * brief instructs an agent to fix findings against work it has never seen.
+   * brief instructs an agent to fix a gate against work it has never seen.
    * §15.2 is the other half of that rule — every invalid ledger entry must fall
    * back to a fresh session *and* a non-continuation prompt.
    */
@@ -249,7 +240,6 @@ export function composeSpawnPrompt(request: SpawnPromptRequest): string {
   if (request.continuation === true && request.reorientation === undefined) {
     const resumed = resume(request, request.workspace)
     if (role === 'implementer') return renderImplementerContinuation(resumed)
-    if (role === 'reviewer') return renderReviewerContinuation(resumed)
     return renderFixerContinuation(resumed)
   }
 
@@ -261,7 +251,6 @@ export function composeSpawnPrompt(request: SpawnPromptRequest): string {
   const preamble =
     request.reorientation === undefined ? '' : renderReorientation(request.reorientation, materials)
   if (role === 'implementer') return preamble + renderImplementer(materials)
-  if (role === 'reviewer') return preamble + renderReviewer(materials)
   return preamble + renderFixer(materials)
 }
 
@@ -322,16 +311,7 @@ interface Continuation {
   readonly workspace: string
   readonly branch: string
   readonly baseBranch: string
-  /**
-   * The last report on this node: the reviewer's findings when its last turn
-   * was a review, the fixer's report when it was a fix.
-   */
-  readonly findings: string | null
   readonly facts: GuardContext
-  /** What the loop has already settled (§16.3). Empty on a phase's first review. */
-  readonly ledger: LedgerView
-  /** Whether the lane carries a project `REVIEW.md`, which replaces the shipped standard. */
-  readonly projectStandard: boolean
 }
 
 /** What a cold turn is composed from: the above, plus everything read off disk. */
@@ -359,10 +339,7 @@ function resume(request: SpawnPromptRequest, workspace: string): Continuation {
     // fallbacks only ever cover a pipeline that spawns before it branches.
     branch: row?.branch ?? 'HEAD',
     baseBranch: row?.base_branch ?? workflow.base_branch,
-    findings: lastReport(journal, runId, node.id, FINDINGS_LIMIT),
     facts: request.facts,
-    ledger: viewLedger(parseLedger(journal.reviewLedger(runId, node.id))),
-    projectStandard: existsSync(join(workspace, 'REVIEW.md')),
   }
 }
 
@@ -657,7 +634,7 @@ function renderImplementer(materials: Materials): string {
  *
  * This is not a reminder. A phase ran four sessions, reported `SUCCESS` with a
  * green inner loop, and never once ran `git commit`: its deliverables existed
- * only as untracked files. The reviewer reads `git diff <base>...<branch>` and
+ * only as untracked files. The reviewer read `git diff <base>...<branch>` and
  * so saw an empty diff, reported "phase not implemented at all", and the fixer
  * re-implemented — also without committing — until the fix rounds ran out. Then
  * the lane was recycled and the files were deleted.
@@ -810,7 +787,7 @@ function commitProtocol(materials: Continuation): string[] {
     '',
     '## Committing is part of the work, not after it',
     `Your phase is reviewed and merged **from the commits on \`${materials.branch}\`**. The`,
-    `reviewer reads \`git diff ${materials.baseBranch}...${materials.branch}\` and nothing else:`,
+    `review reads \`git diff ${materials.baseBranch}...${materials.branch}\` and nothing else:`,
     'a file you wrote and did not commit does not exist as far as the rest of this',
     'run is concerned, and the lane it sits in is reset before the next phase.',
     '',
@@ -825,11 +802,10 @@ function commitProtocol(materials: Continuation): string[] {
     'test you could not make pass, a phase you got half way through: none of them',
     'is a reason to end the turn with the work only on disk. Commit it and report',
     'FAILURE, saying what is still red. A commit is not a claim that the phase is',
-    'finished — it is what makes the work exist for the reviewer, for the fixer who',
-    'acts on their findings, and for the next turn on this branch. The alternative',
-    'is not "a clean branch": it is a phase that is reviewed as though you had',
-    'written nothing, fixed by someone writing it a second time, and then deleted',
-    'with the lane.',
+    'finished — it is what makes the work exist for the gates, for the review, and',
+    'for the next turn on this branch. The alternative is not "a clean branch": it',
+    'is a phase that is gated and reviewed as though you had written nothing, and',
+    'then deleted with the lane.',
   ]
 }
 
@@ -1054,13 +1030,11 @@ function gateList(materials: Continuation): string[] {
 /**
  * The report line that says which gates ran and what they said.
  *
- * A record, and deliberately not a substitute for one. The reviewer is told in
- * the same breath to run the gates itself — that instruction predates this and
- * stays exactly as it was, because the bug it was written for was reviewers
- * reaching a verdict on an implementer's word. What this adds is something to
- * check *against*: a phase whose report claims a green `unit` and whose gate
- * node then fails on `unit` is a specific, findable disagreement, and before
- * this there was nothing on either side to compare.
+ * A record, and deliberately not a substitute for one. The gate node runs the
+ * gates itself afterwards, because a verdict reached on an agent's word is the
+ * bug that rule was written for. What this adds is something to check
+ * *against*: a phase whose report claims a green `unit` and whose gate node
+ * then fails on `unit` is a specific, findable disagreement.
  */
 function gateReport(materials: Continuation): string[] {
   // The ids are deliberately not interpolated: they are already on the page
@@ -1133,260 +1107,25 @@ function gateBlock(materials: Continuation): string[] {
 }
 
 /**
- * The reviewer's other source of evidence: what is on disk but not on the
- * branch.
- *
- * Shared by both reviewer prompts, because the round *after* a fix is if
- * anything the more likely one to find uncommitted work — the fixer has just
- * been told to commit, and whether it did is the question.
- *
- * **Scoped to a diff that is missing the work**, which it was not. "Where you
- * find uncommitted work, that *is* the finding" made any unclean tree a
- * BLOCKER — and a lane's tree is essentially never clean. The pool copies
- * configuration into it, links dependency trees, and the gates the reviewer was
- * just asked to run leave caches and build output behind; the implementer is
- * told by name not to stage any of it. So a phase could be implemented,
- * committed and correct, and still fail review for the files the harness itself
- * created around it.
- *
- * The failure this was written for is narrower and worth keeping: work that
- * exists only in the tree. That one needs saying because the fixer's response
- * to it — commit what is there — is the opposite of its response to a phase
- * that was never implemented, and the reviewer is the only one positioned to
- * tell those apart.
- */
-function workingTree(materials: Continuation): string[] {
-  return [
-    '',
-    '**Check the working tree too, before you conclude anything from an empty or a',
-    'thin diff:**',
-    `    git -C ${materials.workspace} status --porcelain`,
-    'An implementer that did the work and never committed it leaves a full tree and',
-    'an empty diff. That is a real failure, and it is not "the phase was not',
-    'implemented" — the difference decides whether the fixer writes the code again',
-    'or simply commits it, and getting it wrong costs the phase every fix round it',
-    'has. Where the phase’s work is in the tree and missing from the diff, that',
-    '*is* the finding: name the paths, make it a BLOCKER, and say the work needs',
-    'committing rather than writing again.',
-    '',
-    'An unclean tree is **not by itself a finding.** A lane carries files nobody is',
-    'meant to commit — configuration the pool copied in, dependency trees it',
-    'linked, caches and build output the gates you just ran produced — and the',
-    'implementer is told by name not to stage them. If the diff holds the phase’s',
-    'work, do not raise what is sitting in the tree beside it.',
-  ]
-}
-
-function renderReviewer(materials: Materials): string {
-  const { node, workflow } = materials
-  return section([
-    `You are the reviewer of ${node.id}: ${node.name} of plan ${workflow.id}.`,
-    'You read, run and report; you never edit. A fixer acts on your findings after',
-    'you, and this review loop ends only when you explicitly approve. The orchestrator',
-    'records `HEAD` and the tracked diff before your turn and compares them after it:',
-    'any edit or commit you make stops the loop and is put to the operator. Scratch',
-    'work — a throwaway repository to check git behaviour, say — goes in a temporary',
-    'directory outside this worktree.',
-    '',
-    '## What to review',
-    `The diff of \`${materials.branch}\` against its base \`${materials.baseBranch}\`:`,
-    `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
-    'Read the full diff of every changed file, and the callers and context around',
-    'it. Spot-checking is not a review.',
-    ...workingTree(materials),
-    ...commandBlock(materials),
-    ...gateBlock(materials),
-    ...leaseBlock(materials),
-    '',
-    '## The stated requirement',
-    'This diff implements the phase below. It is the requirement, verbatim: the code',
-    'should do what it asks, not something adjacent.',
-    '',
-    materials.brief,
-    ...planLevel(materials, [
-      'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim.',
-      'A change serving a non-goal is scope creep, and one that contradicts a guiding',
-      'decision is a finding even where the phase body says nothing about it. Do not',
-      'ask this diff to satisfy the whole plan — it implements one phase, and the',
-      'phase body above is the only thing it was asked for.',
-    ]),
-    '',
-    '## Run the gates yourself',
-    'An implementer saying they were green is a claim, not evidence. Run each of',
-    'these and read what it returns:',
-    ...gateList(materials),
-    'Say in your report that you ran them and what they returned. If you could not',
-    'run them, that is a finding. Running them again is cheap: an unchanged tree is',
-    'served from cache.',
-    ...settledBlock(materials),
-    '',
-    ...standardBlock(materials),
-    ...soloTurn('reviews this diff'),
-    '',
-    ...verdictProtocol(),
-  ])
-}
-
-/**
- * The standard the review is held to: the project's own `REVIEW.md` where it
- * has one, and the shipped Review Standard otherwise (§16.1).
- *
- * Wholesale, never merged. A project that wrote its own standard wrote it to be
- * read alone, and a reviewer handed both would be applying whichever of two
- * contradicting rules it happened to weigh last.
- */
-function standardBlock(materials: Continuation): string[] {
-  if (materials.projectStandard) {
-    return [
-      '## The standard',
-      `Read \`${join(materials.workspace, 'REVIEW.md')}\` and apply it. It is this project’s`,
-      'review standard and the only one you hold this diff to.',
-    ]
-  }
-  return ['## The standard', '', ...REVIEW_STANDARD]
-}
-
-/**
- * The verdict protocol, in the one place both reviewer prompts read it from.
- *
- * `readVerdict` above is what the executor runs over the reviewer's last words,
- * and this is what asks for the form it accepts — the module header's third
- * rule. A continuation is where that rule is easiest to break: the delta looks
- * like a nudge to an agent that was already told the protocol two turns ago, so
- * dropping it feels harmless. It is not. Nothing carries a verdict between
- * turns; every turn is parsed on its own and a turn that states none takes the
- * fail-closed default, which fails the node and burns its fix rounds on a
- * review nobody asked for. So this block is not optional in either form, and
- * sharing it is what stops one of them from drifting.
- *
- * `pass` is the explicit approval §16 makes the loop's only exit — passing
- * gates are not approval, and neither is a review that ran out of things to say.
- */
-function verdictProtocol(): string[] {
-  return [
-    '## How to report',
-    'Prioritized findings first, each a BLOCKER with file:line evidence, its failure',
-    'mode or cost, the remedy, and your confidence. Fewer high-conviction findings',
-    'beat a long list. Then, under their own heading, **questions for the human**:',
-    'scenarios that are genuinely undecided, each with your recommendation. Those are',
-    'not blockers — the fixer decides whether to put them to a person.',
-    '',
-    'End your final message with one line, exactly:',
-    `    ${VERDICT_MARKER} pass`,
-    'or',
-    `    ${VERDICT_MARKER} fail`,
-    `\`${VERDICT_MARKER} pass\` is your explicit approval: nothing blocks and the phase meets`,
-    `the standard. Any blocker standing is \`${VERDICT_MARKER} fail\`. That line is read by the`,
-    'orchestrator; a turn that ends without it is taken as a failure, so it must be',
-    'the last thing you write.',
-  ]
-}
-
-/**
- * What the review ledger already settled (§16.3), for every prompt on either
- * side of the loop.
- *
- * Rejected findings carry the fixer's counter-evidence, so a reviewer can tell
- * "answered" from "ignored" and re-raise one only with something new. Settled
- * decisions carry what a person decided, dated, so neither agent re-asks it.
- * An empty ledger renders nothing: the first review of a phase has no history.
- */
-function settledBlock(materials: Continuation): string[] {
-  const { rejected, settled } = materials.ledger
-  const lines: string[] = []
-  if (settled.length > 0) {
-    lines.push(
-      '',
-      '## Settled decisions',
-      'A person decided these. Treat each as part of the requirement. Re-raise one only',
-      'with new evidence, and name the evidence.',
-    )
-    for (const decision of settled) {
-      const how = decision.unattended
-        ? 'Nobody answered in time, so each item took its stated default.'
-        : `The operator answered: ${decision.answer ?? '(no answer)'}`
-      lines.push('', `### Decided ${decision.at.slice(0, 10)}`, how)
-      for (const item of decision.items) {
-        lines.push(
-          `- ${item.id} (${item.trigger}): ${item.finding}`,
-          `  Fixer recommended: ${item.recommendation}. Default: ${item.default}.`,
-        )
-      }
-    }
-  }
-  if (rejected.length > 0) {
-    lines.push(
-      '',
-      '## Findings the fixer rejected, with its counter-evidence',
-      'Check the counter-evidence rather than accepting it. Re-raise a finding only',
-      'with evidence that answers it.',
-    )
-    for (const item of rejected) lines.push(`- ${item.finding}`, `  Counter-evidence: ${item.counter_evidence}`)
-  }
-  return lines
-}
-
-/**
- * How the fixer treats what came back (§16.2) — the thermo-nuclear loop's
- * fixer discipline, shared by both fixer prompts.
- *
- * The fixer is the implementer continuing its own session, which is what makes
- * "verify before fixing" cheap: the agent checking a finding is the one that
- * knows why the code is the way it is. It is also what makes it necessary. An
- * author told "fix exactly what is listed" fixes unsupported findings too, and
- * every one of them is defensive code nobody needed.
+ * How the fixer turns a red gate green (§16): the cause, not the symptom, and
+ * nothing beside it. The fix is gated again straight after, and reviewed again
+ * after that, so a change beyond the failure is one more thing both have to
+ * read.
  */
 function fixerProtocol(): string[] {
   return [
     '',
-    '## Verify before fixing',
-    'The findings are leads, not orders. For each one: reproduce or prove the claim',
-    'from code and tests; check the repository’s invariants, the intended behaviour,',
-    'the history and the current callers; then decide whether it is correct,',
-    'partially correct or unsupported. Reject unsupported findings, issues outside',
-    'this phase, and anything that fails the evidence bar — and keep the concrete',
-    'counter-evidence, because the reviewer is shown it.',
-    '',
-    'Choosing the remedy is yours. Where a verified problem has several, pick the one',
-    'that makes the bad state unreachable for every consumer of the data — a type, an',
-    'exact comparison, a key derived by construction — and then the simplest. Where',
-    'docs, names or copy promise more than the code does, make the code keep the',
-    'promise; weaken the text only where a person has settled the case is out of',
-    'scope. Before adding machinery for a rare case, look for the project’s existing',
-    'pattern in its README, AGENTS.md, rules and neighbouring code: the pattern is',
-    'the answer, and no pattern means asking, not assuming.',
-    '',
-    '## What goes to a person instead of into the code',
-    'Do not fix a finding that depends on a decision that is not yours. Put it to the',
-    'operator when it asks for:',
-    '- `unreachable` — handling for a scenario no current caller, type or data reaches;',
-    '- `defensive` — a check on data already typed or validated upstream;',
-    '- `ambiguity` — docs, tests and code disagree about what is wanted and none is',
-    '  clearly the bug, or the requirement names a mechanism that does not achieve its',
-    '  own goal;',
-    '- `destructive` — a delete, a migration, or anything touching production.',
-    'Fix every other justified finding first. The orchestrator asks the operator about',
-    'every gated item at once after your turn, and the review after that sees the',
-    'answers. For `unreachable` and `defensive` your recommendation is normally "reject',
-    'the finding". Every item states the default taken if nobody answers, and for a',
-    '`destructive` one that default is never the destructive option.',
-    '',
     '## How to fix',
-    'Address every verified finding as one coherent design change. Prefer changes',
-    'that delete concepts, branches, duplicated state and boundary leaks, and keep',
-    'intended behaviour unless a finding proves it wrong — when a fix changes',
-    'documented behaviour, change the docs, names and copy in the same commit. Where a',
-    'fix needs a guarantee, take the highest rung available: the illegal state made',
-    'unrepresentable in types; a static check; a scripted check such as a test; one',
-    'assertion at the trust boundary; a runtime check inside the flow, last. A new',
-    'file needs a reason a reader would recognise, not a line count. Add a test only',
-    'where a fix changes behaviour or a verified bug was found, enter through the',
-    'real routes rather than seeding state, and delete tests a simplification made',
-    'redundant. Change nothing unrelated: the next review reads every line.',
+    'Read the gate’s output before the code: it says what broke. Find the cause and',
+    'fix that, in the code this phase changed where you can. Do not weaken, skip or',
+    'delete a test, loosen a lint rule, or narrow a check to make it pass — a gate',
+    'that goes green that way has stopped checking the thing it was there for. If',
+    'the failure is in code this phase did not touch, or the gate itself is broken,',
+    'say so in your report rather than working around it. Change nothing unrelated.',
   ]
 }
 
-/** The fixer's report, ending in the block `readFixerReport` parses. */
+/** The fixer's report. */
 function fixerOutput(materials: Continuation): string[] {
   return [
     '',
@@ -1394,20 +1133,7 @@ function fixerOutput(materials: Continuation): string[] {
     '- Status: SUCCESS or FAILURE, and why.',
     '- The commit this round made, by hash, and the files it changed, paths only.',
     ...gateReport(materials),
-    '- Each finding: fixed (and how), rejected (and the counter-evidence), or gated.',
-    '- The reason for each new file.',
-    '',
-    `Then end with exactly one fenced \`${LEDGER_FENCE}\` block — the orchestrator reads it,`,
-    'and an item missing from it is one nobody downstream is told about:',
-    '',
-    '```' + LEDGER_FENCE,
-    '{"rejected": [{"finding": "<the finding, one line>", "counter_evidence": "<file:line and why>"}],',
-    ' "gated": [{"id": "g1", "trigger": "unreachable", "finding": "<one line>",',
-    '            "evidence": "<file:line>", "reviewer_recommendation": "<its words>",',
-    '            "recommendation": "<yours>", "default": "<what happens if nobody answers>"}]}',
-    '```',
-    'Use empty lists when there is nothing to put in them. `trigger` is one of',
-    `${GATE_TRIGGERS.map((trigger) => `\`${trigger}\``).join(', ')}.`,
+    '- What broke, and what you changed to fix it.',
   ]
 }
 
@@ -1422,7 +1148,6 @@ function renderFixer(materials: Materials): string {
     '',
     '## What came back',
     ...failure(materials),
-    ...settledBlock(materials),
     '',
     '## The phase this branch is implementing',
     materials.brief,
@@ -1436,7 +1161,7 @@ function renderFixer(materials: Materials): string {
     ...foreground(),
     ...commitProtocol(materials),
     'Keep this round to one commit where you can — a hook rewrite aside — with a',
-    'message naming the findings it addresses, so the reviewer can read the round.',
+    'message naming the gate it fixes.',
     ...fixerOutput(materials),
   ])
 }
@@ -1533,12 +1258,15 @@ function choreMaterials(request: SpawnPromptRequest, workspace: string): ChoreMa
  * implementation round — which no reviewer asked for and no fix round paid for.
  *
  * **The gates are not this turn's.** `polish` sits immediately in front of the
- * gate state, so a chore that runs the suite makes the phase pay for it twice.
- * Saying so is what keeps this cheap; the gate right after is what catches a
- * chore that broke something.
+ * `verify` gate state, so a chore that runs the suite makes the phase pay for
+ * it twice. Saying so is what keeps this cheap; the gate right after is what
+ * catches a chore that broke something.
+ *
+ * A review chore is the exception to all three, and has rules of its own.
  */
-function choreRules(materials: Continuation, chore: ChoreMaterials): string[] {
+function choreRules(materials: Continuation, chore: ChoreMaterials, cold: boolean): string[] {
   if (chore.when === 'after_pr') return afterPrRules(materials, chore)
+  if (chore.when === 'review') return reviewRules(materials, chore, cold)
   return [
     '',
     '## What this turn is, and is not',
@@ -1569,7 +1297,7 @@ function choreRules(materials: Continuation, chore: ChoreMaterials): string[] {
 /**
  * The rules for a chore that runs once the phase's PR is open.
  *
- * The opposite bound from a `before_gate` chore: the phase is already merged
+ * The opposite bound from an `after_review` chore: the phase is already merged
  * and pushed, so an edit now would be one that no reviewer and no gate saw,
  * on a branch that is already the PR. The turn works *about* the PR — a
  * review canvas, a comment — and leaves the tree as it found it.
@@ -1601,8 +1329,164 @@ function afterPrRules(materials: Continuation, chore: ChoreMaterials): string[] 
   ]
 }
 
+/**
+ * The rules for the phase's review: the thermo-nuclear review loop, run by the
+ * agent that wrote the phase (§16).
+ *
+ * The loop's own procedure lives in the skill the chore names; this says what
+ * only the orchestrator knows. The scope and the baseline. That the gates are
+ * already green. The budget, which replaces the skill's own pause to ask — a
+ * headless turn that stops to ask whether to continue is a turn that ends, so
+ * the turn stops and reports, and `unapproved` asks the operator. How a gate
+ * question reaches a person, which is the `NEEDS_INPUT` block rather than a
+ * question tool nobody is attached to. And the closing `VERDICT:` line.
+ *
+ * It also lifts, for exactly one agent, the rule every other turn is held to:
+ * do not delegate (`soloTurn`). The reviewer is a sub-agent by design — its
+ * independence is the point — and it is the only one. The verification, the
+ * fixes and the commits stay in this session, which is what makes the next
+ * phase's continuation of it worth anything.
+ */
+function reviewRules(materials: Continuation, chore: ChoreMaterials, cold: boolean): string[] {
+  const budget = materials.node.max_fix_rounds
+  return [
+    '',
+    '## What this turn is',
+    'This turn is the phase’s code review, and nothing merges until it approves. The',
+    'phase’s gates are already green: the review is of code that builds and passes.',
+    '',
+    'Run it as a review loop, with yourself as the fixer. Spawn one reviewer, hand',
+    'it the scope and the stated requirement, and wait for its verdict. Treat',
+    'each finding as a lead, not an order: check it against the code, the tests and',
+    'the callers, fix the ones that hold up, and reject the ones that do not with',
+    'concrete counter-evidence. Then send the same reviewer what changed, the',
+    'findings you rejected and why, and any decisions the operator made, and ask it',
+    'to review the whole diff again. The loop ends when the reviewer explicitly',
+    'approves. Passing gates are not approval.',
+    ...(chore.skill === null
+      ? []
+      : [
+          '',
+          `Use the \`${chore.skill}\` skill for this: it is the loop’s full procedure and`,
+          'names the standard the reviewer applies — a project `REVIEW.md` where there is',
+          'one. Where the skill and this prompt disagree, this prompt wins. If your',
+          'harness has no such skill, run the loop as this prompt describes it.',
+        ]),
+    '',
+    '## The scope',
+    `This phase’s own diff, \`git diff ${materials.baseBranch}...${materials.branch}\`, against the`,
+    `baseline \`${materials.baseBranch}\`. Nothing outside it is in scope for the reviewer or`,
+    'for your fixes.',
+    cold
+      ? 'The stated requirement is the phase brief printed below. Hand it to the reviewer'
+      : 'The stated requirement is the phase brief already in this session. Hand it to',
+    cold
+      ? 'verbatim, with the plan-level decisions when they are printed here.'
+      : 'the reviewer verbatim, with the plan-level decisions when you were given them.',
+    '',
+    '## The reviewer',
+    'Exactly one reviewer sub-agent for this whole turn. Spawn it with your harness’s',
+    'sub-agent tool (claude-code’s Agent tool, or the same thing under another name)',
+    'on its most capable model tier, and send every later pass to that same agent so',
+    'it keeps its context. It reads and runs commands but edits nothing: check',
+    '`git status --porcelain` and `git rev-parse HEAD` before and after each pass,',
+    'and if it changed anything, say so in your report and do not build on it.',
+    'This turn resumes after any question you stop to ask, and the reviewer may not',
+    'be reachable then. If it is not, spawn a fresh one and give it the findings you',
+    'rejected, with your counter-evidence, and the operator’s decisions.',
+    '',
+    '## The budget',
+    ...(budget === undefined
+      ? [
+          'No pass limit. Keep the loop going until the reviewer approves, and do not stop',
+          'to ask whether to keep going.',
+        ]
+      : [
+          budget === 0
+            ? 'One pass. If the reviewer does not approve on its first pass, stop there: do'
+            : `At most ${budget} passes that come back with blockers. If the reviewer has still`,
+          budget === 0
+            ? 'not ask whether to keep going. Report what is left, and the orchestrator asks'
+            : 'not approved after that, stop: do not ask whether to keep going. Report what',
+          budget === 0 ? 'the operator.' : 'is left, and the orchestrator asks the operator.',
+        ]),
+    'If an earlier turn in this session already ran this review and stopped without',
+    'approval, the operator chose to continue: pick the loop up where it stopped,',
+    'with a fresh budget.',
+    '',
+    '## What goes to a person instead of into the code',
+    'Do not fix a finding that depends on a decision that is not yours: handling for a',
+    'scenario no current caller, type or data reaches; a defensive check on data',
+    'already validated upstream; a requirement that the docs, tests and code disagree',
+    'about; a delete, a migration, or anything that touches production. Fix every',
+    'other finding first and commit, then put those to the operator in one batch with',
+    'the block under "When you need a human decision", each with the evidence, the',
+    'reviewer’s recommendation and yours. For the first two, your recommendation is',
+    'normally to reject the finding.',
+    '',
+    '## Verify and commit',
+    'After each round of fixes, run the inner loop, then each of these yourself:',
+    ...gateList(materials),
+    'Commit each round as one commit whose message names the findings it addresses,',
+    'so the reviewer can read the round.',
+  ]
+}
+
+/**
+ * What the review chore reports, ending on the line `readVerdict` parses.
+ *
+ * `pass` is the reviewer's explicit approval and nothing else. Without it the
+ * turn reads as `fail` — a merge on a review's silence is the one failure a
+ * review exists to prevent — so the line has to be the last thing written.
+ */
+function verdictProtocol(): string[] {
+  return [
+    '',
+    '## Required output',
+    '- How many passes the reviewer made, and the commit each round of fixes made.',
+    '- Each finding: fixed (and how), rejected (and the counter-evidence), or decided',
+    '  by the operator.',
+    '- The gates you ran and what they returned.',
+    '- The reviewer’s final verdict, in one line of its own words.',
+    '',
+    'End your final message with one line, exactly:',
+    `    ${VERDICT_MARKER} pass`,
+    'or',
+    `    ${VERDICT_MARKER} fail`,
+    `\`${VERDICT_MARKER} pass\` means the reviewer explicitly approved the phase. Anything else`,
+    `is \`${VERDICT_MARKER} fail\`. The orchestrator reads that line, and a turn that ends`,
+    'without it counts as a failed review, so it must be the last thing you write —',
+    'unless you are stopping for a decision, when the NEEDS_INPUT block above ends',
+    'the turn alone, with no verdict after it.',
+  ]
+}
+
+/**
+ * That this turn delegates exactly one thing, and does the rest itself.
+ *
+ * `soloTurn`'s rule, minus the reviewer. The pull towards the conductor skills
+ * is the same here as anywhere — `review-phase` matches this turn's description
+ * closely — and following its spawn steps would hand the fixes to an agent whose
+ * context ends with the turn.
+ */
+function reviewerOnly(): string[] {
+  return [
+    '',
+    '## Do the rest of this work in this session, yourself',
+    'The reviewer is the only sub-agent this turn may use. The verification, the',
+    'fixes and the commits are yours: do not delegate any of them, or a search of',
+    'the codebase. This session is reused across phases, and what you learn here is',
+    'only kept if this session is what learned it. A project skill that tells you to',
+    'spawn an implementer or a fixer — `implement-plan`, `implement-phase`,',
+    '`review-phase`, `amend-plan` — is written for the orchestrator that dispatches',
+    'phases, which is already running. Take what it says about this repository’s',
+    'conventions; never follow its spawn steps.',
+  ]
+}
+
 /** What a chore turn has to report back. Short: it is a small job. */
 function choreOutput(chore: ChoreMaterials): string[] {
+  if (chore.when === 'review') return verdictProtocol()
   return [
     '',
     '## Required output',
@@ -1614,30 +1498,58 @@ function choreOutput(chore: ChoreMaterials): string[] {
   ]
 }
 
+/**
+ * The parts of a chore turn its timing decides: who it may delegate to, and
+ * whether it commits and may stop to ask.
+ */
+function choreTail(materials: Continuation, chore: ChoreMaterials): string[] {
+  const review = chore.when === 'review'
+  return [
+    ...(review ? reviewerOnly() : soloTurn('runs this chore')),
+    ...foreground(),
+    ...(chore.when === 'after_pr' ? [] : commitProtocol(materials)),
+    ...(review ? needsInput() : []),
+    ...choreOutput(chore),
+  ]
+}
+
 /** The chore, in a session that has never seen this phase. */
 function renderChore(materials: Materials, chore: ChoreMaterials): string {
   const { node, workflow } = materials
+  const review = chore.when === 'review'
   return section([
     `You are running the \`${chore.id}\` chore over ${node.id}: ${node.name} of plan ${workflow.id}.`,
     `Work entirely inside \`${materials.workspace}\`, on branch \`${materials.branch}\`, which was`,
     `cut from \`${materials.baseBranch}\`. Never read or write a path outside it: sibling`,
     'phases of this plan may be running in worktrees beside yours.',
     ...commandBlock(materials),
+    ...(review ? gateBlock(materials) : []),
     ...leaseBlock(materials),
-    ...choreRules(materials, chore),
+    ...choreRules(materials, chore, true),
     '',
     '## The chore',
     chore.instruction,
-    '',
-    '## The phase this diff was implementing',
-    'Context for judging what the diff is for. It is not a list of work to do —',
-    'the phase is already written and reviewed.',
+    ...(review
+      ? [
+          ...planLevel(materials, [
+            'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim.',
+            'Hand them to the reviewer with the phase brief: a change serving a non-goal',
+            'is scope creep, and one that contradicts a guiding decision is a finding. The',
+            'phase implements one part of the plan, and the brief is all it was asked for.',
+          ]),
+          '',
+          '## The stated requirement',
+          'The phase this diff implements, verbatim.',
+        ]
+      : [
+          '',
+          '## The phase this diff was implementing',
+          'Context for judging what the diff is for. It is not a list of work to do —',
+          'the phase is already written and reviewed.',
+        ]),
     '',
     materials.brief,
-    ...soloTurn('runs this chore'),
-    ...foreground(),
-    ...(chore.when === 'after_pr' ? [] : commitProtocol(materials)),
-    ...choreOutput(chore),
+    ...choreTail(materials, chore),
   ])
 }
 
@@ -1655,14 +1567,12 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
     `different job. This turn is the \`${chore.id}\` chore over the diff you have already`,
     'written. The phase brief and your own work are above; none of it is repeated',
     'here and none of it has changed.',
-    ...choreRules(materials, chore),
+    ...(chore.when === 'review' ? gateBlock(materials) : []),
+    ...choreRules(materials, chore, false),
     '',
     '## The chore',
     chore.instruction,
-    ...soloTurn('runs this chore'),
-    ...foreground(),
-    ...(chore.when === 'after_pr' ? [] : commitProtocol(materials)),
-    ...choreOutput(chore),
+    ...choreTail(materials, chore),
   ])
 }
 
@@ -1675,12 +1585,11 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
 // renderer below is therefore a *delta*: the facts that are new since that
 // session last spoke, and what to do about them. Re-sending the brief here
 // would not merely waste the prefix these prompts exist to cache — it would
-// tell an agent to implement what it has already implemented, and tell a
-// reviewer to review a diff it has already reviewed.
+// tell an agent to implement what it has already implemented.
 //
 // What a delta may still restate is anything the *host* knows and the session
-// cannot: which turn this is, what came back from the gate or the reviewer, and
-// the machine-read protocol the executor parses. Those are cheap, and each of
+// cannot: which turn this is, what came back from the gate, and the
+// machine-read protocol the executor parses. Those are cheap, and each of
 // them is wrong to leave out.
 
 /**
@@ -1688,13 +1597,9 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
  *
  * It opens by claiming the plan's bounds are already above, which the *cold*
  * fixer is never given — deliberately, since handing the plan's goals to an
- * agent told to change one named thing only widens it. Both are right: the
- * session this continues is the implementer's, and the implementer was given
- * them. The line is true of the context window, not of the fixer's own prompt.
- *
- * The protocol is restated in full, unlike the brief. It is short beside the
- * findings it governs, and a fixer that remembers "verify before fixing" from
- * three rounds ago is the one most tempted to stop doing it.
+ * agent told to turn one gate green only widens it. Both are right: the session
+ * this continues is the implementer's, and the implementer was given them. The
+ * line is true of the context window, not of the fixer's own prompt.
  */
 function renderFixerContinuation(materials: Continuation): string {
   const { node } = materials
@@ -1704,11 +1609,7 @@ function renderFixerContinuation(materials: Continuation): string {
     'it is repeated here, and none of it has changed.',
     '',
     '## What came back',
-    ...failure(materials, [
-      'The review did not pass and recorded no findings. Re-read your own diff',
-      'against the phase brief already above, and fix what does not match it.',
-    ]),
-    ...settledBlock(materials),
+    ...failure(materials),
     ...fixerProtocol(),
     '',
     '## Verify',
@@ -1719,58 +1620,8 @@ function renderFixerContinuation(materials: Continuation): string {
     ...foreground(),
     ...commitProtocol(materials),
     'Keep this round to one commit where you can — a hook rewrite aside — with a',
-    'message naming the findings it addresses, so the reviewer can read the round.',
+    'message naming the gate it fixes.',
     ...fixerOutput(materials),
-  ])
-}
-
-/**
- * The reviewer, continuing its own session across rounds (§16, pass two).
- *
- * Three things are new to it and nothing else is: the fixer's report, which is
- * a summary to check rather than to trust; the ledger's rejected findings and
- * settled decisions, which change what may be raised again; and the pass-two
- * rules, restated every round because they are what keeps the bar from moving.
- */
-function renderReviewerContinuation(materials: Continuation): string {
-  const { node } = materials
-  return section([
-    `Still reviewing ${node.id}: ${node.name}. A fixer has acted on your last review;`,
-    'the phase brief, the plan’s bounds and the standard are unchanged and already',
-    'in this session.',
-    'You still review rather than edit: report every issue, fix none of them. The',
-    'orchestrator still compares `HEAD` and the tracked diff across your turn.',
-    '',
-    '## What the fixer says it did',
-    'A summary to check against the diff, not one to accept in place of reading it:',
-    '',
-    materials.findings ?? 'The fixer left no report. Read the diff for what changed.',
-    ...settledBlock(materials),
-    '',
-    '## What to re-review',
-    'The diff as it now stands, and the commits this round added:',
-    `    git -C ${materials.workspace} diff ${materials.baseBranch}...${materials.branch}`,
-    `    git -C ${materials.workspace} log --oneline ${materials.baseBranch}..${materials.branch}`,
-    'Read it again in full and reapply the whole standard. A fix moves lines you had',
-    'already accepted, so a diff you only re-read around the findings is one you have',
-    'not read.',
-    '',
-    '**Run these again yourself, every round.** A session that remembers running',
-    'them last round is remembering a different tree:',
-    ...gateList(materials),
-    // The verification stays; only the cost of it changed. A reviewer told the
-    // repetition is cheap has one fewer reason to talk itself out of it.
-    'A round that changed nothing they touch is served from cache and returns at',
-    'once, so this costs you very little — and a round that did change something is',
-    'exactly the round where last round’s answer is wrong.',
-    ...workingTree(materials),
-    '',
-    ...PASS_TWO,
-    ...soloTurn('reviews this diff'),
-    '',
-    // Restated in full, every round. See `verdictProtocol` for why this is not
-    // the sort of repetition a delta is allowed to drop.
-    ...verdictProtocol(),
   ])
 }
 
@@ -1810,41 +1661,26 @@ function renderImplementerContinuation(materials: Continuation): string {
 }
 
 /**
- * The gate's log reference where a gate failed, and the reviewer's findings
- * otherwise. Read from the facts of this turn rather than guessed from the
- * transcript: after a red gate the last thing in the transcript is the review
- * that passed, which is not what needs fixing.
- *
- * `absent` is the one line that cannot be shared between the two prompt forms:
- * a cold fixer is pointed at the phase body printed below it, and a continued
- * one at the body already in its own context, which is nowhere on the page.
+ * The gate that failed, and where its output is. Read from the facts of this
+ * turn: the fixer only ever runs after a red gate, and the fact names it.
  */
-function failure(
-  materials: Continuation,
-  absent: readonly string[] = [
-    'The review did not pass. Re-read the diff against the phase body below and',
-    'fix what does not match it.',
-  ],
-): string[] {
-  // The review is checked first because the gate root outlives it. A red gate
-  // sends the node through a fixer and back to review, and a review that then
-  // fails leaves the old `gate.exit_code` in the context — read first, it would
-  // hand this fixer last round's gate instead of the findings it is answering.
-  const reviewFailed = materials.facts.review?.['verdict'] === 'fail'
+function failure(materials: Continuation): string[] {
   const gate = materials.facts.gate
   const exitCode = gate?.['exit_code']
-  if (!reviewFailed && typeof exitCode === 'number' && exitCode !== 0) {
-    const id = gate?.['id']
-    const logRef = gate?.['log_ref']
+  if (typeof exitCode !== 'number' || exitCode === 0) {
     return [
-      `Gate ${typeof id === 'string' ? id : 'unknown'} failed with exit code ${exitCode}.`,
-      typeof logRef === 'string'
-        ? `Its output is at ${logRef} — read it first; it says what broke.`
-        : 'Re-run the gate command below to see what broke.',
+      'A gate failed, and the orchestrator did not record which. Run each gate below',
+      'to find the red one.',
     ]
   }
-
-  return materials.findings === null ? [...absent] : ['The reviewer reported:', '', materials.findings]
+  const id = gate?.['id']
+  const logRef = gate?.['log_ref']
+  return [
+    `Gate ${typeof id === 'string' ? id : 'unknown'} failed with exit code ${exitCode}.`,
+    typeof logRef === 'string'
+      ? `Its output is at ${logRef} — read it first; it says what broke.`
+      : 'Re-run the gate command below to see what broke.',
+  ]
 }
 
 /** Joins rendered lines and trims the trailing blank a block naturally leaves. */

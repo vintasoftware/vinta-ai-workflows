@@ -138,7 +138,7 @@ deadlock against itself.
 ### Running the outer gate
 
 The gates themselves are not commands an agent should type. A phase's
-implementer, its reviewer and each fixer round are all told to run the outer
+implementer, each fixer round and the review loop are all told to run the outer
 gate, and before this verb every one of those was a bare shell line: invisible
 to the gate cache, and inside the resource pool only if the agent remembered to
 wrap it. The authoritative `gate` node then ran the same suite a fifth time.
@@ -154,9 +154,9 @@ phase's lane with that lane's environment, and exits with the gate's own code.
 Three things follow from the daemon being the one that runs it:
 
 - **The result is cached**, on the same `(gate id, lane tree hash)` key the
-  `gate` node reads — so the reviewer's run of a gate the implementer already
-  ran against an unchanged tree is a lookup, and so is the gate node's
-  afterwards.
+  `gate` node reads — so the review loop's run of a gate the implementer
+  already ran against an unchanged tree is a lookup, and so is the `verify`
+  node's afterwards.
 - **The lease cannot be forgotten**, because the daemon takes the gate's
   `requires` around the run rather than trusting the agent to.
 - **The command cannot be improvised**, because an id resolves to the plan's
@@ -300,7 +300,7 @@ deletions excluded) or `{touches}` (the node's Touch List) in it:
 ```
 
 Under `defaults.gate_scope: scoped`, the default, phase gates run `scoped_cmd`.
-Those are the gates the implementer, the reviewer and every fixer round ask for.
+Those are the gates the implementer, every fixer round and the review loop ask for.
 The full `cmd` then runs **once per wave, on the merged tree**, after the wave's
 branches are merged. A red full run there is a regression *between* phases. It
 fails the merge and names the wave and the gate. `gate_scope: full` runs `cmd`
@@ -368,8 +368,13 @@ still holds the brief and its reasons for every line.
 Declare them per workflow and pick them per phase:
 
 ```jsonc
-"defaults": { "chores": ["deslop"] },       // what every phase runs
+"defaults": { "chores": ["review", "deslop"] }, // what every phase runs
 "chores": {
+  "review": {
+    "skill": "thermo-nuclear-review-loop",
+    "when": "review",                        // the phase's code review
+    "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it."
+  },
   "deslop": {
     "prompt_ref": "ai-plans/PLAN.md#deslop", // or `prompt`, inline
     "skill": "deslop-comments",              // named in the prompt, not a CLI flag
@@ -386,18 +391,21 @@ Declare them per workflow and pick them per phase:
 A node's list **replaces** the run-wide default rather than adding to it, which
 is what makes `[]` an opt-out.
 
-In `standard-phase` they run in the `polish` state, between a passing review and
-the gate. That position is the design: a chore edits the tree, so running it
-after the gate would merge a diff the gates never saw, and running it before the
-review would have the fixer rewrite what it just did. Here it runs on the diff
-that actually merges, and the gates behind it check what it did — which also
-means the gate cache misses, correctly, because the tree changed.
+A chore's `when` says where in the phase it runs. `after_review`, the default,
+runs it in the `polish` state, once the review approved and before the gates run
+again in `verify`. That position is the design: a chore edits the tree, so
+running it after the last gate would merge a diff the gates never saw, and
+running it before the review would have the review rewrite what it just did.
+Here it runs on the diff that actually merges, and the gates behind it check
+what it did — which also means the gate cache misses, correctly, when the tree
+changed. `review` and `after_pr` are below.
 
-A chore that fails is journalled and the phase goes on to its gates; a chore is
+A chore that fails is journalled and the phase goes on; a chore is
 polish, and losing an implemented phase to one that timed out is the worse
 trade. Set `on_failure: "fail"` on a chore the phase is not correct without. A
 chore the harness had no capacity for is skipped for the same reason, rather
-than re-driving a finished phase to fit the turn in.
+than re-driving a finished phase to fit the turn in. Neither applies to a
+review chore: see below.
 
 Each turn lands in the phase transcript attributed to `chore` and its id, beside
 a `chore_result` event saying whether it ran, failed or was skipped.
@@ -416,7 +424,7 @@ integration is the motivating case. Once `pr-review install-skill` has run in
 the project, this chore posts a topic-grouped review canvas on every phase PR:
 
 ```jsonc
-"defaults": { "chores": ["deslop", "review-canvas"] },
+"defaults": { "chores": ["review", "deslop", "review-canvas"] },
 "chores": {
   "review-canvas": {
     "skill": "pr-review-canvas",
@@ -429,36 +437,40 @@ the project, this chore posts a topic-grouped review canvas on every phase PR:
 The node view links the phase's PR on its **Changes** card, or says why none
 opened.
 
-## The review loop
+## The review — `when: "review"`
 
-`standard-phase` reviews and fixes a phase the way Vinta's thermo-nuclear review
-loop does by hand ([SPEC §16](SPEC.md#16-the-review-loop)):
+A phase's code review is a chore too ([SPEC §16](SPEC.md#16-the-review-loop)). A chore
+with `"when": "review"` runs in the `review` state, once the phase's gates are
+green, on the implementer's own session. `plan-feature` gives every plan one,
+running the `thermo-nuclear-review-loop` skill:
 
-- **The reviewer** keeps one session across rounds and is held to the shipped
-  Review Standard — or to your project's `REVIEW.md`, if the lane has one, which
-  replaces it entirely. It runs the gates itself, never edits, and ends on
-  `VERDICT: pass` only when it explicitly approves. If a review turn moves
-  `HEAD` or edits a tracked file, the node stops and asks whether to keep the
-  edits or stop the phase.
-- **The fixer** is the implementer continuing its own session. It verifies each
-  finding before acting on it, rejects the unsupported ones with
-  counter-evidence, and does not decide scope on your behalf: a finding about an
-  unreachable scenario, a defensive check, a requirements ambiguity or a
-  destructive operation is put to you instead, all at once, in the node view.
-- **Rejections and your answers** are kept per node in
-  `runs/<run-id>/nodes/<node-id>/review-ledger.jsonl`, and every later review
-  and fix is shown them, so nobody re-asks what you already decided.
-- **After `max_fix_rounds` (default 4)** the phase asks whether to continue for
-  another round of the same budget or stop.
+- **The implementer runs the loop.** It spawns one reviewer sub-agent at the
+  harness's most capable tier and keeps it for the whole turn, so a pass costs a
+  message to a reviewer that still remembers the last one. The reviewer reads,
+  runs commands and never edits.
+- **Findings are leads, not orders.** The implementer checks each against the
+  code, fixes the ones that hold up, answers the rest with counter-evidence, runs
+  the gates through `vinta-ai-maestro gate`, commits the round, and sends the
+  reviewer the next pass. A finding that needs your decision — an unreachable
+  scenario, a defensive check, a requirements ambiguity, a destructive operation
+  — comes to you as an agent question in the node view.
+- **It ends on `VERDICT: pass` or `VERDICT: fail`.** Only the reviewer's explicit
+  approval is a pass; a turn that states no verdict, or breaks, reads as a fail.
+  By default it has no pass limit and runs until the reviewer approves. A node
+  with `max_fix_rounds` set stops after that many passes that still had
+  blockers, and reports instead of pausing on its own.
+- **An unapproved review asks you** whether to continue the review for another
+  round of the same budget or stop the phase. Under `--retry-after`, nobody
+  answering takes `stop`, as an exhausted fix budget does.
 
-Under `--retry-after`, nobody answering a scope question takes each item's
-stated default, and nobody answering the exhausted-budget question takes
-`stop` — so an unattended run spends no more than it did before. Without it,
-both wait for you.
+Once the review passes, the `after_review` chores run (`deslop`, in a plan
+`plan-feature` writes) and then `verify` runs the gates again on the tree that
+merges. A tree the review loop left green and the polish left alone is a cache
+hit there. A red `verify` goes back through `fix` and `gate` to the review,
+because the fix changed code after the reviewer approved it.
 
-An unstaffed review runs on `defaults.reviewer_model` if the workflow sets one,
-otherwise on the harness's top tier (`opus` on claude-code), otherwise on the
-phase's own model.
+A node with no review chore passes the review state, the way a node with no
+gates passes the gate state.
 
 ## When an agent stops to ask
 
@@ -483,7 +495,7 @@ npx vinta-ai-maestro@alpha review open ai-plans/2026-03-04-bookmark-folders.work
 
 | Tab | What it shows |
 |---|---|
-| **Graph** | The phase DAG, with wave bands and an artifact label on every edge. Each phase is coloured by its review state: no comments, open comments, comments resolved, or has issues. Below the graph is the selected phase in full: who implements and reviews it at which tier and model, its pipeline as a strip of steps (implement → review/fix loop → polish → gates → integrate), what it depends on and unblocks, and its touch list. Its tabs hold the **brief**, the **implementer, reviewer and fixer prompts**, its **gates** and its **chores**. |
+| **Graph** | The phase DAG, with wave bands and an artifact label on every edge. Each phase is coloured by its review state: no comments, open comments, comments resolved, or has issues. Below the graph is the selected phase in full: who implements it at which tier and model and whether a review chore reviews it, its pipeline as a strip of steps (implement → gates → review → polish → verify → integrate), what it depends on and unblocks, and its touch list. Its tabs hold the **brief**, the **implementer and fixer prompts**, its **gates** and its **chores** — the review loop's prompt among them. |
 | **Plan** | The markdown plan, whole, with an outline. Every section has its own comment button. A section that is a phase's brief links to that phase on the graph. |
 | **Gates** | A phase × gate matrix, and each gate's resolved command, scoped command, timeout and the pools it holds. "Resolved" means the project's `.vinta-ai-workflows.yaml` layered under the plan, so these are the commands a run executes. Resource pools and chores are listed too. |
 | **Schedule** | `simulate`'s projection drawn as a timeline: which phases run side by side and which chain is the critical path. It uses default durations, so it shows the shape of the schedule, not how long the run will take. |
@@ -654,9 +666,9 @@ $ vinta-ai-maestro purge <run-id>
 
 ### What this walkthrough has and has not been run against
 
-Every step above is transcribed from a real run of exactly these commands, and that run predates agent prompt composition — at the time, the scheduler handed the harness `node.prompt_ref` as the entire prompt for every role, so the reviewer was never told to end its turn with `VERDICT: pass`, every node fell back to the fail-closed default, and the run ended with `failed nodes: p1, p2`.
+Every step above is transcribed from a real run of exactly these commands, and that run predates agent prompt composition — at the time, the scheduler handed the harness `node.prompt_ref` as the entire prompt for every role, so the reviewer of that time was never told to end its turn with `VERDICT: pass`, every node fell back to the fail-closed default, and the run ended with `failed nodes: p1, p2`.
 
-**That cause is fixed.** `spawn_agent`'s `prompt_template` now selects a composed, per-role prompt, and the shipped `standard-phase` pipeline is driven to `done` in the test suite against real git worktrees, real branches, real gate commands and real merges — including the fix loop, where a red gate produces a fixer and the next review passes. The verdict protocol the reviewer is asked for and the parser that reads it are one definition, so they cannot drift.
+**That cause is fixed.** `spawn_agent`'s `prompt_template` now selects a composed, per-role prompt, and the shipped `standard-phase` pipeline is driven to `done` in the test suite against real git worktrees, real branches, real gate commands and real merges — including the fix loop, where a red gate produces a fixer and the review that follows passes. The verdict protocol the review is asked for and the parser that reads it are one definition, so they cannot drift.
 
 What has **not** happened is a live run with real agents since that landed. The mechanism is tested; the numbers in the walkthrough above are from the older run. Treat the failure output it describes as history rather than as current behaviour, and expect to be the first to see a full real-agent run reach a merged wave branch.
 

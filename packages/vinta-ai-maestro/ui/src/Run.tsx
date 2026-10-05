@@ -534,14 +534,9 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
                 <span className="text-muted-foreground">
                   {member.member} · tier {member.tier}
                 </span>
-                {/* Two seats, named, because one number covering both is how
-                    this panel used to report a member's reviews as phases they
-                    had taken. A member who only reviewed reads as `0 · 6
-                    reviewed` rather than as somebody who did nothing. */}
                 <span className="font-mono">
                   {member.nodes}
                   {member.coveredFor > 0 && ` (${member.coveredFor} covering)`}
-                  {member.reviews > 0 && ` · ${member.reviews} reviewed`}
                 </span>
               </li>
             ))}
@@ -609,7 +604,7 @@ function TokensExplanation({ usage }: { readonly usage: RunUsageResponse }) {
   return (
     <>
       <p>
-        Counted, not estimated. Each agent session — every implementer, reviewer and fixer turn —
+        Counted, not estimated. Each agent session — every implementer, fixer and chore turn —
         reports one token total when it ends, and this is the sum of those reports.
       </p>
       <p>
