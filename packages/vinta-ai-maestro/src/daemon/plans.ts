@@ -20,7 +20,7 @@
  *   mouth that the agent then reads back as its own.
  */
 import type { Context, Hono } from 'hono'
-import { join, relative } from 'node:path'
+import { join } from 'node:path'
 import { z } from 'zod'
 import {
   addComment,
@@ -33,6 +33,7 @@ import {
   planStamp,
   postMessage,
   readContained,
+  repoRelative,
   ReviewRefusal,
   setCommentStatus,
   unsentThreads,
@@ -270,7 +271,7 @@ export function registerPlanRoutes(app: Hono, options: PlanRoutesOptions): void 
     return {
       id,
       stamp: planStamp(repoDir, plansDir, id) ?? '',
-      path: relative(repoDir, store.path),
+      path: repoRelative(repoDir, store.path),
       review,
       presence: store.presence(),
     }

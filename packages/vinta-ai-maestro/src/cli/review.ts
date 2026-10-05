@@ -22,12 +22,13 @@
  * one command may take. The loop around it is the agent's: wait, act, reply,
  * wait again — until the person approves the plan.
  */
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import {
   addReply,
   createReviewStore,
   markDelivered,
+  repoRelative,
   postMessage,
   ReviewRefusal,
   setCommentStatus,
@@ -217,7 +218,7 @@ async function waitCommand(argv: readonly string[], io: Io, deps: ReviewDeps): P
           JSON.stringify({
             kind: 'timeout',
             workflow_id: target.id,
-            review_path: relative(target.repoDir, store.path),
+            review_path: repoRelative(target.repoDir, store.path),
             status: current.review.status,
             messages: [],
           }),
@@ -244,7 +245,7 @@ function handover(target: Target, review: PlanReview, picked: readonly Message[]
   return {
     kind: review.status === 'approved' && last?.kind === 'approval' ? 'approved' : 'messages',
     workflow_id: target.id,
-    review_path: relative(target.repoDir, target.store.path),
+    review_path: repoRelative(target.repoDir, target.store.path),
     status: review.status,
     messages: picked.map((message) => ({
       id: message.id,

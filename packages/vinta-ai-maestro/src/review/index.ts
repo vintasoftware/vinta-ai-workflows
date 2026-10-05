@@ -42,6 +42,7 @@ export {
   REVIEWS_DIRNAME,
   WORKING_WINDOW_MS,
   createReviewStore,
+  repoRelative,
   reviewPathFor,
   type Presence,
   type ReviewRead,

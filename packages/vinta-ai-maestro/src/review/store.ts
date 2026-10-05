@@ -28,7 +28,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import {
   REVIEW_SUFFIX,
   ReviewRefusal,
@@ -106,6 +106,16 @@ export interface ReviewStoreOptions {
   readonly workflowId: string
   /** Liveness of a pid. Injected so a test can say a process died. */
   readonly alive?: (pid: number) => boolean
+}
+
+/**
+ * A path as the review's readers see it: relative to the repository and
+ * `/`-separated on every platform. The agent quotes it back in commands and
+ * the page prints it, so a Windows `ai-plans\x.review.json` would be a path
+ * neither of them could use on the next machine.
+ */
+export function repoRelative(repoDir: string, path: string): string {
+  return relative(repoDir, path).split(sep).join('/')
 }
 
 export function reviewPathFor(plansDir: string, workflowId: string): string {
