@@ -435,6 +435,7 @@ function conflictFixer(
     env,
     crewAssignments,
     record,
+    fallbacks: workflow.defaults.model_fallbacks,
   })
 }
 

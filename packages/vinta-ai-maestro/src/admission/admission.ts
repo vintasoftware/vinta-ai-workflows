@@ -69,6 +69,14 @@
  * discovering the refusal for itself, which is what keeps a hundred waiting
  * nodes from becoming a hundred timers and a hundred re-probes.
  *
+ * **A model out of quota is not a harness out of quota.** A `quota` refusal on
+ * a model that has a fallback (`defaults.model_fallbacks`) does not park the
+ * harness: the model is remembered as out — until the reset the vendor stated,
+ * or for the rest of the run — and the spawn goes again at once on the
+ * fallback, as does every later spawn of that model. If the fallback is
+ * refused for quota too, the refusal was the account's rather than the
+ * model's: the memory is undone and the harness parks as it always did.
+ *
  * Nothing here logs prompt text, file contents or agent output. Refusal
  * messages come from the adapter, which is bound by the same rule; everything
  * this module adds is a run, node or harness identifier.
@@ -80,6 +88,7 @@ import type {
   SpawnRefusalKind,
   TurnRefusal,
 } from '../harness/adapter.ts'
+import { type ModelFallbacks, nextFallback } from '../harness/fallback.ts'
 import type { Journal } from '../journal/journal.ts'
 import { type Clock, systemClock } from './clock.ts'
 import { CapacityWaitLog } from './waits.ts'
@@ -116,6 +125,8 @@ export type AdmissionOutcome =
   | {
       readonly status: 'admitted'
       readonly session: AgentSession
+      /** The model the session runs on — the task's own, or its fallback. */
+      readonly model: string
       /**
        * Frees the harness in-flight slot. The scheduler calls it when the
        * session ends — the ceiling counts running agents, not spawn calls.
@@ -200,6 +211,8 @@ const DEFAULT_CEILING_FRESH_FOR_MS = 6 * 60 * 60 * 1_000
 export interface AdmitOptions {
   /** Higher goes first when slots are scarce. The scheduler passes node height. */
   readonly priority?: number
+  /** `defaults.model_fallbacks`: what runs instead of a model out of quota. */
+  readonly fallbacks?: ModelFallbacks
 }
 
 interface QueuedSlot {
@@ -249,6 +262,14 @@ interface HarnessState {
   starting: Promise<void>
   /** The `unauthenticated` refusal this harness is holding, until `loggedIn`. */
   loginRequired: string | null
+  /**
+   * Models this harness refused for quota that have a fallback, by id, to the
+   * epoch ms they may be tried again. `Infinity` when the vendor stated no
+   * reset: credits do not come back on a timer, and re-probing would spend a
+   * refused spawn per node to learn that. In memory only — a restart probes
+   * each once, which costs one refusal rather than a stale belief.
+   */
+  exhausted: Map<string, number>
 }
 
 export class AdmissionControl {
@@ -295,66 +316,88 @@ export class AdmissionControl {
     options: AdmitOptions = {},
   ): Promise<AdmissionOutcome> {
     const state = this.#state(adapter.id)
+    const { fallbacks } = options
+    // Models this call itself found out. Undone if the fallback is refused for
+    // quota as well, because then it was the account that ran out.
+    const discovered: string[] = []
+    let current = this.#avoidExhausted(state, task, fallbacks)
 
-    if (state.loginRequired !== null) return { status: 'unauthenticated', message: state.loginRequired }
-    // The harness is already parked: park this node too rather than spending a
-    // spawn to be told the same thing again.
-    if (this.#parked(state)) return this.#retry(state, task.nodeId)
+    for (;;) {
+      if (state.loginRequired !== null) return { status: 'unauthenticated', message: state.loginRequired }
+      // The harness is already parked: park this node too rather than spending a
+      // spawn to be told the same thing again.
+      if (this.#parked(state)) return this.#retry(state, current.nodeId)
 
-    await this.#acquireSlot(state, options.priority ?? 0)
-    const started = await this.#startGate(state)
-    // Another node may have been refused while we queued for the slot, or
-    // while the spawn ahead of us was starting.
-    if (state.loginRequired !== null) {
-      started()
-      this.#releaseSlot(state)
-      return { status: 'unauthenticated', message: state.loginRequired }
-    }
-    if (this.#parked(state)) {
-      started()
-      this.#releaseSlot(state)
-      return this.#retry(state, task.nodeId)
-    }
-
-    let outcome: Awaited<ReturnType<HarnessAdapter['spawn']>>
-    try {
-      outcome = await adapter.spawn(task)
-    } finally {
-      started()
-    }
-    if (outcome.ok) {
-      this.#onClean(state)
-      let released = false
-      return {
-        status: 'admitted',
-        session: outcome.session,
-        release: () => {
-          if (released) return
-          released = true
-          this.#releaseSlot(state)
-        },
+      await this.#acquireSlot(state, options.priority ?? 0)
+      const started = await this.#startGate(state)
+      // Another node may have been refused while we queued for the slot, or
+      // while the spawn ahead of us was starting.
+      if (state.loginRequired !== null) {
+        started()
+        this.#releaseSlot(state)
+        return { status: 'unauthenticated', message: state.loginRequired }
       }
-    }
+      if (this.#parked(state)) {
+        started()
+        this.#releaseSlot(state)
+        return this.#retry(state, current.nodeId)
+      }
+      // A spawn queued behind the one that discovered this model was out.
+      if (this.#isExhausted(state, current.model)) current = this.#avoidExhausted(state, current, fallbacks)
 
-    // The slot goes back before anything else: a refused spawn holds nothing.
-    this.#releaseSlot(state)
-    if (outcome.kind === 'fatal') return { status: 'failed', message: outcome.message }
-    // Before `#park`, deliberately: this refusal is about one task's token, not
-    // about the harness, and neither the park nor the AIMD step may see it.
-    // `#onClean` is not called either — a stale token is no evidence the
-    // ceiling was safe, only that it was never tested.
-    if (outcome.kind === 'stale_session') {
-      return { status: 'stale_session', message: outcome.message }
-    }
-    // Neither parked nor counted by AIMD: it says nothing about capacity, and
-    // no timer ends it. The harness holds the refusal until `loggedIn`.
-    if (outcome.kind === 'unauthenticated') {
-      state.loginRequired = outcome.message
-      return { status: 'unauthenticated', message: outcome.message }
-    }
+      let outcome: Awaited<ReturnType<HarnessAdapter['spawn']>>
+      try {
+        outcome = await adapter.spawn(current)
+      } finally {
+        started()
+      }
+      if (outcome.ok) {
+        this.#onClean(state)
+        let released = false
+        return {
+          status: 'admitted',
+          session: outcome.session,
+          model: current.model,
+          release: () => {
+            if (released) return
+            released = true
+            this.#releaseSlot(state)
+          },
+        }
+      }
 
-    this.#park(adapter.id, state, outcome.kind, outcome.retryAfter)
-    return this.#retry(state, task.nodeId)
+      // The slot goes back before anything else: a refused spawn holds nothing.
+      this.#releaseSlot(state)
+      if (outcome.kind === 'fatal') return { status: 'failed', message: outcome.message }
+      // Before `#park`, deliberately: this refusal is about one task's token, not
+      // about the harness, and neither the park nor the AIMD step may see it.
+      // `#onClean` is not called either — a stale token is no evidence the
+      // ceiling was safe, only that it was never tested.
+      if (outcome.kind === 'stale_session') {
+        return { status: 'stale_session', message: outcome.message }
+      }
+      // Neither parked nor counted by AIMD: it says nothing about capacity, and
+      // no timer ends it. The harness holds the refusal until `loggedIn`.
+      if (outcome.kind === 'unauthenticated') {
+        state.loginRequired = outcome.message
+        return { status: 'unauthenticated', message: outcome.message }
+      }
+
+      if (outcome.kind === 'quota') {
+        const next = nextFallback(current.model, fallbacks, (model) => this.#isExhausted(state, model))
+        if (next !== undefined) {
+          state.exhausted.set(current.model, outcome.retryAfter?.getTime() ?? Number.POSITIVE_INFINITY)
+          discovered.push(current.model)
+          this.#fellBack(adapter.id, current, next, false)
+          current = { ...current, model: next }
+          continue
+        }
+        for (const model of discovered) state.exhausted.delete(model)
+      }
+
+      this.#park(adapter.id, state, outcome.kind, outcome.retryAfter)
+      return this.#retry(state, current.nodeId)
+    }
   }
 
   /**
@@ -379,8 +422,23 @@ export class AdmissionControl {
    * everything after the refusal — the same `#park`, the same wait, the same
    * `waiting_on_capacity` row.
    */
-  refusedMidTurn(harness: string, nodeId: string, refusal: TurnRefusal): AdmissionOutcome {
+  refusedMidTurn(
+    harness: string,
+    nodeId: string,
+    refusal: TurnRefusal,
+    turn: { readonly model: string; readonly fallbacks?: ModelFallbacks } | undefined = undefined,
+  ): AdmissionOutcome {
     const state = this.#state(harness)
+    // The model ran out partway through, and something else can take the turn
+    // over: no wait at all. The re-driven spawn is the one that falls back, and
+    // journals it — nothing has run on the fallback yet.
+    if (refusal.kind === 'quota' && turn !== undefined) {
+      const next = nextFallback(turn.model, turn.fallbacks, (model) => this.#isExhausted(state, model))
+      if (next !== undefined) {
+        state.exhausted.set(turn.model, refusal.retryAfter?.getTime() ?? Number.POSITIVE_INFINITY)
+        return { status: 'retry', kind: 'quota', wakeAt: this.#clock.now(), wait: () => Promise.resolve() }
+      }
+    }
     this.#park(harness, state, refusal.kind, refusal.retryAfter)
     return this.#retry(state, nodeId)
   }
@@ -412,6 +470,37 @@ export class AdmissionControl {
   close(): void {
     for (const state of this.#states.values()) state.cancelTimer?.()
     this.#waitLog.close()
+  }
+
+  /** Whether `model` is still out of quota on this harness. Expires lazily. */
+  #isExhausted(state: HarnessState, model: string): boolean {
+    const until = state.exhausted.get(model)
+    if (until === undefined) return false
+    if (this.#clock.now() < until) return true
+    state.exhausted.delete(model)
+    return false
+  }
+
+  /**
+   * `task`, on its fallback when its model is known to be out. Unchanged when
+   * the whole chain is out too: the original is then tried, and either it has
+   * come back or its refusal parks the harness.
+   */
+  #avoidExhausted(state: HarnessState, task: AgentTask, fallbacks: ModelFallbacks | undefined): AgentTask {
+    if (!this.#isExhausted(state, task.model)) return task
+    const next = nextFallback(task.model, fallbacks, (model) => this.#isExhausted(state, model))
+    if (next === undefined) return task
+    this.#fellBack(state.harness, task, next, true)
+    return { ...task, model: next }
+  }
+
+  #fellBack(harness: string, task: AgentTask, to: string, known: boolean): void {
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: task.nodeId,
+      type: 'node_model_fallback',
+      payload: { harness, from: task.model, to, known },
+    })
   }
 
   /** Journals the node as waiting and hands back the deferred wait. */
@@ -601,6 +690,7 @@ export class AdmissionControl {
       slots: [],
       starting: Promise.resolve(),
       loginRequired: null,
+      exhausted: new Map(),
     }
     this.#states.set(harness, state)
     return state

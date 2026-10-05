@@ -12,6 +12,7 @@
 2. **No effective tier (override absent AND key unset, or the whole `agent_models` section absent) → do not force a model.** Spawn with the runtime's default model (today's behavior). Skip the rest.
 3. Open [`ai-tools/skills/plan-feature/resources/ai-models.yaml`](../plan-feature/resources/ai-models.yaml), take that tier's `models`, **filter to the vendors the runtime actually exposes**, pick the cheapest/fastest survivor, and translate it to the runner's spawn form — the same resolution [implement-phase](../implement-phase/SKILL.md) runs for the implementer, only keyed by a config tier instead of a plan line.
 4. `ai-models.yaml` missing, or the tier has no runtime-available vendor → fall back to the runtime default and surface the fallback once. Never hard-fail a phase over a model-selection miss.
+5. The resolved model is out of quota or credits and its `ai-models.yaml` entry carries a `fallback:` → spawn on the fallback instead, by the same **Out of quota** rule the implementer follows in [implement-phase](../implement-phase/SKILL.md).
 
 ### Who reviews: a member, not a tier
 

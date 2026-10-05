@@ -571,6 +571,25 @@ interface NodePayloads {
     readonly role?: CrewRole
   }
   /**
+   * A spawn ran on a different model than the one it asked for, because the
+   * one it asked for is out of quota (`defaults.model_fallbacks`, §6.1).
+   *
+   * One row per substituted spawn, not one per exhaustion: the question it
+   * answers is "what model did this turn actually run on", and a run whose top
+   * tier quietly ran a tier lower is otherwise indistinguishable from one that
+   * ran as staffed. `known` separates the spawn that discovered the exhaustion
+   * — it was refused, then retried — from every later one that went straight
+   * to the fallback without spending a spawn to be told again.
+   *
+   * Model ids and a harness id. No vendor prose (§11).
+   */
+  node_model_fallback: {
+    readonly harness: string
+    readonly from: string
+    readonly to: string
+    readonly known: boolean
+  }
+  /**
    * One edge of a gate-pool acquisition, for the whole set the gate needs —
    * acquisition is all-or-nothing and in one `pools.acquire` call (§6), so a
    * per-resource event would claim an ordering the scheduler does not have.

@@ -14,6 +14,7 @@
  * in a log.
  */
 import type { AgentTask, HarnessAdapter } from '../harness/adapter.ts'
+import { type ModelFallbacks, spawnWithFallbacks } from '../harness/fallback.ts'
 import {
   attribute,
   CONFLICT_FIXER_ROLE,
@@ -82,6 +83,8 @@ export interface AgentConflictFixerOptions {
    * `adapter`/`model` above, which is the pre-roster path.
    */
   readonly staff?: (request: ConflictRequest) => FixerAgent | null
+  /** `defaults.model_fallbacks`, for a staffed model that is out of quota. */
+  readonly fallbacks?: ModelFallbacks
   /**
    * Where the fix round's turn is written down.
    *
@@ -142,7 +145,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         // whoever reads this next.
       }
       const adapter = staffed?.adapter ?? options.adapter
-      const outcome = await adapter.spawn(task)
+      const { outcome } = await spawnWithFallbacks(adapter, task, options.fallbacks)
       if (!outcome.ok) throw new Error(`conflict fixer spawn refused: ${outcome.kind}`)
 
       // Draining is mandatory — an unread stream never ends — and the outcome

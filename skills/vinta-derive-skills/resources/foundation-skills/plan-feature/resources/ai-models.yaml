@@ -23,6 +23,11 @@ source:
   primary: https://models.dev/api.json
   fallback: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
 
+# `fallback:` on a model is what runs instead once that model is out of quota
+# or credits — the frontier models here are sold as a small credit allowance
+# and run out long before the plan's usage window does. A budget decision, not
+# a tier placement, so it may point outside its tier.
+#
 # Tiers run cheapest/fastest (1) → architectural/hard (4). Default to the
 # cheapest tier that plausibly one-shots the work; a cheap model failing fast
 # beats an expensive one succeeding slowly.
@@ -82,9 +87,11 @@ tiers:
     models:
       anthropic:
         - id: claude-fable-5-1
+          fallback: claude-opus-5-5
       openai:
         - id: gpt-6-astra
           note: frontier model; roughly twice sol's price, so reserve it for tier 4
+          fallback: gpt-5.6-sol
       google:
         - id: gemini-3.1-pro-preview
           note: with thinking

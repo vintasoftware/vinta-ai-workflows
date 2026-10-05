@@ -29,6 +29,8 @@ Start cold instead when any of these hold:
 
 Record which of those applied, so a phase that was unexpectedly slow can be read later without guessing.
 
+**Out of quota (no user prompt):** the spawn is refused, or the turn cut off, because the picked model's quota or credits are spent — a usage-limit, credit-balance or insufficient-quota error, not a capability gap — and its entry in `ai-models.yaml` carries a `fallback:`. Re-spawn on the fallback at once instead of waiting, and keep using the fallback in place of that model for the rest of the run; say so once. If the fallback is refused the same way, the account is out rather than the model: wait for the reset as you would with no fallback. A plan's workflow JSON may carry the same map as `defaults.model_fallbacks`; when it does, it wins over `ai-models.yaml`.
+
 **Retry escalation (no user prompt):** the picked model fails on a clear capability gap → step **one tier up** and retry once. After Tier 4 fails, STOP. Update tracking with `❌` and hand the failure back to the conductor, which asks the user how to proceed with a structured question (see its **Model escalation** rule).
 
 Record the **model actually used**, the **crew member** it came from, and **whether that member is the one the plan assigned** — a phase run by a covering peer is the difference between a run that cost what the plan said and one that did not.

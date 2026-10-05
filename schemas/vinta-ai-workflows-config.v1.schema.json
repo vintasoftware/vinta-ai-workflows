@@ -328,7 +328,7 @@
       "additionalProperties": false,
       "properties": {
         "defaults": {
-          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `reviewer_model`, `max_session_turns`.",
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `reviewer_model`, `model_fallbacks`, `max_session_turns`.",
           "type": "object",
           "properties": {
             "harness": {
@@ -371,6 +371,14 @@
             "reviewer_model": {
               "type": "string",
               "minLength": 1
+            },
+            "model_fallbacks": {
+              "description": "Model id → the model to run instead once the first is out of quota or credits. A `quota` refusal on a listed model retries on the fallback instead of parking the harness; later spawns of that model go straight to the fallback until the vendor's stated reset, or for the rest of the run. A plan's own map replaces this one whole.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
             },
             "max_session_turns": {
               "type": "integer",

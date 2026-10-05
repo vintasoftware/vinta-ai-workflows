@@ -110,7 +110,12 @@ function citedIdsByVendor(doc) {
   for (const tier of doc.tiers ?? []) {
     for (const [vendor, models] of Object.entries(tier.models ?? {})) {
       (out[vendor] ??= new Set());
-      for (const entry of models) out[vendor].add(entry.id);
+      for (const entry of models) {
+        out[vendor].add(entry.id);
+        // A fallback is spawned when its model runs out of quota, so a dead one
+        // fails exactly when it is needed. Same vendor: it runs on the same harness.
+        if (entry.fallback) out[vendor].add(entry.fallback);
+      }
     }
   }
   return out;
@@ -151,7 +156,8 @@ Produce an UPDATED version of the YAML file that:
 - keeps the exact same top-level structure, keys, comment style, \`source:\` block, and tier numbering,
 - keeps the leading comment block and the \`# yaml-language-server\` directive,
 - updates \`last_verified\` to today's date if you know it; otherwise leave it,
-- preserves \`note:\` caveats where still accurate, edits them where not.
+- preserves \`note:\` caveats where still accurate, edits them where not,
+- preserves every \`fallback:\` — it is a budget decision, not a tier placement: replace a dead fallback id with its closest current equivalent, and keep it on the same model if that model moves tier, but never add or remove one.
 
 Return ONLY the full updated YAML between <yaml> and </yaml> tags. No prose.`;
 

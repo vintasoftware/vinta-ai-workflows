@@ -814,6 +814,17 @@ export const DefaultsSchema = z.strictObject({
         'tier the phase was written at. Absent takes the harness’s own top tier where it names ' +
         'one, and the node’s model where it does not.',
     ),
+  model_fallbacks: z
+    .record(z.string().min(1), z.string().min(1))
+    .default({})
+    .describe(
+      'Model id → the model to run instead once the first is out of quota (§6.1). A `quota` ' +
+        'refusal on a model listed here does not park the harness: the spawn is retried at ' +
+        'once on the fallback, and every later spawn of that model on the same harness goes ' +
+        'straight to the fallback until the vendor’s stated reset, or for the rest of the run ' +
+        'when it stated none. Chains are followed; a fallback refused for quota too means the ' +
+        'account is out, not the model, and the harness parks as it would have.',
+    ),
   max_session_turns: z
     .number()
     .int()
