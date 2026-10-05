@@ -30,6 +30,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Model fallbacks for models that run out of quota.** A frontier model sold
+  as a small credit allowance used to stall a whole run when its credits ran
+  out: the `quota` refusal parked the harness, and every model on it waited
+  for a reset that might never come. Now a model can name a fallback, and the
+  run switches to it instead of waiting.
+  - **`ai-models.yaml` entries take `fallback:`.** The shipped table sets
+    `claude-fable-5-1 → claude-opus-5-5` and `gpt-6-astra → gpt-5.6-sol`
+    (tier 4). `ai-models.v1.schema.json` gains the optional field, and the
+    nightly `check-ai-models` job checks fallback ids for staleness too.
+  - **Maestro: `defaults.model_fallbacks`** (model id → fallback id), in a
+    plan's workflow or in `.vinta-ai-workflows.yaml` under
+    `maestro.defaults`. A `quota` refusal on a listed model retries the
+    spawn on its fallback right away and leaves the harness unparked. Later
+    spawns of that model on the same harness go straight to the fallback,
+    until the reset time the vendor gave, or for the rest of the run if it
+    gave none. This also covers a turn cut off mid-way and the monitor and
+    conflict-fixer spawns. Chains are followed. If the fallback is refused
+    for quota too, the whole account is out: the harness parks as it did
+    before. Each substituted spawn is journaled as `node_model_fallback`.
+  - **`plan-feature` writes the map** into each plan's workflow from the
+    crew's `fallback:` entries. The plan-execution skills (`implement-phase`,
+    `review-phase`) follow the same rule when maestro isn't running them.
 - **Project defaults for maestro in `.vinta-ai-workflows.yaml`.** A new
   `maestro:` section holds what every plan's `.workflow.json` used to repeat:
   per-type gate defaults, resource pools, chores, run defaults and the
