@@ -29,6 +29,14 @@ import type { HarnessCapabilities } from '../harness/adapter.ts'
 import type { NodeStatus, RunStatus } from '../journal/events.ts'
 import { AgentAnswersSchema, AgentAskSchema } from '../questions/shape.ts'
 import { WorkflowSchema } from '../types.ts'
+import {
+  AnchorSchema,
+  COMMENT_STATUSES,
+  MAX_BODY,
+  MAX_QUOTE,
+  PlanReviewSchema,
+  REVIEW_STATUSES,
+} from '../review/document.ts'
 import { PtyServerFrameSchema } from './pty-frames.ts'
 
 /** Compile-time exhaustiveness: a new status must be added to the enum below. */
@@ -737,6 +745,120 @@ export const AmendResponseSchema = z.strictObject({
 })
 
 // ---------------------------------------------------------------------------
+// Plan review — §19
+// ---------------------------------------------------------------------------
+
+/**
+ * Where an issue came from, so the page can say which file to open: the
+ * workflow document, the project's `.vinta-ai-workflows.yaml`, or a reference
+ * from the workflow into the plan.
+ */
+export const PlanIssueSchema = z.strictObject({
+  path: z.string(),
+  source: z.enum(['workflow', 'config', 'reference']),
+  message: z.string(),
+})
+
+/** One row of the plan list. Enough to choose one, and to see which need attention. */
+export const PlanSummarySchema = z.strictObject({
+  id: z.string(),
+  title: z.string().nullable(),
+  planRef: z.string().nullable(),
+  phases: z.number().int().nullable(),
+  valid: z.boolean(),
+  status: z.enum(REVIEW_STATUSES),
+  openComments: z.number().int(),
+  unsentComments: z.number().int(),
+})
+
+export const PlanListResponseSchema = z.strictObject({ plans: z.array(PlanSummarySchema) })
+
+export const PhaseMaterialsSchema = z.strictObject({
+  brief: z.string().nullable(),
+  prompts: z.strictObject({
+    implementer: z.string().nullable(),
+    reviewer: z.string().nullable(),
+    fixer: z.string().nullable(),
+  }),
+  chores: z.record(z.string(), z.string()),
+  error: z.string().nullable(),
+})
+
+/**
+ * Everything the review page draws. The workflow is the *resolved* one, as on
+ * the editor's endpoint, and it is nullable for the same reason the page still
+ * opens on a broken plan: the issue list is the most useful thing on it then.
+ */
+export const PlanViewResponseSchema = z.strictObject({
+  id: z.string(),
+  stamp: z.string(),
+  workflow: WorkflowSchema.nullable(),
+  valid: z.boolean(),
+  issues: z.array(PlanIssueSchema),
+  waves: z.record(z.string(), z.number().int()),
+  plan: z
+    .strictObject({ ref: z.string(), title: z.string().nullable(), markdown: z.string() })
+    .nullable(),
+  phases: z.record(z.string(), PhaseMaterialsSchema),
+})
+
+export const PresenceSchema = z.discriminatedUnion('state', [
+  z.strictObject({ state: z.literal('listening'), since: z.string() }),
+  z.strictObject({ state: z.literal('working'), lastSeenAt: z.string() }),
+  z.strictObject({ state: z.literal('away'), lastSeenAt: z.string().nullable() }),
+])
+
+/**
+ * The review document as it is on disk, the agent's presence, and the stamp
+ * of the files the view is built from. Polled: the page re-reads the view only
+ * when `stamp` moves, which is how an edit the agent makes shows up.
+ */
+export const PlanReviewResponseSchema = z.strictObject({
+  id: z.string(),
+  stamp: z.string(),
+  /** Repo-relative path of the review file, for the "it lives here" line. */
+  path: z.string(),
+  review: PlanReviewSchema,
+  presence: PresenceSchema,
+})
+
+export const CommentRequestSchema = z.strictObject({
+  anchor: AnchorSchema,
+  body: z.string().trim().min(1).max(MAX_BODY),
+  quote: z.string().max(MAX_QUOTE).optional(),
+})
+
+export const ReplyRequestSchema = z.strictObject({ body: z.string().trim().min(1).max(MAX_BODY) })
+
+export const CommentStatusRequestSchema = z.strictObject({ status: z.enum(COMMENT_STATUSES) })
+
+/**
+ * A chat message. `send: 'unsent'` also sends every comment the agent has not
+ * seen yet — the review page's "Send to agent". The body may then be empty.
+ */
+export const ChatRequestSchema = z.strictObject({
+  body: z.string().max(MAX_BODY),
+  send: z.enum(['unsent', 'none']).default('none'),
+})
+
+/** §13.1's projection, for a plan that has not run: when each phase would start and end. */
+export const PlanScheduleResponseSchema = z.strictObject({
+  status: z.enum(['completed', 'stopped']),
+  projectedMs: z.number(),
+  nodes: z.array(
+    z.strictObject({
+      id: z.string(),
+      wave: z.number().int(),
+      startedAtMs: z.number().nullable(),
+      finishedAtMs: z.number().nullable(),
+      busyMs: z.number(),
+      queueMs: z.number(),
+    }),
+  ),
+  criticalPath: z.array(z.string()),
+})
+
+// ---------------------------------------------------------------------------
 // The WebSocket envelope
 // ---------------------------------------------------------------------------
 
@@ -877,6 +999,13 @@ export type Frame = z.infer<typeof FrameSchema>
 export type Issue = z.infer<typeof IssueSchema>
 export type WorkflowResponse = z.infer<typeof WorkflowResponseSchema>
 export type WorkflowListResponse = z.infer<typeof WorkflowListResponseSchema>
+export type PlanIssueResponse = z.infer<typeof PlanIssueSchema>
+export type PlanSummary = z.infer<typeof PlanSummarySchema>
+export type PlanListResponse = z.infer<typeof PlanListResponseSchema>
+export type PlanViewResponse = z.infer<typeof PlanViewResponseSchema>
+export type PlanReviewResponse = z.infer<typeof PlanReviewResponseSchema>
+export type PresenceResponse = z.infer<typeof PresenceSchema>
+export type PlanScheduleResponse = z.infer<typeof PlanScheduleResponseSchema>
 
 /**
  * `validate.ts`'s issues on the wire. Its path is an array of segments; the

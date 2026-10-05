@@ -22,10 +22,12 @@ import { GATE_USAGE, gateCommand } from './gate.ts'
 import { PAUSE_USAGE, STOP_USAGE, pauseCommand, stopCommand } from './halt.ts'
 import { LOGS_USAGE, logsCommand } from './logs.ts'
 import { PURGE_USAGE, purgeCommand } from './purge.ts'
+import { REVIEW_USAGE, reviewCommand } from './review.ts'
 import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
 import { SIMULATE_USAGE, simulateCommand } from './simulate.ts'
 import { STATUS_USAGE, statusCommand } from './status.ts'
+import { VALIDATE_USAGE, validateCommand } from './validate.ts'
 import { WITH_USAGE, withCommand } from './with.ts'
 import { judgeHookCommandMain } from '../system-one/hook.ts'
 
@@ -33,6 +35,12 @@ export const HELP = `vinta-ai-maestro — code-orchestrated parallel execution o
 
 usage: vinta-ai-maestro <command> [options]
 
+  validate <workflow.json>   Check a workflow and the plan headings it points
+                             at, without running anything. --json for agents.
+  review open <workflow.json>
+                             Serve the plan's review page — graph, prompts,
+                             gates, comments, and a chat with its author.
+  review wait|reply …        The authoring agent's side of that chat.
   doctor <workflow.json>     Preflight every check a run depends on, and exit
                              non-zero if a run cannot start.
   simulate <workflow.json>   Project the schedule without running it: wall
@@ -69,6 +77,8 @@ Run \`vinta-ai-maestro <command> --help\` for a command's own options.`
  */
 const USAGES: Readonly<Record<string, string>> = {
   doctor: DOCTOR_USAGE,
+  validate: VALIDATE_USAGE,
+  review: REVIEW_USAGE,
   simulate: SIMULATE_USAGE,
   serve: SERVE_USAGE,
   ui: SERVE_USAGE,
@@ -105,6 +115,10 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
   switch (command) {
     case 'doctor':
       return await doctorCommand(rest, io)
+    case 'validate':
+      return await validateCommand(rest, io)
+    case 'review':
+      return await reviewCommand(rest, io)
     case 'simulate':
       return await simulateCommand(rest, io)
     case 'serve':
@@ -155,6 +169,8 @@ async function readStdin(): Promise<string> {
 export { OK, FAILED, USAGE, processIo, type Io } from './io.ts'
 export { doctorCommand } from './doctor.ts'
 export { simulateCommand } from './simulate.ts'
+export { validateCommand } from './validate.ts'
+export { reviewCommand, describeAnchor, type ReviewDeps } from './review.ts'
 export { serveCommand, announce, type ServeDeps } from './serve.ts'
 export { runCommand, type RunDeps } from './run.ts'
 export { statusCommand } from './status.ts'

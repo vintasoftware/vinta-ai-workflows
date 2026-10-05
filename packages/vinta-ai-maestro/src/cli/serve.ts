@@ -212,11 +212,11 @@ export function toBind(values: BindValues, io: Io): Bind | null {
  * The only place a token is ever written. One line, on stdout, labelled as the
  * secret it is.
  */
-export function announce(daemon: Daemon, io: Io): void {
+export function announce(daemon: Daemon, io: Io, fragment = ''): void {
   const open = reachableUrl(daemon.url)
   io.out(`vinta-ai-maestro: daemon listening on ${daemon.url}`)
   io.out('Open this URL. It carries the access token, so treat it as a secret:')
-  io.out(`  ${open}/?${TOKEN_QUERY}=${daemon.token}`)
+  io.out(`  ${open}/?${TOKEN_QUERY}=${daemon.token}${fragment}`)
 }
 
 /**
@@ -259,6 +259,12 @@ export interface ServeDeps {
    * spawns a detached `run --foreground`; a test hosts the job in-process.
    */
   readonly launch?: (args: readonly string[], runId: string) => Promise<LaunchResult>
+  /**
+   * Where the printed URL lands, as a `#/…` route. `review open` passes the
+   * plan's review page, so the agent can hand the person one link that opens
+   * on the right page rather than on the run list.
+   */
+  readonly fragment?: string
 }
 
 export async function serveCommand(
@@ -371,7 +377,7 @@ export async function serveCommand(
     onFatal: () => {},
   })
 
-  announce(daemon, io)
+  announce(daemon, io, deps.fragment)
   io.out(`Daemon log: ${logging.path}`)
 
   try {
