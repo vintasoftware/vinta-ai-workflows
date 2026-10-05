@@ -31,8 +31,7 @@
  *
  * `depends_on`, `prompt_ref`, `touches`, `base_branch`, `pipeline`, and adding
  * or removing phases are therefore not expressible here. Not refused at
- * runtime — *unrepresentable*, which is the same reason `CREW_ROLES` is
- * disjoint rather than checked. It is the line `amend/diff.ts` already draws
+ * runtime — *unrepresentable*. It is the line `amend/diff.ts` already draws
  * between `TOPOLOGY_KINDS` / `body_changed` and everything else, so it falls
  * out of machinery that exists.
  *

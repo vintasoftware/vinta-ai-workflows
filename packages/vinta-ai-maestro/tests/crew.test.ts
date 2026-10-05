@@ -9,24 +9,14 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import {
-  assignCrew,
-  assignReviewer,
-  type CrewAssignInput,
-  type ReviewAssignInput,
-  type ReviewDecision,
-  roster,
-} from '../src/scheduler/crew.ts'
+import { assignCrew, type CrewAssignInput, roster } from '../src/scheduler/crew.ts'
 import type { CrewMember } from '../src/types.ts'
 
 const impl = (tier: number, model: string, extra: Partial<CrewMember> = {}): CrewMember => ({
-  role: 'implementer',
   tier,
   model,
   ...extra,
 })
-
-const reviewer = (tier: number, model: string): CrewMember => ({ role: 'reviewer', tier, model })
 
 const CREW: Record<string, CrewMember> = {
   tier1: impl(1, 'cheap-1'),
@@ -58,15 +48,6 @@ describe('assignCrew — the plan’s own staffing', () => {
     const decision = assignCrew(input({ assigned: 'tier4', crew }))
 
     expect(decision).toMatchObject({ member: 'tier4', harness: 'codex' })
-  })
-
-  it('refuses to staff a phase to a reviewer, whatever the document said', () => {
-    // `validate.ts` catches this before a run starts. Asserted here too, because
-    // a scheduler that silently accepted it is how a reviewer ends up holding a
-    // phase and then reading its own diff.
-    const crew = { ...CREW, checker: reviewer(4, 'dear-1') }
-
-    expect(assignCrew(input({ assigned: 'checker', crew }))).toEqual({ kind: 'unstaffed' })
   })
 
   it('is unstaffed when there is no roster — every workflow written before one', () => {
@@ -235,20 +216,6 @@ describe('assignCrew — reusing a session that is already open', () => {
     })
   })
 
-  /**
-   * Warmth is asked of implementers only, and `warm` is an input this module
-   * does not get to sanity-check. A reviewer id in it must still be unable to
-   * take a phase: disjoint roles are what make an agent reviewing its own diff
-   * unrepresentable, and a staffing shortcut is exactly the kind of thing that
-   * would breach that one layer down.
-   */
-  it('cannot staff a phase to a warm reviewer', () => {
-    const crew = { ...CREW, checker: reviewer(4, 'dear-1') }
-    const decision = assignCrew(input({ crew, warm: new Set(['checker']) }))
-
-    expect(decision).toMatchObject({ member: 'tier2-1', substitute: false })
-  })
-
   /** No `warm` at all is the pre-warmth behaviour, not "everyone is warm". */
   it('behaves exactly as before when the caller cannot answer the question', () => {
     expect(assignCrew(input())).toMatchObject({ member: 'tier2-1', substitute: false })
@@ -268,79 +235,5 @@ describe('roster order', () => {
       'tier2-2',
       'tier4',
     ])
-  })
-})
-
-describe('assignReviewer — a person, not a tier', () => {
-  const STAFFED: Record<string, CrewMember> = {
-    ...CREW,
-    'reviewer-1': reviewer(2, 'medium-1'),
-    'reviewer-2': reviewer(4, 'dear-1'),
-  }
-
-  const review = (overrides: Partial<ReviewAssignInput> = {}): ReviewDecision =>
-    assignReviewer({
-      crew: STAFFED,
-      authorTier: 1,
-      author: 'tier1',
-      busy: new Set(),
-      ...overrides,
-    })
-
-  it('picks the cheapest reviewer qualified for the phase', () => {
-    expect(review()).toEqual({
-      kind: 'assigned',
-      member: 'reviewer-1',
-      tier: 2,
-      model: 'medium-1',
-      harness: null,
-    })
-  })
-
-  /**
-   * The floor is the author's tier, not one above it. A peer-tier review is a
-   * review by someone the plan judged equally capable, which is what an
-   * independent second pair of eyes is — the independence comes from the role.
-   */
-  it('lets a reviewer at the author’s own tier take it', () => {
-    expect(review({ authorTier: 2, author: 'tier2-1' })).toMatchObject({ member: 'reviewer-1' })
-  })
-
-  it('reaches up when the phase is above the cheaper reviewer', () => {
-    expect(review({ authorTier: 4, author: 'tier4' })).toMatchObject({ member: 'reviewer-2' })
-  })
-
-  it('waits for a busy reviewer rather than dropping below the author’s tier', () => {
-    const decision = review({
-      authorTier: 4,
-      author: 'tier4',
-      busy: new Set(['reviewer-2']),
-    })
-
-    expect(decision).toEqual({ kind: 'wait', requiredTier: 4 })
-  })
-
-  it('covers with the next qualified reviewer when the cheapest is busy', () => {
-    expect(review({ busy: new Set(['reviewer-1']) })).toMatchObject({ member: 'reviewer-2' })
-  })
-
-  it('is unstaffed when the roster has no reviewer, so the project default applies', () => {
-    expect(review({ crew: CREW })).toEqual({ kind: 'unstaffed' })
-  })
-
-  /**
-   * The invariant the two roles exist to guarantee. Unreachable through the
-   * parser — a reviewer cannot be assigned a phase — so this builds the state
-   * by hand and checks the assertion fires rather than the review proceeding.
-   */
-  it('throws rather than let a member review its own phase', () => {
-    expect(() =>
-      assignReviewer({
-        crew: { solo: reviewer(3, 'medium-1') },
-        authorTier: 3,
-        author: 'solo',
-        busy: new Set(),
-      }),
-    ).toThrow(/review its own phase/)
   })
 })

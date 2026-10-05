@@ -125,7 +125,6 @@ export function registerPlanRoutes(app: Hono, options: PlanRoutesOptions): void 
         brief: materials.brief,
         prompts: {
           implementer: materials.prompts.implementer ?? null,
-          reviewer: materials.prompts.reviewer ?? null,
           fixer: materials.prompts.fixer ?? null,
         },
         chores: { ...materials.chores },

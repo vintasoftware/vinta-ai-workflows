@@ -74,14 +74,13 @@
  */
 import { ids as guardIds } from '../guard/guard.ts'
 import { checkCommand, shellLineOf } from '../guard/match.ts'
-import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl, AdmissionOutcome, AdmitOptions } from '../admission/admission.ts'
 import { systemClock, type Clock } from '../admission/clock.ts'
 import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
 import { computeHeights, computeWaves, findCycle, transitiveDependents } from '../graph.ts'
-import { git, gitLines } from '../integration/git.ts'
+import { gitLines } from '../integration/git.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
   ChoreStatus,
@@ -111,14 +110,7 @@ import {
 import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
-import {
-  assignCrew,
-  assignReviewer,
-  type CrewDecision,
-  implementers,
-  laneHolders,
-  type ReviewDecision,
-} from './crew.ts'
+import { assignCrew, type CrewDecision, roster } from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import {
   composeSpawnPrompt,
@@ -137,7 +129,7 @@ import {
 } from '../questions/agent-questions.ts'
 import { killLiveGates } from '../gates/runner.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
-import type { ChoreTiming, Node, Pipeline, SideEffect, Workflow } from '../types.ts'
+import { CHORE_TIMINGS, type ChoreTiming, type Node, type Pipeline, type SideEffect, type Workflow } from '../types.ts'
 
 /** The pool a node is dispatched into. Required of every workflow (§5.1). */
 const LANE = 'lane'
@@ -162,8 +154,6 @@ const RETRY = 'retry'
 const STOP = 'stop'
 /** The login question's affirmative: the operator has logged the harness in. */
 const LOGGED_IN = 'logged in'
-/** The answer to `#reviewerEdited` that carries on with the reviewer's edits in place. */
-const KEEP = 'keep'
 const RETRY_WITH = 'retry with '
 
 /**
@@ -260,8 +250,8 @@ export interface SchedulerOptions {
    * answered those would be the orchestrator overruling the plan on the
    * operator's behalf. So a plan question is answered only when it declares
    * its own `unattended_answer` (`#armUnattendedAnswer`): the shipped
-   * pipeline's consult takes `defaults` and its exhausted budget takes `stop`
-   * (§16). The answer is the plan's; this window is only when it is given.
+   * pipeline's two budget questions, `exhausted` and `unapproved`, take
+   * `stop` (§16). The answer is the plan's; this window is only when it is given.
    *
    * **Deliberately unbounded.** It fires again on each new question, for as
    * long as nobody answers — because the failure it exists for is a run that
@@ -384,7 +374,7 @@ interface Settled {
  * **What this replaces.** The whole reason used to be `pipeline ended in state
  * "failed"` — the name of a state, and nothing else. A real 14-hour run wrote
  * that same sentence three times, and it answered none of the questions an
- * operator has at that point: was a gate red, did the reviewer keep saying no,
+ * operator has at that point: was a gate red, did the review keep saying no,
  * was the fix budget spent. The event this fills in was itself added to close
  * the same complaint one level out — a failed attempt used to leave no record
  * at all — so leaving it saying only *that* a phase failed would have moved
@@ -395,8 +385,8 @@ interface Settled {
  * *stale* rather than absent, which is the distinction that matters:
  *
  * - **A green gate is not reported.** `lastGate` is the last gate that ran this
- *   attempt, which in a phase that failed its review is a gate from two rounds
- *   ago that passed. Printing "gate lint exited 0" beside a failure invites the
+ *   attempt, which in a phase that failed its review is the gate that let the
+ *   review start. Printing "gate lint exited 0" beside a failure invites the
  *   reading that the gate had anything to do with it.
  * - **A gate that timed out says so** rather than "exited 124". 124 is the
  *   runner's own convention (`TIMEOUT_EXIT`) and nothing tells an operator
@@ -410,8 +400,8 @@ interface Settled {
  *   failures that read identically, and separating them is most of the point.
  *
  * §11: a gate id, an exit code, a transition id, a state id, a verdict word and
- * two counts. Nothing here has ever held a line of gate output, a diff, or a
- * reviewer's prose — `src/integration/git.ts`'s `GitCommandError` names a
+ * two counts. Nothing here has ever held a line of gate output, a diff, or an
+ * agent's prose — `src/integration/git.ts`'s `GitCommandError` names a
  * command and a status by the same rule.
  */
 function settledReason(settled: Settled, state: NodeState): string {
@@ -428,7 +418,12 @@ function settledReason(settled: Settled, state: NodeState): string {
     )
   }
   if (state.lastVerdict === 'fail') clauses.push('review verdict "fail"')
-  clauses.push(`${state.fixRounds} of ${state.node.max_fix_rounds} fix rounds spent`)
+  const budget = state.node.max_fix_rounds
+  clauses.push(
+    budget === undefined
+      ? `${state.fixRounds} fix rounds spent`
+      : `${state.fixRounds} of ${budget} fix rounds spent`,
+  )
 
   return clauses.join('; ')
 }
@@ -459,12 +454,6 @@ class LoginDeclined extends SpawnFatal {}
  * whole point of the message.
  */
 class LaneUnusable extends Error {}
-
-/**
- * The operator stopped a phase whose reviewer edited its lane (§16.1). Its
- * message is a lane name and a fixed phrase, so `failureReason` keeps it.
- */
-class ReviewerEdited extends Error {}
 
 /**
  * Unwinds a node the operator aborted (§9). It carries no message: the node is
@@ -566,10 +555,10 @@ interface NodeState {
     readonly status: string | null
   } | null
   /**
-   * The last verdict a reviewer stated this attempt (`pass` | `fail`).
+   * The last verdict the review chores stated this attempt (`pass` | `fail`).
    *
    * A closed vocabulary of two words, decided by `readVerdict` from the
-   * transcript and handed here as a fact — so it carries none of the reviewer's
+   * transcript and handed here as a fact — so it carries none of the review's
    * prose, which is what §11 keeps in the transcript file.
    */
   lastVerdict: 'pass' | 'fail' | null
@@ -582,8 +571,6 @@ interface NodeState {
   retryMember: string | null
   /** How many times the operator has been offered this node. Keeps effect ids apart. */
   retries: number
-  /** Review turns that changed the lane (§16.1). Keeps their questions' effect ids apart. */
-  reviewerEdits: number
   /** Automatic attempts already spent on this node, under `onFailure: retry`. */
   autoRetries: number
   /** Login questions asked, for a unique effect id per ask (§6.1). */
@@ -610,28 +597,14 @@ interface NodeState {
   /**
    * The roster member holding this node, or null when the workflow is
    * unstaffed. Claimed before the lane and released with it, because a member
-   * owns the phase rather than a turn of it: the fixer answering a review
-   * finding is the implementer continuing its own session, so handing the node
-   * to someone else mid-pipeline would hand it to an agent that has no session
-   * to continue.
+   * owns the phase rather than a turn of it: the fixer and the review chore are
+   * the implementer continuing its own session, so handing the node to someone
+   * else mid-pipeline would hand it to an agent that has no session to
+   * continue.
    */
   crew: {
     readonly member: string
     readonly tier: number
-    readonly model: string
-    readonly harness: string | null
-  } | null
-  /**
-   * The reviewer holding this node's review turn, or null between turns.
-   *
-   * Shorter-lived than `crew` on purpose. An implementer owns the phase from
-   * its first turn to its last, because the fixer answering a finding *is* the
-   * implementer continuing. A reviewer owns one turn: it reads a diff, returns
-   * a verdict and goes back to the roster, so a plan with one reviewer and
-   * three implementers is a queue at the review step rather than a deadlock.
-   */
-  reviewer: {
-    readonly member: string
     readonly model: string
     readonly harness: string | null
   } | null
@@ -687,7 +660,6 @@ function failureReason(error: unknown): string {
     error instanceof PromptError ||
     error instanceof SpawnFatal ||
     error instanceof LaneUnusable ||
-    error instanceof ReviewerEdited ||
     // The interpreter composed this one out of a state id and a trigger id.
     error instanceof PipelineStuckError
   ) {
@@ -804,7 +776,7 @@ export class Scheduler {
     // names still match `LanePool`'s own scheme so a real pool hands back the
     // same worktrees; what changes is that the mapping is fixed for the run
     // instead of being whatever the free list had on top.
-    laneHolders(workflow.crew).forEach((member, i) => {
+    roster(workflow.crew).forEach((member, i) => {
       this.#laneOf.set(member.id, `${options.runId}-crew-${i + 1}-${member.id}`)
     })
   }
@@ -817,29 +789,15 @@ export class Scheduler {
   }
 
   /**
-   * Who is taking this turn: the node's reviewer on a review, its implementer
-   * otherwise. Null in an unstaffed workflow.
-   *
-   * The distinction is not cosmetic. A reviewer's session belongs to the
-   * reviewer, and filing it under the implementer would hand the next phase's
-   * reviewer a session another agent opened — the precise confusion the two
-   * roles exist to prevent, reintroduced one layer down.
-   */
-  #actorOf(state: NodeState, role: unknown): string | null {
-    if (role === 'reviewer' && state.reviewer !== null) return state.reviewer.member
-    return state.crew?.member ?? null
-  }
-
-  /**
    * The ledger a turn reads and writes.
    *
-   * Its actor's, in a staffed workflow — which is what lets a session outlive
+   * The member's, in a staffed workflow — which is what lets a session outlive
    * the phase. The node's own, otherwise, which is every workflow written
    * before rosters existed and keeps their behaviour identical.
    */
-  #ledgerOf(state: NodeState, role?: unknown): Map<string, SessionEntry> {
-    const actor = this.#actorOf(state, role)
-    return actor === null ? state.sessions : this.#ledgerFor(actor)
+  #ledgerOf(state: NodeState): Map<string, SessionEntry> {
+    const member = state.crew?.member
+    return member === undefined ? state.sessions : this.#ledgerFor(member)
   }
 
   /** The member's ledger, created on first use. */
@@ -867,7 +825,6 @@ export class Scheduler {
       undelivered: [],
       sessions: new Map(),
       crew: null,
-      reviewer: null,
       lastMember: null,
       resumeSessionId: null,
       pauseRequested: false,
@@ -880,7 +837,6 @@ export class Scheduler {
       lane: null,
       retryMember: null,
       retries: 0,
-      reviewerEdits: 0,
       autoRetries: 0,
       loginAsks: 0,
       agentQuestions: 0,
@@ -926,8 +882,8 @@ export class Scheduler {
    * principle carry on. Three reasons, any one of them enough:
    *
    * - The column is COALESCE-updated by every `node_assigned`, so it holds
-   *   whichever role spawned *last*. Staging it would hand a reviewer's session
-   *   to the implementer restarting the phase — the exact confusion §15.8 keeps
+   *   whichever turn spawned *last*. Staging it would hand a slot's session
+   *   to a turn on another slot restarting the phase — the exact confusion §15.8 keeps
    *   ids filed per slot to prevent. The row cannot say which slot it belongs
    *   to, because the projection was never keyed that way.
    * - It arrives naked. `SessionEntry` carries the harness, the lane, the turn
@@ -1649,7 +1605,7 @@ export class Scheduler {
     const slots = this.#implementerSlots(state.pipeline)
     if (slots.length === 0) return warm
 
-    for (const member of implementers(this.#workflow.crew)) {
+    for (const member of roster(this.#workflow.crew)) {
       // A busy member is not a candidate, warm or not, and asking costs a
       // `planSession` per slot for an answer nobody reads.
       if (this.#busyCrew.has(member.id)) continue
@@ -1680,7 +1636,7 @@ export class Scheduler {
             maxTurns: this.#workflow.defaults.max_session_turns,
             poisoned: this.#poisoned.has(member.id),
             fixRounds: 0,
-            maxFixRounds: state.node.max_fix_rounds,
+            maxFixRounds: state.node.max_fix_rounds ?? null,
             takeoverSessionId: null,
           }).continuation,
       )
@@ -1693,11 +1649,9 @@ export class Scheduler {
   /**
    * The slots this pipeline names on an implementer spawn.
    *
-   * Roles, not just slot names: `main` is shared by `implement` and `fix` in
-   * the standard pipeline while `review` belongs to the reviewer, and a
-   * reviewer's session is filed under the reviewer's own ledger. Counting it
-   * here would make a member look warm for a phase on the strength of a session
-   * that this claim will never reach.
+   * The implementer's slots only: a slot no implementer opens is one a claim
+   * never starts on, so counting it would make a member look warm for a phase
+   * on the strength of a session the phase's first turn will never reach.
    *
    * A pipeline that names no slot has opted out of §15 entirely, so nobody is
    * ever warm for it and the staffing question never arises.
@@ -1718,56 +1672,6 @@ export class Scheduler {
     }
     for (const transition of pipeline.transitions) scan(transition.effects)
     return [...slots]
-  }
-
-  /**
-   * Takes a reviewer for one review turn, waiting if every qualified one is
-   * busy.
-   *
-   * Unlike the implementer claim this happens *inside* the turn, because a
-   * reviewer owns a turn rather than a phase — it reads a diff, returns a
-   * verdict and goes back. Holding one for the whole node would make a plan
-   * with one reviewer and three implementers run three phases strictly in
-   * series.
-   *
-   * The wait cannot deadlock: reviewers never take phases, so a node waiting
-   * for one is waiting on another node's review — a turn already running — and
-   * never on a phase that might itself be blocked behind this one.
-   */
-  async #claimReviewer(state: NodeState): Promise<void> {
-    if (!this.#staffed || state.crew === null) return
-
-    while (!state.aborted) {
-      if (this.#halt !== null) throw new Halted()
-      const decision: ReviewDecision = assignReviewer({
-        crew: this.#workflow.crew,
-        authorTier: state.crew.tier,
-        author: state.crew.member,
-        busy: this.#busyCrew,
-      })
-
-      // No reviewer staffed. The turn runs on the node's own model, which is
-      // what every workflow did before rosters existed.
-      if (decision.kind === 'unstaffed') return
-
-      if (decision.kind === 'assigned') {
-        this.#busyCrew.add(decision.member)
-        state.reviewer = {
-          member: decision.member,
-          model: decision.model,
-          harness: decision.harness,
-        }
-        this.#options.journal.append({
-          runId: this.#options.runId,
-          nodeId: state.node.id,
-          type: 'node_crew',
-          payload: { member: decision.member, tier: decision.tier, substitute: false, role: 'reviewer' },
-        })
-        return
-      }
-
-      await this.#changed()
-    }
   }
 
   /** Throws away this node's actor sessions, so its next attempt starts cold. */
@@ -1802,14 +1706,6 @@ export class Scheduler {
     state.lastVerdict = null
     if (state.crew === null) state.sessions.clear()
     else this.#ledgerFor(state.crew.member).clear()
-  }
-
-  /** Gives the reviewer back after its turn. */
-  #releaseReviewer(state: NodeState): void {
-    if (state.reviewer === null) return
-    this.#busyCrew.delete(state.reviewer.member)
-    state.reviewer = null
-    this.#wake()
   }
 
   /** Gives the node's member back to the roster and wakes whoever is waiting. */
@@ -1872,7 +1768,9 @@ export class Scheduler {
       pipeline: state.pipeline,
       executor: this.#effects(state),
       context: {
-        node: { id: state.node.id, max_fix_rounds: state.node.max_fix_rounds },
+        // `null`, not absent, for a node with no limit: the pipeline's guards
+        // compare against it, and a missing fact makes every comparison false.
+        node: { id: state.node.id, max_fix_rounds: state.node.max_fix_rounds ?? null },
         run: { id: runId, base_branch: workflow.base_branch },
         fix_rounds: state.fixRounds,
       },
@@ -2084,7 +1982,6 @@ export class Scheduler {
         : Object.entries(this.#workflow.crew)
             .filter(
               ([id, member]) =>
-                member.role === 'implementer' &&
                 member.tier >= floor &&
                 id !== assigned &&
                 id !== state.lastMember,
@@ -2253,8 +2150,8 @@ export class Scheduler {
         // gate, a chore, a question. Shut under a halt.
         if (this.#halt !== null) throw new Halted()
         const verb = invocation.effect.definitionId
-        if (verb === 'spawn_agent') return this.#observe(state, await this.#spawn(state, invocation))
-        if (verb === 'run_chore') return await this.#chores(state, invocation)
+        if (verb === 'spawn_agent') return this.#observe(state, await this.#spawnTurn(state, invocation))
+        if (verb === 'run_chore') return this.#observe(state, await this.#chores(state, invocation))
         if (verb === 'run_gate') await this.#acquireGate(state, invocation)
         // The question is journalled before the host executor runs, because
         // the host executor is what raises the notification: the record of the
@@ -2265,13 +2162,13 @@ export class Scheduler {
           state.unattendedAnswer = typeof unattended === 'string' ? unattended : null
         }
         if (verb === 'grant_fix_rounds') {
-          // §16.5. The counter is the scheduler's, so this is the one place it
+          // §16.3. The counter is the scheduler's, so this is the one place it
           // moves other than a fixer finishing; the fact goes back with it so a
           // guard read in this same step sees the budget it was just given.
           this.#log.info('node.fix_rounds_granted', {
             node: state.node.id,
             spent: state.fixRounds,
-            granted: state.node.max_fix_rounds,
+            granted: state.node.max_fix_rounds ?? null,
           })
           state.fixRounds = 0
           await this.#options.executor.execute(invocation)
@@ -2315,26 +2212,28 @@ export class Scheduler {
   }
 
   /**
-   * Admission control, then the session, then the host's reading of it.
-   *
-   * The scheduler drains the session into the transcript because someone must —
-   * an unread stream never ends — and because the transcript is the one place
-   * §5.3 puts agent output. The host executor is left with the question the
-   * scheduler cannot answer: what the turn *meant*, as facts.
-   */
-  /**
-   * The node's chores, one agent turn each, in declaration order.
+   * The node's chores at one point in the phase, one agent turn each, in
+   * declaration order.
    *
    * Every one of them is an ordinary spawn — same admission control, same
    * session ledger, same transcript — so this composes `#spawnTurn` rather than
-   * doing anything of its own. What it owns is the two questions a chore raises
-   * that a role in the pipeline does not: which chores this node runs, and what
-   * happens when one of them cannot.
+   * doing anything of its own. What it owns is the questions a chore raises
+   * that a role in the pipeline does not: which chores this node runs, what
+   * happens when one of them cannot, and — for a review chore — what it said.
    *
-   * **A chore that fails does not fail the phase**, unless it says to. The
-   * default exists because of what the alternative costs: the phase is written,
-   * reviewed and about to be gated, and throwing that away because a comment
-   * pass timed out is a far worse trade than merging comments nobody tidied.
+   * **A review chore is the phase's review (§16)**, so it is the one chore that
+   * decides something. Its turn ends on a `VERDICT:` line, and this returns
+   * `review.verdict`: `pass` once every review chore approved, `fail` at the
+   * first that did not, without running the rest. A turn that broke is a review
+   * nobody approved, so it reads as `fail` too, and the pipeline puts it to the
+   * operator rather than failing an implemented phase over it. A node with no
+   * review chore passes.
+   *
+   * **Any other chore that fails does not fail the phase**, unless it says to.
+   * The default exists because of what the alternative costs: the phase is
+   * written, reviewed and about to be gated, and throwing that away because a
+   * comment pass timed out is a far worse trade than merging comments nobody
+   * tidied.
    *
    * **A capacity refusal is the same answer, and this is the surprising half.**
    * Everywhere else a `CapacityRetry` re-drives the node from its initial state
@@ -2342,6 +2241,7 @@ export class Scheduler {
    * it would re-implement an entire finished phase to get a polish turn in. So
    * an `on_failure: 'continue'` chore is skipped when the harness is full, and
    * only a chore the phase is declared incorrect without is worth the re-drive.
+   * A review is never skipped: skipping it would merge a phase nobody reviewed.
    *
    * `Aborted` is never swallowed by either: the run is being torn down, and
    * there is nothing left for the next chore to run in.
@@ -2353,8 +2253,8 @@ export class Scheduler {
   async #chores(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
     const named = invocation.effect.params['chore']
     const declared = this.#workflow.chores[typeof named === 'string' ? named : '']
-    const when: ChoreTiming =
-      invocation.effect.params['when'] === 'after_pr' ? 'after_pr' : 'before_gate'
+    const asked = invocation.effect.params['when']
+    const when: ChoreTiming = CHORE_TIMINGS.find((timing) => timing === asked) ?? 'after_review'
     // A named chore is run whatever the node declared — that is what naming one
     // in the pipeline is for. Everything else takes the node's own list, at
     // this point in the phase.
@@ -2365,6 +2265,7 @@ export class Scheduler {
           : [{ id: named, chore: declared }]
         : choresFor(this.#workflow, state.node, when)
     const prOpened = invocation.context.pr?.['opened'] === true
+    let verdict: 'pass' | 'fail' = 'pass'
 
     for (const entry of chores) {
       const startedAt = Date.now()
@@ -2372,6 +2273,7 @@ export class Scheduler {
         this.#choreResult(state, entry.id, 'skipped', startedAt)
         continue
       }
+      const review = entry.chore.when === 'review'
       const spawn: EffectInvocation = {
         ...invocation,
         effect: {
@@ -2385,30 +2287,43 @@ export class Scheduler {
             prompt_template: 'chore',
             session: entry.chore.session,
             ...(entry.chore.model === undefined ? {} : { model: entry.chore.model }),
+            ...(review ? { verdict: true } : {}),
           },
         },
       }
 
       try {
-        await this.#spawnTurn(state, spawn, entry)
+        const outcome = await this.#spawnTurn(state, spawn, entry)
+        if (review && outcome.facts?.review?.['verdict'] !== 'pass') {
+          this.#choreResult(state, entry.id, 'failed', startedAt)
+          verdict = 'fail'
+          break
+        }
         this.#choreResult(state, entry.id, 'ran', startedAt)
       } catch (error) {
         if (error instanceof Aborted) throw error
-        if (entry.chore.on_failure === 'fail') throw error
         if (error instanceof CapacityRetry) {
+          if (review || entry.chore.on_failure === 'fail') throw error
           this.#choreResult(state, entry.id, 'skipped', startedAt)
           continue
         }
+        if (!review && entry.chore.on_failure === 'fail') throw error
         this.#choreResult(state, entry.id, 'failed', startedAt)
+        if (review) {
+          verdict = 'fail'
+          break
+        }
       }
     }
 
     // Through the host seam on the way out, exactly as `run_gate` is: the
     // scheduler owns spawning and the catalog is the host's (§5.2), so a host
     // that wants to know its chores ran is told by the verb rather than by
-    // inspecting the turns. It states no facts of its own — a chore is not
+    // inspecting the turns. Only the review states a fact; the others are not
     // something a guard branches on.
-    return await this.#options.executor.execute(invocation)
+    const outcome = await this.#options.executor.execute(invocation)
+    if (when !== 'review') return outcome
+    return { facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict } } }
   }
 
   #choreResult(state: NodeState, chore: string, status: ChoreStatus, startedAt: number): void {
@@ -2420,85 +2335,6 @@ export class Scheduler {
     })
   }
 
-  async #spawn(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
-    const { params } = invocation.effect
-    if (params['role'] === 'reviewer') {
-      // Claimed here rather than with the lane: a reviewer owns a turn, not a
-      // phase, and is released the moment the verdict is in. `#release` frees
-      // it too, so an abort or a capacity refusal mid-review does not strand
-      // the one reviewer on the plan.
-      await this.#claimReviewer(state)
-      if (state.aborted) throw new Aborted()
-      const before = await this.#laneMark(state)
-      let outcome: EffectOutcome
-      try {
-        outcome = await this.#spawnTurn(state, invocation)
-      } finally {
-        this.#releaseReviewer(state)
-      }
-      const after = await this.#laneMark(state)
-      if (before !== null && after !== null && before !== after) await this.#reviewerEdited(state)
-      return outcome
-    }
-    return await this.#spawnTurn(state, invocation)
-  }
-
-  /**
-   * `HEAD` and the tracked diff of the node's lane, hashed: what a review turn
-   * must leave exactly as it found it (§16.1).
-   *
-   * Tracked files only. A reviewer is told to run the gates, and gates leave
-   * caches and build output behind as untracked files; counting those would
-   * stop every loop on the reviewer doing what it was asked. A reviewer that
-   * *creates* a file is therefore not caught — the cost of a check that does
-   * not cry wolf, and the edits that matter land in files the phase touched.
-   *
-   * Null when it cannot be read — no lane on disk, git refusing — and a null on
-   * either side skips the comparison: an unreadable mark is not evidence of an
-   * edit.
-   */
-  async #laneMark(state: NodeState): Promise<string | null> {
-    if (state.lane === null) return null
-    const cwd = join(this.#options.laneRoot, state.lane)
-    if (!existsSync(cwd)) return null
-    try {
-      const head = await git(cwd, ['rev-parse', 'HEAD'])
-      const diff = await git(cwd, ['diff', 'HEAD', '--binary'])
-      return createHash('sha256').update(head).update('\0').update(diff).digest('hex')
-    } catch {
-      return null
-    }
-  }
-
-  /**
-   * The reviewer changed the lane. The skill this loop comes from is plain
-   * about it: stop, say so, and let a person decide what happens to the edits.
-   *
-   * The edits are left exactly where they are — reverting them would destroy
-   * the only evidence of what the reviewer did. `keep` carries on with the
-   * verdict the reviewer stated; anything else fails the phase. No unattended
-   * answer: this is the one question in the loop that is about the loop's own
-   * integrity, and guessing it is how a review that rewrote the code merges.
-   */
-  async #reviewerEdited(state: NodeState): Promise<void> {
-    state.reviewerEdits += 1
-    const effectId = `reviewer-edit:${state.node.id}:${state.reviewerEdits}`
-    this.#log.warn('node.reviewer_edited', { node: state.node.id, lane: state.lane ?? '' })
-    this.#ask(state, effectId, {
-      question:
-        'The reviewer changed this lane during its turn — it moved HEAD or edited tracked ' +
-        'files, which a review must never do. Its changes are left as they are. Keep them ' +
-        'and carry on with the review loop, or stop this phase?',
-      kind: 'choice',
-      choices: [KEEP, STOP],
-    })
-    state.parkedEffectId = effectId
-    const facts = await this.#park(state)
-    if (facts.human?.['answer'] !== KEEP) {
-      throw new ReviewerEdited(`reviewer edited lane "${state.lane ?? ''}"; the operator stopped the phase`)
-    }
-  }
-
   async #spawnTurn(
     state: NodeState,
     invocation: EffectInvocation,
@@ -2506,7 +2342,7 @@ export class Scheduler {
   ): Promise<EffectOutcome> {
     const { params } = invocation.effect
     const { workflow, runId, journal } = this.#options
-    const adapter = this.#adapter(this.#harnessOf(state, params['harness'], params['role']))
+    const adapter = this.#adapter(this.#harnessOf(state, params['harness']))
 
     // §9's queue, on its way to the agent. Carried as its own field rather
     // than folded into the brief so the adapter can present it as the
@@ -2516,10 +2352,7 @@ export class Scheduler {
     const carried = state.pending.length
     const owed = [...state.undelivered, ...state.pending.map((entry) => entry.text)]
 
-    // Every role runs in the node's own lane, the reviewer included. A review
-    // reads the **working tree**, uncommitted changes and all, because the
-    // point of reviewing here is to fix before the commit rather than to record
-    // the mistake and then a correction on top of it.
+    // Every role runs in the node's own lane.
     const cwd = join(this.#options.laneRoot, state.lane as string)
     // The lane's own environment, for the process that is about to run the
     // project's commands in it.
@@ -2579,7 +2412,7 @@ export class Scheduler {
     let plan = this.#sessionPlan(state, params, adapter)
     // Computed once, before the first `build`, because a capacity retry rebuilds
     // the task and re-running a git command per attempt would be wasted work.
-    const reorientation = await this.#reorientation(state, plan, params['role'])
+    const reorientation = await this.#reorientation(state, plan)
     // The tallest node first when the harness is throttled; see `computeHeights`.
     const priority: AdmitOptions = {
       priority: this.#heights.get(state.node.id) ?? 0,
@@ -2637,11 +2470,11 @@ export class Scheduler {
     // that won is the one carrying `stale_session`, so one row per turn still
     // says what happened (§15).
     this.#session(state, plan)
-    this.#remember(state, plan, adapter, outcome.session.id, params['role'])
+    this.#remember(state, plan, adapter, outcome.session.id)
 
     // Every spawn on this node appends to the same file, whatever its role, so
-    // without this the implementer's output, the reviewer's and three fix
-    // rounds' are one undifferentiated stream. Both facts are already here and
+    // without this the implementer's output, three fix rounds' and the review
+    // loop's are one undifferentiated stream. Both facts are already here and
     // were simply not written down (`journal/transcript.ts`).
     const by: Attribution = {
       role: typeof params['role'] === 'string' ? params['role'] : 'agent',
@@ -2731,7 +2564,7 @@ export class Scheduler {
           // before the CLI spoke; a harness that mints its own on resume
           // reports it here, and the ledger must hold the one the *next*
           // resume has to name.
-          this.#remember(state, plan, adapter, event.sessionId, turn.role)
+          this.#remember(state, plan, adapter, event.sessionId)
         }
       }
     } finally {
@@ -2773,7 +2606,7 @@ export class Scheduler {
    * The turn is not over while it does. The effect that spawned it returns
    * only once the agent ends a session without a question, so the pipeline's
    * guards read the work the answer led to — not a report that said "I need a
-   * decision", which a reviewer would rightly fail.
+   * decision", which a review would rightly fail.
    *
    * The questions are agent prose, so they go into the transcript as an
    * `agent_question` entry, and the journal's row is the fixed sentence plus
@@ -2888,13 +2721,9 @@ export class Scheduler {
    * stale" rather than as "nothing changed". A missing answer is not an empty
    * one, and the difference decides whether an agent re-reads before editing.
    */
-  async #reorientation(
-    state: NodeState,
-    plan: SessionPlan,
-    role: unknown,
-  ): Promise<Reorientation | null> {
+  async #reorientation(state: NodeState, plan: SessionPlan): Promise<Reorientation | null> {
     if (!plan.crossPhase) return null
-    const entry = this.#ledgerOf(state, role).get(plan.slot as string)
+    const entry = this.#ledgerOf(state).get(plan.slot as string)
     if (entry === undefined) return null
 
     const priorNodeId = entry.nodeId
@@ -2933,12 +2762,12 @@ export class Scheduler {
       canResume: adapter.capabilities.resume,
       harnessId: adapter.id,
       lane: state.lane,
-      ledger: this.#ledgerOf(state, params['role']),
+      ledger: this.#ledgerOf(state),
       nodeId: state.node.id,
       maxTurns: this.#workflow.defaults.max_session_turns,
-      poisoned: this.#poisoned.has(this.#actorOf(state, params['role']) ?? ''),
+      poisoned: this.#poisoned.has(state.crew?.member ?? ''),
       fixRounds: state.fixRounds,
-      maxFixRounds: state.node.max_fix_rounds,
+      maxFixRounds: state.node.max_fix_rounds ?? null,
       takeoverSessionId: state.resumeSessionId,
     })
   }
@@ -2949,11 +2778,10 @@ export class Scheduler {
     plan: SessionPlan,
     adapter: HarnessAdapter,
     sessionId: string,
-    role: unknown,
   ): void {
     const lane = state.lane
     if (plan.slot === null || lane === null) return
-    this.#ledgerOf(state, role).set(plan.slot, {
+    this.#ledgerOf(state).set(plan.slot, {
       harnessId: adapter.id,
       sessionId,
       lane,
@@ -3032,8 +2860,7 @@ export class Scheduler {
       resume: async (sessionId: string) => {
         // §15.8: the id belongs to the slot this turn was running under.
         // Staging it on the node instead would hand an operator's fixer
-        // session to whichever role spawned next — a reviewer continuing the
-        // session it is supposed to be reviewing.
+        // session to whichever turn spawned next, on whatever slot it named.
         if (slot === null || lane === null) state.resumeSessionId = sessionId
         else {
           state.sessions.set(slot, {
@@ -3114,7 +2941,6 @@ export class Scheduler {
 
   #release(state: NodeState): void {
     this.#releaseGate(state)
-    this.#releaseReviewer(state)
     // Before the early return below: a node can hold a member and no lane —
     // it is claimed first, and a capacity refusal unwinds from in between.
     this.#releaseCrew(state)
@@ -3322,45 +3148,20 @@ export class Scheduler {
     return null
   }
 
-  #harnessOf(state: NodeState, override?: unknown, role?: unknown): string {
+  #harnessOf(state: NodeState, override?: unknown): string {
     if (typeof override === 'string') return override
-    // A reviewer is its own member and may be staffed on another vendor.
-    if (role === 'reviewer' && state.reviewer?.harness != null) return state.reviewer.harness
     return state.crew?.harness ?? state.node.harness ?? this.#workflow.defaults.harness
   }
 
   /**
    * Which model this turn runs on.
    *
-   * In an unstaffed workflow this is what it always was: the effect's own
-   * override, then the node's, then the default. A roster inserts one thing
-   * between them — the member holding the node — and one rule that a per-node
-   * model could never express.
-   *
-   * **A review runs on the reviewer that claimed it**, and reviewers are their
-   * own members. An earlier version resolved a reviewer *model* one tier above
-   * the author without claiming anybody — which read well and was wrong twice
-   * over: a phase substituted up to the top tier had nobody above it and fell
-   * back to being reviewed at its own tier, and a tier says nothing about *who*
-   * once members are durable agents rather than borrowed model ids.
-   *
-   * With no reviewer on the roster there is nobody to claim, and the review
-   * runs on the node's own model — which is what every workflow did before
-   * rosters existed.
+   * The effect's own override, then the member holding the node, then the
+   * node's model, then the default.
    */
   #modelFor(state: NodeState, params: Readonly<Record<string, unknown>>): string {
     const override = params['model']
     if (typeof override === 'string') return override
-
-    if (params['role'] === 'reviewer') {
-      if (state.reviewer !== null) return state.reviewer.model
-      // §16.4: an unstaffed review is not tied to the tier the phase was
-      // written at. The workflow's own choice first, then the harness's name
-      // for its top tier, and only then the node's model.
-      const harness = this.#adapter(this.#harnessOf(state, params['harness'], params['role']))
-      const chosen = this.#workflow.defaults.reviewer_model ?? harness.reviewModel
-      if (chosen !== undefined) return chosen
-    }
 
     const crew = state.crew
     if (crew !== null) return crew.model

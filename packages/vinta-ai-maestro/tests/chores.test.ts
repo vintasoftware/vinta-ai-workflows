@@ -80,14 +80,16 @@ describe('which chores a node runs', () => {
   it('narrows to the chores that run at one point in the phase', () => {
     const workflow = staffed((doc) => {
       doc.chores.canvas = { prompt: 'Post a review canvas.', when: 'after_pr' }
-      doc.defaults.chores = ['deslop', 'canvas']
+      doc.chores.review = { prompt: 'Review the diff.', when: 'review' }
+      doc.defaults.chores = ['review', 'deslop', 'canvas']
     })
     const p1 = node(workflow, 'p1')
 
-    expect(choresFor(workflow, p1, 'before_gate').map((entry) => entry.id)).toEqual(['deslop'])
+    expect(choresFor(workflow, p1, 'review').map((entry) => entry.id)).toEqual(['review'])
+    expect(choresFor(workflow, p1, 'after_review').map((entry) => entry.id)).toEqual(['deslop'])
     expect(choresFor(workflow, p1, 'after_pr').map((entry) => entry.id)).toEqual(['canvas'])
     // No timing is every chore, which is what a named `run_chore` reads.
-    expect(choresFor(workflow, p1).map((entry) => entry.id)).toEqual(['deslop', 'canvas'])
+    expect(choresFor(workflow, p1).map((entry) => entry.id)).toEqual(['review', 'deslop', 'canvas'])
   })
 
   it('refuses an after_pr chore that would fail an already-merged phase', () => {

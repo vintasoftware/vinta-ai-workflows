@@ -32,7 +32,7 @@ export type ContextValue = string | number | boolean | null
 /**
  * The documented guard context (§5.2). Every root is optional because guards
  * are evaluated speculatively — a run in `review` asks about `review.verdict`
- * before any reviewer has spoken.
+ * before any review chore has spoken.
  */
 export interface GuardContext {
   readonly review?: Readonly<Record<string, ContextValue>>

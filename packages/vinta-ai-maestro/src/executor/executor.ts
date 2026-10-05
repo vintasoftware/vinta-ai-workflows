@@ -21,10 +21,9 @@
  *
  * | verb | facts | who reads it |
  * |---|---|---|
- * | `spawn_agent` (`role: reviewer`) | `review.verdict` — `'pass'` \| `'fail'` | `t-review-pass` / `t-review-fail` |
- * | `spawn_agent` (`role: fixer`) | `review.gated` — scope questions the fixer raised | `t-fix-gated` / `t-fix-reviewed` |
- * | `spawn_agent` (any other role) | none | — |
- * | `run_gate` | `gate.id`, `gate.exit_code`, `gate.status`, `gate.cached`, `gate.log_ref` | `t-gate-pass` / `t-gate-fail` |
+ * | `spawn_agent` (`verdict: true`) | `review.verdict` — `'pass'` \| `'fail'` | the scheduler's `run_chore`, which states it for `t-review-pass` / `t-review-fail` |
+ * | `spawn_agent` (otherwise) | none | — |
+ * | `run_gate` | `gate.id`, `gate.exit_code`, `gate.status`, `gate.cached`, `gate.log_ref` | `t-gate-pass` / `t-gate-fail`, `t-verify-*` |
  * | `git_branch` | none | — |
  * | `git_merge` | none | — |
  * | `git_push` | none | — |
@@ -32,7 +31,6 @@
  * | `write_tracking` | none | — |
  * | `await_human` | none — the *answer* arrives as `human.answer`, from the scheduler | any guard on `human.*` |
  * | `notify` | none | — |
- * | `record_decision` | none — files the answer in the review ledger | — |
  * | `grant_fix_rounds` | none — the scheduler resets `fix_rounds` itself | — |
  *
  * `fix_rounds` is the scheduler's, fed in on every step; nothing here writes it.
@@ -40,18 +38,16 @@
  * **Where `review.verdict` comes from.** The scheduler owns the `spawn_agent`
  * body: it admits the turn, drains the session into the transcript, and *then*
  * calls this executor with the same invocation. The turn's meaning is left
- * deliberately unanswered there — "what did the reviewer decide" is not a
+ * deliberately unanswered there — "what did the review decide" is not a
  * scheduling question — and the drained stream is already durable, so the
  * verdict is read back out of the transcript the scheduler just wrote
- * (`Journal.tailTranscript`). No scheduler change is needed for this, and none
- * was made. The reviewer states its verdict in its own last words as
- * `VERDICT: pass` or `VERDICT: fail` — read by `readVerdict`, which
- * `src/prompts` also uses to *ask* for it, so the protocol has one definition
- * rather than a prompt and a parser free to drift apart. A turn that errored,
- * or one that stated nothing, takes `defaultVerdict` — `'fail'`, because a
- * merge on a reviewer's silence is the one failure mode a review step exists
- * to prevent. The
- * transcript text is matched and discarded: it never reaches a fact, a log
+ * (`Journal.tailTranscript`). A review chore states its verdict in its own
+ * last words as `VERDICT: pass` or `VERDICT: fail` — read by `readVerdict`,
+ * which `src/prompts` also uses to *ask* for it, so the protocol has one
+ * definition rather than a prompt and a parser free to drift apart. A turn
+ * that errored, or one that stated nothing, takes `defaultVerdict` — `'fail'`,
+ * because a merge on a review's silence is the one failure mode a review step
+ * exists to prevent. The transcript text is matched and discarded: it never reaches a fact, a log
  * field, an error message or a notification.
  *
  * **How caching composes without double-acquiring.** `runGateCached` wraps
@@ -86,7 +82,7 @@ import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
-import { readFixerReport, readVerdict, resolveBrief } from '../prompts/index.ts'
+import { readVerdict, resolveBrief } from '../prompts/index.ts'
 import { isJudgeGate, type CommandGate, type JudgeGate, type Node, type Workflow } from '../types.ts'
 import type { SystemOneJudge } from '../journal/events.ts'
 import type { SystemOne } from '../system-one/config.ts'
@@ -145,7 +141,7 @@ export interface RunExecutorOptions {
   readonly cache?: GateCache
   /** `--no-cache`: run the gate anyway, and refresh the entry with the result. */
   readonly noCache?: boolean
-  /** Verdict for a reviewer turn that stated none. Conservative by default. */
+  /** Verdict for a review turn that stated none. Conservative by default. */
   readonly defaultVerdict?: 'pass' | 'fail'
   /** Injected in tests, and on a platform with no notification channel. */
   readonly notifier?: Notifier
@@ -191,7 +187,7 @@ export class WaveGateError extends Error {
  */
 const WAVE_GATE_NODE = '_integration'
 
-/** How many transcript entries back to look for the verdict or the fixer's block. */
+/** How many transcript entries back to look for the verdict. */
 const TRANSCRIPT_WINDOW = 50
 
 export class RunEffectExecutor implements EffectExecutor {
@@ -264,15 +260,14 @@ export class RunEffectExecutor implements EffectExecutor {
 
     switch (invocation.effect.definitionId) {
       case 'spawn_agent':
-        return this.#reviewed(nodeId, params)
+        return params['verdict'] === true ? { facts: { review: { verdict: this.#verdict(nodeId) } } } : {}
       case 'run_gate':
         return await this.#runGate(nodeId, params)
       case 'run_chore':
         // The turns are already run: the scheduler owns spawning, exactly as it
         // does for `spawn_agent`, and reaches here on the way out. What a chore
-        // did is in the diff, the transcript and its `chore_result` row, and
-        // none of it is a fact a guard branches on — which is the difference
-        // between a chore and both the other things a phase runs.
+        // did is in the diff, the transcript and its `chore_result` row; the
+        // one fact a chore states, a review's verdict, came back from its turn.
         return {}
       case 'git_branch':
         return await this.#branch(nodeId, params)
@@ -292,8 +287,6 @@ export class RunEffectExecutor implements EffectExecutor {
         return await this.#notify(nodeId, 'waiting for the operator')
       case 'notify':
         return await this.#notify(nodeId, params['text'])
-      case 'record_decision':
-        return this.#recordDecision(nodeId, invocation.context)
       case 'grant_fix_rounds':
         // The scheduler owns the counter and has already moved it; there is no
         // body left for the host to run.
@@ -305,14 +298,8 @@ export class RunEffectExecutor implements EffectExecutor {
   // spawn_agent — the scheduler ran the turn; this reads what it meant
   // -------------------------------------------------------------------------
 
-  #reviewed(nodeId: string, params: Readonly<Record<string, unknown>>): EffectOutcome {
-    if (params['role'] === 'reviewer') return { facts: { review: { verdict: this.#verdict(nodeId) } } }
-    if (params['role'] === 'fixer') return { facts: { review: { gated: this.#fixerReport(nodeId) } } }
-    return {}
-  }
-
   /**
-   * The last verdict the reviewer stated in the turn that just ended. A turn
+   * The last verdict the review stated in the turn that just ended. A turn
    * that errored, or stated nothing, takes the fail-closed default.
    */
   #verdict(nodeId: string): 'pass' | 'fail' {
@@ -320,52 +307,13 @@ export class RunEffectExecutor implements EffectExecutor {
     const turn = this.#lastTurn(nodeId)
     if (!turn.ok) return fallback
     for (const text of turn.texts) {
-      // `src/prompts` owns the marker: the reviewer prompt asks for exactly what
+      // `src/prompts` owns the marker: the review prompt asks for exactly what
       // this reads, so the protocol cannot drift out of one of the two places.
       // The verdict only — the transcript text itself goes no further.
       const stated = readVerdict(text)
       if (stated !== undefined) return stated
     }
     return fallback
-  }
-
-  /**
-   * Files the fixer's `review-ledger` block into the node's ledger (§16.3) and
-   * returns how many findings it put to a person — the one fact a guard reads.
-   *
-   * A turn with no readable block files nothing and gates nothing. That is the
-   * safe way round: the review that follows sees every finding again, rather
-   * than a scope question silently going unasked.
-   */
-  #fixerReport(nodeId: string): number {
-    const turn = this.#lastTurn(nodeId)
-    if (!turn.ok) return 0
-    for (const text of turn.texts) {
-      const report = readFixerReport(text)
-      if (report === undefined) continue
-      this.#options.journal.appendReviewLedger(this.#options.runId, nodeId, {
-        kind: 'report',
-        at: new Date().toISOString(),
-        ...report,
-      })
-      return report.gated.length
-    }
-    return 0
-  }
-
-  /**
-   * The answer the node just resumed from, filed as a settled decision against
-   * the fixer's last batch of scope questions (§16.3).
-   */
-  #recordDecision(nodeId: string, context: EffectInvocation['context']): EffectOutcome {
-    const answer = context.human?.['answer']
-    this.#options.journal.appendReviewLedger(this.#options.runId, nodeId, {
-      kind: 'decision',
-      at: new Date().toISOString(),
-      answer: answer === undefined || answer === null ? null : String(answer),
-      unattended: context.human?.['unattended'] === true,
-    })
-    return {}
   }
 
   /**

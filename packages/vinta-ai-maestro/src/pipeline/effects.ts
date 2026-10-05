@@ -30,11 +30,13 @@ export interface EffectDefinition {
 export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
   spawn_agent: {
     id: 'spawn_agent',
-    params: ['role', 'prompt_template', 'harness', 'model', 'session'],
+    params: ['role', 'prompt_template', 'harness', 'model', 'session', 'verdict'],
     description:
       'Runs a coding agent in the node’s lane. `role` is one of AGENT_ROLES. `session` names a ' +
       'session slot to continue (§15): absent starts a fresh session every time, which is what ' +
-      'every pipeline written before slots existed keeps doing.',
+      'every pipeline written before slots existed keeps doing. `verdict: true` reads the ' +
+      'turn’s closing `VERDICT:` line into `review.verdict`, `fail` when it stated none; ' +
+      '`run_chore` sets it on the review chores.',
   },
   run_gate: {
     id: 'run_gate',
@@ -46,10 +48,12 @@ export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
     params: ['chore', 'when'],
     description:
       'Runs the node’s declared chores as agent turns, in order — `defaults.chores` unless the ' +
-      'node named its own. `when` picks which of them run here: `before_gate` (the default) or ' +
-      '`after_pr`, matched against each chore’s own `when`. `chore` runs exactly one instead, ' +
-      'whatever the node declared. Each turn continues the slot its chore names, so the default ' +
-      'is the implementer’s session.',
+      'node named its own. `when` picks which of them run here: `review`, `after_review` (the ' +
+      'default) or `after_pr`, matched against each chore’s own `when`. `chore` runs exactly ' +
+      'one instead, whatever the node declared. Each turn continues the slot its chore names, ' +
+      'so the default is the implementer’s session. Run with `when: review`, it states ' +
+      '`review.verdict`: `pass` only when every review chore ended on `VERDICT: pass`, and ' +
+      'when the node runs none.',
   },
   git_branch: {
     id: 'git_branch',
@@ -95,20 +99,11 @@ export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
     params: ['channel', 'text'],
     description: 'Sends a browser or OS notification.',
   },
-  record_decision: {
-    id: 'record_decision',
-    params: [],
-    description:
-      'Records the answer to the question the run just resumed from as a settled decision in ' +
-      'the node’s review ledger (§16.3), against the scope questions the fixer last raised. ' +
-      'Every later review and fix prompt carries it, so neither agent re-asks what a person ' +
-      'already decided.',
-  },
   grant_fix_rounds: {
     id: 'grant_fix_rounds',
     params: [],
     description:
-      'Gives the node its `max_fix_rounds` budget again (§16.5). The scheduler owns the ' +
+      'Gives the node its `max_fix_rounds` budget again (§16.3). The scheduler owns the ' +
       'counter, so this is the only way a pipeline can move it; the shipped one does so when ' +
       'the operator answers `continue` to the exhausted-budget question.',
   },
@@ -130,8 +125,8 @@ export interface EffectInvocation {
 export interface EffectOutcome {
   /**
    * Facts the effect learned, merged into the guard context at the root level
-   * before the next guard is evaluated. A reviewer returns `{ review: {...} }`;
-   * a gate returns `{ gate: { exit_code } }`.
+   * before the next guard is evaluated. The review chores return
+   * `{ review: { verdict } }`; a gate returns `{ gate: { exit_code } }`.
    */
   readonly facts?: GuardContext
 }

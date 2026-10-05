@@ -131,7 +131,6 @@ export function anchorKey(anchor: Anchor): string {
 
 export const ROLE_LABELS: Readonly<Record<PromptRole, string>> = {
   implementer: 'Implementer prompt',
-  reviewer: 'Reviewer prompt',
   fixer: 'Fixer prompt',
 }
 

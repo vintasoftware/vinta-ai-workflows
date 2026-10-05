@@ -107,10 +107,10 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                  the previous one's commits and starts a fresh agent session —
                  "cold" is about the session, not the branch.
                  This is the *outer* budget. The inner one is each phase's own
-                 max_fix_rounds (default 4), which counts fix rounds rather
-                 than findings: a first review raising four blockers spends one.
-                 When it runs out the phase asks whether to continue, and only
-                 "stop" brings it here.
+                 max_fix_rounds (no limit by default), which counts fix rounds
+                 and review passes rather than findings. When a set budget runs
+                 out the phase asks whether to continue, and only "stop" brings
+                 it here.
   --retry-after  How long an unanswered failure question waits before it
                  answers itself "retry". Unset — the default — waits for a
                  person, which is what a run did before this existed. Accepts

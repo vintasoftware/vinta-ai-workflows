@@ -91,7 +91,8 @@ export interface SessionPlanInput {
   readonly poisoned: boolean
   /** Fixers that have already *finished* on this node. */
   readonly fixRounds: number
-  readonly maxFixRounds: number
+  /** `node.max_fix_rounds`, or null when the node sets no limit. */
+  readonly maxFixRounds: number | null
   /**
    * §9's takeover handoff, for a pipeline that named no slot: an operator drove
    * this node by hand and detached, leaving the id their terminal held.
@@ -180,9 +181,9 @@ export function planSession(input: SessionPlanInput): SessionPlan {
   // one whose memory was replaced by a summary of itself. It answers, it sounds
   // certain, and the detail it lost is invisible from here — a `context_compacted`
   // event in the transcript is the only trace, and nothing in this function
-  // sees the transcript. The fixer continuing the implementer's session and the
-  // reviewer continuing across rounds are both continuations that assume the
-  // session still holds what it was told.
+  // sees the transcript. The fixer and the review chore continuing the
+  // implementer's session are both continuations that assume the session still
+  // holds what it was told.
   //
   // Left as a turn count deliberately. Counting turns over-retires a session
   // that never compacted and under-retires one that compacted twice, but it is
@@ -212,9 +213,10 @@ export function planSession(input: SessionPlanInput): SessionPlan {
  * spawned is number `fixRounds + 1`. The `>= 1` is the load-bearing half:
  * escalation means "the author already tried and failed", so a node whose
  * budget is a single round keeps that round on the implementer's session rather
- * than never reusing on the fix path at all.
+ * than never reusing on the fix path at all. A node with no limit has no last
+ * round; the turn ceiling (§15.5) is what retires its session.
  */
 function isLastFixRound(input: SessionPlanInput): boolean {
-  if (input.role !== 'fixer') return false
+  if (input.role !== 'fixer' || input.maxFixRounds === null) return false
   return input.fixRounds >= 1 && input.fixRounds + 1 >= input.maxFixRounds
 }

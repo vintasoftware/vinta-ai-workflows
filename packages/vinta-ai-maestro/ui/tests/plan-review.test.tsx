@@ -54,10 +54,9 @@ function view(overrides: Partial<PlanViewResponse> = {}): PlanViewResponse {
       brief: `### ${node.name}\n\nThe brief of ${node.id}.`,
       prompts: {
         implementer: `You are implementing ${node.id}.`,
-        reviewer: `You are reviewing ${node.id}. Read the full diff.`,
-        fixer: `You are fixing ${node.id}.`,
+        fixer: `You are fixing ${node.id}. Read the gate log.`,
       },
-      chores: { deslop: 'Rewrite the comments.' },
+      chores: { review: `Review ${node.id} until approved.`, deslop: 'Rewrite the comments.' },
       error: null,
     }
   }
@@ -176,14 +175,14 @@ test('a comment on a prompt is anchored to that prompt, colours its phase, and i
   const plans = double()
   const { container } = await openReview(plans)
 
-  click(container, '[data-tab="reviewer"]')
-  expect(container.querySelector('[data-prompt="reviewer"]')?.textContent).toContain('You are reviewing p1')
+  click(container, '[data-tab="fixer"]')
+  expect(container.querySelector('[data-prompt="fixer"]')?.textContent).toContain('You are fixing p1')
   click(container, '[data-action="comment-prompt"]')
-  expect(container.querySelector('[data-target]')?.textContent).toBe('Reviewer prompt · p1')
+  expect(container.querySelector('[data-target]')?.textContent).toBe('Fixer prompt · p1')
 
   await saveComment(container, 'Check that the migration reverses.')
   await waitFor(() => expect(container.querySelector('[data-comment="c1"]')).not.toBe(null))
-  expect(plans.comments[0]?.anchor).toEqual({ kind: 'prompt', node: 'p1', role: 'reviewer' })
+  expect(plans.comments[0]?.anchor).toEqual({ kind: 'prompt', node: 'p1', role: 'fixer' })
   expect(within(container.querySelector('[data-comment="c1"]') as HTMLElement).getByText('draft')).toBeTruthy()
 
   // The phase turns "has open comments" on the canvas and in the table.

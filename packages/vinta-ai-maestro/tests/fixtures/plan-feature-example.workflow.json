@@ -29,28 +29,19 @@
   },
   "crew": {
     "tier1": {
-      "role": "implementer",
       "tier": 1,
       "model": "claude-haiku-4-5",
       "description": "A model plus its migration, and a flag deletion."
     },
     "tier2-1": {
-      "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
       "description": "A DRF viewset mirroring the tags viewset."
     },
     "tier2-2": {
-      "role": "implementer",
       "tier": 2,
       "model": "claude-sonnet-5",
       "description": "Tree serializer and the list action that returns it."
-    },
-    "reviewer": {
-      "role": "reviewer",
-      "tier": 2,
-      "model": "claude-sonnet-5",
-      "description": "Reads every phase; Tier 2 is the hardest work here."
     }
   },
   "defaults": {
@@ -58,6 +49,7 @@
     "model": "claude-sonnet-5",
     "pipeline": "standard-phase",
     "chores": [
+      "review",
       "deslop"
     ]
   },
@@ -87,6 +79,12 @@
     }
   },
   "chores": {
+    "review": {
+      "skill": "thermo-nuclear-review-loop",
+      "when": "review",
+      "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it.",
+      "description": "The phase's code review: one reviewer sub-agent, the implementer fixing and answering it."
+    },
     "deslop": {
       "skill": "deslop-comments",
       "prompt": "Rewrite the comments and doc blocks this phase wrote into Simple English, and delete the ones that should not be there. Comment-only: no renames, no logic changes.",

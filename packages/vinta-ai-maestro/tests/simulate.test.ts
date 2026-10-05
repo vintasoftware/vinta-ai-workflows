@@ -523,11 +523,12 @@ describe('the shipped standard-phase', () => {
     expect(report.stop).toBeUndefined()
     expect(report.statuses).toEqual({ p1: 'done', p2: 'done', p3: 'done', p4: 'done' })
 
-    // Two turns per node on the clean path — implementer, then reviewer — plus
-    // the node's gates. `p1` alone, then `p2` and `p3` in parallel, then `p4`.
+    // One turn per node on the clean path — the fixture declares no chores, so
+    // the implementer's is the only one — and the node's gates twice, once in
+    // `gate` and once in `verify`. A projection charges both: it has no cache.
     const busy = (id: string): number =>
       report.nodes.find((node_) => node_.id === id)?.busyMs ?? -1
-    expect(busy('p1')).toBe(2 * DEFAULT_AGENT_TURN_MS + 2 * DEFAULT_GATE_MS)
-    expect(busy('p4')).toBe(2 * DEFAULT_AGENT_TURN_MS + DEFAULT_GATE_MS)
+    expect(busy('p1')).toBe(DEFAULT_AGENT_TURN_MS + 4 * DEFAULT_GATE_MS)
+    expect(busy('p4')).toBe(DEFAULT_AGENT_TURN_MS + 2 * DEFAULT_GATE_MS)
   })
 })

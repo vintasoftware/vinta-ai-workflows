@@ -1,7 +1,8 @@
 # A project that runs plans with vinta-ai-maestro and keeps what every plan
 # would otherwise repeat here: typed gate defaults (maestro runs its own test
 # command, implement-plan keeps commands.test_unit), a scoped test template,
-# the pool the suite contends for, and the gates every phase runs.
+# the pool the suite contends for, the gates every phase runs, and the review
+# and deslop chores that follow green gates.
 schema_version: 1
 vinta_ai_workflows_version: 0.7.0-alpha25
 project:
@@ -30,7 +31,7 @@ maestro:
   defaults:
     gates: [typecheck, lint, test]
     gate_scope: scoped
-    chores: [deslop]
+    chores: [review, deslop]
     model_fallbacks:
       claude-fable-5-1: claude-opus-5-5
   gates:
@@ -48,6 +49,10 @@ maestro:
       kind: semaphore
       match: ['pytest*', 'uv run pytest*']
   chores:
+    review:
+      skill: thermo-nuclear-review-loop
+      when: review
+      prompt: Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it.
     deslop:
       skill: deslop-comments
       prompt: Run the deslop-comments skill over this phase's diff.

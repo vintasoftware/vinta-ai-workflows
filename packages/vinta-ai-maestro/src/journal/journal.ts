@@ -498,31 +498,6 @@ export class Journal {
     return join(dir, `${gateId}.log`)
   }
 
-  /**
-   * §16.3's review ledger: what the fixer rejected and what a person decided,
-   * one JSON value per line. A file beside the transcript rather than an event,
-   * for the reason transcripts are — it is agents' prose about the repository,
-   * and the event log is identifiers. `purge` takes it with the run directory.
-   */
-  appendReviewLedger(runId: string, nodeId: string, entry: unknown): void {
-    mkdirSync(this.nodeDir(runId, nodeId), { recursive: true })
-    appendFileSync(join(this.nodeDir(runId, nodeId), 'review-ledger.jsonl'), `${JSON.stringify(entry)}\n`)
-  }
-
-  /** The whole ledger, oldest first. Small by construction: one entry per fix round. */
-  reviewLedger(runId: string, nodeId: string): unknown[] {
-    let text: string
-    try {
-      text = readFileSync(join(this.nodeDir(runId, nodeId), 'review-ledger.jsonl'), 'utf8')
-    } catch {
-      return []
-    }
-    return text
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as unknown)
-  }
-
   close(): void {
     this.db.close()
   }

@@ -40,7 +40,7 @@ import type { EffectExecutor } from '../pipeline/effects.ts'
 import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
 import type { ResourcePools } from '../resources/pools.ts'
 import { AgentGateBroker } from '../resources/agent-gates.ts'
-import { laneHolders } from '../scheduler/crew.ts'
+import { roster } from '../scheduler/crew.ts'
 import { isJudgeGate, type Workflow } from '../types.ts'
 import type { SystemOne } from '../system-one/config.ts'
 import { judgeHookCommand } from '../system-one/hook.ts'
@@ -171,13 +171,11 @@ export interface ProvisionOptions {
 export async function provision(options: ProvisionOptions): Promise<HostWiring> {
   const { workflow, runId, journal, repoPath, laneRoot, adapters } = options
 
-  // A staffed run gives every *implementer* its own worktree for the whole run —
-  // the thing that lets a member's session outlive a phase, because a session is
-  // about a directory. Reviewers get none: a review runs in the lane it is
-  // reviewing, so that it reads the working tree before anything is committed.
-  // The names are derived from the roster here and in the scheduler, from the
+  // A staffed run gives every member its own worktree for the whole run — the
+  // thing that lets a member's session outlive a phase, because a session is
+  // about a directory. The names are derived from the roster here and in the scheduler, from the
   // same function, so neither can drift from the other.
-  const crewLanes = laneHolders(workflow.crew).map(
+  const crewLanes = roster(workflow.crew).map(
     (member, i) => `${runId}-crew-${i + 1}-${member.id}`,
   )
 
@@ -227,8 +225,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       // the one agent turn in a run that cannot talk back to the daemon.
       { ...integration.env, ...options.agentEnv },
       () => journal.crewAssignments(runId),
-      // Into the incoming phase's own transcript, beside the implementer and
-      // reviewer turns that produced the branches now being merged — which is
+      // Into the incoming phase's own transcript, beside the implementer, fixer
+      // and chore turns that produced the branches now being merged — which is
       // where somebody asking "why does the merge look like this" is already
       // reading. Its `by.role` is what keeps it distinguishable from them.
       (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),

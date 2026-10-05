@@ -53,7 +53,11 @@ export const AuthorSchema = z.strictObject({
   name: z.string().min(1).max(200).optional(),
 })
 
-export const PROMPT_ROLES = ['implementer', 'reviewer', 'fixer'] as const
+/**
+ * The roles whose cold prompt a phase is composed with. A phase's review is a
+ * chore (§16), so its prompt is one of the phase's chore prompts, not a role.
+ */
+export const PROMPT_ROLES = ['implementer', 'fixer'] as const
 export type PromptRole = (typeof PROMPT_ROLES)[number]
 
 /**

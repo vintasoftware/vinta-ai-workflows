@@ -176,7 +176,6 @@ function blankNode(id: string, name: string): Node {
     prompt_ref: NEW_NODE_PROMPT_REF,
     touches: [],
     gates: [],
-    max_fix_rounds: 2,
   }
 }
 
