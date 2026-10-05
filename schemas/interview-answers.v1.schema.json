@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/interview-answers.v1.schema.json",
+  "title": "interview-ui answers (v1)",
+  "description": "The user's answers to one `interview-round.v1` round, written by the `interview-ui` server to `<interview-dir>/answers/round-NN.json` when the browser form is submitted. The agent reads it back, scans for gaps and open questions, and writes the next round (or drafts the artefact).",
+  "type": "object",
+  "required": ["schema_version", "round", "answers"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "round": { "description": "Round number this answers. Matches `rounds/round-NN.json`.", "type": "integer", "minimum": 1 },
+    "interview": { "description": "`interview.slug` echoed from the round.", "type": "string" },
+    "submitted_at": { "description": "ISO 8601 timestamp set by the server on write.", "type": "string", "format": "date-time" },
+    "answers": {
+      "description": "One entry per decision in the round, in round order.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["decision_id", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "decision_id": { "type": "string", "minLength": 1 },
+          "status": {
+            "description": "`answered` — a value is present; `waived` — user marked it not applicable (treat as explicitly out of scope, not as unknown); `skipped` — left open (only possible for `required: false` decisions). A `skipped` required-looking decision is **Open questions** material.",
+            "type": "string",
+            "enum": ["answered", "waived", "skipped"]
+          },
+          "values": { "description": "Chosen option `value`s. One for `single` / `confirm`, any number for `multi`. Empty when the user only used `other`.", "type": "array", "items": { "type": "string" } },
+          "other": { "description": "Free text from the \"Something else\" card.", "type": "string" },
+          "text": { "description": "Free-form answer for `text` inputs.", "type": "string" },
+          "note": { "description": "Optional nuance the user attached to this decision. Quote it in the spec rather than paraphrasing it away.", "type": "string" }
+        }
+      }
+    },
+    "questions": {
+      "description": "Questions the user asked the agent while answering. Reply to every one in the next round's `replies[]` (quote the question, answer in Markdown), and re-ask the decision if the answer could change it.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "body"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "decision_id": { "description": "Decision the question is about, or `null` for a general question.", "type": ["string", "null"] },
+          "body": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "general_note": { "description": "Free text the user wants carried into the artefact, not tied to one decision.", "type": "string" }
+  }
+}

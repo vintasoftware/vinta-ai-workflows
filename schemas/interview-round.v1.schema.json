@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/interview-round.v1.schema.json",
+  "title": "interview-ui round (v1)",
+  "description": "One round of an agent-driven interview, written by the agent to `<interview-dir>/rounds/round-NN.json` and rendered by the `interview-ui` shell as a full-screen decision form. Decisions are grouped; each decision carries the context the agent already knows, an optional explainer document (Markdown with Mermaid, or HTML), and options with their consequences. The browser answers with an `interview-answers.v1` payload.",
+  "type": "object",
+  "required": ["schema_version", "round", "interview", "groups"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "round": {
+      "description": "1-based round number. Must match the `NN` in the filename (`round-01.json` → 1).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "interview": {
+      "type": "object",
+      "required": ["slug", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "slug": {
+          "description": "Stable kebab-case id for the whole interview. The shell keys browser drafts on it; the agent uses it as the interview directory name.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "title": { "description": "Human title shown in the header, e.g. `Order tags — spec interview`.", "type": "string", "minLength": 1 },
+        "skill": { "description": "Skill that is running the interview (`create-spec`, `plan-feature`, …). Display only.", "type": "string" }
+      }
+    },
+    "kind": {
+      "description": "`questions` (default) renders decisions one per screen. `readback` additionally renders `summary` first — use it for the final \"anything I got wrong before I draft?\" round.",
+      "type": "string",
+      "enum": ["questions", "readback"],
+      "default": "questions"
+    },
+    "intro": {
+      "description": "Markdown shown above the first decision — what this round is about, what changed since the last one.",
+      "type": "string"
+    },
+    "summary": {
+      "description": "Markdown read-back of every load-bearing decision so far. Rendered only when `kind` is `readback`.",
+      "type": "string"
+    },
+    "replies": {
+      "description": "Agent answers to questions the user asked in earlier rounds (`interview-answers.v1` → `questions[]`). Shown next to the decision they refer to, or in the general panel when `decision_id` is absent.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["question", "answer"],
+        "additionalProperties": false,
+        "properties": {
+          "question_id": { "description": "`questions[].id` from the answers payload being replied to.", "type": "string" },
+          "decision_id": { "description": "Decision the question was about. Omit for general questions.", "type": "string" },
+          "question": { "description": "The user's question, quoted.", "type": "string" },
+          "answer": { "description": "Markdown answer. Mermaid fences allowed.", "type": "string" }
+        }
+      }
+    },
+    "groups": {
+      "description": "Ordered groups (the left rail). For `create-spec` these are its interview groups A–I.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "decisions"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "decisions": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/decision" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "explainer": {
+      "description": "Rich explanation. Either inline Markdown (string or `{markdown}`) or a file under `<interview-dir>/docs/` (`{path}`). `.md` files render in the shell with Mermaid support; `.html` files render in a sandboxed iframe for layouts Markdown cannot express.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": { "type": "string" },
+            "markdown": { "type": "string", "minLength": 1 },
+            "path": {
+              "description": "Relative to the interview dir, inside `docs/` (e.g. `docs/D4-concurrency.md`). The server refuses anything that escapes `docs/`.",
+              "type": "string",
+              "pattern": "^(docs/)?[^\\0]+\\.(md|markdown|html|htm)$"
+            }
+          },
+          "oneOf": [{ "required": ["markdown"] }, { "required": ["path"] }]
+        }
+      ]
+    },
+    "option": {
+      "type": "object",
+      "required": ["value", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "value": { "description": "Stable machine value echoed back in `answers[].values`.", "type": "string", "minLength": 1 },
+        "label": { "description": "Short card title, a few words.", "type": "string", "minLength": 1 },
+        "description": { "description": "One or two sentences: what this option is.", "type": "string" },
+        "consequences": { "description": "What picking this implies downstream — a new plan phase, a one-way door, a dependency, a cost. The \"choose wisely\" line.", "type": "string" },
+        "recommended": { "description": "Marks the agent's recommended default. At most one per decision.", "type": "boolean" },
+        "tags": {
+          "description": "Small pills under the card, e.g. `{label: \"One-way door\", tone: \"warn\"}`.",
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "required": ["label"],
+                "additionalProperties": false,
+                "properties": {
+                  "label": { "type": "string" },
+                  "tone": { "type": "string", "enum": ["neutral", "warn", "ok"] }
+                }
+              }
+            ]
+          }
+        },
+        "explainer": { "$ref": "#/$defs/explainer" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["id", "title", "input"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "description": "Stable id within the interview (e.g. `D4`). Reused across rounds when a decision is re-asked.", "type": "string", "minLength": 1 },
+        "title": { "description": "The question, as a full sentence the user can answer.", "type": "string", "minLength": 1 },
+        "short": { "description": "Rail label when `title` is long.", "type": "string" },
+        "why": { "description": "One sentence on why the answer matters (the `*Why:*` line from the create-spec question bank).", "type": "string" },
+        "context": { "description": "Markdown: what the agent already knows that bears on this decision — earlier answers quoted back, repo facts, constraints. Mermaid fences allowed.", "type": "string" },
+        "explainer": { "$ref": "#/$defs/explainer" },
+        "required": { "description": "When `false`, the round can be submitted with this decision left open. Default `true`.", "type": "boolean", "default": true },
+        "waivable": { "description": "Show the \"not applicable — skip\" toggle. Default `true`.", "type": "boolean", "default": true },
+        "waive_label": { "type": "string" },
+        "input": {
+          "type": "object",
+          "required": ["type"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "description": "`single` — pick one option; `multi` — pick any; `text` — free-form answer; `confirm` — like `single`, for yes/no and read-back confirmations.",
+              "type": "string",
+              "enum": ["single", "multi", "text", "confirm"]
+            },
+            "options": { "type": "array", "items": { "$ref": "#/$defs/option" } },
+            "allow_other": { "description": "Adds a \"Something else\" card with a text field. Default: on when `options` is empty, off otherwise.", "type": "boolean" },
+            "other_label": { "type": "string" },
+            "other_placeholder": { "type": "string" },
+            "label": { "description": "`text` input only — field label.", "type": "string" },
+            "placeholder": { "description": "`text` input only — placeholder with a real example answer.", "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
