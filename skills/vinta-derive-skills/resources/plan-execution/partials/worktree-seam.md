@@ -1,4 +1,4 @@
-<!-- Partial: worktree-seam — the WORKROOT abstraction. Collapses the former scattered `if use_worktree` conditionals into one resolution (conductor) + two local, data-driven checks (implement-phase spawn wrap, review-phase stray-write). Blocks: WORKROOT_RESOLUTION (conductors), WORKROOT_TOPOLOGY_RULE (conductors + integrate-phase), SANDBOX_WRAP (implement-phase), STRAY_WRITE_CHECK (review-phase). Under parallel execution `WORKROOT` becomes per-lane — the pool lives in parallel-lanes.md#LANE_WORKTREE_POOL and every downstream step still reads exactly one `WORKROOT`, the one for its own lane. -->
+<!-- Partial: worktree-seam — the WORKROOT abstraction. Collapses the former scattered `if use_worktree` conditionals into one resolution (conductor) + two local, data-driven checks (implement-phase spawn wrap, implement-phase stray-write, which review-phase re-runs after each fix round). Blocks: WORKROOT_RESOLUTION (conductors), WORKROOT_TOPOLOGY_RULE (conductors + integrate-phase), SANDBOX_WRAP (implement-phase), STRAY_WRITE_CHECK (implement-phase). Under parallel execution `WORKROOT` becomes per-lane — the pool lives in parallel-lanes.md#LANE_WORKTREE_POOL and every downstream step still reads exactly one `WORKROOT`, the one for its own lane. -->
 
 <!-- block-begin: WORKROOT_RESOLUTION -->
 ## Step 0.5 — Resolve `WORKROOT`
@@ -106,7 +106,7 @@ VINTA_WORKTREE_NAME=<name> VINTA_WORKTREE_PATH=<path> VINTA_WORKTREE_BRANCH=<bra
 <!-- block-end: WORKROOT_TOPOLOGY_RULE -->
 
 <!-- block-begin: SANDBOX_WRAP -->
-**Sandbox the spawn — only when `SANDBOX_TIER = enforced`.** The prompt tells the subagent to stay in `WORKROOT`, but that's cooperative — a smaller model can resolve a path back to the main checkout and silently write there (the review-phase stray-write check catches this reactively). When `SANDBOX_TIER = enforced` **and** the runtime spawns subagents as **subprocesses** (it shells out to an agent CLI — e.g. `codex exec …`, a `claude -p …` child, a custom runner), wrap that launch command in the worktree's bundled guard so the OS blocks main-checkout writes regardless of harness:
+**Sandbox the spawn — only when `SANDBOX_TIER = enforced`.** The prompt tells the subagent to stay in `WORKROOT`, but that's cooperative — a smaller model can resolve a path back to the main checkout and silently write there (the implement-phase stray-write check catches this reactively). When `SANDBOX_TIER = enforced` **and** the runtime spawns subagents as **subprocesses** (it shells out to an agent CLI — e.g. `codex exec …`, a `claude -p …` child, a custom runner), wrap that launch command in the worktree's bundled guard so the OS blocks main-checkout writes regardless of harness:
 
 ```bash
 ai-tools/skills/prepare-worktree/scripts/sandbox-run.sh \
@@ -123,7 +123,7 @@ ai-tools/skills/prepare-worktree/scripts/sandbox-run.sh \
 `<pool_root>` is the directory that holds the lane worktrees (the worktree root prepare-worktree provisioned into). Denying it and allowing back only this lane's `WORKROOT` blocks writes into **sibling lanes** — under parallel execution the more dangerous stray write, because a sibling's tree is being edited and tested at that moment. Omit the `--deny <pool_root>` line only when the run has a single lane and no pool exists.
 
 - **In-process subagent runtimes** (orchestrator and subagent share one OS process — e.g. claude-code's Task tool) can't wrap a single spawn. Two options: (a) install a runtime pre-write guard hook scoped to `WORKROOT` (prepare-worktree ships `scripts/claude-worktree-write-guard.py` + `scripts/gen-claude-sandbox-settings.sh` for claude-code); or (b) run the **entire** invocation under `sandbox-run.sh` with the same `--deny` / `--allow` set. Pick whichever the runtime supports.
-- **`SANDBOX_TIER = none`** (no sandbox tool, or `use_worktree = false`) → skip wrapping; prevention falls back entirely to the review-phase stray-write check. Surface this once to the user when a worktree run is unsandboxed so the weaker guarantee is explicit.
+- **`SANDBOX_TIER = none`** (no sandbox tool, or `use_worktree = false`) → skip wrapping; prevention falls back entirely to the implement-phase stray-write check. Surface this once to the user when a worktree run is unsandboxed so the weaker guarantee is explicit.
 <!-- block-end: SANDBOX_WRAP -->
 
 <!-- block-begin: STRAY_WRITE_CHECK -->

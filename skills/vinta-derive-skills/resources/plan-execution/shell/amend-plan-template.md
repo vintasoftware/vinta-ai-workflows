@@ -132,7 +132,7 @@ Always the first write. Plan file is durable; commits get rewritten next.
    - Letter: `1b` between `1` (relabeled `1a`) and `2`. Requires renaming `1` → `1a` inside **Phased Rollout** + updating downstream references.
    Ask via `AskUserQuestion` (header `Phase id`): `Decimal id (Recommended)` (no rename of existing ids), `Letter id` (relabels the neighbouring phase).
 
-3. **Appends** — new `## Phase N+1` block at end of **Phased Rollout**. Same shape as siblings: Goal, **Assigned to**, optional Review models, reusable_skills, Changes, Tests, Acceptance. An appended phase is staffed off the existing **Crew** table; adding a member is a change to the plan's staffing arithmetic and needs the same `Takes`-column update as any other.
+3. **Appends** — new `## Phase N+1` block at end of **Phased Rollout**. Same shape as siblings: Goal, **Assigned to**, reusable_skills, Changes, Tests, Acceptance. An appended phase is staffed off the existing **Crew** table; adding a member is a change to the plan's staffing arithmetic and needs the same `Takes`-column update as any other.
 
 4. **Guiding Decisions changes** — rewrite the affected row. Add a one-line note at the top of **Guiding Decisions** ("**Amended YYYY-MM-DD**: replaced storage shape from X to Y; affects phases 2, 3, 4.") so reviewers see what shifted. Reference the changed row by its **Decision** column name, not by a `§N.M` shorthand.
 
@@ -252,11 +252,11 @@ When the amend implementer (or any fixer below) returns `NEEDS_INPUT`, relay it 
 
 For `change_kind = rebase-only` (downstream phase whose parent moved): skip the agent. The work is purely git topology.
 
-### 4c. Run the three-layer review
+### 4c. Run the review loop
 
-Invoke [review-phase](../review-phase/SKILL.md) against the rewritten branch, passing the **new** phase body to walk against, `WORKROOT`, and the `reviewer` / `fixer` agent types with their `agent_models` tiers plus this phase's `reviewer_model_tier` / `fixer_model_tier` overrides (parsed from the rewritten body's `**Review models**:` line, null when absent). Layer 2 walks: every "Changes" item in the new body, every "Tests" entry, the new acceptance line.
+Invoke [review-phase](../review-phase/SKILL.md) against the rewritten branch, passing the **new** phase body as the stated requirement, the branch's base, `WORKROOT`, the amend implementer to continue, and the tier it ran at. The reviewer runs one tier above it and reads the new body's changes, tests and acceptance line as what the diff must do.
 
-Skip this step only when `change_kind = rebase-only` (no body change → no compliance walk). Even then, spot-run review-phase's Layer 1 mechanical checks to verify the rebase didn't lose unrelated work.
+Skip this step only when `change_kind = rebase-only` (no body change, and no new code to review). Even then, read `git -C <WORKROOT> diff --stat` against the pre-rebase tip to confirm the rebase didn't lose unrelated work.
 
 ### 4d. Rebase onto the (possibly-rewritten) parent
 
@@ -269,7 +269,7 @@ git -C <WORKROOT> rebase $PARENT_TIP
 
 Conflicts:
 
-1. **Spawn a fixer subagent** with the conflict body + new phase body + parent's tip diff. Same fixer agent type as [review-phase](../review-phase/SKILL.md#fix-loop).
+1. **Spawn a fixer subagent** with the conflict body + new phase body + parent's tip diff: the project's `fixer` agent type, at `agent_models.fixer`.
 2. Fixer resolves, runs inner + outer gate (in `<WORKROOT>`).
 3. Orchestrator continues the rebase: `git -C <WORKROOT> rebase --continue`.
 
@@ -347,7 +347,7 @@ After every queue entry processes:
 - **Confirm every force-push individually.** No batch "confirm all".
 - **Every stop for human input is a structured question.** `AskUserQuestion` with 2–4 concrete options, the recommended (safest) one first — see **Asking the human** in [AGENTS.md](../../../AGENTS.md). Never end a turn with a prose question. Sub-agents return `NEEDS_INPUT`; the orchestrator relays it.
 - **`WORKROOT` is resolved once, used everywhere.** Every `git` call takes `git -C <WORKROOT>`; no per-step worktree branching.
-- **Three-layer review on every rewritten branch.** Same standard as [implement-plan](../implement-plan/SKILL.md) — via [review-phase](../review-phase/SKILL.md). The amendment isn't done until Layer 3 passes.
+- **The review loop on every rewritten branch.** Same standard as [implement-plan](../implement-plan/SKILL.md) — via [review-phase](../review-phase/SKILL.md). The amendment isn't done until the reviewer explicitly approves.
 - **PR-context file is a derived artifact.** Refresh it after the rewrite; never edit the file as a substitute for fixing the diff.
 - **Subagents commit but never push.** Orchestrator owns force-push. {{PR_RULE_TAIL}}.
 {{COAUTHOR_RULE_LINE}}
@@ -365,7 +365,7 @@ After every queue entry processes:
 - [ ] Plan file edited; amendment log entry appended; committed on `{{DEFAULT_BRANCH}}`.
 - [ ] Rewrite queue ordered by stack depth (parent first).
 - [ ] For each entry: body change applied (when `amend-existing`); inner + outer gate green.
-- [ ] [review-phase](../review-phase/SKILL.md) run on each rewritten branch; BLOCKERs fixed; SHOULD-FIX noted.
+- [ ] [review-phase](../review-phase/SKILL.md) run on each rewritten branch, and returned `PASS`.
 - [ ] Rebase onto rewritten parent; conflicts resolved via fixer; tests re-run.
 - [ ] `--force-with-lease` push confirmed and executed per branch.
 - [ ] PR-context file refreshed (pending or republished).

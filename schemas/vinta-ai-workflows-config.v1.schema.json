@@ -135,13 +135,13 @@
           "type": "string"
         },
         "dependency_licenses": {
-          "description": "Third-party dependency license policy. Captured at bootstrap; rendered into the repo-root `AGENTS.md` (`## Dependency licenses` section) and the `implement-plan` / `amend-plan` skill bodies so the implementer / reviewer agents check a new dep's SPDX license against `forbidden_spdx` before running any install command (`npm add`, `pnpm add`, `pip install`, `poetry add`, `uv add`, `cargo add`, `go get`, etc.). When `enforcement: block`, the agent must refuse the install and surface the violation to the user; `warn` records the violation in the phase report but proceeds; `off` skips the check entirely.",
+          "description": "Third-party dependency license policy. Captured at bootstrap; rendered into the repo-root `AGENTS.md` (`## Dependency licenses` section) and the `implement-plan` / `amend-plan` skill bodies so the implementer agent checks a new dep's SPDX license against `forbidden_spdx` before running any install command (`npm add`, `pnpm add`, `pip install`, `poetry add`, `uv add`, `cargo add`, `go get`, etc.). When `enforcement: block`, the agent must refuse the install and surface the violation to the user; `warn` records the violation in the phase report but proceeds; `off` skips the check entirely.",
           "type": "object",
           "required": ["enforcement", "forbidden_spdx"],
           "additionalProperties": false,
           "properties": {
             "enforcement": {
-              "description": "How the implementer / reviewer agents react when a new dep's license is in `forbidden_spdx`. `block` (default) — refuse install, ask user to confirm override before proceeding. `warn` — proceed but flag in the phase report. `off` — skip the check.",
+              "description": "How the implementer agent reacts when a new dep's license is in `forbidden_spdx`. `block` (default) — refuse install, ask user to confirm override before proceeding. `warn` — proceed but flag in the phase report. `off` — skip the check.",
               "type": "string",
               "enum": ["block", "warn", "off"],
               "default": "block"
@@ -154,7 +154,7 @@
               "default": ["GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only", "SSPL-1.0"]
             },
             "allowed_overrides": {
-              "description": "Explicit per-package exceptions to `forbidden_spdx`. Each entry whitelists one package + license pair the team has accepted (legal review, dual-license clause, in-house carve-out). The implementer agent skips the block when the candidate package + license matches an entry; the reviewer agent treats the entry as load-bearing context (don't silently drop).",
+              "description": "Explicit per-package exceptions to `forbidden_spdx`. Each entry whitelists one package + license pair the team has accepted (legal review, dual-license clause, in-house carve-out). The implementer agent skips the block when the candidate package + license matches an entry, and treats the entry as load-bearing context (never silently drops it).",
               "type": "array",
               "items": {
                 "type": "object",
@@ -229,17 +229,17 @@
           "enum": ["enabled", "disabled"]
         },
         "thermo-nuclear-code-quality-review": {
-          "description": "Opt-in deep structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — harsher than the standard per-phase review. Copy-verbatim foundation skill (bucket A). Read-only; hands each fix to the `fixer` agent. Invoked deliberately by the user, or escalated from the `review-phase` Layer 3 structural-simplification lens; never auto-run on every diff.",
+          "description": "Opt-in deep structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — harsher than the standard per-phase review. Copy-verbatim foundation skill (bucket A). Read-only; hands each fix to the `fixer` agent. Invoked deliberately by the user; never auto-run on every diff. The per-phase review (`thermo-nuclear-review-loop`) already applies a structural-simplification lens; this skill is the deliberate deep audit.",
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
         "thermo-nuclear-review-loop": {
-          "description": "Review-and-fix loop over a change: the running agent spawns one reviewer sub-agent, verifies its findings, fixes the justified ones and answers the rest, until the reviewer explicitly approves under a strict code-quality standard. Copy-verbatim foundation skill (bucket A), always shipped: every `vinta-ai-maestro` workflow `plan-feature` writes names it in its `review` chore, which runs on the implementer's session once a phase's gates are green. Set `disabled` only if a project deliberately opts out of maestro's phase review.",
+          "description": "Review-and-fix loop over a change: the running agent spawns one reviewer sub-agent, verifies its findings, fixes the justified ones and answers the rest, until the reviewer explicitly approves under a strict code-quality standard. Copy-verbatim foundation skill (bucket A), always shipped: it is the per-phase review on both execution paths. The `review-phase` skill runs it over each phase `implement-plan`, `amend-plan` and `systematic-debugging` produce, with the conductor as the loop's host; and every `vinta-ai-maestro` workflow `plan-feature` writes names it in its `review` chore, which runs on the implementer's session once a phase's gates are green. Set `disabled` only if a project deliberately opts out of phase review.",
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
         "deslop-comments": {
-          "description": "Rewrite comments and doc blocks touched during the current task into Simple English — strip AI-slop vocabulary and negative framing, comment-only (no renames, no behavior change). Copy-verbatim foundation skill (bucket A), always shipped: the `review-phase` Layer 2 comment-hygiene check and fix loop depend on it. Set `disabled` only if a project deliberately opts out of the review flow's comment-hygiene step.",
+          "description": "Rewrite comments and doc blocks touched during the current task into Simple English — strip AI-slop vocabulary and negative framing, comment-only (no renames, no behavior change). Copy-verbatim foundation skill (bucket A), always shipped: `vinta-ai-maestro`'s `deslop` chore runs it on every phase once the review approves, and `integrate-phase` / `amend-plan` run it over the PR-context prose they write. Set `disabled` only if a project deliberately opts out of both comment passes.",
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
@@ -283,18 +283,19 @@
       }
     },
     "agent_models": {
-      "description": "Per-role / per-task model selection for the plan-execution family, expressed as **tiers** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml`. Each consuming skill resolves a tier to a concrete model at runtime: take that tier's `models`, filter to the vendors the runtime exposes, pick the cheapest survivor. This keeps the config free of hard-coded model IDs (which go stale) — the nightly `check-ai-models` job keeps the tier table fresh. Every key is optional; an unset key (or the whole section absent) means the spawn uses the runtime's default model, i.e. today's behavior. These are the **project defaults**: the `reviewer` / `fixer` tiers here can be overridden per phase by a plan's optional `**Review models**:` line (a phase override wins over the value here for that phase only — see `plan-feature`). The per-phase implementer model is NOT here — that stays owned by each plan phase's `**Suggested AI model**:` line. The mechanical steps (`worktree_prep`, `integrate`) are never plan-named.",
+      "description": "Per-role / per-task model selection for the plan-execution family, expressed as **tiers** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml`. Each consuming skill resolves a tier to a concrete model at runtime: take that tier's `models`, filter to the vendors the runtime exposes, pick the cheapest survivor. This keeps the config free of hard-coded model IDs (which go stale) — the nightly `check-ai-models` job keeps the tier table fresh. Every key is optional; an unset key (or the whole section absent) means the spawn uses the runtime's default model, i.e. today's behavior. The per-phase implementer model is NOT here — the plan owns it, through its **Crew** table and each phase's `**Assigned to**:` line. Neither is the review model: `review-phase` runs its reviewer one tier above the tier the phase's implementer actually ran at, and the phase's own implementer fixes the findings at its own tier. The conflict fixer and the mechanical steps (`worktree_prep`, `integrate`) are never plan-named.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "reviewer": {
-          "description": "Default tier for the independent reviewer subagent spawned by `review-phase` (Layer 3). Reviewing wants a capable model — Tier 3 is the usual default. A plan phase's `**Review models**:` line can override this for that phase. Unset (and no phase override) → runtime default.",
+          "description": "**Deprecated since 0.7.0, and ignored.** The plan-execution review runs one tier above the phase's implementer (`review-phase` derives it), so no configured tier is read. Kept so existing configs still validate; remove it at your next edit.",
+          "deprecated": true,
           "type": "integer",
           "minimum": 1,
           "maximum": 4
         },
         "fixer": {
-          "description": "Default tier for the fixer subagent spawned by `review-phase`'s fix loop to apply one reviewer finding. Narrow, well-specified edits — Tier 2 is the usual default. A plan phase's `**Review models**:` line can override this for that phase. Unset (and no phase override) → runtime default.",
+          "description": "Tier for the merge-conflict fixer subagent (the project's `fixer` agent type) that `implement-plan` spawns when a wave integration or a dependent phase's merge conflicts, and that `amend-plan` spawns when a rewrite conflicts with a child phase. Narrow, well-specified edits — Tier 2 is the usual default. Review findings are not this role's: the phase's own implementer fixes them, and a cold fallback fixer runs at the implementer's tier. Unset → runtime default.",
           "type": "integer",
           "minimum": 1,
           "maximum": 4

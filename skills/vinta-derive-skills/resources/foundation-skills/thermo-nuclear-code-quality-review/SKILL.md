@@ -1,6 +1,6 @@
 ---
 name: thermo-nuclear-code-quality-review
-description: Run an extremely strict maintainability review of a diff — abstraction quality, giant files, and spaghetti-condition growth. This is a deep, on-demand structural audit, harsher than the normal per-phase review: it hunts for "code judo" reframes that make whole branches, helpers, modes, or layers disappear rather than polishing what's there. Use when the user asks for a "thermo-nuclear code quality review", "thermonuclear review", "deep code quality audit", or "harsh maintainability review", or when the standard review flow escalates a structural concern. Opt-in only — do not auto-run it on every diff; it is meant to be invoked deliberately. Read-only: it reports findings and hands each fix to a fixer, it does not edit code itself.
+description: Run an extremely strict maintainability review of a diff — abstraction quality, giant files, and spaghetti-condition growth. This is a deep, on-demand structural audit, harsher than the normal per-phase review: it hunts for "code judo" reframes that make whole branches, helpers, modes, or layers disappear rather than polishing what's there. Use when the user asks for a "thermo-nuclear code quality review", "thermonuclear review", "deep code quality audit", or "harsh maintainability review", or when a large or architectural change deserves a dedicated structural pass beyond the per-phase review loop. Opt-in only — do not auto-run it on every diff; it is meant to be invoked deliberately. Read-only: it reports findings and hands each fix to a fixer, it does not edit code itself.
 disable-model-invocation: true
 ---
 
@@ -10,13 +10,13 @@ An intentionally severe maintainability audit. The normal review checks that a c
 
 The mindset is **ambitious structural simplification**, not incremental cleanup. Look for reframes that make whole branches, helpers, modes, conditionals, or layers disappear entirely — a "code judo" move that preserves behavior while collapsing the structure. Do not approve a change merely because it works.
 
-This is a heavy, deliberate pass. It is **not** part of the automatic per-phase review — run it when asked, or when the standard `review-phase` review escalates a structural concern it can't fully resolve. (See "Relationship to the standard review flow" below.)
+This is a heavy, deliberate pass. It is **not** part of the automatic per-phase review — run it when asked, or when a change is large or architectural enough to deserve a dedicated structural pass. (See "Relationship to the standard review flow" below.)
 
 ## When to use / when to skip
 
 Use it when:
 - The user explicitly asks for a thermo-nuclear / deep / harsh maintainability review.
-- A phase touched core architecture, added a large file, or introduced branching that "smells" — and the standard reviewer flagged it for a deeper look.
+- A phase touched core architecture, added a large file, or introduced branching that "smells" — and the per-phase review's findings suggest the structure deserves a deeper look than the loop gave it.
 - Before merging something large or long-lived where structure matters more than speed.
 
 Skip it when:
@@ -103,16 +103,18 @@ Report findings prioritized in this order:
 
 For each finding: name the file and lines, state the concrete regression, and — this is the point of the review — describe the reframe that removes it, not just "this is complex." Do not flood the review with low-value nits when larger structural issues exist; a page of naming quibbles buries the one restructuring that matters.
 
-Triage each finding like the standard review does:
+Triage each finding:
 - **BLOCKER** — must fix before merge (matches the approval-bar list above).
 - **SHOULD-FIX** — fix now if cheap, otherwise a tracked follow-up.
 - **NIT** — mention only if trivially cheap.
 
 ## Relationship to the standard review flow
 
-This skill is read-only, like the project's normal review. It does not edit code. When a finding warrants a change, hand it to the project's `fixer` agent ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md)) with the finding quoted verbatim, exactly as the standard fix loop does.
+This skill is read-only. It does not edit code. When a finding warrants a change, hand it to the project's `fixer` agent ([ai-tools/agents/fixer.md](ai-tools/agents/fixer.md)) with the finding quoted verbatim.
 
-The per-phase review (the `reviewer` agent, [ai-tools/agents/reviewer.md](ai-tools/agents/reviewer.md)) applies a condensed version of standard 0 on every phase — "is there an obvious code-judo reframe?" When that lens surfaces something structural that deserves a full audit, the reviewer escalates by invoking this skill against the phase diff. Reserve the full pass for when it earns its cost; the condensed lens is enough for routine phases.
+The per-phase review is the [thermo-nuclear-review-loop](../thermo-nuclear-review-loop/SKILL.md). The plan-execution `review-phase` skill runs it over every phase of a plan, and so does `vinta-ai-maestro`'s `review` chore. Its Review Standard already carries a condensed version of standard 0 — delete a layer rather than polish it, make the bad state unrepresentable, reuse the canonical helper — and its reviewer blocks on what that lens finds, so routine phases get the structural question asked every time.
+
+This skill is the deliberate deep audit on top of that loop, not a step inside it. Run it by hand when a change is large, architectural or long-lived enough that its structure deserves a dedicated pass, rather than one lens among the many a loop pass applies. Reserve it for when it earns its cost; the loop's lens is enough for routine phases.
 
 ## Pitfalls
 

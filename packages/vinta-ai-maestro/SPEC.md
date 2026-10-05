@@ -12,7 +12,7 @@ Simplicity here is a **sequencing strategy, not a scope cap**. Each unit is buil
 
 `vinta-ai-maestro` executes a `plan-feature` plan as a real, code-orchestrated run: it schedules independent phases concurrently across git worktree lanes, drives coding agents through installed CLIs, queues expensive gates behind capacity limits, and gives the user a live graph, per-agent logs, and a way to steer any running agent mid-flight.
 
-Today `implement-plan` *is* the orchestrator, written as a prompt. That prompt is the starting specification this daemon implements. The partials under `skills/vinta-derive-skills/resources/plan-execution/partials/` — `parallel-lanes.md`, `implementer-prompt.md`, `worktree-seam.md`, `review-layers.md`, `commit-strategy/` — are the input this document was written from, and remain the shared description of the semantics both implementations follow. They are not, however, a constraint on it: see [Relationship to the skills path](#relationship-to-the-skills-path).
+Today `implement-plan` *is* the orchestrator, written as a prompt. That prompt is the starting specification this daemon implements. The partials under `skills/vinta-derive-skills/resources/plan-execution/partials/` — `parallel-lanes.md`, `implementer-prompt.md`, `worktree-seam.md`, `review-loop.md`, `commit-strategy/` — are the input this document was written from, and remain the shared description of the semantics both implementations follow. They are not, however, a constraint on it: see [Relationship to the skills path](#relationship-to-the-skills-path).
 
 ### Scope
 
@@ -868,7 +868,7 @@ The chore's `chore_result` row says `failed` for an unapproved review, so the po
 
 ### 16.4 Not done here
 
-- **The skills path.** `review-layers.md` and the plan-execution partials still describe the three-layer review with a reviewer and fixer sub-agents. §1 says a semantic change is decided here and then written into the partial; that rewrite is a follow-up.
+- **The skills path's host.** `review-phase` runs the same `thermo-nuclear-review-loop` (`partials/review-loop.md`), but the conductor hosts it rather than the implementer, because a sub-agent cannot spawn sub-agents of its own. The conductor spawns the one reviewer, continues the phase's implementer as the fixer, and asks the gate questions itself. Its reviewer runs one tier above the tier the implementer ran at, and it pauses after 20 unapproved passes; neither rule is specified here.
 - **Reviewer edits.** The prompt tells the implementer to check `HEAD` and `git status` around each pass and not to build on anything the reviewer changed. The host no longer checks it, because the reviewer is a sub-agent of the implementer's turn and the turn itself edits the tree.
 - **The reviewer's model.** The prompt asks for the harness's most capable tier. Reasoning effort and the tier itself are the harness's to resolve, not the scheduler's.
 

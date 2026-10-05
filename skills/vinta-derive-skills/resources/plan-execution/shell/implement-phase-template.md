@@ -47,6 +47,12 @@ A phase that combines shapes → the agent type stays `implementer`, and the pro
 
 **Concurrent invocations are expected.** The conductor may have several lanes in flight, each running its own copy of this skill against a different phase. Nothing here is shared: the prompt, the model pick, the spawn, and the returned report all belong to one phase in one `WORKROOT`. Never read another lane's worktree, branch, or tracking entry — if this phase needs something from another phase, that is a dependency edge the plan should have declared.
 
+## 4. Check for stray writes
+
+<!-- include: partials/worktree-seam.md#STRAY_WRITE_CHECK -->
+
+[review-phase](../review-phase/SKILL.md) runs the same check after each round of fixes.
+
 <!-- include: partials/relay-questions.md#RELAY -->
 
 ## Output
