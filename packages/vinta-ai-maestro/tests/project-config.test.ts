@@ -201,6 +201,7 @@ describe('reading .vinta-ai-workflows.yaml', () => {
     })
     expect(workflow.gates['lint']).toMatchObject({ cmd: 'uv run ruff check', scoped_cmd: 'uv run ruff check {changed_files}' })
     expect(workflow.project?.commands).toMatchObject({ test: 'uv run pytest', typecheck: 'uv run mypy .' })
+    expect(workflow.defaults.model_fallbacks).toEqual({ 'claude-fable-5-1': 'claude-opus-5-5' })
   })
 
   it('locates a bad `maestro` value and never quotes the file', () => {

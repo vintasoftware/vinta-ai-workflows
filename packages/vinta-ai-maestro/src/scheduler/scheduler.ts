@@ -2581,7 +2581,10 @@ export class Scheduler {
     // the task and re-running a git command per attempt would be wasted work.
     const reorientation = await this.#reorientation(state, plan, params['role'])
     // The tallest node first when the harness is throttled; see `computeHeights`.
-    const priority = { priority: this.#heights.get(state.node.id) ?? 0 }
+    const priority: AdmitOptions = {
+      priority: this.#heights.get(state.node.id) ?? 0,
+      fallbacks: this.#workflow.defaults.model_fallbacks,
+    }
     let outcome = await this.#admitLoggedIn(state, adapter, () => build(plan), priority)
 
     // §15.4: the vendor has forgotten the session this task asked to continue.
@@ -2753,7 +2756,10 @@ export class Scheduler {
     // alternative was the node.
     const closed = outcome.session.refusal
     if (closed !== undefined) {
-      const parked = admission.refusedMidTurn(adapter.id, state.node.id, closed)
+      const parked = admission.refusedMidTurn(adapter.id, state.node.id, closed, {
+        model: outcome.model,
+        ...(turn.priority.fallbacks === undefined ? {} : { fallbacks: turn.priority.fallbacks }),
+      })
       if (parked.status === 'retry') throw new CapacityRetry(parked.wait)
     }
     return sessionId

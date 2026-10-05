@@ -403,6 +403,19 @@
           "type": "string",
           "minLength": 1
         },
+        "model_fallbacks": {
+          "default": {},
+          "description": "Model id → the model to run instead once the first is out of quota (§6.1). A `quota` refusal on a model listed here does not park the harness: the spawn is retried at once on the fallback, and every later spawn of that model on the same harness goes straight to the fallback until the vendor’s stated reset, or for the rest of the run when it stated none. Chains are followed; a fallback refused for quota too means the account is out, not the model, and the harness parks as it would have.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "max_session_turns": {
           "default": 12,
           "description": "Turns one reused session slot may take before the next spawn starts fresh (§15.5). A shared session only ever grows; without a ceiling a long node eventually dies on a context-window error that reads as a broken harness.",

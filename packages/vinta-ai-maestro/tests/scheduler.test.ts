@@ -687,6 +687,7 @@ function makeWorkflow(
     readonly pipelines?: Record<string, unknown>
     readonly pipeline?: string
     readonly crew?: Record<string, unknown>
+    readonly modelFallbacks?: Record<string, string>
   } = {},
 ): Workflow {
   return WorkflowSchema.parse({
@@ -699,6 +700,7 @@ function makeWorkflow(
       model: 'opus',
       pipeline: options.pipeline ?? 'solo',
       ...(options.defaultChores === undefined ? {} : { chores: options.defaultChores }),
+      ...(options.modelFallbacks === undefined ? {} : { model_fallbacks: options.modelFallbacks }),
     },
     resources: options.resources ?? { lane: { capacity: options.lanes ?? 4, kind: 'worktree' } },
     gates: options.gates ?? {},
@@ -833,6 +835,55 @@ describe('capacity', () => {
     // Two spawns: the turn the window closed under, and the one after the wait.
     expect(r.adapter.spawned).toHaveLength(2)
     expectDrained(r)
+  })
+
+  /**
+   * `defaults.model_fallbacks`: a model out of quota is retried on its
+   * fallback at once, rather than parking the harness for a reset that a
+   * credit allowance may never have.
+   */
+  describe('a model out of quota with a fallback', () => {
+    const fallbacks = { opus: 'sonnet' }
+
+    it('runs the spawn on the fallback without waiting', async () => {
+      const r = rig(makeWorkflow([node('a'), node('b', ['a'])], { lanes: 1, modelFallbacks: fallbacks }), {
+        spawns: ['quota'],
+      })
+
+      // No clock advance: nothing parked, so nothing to wait out.
+      const report = await r.scheduler.run()
+
+      expect(report.status).toBe('completed')
+      expect(r.adapter.spawned.map((task) => task.model)).toEqual(['sonnet', 'sonnet'])
+      // `a` was refused and fell back; `b` went straight onto the fallback,
+      // without spending a spawn on `opus` to be told the same thing again.
+      const fellBack = r.journal
+        .events('run-1')
+        .filter((e) => e.type === 'node_model_fallback')
+        .map((e) => ('nodeId' in e ? [e.nodeId, e.payload] : null))
+      expect(fellBack).toEqual([
+        ['a', { harness: HARNESS, from: 'opus', to: 'sonnet', known: false }],
+        ['b', { harness: HARNESS, from: 'opus', to: 'sonnet', known: true }],
+      ])
+      const statuses = r.journal
+        .events('run-1')
+        .filter((e) => e.type === 'node_status')
+        .map((e) => (e.payload as { status: string }).status)
+      expect(statuses).not.toContain('waiting_on_capacity')
+      expectDrained(r)
+    })
+
+    it('re-drives a turn whose model ran out mid-turn on the fallback, without waiting', async () => {
+      const r = rig(makeWorkflow([node('a')], { lanes: 1, modelFallbacks: fallbacks }), {
+        midTurnRefusal: { kind: 'quota', reason: 'credits-exhausted' },
+      })
+
+      const report = await r.scheduler.run()
+
+      expect(report.status).toBe('completed')
+      expect(r.adapter.spawned.map((task) => task.model)).toEqual(['opus', 'sonnet'])
+      expectDrained(r)
+    })
   })
 
   it('never exceeds capacity("lane"), and keeps it saturated', async () => {

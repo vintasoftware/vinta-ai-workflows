@@ -30,6 +30,7 @@
  * here reads a prompt, a transcript or a vendor's words (§11).
  */
 import type { HarnessAdapter } from '../harness/adapter.ts'
+import type { ModelFallbacks } from '../harness/fallback.ts'
 import type { StoredEvent } from '../journal/events.ts'
 import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { CrewMember } from '../types.ts'
@@ -147,6 +148,8 @@ export interface CrewConflictFixerOptions {
    * staffed changes nothing about where their turn is recorded.
    */
   readonly record?: (nodeId: string, entry: TranscriptEntry) => void
+  /** `defaults.model_fallbacks`, passed straight through. */
+  readonly fallbacks?: ModelFallbacks
 }
 
 /**
@@ -166,6 +169,7 @@ export function createCrewConflictFixer(options: CrewConflictFixerOptions): Conf
     ...(options.record === undefined ? {} : { record: options.record }),
     model: options.defaults.model,
     ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.fallbacks === undefined ? {} : { fallbacks: options.fallbacks }),
     staff: (request: ConflictRequest) => {
       const top = highestTierImplementer(options.crewAssignments(), request.nodes, options.crew)
       if (top === null) return null

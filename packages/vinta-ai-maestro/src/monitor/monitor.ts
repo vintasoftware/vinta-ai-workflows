@@ -47,7 +47,8 @@
  */
 import { dirname, join } from 'node:path'
 
-import type { HarnessAdapter } from '../harness/adapter.ts'
+import type { AgentTask, HarnessAdapter, SpawnOutcome } from '../harness/adapter.ts'
+import { type ModelFallbacks, spawnWithFallbacks } from '../harness/fallback.ts'
 import type { NodeStatus } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
 import { MONITOR_ROLE, OPERATOR_ROLE } from '../journal/transcript.ts'
@@ -416,6 +417,12 @@ export interface MonitorOptions {
   readonly adapter: HarnessAdapter
   /** The dearest model on the roster: this is the reasoning, not the typing. */
   readonly model: string
+  /**
+   * `defaults.model_fallbacks`. The dearest model is the likeliest to be the
+   * one sold as scarce credits, and a monitor that went unavailable the moment
+   * they ran out would be gone exactly when a stalled run needs explaining.
+   */
+  readonly fallbacks?: ModelFallbacks
   /** Where it runs. The repository, not a lane — it writes nothing. */
   readonly cwd: string
   /**
@@ -441,6 +448,8 @@ export interface MonitorOptions {
 export class Monitor {
   #session: string | null = null
   readonly #options: MonitorOptions
+  /** The model it is on now: `options.model`, until that runs out of quota. */
+  #model: string
 
   // A field and an assignment rather than the parameter property its neighbours
   // use. Both are fine for the shipped binary, whose shebang asks for
@@ -449,6 +458,14 @@ export class Monitor {
   // strip-only mode, which is what an ad-hoc `node src/...` reaches for.
   constructor(options: MonitorOptions) {
     this.#options = options
+    this.#model = options.model
+  }
+
+  /** A spawn down the fallback chain; the model it landed on is kept for the next one. */
+  async #spawn(task: AgentTask): Promise<SpawnOutcome> {
+    const { outcome, model } = await spawnWithFallbacks(this.#options.adapter, task, this.#options.fallbacks)
+    if (outcome.ok) this.#model = model
+    return outcome
   }
 
   /** The session this conversation is continuing, for tests and for the API. */
@@ -458,7 +475,7 @@ export class Monitor {
 
   /** Reported with every answer: the operator should know who is talking. */
   get model(): string {
-    return this.#options.model
+    return this.#model
   }
 
   async ask(digest: RunDigest, question: string): Promise<string> {
@@ -474,13 +491,13 @@ export class Monitor {
           question,
         ].join('\n')
 
-    const outcome = await this.#options.adapter.spawn({
+    const outcome = await this.#spawn({
       // Not a node. The id is a label for the journal and the logs, and it
       // cannot collide with a phase because a phase id has no colon in it.
       nodeId: `monitor:${digest.runId}`,
       cwd: this.#options.cwd,
       prompt,
-      model: this.#options.model,
+      model: this.#model,
       ...(cold ? {} : { resumeSessionId: this.#session as string }),
     })
 
@@ -553,11 +570,11 @@ export class Monitor {
    * monitor that threw on bad JSON would lose the summary along with it.
    */
   async intervene(digest: RunDigest, triggerLines: string, allowed: string): Promise<string> {
-    const outcome = await this.#options.adapter.spawn({
+    const outcome = await this.#spawn({
       nodeId: `monitor:${digest.runId}`,
       cwd: this.#options.cwd,
       prompt: interveneBrief(digest, triggerLines, allowed),
-      model: this.#options.model,
+      model: this.#model,
     })
 
     if (!outcome.ok) throw new MonitorUnavailable(outcome.kind)

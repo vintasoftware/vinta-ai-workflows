@@ -546,6 +546,7 @@ export function monitorFactory(
       // never writes, so it runs at `auto` rather than refusing to start.
       adapter: new ClaudeCodeAdapter({ permission: permission === 'judged' ? 'auto' : permission }),
       model: monitorModel(workflow),
+      fallbacks: workflow.defaults.model_fallbacks,
       cwd: repoPath,
       // The conversation is written here, so it survives the tab it was had in.
       journal,

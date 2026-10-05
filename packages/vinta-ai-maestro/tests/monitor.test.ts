@@ -327,6 +327,21 @@ describe('the conversation', () => {
       ),
     ).rejects.toBeInstanceOf(MonitorUnavailable)
   })
+
+  /** The dearest model is the likeliest to be the scarce one (`defaults.model_fallbacks`). */
+  it('moves to the fallback once its model is out of quota, and stays there', async () => {
+    const workflow = workflowOf()
+    const journal = journalWith(workflow)
+    const adapter = new MockAdapter({ id: HARNESS, spawns: ['quota'] })
+    const monitor = new Monitor({ adapter, model: 'dear', fallbacks: { dear: 'cheaper' }, cwd: '/repo' })
+    const digest = runDigest(journal, RUN, workflow) as NonNullable<ReturnType<typeof runDigest>>
+
+    await monitor.ask(digest, 'why?')
+    await monitor.ask(digest, 'and now?')
+
+    expect(adapter.spawned.map((task) => task.model)).toEqual(['cheaper', 'cheaper'])
+    expect(monitor.model).toBe('cheaper')
+  })
 })
 
 /**

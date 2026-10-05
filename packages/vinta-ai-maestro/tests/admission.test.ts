@@ -584,6 +584,151 @@ describe('admission control', () => {
     expect(adapter.spawned).toHaveLength(1)
   })
 
+  /**
+   * `defaults.model_fallbacks`: a model with its own, smaller allowance — a
+   * frontier tier sold as credits — running out says nothing about the rest of
+   * the harness, so it must not park it.
+   */
+  describe('model fallbacks', () => {
+    const fallbacks = { fable: 'opus' }
+    const on = (nodeId: string, model: string): AgentTask => ({ ...task(nodeId), model })
+
+    /** Refuses every model in `out` for quota, whatever the spawn plan says. */
+    const outOf = (out: ReadonlySet<string>, retryAfter?: Date) => {
+      const adapter = new MockAdapter()
+      const asked: string[] = []
+      const spawn = adapter.spawn.bind(adapter)
+      adapter.spawn = async (spawned: AgentTask) => {
+        asked.push(spawned.model)
+        if (!out.has(spawned.model)) return await spawn(spawned)
+        return {
+          ok: false as const,
+          kind: 'quota' as const,
+          message: 'mock: quota',
+          ...(retryAfter === undefined ? {} : { retryAfter }),
+        }
+      }
+      return { adapter, asked }
+    }
+
+    const fellBack = () =>
+      journal
+        .events(RUN)
+        .filter((e) => e.type === 'node_model_fallback')
+        .map((e) => e.payload)
+
+    it('admits the fallback at once, and leaves the harness unparked', async () => {
+      const { adapter, asked } = outOf(new Set(['fable']))
+      const admission = control()
+
+      const outcome = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+
+      expect(outcome.status).toBe('admitted')
+      if (outcome.status !== 'admitted') return
+      expect(outcome.model).toBe('opus')
+      outcome.release()
+      expect(asked).toEqual(['fable', 'opus'])
+      expect(admission.wakeAt('mock')).toBeUndefined()
+      expect(admission.inFlight('mock')).toBe(0)
+      expect(statuses('p1')).toEqual([])
+      expect(fellBack()).toEqual([{ harness: 'mock', from: 'fable', to: 'opus', known: false }])
+    })
+
+    it('sends every later spawn of that model straight to the fallback', async () => {
+      const { adapter, asked } = outOf(new Set(['fable']))
+      const admission = control()
+
+      admitted(await admission.admit(adapter, on('p1', 'fable'), { fallbacks }))
+      // Hours later: with no reset stated, credits are not assumed to come back.
+      clock.advance(24 * 60 * 60 * 1_000)
+      admitted(await admission.admit(adapter, on('p2', 'fable'), { fallbacks }))
+
+      expect(asked).toEqual(['fable', 'opus', 'opus'])
+      expect(fellBack()).toEqual([
+        { harness: 'mock', from: 'fable', to: 'opus', known: false },
+        { harness: 'mock', from: 'fable', to: 'opus', known: true },
+      ])
+    })
+
+    it('tries the model again once the reset the vendor stated has passed', async () => {
+      const out = new Set(['fable'])
+      const { adapter, asked } = outOf(out, new Date(clock.now() + 60 * 60 * 1_000))
+      const admission = control()
+
+      admitted(await admission.admit(adapter, on('p1', 'fable'), { fallbacks }))
+      out.clear()
+      clock.advance(60 * 60 * 1_000)
+      const outcome = await admission.admit(adapter, on('p2', 'fable'), { fallbacks })
+
+      expect(outcome.status === 'admitted' && outcome.model).toBe('fable')
+      expect(asked).toEqual(['fable', 'opus', 'fable'])
+    })
+
+    it('parks the harness when the fallback is out too, and forgets the model was', async () => {
+      const out = new Set(['fable', 'opus'])
+      const { adapter, asked } = outOf(out)
+      const admission = control()
+
+      const refused = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+
+      // Both refused for quota: the account ran out, not the model.
+      expect(refused.status).toBe('retry')
+      if (refused.status !== 'retry') return
+      expect(refused.kind).toBe('quota')
+      expect(admission.wakeAt('mock')).toBe(refused.wakeAt)
+
+      // So after the wait the model the plan asked for is asked for again.
+      out.clear()
+      clock.advance(refused.wakeAt - clock.now())
+      const outcome = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+      expect(outcome.status === 'admitted' && outcome.model).toBe('fable')
+      expect(asked).toEqual(['fable', 'opus', 'fable'])
+    })
+
+    it('does not fall back on a refusal that is not about quota', async () => {
+      const adapter = new MockAdapter({ spawns: ['rate_limit'] })
+      const admission = control()
+
+      const refused = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+
+      expect(refused.status).toBe('retry')
+      expect(admission.wakeAt('mock')).toBeDefined()
+      expect(fellBack()).toEqual([])
+    })
+
+    it('parks as before on a model with no fallback', async () => {
+      const { adapter } = outOf(new Set(['opus']))
+      const admission = control()
+
+      const refused = await admission.admit(adapter, on('p1', 'opus'), { fallbacks })
+
+      expect(refused.status).toBe('retry')
+      expect(admission.wakeAt('mock')).toBeDefined()
+    })
+
+    it('hands a turn whose model ran out mid-turn back with no wait', async () => {
+      const { adapter, asked } = outOf(new Set())
+      const admission = control()
+
+      const outcome = admission.refusedMidTurn(
+        'mock',
+        'p1',
+        { kind: 'quota', reason: 'credits-exhausted' },
+        { model: 'fable', fallbacks },
+      )
+
+      expect(outcome.status).toBe('retry')
+      if (outcome.status !== 'retry') return
+      expect(outcome.wakeAt).toBe(clock.now())
+      await outcome.wait()
+      expect(admission.wakeAt('mock')).toBeUndefined()
+
+      // The re-driven spawn is the one that lands on the fallback.
+      admitted(await admission.admit(adapter, on('p1', 'fable'), { fallbacks }))
+      expect(asked).toEqual(['opus'])
+    })
+  })
+
   it('rejects a harness with no configured ceiling', async () => {
     const admission = control()
     await expect(admission.admit(new MockAdapter({ id: 'unknown' }), task('p1'))).rejects.toThrow(
