@@ -30,6 +30,52 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Plan review: a page for a plan before it runs, and a chat with the agent
+  that wrote it.** Maestro's UI gains a **Plans** section. `vinta-ai-maestro
+  review open <workflow.json>` serves it and prints a link straight to the
+  plan. The page shows:
+  - **Graph.** The phase DAG, coloured by review state. Below it, the selected
+    phase's brief, its staffing and pipeline, and the implementer, reviewer
+    and fixer prompts. These are the real cold prompts a run would send,
+    composed by the scheduler's own function.
+  - **Plan.** The markdown, section by section, with an outline.
+  - **Gates.** A phase × gate matrix of the commands a run would execute.
+  - **Schedule.** A projected timeline with the critical path marked.
+  - **Issues.** What `validate` reports.
+
+  The reviewer can comment on the plan, a section, a phase, a prompt or a
+  gate, or select text and comment on the quote. Comments stay drafts until
+  sent to the agent as one batch. The sidebar chat shows whether the agent is
+  listening, working or away. The agent answers from its own session through
+  two new commands:
+  - `review wait` blocks, then prints what the person sent as JSON.
+  - `review reply` answers in the chat or on a thread, with `--resolve`.
+
+  Edits the agent makes to the plan show on the page within seconds.
+  **Approve plan** ends the loop. The review is committed beside the plan as
+  `ai-plans/<id>.review.json`. A new generated schema,
+  `schemas/plan-review.v1.schema.json`, validates it. Maestro's SPEC gains
+  §19 to describe it.
+- **`vinta-ai-maestro validate <workflow.json> [--json]`.** It checks a
+  workflow the way a run loads it, layered over `.vinta-ai-workflows.yaml`.
+  It also checks two things only a run used to find: the filename matches
+  the id, and every `plan_ref`, `prompt_ref` and `plan_context_refs` anchor
+  names a heading the plan has. Exit `0` means valid and `1` means not.
+  `--json` gives an agent one object with each issue's source, path and
+  message.
+- **`plan-feature` validates its workflow and runs the review.** When
+  `vinta-ai-maestro` is installed (on `PATH`, in `node_modules/.bin`, or
+  already cached for `npx --no-install`), the skill runs `validate --json` on
+  every workflow it writes. It fixes each issue and runs the check again, and
+  runs it again after every edit made during review. It never installs maestro
+  itself.
+
+  Once the files are written, the skill asks how to review: on the review
+  page, in chat, or later. On the page it serves the review, posts an
+  opening message, and loops on `review wait`. It edits the plan and then the
+  workflow for each comment, and answers every thread. The loop ends when the
+  plan is approved.
+
 - **Model fallbacks for models that run out of quota.** A frontier model sold
   as a small credit allowance used to stall a whole run when its credits ran
   out: the `quota` refusal parked the harness, and every model on it waited
