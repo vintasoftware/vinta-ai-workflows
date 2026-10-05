@@ -1,5 +1,5 @@
 /**
- * Six views, so the route is the fragment and there is still no router.
+ * Eight views, so the route is the fragment and there is still no router.
  *
  * The fragment is also the only navigation that is safe to render: the token
  * lives in the page's query string, and a fragment link leaves it exactly
@@ -32,6 +32,8 @@ import { Logs } from './Logs.tsx'
 import { pageLogsClient, type LogsClient } from './logs-client.ts'
 import { pageWorkflowClient, type WorkflowClient } from './editor-client.ts'
 import { NodeView } from './Node.tsx'
+import { PlanReviewView, PlansList } from './PlanReview.tsx'
+import { pagePlansClient, type PlansClient } from './plans-client.ts'
 import { Notifications } from './Notifications.tsx'
 import { Replay } from './Replay.tsx'
 import { pageReplayClient, type ReplayClient } from './replay-client.ts'
@@ -52,6 +54,7 @@ const CHANGES_ROUTE = /^#\/runs\/([^/]+)\/nodes\/([^/]+)\/changes(?:\?file=(.*))
 const REPLAY_ROUTE = /^#\/runs\/([^/]+)\/replay$/
 const EDITOR_ROUTE = /^#\/editor(?:\/([^/]+))?$/
 const LOGS_ROUTE = /^#\/logs$/
+const PLANS_ROUTE = /^#\/plans(?:\/([^/]+))?$/
 
 type Route =
   | { readonly kind: 'run'; readonly runId: string; readonly nodeId: string | null }
@@ -69,6 +72,10 @@ type Route =
       readonly file: string | null
     }
   | { readonly kind: 'editor'; readonly workflowId: string | null }
+  // §19: a plan under review. Its own member, not the editor's: it reads the
+  // plan and its review rather than the bare workflow, and it writes comments
+  // rather than the document.
+  | { readonly kind: 'plans'; readonly workflowId: string | null }
   // Not addressed by a run, because the records worth reading most are the
   // ones with no run to address them by: a bind that failed, a start request
   // refused before a run id existed, a crash with three runs in flight.
@@ -85,6 +92,7 @@ export function App({
   workflows,
   replay,
   logs,
+  plans,
 }: {
   readonly client: Client
   readonly workflows?: WorkflowClient
@@ -92,11 +100,14 @@ export function App({
   readonly replay?: ReplayClient
   /** The daemon's own log, for the same reason again. */
   readonly logs?: LogsClient
+  /** §19's plan review, for the same reason again. */
+  readonly plans?: PlansClient
 }) {
   const [route, setRoute] = useState<Route | null>(() => routeOf(location.hash))
   const workflowClient = useMemo(() => workflows ?? pageWorkflowClient(), [workflows])
   const replayClient = useMemo(() => replay ?? pageReplayClient(), [replay])
   const logsClient = useMemo(() => logs ?? pageLogsClient(), [logs])
+  const plansClient = useMemo(() => plans ?? pagePlansClient(), [plans])
   // §9.1: a pause is announced whatever is on screen, not only on its run.
   useRunWatch(client)
 
@@ -107,7 +118,13 @@ export function App({
   }, [])
 
   const section =
-    route?.kind === 'editor' ? 'editor' : route?.kind === 'logs' ? 'logs' : 'runs'
+    route?.kind === 'editor'
+      ? 'editor'
+      : route?.kind === 'logs'
+        ? 'logs'
+        : route?.kind === 'plans'
+          ? 'plans'
+          : 'runs'
 
   return (
     <ThemeProvider>
@@ -120,6 +137,9 @@ export function App({
           <AppNav>
             <AppNavLink href="#/" current={section === 'runs'}>
               Runs
+            </AppNavLink>
+            <AppNavLink href="#/plans" current={section === 'plans'}>
+              Plans
             </AppNavLink>
             <AppNavLink href="#/editor" current={section === 'editor'}>
               Editor
@@ -142,6 +162,13 @@ export function App({
   function view() {
     if (route === null) return <Runs client={client} />
     if (route.kind === 'logs') return <Logs logs={logsClient} />
+    if (route.kind === 'plans') {
+      return route.workflowId === null ? (
+        <PlansList plans={plansClient} />
+      ) : (
+        <PlanReviewView key={route.workflowId} plans={plansClient} planId={route.workflowId} />
+      )
+    }
     if (route.kind === 'editor') {
       return route.workflowId === null ? (
         <EditorList workflows={workflowClient} />
@@ -208,6 +235,11 @@ function BrandMark() {
 
 function routeOf(hash: string): Route | null {
   if (LOGS_ROUTE.test(hash)) return { kind: 'logs' }
+  const plans = PLANS_ROUTE.exec(hash)
+  if (plans !== null) {
+    const id = plans[1]
+    return { kind: 'plans', workflowId: id === undefined ? null : decodeURIComponent(id) }
+  }
   const editor = EDITOR_ROUTE.exec(hash)
   if (editor !== null) {
     const id = editor[1]

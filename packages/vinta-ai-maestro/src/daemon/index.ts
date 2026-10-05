@@ -27,6 +27,7 @@ export {
   type WorkflowRead,
   type WorkflowStore,
 } from './workflows.ts'
+export { registerPlanRoutes, type PlanRoutesOptions } from './plans.ts'
 export { startDaemon, type Daemon, type DaemonOptions } from './server.ts'
 export {
   AddContextRequestSchema,
@@ -61,6 +62,10 @@ export {
   StartRunResponseSchema,
   WorkflowListResponseSchema,
   WorkflowResponseSchema,
+  PlanListResponseSchema,
+  PlanViewResponseSchema,
+  PlanReviewResponseSchema,
+  PlanScheduleResponseSchema,
   formatPath,
   toWireIssues,
   type AmendResponse,

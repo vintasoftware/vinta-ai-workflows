@@ -563,6 +563,7 @@ React + Vite, served by `vinta-ai-maestro ui` at `127.0.0.1` behind a random tok
 | Changes | The node's whole diff, full page and linkable (`#/runs/<run>/nodes/<node>/changes`): a sticky file list, unified hunks with syntax highlighting and both line numbers. Served by `GET …/nodes/:nodeId/changes`, which the git unit answers from the lane's working tree while the lane holds the branch — uncommitted work included — and from the branch after that |
 | Terminal | `xterm.js` over WebSocket — PTY takeover and raw stream tailing |
 | Editor | `vinta-dag-editor` in edit mode (add node, draw dependency, set gates/harness/model) plus `vinta-state-machine-editor` for pipelines |
+| Plans | §19's review page for a plan that has not run: the graph coloured by review state, each phase's brief, composed prompts and gates, the plan's markdown, a gate matrix, the projected schedule, comments anchored to any of them, and the conversation with the agent that wrote the plan |
 | Logs | The daemon's own log (§13.8) — level, run, node and substring filters, following the tail. Its own section rather than a run panel, because the records worth reading most are the ones with no run to file them under |
 
 The run view and the workflow editor are **the same component in two modes**, which is what keeps them from drifting into two different pictures of the same graph.
@@ -1049,3 +1050,64 @@ A claude-code `PreToolUse` hook (`guard-hook`) is installed for every spawn in e
 - **opencode enforcement.** Its plugin API could host the guard before a call runs.
 - **A plan branch on a remote.** The reload reads the local ref, and a commit pushed from another machine is not fetched.
 - **Retuning `scoped_cmd`.** The monitor's `retune_gate` changes `cmd` only.
+
+## 19. Plan review
+
+A plan is cheapest to fix before anything has run, and a reviewer who sees only the markdown sees half of what will happen. The other half is three things: the graph, the prompts each agent will be sent, and the gates each phase must pass. Plan review puts all of it on one page and gives the reviewer a channel back to the agent that wrote the plan.
+
+This does not make maestro a plan author, so the §1 non-goal stands. The agent that ran `plan-feature` still writes and edits the plan. Maestro serves the page, stores the review, and relays the conversation.
+
+### 19.1 The page
+
+`#/plans/<workflow-id>`, under a **Plans** section beside Runs, Editor and Logs. `vinta-ai-maestro review open <workflow.json>` serves the UI as `ui` does and prints a URL deep-linked to the page.
+
+| Tab | Contents |
+|---|---|
+| Graph | `vinta-dag-editor` in read mode, wave-banded, with each node coloured by **review state** rather than run state. Four run statuses are borrowed for their tone and relabelled through the canvas's `strings`: no comments, open comments, comments resolved, has issues. Below the graph is the selected phase: staffing, the standard pipeline as a strip of steps, dependencies and dependents, touches, and tabs for its brief, its implementer, reviewer and fixer prompts, its gates and its chores |
+| Plan | The markdown cut at every `#`–`###` heading outside a code fence. Each section is commentable and each selection quotable. A phase's section links to its node |
+| Gates | A phase × gate matrix over the resolved workflow, then each gate's command, scoped command, timeout and pools, the resource pools, and the chores |
+| Schedule | §13.1's projection drawn as a timeline with the critical path marked. It reads `GET /api/plans/:id/schedule` |
+| Issues | `validate`'s issues, each linked to its node where it has one |
+
+**The prompts are composed, not described.** `GET /api/plans/:id` calls `composeSpawnPrompt` for every role over a journal with no history (`src/review/plan.ts`). What the page shows is therefore the cold prompt a run would send, with three exceptions. A run names its lane's path where the page names the checkout. Its branch line is the phase branch, not `HEAD`. And it appends each dependency's final report. A reference that leaves the repository, or a graph with a cycle, blocks composition. The brief still shows and the issue list says why.
+
+**References are contained.** The page reads files named inside a document, on a browser's request, so every `plan_ref`, `prompt_ref` and `plan_context_refs` path is resolved inside the checkout, after following symlinks, before it is read. Anything else is an issue and is never opened (`src/review/references.ts`). Plan ids are the workflow schema's kebab-case, as on the editor's routes.
+
+### 19.2 The review document
+
+`ai-plans/<id>.review.json` sits beside the plan and is committed with it. It is generated from `src/review/document.ts` as `schemas/plan-review.v1.schema.json`. It holds:
+
+- **Comments.** Each comment has an anchor: the plan, a section, a phase, a role's prompt, or a gate, optionally on a phase. It can carry a quote, replies, and a status of open or resolved.
+- **A conversation.** Messages and one approval.
+- **A status.** Open or approved.
+
+A person's comment is a **draft** until it is sent. One "Send to agent" message carries every unsent thread by id, the way a code review is submitted. A person's new reply on a sent thread makes the thread unsent again. Writing after approving reopens the review.
+
+Every change is a pure function over the document. `src/review/store.ts` applies it as a read-modify-write under an exclusive lock file, with atomic writes. The daemon and the agent's CLI are separate processes editing one file, and the lock is what lets them do it safely. A review file that does not parse is never overwritten.
+
+**The browser writes only as the person.** A request body names no author; the route stamps `human`. The agent writes only through `review reply`. A page that could post as the agent would let anyone holding the token put words in its mouth that the agent would later read back as its own.
+
+### 19.3 The agent's loop
+
+The agent is whatever session ran `plan-feature`. It is not hosted by maestro, and there is no harness adapter in the loop. It runs shell commands:
+
+- `review wait <workflow.json>` blocks until a person's message is undelivered. It marks the message delivered under the lock and prints one JSON object. The object holds each message, and each sent thread spelled out with a `where` in words, its anchor, its quote, its body and its replies. It also prints `kind: "approved"` when the last thing the person did was approve. After `--timeout` it exits 0 with `kind: "timeout"`, because agents have a ceiling on how long one command may run.
+- `review reply <workflow.json> -m …` posts to the conversation, or with `--comment <id> [--resolve]` to a thread.
+
+While it waits, `wait` beats a heartbeat into `.vinta-ai-maestro/reviews/<id>.listener.json`, which holds a pid, the time it started listening, and the last beat. That file is per-machine and gitignored. The page shows one of three states:
+
+- **listening:** a fresh beat from a live pid.
+- **working:** the agent picked up a message and has not answered yet, within thirty minutes of its last beat.
+- **away:** neither. The away state prints the exact `review wait` command, so any session can attach.
+
+The page polls the review every two seconds, along with a stamp of every file the view is built from: the workflow, `.vinta-ai-workflows.yaml`, and the plan files the references name. It rebuilds the view only when the stamp moves, which is how an edit the agent makes appears without a reload.
+
+### 19.4 Validation
+
+`vinta-ai-maestro validate <workflow.json> [--json]` runs the load a run does, `resolveWorkflow` over the project configuration. It then runs two checks that only a run used to perform: that the filename stem is the id, and that every reference names a heading that exists. `plan-feature` runs it on every workflow it writes when maestro is installed, and the review page shows the same issues.
+
+### 19.5 Not done here
+
+- **A hosted reviser.** When no agent is listening, messages wait. Spawning a harness to answer them would add an author maestro would have to permission. A §17-style adapter for that is the natural next step.
+- **Multi-reviewer identity.** A comment's author is `human`, with an optional name. Runs are operator-owned (§1), and so are reviews.
+- **Line-anchored comments on the plan.** Anchors are headings, not lines. A heading survives the edits a review causes; a line number does not.

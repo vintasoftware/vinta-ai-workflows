@@ -99,6 +99,7 @@ import {
   type WorkflowListResponse,
   type WorkflowResponse,
 } from './schemas.ts'
+import { registerPlanRoutes } from './plans.ts'
 import { createWorkflowStore, isWorkflowId, plansDirFor } from './workflows.ts'
 
 /**
@@ -1185,6 +1186,9 @@ export function createApi(options: ApiOptions): Hono {
     }
     return c.json({ ok: true })
   })
+
+  // §19: plans under review, read from the same `ai-plans/` the editor opens.
+  registerPlanRoutes(app, { repoDir, stateRoot: journal.root, workflows: store })
 
   return app
 

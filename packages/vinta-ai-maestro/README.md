@@ -84,6 +84,10 @@ Every command runs against a project checkout — your project, not this one. `-
 
 | Command | What it does |
 |---|---|
+| `validate <workflow.json> [--repo <dir>] [--json]` | Checks a workflow without running anything. It checks the document's shape and its graph, layered over the project's `.vinta-ai-workflows.yaml`, as a run loads it. It also checks that the file is named `<id>.workflow.json`, and that `plan_ref` and every `prompt_ref`, `plan_context_refs` and chore anchor name a heading that exists in the plan. `--json` prints one object for an agent. `plan-feature` runs this on every workflow it writes. Exits 1 on any issue. |
+| `review open <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Serves the UI and prints the URL of that plan's [review page](#reviewing-a-plan-before-it-runs). |
+| `review wait <workflow.json> [--timeout <s>]` | The authoring agent's side of the review chat. It blocks until the person sends something, prints it as JSON, and marks it delivered. It gives up after `--timeout` (default 110 s) with `{"kind":"timeout"}`. |
+| `review reply <workflow.json> -m <text\|-> [--comment <id> [--resolve]] [--as <name>]` | Answers in the chat, or on a comment thread, as the agent. |
 | `doctor <workflow.json> [--repo <dir>] [--resume <run-id>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
 | `run <workflow.json> [--repo <dir>]` | Starts the workflow as a **background job** and returns once it is under way. The run does not need the terminal: close it and the run carries on. `--foreground` hosts it in this process instead and exits when it ends, for CI. |
@@ -467,6 +471,46 @@ An implementer that hits a decision it should not make alone ends its turn with 
 
 The answer resumes the agent's own session, so it carries on from where it stopped with its context intact. Under `--retry-after`, nobody answering means the recommended options are taken after the interval, and the answer is marked unattended. The questions stay in the transcript, and the journal records only that the node paused and which options were picked (see [SPEC.md §9.1](SPEC.md)).
 
+## Reviewing a plan before it runs
+
+A plan is cheapest to fix before anything has run. The **Plans** section of the UI is a review page for a plan in `ai-plans/` that has not run yet. You can read and comment on all of it, and talk to the agent that wrote it, which revises the plan while you watch.
+
+```bash
+npx vinta-ai-maestro@alpha review open ai-plans/2026-03-04-bookmark-folders.workflow.json
+```
+
+`review open` serves the UI, as `ui` does, and prints a URL that opens on that plan's page. The page has four tabs and a sidebar:
+
+| Tab | What it shows |
+|---|---|
+| **Graph** | The phase DAG, with wave bands and an artifact label on every edge. Each phase is coloured by its review state: no comments, open comments, comments resolved, or has issues. Below the graph is the selected phase in full: who implements and reviews it at which tier and model, its pipeline as a strip of steps (implement → review/fix loop → polish → gates → integrate), what it depends on and unblocks, and its touch list. Its tabs hold the **brief**, the **implementer, reviewer and fixer prompts**, its **gates** and its **chores**. |
+| **Plan** | The markdown plan, whole, with an outline. Every section has its own comment button. A section that is a phase's brief links to that phase on the graph. |
+| **Gates** | A phase × gate matrix, and each gate's resolved command, scoped command, timeout and the pools it holds. "Resolved" means the project's `.vinta-ai-workflows.yaml` layered under the plan, so these are the commands a run executes. Resource pools and chores are listed too. |
+| **Schedule** | `simulate`'s projection drawn as a timeline: which phases run side by side and which chain is the critical path. It uses default durations, so it shows the shape of the schedule, not how long the run will take. |
+| **Issues** | Shown only when there are issues. It lists what `validate` reports. |
+
+The prompts are the real ones: the same function a run calls composes them over an empty journal. A run differs in three ways: it uses its lane's path, it names the phase branch, and it adds the dependencies' final reports.
+
+**Comments.** You can comment on the whole plan, a section, a phase, one of a phase's prompts, or a gate. You can also select text in the plan or a prompt and comment on the selection, which quotes it. A comment is saved as a **draft** at once and reaches the agent only when you press **Send to agent**. One send carries every unsent comment, like submitting a code review. Threads take replies and can be resolved or reopened.
+
+**The agent chat.** The agent is the session that ran `plan-feature`, wherever it runs. It sits in a loop:
+
+```bash
+vinta-ai-maestro review wait  <workflow.json>          # blocks; prints what you sent as JSON
+vinta-ai-maestro review reply <workflow.json> -m "…"   # answers in the chat
+vinta-ai-maestro review reply <workflow.json> --comment c3 --resolve -m "…"   # answers on a thread
+```
+
+The chat shows the agent's state:
+
+- **listening:** it is blocked in `wait`, so a message is read at once.
+- **working:** it picked up your last message and has not answered yet.
+- **away:** no agent is listening. The panel prints the exact `review wait` command for any agent to attach.
+
+When the agent edits the plan or the workflow, the page notices and reloads them. **Approve plan** ends the loop: the agent's next `wait` returns `{"kind": "approved"}`. If you write again after approving, the review reopens.
+
+**Where it lives.** The review is a committed document, `ai-plans/<id>.review.json`, written beside the plan and its workflow and validated by [`plan-review.v1.schema.json`](../../schemas/plan-review.v1.schema.json). The next reader of the plan can see what was questioned and what changed. The agent's presence (pid and heartbeat) and the file lock are per-machine state under `.vinta-ai-maestro/reviews/`. Both the page and the agent write the review under that lock, so neither can overwrite the other. The browser can only write as the person. Agent replies come only through `review reply`.
+
 ## Walkthrough — two phases in parallel
 
 A repository with two phases that depend on nothing, so both belong to wave 1 and both run at once.
@@ -827,8 +871,9 @@ pnpm run typecheck
 pnpm test
 pnpm run schema:check              # workflow.v1 vs src/types.ts
 pnpm run postmortem:schema:check   # postmortem.v1 vs src/postmortem/postmortem.ts
+pnpm run review:schema:check       # plan-review.v1 vs src/review/document.ts
 ```
 
-`schemas/workflow.v1.schema.json` and `schemas/postmortem.v1.schema.json` are **generated** and drift-checked. Edit the zod source and regenerate with `schema:gen` / `postmortem:schema:gen`; never hand-edit the JSON.
+`schemas/workflow.v1.schema.json`, `schemas/postmortem.v1.schema.json` and `schemas/plan-review.v1.schema.json` are **generated** and drift-checked. Edit the zod source and regenerate with `schema:gen` / `postmortem:schema:gen` / `review:schema:gen`; never hand-edit the JSON.
 
 The browser UI lives in `ui/` and is built on the workspace's design system, [`packages/design-system`](../design-system/README.md) — its tokens, its shadcn/ui components and its layout kit; the two canvas Web Components are re-skinned through their own custom properties in `ui/src/app.css` so the graph and the badges beside it share one palette. `pnpm run ui:dev` serves it with Vite against a running daemon; `pnpm run ui:build` writes the bundle the daemon serves into `dist/ui`. The UI follows the operating system's light or dark scheme by default; the toggle in the top bar remembers a choice per browser. Fonts ship in the bundle — the page makes no request outside its own origin.

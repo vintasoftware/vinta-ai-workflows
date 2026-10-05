@@ -338,3 +338,20 @@ state-machine-editor {
   border-radius: var(--radius-md);
   background: color-mix(in oklch, var(--tone-attention) 7%, transparent);
 }
+
+/* §19's plan document. The plan is read as a document rather than a chat, so
+   its prose gets a document's size and rhythm instead of the transcript's. */
+.plan-prose {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+.plan-prose h1 {
+  font-size: 1.35em;
+}
+.plan-prose h2 {
+  font-size: 1.18em;
+  margin-top: 0.9em;
+}
+.plan-prose h3 {
+  font-size: 1.05em;
+}

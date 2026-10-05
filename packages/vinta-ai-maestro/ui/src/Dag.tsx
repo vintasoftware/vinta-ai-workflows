@@ -29,6 +29,7 @@ import {
   defineDagEditor,
   type Dag,
   type DagNodeActivateDetail,
+  type DagStringOverrides,
   type DagSelectionChangeDetail,
   type VintaDagElement,
 } from 'vinta-dag-editor/src/index.ts'
@@ -52,9 +53,20 @@ export interface DagViewProps {
   readonly onSelect: (nodeId: string | null) => void
   /** A node opened — double-clicked, or Enter on the selected one. */
   readonly onOpen?: (nodeId: string) => void
+  /**
+   * The canvas's labels. The review page (§19) borrows run statuses for their
+   * colour and renames them, so a plan that has not run never reads "Failed".
+   */
+  readonly strings?: DagStringOverrides
 }
 
-export function DagView({ dag, selected, onSelect, onOpen }: DagViewProps): React.ReactElement {
+export function DagView({
+  dag,
+  selected,
+  onSelect,
+  onOpen,
+  strings,
+}: DagViewProps): React.ReactElement {
   const host = useRef<VintaDagElement | null>(null)
 
   useLayoutEffect(() => {
@@ -75,6 +87,10 @@ export function DagView({ dag, selected, onSelect, onOpen }: DagViewProps): Reac
       element.removeEventListener(DAG_NODE_ACTIVATE_EVENT, open)
     }
   }, [onSelect, onOpen])
+
+  useLayoutEffect(() => {
+    if (host.current !== null && strings !== undefined) host.current.strings = strings
+  }, [strings])
 
   useLayoutEffect(() => {
     if (host.current !== null) host.current.value = dag

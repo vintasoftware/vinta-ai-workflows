@@ -68,6 +68,7 @@ The **skills side** of this repo (`skills/`, `dev-skills/`, `schemas/`, `vinta-a
 |---|---|
 | anything under `packages/vinta-ai-maestro/` | From that directory: `pnpm run typecheck` and `pnpm test`. Both must pass. |
 | `packages/vinta-ai-maestro/src/types.ts` | Additionally `pnpm --filter vinta-ai-maestro schema:gen` and commit the regenerated `schemas/workflow.v1.schema.json` — a test fails when the committed file drifts from the zod source. Never hand-edit that JSON. |
+| `packages/vinta-ai-maestro/src/review/document.ts` | Additionally `pnpm --filter vinta-ai-maestro review:schema:gen` and commit the regenerated `schemas/plan-review.v1.schema.json` — `tests/review.test.ts` fails when the committed file drifts. |
 | anything under `packages/vinta-dag-editor/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (Biome, configured in `biome.jsonc` to the repo's style rather than Biome's defaults). |
 | anything under `packages/design-system/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (same Biome setup). Then from `packages/vinta-ai-maestro/`: `pnpm run typecheck`, `pnpm test` and `pnpm run ui:build` — the app is the only consumer, and Tailwind only emits classes it can scan, so the build is the check that a new component's classes reach the bundle. |
 | `pnpm-workspace.yaml`, root `package.json`, or anything that could reach the published package | `npm pack --dry-run` at the root must list **exactly** the same files as before the change, and root `dependencies` must stay absent. |
