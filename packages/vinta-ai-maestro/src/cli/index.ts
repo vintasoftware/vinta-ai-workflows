@@ -27,6 +27,7 @@ import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
 import { SIMULATE_USAGE, simulateCommand } from './simulate.ts'
 import { STATUS_USAGE, statusCommand } from './status.ts'
+import { LAND_USAGE, PROPAGATE_USAGE, landCommand, propagateCommand } from './land.ts'
 import {
   AMEND_USAGE,
   EXEC_USAGE,
@@ -69,6 +70,10 @@ usage: vinta-ai-maestro <command> [options]
   exec <run-id> <lane|integration> -- <cmd>
                              Run a command in a lane or the integration
                              worktree, with that worktree's environment.
+  land <run-id> [--close]    Which PR lands a finished run, and which of its
+                             review PRs are done; --close closes those.
+  propagate <run-id> <phase> Carry a fix made on a phase after the run into
+                             every integ-* and wave-* branch that has it.
   ui                         Serve the browser UI for every run and print the
                              URL to open. Closing it leaves runs running.
                              (\`serve\` is the same command.)
@@ -108,6 +113,8 @@ const USAGES: Readonly<Record<string, string>> = {
   workflow: WORKFLOW_USAGE,
   amend: AMEND_USAGE,
   exec: EXEC_USAGE,
+  land: LAND_USAGE,
+  propagate: PROPAGATE_USAGE,
   purge: PURGE_USAGE,
   with: WITH_USAGE,
   gate: GATE_USAGE,
@@ -167,6 +174,10 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await amendCommand(rest, io)
     case 'exec':
       return await execCommand(rest, io)
+    case 'land':
+      return await landCommand(rest, io)
+    case 'propagate':
+      return await propagateCommand(rest, io)
     case 'purge':
       return await purgeCommand(rest, io)
     case 'with':

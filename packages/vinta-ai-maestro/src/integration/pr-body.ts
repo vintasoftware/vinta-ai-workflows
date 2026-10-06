@@ -110,6 +110,44 @@ export interface PhaseFacts {
   readonly conflicts: readonly { readonly paths: readonly string[]; readonly rounds: number }[]
   /** Files the phase declared it would touch, from the plan. */
   readonly touches: readonly string[]
+  /** How the plan lands, so this PR can say it is not the way. */
+  readonly landing: Landing
+  /**
+   * Phases in this phase's wave or earlier that its base leaves out — neither
+   * its dependencies nor its dependents. Its CI runs without them.
+   */
+  readonly leftOut: readonly string[]
+}
+
+/** The one way a plan lands, as every PR the run opens states it. */
+export interface Landing {
+  readonly runId: string
+  /** The final wave branch: the plan PR's head. */
+  readonly planHead: string
+  readonly baseBranch: string
+}
+
+/**
+ * The landing note every review-unit PR carries.
+ *
+ * A run opens three kinds of PR and one of them lands the plan. Saying so on
+ * every one is the fix for an observed landing that merged 36 PRs in an order
+ * that resolved the same conflicts several times against different bases —
+ * two of those hand resolutions were wrong (a dropped decorator, eight
+ * duplicated definitions), and each broke CI a branch later.
+ */
+function landingNote(landing: Landing): string[] {
+  return [
+    '## Landing',
+    '',
+    `**Review unit — don't merge this PR.** The plan lands through one PR: \`${landing.planHead}\` ` +
+      `into \`${landing.baseBranch}\`, opened when the run's last phase finishes. That branch already ` +
+      'carries this change and every conflict resolution the run made around it; merging this one ' +
+      'separately resolves the same conflicts again, against a different base.',
+    '',
+    `Approve and comment here. Once the plan PR is merged, \`vinta-ai-maestro land ${landing.runId} --close\` ` +
+      'closes this PR, saying it landed.',
+  ]
 }
 
 /**
@@ -137,6 +175,19 @@ export function composePrBody(facts: PhaseFacts): PrText {
         `(${facts.dependsOn.map((id) => `\`${id}\``).join(', ')}), not from plan order. ` +
         'The diff is this phase only; its dependencies are already in the base.',
   ]
+
+  if (facts.leftOut.length > 0) {
+    const ids = facts.leftOut.map((id) => `\`${id}\``).join(', ')
+    lines.push(
+      '',
+      '## What CI on this PR checks',
+      '',
+      `This branch is built on its dependencies only. It leaves out ${ids}, which run beside it ` +
+        'and land with it in the plan PR, so CI here tests a mix that never ships as such: a failure ' +
+        'in their area may already be fixed on their branch. The authoritative check is the merged ' +
+        'wave and the plan PR.',
+    )
+  }
 
   if (facts.touches.length > 0) {
     lines.push('', '## Declared surface', '')
@@ -176,6 +227,8 @@ export function composePrBody(facts: PhaseFacts): PrText {
     )
   }
 
+  lines.push('', ...landingNote(facts.landing))
+
   return { title: facts.name, body: lines.join('\n'), source: 'composed' }
 }
 
@@ -189,6 +242,8 @@ export interface IntegrationFacts {
   readonly baseBranch: string
   /** The dependencies it merges, in the order it merged them. */
   readonly dependsOn: readonly string[]
+  /** How the plan lands. Absent for a caller that does not know (`Integrator` alone). */
+  readonly landing?: Landing
 }
 
 /**
@@ -214,16 +269,17 @@ export function composeIntegrationPrBody(facts: IntegrationFacts): PrText {
       `${deps} — into one branch, so the phase has a single base. The PR for ` +
       `\`${facts.nodeId}\` targets \`${facts.branch}\`.`,
     '',
-    '## Merge order',
+    'What to review here is what only this branch carries: the merge commits, and any ' +
+      'conflict an agent resolved while building it.',
     '',
-    `1. Merge the PRs for ${deps} first.`,
-    `2. Merge this one. By then its diff is only what this branch adds: the merge ` +
-      'commits, and any conflict an agent resolved while building it.',
-    `3. Retarget the PR for \`${facts.nodeId}\` to \`${facts.baseBranch}\`. GitHub does ` +
-      'this by itself when the merged branch is deleted.',
-    '',
-    'Use merge commits, not squash, all the way down the stack. A squash gives the ' +
-      'stacked PRs above it a diff that repeats every change below them.',
+    ...(facts.landing === undefined
+      ? [
+          '## Landing',
+          '',
+          `**Review unit — don't merge this PR.** The plan lands through its plan PR, the final ` +
+            `wave branch into \`${facts.baseBranch}\`, which already carries this branch.`,
+        ]
+      : landingNote(facts.landing)),
   ]
   return { title: `Integrate ${facts.dependsOn.join(' + ')} for ${facts.name}`, body: lines.join('\n'), source: 'composed' }
 }
@@ -238,6 +294,7 @@ export interface PlanPrStep {
 }
 
 export interface PlanFacts {
+  readonly runId: string
   readonly planId: string
   readonly baseBranch: string
   /** The final wave branch, which carries every phase. This PR's head. */
@@ -263,26 +320,27 @@ export function composePlanPrBody(facts: PlanFacts): PrText {
     '',
     '## How to land the plan',
     '',
-    'Pick one. Use merge commits, not squash, either way.',
+    '**Merge this PR, with a merge commit, and no other.** It is the only PR that carries the ' +
+      'whole plan with its conflicts resolved once. The phase and integration PRs below are ' +
+      'review units: merging them as well resolves the same conflicts again, against different ' +
+      'bases, which is how a landing goes wrong.',
     '',
-    `- **All at once.** Merge this PR. Phase PRs based on \`${facts.baseBranch}\` close ` +
-      'as merged by themselves; close the stacked ones.',
-    '- **Phase by phase.** Merge the PRs below in order, then this one last. Its diff ' +
-      'shrinks to what is not on the base yet — usually the conflict resolutions between ' +
-      'sibling phases, which no phase PR carries.',
+    `After it merges, \`vinta-ai-maestro land ${facts.runId} --close\` closes every review PR ` +
+      `whose work is now in \`${facts.baseBranch}\`, with a comment saying so. A fix made to a ` +
+      `phase after the run is carried into this branch with \`vinta-ai-maestro propagate ` +
+      `${facts.runId} <phase>\`.`,
   ]
 
   if (facts.steps.length > 0) {
-    lines.push('', '## Merge order', '')
-    facts.steps.forEach((step, index) => {
+    lines.push('', '## Review units', '')
+    for (const step of facts.steps) {
       const what =
         step.kind === 'integration'
           ? `integration branch for \`${step.nodeId}\``
           : `phase \`${step.nodeId}\``
-      const link = step.url === undefined ? '(no PR — open it by hand)' : step.url
-      lines.push(`${index + 1}. ${what}: ${link} — \`${step.head}\` into \`${step.base}\``)
-    })
-    lines.push(`${facts.steps.length + 1}. This PR.`)
+      const link = step.url === undefined ? '(no PR opened)' : step.url
+      lines.push(`- ${what}: ${link} — \`${step.head}\` into \`${step.base}\``)
+    }
   }
 
   return { title: `Land plan ${facts.planId}`, body: lines.join('\n'), source: 'composed' }
