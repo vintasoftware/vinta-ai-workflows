@@ -610,6 +610,7 @@ Transport: HTTP for commands and snapshots, one WebSocket for the event stream a
 ## 11. Security and data handling
 
 - Binds `127.0.0.1` by default. A random token is required on every request including the WebSocket upgrade. `--host` for remote access is explicit, printed with a warning, and never the default.
+- **Three tokens, one per kind of caller.** Each daemon mints the operator's token (the URL's, and the only one that opens the WebSocket or is forwarded by `ui` to a run's job), the run coordinator's, and the agents'. Lanes receive the agents' token as `VINTA_AI_MAESTRO_TOKEN`, and it reaches only what a lane calls: `POST`/`PUT`/`DELETE` on `/api/runs/:runId/leases…` (`with`), `POST /api/runs/:runId/gates` (`gate`), and the judge and guard hooks (`/permission`, `/guard`). Every other route answers it `403 agent_forbidden` — the §9 operations, `/amend`, `/exec`, `/pause`, `/stop`, the editor, and the reads. All three are registered with `redactValue`, so none reaches a log.
 - **No credentials, ever.** No API keys, no token storage, no login flows. Auth lives entirely in the harness CLIs the user already logged into.
 - Transcripts and gate logs contain repository contents verbatim. They stay inside the project under `.vinta-ai-maestro/` (gitignored), never in a global cache directory. `vinta-ai-maestro purge <run-id>` and a documented retention default.
 - Structured log fields carry opaque identifiers — run id, node id, session id — never file contents or record data.
@@ -1076,7 +1077,6 @@ A claude-code `PreToolUse` hook (`guard-hook`) is installed for every spawn in e
 
 - **opencode enforcement.** Its plugin API could host the guard before a call runs.
 - **A plan branch on a remote.** The reload reads the local ref, and a commit pushed from another machine is not fetched.
-- **An agent's token is the operator's.** Lane agents reach the job's API with the daemon's own token (for `with` and `gate`), so an agent that called the steering or amend endpoints would be taken for the operator. The coordinator has its own token; lane agents do not yet.
 
 ## 19. Plan review
 

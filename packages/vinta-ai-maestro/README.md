@@ -916,6 +916,8 @@ That line is the only place in this package's output where the token ever appear
 
 Each run's job has a token of its own, which it is never printed: it is written to that run's `job.json`, readable by your user only, and removed when the job ends. `ui` reads it to forward a live run's traffic, and the browser never sees it — its requests carry `ui`'s token, which the job would refuse. Treat `job.json` like the URL: it is access to the run.
 
+The run's agents never hold that token. Each lane is handed a narrower one, as `VINTA_AI_MAESTRO_TOKEN`, that reaches only what a lane calls: its own leases (`with`), `gate`, and the permission-judge and gate-guard hooks. Everything else — steering, abort, retry, amend, `exec`, pause, stop, the editor, even reading the run — answers it `403 agent_forbidden`, and it cannot open the WebSocket. An agent can wait on a pool or run a gate; it cannot steer its own run. The run coordinator has a third token of its own (see [The run coordinator](#the-run-coordinator)).
+
 **`--host` is explicit and warned about.** The default bind is `127.0.0.1`. Any other value makes the daemon reachable from other machines, and the daemon prints a warning naming the host — on stderr, where it cannot be mistaken for part of the URL. Anyone who can reach the daemon and holds the token can drive the run: there is no per-user access control, by design. Prefer an SSH port-forward to `--host` for a daemon on a bigger box.
 
 ## Harnesses
