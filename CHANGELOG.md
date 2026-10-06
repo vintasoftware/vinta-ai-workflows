@@ -681,6 +681,22 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Maestro: `defaults.wave_gates`** (`off` | `final` | `every`, additive,
+  default `final`). The phases' gates now run in full on the merged tree:
+  every gate of the plan on the last wave before the plan PR opens, and a
+  wave's gates on any wave whose merge needed a conflict resolution; `every`
+  checks every wave. Merged waves were never tested under `gate_scope: full`,
+  and two parallel phases that each passed their gates disagreed on a signal's
+  keyword arguments, failing 22 tests that only showed up after the plan PR.
+  `plan-feature` now puts a contract test for any interface two parallel
+  phases share into the foundation phase.
+- **Maestro: pausing a phase parked on a question holds it.** Under
+  `--retry-after` the unattended timer no longer answers a question the
+  operator paused; a person's answer releases it, and `status` and the node
+  view say "paused by operator". The pause used to be recorded as `ignored`
+  while the timer fired anyway. Node operations now answer with the delivery
+  they recorded, so `POST …/pause` on a node with nothing to pause reports
+  `"delivery": "ignored"` instead of a bare `ok`.
 - **Maestro: `nodes[].deferred`** (additive). A phase carrying it — the
   soak-gated flag removal `plan-feature` now emits it on — is not dispatched
   when its dependencies merge; it parks on a question naming the reason, and
@@ -700,6 +716,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Maestro: wave branches are built across a restart.** Wave completion was
+  counted in memory, so a run that restarted with some phases of a wave merged
+  before and the rest after never built that wave, and the next wave failed on
+  `git checkout` (exit 128) on every retry. A phase the journal calls `done`
+  now counts as arrived; a wave the run never built is built before the wave
+  on top of it, and a wave that completes before the one under it waits for
+  it (`wave_deferred`) instead of failing. A missing wave is named
+  ("wave 5 was never built") rather than left to git. New `wave_built` event.
 - **Maestro: a phase that moved lanes can check out its branch.** The branch
   is released from the sibling worktree that still had it (detached at its
   commit, tree untouched) before the new lane takes it. Git's "already used

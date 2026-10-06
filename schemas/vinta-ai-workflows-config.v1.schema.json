@@ -339,7 +339,7 @@
       "additionalProperties": false,
       "properties": {
         "defaults": {
-          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`.",
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `wave_gates` (`off` | `final` | `every`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`.",
           "type": "object",
           "properties": {
             "harness": {
@@ -378,6 +378,15 @@
                 "scoped",
                 "full"
               ]
+            },
+            "wave_gates": {
+              "type": "string",
+              "enum": [
+                "off",
+                "final",
+                "every"
+              ],
+              "description": "When the phases' gates run in full on a merged wave, in the integration worktree. `final` (the default): every gate of the plan on the last wave before the plan PR, and a wave's gates on any wave whose merge needed a conflict resolution. `every`: on every wave as well. `off`: none of these (the full form of a `scoped_cmd` gate still runs per wave under `gate_scope: scoped`)."
             },
             "allow_ungated_phases": {
               "type": "boolean",

@@ -307,6 +307,28 @@ naming them — when a gitignored file has a tracked example (`.env.example`,
 the declared files it lacks and leaves the ones it has, so amending the list
 reaches lanes that are already there.
 
+### Testing the merged tree — `defaults.wave_gates`
+
+Each phase passes its gates on its own branch. Two phases running in parallel
+can each be green and still disagree — one sends a signal without a keyword
+argument the other's receiver requires — and only the merged tree shows it.
+
+| Value | Runs the gates in full on the integration worktree |
+|---|---|
+| `final` (default) | every gate of the plan on the last wave, before the plan PR opens; a wave's own gates on any wave whose merge needed a conflict resolution |
+| `every` | a wave's own gates on every wave, plus the final check — one extra suite per wave, and a break is named at the wave that introduced it |
+| `off` | none of the above |
+
+Under `gate_scope: scoped`, the full form of a narrowed gate still runs on
+every wave whatever this says. A red merged tree fails the phase whose merge
+built the wave.
+
+### Pausing a phase that is waiting on you
+
+Pause on a phase parked on a question keeps it parked: under `--retry-after`,
+no timer answers its question until you do. `status` shows it as "paused by
+operator". Any answer releases it.
+
 ### Deferred phases — `nodes[].deferred`
 
 A phase the plan says must not start on its own — the flag removal that waits
