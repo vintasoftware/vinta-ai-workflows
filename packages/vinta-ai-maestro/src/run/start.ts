@@ -66,6 +66,7 @@ import { PROJECT_CONFIG_FILE, readFileAt } from '../config/project-config.ts'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readSources, repoRelative, writeSources, type RunSources, type RunSourcesInput } from './sources.ts'
+import { ensureLauncher, selfSource, withLauncherOnPath } from './launcher.ts'
 import type { Monitor } from '../monitor/monitor.ts'
 import type { SystemOne } from '../system-one/config.ts'
 import { createPermissionJudge } from '../system-one/permission.ts'
@@ -147,6 +148,16 @@ export interface StartRunOptions {
   readonly sources?: RunSourcesInput
   /** How often the plan branch is checked for new commits. */
   readonly configReloadMs?: number
+}
+
+/**
+ * `PATH` with the daemon's launcher first, under whichever spelling of the
+ * variable this process has — Windows keeps it as `Path`, and an overlay that
+ * added `PATH` beside it would leave the child with two.
+ */
+function launcherPath(storeDir: string): Record<string, string> {
+  const key = Object.keys(process.env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
+  return { [key]: withLauncherOnPath(ensureLauncher(storeDir, selfSource()), process.env[key]) }
 }
 
 /**
@@ -371,6 +382,10 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
               [MAESTRO_URL_ENV]: daemon.url,
               [MAESTRO_TOKEN_ENV]: daemon.token,
               [MAESTRO_RUN_ENV]: runId,
+              // The daemon's own launcher first on PATH, so the lease and gate
+              // verbs the prompts name resolve from inside every lane however
+              // maestro was installed (`launcher.ts`).
+              ...launcherPath(journal.root),
             },
             ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
           })
@@ -429,6 +444,9 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(host.laneDelta === undefined ? {} : { laneDelta: host.laneDelta }),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
   })
+  // A merge commit git refused is the operator's call, asked on the node whose
+  // merge it is; `abort` is answered for them under `--retry-after`.
+  host.bindCommitDecision?.((failure) => scheduler.decideCommit(failure))
 
   // §9's amend needs two things this composition owns: the integration worktree
   // a `done` node's branch is moved in, and the live scheduler that hands an

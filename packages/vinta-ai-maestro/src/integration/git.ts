@@ -7,37 +7,72 @@
  *
  * No stdout from these calls ever reaches an error message or a structured
  * field. Git prints repository content — diffs, conflict hunks, commit bodies —
- * and §11 puts that in exactly one place, which is not here.
+ * on stdout, and §11 puts that in exactly one place, which is not here. The
+ * tail of *stderr* is a different thing and is carried: see `GitCommandError`.
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { redactText } from '../log/index.ts'
 
 const exec = promisify(execFile)
 
 /**
- * A git command that exited non-zero, named by its subcommand and code.
+ * How much of git's stderr an error keeps. The tail rather than the head,
+ * because a hook that fails prints its traceback last; bounded, because a
+ * hook that prints a file prints it to stderr too.
+ */
+export const GIT_STDERR_LIMIT = 600
+
+/**
+ * A git command that exited non-zero, named by its subcommand and code, with
+ * the tail of what git said on stderr.
  *
- * Both halves are what §11 allows and nothing more: `git commit` and `1` are a
- * command name and an exit status, not repository content. Git's own stderr is
- * deliberately dropped — it is where the diff hunks and file bodies are.
+ * The subcommand and the exit status are what §11 allows outright. The stderr
+ * tail used to be dropped, on the argument that stderr is where diff hunks and
+ * file bodies are — and the argument was wrong about which failures this
+ * package actually has. Git's stderr on a non-zero exit is its diagnostic:
+ * "you need to resolve your current index first", "pathspec 'x' did not match",
+ * or the pre-commit hook's own last lines. Without it one observed run failed
+ * four phases up to twenty-three times each on `git checkout exited 1`, and
+ * the one fact that explained all of them — the integration worktree was
+ * mid-merge — took a person reading `.git/` by hand to find.
+ *
+ * So the tail is kept, under the same rules a log record's `message` has:
+ * registered secrets replaced, the length capped (`redactText`), and the
+ * amount bounded further by `GIT_STDERR_LIMIT` so a hook that echoes a file
+ * cannot put the file in the journal.
  *
  * It exists because the alternative was worse than terse. An `execFile`
  * rejection carries `name: 'Error'` and a *numeric* `code`, and the scheduler's
  * `failureReason` reports an unrecognised error as its name plus a **string**
  * `code` — so every non-zero git exit in the run, which is the most common real
- * failure this package has, was persisted as the single word "Error". A phase
- * that died on `git commit` exiting 1 said exactly as much as one that died on
- * a missing binary.
+ * failure this package has, was persisted as the single word "Error".
  */
 export class GitCommandError extends Error {
+  /** The redacted stderr tail, '' when git said nothing. */
+  readonly detail: string
+
   constructor(
     /** The subcommand, e.g. `commit`. Never the full argument list — paths and refs live there. */
     readonly subcommand: string,
     readonly exitCode: number | null,
+    stderr = '',
   ) {
-    super(`git ${subcommand} exited ${exitCode ?? 'abnormally'}`)
+    const detail = stderrTail(stderr)
+    super(
+      `git ${subcommand} exited ${exitCode ?? 'abnormally'}` +
+        (detail === '' ? '' : `: ${detail}`),
+    )
     this.name = 'GitCommandError'
+    this.detail = detail
   }
+}
+
+/** The last `GIT_STDERR_LIMIT` characters of a stderr capture, redacted. */
+function stderrTail(stderr: string): string {
+  const trimmed = stderr.trim()
+  const tail = trimmed.length <= GIT_STDERR_LIMIT ? trimmed : `…${trimmed.slice(-GIT_STDERR_LIMIT)}`
+  return redactText(tail)
 }
 
 /**
@@ -63,9 +98,9 @@ export async function git(
     // A spawn failure — git missing from PATH — keeps its own `ENOENT`, which
     // `failureReason` already reports and which means something different from
     // any exit status: nothing ran.
-    const code = (error as { code?: unknown }).code
+    const { code, stderr } = error as { code?: unknown; stderr?: unknown }
     if (typeof code !== 'number') throw error
-    throw new GitCommandError(args[0] ?? 'git', code)
+    throw new GitCommandError(args[0] ?? 'git', code, typeof stderr === 'string' ? stderr : '')
   }
 }
 

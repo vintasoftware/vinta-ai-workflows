@@ -698,7 +698,7 @@ export class RunEffectExecutor implements EffectExecutor {
     // its wave against is the plan whose last wave this is or is not.
     const final = wave === this.#finalWave()
     await this.#integration(async () => {
-      const result = await this.#options.integrator.mergeWave(wave, members)
+      const result = await this.#options.integrator.mergeWave(wave, members, nodeId)
       await this.#waveGates(nodeId, wave, members)
       // Pushed, because the plan PR is opened from the last one and a PR needs
       // a head the forge has seen. The rest are pushed for the same reason the

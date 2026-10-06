@@ -28,7 +28,12 @@ import { OpencodeAdapter } from '../harness/opencode.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
 import type { ConflictFixer } from '../integration/fixer.ts'
 import { gitLines } from '../integration/git.ts'
-import { Integrator, type WaveResult } from '../integration/integrator.ts'
+import {
+  type CommitDecision,
+  type CommitFailure,
+  Integrator,
+  type WaveResult,
+} from '../integration/integrator.ts'
 import { createCrewConflictFixer } from '../integration/staffing.ts'
 import type { StoredEvent } from '../journal/events.ts'
 import type { TranscriptEntry } from '../journal/transcript.ts'
@@ -104,6 +109,17 @@ export interface HostWiring {
    */
   readonly adopt?: (workflow: Workflow) => void
   /**
+   * Binds who answers when git refuses to commit a resolved merge
+   * (`IntegratorOptions.onCommitFailure`).
+   *
+   * Late-bound, because the answer comes from the scheduler's node question
+   * and the scheduler is built after this seam, from what it returns. Until
+   * bound — and for an injected executor, which is never bound — the
+   * integrator aborts the merge, which is the one answer that keeps the
+   * shared worktree usable without a person.
+   */
+  readonly bindCommitDecision?: (decide: (failure: CommitFailure) => Promise<CommitDecision>) => void
+  /**
    * Handles this process opened. Never the lanes: §8 leaves worktrees, branches
    * and databases in place for the human who has to read what happened — and,
    * since runs became resumable, for the attempt that picks the run back up.
@@ -125,8 +141,12 @@ class RecordingIntegrator extends Integrator {
   // `members` is passed through: dropping it here made every production merge
   // fall back to the integrator's own reading of the wave, which is the window
   // `mergeWave`'s note says an amendment can land in.
-  override async mergeWave(wave: number, members?: readonly string[]): Promise<WaveResult> {
-    const result = await super.mergeWave(wave, members)
+  override async mergeWave(
+    wave: number,
+    members?: readonly string[],
+    forNode?: string,
+  ): Promise<WaveResult> {
+    const result = await super.mergeWave(wave, members, forNode)
     // Identifiers only, as `ConflictRecord` already is: node ids, paths, rounds.
     this.records.push({ wave: result.wave, conflicts: result.conflicts })
     return result
@@ -211,6 +231,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   // rather than an object with an `adopt`: `verify` captured the snapshot the
   // run was provisioned with and kept gating merges on it.
   let current = workflow
+  // Bound by `bindCommitDecision` once a scheduler exists to ask through.
+  let decideCommit: ((failure: CommitFailure) => Promise<CommitDecision>) | null = null
   const integrator = new RecordingIntegrator({
     // `Workflow` satisfies `IntegrationPlan` structurally.
     plan: workflow,
@@ -283,6 +305,10 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // other participants are in the payload, because a conflict is never one
     // phase's alone and a report naming only the second arrival reads as a
     // verdict on it.
+    // Routed to the scheduler's node question once one is bound; `abort`
+    // until then, for the reason `bindCommitDecision` gives.
+    onCommitFailure: (failure) =>
+      decideCommit === null ? Promise.resolve('abort' as const) : decideCommit(failure),
     onConflict: (conflict) => {
       journal.append({
         runId,
@@ -352,6 +378,9 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     },
     recycleLane: async (name: string) => {
       await pool.recycle(name)
+    },
+    bindCommitDecision: (decide) => {
+      decideCommit = decide
     },
     // Read through the pool rather than captured, because a recycle that had to
     // re-provision hands back a different `Lane` object for the same slot.

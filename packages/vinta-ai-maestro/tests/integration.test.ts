@@ -24,11 +24,16 @@ import {
 } from '../src/integration/fixer.ts'
 import type { TranscriptEntry } from '../src/journal/transcript.ts'
 import {
+  type CommitFailure,
+  IntegrationCommitError,
+  IntegrationWorktreeBusyError,
   Integrator,
   type IntegrationNode,
   type IntegrationPlan,
   UnresolvedConflictError,
 } from '../src/integration/integrator.ts'
+import { GIT_STDERR_LIMIT, GitCommandError, git } from '../src/integration/git.ts'
+import { clearRedactions, redactValue } from '../src/log/index.ts'
 import { fakeCliFromSource } from './support/fake-cli.ts'
 import { FAKE_BIN_VIA_EXECFILE } from './support/platform.ts'
 
@@ -1190,5 +1195,303 @@ describe('pull requests', () => {
     expect(result.message).toContain('gh is not installed')
     // The run is not failed by it: the branch is untouched and still there.
     expect(run(lane, 'rev-parse', '--verify', 'plan/wf/phase-a')).toHaveLength(40)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A commit git refuses, and a worktree left mid-merge
+// ---------------------------------------------------------------------------
+
+/**
+ * A `pre-commit` hook that refuses every commit, the way a hook chain does
+ * when it imports a gitignored settings module the integration worktree never
+ * received. Hooks live in the main checkout's `.git/hooks` and every worktree
+ * shares them, so this refuses commits in `integ` and in the lanes alike —
+ * which is why it is installed only once the fixture's own commits are made.
+ */
+const HOOK_COMPLAINT = "ModuleNotFoundError: No module named 'settings.local'"
+
+async function installRefusingHook(repo: Repo): Promise<string> {
+  const hooks = join(repo.main, '.git', 'hooks')
+  await mkdir(hooks, { recursive: true })
+  const path = join(hooks, 'pre-commit')
+  await writeFile(path, `#!/bin/sh\necho "${HOOK_COMPLAINT}" >&2\nexit 1\n`, { mode: 0o755 })
+  return path
+}
+
+/** Three nodes: `c` depends on both `a` and `b`, which conflict. */
+async function conflictingBase(): Promise<Repo> {
+  return await conflictingPair()
+}
+
+const midMerge = (cwd: string): boolean => {
+  try {
+    run(cwd, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD')
+    return true
+  } catch {
+    return false
+  }
+}
+
+describe('a resolution git refuses to commit', () => {
+  const RESOLVED = 'const value = "a" + "b"\n'
+
+  /**
+   * The failure that cost the observed run four phases: the fixer resolved
+   * the conflict, the integrator's `git commit` was refused by a hook, and
+   * `MERGE_HEAD` was left in the one worktree every later base is built in.
+   */
+  it('abandons the merge rather than leaving the integration worktree mid-merge', async () => {
+    const repo = await conflictingBase()
+    await installRefusingHook(repo)
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+
+    const failure = await integrator.prepareBase('c').then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(IntegrationCommitError)
+    const error = failure as IntegrationCommitError
+    // Git's own diagnostic, which is the hook's last line here, is in the
+    // reason — "git commit exited 1" alone took a manual investigation.
+    expect(error.message).toContain('git commit exited 1')
+    expect(error.message).toContain(HOOK_COMPLAINT)
+    expect(error.cause).toBeInstanceOf(GitCommandError)
+    expect(error.cause.detail).toContain(HOOK_COMPLAINT)
+    // The *incoming* phase, whose merge was being committed — the same node a
+    // conflict record names — not the phase whose base was being built.
+    expect(error.nodeId).toBe('b')
+    expect(error.incoming).toBe('plan/wf/phase-b')
+    expect(error.branch).toBe('plan/wf/integ-c')
+
+    // The invariant: nothing is in progress in the shared worktree, so the
+    // next phase whose base is built here is not failed by this one.
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+
+    // And the fixer's work survived the abort, as a commit with the parents
+    // the merge commit would have had.
+    expect(error.preservedRef).toBe('refs/vinta-ai-maestro/resolutions/b')
+    expect(run(repo.integ, 'show', `${error.preservedRef}:app.ts`).trim()).toBe(RESOLVED.trim())
+    expect(parents(repo.integ, error.preservedRef as string)).toHaveLength(2)
+  })
+
+  it('reuses the kept resolution on the retry instead of spending another fixer round', async () => {
+    const repo = await conflictingBase()
+    const hook = await installRefusingHook(repo)
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+    await expect(integrator.prepareBase('c')).rejects.toBeInstanceOf(IntegrationCommitError)
+    expect(fixer.calls).toHaveLength(1)
+
+    // The operator fixes what the hook wanted, and the phase is retried.
+    await rm(hook)
+    const base = await integrator.prepareBase('c')
+
+    expect(fixer.calls).toHaveLength(1)
+    expect(run(repo.integ, 'show', `${base}:app.ts`).trim()).toBe(RESOLVED.trim())
+    expect(isAncestor(repo.integ, 'plan/wf/phase-a', base)).toBe(true)
+    expect(isAncestor(repo.integ, 'plan/wf/phase-b', base)).toBe(true)
+    expect(midMerge(repo.integ)).toBe(false)
+  })
+
+  it('asks, and `no-verify` commits past the hook with the resolution intact', async () => {
+    const repo = await conflictingBase()
+    await installRefusingHook(repo)
+    const asked: CommitFailure[] = []
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      onCommitFailure: async (failure) => {
+        asked.push(failure)
+        return 'no-verify'
+      },
+    })
+
+    const base = await integrator.prepareBase('c')
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.nodeId).toBe('b')
+    expect(asked[0]?.attempt).toBe(1)
+    expect(asked[0]?.error.detail).toContain(HOOK_COMPLAINT)
+    expect(run(repo.integ, 'show', `${base}:app.ts`).trim()).toBe(RESOLVED.trim())
+    expect(run(repo.integ, 'rev-list', '--merges', '--count', base)).toBe('1')
+    expect(midMerge(repo.integ)).toBe(false)
+  })
+
+  it('asks, and `commit` tries again with the hooks the operator has since fixed', async () => {
+    const repo = await conflictingBase()
+    const hook = await installRefusingHook(repo)
+    const attempts: number[] = []
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      onCommitFailure: async (failure) => {
+        attempts.push(failure.attempt)
+        // First time: the operator has not fixed it yet, and says commit anyway.
+        // Second time: they remove the cause and say commit.
+        if (failure.attempt === 2) await rm(hook)
+        return 'commit'
+      },
+    })
+
+    const base = await integrator.prepareBase('c')
+
+    expect(attempts).toEqual([1, 2])
+    expect(run(repo.integ, 'show', `${base}:app.ts`).trim()).toBe(RESOLVED.trim())
+    expect(midMerge(repo.integ)).toBe(false)
+  })
+
+  it('asks, and `abort` fails the phase with the worktree clean and the resolution kept', async () => {
+    const repo = await conflictingBase()
+    await installRefusingHook(repo)
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      onCommitFailure: async () => 'abort',
+    })
+
+    await expect(integrator.prepareBase('c')).rejects.toMatchObject({
+      name: 'IntegrationCommitError',
+      decision: 'abort',
+      preservedRef: 'refs/vinta-ai-maestro/resolutions/b',
+    })
+    expect(midMerge(repo.integ)).toBe(false)
+  })
+
+  it('leaves the worktree clean when the question itself is withdrawn', async () => {
+    // A halt reaches the integrator as the question rejecting. The worktree
+    // must still be usable by whatever resumes the run.
+    const repo = await conflictingBase()
+    await installRefusingHook(repo)
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      onCommitFailure: async () => {
+        throw new Error('halted')
+      },
+    })
+
+    await expect(integrator.prepareBase('c')).rejects.toThrow('halted')
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'show', 'refs/vinta-ai-maestro/resolutions/b:app.ts').trim()).toBe(
+      RESOLVED.trim(),
+    )
+  })
+})
+
+describe('an integration worktree that is mid-merge', () => {
+  it('is refused by name before any checkout, rather than failing on `git checkout exited 1`', async () => {
+    const repo = await conflictingPair()
+    // Somebody — a killed run, a person — left a conflicted merge standing.
+    run(repo.integ, 'checkout', '-B', 'plan/wf/integ-c', 'plan/wf/phase-a')
+    try {
+      run(repo.integ, 'merge', '--no-ff', '--no-edit', 'plan/wf/phase-b')
+    } catch {
+      // Conflicted, as intended.
+    }
+    expect(midMerge(repo.integ)).toBe(true)
+    const fixer = spyFixer()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b']), node('d', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+
+    // Another phase's base, built in the same worktree.
+    const failure = await integrator.prepareBase('d').then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(IntegrationWorktreeBusyError)
+    const error = failure as IntegrationWorktreeBusyError
+    expect(error.operation).toBe('merge')
+    expect(error.incoming).toBe('plan/wf/phase-b')
+    expect(error.into).toBe('plan/wf/integ-c')
+    expect(error.message).toContain('mid-merge')
+    expect(error.message).toContain('plan/wf/phase-b into plan/wf/integ-c')
+    // Nothing was touched: the merge is still there for whoever owns it.
+    expect(midMerge(repo.integ)).toBe(true)
+    expect(fixer.calls).toEqual([])
+    // A wave merge is refused the same way.
+    await expect(integrator.mergeWave(1)).rejects.toBeInstanceOf(IntegrationWorktreeBusyError)
+  })
+
+  it('does not leave one behind when the fixer could not run at all', async () => {
+    const repo = await conflictingPair()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: {
+        async fix(): Promise<void> {
+          throw new Error('conflict fixer spawn refused: quota')
+        },
+      },
+    })
+
+    await expect(integrator.prepareBase('c')).rejects.toThrow('quota')
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+})
+
+describe('GitCommandError', () => {
+  it('carries the tail of what git said, so a failure explains itself', async () => {
+    const repo = await makeRepo()
+    const failure = await git(repo.main, ['checkout', 'no-such-branch']).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(failure).toBeInstanceOf(GitCommandError)
+    const error = failure as GitCommandError
+    expect(error.subcommand).toBe('checkout')
+    expect(error.exitCode).toBe(1)
+    expect(error.detail).toContain('no-such-branch')
+    expect(error.message).toMatch(/^git checkout exited 1: /)
+  })
+
+  it('bounds the tail and redacts a registered secret', () => {
+    redactValue('hunter2-secret-token')
+    try {
+      const long = `${'x'.repeat(2_000)}\npassword is hunter2-secret-token\n`
+      const error = new GitCommandError('commit', 1, long)
+      expect(error.detail.length).toBeLessThanOrEqual(GIT_STDERR_LIMIT + 1)
+      expect(error.detail).not.toContain('hunter2-secret-token')
+      // A secret anywhere in the tail replaces the whole tail.
+      expect(error.message).not.toContain('hunter2')
+    } finally {
+      clearRedactions()
+    }
   })
 })

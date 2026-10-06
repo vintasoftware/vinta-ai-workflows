@@ -159,6 +159,19 @@ export function clearRedactions(): void {
 }
 
 /**
+ * One string with every registered secret replaced and the message cap
+ * applied — the same two rules `sanitize` applies to a record's `message`.
+ *
+ * For a caller composing an error message out of a child process's output
+ * before it reaches a logger: a `GitCommandError` carries git's stderr, and
+ * the one place that stderr must be made safe is where it is picked up, not
+ * at each of the sinks it later flows into.
+ */
+export function redactText(value: string): string {
+  return text(value, MAX_MESSAGE_CHARS)
+}
+
+/**
  * Applies all three rules. Unknown keys and unknown value shapes are dropped
  * rather than coerced, and the count of what was dropped is not reported —
  * a caller logging an object has a bug in their call site, not a fact to

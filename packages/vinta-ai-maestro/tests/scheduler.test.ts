@@ -28,6 +28,9 @@ import type {
   SpawnRefusalKind,
 } from '../src/harness/adapter.ts'
 import { MockAdapter, type MockScript } from '../src/harness/mock.ts'
+import { ConflictFixerRefused } from '../src/integration/fixer.ts'
+import { GitCommandError } from '../src/integration/git.ts'
+import type { CommitDecision, CommitFailure } from '../src/integration/integrator.ts'
 import type { TurnRefusal } from '../src/harness/adapter.ts'
 import type { NodeStatus } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
@@ -176,7 +179,7 @@ interface Recorder extends EffectExecutor {
  */
 function recorder(
   outcomes: Readonly<Record<string, EffectOutcome | readonly EffectOutcome[]>> = {},
-  tap?: (call: Call) => void,
+  tap?: (call: Call) => unknown,
 ): Recorder {
   const calls: Call[] = []
   const seen = new Map<string, number>()
@@ -192,7 +195,8 @@ function recorder(
         context: invocation.context,
       }
       calls.push(call)
-      tap?.(call)
+      const tapped = tap?.(call)
+      if (tapped instanceof Promise) await tapped
 
       const key = `${nodeId}:${call.effect}`
       const scripted = outcomes[key] ?? outcomes[call.effect]
@@ -237,7 +241,8 @@ function rig(
   options: {
     readonly spawns?: readonly (SpawnRefusalKind | 'ok')[]
     readonly outcomes?: Readonly<Record<string, EffectOutcome | readonly EffectOutcome[]>>
-    readonly tap?: (call: Call) => void
+    /** Sees every effect; one that returns a promise holds the effect open until it settles. */
+    readonly tap?: (call: Call) => unknown
     readonly register?: boolean
     /** Holds every session open after `session_started`, for the §9 operations. */
     readonly stall?: boolean
@@ -4265,5 +4270,278 @@ describe('an agent that stops to ask', () => {
     expect(report.statuses).toEqual({ a: 'done' })
     expect(questionsOf(r)).toEqual([])
     expect(r.adapter.spawned).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Setup failures: the shared integration worktree, and a retry that cannot help
+// ---------------------------------------------------------------------------
+
+/** Branch first, then one turn: the shape of a phase whose base is built in the integration worktree. */
+const BRANCH_FIRST = {
+  states: [
+    {
+      id: 'branch',
+      name: 'Branch',
+      position: { x: 0, y: 0 },
+      onEnter: [{ id: 'e-branch', definitionId: 'git_branch', params: {} }],
+    },
+    { id: 'work', name: 'Work', position: { x: 200, y: 0 }, onEnter: [spawn('e-work', 'implementer')] },
+    { id: 'done', name: 'Done', position: { x: 400, y: 0 }, data: { outcome: 'done' } },
+  ],
+  transitions: [
+    { id: 't-branched', from: 'branch', to: 'work' },
+    { id: 't-done', from: 'work', to: 'done' },
+  ],
+  initialStateIds: ['branch'],
+  finalStateIds: ['done'],
+}
+
+const branchFirstWorkflow = (): Workflow =>
+  makeWorkflow([node('a')], { pipelines: { 'branch-first': BRANCH_FIRST }, pipeline: 'branch-first' })
+
+/** Every `node_error` reason a node journalled, in order. */
+const errorsOf = (r: Rig, nodeId: string): string[] =>
+  r.journal
+    .events('run-1')
+    .filter((event) => event.type === 'node_error' && event.nodeId === nodeId)
+    .map((event) => String((event.payload as { reason?: unknown }).reason))
+
+/** Every question a node was parked on, in order. */
+const questionsOf = (r: Rig, nodeId: string): { question: string; choices?: readonly string[] }[] =>
+  r.journal
+    .events('run-1')
+    .filter((event) => event.type === 'human_question' && event.nodeId === nodeId)
+    .map((event) => event.payload as { question: string; choices?: readonly string[] })
+
+describe('a failure before any agent ran', () => {
+  const MID_MERGE = 'error: you need to resolve your current index first'
+
+  /**
+   * The observed run: four phases whose base was built in a worktree left
+   * mid-merge failed in their own setup, on the same line, up to twenty-three
+   * times each — `--retry-after` answering "retry" every window to a failure
+   * no retry could change.
+   */
+  it('is not retried unattended once it has repeated verbatim', async () => {
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      tap: (call) => {
+        if (call.verb === 'git_branch') throw new GitCommandError('checkout', 1, MID_MERGE)
+      },
+    })
+
+    const running = r.scheduler.run()
+    // One automatic attempt, then the question — the production default.
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after two attempts')
+    expect(countOf(r, 'e-branch')).toBe(2)
+
+    // Git's own words reach the record, not just "exited 1".
+    expect(errorsOf(r, 'a')).toEqual([
+      `git checkout exited 1: ${MID_MERGE}`,
+      `git checkout exited 1: ${MID_MERGE}`,
+    ])
+    // The question says why it will wait for a person.
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('before any agent ran')
+    expect(question?.question).toContain('2 times in a row')
+
+    // The window passes, several times over, and nothing retries.
+    await r.advance(60_000 * 64)
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    expect(countOf(r, 'e-branch')).toBe(2)
+    expect(r.adapter.spawned).toHaveLength(0)
+    expect(answersOf(r)).toEqual([])
+
+    // A person can still retry it — the question is a question.
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(report.failures['a']).toContain(MID_MERGE)
+    expectDrained(r)
+  })
+
+  it('keeps the unattended retry while the setup failures differ', async () => {
+    let attempt = 0
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      tap: (call) => {
+        if (call.verb !== 'git_branch') return
+        attempt += 1
+        // Two different transient refusals, then a clean branch.
+        if (attempt === 1) throw new GitCommandError('checkout', 128, 'fatal: index.lock exists')
+        if (attempt === 2) throw new GitCommandError('checkout', 1, 'error: unable to write index')
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+    await r.advance(60_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(answersOf(r)).toEqual([{ effect_id: 'retry:a:1', answer: 'retry', unattended: true }])
+    expectDrained(r)
+  })
+
+  it('keeps the unattended retry for a failure after an agent ran', async () => {
+    // The same line twice, but after a turn: that is the phase's failure, and
+    // the timer is the operator's declared policy for it.
+    const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+    await r.advance(60_000)
+    await until(() => r.adapter.spawned.length === 3, 'the unattended third attempt')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer again')
+
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+    expect(answersOf(r)[0]).toMatchObject({ answer: 'retry', unattended: true })
+    expectDrained(r)
+  })
+})
+
+describe('a conflict fixer the harness refused', () => {
+  it('parks the phase on the harness’s wait rather than failing it', async () => {
+    let refusals = 0
+    const r = rig(branchFirstWorkflow(), {
+      tap: (call) => {
+        if (call.verb === 'git_branch' && refusals === 0) {
+          refusals += 1
+          throw new ConflictFixerRefused(HARNESS, 'opus', 'quota', undefined, 'usage limit reached')
+        }
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'waiting_on_capacity', 'the park')
+    // Backpressure, not a failure: nothing journalled as one, lane released.
+    expect(errorsOf(r, 'a')).toEqual([])
+    expect(r.pools.held('lane')).toBe(0)
+
+    await r.advance(5_000)
+    const report = await running
+
+    expect(report.status).toBe('completed')
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(countOf(r, 'e-branch')).toBe(2)
+    expectDrained(r)
+  })
+
+  it('still fails the phase for a refusal that no wait ends', async () => {
+    const r = rig(branchFirstWorkflow(), {
+      tap: (call) => {
+        if (call.verb === 'git_branch') {
+          throw new ConflictFixerRefused(HARNESS, 'opus', 'fatal', undefined, 'binary-not-found')
+        }
+      },
+    })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(report.failures['a']).toContain('conflict fixer spawn refused: fatal')
+    expect(report.failures['a']).toContain('binary-not-found')
+    expectDrained(r)
+  })
+})
+
+describe('a merge commit git refused', () => {
+  const failure = (): CommitFailure => ({
+    nodeId: 'z',
+    forNode: 'a',
+    branch: 'plan/test-flow/integ-a',
+    incoming: 'plan/test-flow/phase-z',
+    error: new GitCommandError('commit', 1, "ModuleNotFoundError: No module named 'settings.local'"),
+    attempt: 1,
+  })
+
+  it('asks on the node whose merge it is, and returns what the operator chose', async () => {
+    let decided: CommitDecision | null = null
+    const r = rig(branchFirstWorkflow(), {
+      tap: async (call) => {
+        if (call.verb === 'git_branch' && decided === null) {
+          // What the integrator does from inside the effect: ask, and wait.
+          decided = await r.scheduler.decideCommit(failure())
+        }
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the question')
+
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('plan/test-flow/phase-z into plan/test-flow/integ-a')
+    expect(question?.question).toContain('git commit exited 1')
+    expect(question?.choices).toEqual(['commit', 'commit --no-verify', 'abort merge'])
+    // The reason is on the record (§11 keeps it out of the question itself).
+    expect(errorsOf(r, 'a')).toEqual([
+      "merge of plan/test-flow/phase-z into plan/test-flow/integ-a: git commit exited 1: ModuleNotFoundError: No module named 'settings.local'",
+    ])
+    expect(question?.question).not.toContain('ModuleNotFoundError')
+
+    r.scheduler.answer('a', { human: { answer: 'commit --no-verify' } })
+    await until(() => decided !== null, 'the decision')
+    expect(decided).toBe('no-verify')
+
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+
+  it('aborts the merge for an operator who is not there', async () => {
+    let decided: CommitDecision | null = null
+    const r = rig(branchFirstWorkflow(), {
+      retryAfterMs: 60_000,
+      tap: async (call) => {
+        if (call.verb === 'git_branch' && decided === null) {
+          decided = await r.scheduler.decideCommit(failure())
+        }
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the question')
+    await r.advance(60_000)
+    await until(() => decided !== null, 'the unattended answer')
+
+    expect(decided).toBe('abort')
+    expect(answersOf(r)).toEqual([{ effect_id: 'host:a:1', answer: 'abort merge', unattended: true }])
+    await running
+    expectDrained(r)
+  })
+
+  it('withdraws the question on a halt, so the integrator can clean up', async () => {
+    let settled: 'answered' | 'thrown' | null = null
+    const r = rig(branchFirstWorkflow(), {
+      tap: async (call) => {
+        if (call.verb === 'git_branch' && settled === null) {
+          try {
+            await r.scheduler.decideCommit(failure())
+            settled = 'answered'
+          } catch (error) {
+            settled = 'thrown'
+            throw error
+          }
+        }
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the question')
+    await r.scheduler.halt('paused')
+    await until(() => settled !== null, 'the withdrawal')
+
+    expect(settled).toBe('thrown')
+    const report = await running
+    expect(report.status).toBe('stopped')
+    expect(report.statuses).toEqual({ a: 'pending' })
+    expectDrained(r)
   })
 })

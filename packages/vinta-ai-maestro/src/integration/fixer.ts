@@ -13,7 +13,7 @@
  * conflict itself, and putting file contents in a request is how they end up
  * in a log.
  */
-import type { AgentTask, HarnessAdapter } from '../harness/adapter.ts'
+import type { AgentTask, HarnessAdapter, SpawnRefusalKind, TurnRefusal } from '../harness/adapter.ts'
 import { type ModelFallbacks, spawnWithFallbacks } from '../harness/fallback.ts'
 import {
   attribute,
@@ -39,6 +39,47 @@ export interface ConflictRequest {
   readonly promptRefs: readonly string[]
   /** 1-based. Exhausting the rounds hands the conflict to a person, not to a harder retry. */
   readonly round: number
+}
+
+/**
+ * The fixer's harness would not start it (§6.1).
+ *
+ * Thrown rather than returned because `fix` has no outcome to carry it in,
+ * and typed rather than a bare `Error` because the two things that read it
+ * need different facts from it. The scheduler reads `refusal`: a capacity
+ * kind — a plan window, a rate limit, an account out of credits — is
+ * backpressure, and it parks the phase on the harness's wait exactly as a
+ * refused implementer spawn would, instead of failing the phase and burning
+ * its retries against a window that ends by itself. The journal reads the
+ * message: harness, model, kind and the adapter's own identifiers-only line.
+ *
+ * Before this the refusal was a plain `Error('conflict fixer spawn refused:
+ * quota')`, which `failureReason` flattened to the word `Error` and the retry
+ * policy retried on a timer, for as long as the window lasted.
+ */
+export class ConflictFixerRefused extends Error {
+  constructor(
+    readonly harness: string,
+    readonly model: string,
+    readonly kind: SpawnRefusalKind,
+    readonly retryAfter: Date | undefined,
+    detail: string,
+  ) {
+    super(`conflict fixer spawn refused: ${kind} on ${harness} (${model}): ${detail}`)
+    this.name = 'ConflictFixerRefused'
+  }
+
+  /** The refusal as admission control takes it, or null for a kind that does not wait. */
+  get refusal(): TurnRefusal | null {
+    if (this.kind === 'fatal' || this.kind === 'stale_session' || this.kind === 'unauthenticated') {
+      return null
+    }
+    return {
+      kind: this.kind,
+      reason: 'conflict-fixer-refused',
+      ...(this.retryAfter === undefined ? {} : { retryAfter: this.retryAfter }),
+    }
+  }
 }
 
 /** One method, so the scheduler can inject a real agent and a test a spy. */
@@ -145,8 +186,10 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         // whoever reads this next.
       }
       const adapter = staffed?.adapter ?? options.adapter
-      const { outcome } = await spawnWithFallbacks(adapter, task, options.fallbacks)
-      if (!outcome.ok) throw new Error(`conflict fixer spawn refused: ${outcome.kind}`)
+      const { outcome, model } = await spawnWithFallbacks(adapter, task, options.fallbacks)
+      if (!outcome.ok) {
+        throw new ConflictFixerRefused(adapter.id, model, outcome.kind, outcome.retryAfter, outcome.message)
+      }
 
       // Draining is mandatory — an unread stream never ends — and the outcome
       // is deliberately not inspected: whether the conflict is actually
