@@ -25,6 +25,7 @@
  * than quoted into a message.
  */
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { connect } from 'node:net'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -878,6 +879,122 @@ export function checkGateGuard(workflow: Workflow): CheckResult[] {
   )
 }
 
+/**
+ * Tracked example files whose real counterpart is gitignored: `.env.example`
+ * beside an ignored `.env`, `settings/local.py.example` beside an ignored
+ * `settings/local.py`. Each one names a file the project needs and git does
+ * not carry — which is exactly the file a lane never receives unless
+ * `project.env_files` says so.
+ */
+const EXAMPLE_SUFFIXES = ['.example', '.sample', '.template', '.dist'] as const
+
+/** `x.example` → `x`; `x.example.py` → `x.py`; anything else → null. */
+export function exampleTarget(path: string): string | null {
+  for (const suffix of EXAMPLE_SUFFIXES) {
+    if (path.endsWith(suffix)) return path.slice(0, -suffix.length)
+    const infix = `${suffix}.`
+    const at = path.lastIndexOf(infix)
+    if (at > 0 && !path.slice(at + infix.length).includes('/')) {
+      return `${path.slice(0, at)}.${path.slice(at + infix.length)}`
+    }
+  }
+  return null
+}
+
+/** Tracked files, posix paths. Empty when git cannot answer — the git check reports that. */
+async function trackedFiles(bin: string, repoPath: string): Promise<string[]> {
+  const probe = await probeCommand(bin, ['ls-files', '-z'], repoPath)
+  if (!probe.ok) return []
+  return probe.output.split('\0').filter((entry) => entry.length > 0)
+}
+
+/** The subset of `paths` git ignores. Empty when git cannot answer. */
+async function ignoredAmong(bin: string, repoPath: string, paths: readonly string[]): Promise<Set<string>> {
+  if (paths.length === 0) return new Set()
+  // Exits 1 when none is ignored, which is an answer rather than a failure.
+  const probe = await probeCommand(bin, ['check-ignore', '--no-index', ...paths], repoPath)
+  return new Set(probe.output.split('\n').map((line) => line.trim()).filter((line) => line.length > 0))
+}
+
+/**
+ * `project.env_files` against the checkout: a declared file that is missing
+ * fails — provisioning would, one step later and less clearly — and a
+ * gitignored file with a tracked example that nothing declares is warned
+ * about by name.
+ *
+ * The second half is the one that would have caught the observed run. Its
+ * workflow declared no `env_files`; its `.gitignore` listed `.env`,
+ * `.env.docker` and the local settings module, each with a committed
+ * example beside it; every hook and `manage.py` call in every lane needed all
+ * three; and `doctor` said nothing, because nothing asked it to look.
+ */
+export async function checkEnvFiles(
+  bin: string,
+  repoPath: string,
+  project: ProjectSpec | undefined,
+): Promise<CheckResult[]> {
+  const declared = project?.envFiles ?? []
+  const checks: CheckResult[] = []
+  for (const file of declared) {
+    checks.push(
+      existsSync(join(repoPath, file))
+        ? pass(`env-file:${file}`, `env file ${file}: present, every lane gets its own copy`)
+        : flag(
+            `env-file:${file}`,
+            `env file ${file}: declared in project.env_files but not in the checkout`,
+            'fail',
+            `create ${file} (its example sibling is the usual start), or drop it from env_files`,
+          ),
+    )
+  }
+
+  const tracked = await trackedFiles(bin, repoPath)
+  const candidates = [...new Set(tracked.map(exampleTarget).filter((t): t is string => t !== null))]
+  const ignored = await ignoredAmong(bin, repoPath, candidates)
+  const undeclared = candidates.filter((path) => ignored.has(path) && !declared.includes(path)).sort()
+  if (undeclared.length === 0) {
+    if (declared.length === 0) checks.push(pass('env-files', 'env files: nothing gitignored with a tracked example'))
+    return checks
+  }
+  const list = undeclared.join(', ')
+  checks.push(
+    flag(
+      'env-files',
+      declared.length === 0
+        ? `env files: project.env_files is empty, but ${undeclared.length} gitignored ` +
+            `file${undeclared.length === 1 ? ' has' : 's have'} a tracked example — ${list} — and no lane will get ${undeclared.length === 1 ? 'it' : 'them'}`
+        : `env files: not in project.env_files, though gitignored with a tracked example: ${list}`,
+      'warn',
+      `declare them once for every plan — maestro.project.env_files: [${undeclared.join(', ')}] in ` +
+        '.vinta-ai-workflows.yaml — or in this workflow’s project.env_files',
+    ),
+  )
+  return checks
+}
+
+/**
+ * Phases with no gates. A warning here, the same finding `validate` refuses
+ * on: a phase that declares no gates passes its gate step without running a
+ * command, and twelve of them did in one observed run before anyone noticed
+ * the gate cache was empty.
+ */
+export function checkGates(workflow: Workflow): CheckResult[] {
+  const ungated = workflow.nodes.filter((node) => node.gates.length === 0).map((node) => node.id)
+  if (ungated.length === 0) return [pass('gates', 'gates: every phase runs at least one')]
+  if (workflow.defaults.allow_ungated_phases) {
+    return [pass('gates', `gates: ${ungated.length} phase${ungated.length === 1 ? '' : 's'} ungated by declaration (allow_ungated_phases)`)]
+  }
+  return [
+    flag(
+      'gates',
+      `gates: ${ungated.length} of ${workflow.nodes.length} phases run no gate at all — ${ungated.join(', ')}`,
+      'warn',
+      'omit `gates` on those nodes to take defaults.gates (the plan’s or maestro.defaults.gates), name their gates, ' +
+        'or set defaults.allow_ungated_phases: true if that is intended',
+    ),
+  ]
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const { workflow, repoPath } = options
   const gitBin = options.bins?.git ?? 'git'
@@ -899,7 +1016,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
         : await adoptedLaneBranches(gitBin, options.poolRoot, options.resumeRunId),
     )
 
-  const [harnesses, git, worktrees, compose, servers, disk, lanes, briefs, branches] =
+  const [harnesses, git, worktrees, compose, servers, disk, lanes, briefs, branches, envFiles] =
     await Promise.all([
       Promise.all(
         referencedHarnesses(workflow).map((id) => checkHarness(id, options.bins?.harness?.[id])),
@@ -912,6 +1029,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       checkLaneSummaries(summaryDir),
       checkBriefs(gitBin, repoPath, workflow),
       heldBranches(),
+      checkEnvFiles(gitBin, repoPath, options.project),
     ])
 
   const systemOne = await checkSystemOne(workflow, options.systemOne, options.permission)
@@ -925,6 +1043,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     compose,
     ...servers,
     disk,
+    ...checkGates(workflow),
+    ...envFiles,
     ...briefs,
     ...branches,
     ...lanes,

@@ -719,7 +719,12 @@ export const ProjectSchema = z
           'virtualenv per lane before it will let a commit through — observed as four failed ' +
           'commit attempts, one of them a two-minute timeout, and a 510 MB `.venv` per lane. ' +
           'The gates still run; this only stops each lane paying a whole-environment install ' +
-          'to make a commit.',
+          'to make a commit. The integration worktree follows the same setting: the merge ' +
+          'commits maestro makes there — a resolved conflict, a wave — run the hooks under ' +
+          '`run` and skip them under `skip`, exactly as a lane’s commits do. A hook that ' +
+          'refuses one of those commits is asked about (commit, commit --no-verify, abort) ' +
+          'rather than left mid-merge; a hook that needs a gitignored file needs that file ' +
+          'in `env_files`.',
       ),
     services: z
       .record(Id, ServiceSchema)
@@ -775,6 +780,16 @@ export const DefaultsSchema = z.strictObject({
       'The gates every phase must pass unless it names its own. Resolved into each node when ' +
         'the workflow is loaded, with the same override rule as `chores`: a node’s own list — ' +
         '`[]` included — replaces this one.',
+    ),
+  allow_ungated_phases: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Whether a phase that resolves to no gates at all is acceptable. Off — the default — ' +
+        '`validate` refuses the workflow and `doctor` warns, because a phase with no gates ' +
+        'passes its gate step vacuously: an observed run finished twelve phases without a ' +
+        'single check because every node carried `gates: []` where its author meant "the ' +
+        'project’s". Set it only for a plan whose phases genuinely have nothing to check.',
     ),
   gate_scope: z
     .enum(GATE_SCOPES)

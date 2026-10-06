@@ -103,6 +103,7 @@ These bleed across sub-skills, so capture once now:
    - **A different command for maestro.** `AskUserQuestion` per selected type: `Same as commands.* (Recommended)`, `Different for maestro (I'll give it)`. Teams pick a different one when lanes need a flag the inner loop does not, e.g. `pytest --reuse-db -n auto`. → `maestro.gates.<type>.cmd`. `implement-plan` keeps running `commands.*`.
    - **Scoped gates.** Only when `test` (or `lint`) is selected: should a phase's gate run narrowed to the files the phase changed, with the full command run once per merged wave? `AskUserQuestion`: `Yes — scoped per phase, full per wave (Recommended)`, `No — full command every phase`. On `Yes`, propose a template with `{changed_files}` for the detected runner (`vitest related {changed_files} --run`, `jest --findRelatedTests {changed_files}`, `pytest --testmon {changed_files}`, `ruff check {changed_files}`) and confirm it. It lands in `commands.test_unit_scoped` / `commands.lint_scoped`, where `implement-plan` reads it too. `No` sets `maestro.defaults.gate_scope: full`.
    - **A test-suite pool.** `AskUserQuestion`: `One suite at a time (Recommended for DB-backed suites)`, `Two at a time`, `No limit`. A limit emits `maestro.resources.test-suite` (`kind: semaphore`, `capacity` 1 or 2) and `maestro.gates.test.requires: [test-suite]`. Then offer the runner's command patterns as the pool's `match` (`pytest*`, `uv run pytest*`, `pnpm test*`), which makes agents take the lease before running tests by hand.
+   - **Files git does not carry.** A maestro lane is a worktree and has only what git tracks. Read `.gitignore` for entries with a tracked `*.example` / `*.sample` / `*.template` sibling, the compose file's `env_file:` lines, and the gitignored settings module the framework imports (`DJANGO_SETTINGS_MODULE`'s local module, typically). Propose the list in a multi-select `AskUserQuestion` (header `Env files`), each path pre-selected; the user confirms or drops entries. → `maestro.project.env_files`. Every hook, gate and `manage.py` call in a lane depends on these, and a plan that omits them fails in ways that look like code problems. Nothing found → omit the key and say so.
 
    Everything here is a default under every plan. A plan's own `.workflow.json` overrides any of it, and a commit to this file on a running plan's branch (`plan/<workflow-id>/base`) is applied to that run.
 
@@ -372,6 +373,8 @@ maestro:
       capacity: <1 | 2>
       kind: semaphore
       match: <C.11 → runner command patterns, e.g. ['pytest*', 'uv run pytest*']>
+  project:
+    env_files: <C.11 → gitignored files every lane needs its own copy of, e.g. [.env, .env.docker, app/settings/local.py]; omit when none>
 
 skills:
   # Only emit this block when foundation_skills.systematic-debugging = enabled.

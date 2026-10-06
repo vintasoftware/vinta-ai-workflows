@@ -136,11 +136,47 @@ export async function inspectWorkflow(
   if (workflow !== null && workflow.id !== id) {
     issues.push({ path: ['id'], message: 'does not match the filename', source: 'workflow' })
   }
+  if (workflow !== null) {
+    issues.push(...ungatedPhases(workflow).map((issue) => ({ ...issue, source: 'workflow' as const })))
+  }
 
   const references = workflow === null ? [] : checkReferences(workflow, repoDir)
   issues.push(...references.map((issue) => ({ ...issue, source: 'reference' as const })))
 
   return { ok: true, workflow, issues, waves: workflow === null ? {} : wavesOf(workflow) }
+}
+
+/**
+ * Phases that resolve to no gates, unless the plan says that is intended.
+ *
+ * Here and not in `validateWorkflow`, deliberately: that runs on every load,
+ * including a run's frozen snapshot, and a workflow that ran yesterday with an
+ * ungated phase must still load today. This is the check `plan-feature` runs
+ * before a plan is handed over, and the one the review page lists — the two
+ * moments a person is looking and the gate table is still cheap to fix.
+ *
+ * What it guards against is not a plan that declares no gates — a project
+ * with no test suite has nothing to run — but the one observed: every node
+ * carrying `gates: []` because its author read "omit for the defaults" as
+ * "write an empty list", and twelve phases merged with no check having run.
+ * `[]` is an opt-out, and an opt-out on every phase is a plan with no gates,
+ * which deserves to be said out loud and confirmed with
+ * `defaults.allow_ungated_phases`.
+ */
+export function ungatedPhases(workflow: Workflow): ValidationIssue[] {
+  if (workflow.defaults.allow_ungated_phases) return []
+  const issues: ValidationIssue[] = []
+  workflow.nodes.forEach((node, i) => {
+    if (node.gates.length > 0) return
+    issues.push({
+      path: ['nodes', i, 'gates'],
+      message:
+        `phase "${node.id}" has no gates, so its gate step passes without running anything. ` +
+        'Omit `gates` to take `defaults.gates` (the plan’s or the project’s `maestro.defaults.gates`), ' +
+        'name the gates it must pass, or set `defaults.allow_ungated_phases: true` if that is intended.',
+    })
+  })
+  return issues
 }
 
 export async function buildPlanView(
