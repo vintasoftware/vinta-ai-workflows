@@ -48,6 +48,10 @@ const SCROLL_MARGIN = 40
 export function Transcript({
   entries,
   composer,
+  title = 'Transcript',
+  empty = 'No transcript yet.',
+  className,
+  ...attributes
 }: {
   readonly entries: readonly unknown[]
   /**
@@ -55,6 +59,13 @@ export function Transcript({
    * lives inside this panel so it follows the transcript to full page.
    */
   readonly composer?: ReactNode
+  /** The panel's title. A phase's transcript, or the run coordinator's conversation. */
+  readonly title?: ReactNode
+  /** What an empty transcript says; null says nothing (something is on its way). */
+  readonly empty?: ReactNode
+  readonly className?: string
+  /** `data-*` hooks for the panel, as a caller's tests address it. */
+  readonly [attribute: `data-${string}`]: string | boolean | undefined
 }) {
   // The box's height is the panel's to decide (`Panel.tsx`): expanded it is a
   // screen, in the page it is what the window leaves after the header — the
@@ -92,9 +103,10 @@ export function Transcript({
 
   return (
     <Panel
-      title="Transcript"
+      title={title}
       expandable
-      className="transcript"
+      className={className === undefined ? 'transcript' : `transcript ${className}`}
+      {...attributes}
       action={
         entries.length > 0 ? (
           <>
@@ -109,7 +121,7 @@ export function Transcript({
       }
     >
       {entries.length === 0 ? (
-        <EmptyNote>No transcript yet.</EmptyNote>
+        empty === null ? null : <EmptyNote>{empty}</EmptyNote>
       ) : (
         <>
           {(hidden > 0 || !following) && (
@@ -146,6 +158,7 @@ export function Transcript({
             rows={rows}
             open={open}
             listRef={listRef}
+            data-exchanges
             // With a composer seated under it, the list gives up that much
             // height, so the input stays on screen rather than under the fold.
             className={
