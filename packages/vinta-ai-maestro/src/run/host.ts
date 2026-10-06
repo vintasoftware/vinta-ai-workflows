@@ -39,7 +39,7 @@ import type { StoredEvent } from '../journal/events.ts'
 import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { Journal } from '../journal/journal.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
-import { LaneAdoptError, LaneEnvFileError, LanePool, LaneSetupError } from '../lanes/pool.ts'
+import { LaneAdoptError, LaneEnvFileError, LanePool, LaneSetupError, type StackStop } from '../lanes/pool.ts'
 import { errorKind, sanitize } from '../log/index.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
@@ -83,6 +83,8 @@ export interface HostWiring {
   readonly workspace?: (
     target: string,
   ) => { readonly path: string; readonly env: Readonly<Record<string, string>> } | null
+  /** Stops every lane's compose stack, volumes kept (`LanePool.stopStacks`). */
+  readonly stopStacks?: () => Promise<readonly StackStop[]>
   /** Runs `work` holding the integration worktree's queue, as `label`. */
   readonly holdIntegration?: <T>(label: string, work: () => Promise<T>) => Promise<T>
   readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
@@ -433,6 +435,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       return lane === undefined ? null : { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
     },
     holdIntegration: (label, work) => executor.integration(work, null, label),
+    stopStacks: () => pool.stopStacks(),
     // The same cache the executor was given, so a gate an agent ran is a hit
     // for the `gate` node afterwards. Two caches over one project would be two
     // databases in one file's place and the hits would land in whichever one

@@ -65,7 +65,7 @@
  * member, never a session or anything a session said.
  */
 import type { CrewSubstituteReason } from '../journal/events.ts'
-import type { CrewMember } from '../types.ts'
+import type { CrewMember, Substitution } from '../types.ts'
 
 /** One roster member, resolved with the id the workflow filed them under. */
 export interface RosterMember extends CrewMember {
@@ -115,6 +115,11 @@ export interface CrewAssignInput {
    * higher-tier model and a cold start — so the default is to claim none.
    */
   readonly warm?: ReadonlySet<string>
+  /**
+   * `defaults.substitution`: how far above the named member's tier a phase may
+   * go. Absent means the schema's default, `up_one_tier`.
+   */
+  readonly substitution?: Substitution
 }
 
 /**
@@ -157,11 +162,20 @@ export function assignCrew(input: CrewAssignInput): CrewDecision {
   // and nothing else, which is what makes "never below the phase's tier" a
   // property of the shape rather than of three conditions staying in step.
   // `members` is sorted cheapest-first, so `candidates` is too.
+  //
+  // And a ceiling, from `defaults.substitution`. An observed run moved 23
+  // phases from Tier 3 to a Tier 4 member — mostly to reuse a warm session —
+  // whose limited credits then ran out mid-run, and nothing reported it.
+  const substitution = input.substitution ?? 'up_one_tier'
+  const ceiling = ceilingFor(members, named.tier, substitution)
   const candidates = members.filter(
-    (member) => member.tier >= named.tier && !input.busy.has(member.id),
+    (member) => member.tier >= named.tier && member.tier <= ceiling && !input.busy.has(member.id),
   )
   const self = candidates.find((member) => member.id === input.assigned)
   const warm = input.warm ?? EMPTY
+  // A warm session moves a phase up a tier only when the operator said any
+  // tier will do: a saved cold start is not worth a dearer model by default.
+  const warmTiers = (member: RosterMember): boolean => substitution === 'any' || member.tier === named.tier
 
   // Warm first, and the plan's own member first among the warm. Without that
   // second half, a roster with two warm peers would hand `tier2-2`'s phase to
@@ -169,7 +183,9 @@ export function assignCrew(input: CrewAssignInput): CrewDecision {
   // substitution — a divergence from the plan bought for no saving at all,
   // since both were warm and neither would have started cold.
   const reuse =
-    self !== undefined && warm.has(self.id) ? self : candidates.find((member) => warm.has(member.id))
+    self !== undefined && warm.has(self.id)
+      ? self
+      : candidates.find((member) => warm.has(member.id) && warmTiers(member))
   if (reuse !== undefined) return take(reuse, reuse.id === input.assigned ? null : 'warm_session')
 
   // Nobody warm. A session is being opened whatever we decide, so there is no
@@ -180,4 +196,17 @@ export function assignCrew(input: CrewAssignInput): CrewDecision {
   if (cover !== undefined) return take(cover, 'peer_busy')
 
   return { kind: 'wait', requiredTier: named.tier }
+}
+
+/**
+ * The highest tier a phase planned at `tier` may run at. `up_one_tier` is the
+ * next tier the roster actually has, not `tier + 1`: a roster of Tier 2 and
+ * Tier 4 members has no Tier 3 to cover with, and reading "one up" literally
+ * would make such a roster wait on every busy Tier 2 member.
+ */
+function ceilingFor(members: readonly RosterMember[], tier: number, substitution: Substitution): number {
+  if (substitution === 'any') return Number.POSITIVE_INFINITY
+  if (substitution === 'same_tier') return tier
+  const above = members.map((member) => member.tier).filter((candidate) => candidate > tier)
+  return above.length === 0 ? tier : Math.min(...above)
 }

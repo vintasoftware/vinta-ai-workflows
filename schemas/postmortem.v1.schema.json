@@ -169,6 +169,14 @@
                 "maximum": 9007199254740991,
                 "description": "The wave whose merge produced the conflict."
               },
+              "where": {
+                "description": "`wave`: the wave merge. `base`: building a phase’s `integ-` base out of its dependencies, a wave earlier. Absent on post-mortems written before base conflicts were counted.",
+                "type": "string",
+                "enum": [
+                  "base",
+                  "wave"
+                ]
+              },
               "nodes": {
                 "minItems": 2,
                 "type": "array",
@@ -502,7 +510,334 @@
             "additionalProperties": false,
             "description": "One amendment a run made to itself, and what happened to the thing it changed. The effect is a comparison of measured durations, not a claim of cause: a gate that got cheaper across an amendment did so while other things were also changing."
           },
-          "description": "Amendments the run made to itself (§9.2), oldest first. Empty means it made none, which is a fact rather than a gap: `workflow_amended` rows say who wrote them."
+          "description": "Amendments the run made to itself (§9.2), oldest first. Empty means it made none, which is a fact rather than a gap: `workflow_amended` rows say who wrote them. Changes a person made are in `operations`."
+        },
+        "failure_causes": {
+          "description": "Failed attempts grouped by cause, most expensive first.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "The scheduler’s recorded reason, verbatim up to 300 characters."
+              },
+              "setup": {
+                "type": "boolean",
+                "description": "Whether these attempts failed before any agent ran — provisioning, a base merge, a checkout. The machinery’s failure rather than the work’s, and the kind a plan cannot fix but a project configuration can."
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Attempts that failed with this reason, across every phase."
+              },
+              "nodes": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "description": "The phases it hit."
+              }
+            },
+            "required": [
+              "reason",
+              "setup",
+              "attempts",
+              "nodes"
+            ],
+            "additionalProperties": false,
+            "description": "One cause of failed attempts, and what it cost: the run’s retries, grouped."
+          }
+        },
+        "crew_substitutions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "planned": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The member the plan named."
+              },
+              "planned_tier": {
+                "description": "Their tier. Absent on rows written before it was recorded.",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "member": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Who ran it instead."
+              },
+              "tier": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "model": {
+                "description": "The model that member ran on, from the roster.",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "peer_busy",
+                  "warm_session"
+                ],
+                "description": "`peer_busy`: the planned member was working. `warm_session`: promoted to reuse an open session."
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Attempts this member took the phase for."
+              },
+              "above_plan": {
+                "type": "boolean",
+                "description": "Whether this ran at a higher tier than the plan named — dearer than budgeted."
+              },
+              "node_cost_usd": {
+                "description": "What the whole phase cost, every attempt and member included, when its harness reported cost.",
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "node",
+              "planned",
+              "member",
+              "tier",
+              "reason",
+              "attempts",
+              "above_plan"
+            ],
+            "additionalProperties": false,
+            "description": "A phase run by somebody other than the member its plan named."
+          }
+        },
+        "operations": {
+          "type": "object",
+          "properties": {
+            "amendments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "amendment": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "author": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "monitor",
+                      "coordinator",
+                      "config"
+                    ]
+                  }
+                },
+                "required": [
+                  "amendment",
+                  "at_ms",
+                  "author"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Every change to the run’s definition while it ran, whoever made it."
+            },
+            "node_operations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  },
+                  "op": {
+                    "type": "string",
+                    "enum": [
+                      "add_context",
+                      "redirect",
+                      "pause",
+                      "abort"
+                    ]
+                  },
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "coordinator"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "node",
+                  "op",
+                  "by",
+                  "count"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Steering, pauses and aborts, per phase."
+            },
+            "questions": {
+              "type": "object",
+              "properties": {
+                "asked": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "by_operator": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unattended": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "Answered by a `--retry-after` timer."
+                },
+                "by_coordinator": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unanswered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "asked",
+                "by_operator",
+                "unattended",
+                "by_coordinator",
+                "unanswered"
+              ],
+              "additionalProperties": false,
+              "description": "Every question a phase was parked on, and who answered it."
+            },
+            "exec_runs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "operator",
+                      "coordinator"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "failed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "target",
+                  "by",
+                  "count",
+                  "failed"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Commands run by hand in a lane or the integration worktree (`vinta-ai-maestro exec`)."
+            }
+          },
+          "required": [
+            "amendments",
+            "node_operations",
+            "questions",
+            "exec_runs"
+          ],
+          "additionalProperties": false,
+          "description": "What was done to the run while it ran, by a person or its coordinator. Repairs made outside maestro — a wave branch rebuilt in another checkout — leave no record and are not counted."
+        },
+        "cross_phase_failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "wave": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "members": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "description": "The phases merged in that wave."
+              },
+              "at_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "exit_code": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "wave",
+              "gate",
+              "members",
+              "at_ms",
+              "exit_code"
+            ],
+            "additionalProperties": false,
+            "description": "A gate that every phase passed on its own branch and that failed on the merged wave: two of `members` (or one of them and an earlier wave) disagree. The evidence of a missing dependency or a missing contract test that `missing_dependencies`’ ordering cannot see."
+          }
         }
       },
       "required": [

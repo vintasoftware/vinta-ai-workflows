@@ -151,6 +151,7 @@ export function runUsage(parts: Partial<RunUsageResponse> = {}): RunUsageRespons
       asPlanned: 0,
       substituted: 0,
       warmReuse: 0,
+      promoted: 0,
       idle: [],
     },
     inputTokens: 12_400,

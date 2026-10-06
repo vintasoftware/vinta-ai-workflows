@@ -357,6 +357,19 @@ export interface PoolOptions {
   readonly readCompose?: (
     repoPath: string,
   ) => Promise<{ config: ComposeConfig; baseFile: string } | null>
+  /**
+   * Stops one lane's compose stack — `docker compose down`, volumes kept. The
+   * seam `readCompose` is, for the same reason.
+   */
+  readonly composeDown?: (lane: { readonly path: string; readonly env: Readonly<Record<string, string>> }) => Promise<void>
+}
+
+/** One lane's compose stack, after `stopStacks`. */
+export interface StackStop {
+  /** The compose project, which is what `docker compose -p` takes. */
+  readonly project: string
+  readonly lane: string
+  readonly stopped: boolean
 }
 
 export interface Lane {
@@ -531,6 +544,35 @@ export class LanePool {
    * worktree goes first — a `git clean` run after the reset would delete the
    * database file the reset had just restored.
    */
+  /**
+   * Stops every lane's compose stack, the integration worktree's included.
+   * `down` without `-v`: containers and networks go, volumes — the lanes'
+   * databases — stay, so nothing a person might still want to look at is
+   * destroyed. A finished run used to leave every stack running: one observed
+   * run had twenty containers up a day and a half after it was done.
+   *
+   * Never throws. A stack that will not stop is reported, and the run that
+   * just finished is not failed for it.
+   */
+  async stopStacks(): Promise<readonly StackStop[]> {
+    const down =
+      this.#options.composeDown ??
+      (async (lane: { readonly path: string; readonly env: Readonly<Record<string, string>> }) => {
+        await run('docker', ['compose', 'down'], { cwd: lane.path, env: { ...process.env, ...lane.env } })
+      })
+    const stopped: StackStop[] = []
+    for (const lane of this.#all) {
+      if (lane.compose === null) continue
+      try {
+        await down({ path: lane.path, env: lane.env })
+        stopped.push({ project: lane.composeProject, lane: lane.name, stopped: true })
+      } catch {
+        stopped.push({ project: lane.composeProject, lane: lane.name, stopped: false })
+      }
+    }
+    return stopped
+  }
+
   async recycle(name: string): Promise<Lane> {
     const lane = this.lane(name)
     const summary = await readSummary(this.#summaryDir, name)
@@ -723,10 +765,8 @@ export class LanePool {
     return true
   }
 
-  #git(args: readonly string[]): Promise<unknown> {
-    const turn = this.#gitTurn.then(() =>
-      run('git', [...args], { cwd: this.#options.repoPath }),
-    )
+  #git(args: readonly string[], cwd: string = this.#options.repoPath): Promise<unknown> {
+    const turn = this.#gitTurn.then(() => run('git', [...args], { cwd }))
     this.#gitTurn = turn.catch(() => undefined)
     return turn
   }
@@ -938,20 +978,23 @@ export class LanePool {
     // not available here because the agent runs its own git. So: worktree
     // config, with the extension enabled first.
     //
-    // **The extension goes through `#git`, which serializes; the `--worktree`
-    // write does not need to.** `extensions.worktreeConfig` is a
-    // repository-wide key, so enabling it writes the *shared* `.git/config` —
-    // one file, whichever worktree asks — and git takes `.git/config.lock` to
-    // do it. Called per lane out of the provisioning `Promise.all`, the lanes
-    // collided on that lock: `could not lock config file …: File exists`, and
-    // the pool refused. A fresh provision never showed it, because
-    // `worktree add` goes through the same turn and staggered the lanes apart
-    // — so this was a bug only on the path that skips `worktree add`, which is
-    // `adopt`, which is every resume of a project with `hooks: false`. The
-    // second write lands in `.git/worktrees/<name>/config.worktree`, a
-    // different file per lane, and stays parallel.
+    // **Both go through `#git`, which serializes.** `extensions.worktreeConfig`
+    // is a repository-wide key, so enabling it writes the *shared*
+    // `.git/config` — one file, whichever worktree asks — and git takes
+    // `.git/config.lock` to do it. Called per lane out of the provisioning
+    // `Promise.all`, the lanes collided on that lock: `could not lock config
+    // file …: File exists`, and the pool refused. That was a bug only on the
+    // path that skips `worktree add` (which goes through the same turn and
+    // staggers the lanes), which is `adopt`, which is every resume of a project
+    // with `hooks: false`.
+    //
+    // The `--worktree` write lands in a file of its own per lane, but git
+    // *reads* the shared `.git/config` to make it. On Windows a read that
+    // meets another lane's write — git replaces the file by renaming its lock
+    // over it — fails outright: `unable to access '.git/config': Permission
+    // denied`, seen on CI. So it takes the same turn.
     await this.#git(['config', 'extensions.worktreeConfig', 'true'])
-    await gitIn(lanePath, ['config', '--worktree', 'core.hooksPath', empty])
+    await this.#git(['config', '--worktree', 'core.hooksPath', empty], lanePath)
   }
 
   /**

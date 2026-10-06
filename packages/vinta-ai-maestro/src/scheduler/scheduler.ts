@@ -1689,6 +1689,7 @@ export class Scheduler {
         // the menu — a saving nobody asked for, spent against an explicit
         // instruction.
         ...(state.retryMember === null ? { warm: this.#warmCrew(state) } : {}),
+        substitution: this.#workflow.defaults.substitution,
       })
 
       if (decision.kind === 'unstaffed') return
@@ -1709,7 +1710,14 @@ export class Scheduler {
             member: decision.member,
             tier: decision.tier,
             substitute: decision.substitute,
-            ...(decision.insteadOf === null ? {} : { instead_of: decision.insteadOf }),
+            ...(decision.insteadOf === null
+              ? {}
+              : {
+                  instead_of: decision.insteadOf,
+                  ...(this.#workflow.crew[decision.insteadOf] === undefined
+                    ? {}
+                    : { planned_tier: this.#workflow.crew[decision.insteadOf]?.tier as number }),
+                }),
             ...(decision.reason === null ? {} : { reason: decision.reason }),
           },
         })
@@ -3372,7 +3380,7 @@ export class Scheduler {
       runId: this.#options.runId,
       nodeId: state.node.id,
       type: 'node_error',
-      payload: { reason, attempt: state.retries + state.autoRetries + 1 },
+      payload: { reason, attempt: state.retries + state.autoRetries + 1, ...(setup ? { setup: true as const } : {}) },
     })
   }
 

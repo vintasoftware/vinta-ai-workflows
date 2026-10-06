@@ -40,6 +40,8 @@ const FACTS = {
   attempts: 1,
   conflicts: [],
   touches: ['public_api/aggregations/plan.py'],
+  landing: { runId: 'run-7', planHead: 'plan/x/wave-7', baseBranch: 'main' },
+  leftOut: [],
 } as const
 
 describe('reading the phase’s prs-context file', () => {
@@ -119,6 +121,23 @@ describe('composing a body when the agent wrote none', () => {
     expect(text.body).toContain('Nobody has reviewed those resolutions')
   })
 
+  it('says it is a review unit, and how the plan lands instead', () => {
+    // 36 PRs, no merge order, and the same conflicts resolved several times
+    // against different bases by hand — two of them wrongly.
+    const text = composePrBody(FACTS)
+    expect(text.body).toContain("**Review unit — don't merge this PR.**")
+    expect(text.body).toContain('`plan/x/wave-7` into `main`')
+    expect(text.body).toContain('vinta-ai-maestro land run-7 --close')
+  })
+
+  it('names the sibling phases its base leaves out, so their failures are not read as its own', () => {
+    // A phase PR failed CI in a test a sibling had already fixed on its branch.
+    const text = composePrBody({ ...FACTS, leftOut: ['p8', 'p9'] })
+    expect(text.body).toContain('## What CI on this PR checks')
+    expect(text.body).toContain('It leaves out `p8`, `p9`')
+    expect(composePrBody(FACTS).body).not.toContain('## What CI on this PR checks')
+  })
+
   it('carries no gate output — a PR body is published (§11)', () => {
     const text = composePrBody({ ...FACTS, gates: [{ gate: 'unit', exitCode: 1 }] })
 
@@ -141,24 +160,26 @@ describe('the PR number off the URL gh printed', () => {
 })
 
 describe('the integration branch PR', () => {
-  it('names what it merges and the order to land it in', () => {
+  it('names what it merges, and says it is a review unit rather than a merge step', () => {
     const text = composeIntegrationPrBody({
       nodeId: 'p2',
       name: 'Aggregate root fields',
       branch: 'plan/x/integ-p2',
       baseBranch: 'main',
       dependsOn: ['p0', 'p1'],
+      landing: { runId: 'run-7', planHead: 'plan/x/wave-7', baseBranch: 'main' },
     })
     expect(text.title).toBe('Integrate p0 + p1 for Aggregate root fields')
-    expect(text.body).toContain('## Merge order')
     expect(text.body).toContain('`plan/x/integ-p2`')
-    expect(text.body).toContain('Retarget the PR for `p2` to `main`')
+    expect(text.body).not.toContain('## Merge order')
+    expect(text.body).toContain("**Review unit — don't merge this PR.**")
   })
 })
 
 describe('the plan PR', () => {
-  it('lists every PR in merge order, and the ones that never opened', () => {
+  it('is the one PR to merge, and lists the review units it carries', () => {
     const text = composePlanPrBody({
+      runId: 'run-7',
       planId: 'x',
       baseBranch: 'main',
       head: 'plan/x/wave-2',
@@ -170,10 +191,13 @@ describe('the plan PR', () => {
       ],
     })
     expect(text.title).toBe('Land plan x')
-    const order = text.body.split('## Merge order')[1] ?? ''
-    expect(order.indexOf('pr/1')).toBeLessThan(order.indexOf('pr/3'))
-    expect(order.indexOf('pr/3')).toBeLessThan(order.indexOf('pr/4'))
-    expect(order).toContain('phase `p1`: (no PR — open it by hand)')
-    expect(order).toContain('5. This PR.')
+    // One landing path, not two to pick from.
+    expect(text.body).toContain('**Merge this PR, with a merge commit, and no other.**')
+    expect(text.body).not.toContain('Pick one')
+    expect(text.body).toContain('vinta-ai-maestro land run-7 --close')
+    expect(text.body).toContain('vinta-ai-maestro propagate run-7 <phase>')
+    const units = text.body.split('## Review units')[1] ?? ''
+    expect(units).toContain('phase `p1`: (no PR opened)')
+    expect(units).toContain('https://example.invalid/pr/3')
   })
 })

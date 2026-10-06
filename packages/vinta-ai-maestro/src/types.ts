@@ -192,6 +192,10 @@ export type GateType = (typeof GATE_TYPES)[number]
 export const GATE_SCOPES = ['scoped', 'full'] as const
 export type GateScope = (typeof GATE_SCOPES)[number]
 
+/** How far above its planned tier a phase may be moved (`defaults.substitution`). */
+export const SUBSTITUTIONS = ['same_tier', 'up_one_tier', 'any'] as const
+export type Substitution = (typeof SUBSTITUTIONS)[number]
+
 /** When the project's gates run in full on a merged wave (`defaults.wave_gates`). */
 export const WAVE_GATES = ['off', 'final', 'every'] as const
 export type WaveGates = (typeof WAVE_GATES)[number]
@@ -812,6 +816,18 @@ export const DefaultsSchema = z.strictObject({
     .describe(
       '`scoped` — the default — runs a gate’s `scoped_cmd` on phase gates and its full `cmd` on ' +
         'the gate that re-runs after a wave merge. `full` runs `cmd` everywhere.',
+    ),
+  substitution: z
+    .enum(SUBSTITUTIONS)
+    .default('up_one_tier')
+    .describe(
+      'How far above the member the plan named a phase may be moved when that member is busy ' +
+        'or another holds a warm session. `same_tier` \u2014 only a peer at the same tier; a phase ' +
+        'waits rather than run dearer. `up_one_tier` \u2014 the default \u2014 also the next tier up the ' +
+        'roster has, when nobody at the planned tier is free; a warm session never moves a ' +
+        'phase up. `any` \u2014 any tier above, and a warm session above the plan may take it to ' +
+        'avoid a cold start. One observed run moved 23 phases from Tier 3 to a Tier 4 member ' +
+        'whose credits then ran out, and nothing showed it.',
     ),
   wave_gates: z
     .enum(WAVE_GATES)

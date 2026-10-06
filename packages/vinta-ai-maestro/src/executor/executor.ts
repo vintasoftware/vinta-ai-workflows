@@ -74,7 +74,7 @@
 import { laneTreeHash, type GateCache } from '../gates/cache.ts'
 import { phaseGate } from '../gates/scope.ts'
 import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from '../gates/runner.ts'
-import { computeWaves } from '../graph.ts'
+import { computeWaves, transitiveDependents } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
 import type { Integrator } from '../integration/integrator.ts'
 import { prNumberOf } from '../integration/pr.ts'
@@ -93,9 +93,11 @@ import {
   type Judgement,
 } from '../system-one/judges.ts'
 import {
+  composeIntegrationPrBody,
   composePlanPrBody,
   composePrBody,
   readPrContext,
+  type Landing,
   type PlanPrStep,
   type PrText,
 } from '../integration/pr-body.ts'
@@ -1042,8 +1044,17 @@ export class RunEffectExecutor implements EffectExecutor {
       // nothing targeted *it*: every PR stacked above it had no path to
       // `base_branch`, and landing the plan meant redoing the merges by hand.
       // Opened before the phase PR so the forge lists them in merge order.
+      const node = this.#node(nodeId)
       const integration = await integrator.openIntegrationPr(nodeId, {
         draft: params['draft'] === true,
+        text: composeIntegrationPrBody({
+          nodeId,
+          name: node?.name ?? nodeId,
+          branch: base.branch,
+          baseBranch: this.#workflow.base_branch,
+          dependsOn: base.nodes,
+          landing: this.#landing(),
+        }),
       })
       if (integration !== null) this.#recordPr(nodeId, 'integration', integration)
     }
@@ -1136,6 +1147,7 @@ export class RunEffectExecutor implements EffectExecutor {
     }
 
     return composePlanPrBody({
+      runId,
       planId: this.#workflow.id,
       baseBranch: this.#workflow.base_branch,
       head: integrator.waveBranch(wave),
@@ -1207,7 +1219,40 @@ export class RunEffectExecutor implements EffectExecutor {
       attempts,
       conflicts,
       touches: node.touches,
+      landing: this.#landing(),
+      leftOut: this.#leftOut(nodeId),
     })
+  }
+
+  /** How this plan lands: its final wave branch into `base_branch`. */
+  #landing(): Landing {
+    return {
+      runId: this.#options.runId,
+      planHead: this.#options.integrator.waveBranch(this.#finalWave()),
+      baseBranch: this.#workflow.base_branch,
+    }
+  }
+
+  /**
+   * The phases a node's base leaves out: in its wave or earlier, and neither
+   * its dependency nor its dependent. Its PR's CI runs without them, so a
+   * failure in their area there is not its own (observed: a phase PR failed in
+   * a test a sibling phase had already fixed on its own branch).
+   */
+  #leftOut(nodeId: string): readonly string[] {
+    const wave = this.#waves.get(nodeId) ?? 0
+    const deps = new Map(this.#workflow.nodes.map((node) => [node.id, node.depends_on.map((dep) => dep.node)]))
+    const related = new Set<string>([nodeId, ...transitiveDependents(this.#workflow.nodes, nodeId)])
+    const queue = [...(deps.get(nodeId) ?? [])]
+    while (queue.length > 0) {
+      const next = queue.shift() as string
+      if (related.has(next)) continue
+      related.add(next)
+      queue.push(...(deps.get(next) ?? []))
+    }
+    return this.#workflow.nodes
+      .filter((node) => !related.has(node.id) && (this.#waves.get(node.id) ?? 0) <= wave)
+      .map((node) => node.id)
   }
 
   // -------------------------------------------------------------------------

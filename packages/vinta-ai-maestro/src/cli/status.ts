@@ -23,6 +23,7 @@ import { jobLogPathFor, liveJob, type JobRecord } from '../job/job.ts'
 import { openJournal, type Journal, type RunRow } from '../journal/journal.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
+import { describeLeftovers, findLeftovers, type LeftoverDeps } from '../run/leftovers.ts'
 
 export const STATUS_USAGE = `usage: vinta-ai-maestro status [runId] [--repo <dir>] [--json]
 
@@ -48,7 +49,11 @@ export function runState(row: RunRow, job: JobRecord | null): RunState {
 export const isResumable = (state: RunState): boolean =>
   state === 'paused' || state === 'failed' || state === 'interrupted'
 
-export async function statusCommand(argv: readonly string[], io: Io): Promise<number> {
+export async function statusCommand(
+  argv: readonly string[],
+  io: Io,
+  deps: LeftoverDeps = {},
+): Promise<number> {
   let parsed
   try {
     parsed = parseArgs({
@@ -82,14 +87,20 @@ export async function statusCommand(argv: readonly string[], io: Io): Promise<nu
   const journal = openJournal(repoPath)
   try {
     return runId === undefined
-      ? listRuns(journal, repoPath, json, io)
+      ? await listRuns(journal, repoPath, json, io, deps)
       : showRun(journal, repoPath, runId, json, io)
   } finally {
     journal.close()
   }
 }
 
-function listRuns(journal: Journal, repoPath: string, json: boolean, io: Io): number {
+async function listRuns(
+  journal: Journal,
+  repoPath: string,
+  json: boolean,
+  io: Io,
+  deps: LeftoverDeps,
+): Promise<number> {
   const now = Date.now()
   const rows = journal.runs().map((row) => {
     const nodes = journal.nodes(row.id)
@@ -106,8 +117,12 @@ function listRuns(journal: Journal, repoPath: string, json: boolean, io: Io): nu
     }
   })
 
+  // What finished runs left running or on disk: a run that is over should not
+  // still hold containers, worktrees or a process, and nothing else says so.
+  const leftovers = await findLeftovers(repoPath, journal, deps)
+
   if (json) {
-    io.out(JSON.stringify({ runs: rows }))
+    io.out(JSON.stringify({ runs: rows, leftovers }))
     return OK
   }
   if (rows.length === 0) {
@@ -126,6 +141,11 @@ function listRuns(journal: Journal, repoPath: string, json: boolean, io: Io): nu
       ]),
     ),
   )
+  if (leftovers.length > 0) {
+    io.out('')
+    io.out('Left behind by finished runs:')
+    for (const line of describeLeftovers(leftovers)) io.out(`  ${line}`)
+  }
   return OK
 }
 
@@ -147,6 +167,13 @@ function showRun(
   const asking = new Set(journal.pendingQuestions(runId).map((question) => question.nodeId))
   const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, string | null>()
   const held = state === 'running' ? journal.heldNodes(runId) : new Set<string>()
+  const substituted = journal.substitutions(runId)
+  const crewNote = (nodeId: string): string => {
+    const row = substituted.get(nodeId)
+    if (row === undefined) return ''
+    const dearer = row.plannedTier !== null && row.tier > row.plannedTier ? `, tier ${row.plannedTier} → ${row.tier}` : ''
+    return ` — on ${row.member} instead of ${row.insteadOf ?? '?'}${dearer}${row.reason === null ? '' : ` (${row.reason})`}`
+  }
   const waitNote = (nodeId: string): string => {
     if (held.has(nodeId)) return ' — paused by operator'
     if (!waiting.has(nodeId)) return ''
@@ -172,6 +199,7 @@ function showRun(
           waitingOn: waiting.has(node.node_id) ? 'integration_worktree' : null,
           heldBy: waiting.get(node.node_id) ?? null,
           pausedByOperator: held.has(node.node_id),
+          substitution: substituted.get(node.node_id) ?? null,
         })),
       }),
     )
@@ -191,7 +219,9 @@ function showRun(
       ['PHASE', 'STATUS', 'WAVE', 'HARNESS'],
       nodes.map((node) => [
         node.node_id,
-        (asking.has(node.node_id) ? `${node.status} — asking` : node.status) + waitNote(node.node_id),
+        (asking.has(node.node_id) ? `${node.status} — asking` : node.status) +
+          waitNote(node.node_id) +
+          crewNote(node.node_id),
         String(node.wave),
         node.harness,
       ]),

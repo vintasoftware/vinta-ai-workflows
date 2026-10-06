@@ -59,6 +59,12 @@ export interface RunCrew {
    */
   readonly warmReuse: number
   /**
+   * Of `substituted`, the ones that ran at a higher tier than the member the
+   * plan named — dearer than budgeted. Counted only on rows that recorded the
+   * planned tier. One observed run had 73 of these and showed none of them.
+   */
+  readonly promoted: number
+  /**
    * Members the roster declared who took nothing here. Empty on a completed
    * run of a validated workflow — `validate.ts` refuses a member assigned no
    * node — so a non-empty list means the run stopped before they were reached.
@@ -77,6 +83,8 @@ interface Claim {
   readonly substitute: boolean
   /** Why, when the row says. Absent on rows written before it did (§15.6). */
   readonly reason: string | null
+  /** The named member's tier, on a substitution that recorded it. */
+  readonly plannedTier: number | null
 }
 
 export function collectRunCrew(
@@ -91,6 +99,7 @@ export function collectRunCrew(
   let asPlanned = 0
   let substituted = 0
   let warmReuse = 0
+  let promoted = 0
 
   for (const event of source.crewAssignments(runId)) {
     const claim = read(event)
@@ -109,6 +118,7 @@ export function collectRunCrew(
       entry.coveredFor += 1
       substituted += 1
       if (claim.reason === 'warm_session') warmReuse += 1
+      if (claim.plannedTier !== null && claim.tier > claim.plannedTier) promoted += 1
     } else {
       asPlanned += 1
     }
@@ -130,6 +140,7 @@ export function collectRunCrew(
     asPlanned,
     substituted,
     warmReuse,
+    promoted,
     idle: declared.filter((member) => !byMember.has(member)).sort(),
   }
 }
@@ -151,5 +162,6 @@ function read(event: StoredEvent): Claim | null {
     tier,
     substitute: payload['substitute'] === true,
     reason: typeof reason === 'string' ? reason : null,
+    plannedTier: typeof payload['planned_tier'] === 'number' ? payload['planned_tier'] : null,
   }
 }

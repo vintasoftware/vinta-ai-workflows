@@ -521,6 +521,26 @@ describe('lane pool', () => {
     expect(new Set(overrides).size).toBe(2)
   })
 
+  it('stops every lane’s compose stack when asked, volumes kept, and never throws', async () => {
+    // A finished run left twenty containers up for a day and a half. The pool
+    // is what knows each lane's compose project and files, so it is what
+    // stops them.
+    const downs: { path: string; project: string | undefined }[] = []
+    const pool = await provision({ ...sqliteProject(), compose: {} }, 2, {
+      readCompose,
+      composeDown: async (lane) => {
+        downs.push({ path: lane.path, project: lane.env['COMPOSE_PROJECT_NAME'] })
+        if (downs.length === 3) throw new Error('docker is not running')
+      },
+    })
+
+    const stopped = await pool.stopStacks()
+    // Both lanes and the integration worktree, each by its own project.
+    expect(downs).toHaveLength(3)
+    expect(new Set(downs.map((down) => down.project)).size).toBe(3)
+    expect(stopped.map((stack) => stack.stopped)).toEqual([true, true, false])
+  })
+
   it('records the forked volumes in the summary, which is the teardown manifest', async () => {
     const pool = await provision({ ...sqliteProject(), compose: {} }, 1, { readCompose })
     const lane = pool.lanes[0] as Lane

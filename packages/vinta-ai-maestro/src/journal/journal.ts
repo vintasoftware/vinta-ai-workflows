@@ -542,6 +542,40 @@ export class Journal {
   }
 
   /**
+   * Each phase's current staffing when it is not the plan's: the latest
+   * `node_crew` row per node, kept only when it is a substitution. For
+   * `status`, which otherwise shows a phase running on a dearer model than its
+   * plan named as if nothing were different.
+   */
+  substitutions(
+    runId: string,
+  ): Map<string, { member: string; tier: number; insteadOf: string | null; plannedTier: number | null; reason: string | null }> {
+    const latest = new Map<
+      string,
+      { member: string; tier: number; insteadOf: string | null; plannedTier: number | null; reason: string | null } | null
+    >()
+    for (const event of this.crewAssignments(runId)) {
+      if (!('nodeId' in event) || event.nodeId === null) continue
+      const payload = event.payload as Record<string, unknown>
+      latest.set(
+        event.nodeId,
+        payload['substitute'] === true && typeof payload['member'] === 'string'
+          ? {
+              member: payload['member'],
+              tier: typeof payload['tier'] === 'number' ? payload['tier'] : 0,
+              insteadOf: typeof payload['instead_of'] === 'string' ? payload['instead_of'] : null,
+              plannedTier: typeof payload['planned_tier'] === 'number' ? payload['planned_tier'] : null,
+              reason: typeof payload['reason'] === 'string' ? payload['reason'] : null,
+            }
+          : null,
+      )
+    }
+    const found = new Map<string, NonNullable<ReturnType<typeof latest.get>>>()
+    for (const [node, row] of latest) if (row !== null && row !== undefined) found.set(node, row)
+    return found
+  }
+
+  /**
    * Forgets a run: its events and every projection folded from them. For
    * `purge`, which removes the run directory — and until this existed left
    * the rows behind, so the UI went on listing, and offering to resume, a run
@@ -678,6 +712,7 @@ export class Journal {
       case 'wave_built':
       case 'wave_deferred':
       case 'workspace_exec':
+      case 'stacks_stopped':
       case 'coordinator_woke':
       case 'bare_gate_blocked':
       case 'bare_gate_detected':

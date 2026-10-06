@@ -29,7 +29,7 @@ import {
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
@@ -1174,7 +1174,69 @@ describe('vinta-ai-maestro run', () => {
    * pinned here, because an empty `wave_conflicts` means something different
    * under each.
    */
-  it('records conflicts from the integrator’s wave results, and their absence as a gap', async () => {
+  it('stops a done run’s compose stacks, keeps their volumes, and says how to remove the rest', async () => {
+    // Twenty containers were still up a day and a half after a run was done.
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    const io = recorder()
+    let asked = 0
+
+    const code = await runCommand(['--foreground', path, '--repo', dir], io.io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: NO_EFFECTS,
+      runId: 'tidy',
+      stopStacks: async () => {
+        asked += 1
+        return [
+          { project: 'repo_tidy-lane-1', lane: 'tidy-lane-1', stopped: true },
+          { project: 'repo_tidy-integ', lane: 'tidy-integ', stopped: true },
+        ]
+      },
+    })
+
+    expect(code).toBe(OK)
+    expect(asked).toBe(1)
+    expect(io.out).toContain('vinta-ai-maestro: stopped 2 compose stack(s); their volumes are kept.')
+    expect(io.out).toContain('  vinta-ai-maestro purge tidy --lanes')
+    expect(io.out).toContain('  docker compose -p repo_tidy-lane-1 down -v')
+    const journal = openJournal(dir)
+    try {
+      expect(journal.events('tidy').find((event) => event.type === 'stacks_stopped')?.payload).toEqual({
+        stopped: ['repo_tidy-lane-1', 'repo_tidy-integ'],
+        failed: [],
+      })
+    } finally {
+      journal.close()
+    }
+  })
+
+  it('leaves a failed run’s stacks up: it is resumable, and they are what someone debugs', async () => {
+    const dir = makeTemp()
+    const path = writeJson(dir, 'workflow.json', workflowJson([node('a')]))
+    let asked = 0
+    await runCommand(['--foreground', path, '--repo', dir, '--on-failure', 'stop'], recorder().io, {
+      adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) },
+      executor: {
+        execute: async () => {
+          throw new Error('every effect fails')
+        },
+      },
+      runId: 'broken',
+      stopStacks: async () => {
+        asked += 1
+        return []
+      },
+    })
+    expect(asked).toBe(0)
+    const journal = openJournal(dir)
+    try {
+      expect(journal.run('broken')?.status).toBe('failed')
+    } finally {
+      journal.close()
+    }
+  })
+
+  it('records conflicts from the integrator’s wave results when the journal has none', async () => {
     const dir = makeTemp()
     const path = writeJson(dir, 'workflow.json', workflowJson([node('a'), node('b')]))
     const io = recorder()
@@ -1202,7 +1264,8 @@ describe('vinta-ai-maestro run', () => {
       'integration_record_unavailable',
     )
 
-    // The same run without the record: empty findings, and a gap that says so.
+    // The same run without the record: the journal is the record now
+    // (`node_conflict`), so no conflicts is a finding, not a gap.
     const bare = makeTemp()
     const barePath = writeJson(bare, 'workflow.json', workflowJson([node('a'), node('b')]))
     await runCommand(['--foreground', barePath, '--repo', bare], recorder().io, {
@@ -1218,7 +1281,7 @@ describe('vinta-ai-maestro run', () => {
     expect(withoutRecord.ok).toBe(true)
     if (!withoutRecord.ok) return
     expect(withoutRecord.report.findings.wave_conflicts).toEqual([])
-    expect(withoutRecord.report.gaps.map((gap) => gap.kind)).toContain(
+    expect(withoutRecord.report.gaps.map((gap) => gap.kind)).not.toContain(
       'integration_record_unavailable',
     )
   })
@@ -2556,6 +2619,52 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
     const one = recorder()
     expect(await statusCommand(['orphaned', '--repo', dir, '--json'], one.io)).toBe(OK)
     expect(JSON.parse(one.out.join(''))).toMatchObject({ runId: 'orphaned', state: 'interrupted', pid: null })
+  })
+
+  it('shows a phase staffed above its plan, and on whom', async () => {
+    // 73 substitutions in one run, 24 of them a tier or two dearer than
+    // planned, and `status` showed every one of those phases as just `running`.
+    const dir = gitRepo()
+    orphan(dir, 'staffed')
+    const journal = openJournal(dir)
+    journal.append({
+      runId: 'staffed',
+      nodeId: 'a',
+      type: 'node_crew',
+      payload: { member: 'tier4', tier: 4, substitute: true, instead_of: 'tier3-1', planned_tier: 3, reason: 'warm_session' },
+    })
+    journal.close()
+
+    const io = recorder()
+    expect(await statusCommand(['staffed', '--repo', dir], io.io)).toBe(OK)
+    expect(io.out.join('\n')).toContain('on tier4 instead of tier3-1, tier 3 → 4 (warm_session)')
+    const json = recorder()
+    expect(await statusCommand(['staffed', '--repo', dir, '--json'], json.io)).toBe(OK)
+    expect(JSON.parse(json.out.join('')).nodes[0]).toMatchObject({
+      nodeId: 'a',
+      substitution: { member: 'tier4', tier: 4, insteadOf: 'tier3-1', plannedTier: 3, reason: 'warm_session' },
+    })
+  })
+
+  it('lists what a finished run left running or on disk, with the command for each', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'over')
+    const journal = openJournal(dir)
+    journal.append({ runId: 'over', type: 'run_ended', payload: { status: 'done' } })
+    journal.close()
+    mkdirSync(join(dir, '.vinta-ai-maestro', 'lanes', 'over-lane-1'), { recursive: true })
+    const project = `${basename(dir).toLowerCase()}_over-lane-1`
+
+    const io = recorder()
+    expect(
+      await statusCommand(['--repo', dir], io.io, { listStacks: async () => [project, 'someone-else_x'] }),
+    ).toBe(OK)
+    const text = io.out.join('\n')
+    expect(text).toContain('Left behind by finished runs:')
+    expect(text).toContain(`over: compose stack still running ${project} — docker compose -p ${project} down`)
+    expect(text).toContain('over: lane worktree still on disk')
+    expect(text).toContain('vinta-ai-maestro purge over --lanes')
+    expect(text).not.toContain('someone-else')
   })
 
   it('says there are no runs without creating a store', async () => {

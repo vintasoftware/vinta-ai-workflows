@@ -393,6 +393,16 @@
             "full"
           ]
         },
+        "substitution": {
+          "default": "up_one_tier",
+          "description": "How far above the member the plan named a phase may be moved when that member is busy or another holds a warm session. `same_tier` — only a peer at the same tier; a phase waits rather than run dearer. `up_one_tier` — the default — also the next tier up the roster has, when nobody at the planned tier is free; a warm session never moves a phase up. `any` — any tier above, and a warm session above the plan may take it to avoid a cold start. One observed run moved 23 phases from Tier 3 to a Tier 4 member whose credits then ran out, and nothing showed it.",
+          "type": "string",
+          "enum": [
+            "same_tier",
+            "up_one_tier",
+            "any"
+          ]
+        },
         "wave_gates": {
           "default": "final",
           "description": "When the phases’ gates run in full on a merged wave, in the integration worktree. Each phase passes its gates on its own branch, and two parallel phases can each be green and disagree with each other — a sender and a receiver of one signal, say — which only a merged tree shows. `final` — the default — runs every gate of the plan once on the last wave before the plan PR opens, and the wave’s phases’ gates on any wave whose merge needed a conflict resolution. `every` runs the wave’s phases’ gates on every wave as well, which costs one full suite per wave and catches a disagreement at the wave that introduced it. `off` runs none of these. Under `gate_scope: scoped` the full form of a narrowed gate still runs on each wave whatever this says: that is where the suite the phases skipped is paid back.",

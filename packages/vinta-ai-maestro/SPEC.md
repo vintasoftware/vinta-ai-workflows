@@ -565,6 +565,20 @@ What remains is *how* the run executes — models, harnesses and the crew, fix b
 
 The post-mortem scores the coordinator's amendments as it scored the monitor's (`interventions`), pointing at its conversation for the reasoning.
 
+### 9.4 After the run: landing, carrying fixes forward, cleaning up
+
+**One PR lands the plan.** A run opens a PR per phase, one per `integ-<id>` branch and one for the plan — the final wave branch into `base_branch`. Only the plan PR carries every phase with every conflict resolved once; the others are review units, and every one of them says so in a **Landing** section, naming the plan's head branch and `vinta-ai-maestro land <run> --close`. The plan PR says to merge it, with a merge commit, and no other. A phase PR also says which phases in its wave or earlier its base leaves out — its CI runs without them, so a failure in their area is not its own. An observed landing of 36 PRs with none of this resolved the same conflicts several times by hand; two resolutions were wrong.
+
+**`land <run>`** lists the plan PR and every review PR with its state, and marks a review PR as landed when every commit it adds is a merge whose parents the base already has — what GitHub's "Update branch" on a landed phase looks like. `--close` closes exactly those, with a comment saying they landed.
+
+**`propagate <run> <phase>`** carries new commits on a phase branch — a fix found after the run — into every `integ-*` and `wave-*` branch that contains the phase (read from git: the branch shares a commit of the phase's own). Integration branches take the phase; waves keep their chain, the lowest one taking the phase and each above it the wave below. A scratch worktree, merge commits only, a conflict stops it with the branch left as it was, `--dry-run` shows the merges, and it refuses a live run.
+
+**A run that ends `done` stops its compose stacks** — `docker compose down` in every lane and the integration worktree, volumes kept — journals `stacks_stopped`, and prints the commands that remove the rest (`purge <run> --lanes`, `docker compose -p <project> down -v`). A failed run keeps them: it is resumable, and they are what someone debugging it needs. `status` and `doctor` list what runs that are over (`done`, `cancelled`) left behind — stacks still running, lane worktrees, live job processes — each with its command.
+
+**The post-mortem reads the journal, not the host's memory.** `wave_conflicts` comes from `node_conflict` rows, base merges included (`where`); new findings `failure_causes` (failed attempts grouped by reason, setup failures apart), `crew_substitutions` (with tier, model and the phase's cost), `operations` (amendments by any author, steering, questions and who answered them, `exec` runs) and `cross_phase_failures` (wave gates red on a merged tree). An observed post-mortem reported no conflicts, no interventions and no dependencies against 16 conflicts, 3 amendments, 485 failed attempts and 861 questions in its journal.
+
+**Crew substitution is capped** (`defaults.substitution`, default `up_one_tier`): a busy member's phase may go to the next tier up the roster has, and a warm session moves a phase only within its tier unless the setting is `any`. Every substitution carries `planned_tier`, and `status`, the run view and the post-mortem show the ones that ran above plan. One run had moved 73 phases up a tier, 23 of them onto a member whose limited credits then ran out.
+
 ### 9.3 Ending a run early
 
 Two operations on a run as a whole, beside §9's five on a node, and both are journalled as how the run ended — `run_ended` carries `paused` or `cancelled`:
