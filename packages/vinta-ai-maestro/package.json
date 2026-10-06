@@ -25,8 +25,6 @@
     "schema:check": "node --experimental-strip-types src/schema/generate.ts --check",
     "postmortem:schema:gen": "node --experimental-strip-types src/postmortem/generate.ts",
     "postmortem:schema:check": "node --experimental-strip-types src/postmortem/generate.ts --check",
-    "intervention:schema:gen": "node --experimental-strip-types src/intervention/generate.ts",
-    "intervention:schema:check": "node --experimental-strip-types src/intervention/generate.ts --check",
     "review:schema:gen": "node --experimental-strip-types src/review/generate.ts",
     "review:schema:check": "node --experimental-strip-types src/review/generate.ts --check",
     "postinstall": "node scripts/fix-node-pty.mjs"

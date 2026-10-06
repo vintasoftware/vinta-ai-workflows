@@ -96,6 +96,10 @@ Every command runs against a project checkout — your project, not this one. `-
 | `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
 | `pause <run-id> [--wait]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
 | `stop <run-id> [--wait]` | Kills every live agent turn and gate now. The run is `cancelled` and cannot be resumed. |
+| `node <context\|redirect\|pause\|abort\|retry\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, or `ignored`, which exits 1). |
+| `workflow <run-id>` | Prints the run's workflow as it stands now, every amendment applied. |
+| `amend <run-id> <workflow.json>` | Applies an edited workflow to a live run (§9's amend: refused while a phase it would move is running). |
+| `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. A run whose job is still running is kept. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
@@ -105,6 +109,31 @@ Every command runs against a project checkout — your project, not this one. `-
 There are also `judge-hook` and `guard-hook`, which are internal: they are the hooks `--permission judged` and [the gate guard](#the-gate-guard) install, and claude-code runs them, not you.
 
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
+
+### The run coordinator
+
+Every run has a coordinator: one agent that watches it, fixes what is wrong
+around its agents, and tunes how it executes — and the one you talk to in the
+run view. It does not orchestrate.
+
+It is **woken** when a phase fails, an attempt errors, maestro logs an error
+about itself, a phase waits 20 minutes for the integration worktree, or a phase
+or gate crosses its cost threshold (an hour running; half an hour of uncached
+gate time). A burst is one wake, wakes are at least two minutes apart, and a
+run wakes it at most 24 times. `--no-coordinator` turns the wakes off.
+
+It **acts** with the commands above — `node`, `workflow`/`amend`, `exec` —
+through the run's API, with a token of its own, so everything it does is
+recorded as its own. Its limits are enforced by the run, not by its prompt:
+
+- it may change *how* the run executes (models, fix budgets, gate timeouts,
+  resources, the project environment, a gate flag the gate's
+  `tuning.allowed_flags` lists) and never *what* the plan builds;
+- it may never weaken a check — drop a gate or chore, rewrite a gate command,
+  edit a judge gate, change `hooks`, lower `wave_gates`;
+- it answers only the questions `--retry-after` could answer, never one you
+  are holding, never a deferred start or a plan's human gate;
+- it cannot pause or stop the run.
 
 ### A run is a background job
 
@@ -267,7 +296,7 @@ with the project's commands:
 1. `commands.*`: the lines `implement-plan` runs.
 2. `maestro.*`: what maestro does differently, or what every plan would repeat.
 3. The plan's `.workflow.json`.
-4. The run's own amendments (an operator's edit, the monitor's retune). A config
+4. The run's own amendments (an operator's edit, the coordinator's). A config
    change never undoes one of these.
 
 **The merge rules are the workflow's own.** Maps keyed by id (`resources`,
@@ -430,7 +459,7 @@ $ git commit -am "maestro: reuse the test db" && git switch -
 What a config change may not do:
 
 - **Undo a change made in this run.** A gate, node, chore or pool that an
-  operator or the monitor amended keeps the run's value.
+  operator or the run coordinator amended keeps the run's value.
 - **Rewrite a phase that has started.** Its definition stays as it was. A gate
   *command* change reaches every phase at its next gate run, including phases
   already done.

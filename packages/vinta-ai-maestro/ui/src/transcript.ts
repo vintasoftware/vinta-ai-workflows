@@ -33,7 +33,12 @@
  */
 import { z } from 'zod'
 import type { AgentEvent } from '../../src/harness/adapter.ts'
-import type { InterventionVerbId } from '../../src/intervention/intervention.ts'
+/**
+ * The verbs of the intervention documents earlier versions of the monitor
+ * answered a watchdog with. The coordinator acts through the run's API now
+ * and writes none, but conversations recorded before that still hold them.
+ */
+type InterventionVerbId = 'retune_gate' | 'retime_gate' | 'rebudget_fixes' | 'retier_phase'
 import type { TranscriptEntry } from '../../src/journal/transcript.ts'
 import type { Tone } from './status.ts'
 

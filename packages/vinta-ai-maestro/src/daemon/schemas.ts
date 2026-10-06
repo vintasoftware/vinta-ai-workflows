@@ -86,6 +86,15 @@ export const RedirectRequestSchema = z.strictObject({ instruction: z.string().mi
 /** Pause and abort take no arguments; the strict empty object rejects the typo. */
 export const NoArgsRequestSchema = z.strictObject({})
 
+/**
+ * `POST /api/runs/:runId/exec` — one shell command, run in a lane (by name)
+ * or in the integration worktree (`integration`).
+ */
+export const ExecRequestSchema = z.strictObject({
+  target: z.string().min(1),
+  command: z.string().min(1),
+})
+
 /** A command inside an agent turn asks for semaphore resources as one lease. */
 export const AgentLeaseRequestSchema = z.strictObject({
   resources: z.array(z.string().min(1)).min(1).max(32),

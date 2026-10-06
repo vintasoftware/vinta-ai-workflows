@@ -334,3 +334,23 @@ test('an intervention proposal is readable in the conversation', async () => {
   expect(text).toContain('Gate unit — run: pytest --reuse-db')
   expect(text).not.toContain('schema_version')
 })
+
+test('is drawn by the phase page’s transcript, windowing and folding included', async () => {
+  // The coordinator's conversation is a transcript like a phase's — its
+  // thinking, its tool calls, the commands it ran through `exec` — and it used
+  // to be drawn by a second, simpler list that had neither the window nor the
+  // panel's controls. Now it is the same component.
+  const seed = Array.from({ length: 70 }, (_, index) => ({
+    type: 'assistant_text',
+    text: `note ${index}`,
+    by: { role: 'monitor' },
+  }))
+  const { container } = await openRun(seed)
+
+  await waitFor(() => expect(container.querySelector('[data-monitor].transcript')).not.toBe(null))
+  await waitFor(() =>
+    expect(textOf(container, '[data-monitor] [data-transcript-window]')).toContain('Showing 60 of 70'),
+  )
+  expect(container.querySelector('[data-monitor] [data-action="show-earlier"]')).not.toBe(null)
+  expect(container.querySelector('[data-monitor] [data-field="question"]')).not.toBe(null)
+})

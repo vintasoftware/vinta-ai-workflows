@@ -177,8 +177,9 @@ function recordingControl(): RunControl & { readonly calls: ControlCall[] } {
     answer: record('answer'),
     addContext: record('addContext'),
     redirect: record('redirect'),
-    pause: record('pause'),
-    abortNode: record('abortNode'),
+    // The second argument of these two is the actor, not a payload.
+    pause: (nodeId) => record('pause')(nodeId),
+    abortNode: (nodeId) => record('abortNode')(nodeId),
     question: (nodeId) =>
       nodeId === 'a'
         ? { question: 'Ship it?', kind: 'confirm' as const, context: { diffRef: 'phase/a' } }

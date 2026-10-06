@@ -1342,16 +1342,20 @@ export class RunEffectExecutor implements EffectExecutor {
   }
 
   /** Serializes work in the single integration worktree. */
-  async #integration<T>(work: () => Promise<T>, nodeId: string | null = null): Promise<T> {
+  async #integration<T>(
+    work: () => Promise<T>,
+    nodeId: string | null = null,
+    label: string | null = null,
+  ): Promise<T> {
     // Decided at the call, not when the work starts: two callers in one tick
     // must see each other, and the holder is whoever got here first.
     const queued = this.#integrationDepth > 0
     const holder = queued ? this.#integrationHolder : null
     this.#integrationDepth += 1
-    if (!queued) this.#integrationHolder = nodeId ?? '?'
+    if (!queued) this.#integrationHolder = nodeId ?? label ?? '?'
     if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'queued', holder)
     const held = async (): Promise<T> => {
-      this.#integrationHolder = nodeId ?? '?'
+      this.#integrationHolder = nodeId ?? label ?? '?'
       if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'granted', holder)
       try {
         return await work()
@@ -1378,10 +1382,17 @@ export class RunEffectExecutor implements EffectExecutor {
    * wave's merge is in flight in the same directory.
    *
    * Exposed rather than given a second queue of its own, because two queues
-   * over one worktree serialize nothing.
+   * over one worktree serialize nothing. The third writer is a person or the
+   * run coordinator working there by hand (`vinta-ai-maestro exec <run>
+   * integration`), who holds it under `label` — the name a queued phase's
+   * `node_wait` then gives as the holder.
    */
-  async integration<T>(work: () => Promise<T>, nodeId: string | null = null): Promise<T> {
-    return await this.#integration(work, nodeId)
+  async integration<T>(
+    work: () => Promise<T>,
+    nodeId: string | null = null,
+    label: string | null = null,
+  ): Promise<T> {
+    return await this.#integration(work, nodeId, label)
   }
 }
 

@@ -648,7 +648,7 @@ const ROLE_NAMES: Readonly<Record<string, string>> = {
   chore: 'Chore',
   'conflict-fixer': 'Conflict fixer',
   gate: 'Gate',
-  monitor: 'Monitor',
+  monitor: 'Coordinator',
 }
 
 export type { ReactNode }

@@ -1972,4 +1972,24 @@ describe('the integration worktree’s queue', () => {
     await rig.executor.integration(async () => undefined, 'p3')
     expect(waits).toHaveLength(2)
   })
+
+  it('names a person or the coordinator holding it by hand as the holder', async () => {
+    // `vinta-ai-maestro exec <run> integration` holds the queue for as long as
+    // its command runs; a phase queued behind it must say who it waits on.
+    const waits: [string, string, string | null][] = []
+    const rig = setup(() => goldenWorkflow({}), {
+      onIntegrationWait: (nodeId, state, holder) => waits.push([nodeId, state, holder]),
+    })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const byHand = rig.executor.integration(() => held, null, 'coordinator')
+    const phase = rig.executor.integration(async () => 'in', 'p2')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(waits).toEqual([['p2', 'queued', 'coordinator']])
+    release()
+    await byHand
+    await phase
+  })
 })

@@ -658,6 +658,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- **Maestro: the monitor's intervention documents.** The watchdog no longer
+  asks the monitor for a JSON proposal of four verbs; the coordinator acts
+  through the run's API under the same "how, never what" rule, enforced on
+  every amendment it makes. `schemas/intervention.v1.schema.json`, the
+  `intervention:schema:*` scripts and `runs/<id>/interventions.jsonl` are
+  gone; the post-mortem's `interventions` now point at the coordinator's
+  conversation.
 - **The three-layer phase review.** `review-phase` no longer runs the
   mechanical checks (including the review-time secret scan, dependency-license
   check and co-author trailer check), the plan-compliance walkthrough
@@ -681,6 +688,27 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Maestro: the run coordinator.** The run's monitor becomes its
+  coordinator: one agent per run that is woken when a phase fails, an attempt
+  errors, maestro logs an error about itself, a phase waits 20 minutes for
+  the integration worktree, or a phase or gate crosses its cost threshold, and
+  that can act: steer, redirect, pause, abort or retry a phase, answer a
+  question a `--retry-after` timer could answer, amend the live run, and run
+  commands in a lane or the integration worktree. It reaches the run with a
+  token of its own, everything it does is journalled as its own, and the run
+  refuses what it may not do: change what the plan builds, weaken a check
+  (drop a gate or chore, rewrite a gate command beyond its
+  `tuning.allowed_flags`, edit a judge gate, change `hooks`, lower
+  `wave_gates`), answer a question the operator holds, or halt the run. Woken
+  at most 24 times per run; `--no-coordinator` turns the wakes off
+  (`--no-intervene` still works).
+- **Maestro: `node`, `workflow`, `amend` and `exec` commands.** Steer one
+  phase (`context`, `redirect`, `pause`, `abort`, `retry`, `answer`), print or
+  amend a live run's workflow, and run a command in a lane or the integration
+  worktree with that worktree's environment — its database, compose project
+  and ports — from a terminal. `exec … integration` holds the integration
+  worktree while the command runs, so no merge or unattended retry checks a
+  branch out underneath a manual repair.
 - **Maestro: `defaults.wave_gates`** (`off` | `final` | `every`, additive,
   default `final`). The phases' gates now run in full on the merged tree:
   every gate of the plan on the last wave before the plan PR opens, and a

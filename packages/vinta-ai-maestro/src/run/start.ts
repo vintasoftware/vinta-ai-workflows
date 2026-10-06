@@ -59,7 +59,10 @@ import type { Workflow } from '../types.ts'
 import { laneRootFor } from '../cli/paths.ts'
 import { projectSpec } from '../cli/project.ts'
 import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
-import { startSupervisor, type Supervisor } from '../intervention/supervisor.ts'
+import { startCoordinatorLoop, type CoordinatorLoop } from '../coordinator/loop.ts'
+import type { ErrorFeed } from '../coordinator/errors.ts'
+import { execPort } from '../coordinator/exec.ts'
+import type { TriggerOptions } from '../coordinator/triggers.ts'
 import { startConfigReloader, type ConfigReloader } from '../config/reload.ts'
 import { commitOf, ensurePlanBranch, planBranchName } from './plan-branch.ts'
 import { PROJECT_CONFIG_FILE, readFileAt } from '../config/project-config.ts'
@@ -108,24 +111,31 @@ export interface StartRunOptions {
    */
   readonly logger?: Logger
   /**
-   * Builds the run's monitor, for the watchdog that lets a run tune itself
-   * (`intervention/`).
+   * Builds the run's coordinator (`monitor/monitor.ts`), which the loop in
+   * `coordinator/loop.ts` wakes when something goes wrong.
    *
    * Passed in rather than imported, because the factory lives in `cli/serve.ts`
    * and that module imports this one. It is also what makes the feature
-   * optional in one place: a caller that supplies no monitor gets no watchdog,
-   * which is what every test host and every out-of-tree host wants.
+   * optional in one place: a caller that supplies none gets no coordinator,
+   * which is what every test host and every out-of-tree host wants. The same
+   * factory instance should back the daemon's conversation endpoint, so the
+   * operator and the wake-ups talk to one coordinator.
    */
   readonly monitorFor?: (runId: string) => Monitor | null
   /**
-   * `--no-intervene`. The kill switch for a run that must execute exactly the
-   * plan it was given, whatever it costs.
+   * `--no-coordinator` (`--no-intervene`). Nothing wakes the coordinator; the
+   * operator can still ask it things.
    */
   readonly intervene?: boolean
-  /** Overrides the watchdog's thresholds. Tests, and an operator who wants a tighter leash. */
-  readonly watchdog?: { readonly phaseThresholdMs?: number; readonly gateCostCeilingMs?: number }
-  /** Autonomous amendments this run may make in total. */
+  /** Overrides what wakes the coordinator. Tests, and an operator who wants a tighter leash. */
+  readonly watchdog?: Omit<TriggerOptions, 'now'> & { readonly tickMs?: number; readonly cooldownMs?: number }
+  /** How many times this run may wake its coordinator. */
   readonly interventionBudget?: number
+  /**
+   * Errors maestro logs while this run is hosted (`coordinator/errors.ts`).
+   * The coordinator is woken for them.
+   */
+  readonly errors?: ErrorFeed
   /**
    * The operator's classifier (§17), from `--system-one`. Absent: judge gates
    * answer as unavailable, no built-in judge runs, and `judged` is refused by
@@ -155,7 +165,7 @@ export interface StartRunOptions {
  * variable this process has — Windows keeps it as `Path`, and an overlay that
  * added `PATH` beside it would leave the child with two.
  */
-function launcherPath(storeDir: string): Record<string, string> {
+export function launcherPath(storeDir: string): Record<string, string> {
   const key = Object.keys(process.env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
   return { [key]: withLauncherOnPath(ensureLauncher(storeDir, selfSource()), process.env[key]) }
 }
@@ -501,6 +511,16 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
     ...(amend === undefined ? {} : { amend }),
     ...(permissionJudge === undefined ? {} : { permissionJudge }),
+    // `vinta-ai-maestro exec`: a command by hand in a lane or the integration
+    // worktree, for the operator and the coordinator alike.
+    ...(host.workspace === undefined
+      ? {}
+      : {
+          exec: execPort({
+            workspace: host.workspace,
+            ...(host.holdIntegration === undefined ? {} : { holdIntegration: host.holdIntegration }),
+          }),
+        }),
     // Read through `current`, so a gate retuned mid-run is guarded on the
     // command it runs now rather than the one the run started with.
     gateGuard: createGateGuard({ journal, runId, workflow: () => current }),
@@ -511,25 +531,24 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   }
   daemon.register(registered)
 
-  // The watchdog (`intervention/`). Off unless a monitor was supplied and the
-  // operator did not say no, and off outright for a host that cannot amend —
-  // a supervisor with no `AmendRunner` would spend model turns producing
-  // proposals that `amendRun` refuses for want of somewhere to rebase.
-  const monitor = options.intervene === false ? null : (options.monitorFor?.(runId) ?? null)
-  const supervisor: Supervisor | null =
-    monitor === null || amend === undefined
+  // The coordinator's clock (`coordinator/loop.ts`). Off unless a coordinator
+  // was supplied and the operator did not say no.
+  const coordinator = options.intervene === false ? null : (options.monitorFor?.(runId) ?? null)
+  const loop: CoordinatorLoop | null =
+    coordinator === null
       ? null
-      : startSupervisor({
+      : startCoordinatorLoop({
           journal,
           runId,
           workflow: () => current,
-          monitor,
-          runner: amend,
-          ...(options.watchdog === undefined ? {} : { watchdog: options.watchdog }),
-          ...(options.interventionBudget === undefined
-            ? {}
-            : { budget: options.interventionBudget }),
+          coordinator,
+          ...(options.watchdog === undefined ? {} : { triggers: options.watchdog }),
+          ...(options.watchdog?.tickMs === undefined ? {} : { tickMs: options.watchdog.tickMs }),
+          ...(options.watchdog?.cooldownMs === undefined ? {} : { cooldownMs: options.watchdog.cooldownMs }),
+          ...(options.interventionBudget === undefined ? {} : { budget: options.interventionBudget }),
+          ...(options.logger === undefined ? {} : { logger: options.logger }),
         })
+  if (loop !== null) options.errors?.listen((trigger) => loop.notify(trigger))
 
   // The plan branch's watcher. Off without an `AmendRunner` for the reason the
   // supervisor is, and off for a run that recorded no sources to re-resolve.
@@ -566,7 +585,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     } finally {
       // Everything closed here is a handle this run opened. The lanes are
       // deliberately absent — see `HostWiring.close`.
-      supervisor?.stop()
+      loop?.stop()
       reloader?.stop()
       admission.close()
       agentLeases.close()

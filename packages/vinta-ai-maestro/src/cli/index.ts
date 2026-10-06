@@ -27,6 +27,16 @@ import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
 import { SIMULATE_USAGE, simulateCommand } from './simulate.ts'
 import { STATUS_USAGE, statusCommand } from './status.ts'
+import {
+  AMEND_USAGE,
+  EXEC_USAGE,
+  NODE_USAGE,
+  WORKFLOW_USAGE,
+  amendCommand,
+  execCommand,
+  nodeCommand,
+  workflowCommand,
+} from './steer.ts'
 import { VALIDATE_USAGE, validateCommand } from './validate.ts'
 import { WITH_USAGE, withCommand } from './with.ts'
 import { judgeHookCommandMain } from '../system-one/hook.ts'
@@ -52,6 +62,13 @@ usage: vinta-ai-maestro <command> [options]
   logs <run-id> [-f]         A run's job log; -f follows it to the end.
   pause <run-id>             Let running steps finish, then stop. Resumable.
   stop <run-id>              Kill the run now. Final.
+  node <op> <run-id> <phase> Steer one phase of a live run: context, redirect,
+                             pause, abort, retry, answer.
+  workflow <run-id>          Print a run's workflow as it stands now.
+  amend <run-id> <file>      Apply an edited workflow to a live run.
+  exec <run-id> <lane|integration> -- <cmd>
+                             Run a command in a lane or the integration
+                             worktree, with that worktree's environment.
   ui                         Serve the browser UI for every run and print the
                              URL to open. Closing it leaves runs running.
                              (\`serve\` is the same command.)
@@ -87,6 +104,10 @@ const USAGES: Readonly<Record<string, string>> = {
   logs: LOGS_USAGE,
   pause: PAUSE_USAGE,
   stop: STOP_USAGE,
+  node: NODE_USAGE,
+  workflow: WORKFLOW_USAGE,
+  amend: AMEND_USAGE,
+  exec: EXEC_USAGE,
   purge: PURGE_USAGE,
   with: WITH_USAGE,
   gate: GATE_USAGE,
@@ -107,7 +128,11 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
   }
 
   const usage = USAGES[command]
-  if (usage !== undefined && rest.some((arg) => arg === '--help' || arg === '-h')) {
+  // Only this command's own options: after `--` the words belong to the
+  // command `with` or `exec` runs, which may well take a `--help` of its own.
+  const end = rest.indexOf('--')
+  const own = end === -1 ? rest : rest.slice(0, end)
+  if (usage !== undefined && own.some((arg) => arg === '--help' || arg === '-h')) {
     io.out(usage)
     return OK
   }
@@ -134,6 +159,14 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await pauseCommand(rest, io)
     case 'stop':
       return await stopCommand(rest, io)
+    case 'node':
+      return await nodeCommand(rest, io)
+    case 'workflow':
+      return await workflowCommand(rest, io)
+    case 'amend':
+      return await amendCommand(rest, io)
+    case 'exec':
+      return await execCommand(rest, io)
     case 'purge':
       return await purgeCommand(rest, io)
     case 'with':

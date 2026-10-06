@@ -100,6 +100,11 @@ export interface Daemon {
   readonly port: number
   /** Required on every request and on the upgrade. Never logged (§11). */
   readonly token: string
+  /**
+   * The run coordinator's token: accepted by the HTTP API only, and every
+   * request carrying it is the coordinator's (`coordinator/`). Never logged.
+   */
+  readonly coordinatorToken: string
   /** Makes a run reachable. Runs are registered as they start. */
   register(run: DaemonRun): void
   /**
@@ -120,6 +125,7 @@ export interface Daemon {
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const host = options.host ?? LOOPBACK
   const token = options.token ?? createToken()
+  const coordinatorToken = createToken()
   const log = options.logger ?? nullLogger()
   const runs = new Map<string, DaemonRun>()
   // Read through a getter below, so `acceptRuns` after boot is visible to a
@@ -139,6 +145,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const app = createApi({
     journal: options.journal,
     token,
+    coordinatorToken,
     runs,
     get runStarter(): RunStartPort | undefined {
       return starter
@@ -217,6 +224,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     host: address.address,
     port: address.port,
     token,
+    coordinatorToken,
     register(run: DaemonRun): void {
       runs.set(run.runId, run)
       log.info('daemon.run_registered', { run: run.runId })

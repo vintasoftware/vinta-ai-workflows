@@ -699,7 +699,7 @@ describe('what the run changed about itself', () => {
         after_ms: 3 * MIN,
         runs_before: 2,
         runs_after: 2,
-        record_ref: 'interventions.jsonl',
+        record_ref: 'nodes/_monitor-conversation/transcript.jsonl',
       },
     ])
   })
@@ -755,7 +755,7 @@ describe('what the run changed about itself', () => {
         at_ms: T0 + 5 * MIN,
         target: 'node:p3',
         effect: 'unmeasured',
-        record_ref: 'interventions.jsonl',
+        record_ref: 'nodes/_monitor-conversation/transcript.jsonl',
       },
     ])
     const gap = full.gaps.find((entry) => entry.kind === 'intervention_effect_unmeasured')
@@ -794,7 +794,7 @@ describe('what the run changed about itself', () => {
     // §11. The artifact is read by an agent in another session that cannot
     // cross-check it, so it carries what can be counted and a path to the rest.
     const serialized = serializePostMortem(postMortem(retuned(), RUN, { integration: [] }))
-    expect(serialized).toContain('interventions.jsonl')
+    expect(serialized).toContain('nodes/_monitor-conversation/transcript.jsonl')
     expect(serialized).not.toContain('pytest')
     expect(serialized).not.toContain('evidence')
   })

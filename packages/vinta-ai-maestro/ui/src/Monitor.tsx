@@ -30,13 +30,11 @@
  * journals as it thinks, so the fast one is what turns "Thinking…" from a word
  * into the thing it is actually doing.
  */
-import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button } from 'vinta-design-system/ui/button'
 import type { Client } from './client.ts'
-import { CLOSED, Entries, FoldControls, type Folded } from './Entries.tsx'
-import { useFollowing } from './follow.ts'
-import { EmptyNote, ErrorNote, Panel } from './Panel.tsx'
-import { fold } from './transcript.ts'
+import { ErrorNote } from './Panel.tsx'
+import { Transcript } from './Transcript.tsx'
 
 /**
  * How often the conversation is re-read while an answer is arriving.
@@ -52,8 +50,6 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
   const [pending, setPending] = useState(false)
   const [text, setText] = useState('')
   const [failed, setFailed] = useState(false)
-  const [open, setOpen] = useState<Folded>(CLOSED)
-  const { listRef, onScroll, following, jump, stick } = useFollowing()
 
   const reload = useCallback(async () => {
     try {
@@ -80,25 +76,6 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
     return () => clearInterval(tick)
   }, [pending, reload])
 
-  // The answer arrives at the bottom, so that is where the box opens and stays.
-  //
-  // It used to stick **only while a turn was running**, on the theory that this
-  // list is short and the operator is watching the answer they just asked for.
-  // Neither half held. The conversation is the journal's, so it is every
-  // question ever asked about this run — a hundred entries is ordinary — and
-  // the interventions a run makes about itself land in it with nobody having
-  // asked anything. So opening the panel put the operator at the oldest entry
-  // of a long history, and the newest, which is the only one that could still
-  // be relevant, was as far below the fold as the run was old.
-  //
-  // Now it follows the way a phase's transcript does, conditionally and with an
-  // escape (`follow.ts`), because the other half of the old reasoning was also
-  // wrong: there is plenty above worth reading, and yanking somebody out of it
-  // is worse than the problem.
-  useLayoutEffect(() => {
-    stick()
-  }, [entries.length, stick])
-
   async function ask(): Promise<void> {
     const question = text.trim()
     if (question === '' || pending) return
@@ -117,100 +94,66 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
     await reload()
   }
 
-  const rows = fold(entries, 0)
-
+  // The same component a phase's transcript is drawn with (`Transcript.tsx`):
+  // the coordinator's conversation is a transcript like any other — its
+  // thinking, its tool calls, the commands it ran — and drawing it with a
+  // second, simpler list was how it came to read worse than a phase's. The
+  // windowing, the folding and the following come with it; the question box is
+  // its composer.
   return (
-    <Panel
-      title="Monitor"
+    <Transcript
+      entries={entries}
+      title="Coordinator"
       className="monitor"
       data-monitor
-      expandable
-      action={
-        entries.length > 0 ? (
-          <>
-            <FoldControls
-              open={open}
-              onToggle={(shape) => setOpen((current) => ({ ...current, [shape]: !current[shape] }))}
-            />
-            <span className="muted text-xs text-muted-foreground" data-conversation-size>
-              {entries.length} in this conversation
-            </span>
-          </>
-        ) : undefined
+      empty={
+        pending
+          ? null
+          : 'Ask about this run — what is blocked, why a phase failed, what it would take to move on.'
       }
-    >
-      {entries.length === 0 && !pending ? (
-        <EmptyNote>
-          Ask about this run — what is blocked, why a phase failed, what it would take to move on.
-        </EmptyNote>
-      ) : (
+      composer={
         <>
-          {/* The escape from the following rule, and the only way back into it
-              short of scrolling to the very bottom by hand. It appears only
-              once the reader has left the newest row, so it is never a control
-              that does nothing. */}
-          {!following && (
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              className="w-fit self-end"
-              data-action="jump-latest"
-              onClick={jump}
-            >
-              Jump to latest
-            </Button>
+          {/* Said once, under the conversation, and only while nothing of the
+              answer has arrived yet. Once the monitor starts thinking out loud the
+              rows say it better than a word does — which is the whole reason the
+              daemon journals a turn as it runs rather than at the end of it. */}
+          {pending && (
+            <p className="text-sm text-muted-foreground" data-thinking>
+              Thinking…
+            </p>
           )}
-          <Entries
-            rows={rows}
-            open={open}
-            listRef={listRef}
-            onScroll={onScroll}
-            className="exchanges max-h-[var(--panel-scroll,320px)] overflow-y-auto"
-            data-exchanges
-          />
-        </>
-      )}
 
-      {/* Said once, under the conversation, and only while nothing of the
-          answer has arrived yet. Once the monitor starts thinking out loud the
-          rows say it better than a word does — which is the whole reason the
-          daemon journals a turn as it runs rather than at the end of it. */}
-      {pending && (
-        <p className="text-sm text-muted-foreground" data-thinking>
-          Thinking…
-        </p>
-      )}
+          {failed && <ErrorNote>The run coordinator could not be reached.</ErrorNote>}
 
-      {failed && <ErrorNote>The monitor could not be reached.</ErrorNote>}
-
-      <form
-        className="flex items-start gap-2"
-        onSubmit={(event) => {
-          event.preventDefault()
-          void ask()
-        }}
-      >
-        <textarea
-          className="min-h-16 flex-1 resize-y rounded-md border bg-background px-2.5 py-2 text-sm"
-          data-field="question"
-          aria-label="Ask the monitor about this run"
-          placeholder="Why did p1 fail?"
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            // Enter sends, because this is a question box and not a document.
-            // Shift+Enter is the escape hatch for a question worth two lines.
-            if (event.key === 'Enter' && !event.shiftKey) {
+          <form
+            className="flex items-start gap-2"
+            onSubmit={(event) => {
               event.preventDefault()
               void ask()
-            }
-          }}
-        />
-        <Button type="submit" size="sm" data-action="ask" disabled={pending || text.trim() === ''}>
-          {pending ? 'Asking…' : 'Ask'}
-        </Button>
-      </form>
-    </Panel>
+            }}
+          >
+            <textarea
+              className="min-h-16 flex-1 resize-y rounded-md border bg-background px-2.5 py-2 text-sm"
+              data-field="question"
+              aria-label="Ask the run coordinator about this run"
+              placeholder="Why did p1 fail?"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              onKeyDown={(event) => {
+                // Enter sends, because this is a question box and not a document.
+                // Shift+Enter is the escape hatch for a question worth two lines.
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  void ask()
+                }
+              }}
+            />
+            <Button type="submit" size="sm" data-action="ask" disabled={pending || text.trim() === ''}>
+              {pending ? 'Asking…' : 'Ask'}
+            </Button>
+          </form>
+        </>
+      }
+    />
   )
 }

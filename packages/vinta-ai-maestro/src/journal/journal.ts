@@ -677,6 +677,8 @@ export class Journal {
       case 'wave_gate_result':
       case 'wave_built':
       case 'wave_deferred':
+      case 'workspace_exec':
+      case 'coordinator_woke':
       case 'bare_gate_blocked':
       case 'bare_gate_detected':
       case 'chore_result':

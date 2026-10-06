@@ -71,7 +71,7 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                            [--permission <ask|auto|full|judged>]
                            [--system-one <config.json>]
                            [--on-failure <stop|retry|ask>] [--retries <n>]
-                           [--retry-after <15m>] [--no-intervene]
+                           [--retry-after <15m>] [--no-coordinator]
                            [--log-level <debug|info|warn|error>] [--log-stderr]
                            [--log-detail <kind|message>]
        vinta-ai-maestro serve …   (the same command)
@@ -166,13 +166,17 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                  Without it a plan's judge gates answer as unavailable. With it,
                  diffs, gate logs and commands are sent to that classifier —
                  point it at a local one where that must not happen.
-  --no-intervene Execute the plan exactly as written, whatever it costs.
-                 By default a run that is dragging wakes its monitor, which
-                 reads the gate logs and may amend how the run *executes* — a
-                 gate's command or timeout, a phase's fix budget or model. It
-                 can never change what a phase builds, it is bounded by each
-                 gate's own tuning.allowed_flags, and a run gets three such
-                 amendments in its life. Pass this to turn it off entirely.
+  --no-coordinator
+                 Never wake the run coordinator. By default a phase that fails,
+                 an attempt that errors, an error maestro logs, a phase stuck
+                 behind the integration worktree, or a phase or gate past its
+                 cost threshold wakes it: it reads the run, and may steer an
+                 agent, retry a failed phase, answer a question a timer could
+                 answer, run a command in a lane, or amend how the run
+                 *executes*. It can never change what the plan builds, never
+                 weaken a check, never answer a question you hold, and never
+                 halt the run; it is woken at most 24 times. With this flag you
+                 can still ask it things. (\`--no-intervene\` is the old name.)
                  The operator sets this, never the workflow document.`
 
 /** One name for one command; `ui` is the one the help leads with. */
@@ -286,6 +290,7 @@ export async function serveCommand(
         retries: { type: 'string' },
         'retry-after': { type: 'string' },
         'no-intervene': { type: 'boolean' },
+        'no-coordinator': { type: 'boolean' },
         'log-level': { type: 'string' },
         'log-stderr': { type: 'boolean' },
         'log-detail': { type: 'string' },
@@ -522,38 +527,44 @@ export function untilSignalled(): SignalWatch {
 }
 
 /**
- * Builds the run's spokesperson, on demand and per run.
+ * Builds the run's coordinator, on demand, once per run.
  *
- * Per call rather than cached, because a monitor holds a conversation and two
- * operators looking at two runs are having two of them. Cheap to build: it is a
- * model name, an adapter and a directory; the session only exists once someone
- * asks something.
+ * Kept per run rather than built per call, because the operator's questions
+ * and the wake-ups from `coordinator/loop.ts` are one conversation: what the
+ * coordinator did at three in the morning is what the operator asks about at
+ * nine. Cheap to build — a model name, an adapter and a directory; the session
+ * only exists once something is said.
  *
  * It reads the frozen workflow to pick its model — the dearest tier on the
  * roster — and to name the phases, so a run whose plan cannot be read has no
- * monitor rather than a confused one.
+ * coordinator rather than a confused one. `env` is what gives it its powers on
+ * a live run (`run.ts` builds it once the job's daemon is listening); a host
+ * that passes none gets a coordinator that reads and does not act.
  */
 export function monitorFactory(
   journal: Journal,
   repoPath: string,
   permission: AgentPermission,
+  env?: (runId: string) => Readonly<Record<string, string>> | undefined,
 ): (runId: string) => Monitor | null {
+  const built = new Map<string, Monitor>()
   return (runId) => {
+    const kept = built.get(runId)
+    if (kept !== undefined) return kept
     let workflow: Workflow
     try {
       workflow = journal.readWorkflow(runId)
     } catch {
       return null
     }
-    return new Monitor({
-      // It answers questions; it does not touch the repository. The lane's read
-      // grant and write guard are not its concern, and it is given neither.
-      // `judged` needs a hook only a run's lanes are given (§17.6); the monitor
-      // never writes, so it runs at `auto` rather than refusing to start.
+    const monitor = new Monitor({
+      // It acts through the run's API and `exec`, not through a lane's write
+      // grant. `judged` needs a hook only a run's lanes are given (§17.6), so it
+      // runs at `auto` there rather than refusing to start.
       adapter: new ClaudeCodeAdapter({ permission: permission === 'judged' ? 'auto' : permission }),
       model: monitorModel(workflow),
       // Off the snapshot as it is *now*, every question: an amendment to the
-      // crew's models reaches the monitor without a pause and resume.
+      // crew's models reaches the coordinator without a pause and resume.
       modelFor: () => {
         try {
           return monitorModel(journal.readWorkflow(runId))
@@ -563,8 +574,11 @@ export function monitorFactory(
       },
       fallbacks: workflow.defaults.model_fallbacks,
       cwd: repoPath,
+      ...(env === undefined ? {} : { env: () => env(runId) }),
       // The conversation is written here, so it survives the tab it was had in.
       journal,
     })
+    built.set(runId, monitor)
+    return monitor
   }
 }

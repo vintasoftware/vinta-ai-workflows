@@ -233,7 +233,15 @@ export type AmendmentKind =
  * the other two — and the intervention budget, which folds `monitor` rows only,
  * is not spent by it.
  */
-export type AmendmentAuthor = 'operator' | 'monitor' | 'config'
+export type AmendmentAuthor = 'operator' | 'monitor' | 'coordinator' | 'config'
+
+/**
+ * Who reached a live run through its API. `operator` is a person — the UI,
+ * the CLI from a terminal; `coordinator` is the run's coordinator agent
+ * (`src/coordinator/`), which authenticates with a token of its own so that
+ * what it may do, and what it did, never depends on it saying who it is.
+ */
+export type Actor = 'operator' | 'coordinator'
 
 /** One node and one way it moved. Both fields are identifiers. */
 export interface AmendmentChange {
@@ -243,6 +251,26 @@ export interface AmendmentChange {
 
 /** Events about a run as a whole. */
 interface RunPayloads {
+  /**
+   * A command run by hand in a live run's worktree (`vinta-ai-maestro exec`).
+   * The target, who ran it and how it ended; the command and its output are
+   * repository content and are not recorded (§11).
+   */
+  workspace_exec: {
+    readonly target: string
+    readonly exit_code: number
+    readonly duration_ms: number
+    readonly by?: Actor
+  }
+  /**
+   * The run coordinator was woken (`coordinator/`). What woke it, as kinds and
+   * identifiers, and how the turn ended; what it said and did is in its
+   * conversation and in the events its actions wrote.
+   */
+  coordinator_woke: {
+    readonly triggers: readonly { readonly kind: string; readonly node?: string; readonly gate?: string }[]
+    readonly outcome: 'answered' | 'unavailable' | 'budget_spent'
+  }
   run_started: { readonly workflow_id: string; readonly base_branch: string }
   run_ended: { readonly status: Exclude<RunStatus, 'running'> }
   /**
@@ -505,6 +533,8 @@ interface NodePayloads {
     readonly effect_id: string
     readonly answer: HumanAnswer
     readonly unattended?: true
+    /** Set when the run coordinator answered, rather than a person. */
+    readonly by?: Actor
   }
   /**
    * One §9 operation. `text` is the operator's own steering message: it is
@@ -515,6 +545,8 @@ interface NodePayloads {
     readonly op: OperatorOp
     readonly text?: string
     readonly delivery: OperatorDelivery
+    /** Set when the run coordinator operated, rather than a person. */
+    readonly by?: Actor
   }
   /**
    * What one spawn decided about its session slot (§15).
