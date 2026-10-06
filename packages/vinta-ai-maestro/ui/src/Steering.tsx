@@ -372,14 +372,22 @@ export function NodeControls({
           variant="outline"
           size="sm"
           data-op="pause"
-          disabled={busy || status !== 'running'}
+          disabled={busy || (status !== 'running' && status !== 'awaiting_human')}
           title={
             status === 'running'
               ? 'Let the current turn finish, then wait for you to resume it.'
-              : 'Only a node in an agent turn can be paused.'
+              : status === 'awaiting_human'
+                ? 'Keep it parked: no unattended timer answers its question until you do.'
+                : 'Only a node in an agent turn, or parked on a question, can be paused.'
           }
           onClick={() =>
-            onOperate('pause', {}, 'Pause requested. The node stops after its current turn.')
+            onOperate(
+              'pause',
+              {},
+              status === 'awaiting_human'
+                ? 'Paused. No timer will answer this question; your answer releases it.'
+                : 'Pause requested. The node stops after its current turn.',
+            )
           }
         >
           <PauseIcon />

@@ -518,6 +518,30 @@ export class Journal {
   }
 
   /**
+   * Nodes the operator paused while they were parked on a question
+   * (`Scheduler.pause` — `held`), still held: no answer and no status change
+   * since. For `status`, which would otherwise show them as merely asking.
+   */
+  heldNodes(runId: string): Set<string> {
+    const rows = this.db
+      .prepare(
+        "SELECT node_id, type, payload_json FROM events WHERE run_id = ? AND node_id IS NOT NULL" +
+          " AND type IN ('node_operation', 'human_answered', 'node_status') ORDER BY id",
+      )
+      .all(runId) as { node_id: string; type: string; payload_json: string }[]
+    const held = new Set<string>()
+    for (const row of rows) {
+      if (row.type !== 'node_operation') {
+        held.delete(row.node_id)
+        continue
+      }
+      const payload = JSON.parse(row.payload_json) as { op?: string; delivery?: string }
+      if (payload.op === 'pause' && payload.delivery === 'held') held.add(row.node_id)
+    }
+    return held
+  }
+
+  /**
    * Forgets a run: its events and every projection folded from them. For
    * `purge`, which removes the run directory — and until this existed left
    * the rows behind, so the UI went on listing, and offering to resume, a run

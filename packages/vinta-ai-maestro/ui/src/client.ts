@@ -30,6 +30,7 @@ import {
   NodeChangesSchema,
   RunUsageResponseSchema,
   OkResponseSchema,
+  OperationResponseSchema,
   RedirectRequestSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
@@ -75,6 +76,8 @@ const OPERATIONS = {
 
 export type NodeOperation = keyof typeof OPERATIONS
 export type OperationBody<K extends NodeOperation> = z.infer<(typeof OPERATIONS)[K]>
+/** What the daemon says a node operation did (`OperationResponseSchema`). */
+export type OperationDelivery = NonNullable<z.infer<typeof OperationResponseSchema>['delivery']>
 
 export type StreamClose = 'closed' | 'invalid_frame'
 
@@ -126,7 +129,7 @@ export interface Client {
     nodeId: string,
     operation: K,
     body: OperationBody<K>,
-  ) => Promise<void>
+  ) => Promise<OperationDelivery | null>
   /**
    * End the run before its DAG does (SPEC §9.3). `pause` drains it to a
    * resumable stop; `stop` kills its live turns and cancels it for good.
@@ -196,9 +199,9 @@ export function createClient(origin: string, token: string): Client {
         body: JSON.stringify(parsed.data),
       })
       if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
-      if (!OkResponseSchema.safeParse(await response.json()).success) {
-        throw new Error(`${path}: response did not match the daemon schema`)
-      }
+      const answered = OperationResponseSchema.safeParse(await response.json())
+      if (!answered.success) throw new Error(`${path}: response did not match the daemon schema`)
+      return answered.data.delivery ?? null
     },
     async halt(runId, mode) {
       const path = `/api/runs/${encodeURIComponent(runId)}/${mode}`

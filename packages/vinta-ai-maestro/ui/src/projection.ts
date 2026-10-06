@@ -43,6 +43,11 @@ export interface Projection {
    * status alone cannot show.
    */
   readonly waits: ReadonlyMap<string, string | null>
+  /**
+   * Nodes paused by the operator while parked on a question: no unattended
+   * timer answers them, and the next answer releases them.
+   */
+  readonly held: ReadonlySet<string>
 }
 
 export const EMPTY_PROJECTION: Projection = {
@@ -50,7 +55,10 @@ export const EMPTY_PROJECTION: Projection = {
   statuses: new Map(),
   runStatus: null,
   waits: new Map(),
+  held: new Set(),
 }
+
+const NodeOperationPayloadSchema = z.object({ op: z.string(), delivery: z.string() })
 
 const NodeWaitPayloadSchema = z.object({
   state: z.enum(['queued', 'granted']),
@@ -60,6 +68,7 @@ const NodeWaitPayloadSchema = z.object({
 export function applyFrame(projection: Projection, frame: EventFrame): Projection {
   const statuses = new Map(projection.statuses)
   const waits = new Map(projection.waits)
+  const held = new Set(projection.held)
   let runStatus = projection.runStatus
   let applied = 0
 
@@ -69,6 +78,14 @@ export function applyFrame(projection: Projection, frame: EventFrame): Projectio
     if (event.type === 'node_status' && event.nodeId !== null) {
       const payload = NodeStatusPayloadSchema.safeParse(event.payload)
       if (payload.success) statuses.set(event.nodeId, payload.data.status)
+      held.delete(event.nodeId)
+    } else if (event.type === 'human_answered' && event.nodeId !== null) {
+      held.delete(event.nodeId)
+    } else if (event.type === 'node_operation' && event.nodeId !== null) {
+      const payload = NodeOperationPayloadSchema.safeParse(event.payload)
+      if (payload.success && payload.data.op === 'pause' && payload.data.delivery === 'held') {
+        held.add(event.nodeId)
+      }
     } else if (event.type === 'run_ended') {
       const payload = RunEndedPayloadSchema.safeParse(event.payload)
       if (payload.success) runStatus = payload.data.status
@@ -79,6 +96,7 @@ export function applyFrame(projection: Projection, frame: EventFrame): Projectio
       // still reads "failed", and the only way out is a reload.
       runStatus = 'running'
       waits.clear()
+      held.clear()
     } else if (event.type === 'node_wait' && event.nodeId !== null) {
       const payload = NodeWaitPayloadSchema.safeParse(event.payload)
       if (payload.success) {
@@ -89,5 +107,5 @@ export function applyFrame(projection: Projection, frame: EventFrame): Projectio
   }
 
   if (applied === 0) return projection
-  return { cursor: Math.max(projection.cursor, frame.cursor), statuses, runStatus, waits }
+  return { cursor: Math.max(projection.cursor, frame.cursor), statuses, runStatus, waits, held }
 }

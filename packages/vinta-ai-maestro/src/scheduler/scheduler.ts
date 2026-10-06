@@ -656,6 +656,11 @@ interface NodeState {
   released: boolean
   /** Whether the deferred question is being asked, so dispatch asks it once. */
   deferredAsked: boolean
+  /**
+   * Paused by the operator while parked on a question: no `--retry-after`
+   * timer answers it, and only a person's answer releases it. See `pause`.
+   */
+  held: boolean
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -925,6 +930,7 @@ export class Scheduler {
       hostAsks: 0,
       released: false,
       deferredAsked: false,
+      held: false,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -1168,6 +1174,7 @@ export class Scheduler {
 
   /** Where a node goes when a halt reaches it: everything back, and `pending`. */
   #unwindHalted(state: NodeState): void {
+    state.held = false
     this.#release(state)
     if (!this.#settledNode(state) && state.status !== 'pending') this.#setStatus(state, 'pending')
   }
@@ -1230,6 +1237,7 @@ export class Scheduler {
       throw new Error(`node "${nodeId}" is not awaiting an answer`)
     }
     state.resume = null
+    state.held = false
     const answer = facts.human?.['answer']
     this.#options.journal.append({
       runId: this.#options.runId,
@@ -1261,18 +1269,17 @@ export class Scheduler {
    * queue drained into the node's next resume. The refusal a harness without
    * `inject` would raise is not the operator's to see, so it is never asked.
    */
-  async addContext(nodeId: string, text: string): Promise<void> {
+  async addContext(nodeId: string, text: string): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
     if (this.#settledNode(state)) return this.#operation(state, 'add_context', text, 'ignored')
 
     const live = state.live
     if (live !== null && live.adapter.capabilities.inject) {
       await live.session.send(text)
-      this.#operation(state, 'add_context', text, 'sent')
-      return
+      return this.#operation(state, 'add_context', text, 'sent')
     }
     state.pending.push({ op: 'add_context', text })
-    this.#operation(state, 'add_context', text, 'queued')
+    return this.#operation(state, 'add_context', text, 'queued')
   }
 
   /**
@@ -1281,7 +1288,7 @@ export class Scheduler {
    * of this verb — "resume with an amended prompt" — is the one that can
    * actually deliver it.
    */
-  async redirect(nodeId: string, instruction: string): Promise<void> {
+  async redirect(nodeId: string, instruction: string): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
     if (this.#settledNode(state)) {
       return this.#operation(state, 'redirect', instruction, 'ignored')
@@ -1289,7 +1296,7 @@ export class Scheduler {
 
     await this.#interruptLive(state)
     state.pending.push({ op: 'redirect', text: instruction })
-    this.#operation(state, 'redirect', instruction, 'queued')
+    return this.#operation(state, 'redirect', instruction, 'queued')
   }
 
   /**
@@ -1306,12 +1313,27 @@ export class Scheduler {
   /**
    * §9 — finish the current turn, then `await_human`. The flag is read between
    * steps, never inside one: killing a turn to pause it is what abort is for.
+   *
+   * **A node already parked on a question is held.** It is not running, so
+   * there is no turn to finish — but under `--retry-after` it is not idle
+   * either: a timer will answer its question, and the answer starts work. An
+   * operator paused one such phase to keep its unattended retry out of the
+   * integration worktree during a manual repair; the pause was recorded as
+   * `ignored`, the API said `ok`, the timer fired, and the retry checked out
+   * a wave branch under the operator's test run. A held node keeps its
+   * question and its lane, no timer answers it, and the next answer — which
+   * can only be a person's — releases it.
    */
-  async pause(nodeId: string): Promise<void> {
+  async pause(nodeId: string): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
+    if (state.status === 'awaiting_human' && state.resume !== null) {
+      state.held = true
+      this.#log.info('node.held', { node: state.node.id })
+      return this.#operation(state, 'pause', undefined, 'held')
+    }
     if (state.status !== 'running') return this.#operation(state, 'pause', undefined, 'ignored')
     state.pauseRequested = true
-    this.#operation(state, 'pause', undefined, 'sent')
+    return this.#operation(state, 'pause', undefined, 'sent')
   }
 
   /**
@@ -1320,7 +1342,7 @@ export class Scheduler {
    * who aborts sees the containment immediately; the loop discovers the abort
    * at its next step and stops without failing the node a second time.
    */
-  async abortNode(nodeId: string): Promise<void> {
+  async abortNode(nodeId: string): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
     if (this.#settledNode(state)) return this.#operation(state, 'abort', undefined, 'ignored')
 
@@ -1342,6 +1364,7 @@ export class Scheduler {
     // A parked node is asleep on a promise nobody else will settle; waking it
     // is how it reaches the abort check and stops stepping.
     if (resume !== null) resume({})
+    return 'sent'
   }
 
   /** Node statuses as of now. A projection of the same facts the journal holds. */
@@ -2257,13 +2280,14 @@ export class Scheduler {
     op: OperatorOp,
     text: string | undefined,
     delivery: OperatorDelivery,
-  ): void {
+  ): OperatorDelivery {
     this.#options.journal.append({
       runId: this.#options.runId,
       nodeId: state.node.id,
       type: 'node_operation',
       payload: { op, delivery, ...(text === undefined ? {} : { text }) },
     })
+    return delivery
   }
 
   #stateOf(nodeId: string): NodeState {
@@ -3343,6 +3367,10 @@ export class Scheduler {
     const clock = this.#options.clock ?? systemClock
     return clock.at(clock.now() + after, () => {
       if (state.resume === null || state.aborted) return
+      if (state.held) {
+        this.#log.info('node.unattended_withheld', { node: state.node.id, reason: 'held' })
+        return
+      }
       this.#log.info('node.unattended_answer', { node: state.node.id, after_ms: after })
       this.answer(state.node.id, { human: { answer, unattended: true } })
     })
@@ -3387,6 +3415,10 @@ export class Scheduler {
       // answered: `resume` is nulled by `answer`, and asking again here is
       // cheaper than reasoning about whether that can happen.
       if (state.resume === null || state.aborted) return
+      if (state.held) {
+        this.#log.info('node.unattended_withheld', { node: state.node.id, reason: 'held' })
+        return
+      }
       state.unattended += 1
       this.#log.info('node.unattended_retry', {
         node: state.node.id,

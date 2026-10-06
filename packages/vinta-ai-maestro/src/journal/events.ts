@@ -180,10 +180,11 @@ export type CrewSubstituteReason =
 /**
  * Where the operation went. `sent` reached the live session; `queued` is
  * waiting for the node's next resume (§9's queue for harnesses that cannot
- * inject); `delivered` is that queue draining; `ignored` is an operation on a
- * node that has already settled and has nothing left to steer.
+ * inject); `delivered` is that queue draining; `held` is a pause that reached
+ * a node parked on a question — no timer answers it until a person does;
+ * `ignored` is an operation on a node that has nothing for it to act on.
  */
-export type OperatorDelivery = 'sent' | 'queued' | 'delivered' | 'ignored'
+export type OperatorDelivery = 'sent' | 'queued' | 'delivered' | 'held' | 'ignored'
 
 /**
  * How one node's definition moved between the run's frozen snapshot and the

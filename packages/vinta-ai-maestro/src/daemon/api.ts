@@ -74,6 +74,7 @@ import {
   HumanQuestionSchema,
   MonitorAskSchema,
   NoArgsRequestSchema,
+  OperationResponseSchema,
   RedirectRequestSchema,
   StartRunRequestSchema,
   toIssues,
@@ -1414,14 +1415,18 @@ export function createApi(options: ApiOptions): Hono {
     const body = await readBody(c, schema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
 
+    let result: unknown
     try {
-      await apply(found.run, found.node.node_id, body.value)
+      result = await apply(found.run, found.node.node_id, body.value)
     } catch {
       // Codes only. The thrown message belongs to a harness or a scheduler and
       // is not this layer's to relay into a browser.
       return fail(c, 409, 'operation_failed')
     }
-    return c.json({ ok: true })
+    // The delivery the scheduler journalled, so a pause that did nothing says
+    // `ignored` rather than an `ok` an operator reads as done.
+    const delivery = OperationResponseSchema.shape.delivery.safeParse(result)
+    return c.json({ ok: true, ...(delivery.success && delivery.data !== undefined ? { delivery: delivery.data } : {}) })
   }
 
   /**
