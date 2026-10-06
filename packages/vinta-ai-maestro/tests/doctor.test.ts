@@ -15,17 +15,19 @@
  * via `cmd.exe`, which is exactly the shape an npm-installed `claude` has and
  * the exact thing a shebang fixture could never test.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { openJournal } from '../src/journal/journal.ts'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { stringify } from 'yaml'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   exampleTarget,
   formatDoctorReport,
   runDoctor,
+  checkLeftovers,
   type CheckResult,
   type DoctorOptions,
 } from '../src/doctor/index.ts'
@@ -870,5 +872,39 @@ describe('example files', () => {
     expect(exampleTarget('README.md')).toBeNull()
     // `.example` as a directory name is not an example file.
     expect(exampleTarget('docs.example/index.md')).toBeNull()
+  })
+})
+
+describe('leftovers of finished runs', () => {
+  it('warns about a done run’s stack still running, with the command that stops it', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-leftovers-'))
+    try {
+      const journal = openJournal(repo)
+      journal.createRun('old', WorkflowSchema.parse(JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures/golden-workflow.json'), 'utf8'))))
+      journal.append({ runId: 'old', type: 'run_ended', payload: { status: 'done' } })
+      journal.close()
+      const project = `${basename(repo).toLowerCase()}_old-lane-2`
+
+      const checks = await checkLeftovers(repo, { listStacks: async () => [project] })
+      expect(checks).toEqual([
+        {
+          id: 'leftover:stack:0',
+          label: `run old is over and left a compose stack running: ${project}`,
+          status: 'warn',
+          remedy: `docker compose -p ${project} down`,
+        },
+      ])
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('asks nothing of a project with no runs', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-leftovers-'))
+    try {
+      expect(await checkLeftovers(repo, { listStacks: async () => ['x'] })).toEqual([])
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
   })
 })

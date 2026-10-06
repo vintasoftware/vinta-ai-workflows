@@ -468,15 +468,152 @@ describe('same-wave conflicts', () => {
     expect(report.findings.wave_conflicts).toEqual([])
   })
 
-  it('distinguishes “no conflicts” from “nobody told us about conflicts”', () => {
-    const unknown = postMortem(cleanTape(), RUN)
-    expect(unknown.findings.wave_conflicts).toEqual([])
-    const gap = gapOf(unknown, 'integration_record_unavailable')
-    expect(gap?.needs).toContain('no event carries them')
-    expect(gap?.needs).toContain('unrecorded, not clean')
+  it('reads conflicts from the journal, base merges included, so a restart cannot lose them', () => {
+    // An observed run restarted three times; the integrator's in-memory wave
+    // results died with each process, and its post-mortem reported no
+    // conflicts against 16 `node_conflict` rows in its journal.
+    const tape = new Tape(chain()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.ran('p2', T0 + 12 * MIN, T0 + 22 * MIN)
+    tape.ran('p3', T0 + 12 * MIN, T0 + 24 * MIN)
+    tape.push(T0 + 24 * MIN, {
+      runId: RUN,
+      nodeId: 'p4',
+      type: 'node_conflict',
+      payload: { where: 'base', branch: 'plan/flow/integ-p4', nodes: ['p2', 'p3'], paths: ['a.py'], rounds: 2 },
+    })
+    tape.push(T0 + 30 * MIN, {
+      runId: RUN,
+      nodeId: 'p3',
+      type: 'node_conflict',
+      payload: { where: 'wave', branch: 'plan/flow/wave-2', nodes: ['p3', 'p2'], paths: ['b.py'], rounds: 1 },
+    })
+    tape.ran('p4', T0 + 25 * MIN, T0 + 35 * MIN)
+    tape.end(T0 + 36 * MIN)
 
-    const clean = postMortem(cleanTape(), RUN, { integration: [] })
-    expect(gapOf(clean, 'integration_record_unavailable')).toBeUndefined()
+    const report = postMortem(tape, RUN)
+    expect(report.findings.wave_conflicts).toEqual([
+      { wave: 3, where: 'base', nodes: ['p2', 'p3'], paths: ['a.py'], fix_rounds: 2 },
+      { wave: 2, where: 'wave', nodes: ['p3', 'p2'], paths: ['b.py'], fix_rounds: 1 },
+    ])
+    expect(gapOf(report, 'integration_record_unavailable')).toBeUndefined()
+  })
+})
+
+describe('what was done to the run', () => {
+  it('counts failed attempts by cause, setup failures apart', () => {
+    // 485 `node_error` rows, one setup failure repeated 23–48 times a phase,
+    // and the post-mortem did not mention any of them.
+    const tape = cleanTape()
+    for (const nodeId of ['p2', 'p2', 'p3']) {
+      tape.push(T0 + 13 * MIN, {
+        runId: RUN,
+        nodeId,
+        type: 'node_error',
+        payload: { reason: 'git checkout exited 128: wave-5 is not a commit', attempt: 1, setup: true },
+      })
+    }
+    tape.push(T0 + 14 * MIN, { runId: RUN, nodeId: 'p4', type: 'node_error', payload: { reason: 'gate unit exited 1', attempt: 1 } })
+
+    expect(report_(tape).findings.failure_causes).toEqual([
+      { reason: 'git checkout exited 128: wave-5 is not a commit', setup: true, attempts: 3, nodes: ['p2', 'p3'] },
+      { reason: 'gate unit exited 1', setup: false, attempts: 1, nodes: ['p4'] },
+    ])
+  })
+
+  it('records every amendment, steering operation, question and hand-run command', () => {
+    const tape = cleanTape()
+    tape.amended(T0 + 5 * MIN, 1, [], 'operator')
+    tape.amended(T0 + 6 * MIN, 2, ['gate:unit'], 'coordinator')
+    tape.push(T0 + 7 * MIN, { runId: RUN, nodeId: 'p2', type: 'node_operation', payload: { op: 'pause', delivery: 'held' } })
+    tape.push(T0 + 8 * MIN, {
+      runId: RUN,
+      nodeId: 'p2',
+      type: 'node_operation',
+      payload: { op: 'add_context', text: 'x', delivery: 'sent', by: 'coordinator' },
+    })
+    for (const answered of [{ unattended: true as const }, {}, { by: 'coordinator' as const }]) {
+      tape.push(T0 + 9 * MIN, {
+        runId: RUN,
+        nodeId: 'p3',
+        type: 'human_question',
+        payload: { effect_id: 'e', question: 'Try it again?', kind: 'choice' },
+      })
+      tape.push(T0 + 10 * MIN, {
+        runId: RUN,
+        nodeId: 'p3',
+        type: 'human_answered',
+        payload: { effect_id: 'e', answer: 'retry', ...answered },
+      })
+    }
+    tape.push(T0 + 11 * MIN, {
+      runId: RUN,
+      type: 'workspace_exec',
+      payload: { target: 'integration', exit_code: 1, duration_ms: 5, by: 'coordinator' },
+    })
+
+    const report = report_(tape)
+    expect(report.findings.operations).toEqual({
+      amendments: [
+        { amendment: 1, at_ms: T0 + 5 * MIN, author: 'operator' },
+        { amendment: 2, at_ms: T0 + 6 * MIN, author: 'coordinator' },
+      ],
+      node_operations: [
+        { node: 'p2', op: 'pause', by: 'operator', count: 1 },
+        { node: 'p2', op: 'add_context', by: 'coordinator', count: 1 },
+      ],
+      questions: { asked: 3, by_operator: 1, unattended: 1, by_coordinator: 1, unanswered: 0 },
+      exec_runs: [{ target: 'integration', by: 'coordinator', count: 1, failed: 1 }],
+    })
+    // The coordinator's amendment is still scored as the run's own.
+    expect(report.findings.interventions.map((finding) => finding.amendment)).toEqual([2])
+  })
+
+  it('names every phase staffed above its plan, with the model and what the phase cost', () => {
+    const wf = workflow([phase('p1')])
+    const staffed = { ...wf, crew: { 'tier3-1': { tier: 3, model: 'sonnet' }, tier4: { tier: 4, model: 'fable' } } } as Workflow
+    const tape = new Tape(staffed).begin()
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      tape.push(T0 + MIN, {
+        runId: RUN,
+        nodeId: 'p1',
+        type: 'node_crew',
+        payload: { member: 'tier4', tier: 4, substitute: true, instead_of: 'tier3-1', planned_tier: 3, reason: 'warm_session' },
+      })
+    }
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.end(T0 + 12 * MIN)
+
+    const report = postMortem(tape, RUN, { integration: [], nodeCostUsd: () => 4.567 })
+    expect(report.findings.crew_substitutions).toEqual([
+      {
+        node: 'p1',
+        planned: 'tier3-1',
+        planned_tier: 3,
+        member: 'tier4',
+        tier: 4,
+        model: 'fable',
+        reason: 'warm_session',
+        attempts: 2,
+        above_plan: true,
+        node_cost_usd: 4.57,
+      },
+    ])
+  })
+
+  it('reports a gate that failed on a merged wave as a cross-phase failure', () => {
+    // Every phase green alone; the merged wave failed 22 tests. That is a
+    // missing dependency or contract test that ordering evidence cannot see.
+    const tape = cleanTape()
+    tape.push(T0 + 24 * MIN, {
+      runId: RUN,
+      nodeId: 'p3',
+      type: 'wave_gate_result',
+      payload: { wave: 2, gate: 'unit', exit_code: 1, status: 'failed', duration_ms: 1000 },
+    })
+    expect(report_(tape).findings.cross_phase_failures).toEqual([
+      { wave: 2, gate: 'unit', members: ['p2', 'p3'], at_ms: T0 + 24 * MIN, exit_code: 1 },
+    ])
   })
 })
 

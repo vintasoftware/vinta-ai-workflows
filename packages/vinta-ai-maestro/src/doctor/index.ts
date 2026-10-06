@@ -42,6 +42,9 @@ import { isJudgeGate, type Workflow } from '../types.ts'
 import { JUDGED_HARNESSES, type AgentPermission } from '../harness/permissions.ts'
 import type { SystemOne } from '../system-one/config.ts'
 import { PROBE_QUESTION } from '../system-one/adapter.ts'
+import { findLeftovers, type LeftoverDeps } from '../run/leftovers.ts'
+import { openJournal } from '../journal/journal.ts'
+import { storeFor } from '../cli/paths.ts'
 
 const run = promisify(execFile)
 
@@ -98,6 +101,8 @@ export interface DoctorOptions {
   readonly permission?: AgentPermission
   /** The operator's `--system-one` (§17). */
   readonly systemOne?: SystemOne
+  /** How leftovers of finished runs are looked for. Tests only. */
+  readonly leftovers?: LeftoverDeps
 }
 
 const PROBE_TIMEOUT_MS = 10_000
@@ -1032,6 +1037,28 @@ export function checkComposeTty(workflow: Workflow): CheckResult[] {
   ]
 }
 
+/**
+ * What finished runs left running or on disk (`run/leftovers.ts`), one warning
+ * each with the command that removes it. A warning, not a failure: none of it
+ * stops a run, it only costs memory, disk and ports nobody is using.
+ */
+export async function checkLeftovers(repoPath: string, deps: LeftoverDeps = {}): Promise<CheckResult[]> {
+  if (!existsSync(storeFor(repoPath))) return []
+  const journal = openJournal(repoPath)
+  try {
+    const found = await findLeftovers(repoPath, journal, deps)
+    const what = { stack: 'a compose stack running', lane: 'a lane on disk', job: 'its job process alive' }
+    return found.map((entry, index) => ({
+      id: `leftover:${entry.kind}:${index}`,
+      label: `run ${entry.runId} is over and left ${what[entry.kind]}: ${entry.what}`,
+      status: 'warn' as const,
+      remedy: entry.remedy,
+    }))
+  } finally {
+    journal.close()
+  }
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const { workflow, repoPath } = options
   const gitBin = options.bins?.git ?? 'git'
@@ -1070,6 +1097,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ])
 
   const systemOne = await checkSystemOne(workflow, options.systemOne, options.permission)
+  const leftovers = await checkLeftovers(repoPath, options.leftovers)
 
   const checks = [
     ...harnesses,
@@ -1086,6 +1114,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ...briefs,
     ...branches,
     ...lanes,
+    ...leftovers,
   ]
   const ok = !checks.some((check) => check.status === 'fail')
   return { checks, ok, exitCode: ok ? 0 : 1 }

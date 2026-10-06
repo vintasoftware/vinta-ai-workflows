@@ -702,6 +702,7 @@ function makeWorkflow(
     readonly pipeline?: string
     readonly crew?: Record<string, unknown>
     readonly modelFallbacks?: Record<string, string>
+    readonly substitution?: 'same_tier' | 'up_one_tier' | 'any'
   } = {},
 ): Workflow {
   return WorkflowSchema.parse({
@@ -715,6 +716,7 @@ function makeWorkflow(
       pipeline: options.pipeline ?? 'solo',
       ...(options.defaultChores === undefined ? {} : { chores: options.defaultChores }),
       ...(options.modelFallbacks === undefined ? {} : { model_fallbacks: options.modelFallbacks }),
+      ...(options.substitution === undefined ? {} : { substitution: options.substitution }),
     },
     resources: options.resources ?? { lane: { capacity: options.lanes ?? 4, kind: 'worktree' } },
     gates: options.gates ?? {},
@@ -3265,7 +3267,8 @@ describe('crew', () => {
           node('a', [], { crew: 'tier4', pipeline: 'reuse' }),
           node('b', ['a'], { crew: 'tier2-1', pipeline: 'reuse' }),
         ],
-        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 2 },
+        // Opted in: by default a warm session never moves a phase up a tier.
+        { crew: { 'tier2-1': CREW['tier2-1'], tier4: CREW.tier4 }, lanes: 2, substitution: 'any' },
       ),
     )
     const report = await r.scheduler.run()

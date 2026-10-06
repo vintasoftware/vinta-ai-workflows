@@ -136,6 +136,7 @@ describe('collectRunCrew', () => {
       asPlanned: 0,
       substituted: 0,
       warmReuse: 0,
+      promoted: 0,
       idle: [],
     })
   })

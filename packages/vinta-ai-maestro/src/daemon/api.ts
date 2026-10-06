@@ -544,6 +544,7 @@ export function createApi(options: ApiOptions): Hono {
         asPlanned: crew.asPlanned,
         substituted: crew.substituted,
         warmReuse: crew.warmReuse,
+        promoted: crew.promoted,
         idle: [...crew.idle],
       },
       inputTokens: usage.totals.inputTokens,

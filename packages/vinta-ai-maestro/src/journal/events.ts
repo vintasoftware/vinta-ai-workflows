@@ -263,6 +263,14 @@ interface RunPayloads {
     readonly by?: Actor
   }
   /**
+   * A finished run's compose stacks, stopped (`docker compose down`, volumes
+   * kept). Projects only; `failed` are the ones that would not stop.
+   */
+  stacks_stopped: {
+    readonly stopped: readonly string[]
+    readonly failed: readonly string[]
+  }
+  /**
    * The run coordinator was woken (`coordinator/`). What woke it, as kinds and
    * identifiers, and how the turn ended; what it said and did is in its
    * conversation and in the events its actions wrote.
@@ -419,6 +427,12 @@ interface NodePayloads {
     readonly reason: string
     /** 1 for the first attempt at this node, and one more for each after it. */
     readonly attempt: number
+    /**
+     * The attempt failed before any agent ran: provisioning, a base merge, a
+     * checkout. The machinery's failure, not the work's, and the kind that
+     * repeats verbatim. Absent on rows written before it was recorded.
+     */
+    readonly setup?: true
   }
   /**
    * A node queued behind the one integration worktree, and then let in.
@@ -589,6 +603,11 @@ interface NodePayloads {
     readonly substitute: boolean
     /** Who the plan named. Present only on a substitution. */
     readonly instead_of?: string
+    /**
+     * The named member's tier. Present only on a substitution, so a row says
+     * whether it ran dearer than planned without the roster beside it.
+     */
+    readonly planned_tier?: number
     /**
      * Why somebody else took it. Present only on a substitution, and absent on
      * rows written before there were two ways to be one — which read as

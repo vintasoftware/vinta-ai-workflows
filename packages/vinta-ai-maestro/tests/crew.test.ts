@@ -116,7 +116,7 @@ describe('assignCrew — reusing a session that is already open', () => {
    * merely as "`tier4` took it".
    */
   it('gives a phase to a warm higher-tier member rather than cold-starting the plan’s member', () => {
-    const decision = assignCrew(input({ warm: new Set(['tier4']) }))
+    const decision = assignCrew(input({ warm: new Set(['tier4']), substitution: 'any' }))
 
     expect(decision).toEqual({
       kind: 'assigned',
@@ -178,7 +178,7 @@ describe('assignCrew — reusing a session that is already open', () => {
    */
   it('takes the cheapest warm member when more than one would resume', () => {
     const decision = assignCrew(
-      input({ assigned: 'tier1', busy: new Set(['tier1']), warm: new Set(['tier2-2', 'tier4']) }),
+      input({ assigned: 'tier1', busy: new Set(['tier1']), warm: new Set(['tier2-2', 'tier4']), substitution: 'any' }),
     )
 
     expect(decision).toMatchObject({ member: 'tier2-2', tier: 2, reason: 'warm_session' })
@@ -206,7 +206,7 @@ describe('assignCrew — reusing a session that is already open', () => {
    * afterwards: both are `substitute: true`, and only one of them was a choice.
    */
   it('prefers a warm higher-tier member over a cheaper cold peer when covering', () => {
-    const decision = assignCrew(input({ busy: new Set(['tier2-1']), warm: new Set(['tier4']) }))
+    const decision = assignCrew(input({ busy: new Set(['tier2-1']), warm: new Set(['tier4']), substitution: 'any' }))
 
     expect(decision).toMatchObject({
       member: 'tier4',
@@ -219,6 +219,43 @@ describe('assignCrew — reusing a session that is already open', () => {
   /** No `warm` at all is the pre-warmth behaviour, not "everyone is warm". */
   it('behaves exactly as before when the caller cannot answer the question', () => {
     expect(assignCrew(input())).toMatchObject({ member: 'tier2-1', substitute: false })
+  })
+})
+
+describe('assignCrew — how far up a phase may go (`defaults.substitution`)', () => {
+  /**
+   * The observed run: 23 phases moved from Tier 3 to a Tier 4 member, mostly to
+   * reuse a warm session, while that member's limited credits ran out. A warm
+   * session is not a reason to run a phase dearer unless the operator said so.
+   */
+  it('does not move a phase up a tier for a warm session by default', () => {
+    expect(assignCrew(input({ warm: new Set(['tier4']) }))).toMatchObject({
+      member: 'tier2-1',
+      substitute: false,
+    })
+  })
+
+  it('still reuses a warm peer at the planned tier by default', () => {
+    expect(assignCrew(input({ warm: new Set(['tier2-2']) }))).toMatchObject({
+      member: 'tier2-2',
+      reason: 'warm_session',
+    })
+  })
+
+  it('waits rather than run dearer under same_tier', () => {
+    const decision = assignCrew(input({ busy: new Set(['tier2-1', 'tier2-2']), substitution: 'same_tier' }))
+    expect(decision).toEqual({ kind: 'wait', requiredTier: 2 })
+  })
+
+  /** One up is the next tier the roster has: here Tier 2 covers Tier 1, Tier 3 does not. */
+  it('reaches only to the next tier the roster has under up_one_tier', () => {
+    const crew = { ...CREW, tier3: impl(3, 'dearer-1') }
+    expect(
+      assignCrew(input({ crew, assigned: 'tier1', busy: new Set(['tier1']) })),
+    ).toMatchObject({ member: 'tier2-1', reason: 'peer_busy' })
+    expect(
+      assignCrew(input({ crew, assigned: 'tier1', busy: new Set(['tier1', 'tier2-1', 'tier2-2']) })),
+    ).toEqual({ kind: 'wait', requiredTier: 1 })
   })
 })
 

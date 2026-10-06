@@ -523,6 +523,11 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
             {crew.substituted > 0 &&
               ` — ${crew.substituted} of ${crew.asPlanned + crew.substituted} phases covered by a peer`}
             {crew.warmReuse > 0 && `, ${crew.warmReuse} to reuse a warm session`}
+            {crew.promoted > 0 && (
+              <span data-crew-promoted>
+                {` — ${crew.promoted} ran above their planned tier`}
+              </span>
+            )}
           </Hint>
           <ul className="crew-members flex flex-col gap-1 text-xs">
             {crew.members.map((member) => (

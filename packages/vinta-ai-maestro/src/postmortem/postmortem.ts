@@ -75,6 +75,18 @@ import { z } from 'zod'
 import { computeWaves, transitiveDependents } from '../graph.ts'
 import type { NodeStatus, StoredEvent } from '../journal/events.ts'
 import type { Workflow } from '../types.ts'
+import {
+  ConflictWhereSchema,
+  CrewSubstitutionSchema,
+  CrossPhaseFailureSchema,
+  crewSubstitutions,
+  crossPhaseFailures,
+  FailureCauseSchema,
+  failureCauses,
+  journalConflicts,
+  operations,
+  OperationsSchema,
+} from './activity.ts'
 
 export const POSTMORTEM_SCHEMA_URL =
   'https://github.com/vintasoftware/vinta-ai-workflows/schemas/postmortem.v1.schema.json'
@@ -135,6 +147,10 @@ export const MissingDependencySchema = z
 export const WaveConflictSchema = z
   .strictObject({
     wave: z.number().int().min(1).describe('The wave whose merge produced the conflict.'),
+    where: ConflictWhereSchema.optional().describe(
+      '`wave`: the wave merge. `base`: building a phase’s `integ-` base out of its dependencies, ' +
+        'a wave earlier. Absent on post-mortems written before base conflicts were counted.',
+    ),
     nodes: z.array(Id).min(2).describe('The phases that both own the contested paths.'),
     paths: z.array(z.string()).describe('Repository paths that conflicted. Paths, never hunks.'),
     fix_rounds: z
@@ -381,8 +397,18 @@ export const PostMortemSchema = z
         .array(InterventionFindingSchema)
         .describe(
           'Amendments the run made to itself (§9.2), oldest first. Empty means it made none, ' +
-            'which is a fact rather than a gap: `workflow_amended` rows say who wrote them.',
+            'which is a fact rather than a gap: `workflow_amended` rows say who wrote them. ' +
+            'Changes a person made are in `operations`.',
         ),
+      // Optional so a post-mortem written before they existed still reads;
+      // always written now.
+      failure_causes: z
+        .array(FailureCauseSchema)
+        .optional()
+        .describe('Failed attempts grouped by cause, most expensive first.'),
+      crew_substitutions: z.array(CrewSubstitutionSchema).optional(),
+      operations: OperationsSchema.optional(),
+      cross_phase_failures: z.array(CrossPhaseFailureSchema).optional(),
     }),
     gaps: z.array(PostMortemGapSchema),
   })
@@ -442,6 +468,11 @@ export interface PostMortemOptions {
    * run that integrated with none.
    */
   readonly integration?: readonly IntegrationWaveRecord[]
+  /**
+   * What a phase cost in total, when its harness reported it. Carried on its
+   * `crew_substitutions` entries, so a promotion's price is beside it.
+   */
+  readonly nodeCostUsd?: (nodeId: string) => number | null
   /** How many times a span must miss its wave baseline to be a divergence. Default 4. */
   readonly divergenceFactor?: number
   /**
@@ -633,14 +664,20 @@ export function postMortem(
       // what would make it derivable; guessing here is the failure mode.
       unused_dependencies: [],
       missing_dependencies: missingDependencies(workflow, traces),
-      wave_conflicts: waveConflicts(options.integration),
+      wave_conflicts: waveConflicts(events, waveOf, options.integration),
       duration_divergences: durationDivergences(workflow, traces, waveOf, options),
       gate_costs: gateCosts(workflow, traces),
       critical_path: criticalPath(workflow, traces, waveOf, endedAtMs - startedAtMs),
       idle_capacity: idleCapacity(workflow, traces, endedAtMs - startedAtMs),
       interventions: selfChanges,
+      failure_causes: failureCauses(events),
+      crew_substitutions: crewSubstitutions(events, workflow.crew, options.nodeCostUsd),
+      operations: operations(events),
+      cross_phase_failures: crossPhaseFailures(events, (wave) =>
+        workflow.nodes.filter((node) => waves.get(node.id) === wave).map((node) => node.id),
+      ),
     },
-    gaps: gaps(workflow, traces, options, selfChanges),
+    gaps: gaps(workflow, traces, selfChanges),
   } satisfies PostMortem)
 }
 
@@ -866,17 +903,38 @@ function missingDependencies(
 }
 
 /**
- * Same-wave phases that actually fought, straight off the integration record.
+ * Phases that actually fought, read from the journal's `node_conflict` rows:
+ * at wave merges, and at base merges, where a phase's dependencies collide
+ * while its `integ-` base is built.
+ *
+ * The journal, not the integrator's wave results. Those live in the process
+ * that merged, and a run that restarts loses every one before the restart:
+ * an observed run that restarted three times reported no conflicts against 16
+ * in its journal. The wave results are read only for a journal written before
+ * conflicts were journalled.
  *
  * A record naming one node is dropped: the integrator always names the
- * incoming node and adds the same-wave peers that touched the contested paths,
- * so a lone name means the merge collided with history from earlier waves —
- * true, and not a fact about two peers being wrongly parallel.
+ * incoming node and adds the peers that touched the contested paths, so a
+ * lone name means the merge collided with history from earlier waves — true,
+ * and not a fact about two phases being wrongly parallel.
  */
 function waveConflicts(
+  events: readonly StoredEvent[],
+  waveOf: (nodeId: string) => number,
   integration: readonly IntegrationWaveRecord[] | undefined,
 ): WaveConflict[] {
-  if (integration === undefined) return []
+  const journalled = journalConflicts(events, waveOf)
+  if (journalled.length > 0 || integration === undefined) {
+    return journalled
+      .filter((conflict) => conflict.nodes.length >= 2)
+      .map((conflict) => ({
+        wave: conflict.wave,
+        where: conflict.where,
+        nodes: [...conflict.nodes],
+        paths: [...conflict.paths],
+        fix_rounds: conflict.rounds,
+      }))
+  }
   const conflicts: WaveConflict[] = []
   for (const wave of integration) {
     for (const conflict of wave.conflicts) {
@@ -1165,7 +1223,6 @@ function effectOf(beforeMs: number, afterMs: number): InterventionEffect {
 function gaps(
   workflow: Workflow,
   traces: ReadonlyMap<string, Trace>,
-  options: PostMortemOptions,
   interventionFindings: readonly InterventionFinding[],
 ): PostMortemGap[] {
   const found: PostMortemGap[] = []
@@ -1273,17 +1330,6 @@ function gaps(
         'measurement of the gate. This run recorded a verdict for these gates without one, ' +
         'which is what a journal written before the runner measured itself looks like. ' +
         'Their `gate_costs` durations are a floor: the missing runs are unmeasured, not free.',
-    })
-  }
-
-  if (options.integration === undefined) {
-    found.push({
-      kind: 'integration_record_unavailable',
-      needs:
-        'the integrator’s wave results, passed as `options.integration`. `mergeWave` returns ' +
-        'its `ConflictRecord`s in process and no event carries them, so this run cannot say ' +
-        'whether same-wave phases conflicted. `wave_conflicts` being empty here means ' +
-        'unrecorded, not clean.',
     })
   }
 

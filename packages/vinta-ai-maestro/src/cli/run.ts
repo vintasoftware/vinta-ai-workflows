@@ -59,6 +59,7 @@ import { monitorFactory, toBind, untilSignalled, type Bind } from './serve.ts'
 import { createErrorFeed, tapErrors } from '../coordinator/errors.ts'
 import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import { launcherPath } from '../run/start.ts'
+import type { StackStop } from '../lanes/pool.ts'
 
 /** How long a signalled run gets to kill its agents and drain before the process goes anyway. */
 const INTERRUPT_DEADLINE_MS = 15_000
@@ -122,6 +123,8 @@ export interface RunDeps {
    * that, and is the only source for a run whose executor was injected.
    */
   readonly waveResults?: () => readonly IntegrationWaveRecord[]
+  /** Stands in for the lane pool's `stopStacks` under an injected executor. */
+  readonly stopStacks?: () => Promise<readonly StackStop[]>
   /**
    * Preflight overrides — the injected binaries and disk estimate `runDoctor`
    * already takes. There is no flag for them, for `doctor`'s own reason: a
@@ -462,6 +465,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
       ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
       ...(deps.waveResults === undefined ? {} : { waveResults: deps.waveResults }),
+      ...(deps.stopStacks === undefined ? {} : { stopStacks: deps.stopStacks }),
       // The coordinator's loop (`coordinator/`). The same factory, and so the
       // same coordinator, the conversation endpoint above serves.
       monitorFor: coordinators,
@@ -563,7 +567,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       return FAILED
     }
 
-    const { report, postMortem } = await started.finished
+    const { report, postMortem, stacks } = await started.finished
     if (postMortem !== null) io.out(`vinta-ai-maestro: post-mortem written to ${postMortem}`)
     if (report === null) {
       io.err(`vinta-ai-maestro: run ${runId} aborted. Its journal is intact and can be inspected.`)
@@ -605,6 +609,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
     }
 
     io.out(`vinta-ai-maestro: run ${runId} ${report.status}.`)
+    if (stacks !== undefined && stacks.length > 0) reportStacks(io, runId, stacks)
     return report.status === 'completed' && failed.length === 0 ? OK : FAILED
   } finally {
     // Unhooked whichever way the race went: a watch left on a process that is
@@ -643,4 +648,23 @@ function describeStop(stop: RunStop): string {
     return `node "${stop.nodeId}" requires unknown resource pool "${stop.resource}"`
   }
   return `deadlock, pending: ${stop.pending.join(', ')}`
+}
+
+/**
+ * What a finished run stopped, and what it left for the operator to remove.
+ * The lanes and their volumes are kept on purpose — a phase's last state is
+ * in them — so the commands are printed rather than run.
+ */
+function reportStacks(io: Io, runId: string, stacks: readonly StackStop[]): void {
+  const stopped = stacks.filter((stack) => stack.stopped)
+  const failed = stacks.filter((stack) => !stack.stopped)
+  if (stopped.length > 0) {
+    io.out(`vinta-ai-maestro: stopped ${stopped.length} compose stack(s); their volumes are kept.`)
+  }
+  for (const stack of failed) {
+    io.err(`vinta-ai-maestro: compose stack ${stack.project} did not stop: docker compose -p ${stack.project} down`)
+  }
+  io.out('vinta-ai-maestro: when you are done with the lanes and their databases:')
+  io.out(`  vinta-ai-maestro purge ${runId} --lanes`)
+  for (const stack of stacks) io.out(`  docker compose -p ${stack.project} down -v`)
 }

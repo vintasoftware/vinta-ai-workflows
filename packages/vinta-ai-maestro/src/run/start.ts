@@ -54,11 +54,13 @@ import {
   MAESTRO_URL_ENV,
 } from '../resources/agent-leases.ts'
 import { errorFields, stackFields, type Logger } from '../log/index.ts'
+import { collectNodeUsage } from '../usage/usage.ts'
 import { createScheduler, type RunReport } from '../scheduler/index.ts'
 import type { Workflow } from '../types.ts'
 import { laneRootFor } from '../cli/paths.ts'
 import { projectSpec } from '../cli/project.ts'
 import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
+import type { StackStop } from '../lanes/pool.ts'
 import { startCoordinatorLoop, type CoordinatorLoop } from '../coordinator/loop.ts'
 import type { ErrorFeed } from '../coordinator/errors.ts'
 import { execPort } from '../coordinator/exec.ts'
@@ -105,6 +107,8 @@ export interface StartRunOptions {
   readonly adapters?: Readonly<Record<string, HarnessAdapter>>
   readonly perLaneBytes?: number
   readonly waveResults?: () => readonly IntegrationWaveRecord[]
+  /** Replaces the pool's `stopStacks`, for a host that composed none. Tests. */
+  readonly stopStacks?: () => Promise<readonly StackStop[]>
   /**
    * The daemon's log, handed on to the scheduler this composes. Absent for a
    * host that wired none, and then nothing is written.
@@ -327,6 +331,8 @@ export interface RunOutcome {
   readonly report: RunReport | null
   /** Where §13.6's artifact was written, or `null` when it could not be. */
   readonly postMortem: string | null
+  /** The compose stacks a `done` run stopped. Absent when it stopped none. */
+  readonly stacks?: readonly StackStop[]
 }
 
 export type StartRunResult = StartedRun | StartRunRefusal
@@ -581,7 +587,24 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
       if (report.halted === 'paused' || report.halted === 'interrupted') return { report, postMortem: null }
       // `scheduler.run` journalled `run_ended`, which is the one moment a
       // post-mortem is true (§13.6).
-      return { report, postMortem: emitPostMortem(journal, runId, options.waveResults ?? host.waveResults) }
+      const postMortem = emitPostMortem(journal, runId, options.waveResults ?? host.waveResults)
+      // A run that is done has nothing left to run in its lanes: their compose
+      // stacks are stopped, volumes kept. A failed run keeps them up — it is
+      // resumable, and its stacks are what someone debugging it will want.
+      const stopStacks = options.stopStacks ?? host.stopStacks
+      if (journal.run(runId)?.status !== 'done' || stopStacks === undefined) return { report, postMortem }
+      const stacks = await stopStacks()
+      if (stacks.length > 0) {
+        journal.append({
+          runId,
+          type: 'stacks_stopped',
+          payload: {
+            stopped: stacks.filter((stack) => stack.stopped).map((stack) => stack.project),
+            failed: stacks.filter((stack) => !stack.stopped).map((stack) => stack.project),
+          },
+        })
+      }
+      return { report, postMortem, stacks }
     } catch {
       return { report: null, postMortem: null }
     } finally {
@@ -637,7 +660,15 @@ function emitPostMortem(
 ): string | null {
   try {
     const integration = waveResults?.()
-    const report = postMortem(journal, runId, integration === undefined ? {} : { integration })
+    const report = postMortem(journal, runId, {
+      ...(integration === undefined ? {} : { integration }),
+      // What a phase cost, for its `crew_substitutions` entries. Read from the
+      // transcripts, which is why it is asked only for substituted phases.
+      nodeCostUsd: (nodeId) => {
+        const cost = collectNodeUsage(journal, runId, nodeId).totals.cost
+        return cost.status === 'complete' ? cost.usd : cost.status === 'partial' ? cost.usdSoFar : null
+      },
+    })
     return writePostMortem(journal.root, report)
   } catch {
     return null

@@ -378,6 +378,7 @@ test('the rollup names who worked, and flags the phases a peer covered', async (
           asPlanned: 4,
           substituted: 1,
           warmReuse: 0,
+          promoted: 1,
           idle: ['tier2-1'],
         },
       }),
@@ -393,6 +394,9 @@ test('the rollup names who worked, and flags the phases a peer covered', async (
   // the tier the plan budgeted for.
   expect(textOf(container, '[data-crew-member="tier4"]')).toContain('1 covering')
   expect(textOf(container, '.crew-head')).toContain('1 of 5 phases covered')
+  // And how many of them ran dearer than planned, which nothing showed when a
+  // run moved 73 phases up a tier.
+  expect(textOf(container, '[data-crew-promoted]')).toContain('1 ran above their planned tier')
   // A declared member with nothing yet is "not reached", not "overstaffed" —
   // a validated workflow cannot declare one nobody is assigned to.
   expect(textOf(container, '[data-crew-idle="tier2-1"]')).toContain('not reached')

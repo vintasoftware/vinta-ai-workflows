@@ -687,6 +687,8 @@ export const CrewTotalsSchema = z.strictObject({
   asPlanned: z.number().int(),
   substituted: z.number().int(),
   warmReuse: z.number().int(),
+  /** Substitutions that ran above the planned member's tier. */
+  promoted: z.number().int(),
   idle: z.array(z.string()),
 })
 
