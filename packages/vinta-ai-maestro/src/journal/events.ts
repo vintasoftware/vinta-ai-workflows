@@ -17,7 +17,13 @@
  * was: the run did not complete and nobody asked it to stop, which includes a
  * host process that died under it.
  */
-export type RunStatus = 'running' | 'done' | 'failed' | 'paused' | 'cancelled'
+/**
+ * `interrupted` is a run whose process was ended by a signal: its agents were
+ * killed, the integration worktree was left with no merge in progress, and
+ * `--resume` picks it up. Before it existed a signal wrote `failed`, which
+ * reads as the plan's verdict rather than the operator's terminal closing.
+ */
+export type RunStatus = 'running' | 'done' | 'failed' | 'paused' | 'cancelled' | 'interrupted'
 
 export type NodeStatus =
   | 'pending'
@@ -384,6 +390,22 @@ interface NodePayloads {
     readonly reason: string
     /** 1 for the first attempt at this node, and one more for each after it. */
     readonly attempt: number
+  }
+  /**
+   * A node queued behind the one integration worktree, and then let in.
+   *
+   * The worktree is one and every base merge, wave merge and conflict fix
+   * happens in it, so a phase whose turn is a merge waits for whoever holds
+   * it — for as long as a fixer round takes. That wait used to be invisible:
+   * the node read `running` with no agent process, and three phases queued
+   * behind one looping fixer looked like a frozen run. `queued` names the
+   * holder; `granted` closes the wait. Identifiers only.
+   */
+  node_wait: {
+    readonly on: 'integration_worktree'
+    readonly state: 'queued' | 'granted'
+    /** The node holding the worktree when this one queued, or null when it was unknown. */
+    readonly holder: string | null
   }
   /**
    * A merge conflict an agent settled, filed against the node whose merge hit

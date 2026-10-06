@@ -499,6 +499,25 @@ export class Journal {
   }
 
   /**
+   * Nodes queued behind the integration worktree right now, with the holder
+   * each one was told about: the last `node_wait` per node, where it says
+   * `queued`. For `status`, which otherwise shows such a node as `running`
+   * with nothing running.
+   */
+  integrationWaits(runId: string): Map<string, string | null> {
+    const rows = this.db
+      .prepare("SELECT node_id, payload_json FROM events WHERE run_id = ? AND type = 'node_wait' ORDER BY id")
+      .all(runId) as { node_id: string; payload_json: string }[]
+    const waits = new Map<string, string | null>()
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json) as { state?: string; holder?: string | null }
+      if (payload.state === 'queued') waits.set(row.node_id, payload.holder ?? null)
+      else waits.delete(row.node_id)
+    }
+    return waits
+  }
+
+  /**
    * Forgets a run: its events and every projection folded from them. For
    * `purge`, which removes the run directory — and until this existed left
    * the rows behind, so the UI went on listing, and offering to resume, a run

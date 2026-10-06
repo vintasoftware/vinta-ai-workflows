@@ -128,6 +128,33 @@ export interface ComposeIsolationOptions {
   readonly allocate?: (count: number) => Promise<readonly number[]>
 }
 
+/**
+ * The same connection URL, reachable from the host: the compose service's
+ * port the lane was granted on the host, in place of the service's name.
+ *
+ * A compose-delivered database's `server_url` names the server as the compose
+ * network sees it (`postgres://db:5432`), which is right for the project's
+ * own `docker compose run …` commands and wrong for anything an agent runs
+ * bare on the host. When the service is in `compose.publish`, the lane holds
+ * a host port for it, and this is that URL — offered beside the original
+ * under `<VAR>_HOST`, never in its place. Null when nothing was published for
+ * that service and port.
+ */
+export function hostReachableUrl(url: string, published: readonly PublishedPort[]): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  const target = parsed.port === '' ? 5432 : Number(parsed.port)
+  const port = published.find((entry) => entry.service === parsed.hostname && entry.target === target)
+  if (port === undefined) return null
+  parsed.hostname = '127.0.0.1'
+  parsed.port = String(port.published)
+  return parsed.toString()
+}
+
 /** Where compose looks for its file, in the order compose looks. */
 export const COMPOSE_FILENAMES = [
   'compose.yaml',

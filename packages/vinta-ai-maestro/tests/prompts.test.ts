@@ -1556,6 +1556,21 @@ describe('prompt_template', () => {
 // ---------------------------------------------------------------------------
 
 describe('the conflict-fixer prompt', () => {
+  it('tells the fixer to verify only what it touched, within a time limit', () => {
+    const prompt = composeConflictPrompt({
+      into: 'plan/wf/integ-c',
+      incoming: 'plan/wf/phase-b',
+      nodes: ['a', 'b'],
+      paths: ['app.ts'],
+      promptRefs: ['plan.md#phase-a', 'plan.md#phase-b'],
+    })
+    // One observed round spent hours re-running a suite that could not reach
+    // its database, holding the worktree three phases were queued behind.
+    expect(prompt).toContain('Verify only the files you touched')
+    expect(prompt).toContain('Do not run the whole suite')
+    expect(prompt).toContain('time limit')
+  })
+
   it('carries identifiers and plan references, and the one rule that matters', () => {
     const prompt = composeConflictPrompt({
       into: 'plan/bookmarks/wave-2',

@@ -34,7 +34,7 @@
  */
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { ConflictFixer, ConflictRequest } from './fixer.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
@@ -492,6 +492,7 @@ export class Integrator {
   async startNode(nodeId: string, lanePath: string, resume = false): Promise<string> {
     const base = await this.prepareBase(nodeId)
     const branch = this.nodeBranch(nodeId)
+    await this.#releaseBranch(lanePath, branch)
 
     if (resume && (await this.#carriesWork(lanePath, branch, base))) {
       // Deliberately not rebased or fast-forwarded onto a base that has moved.
@@ -505,6 +506,37 @@ export class Integrator {
 
     await git(lanePath, ['checkout', '-B', branch, base])
     return branch
+  }
+
+  /**
+   * Lets go of the phase branch wherever another worktree has it checked out,
+   * so this lane can take it.
+   *
+   * A phase moves lanes: the crew assignment changes between attempts, or a
+   * staffed phase's member sits at a different desk than last time. Git
+   * refuses to check a branch out in two worktrees at once — `fatal: 'plan/…/
+   * phase-p13' is already used by worktree at '…/crew-1'`, exit 128 — and
+   * nothing moved the old lane off it, so the phase failed in its setup on
+   * every attempt. Thirty-nine in a row, in the observed run.
+   *
+   * The holder is detached at the commit it is on, which releases the name
+   * and changes nothing in its working tree: a lane left mid-phase keeps its
+   * files, and the next phase handed that lane resets it anyway. Only this
+   * run's worktrees are touched; a developer's own checkout holding the branch
+   * is left alone and the checkout below fails with git's reason, as before.
+   */
+  async #releaseBranch(lanePath: string, branch: string): Promise<void> {
+    const lines = await gitLines(lanePath, ['worktree', 'list', '--porcelain']).catch(() => [])
+    const here = await git(lanePath, ['rev-parse', '--show-toplevel']).then((out) => out.trim(), () => lanePath)
+    const poolRoot = dirname(here)
+    let worktree: string | null = null
+    for (const line of lines) {
+      if (line.startsWith('worktree ')) worktree = line.slice('worktree '.length)
+      if (line !== `branch refs/heads/${branch}` || worktree === null || worktree === here) continue
+      // Another worktree of this run's pool: a sibling under the same root.
+      if (dirname(worktree) !== poolRoot) continue
+      await gitOk(worktree, ['checkout', '--detach'])
+    }
   }
 
   /**

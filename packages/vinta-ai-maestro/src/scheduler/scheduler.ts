@@ -98,7 +98,7 @@ import {
   type Attribution,
   OPERATOR_ROLE,
 } from '../journal/transcript.ts'
-import { ConflictFixerRefused } from '../integration/fixer.ts'
+import { ConflictFixerInterrupted, ConflictFixerRefused, ConflictFixerTimeout } from '../integration/fixer.ts'
 import { GitCommandError } from '../integration/git.ts'
 import {
   COMMIT_DECISIONS,
@@ -183,6 +183,9 @@ function commitDecisionOf(answer: HumanAnswer | undefined): CommitDecision {
   }
   return 'abort'
 }
+
+/** The deferred question's affirmative: run the phase now. */
+const DEFERRED_START = 'start'
 
 /** The login question's affirmative: the operator has logged the harness in. */
 const LOGGED_IN = 'logged in'
@@ -378,8 +381,11 @@ export interface RunReport {
  *   step boundary, and nothing is killed. A resume picks it up.
  * - `cancelled` kills every live agent turn first, then drains the same way.
  *   It is final; a resume refuses it.
+ * - `interrupted` is `cancelled`'s teardown with `paused`'s meaning: the
+ *   process is ending on a signal, every live turn is killed so none is left
+ *   an orphan still editing a worktree, and the run ends resumable.
  */
-export type HaltMode = 'paused' | 'cancelled'
+export type HaltMode = 'paused' | 'cancelled' | 'interrupted'
 
 /**
  * The failure reason, with the attempts behind it.
@@ -642,6 +648,14 @@ interface NodeState {
   setupFailure: { readonly reason: string; readonly count: number } | null
   /** Questions the host asked through `askNode`. Keeps their effect ids apart. */
   hostAsks: number
+  /**
+   * A deferred node the operator has released (`node.deferred`). Until then
+   * the node is not dispatched however ready its dependencies are; it parks on
+   * the question instead, once.
+   */
+  released: boolean
+  /** Whether the deferred question is being asked, so dispatch asks it once. */
+  deferredAsked: boolean
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -726,7 +740,9 @@ function failureReason(error: unknown): string {
     error instanceof IntegrationCommitError ||
     error instanceof IntegrationWorktreeBusyError ||
     error instanceof UnresolvedConflictError ||
-    error instanceof ConflictFixerRefused
+    error instanceof ConflictFixerRefused ||
+    error instanceof ConflictFixerTimeout ||
+    error instanceof ConflictFixerInterrupted
   ) {
     return error.message
   }
@@ -907,6 +923,8 @@ export class Scheduler {
       agentRan: false,
       setupFailure: null,
       hostAsks: 0,
+      released: false,
+      deferredAsked: false,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -1124,7 +1142,7 @@ export class Scheduler {
    * Idempotent, and a pause can be upgraded to a cancel; the reverse is ignored.
    */
   async halt(mode: HaltMode): Promise<void> {
-    if (this.#halt === 'cancelled' || this.#halt === mode) return
+    if (this.#halt === 'cancelled' || this.#halt === 'interrupted' || this.#halt === mode) return
     this.#halt = mode
     this.#log.info('scheduler.halt', { mode })
     this.#halting.resolve()
@@ -1136,7 +1154,7 @@ export class Scheduler {
         resume({})
       }
     }
-    if (mode === 'cancelled') {
+    if (mode !== 'paused') {
       const kills: Promise<void>[] = []
       for (const state of this.#states.values()) {
         const live = state.live
@@ -1349,6 +1367,26 @@ export class Scheduler {
         (dep) => this.#states.get(dep.node)?.status === 'done',
       )
       if (!ready) continue
+      // A deferred phase (`node.deferred`) waits for a person, not for its
+      // dependencies: the plan said when it may run and this is not the
+      // scheduler's call. Asked once; the answer releases it into this same
+      // loop or fails it.
+      if (state.node.deferred !== undefined && !state.released) {
+        if (!state.deferredAsked) {
+          state.deferredAsked = true
+          this.#active += 1
+          void this.#holdDeferred(state)
+            .catch((error: unknown) => {
+              this.#log.error('scheduler.node_threw', { node: state.node.id, ...errorFields(error) })
+              this.#fail(state, `scheduler error: ${errorKind(error)}`)
+            })
+            .finally(() => {
+              this.#active -= 1
+              this.#wake()
+            })
+        }
+        continue
+      }
       this.#log.info('scheduler.dispatch', {
         node: state.node.id,
         wave: this.#waves.get(state.node.id) ?? -1,
@@ -1869,7 +1907,7 @@ export class Scheduler {
       // throw that away. A cancel stops now, because the turn it ends was
       // killed, and a transition reading a killed turn as a failure would
       // record one that never happened.
-      if (this.#halt === 'cancelled' && result.kind !== 'final') throw new Halted()
+      if (this.#halt !== null && this.#halt !== 'paused' && result.kind !== 'final') throw new Halted()
 
       if (result.kind === 'suspended') {
         // The question itself was journalled when the effect ran; here the
@@ -3085,6 +3123,45 @@ export class Scheduler {
       fallbacks: this.#workflow.defaults.model_fallbacks,
     })
     return parked.status === 'retry' ? new CapacityRetry(parked.wait) : refused
+  }
+
+  /**
+   * Holds a deferred phase on its question until the operator answers.
+   *
+   * `start` releases it: back to `pending`, where the dispatch loop takes it
+   * on the next pass. `stop` fails it, with the reason the plan gave, and
+   * blocks what depends on it. A halt withdraws the question and leaves the
+   * node `pending`, unreleased, so a resume asks again. Nothing answers this
+   * unattended — a soak is the one wait no timer should end.
+   */
+  async #holdDeferred(state: NodeState): Promise<void> {
+    const reason = state.node.deferred ?? ''
+    const effectId = `deferred:${state.node.id}`
+    this.#ask(state, effectId, {
+      question: `Phase "${state.node.name}" is deferred: ${reason} Its dependencies are done. Start it now?`,
+      kind: 'choice',
+      choices: [DEFERRED_START, STOP],
+    })
+    state.parkedEffectId = effectId
+    this.#log.info('node.deferred', { node: state.node.id })
+    let facts: GuardContext
+    try {
+      facts = await this.#park(state)
+    } catch (error) {
+      if (error instanceof Halted || error instanceof Aborted) {
+        state.deferredAsked = false
+        if (!state.aborted) this.#setStatus(state, 'pending')
+        return
+      }
+      throw error
+    }
+    if (facts.human?.['answer'] === DEFERRED_START) {
+      state.released = true
+      this.#log.info('node.deferred_released', { node: state.node.id })
+      this.#setStatus(state, 'pending')
+      return
+    }
+    this.#fail(state, `deferred phase not started: ${reason}`)
   }
 
   /**

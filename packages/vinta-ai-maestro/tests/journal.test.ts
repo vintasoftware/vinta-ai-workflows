@@ -433,3 +433,24 @@ describe('journal', () => {
     )
   })
 })
+
+describe('integration waits', () => {
+  it('folds the last node_wait per node into who is queued now', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-journal-'))
+    const journal = openJournal(dir)
+    try {
+      journal.createRun('r', golden())
+      const wait = (nodeId: string, state: 'queued' | 'granted', holder: string | null) =>
+        journal.append({ runId: 'r', nodeId, type: 'node_wait', payload: { on: 'integration_worktree', state, holder } })
+      wait('p2', 'queued', 'p1')
+      wait('p3', 'queued', 'p1')
+      wait('p2', 'granted', 'p1')
+      expect([...journal.integrationWaits('r')]).toEqual([['p3', 'p1']])
+      wait('p3', 'granted', 'p1')
+      expect(journal.integrationWaits('r').size).toBe(0)
+    } finally {
+      journal.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

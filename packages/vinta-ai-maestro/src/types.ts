@@ -493,6 +493,17 @@ export const NodeSchema = z.strictObject({
     'The member this phase is assigned to. Their tier is the floor for it: a busier roster ' +
       'may hand the phase to a free member at that tier or above, never below.',
   ),
+  deferred: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Why this phase must not start on its own — "deferred until the flag has soaked two weeks ' +
+        'at 100% in production". A deferred phase is not dispatched when its dependencies are ' +
+        'done: it parks on a question naming this reason, and the operator answers `start` (now) ' +
+        'or `stop` (fail it, blocking what depends on it). Without it the scheduler would run a ' +
+        'soak-gated flag removal the moment its dependencies merged.',
+    ),
   max_fix_rounds: z
     .number()
     .int()

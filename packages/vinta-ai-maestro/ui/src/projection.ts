@@ -37,16 +37,29 @@ export interface Projection {
   readonly cursor: number
   readonly statuses: ReadonlyMap<string, NodeStatus>
   readonly runStatus: RunStatus | null
+  /**
+   * Nodes queued behind the integration worktree, with the node holding it.
+   * A `running` node in here is waiting, not working — the one state the
+   * status alone cannot show.
+   */
+  readonly waits: ReadonlyMap<string, string | null>
 }
 
 export const EMPTY_PROJECTION: Projection = {
   cursor: 0,
   statuses: new Map(),
   runStatus: null,
+  waits: new Map(),
 }
+
+const NodeWaitPayloadSchema = z.object({
+  state: z.enum(['queued', 'granted']),
+  holder: z.string().nullable(),
+})
 
 export function applyFrame(projection: Projection, frame: EventFrame): Projection {
   const statuses = new Map(projection.statuses)
+  const waits = new Map(projection.waits)
   let runStatus = projection.runStatus
   let applied = 0
 
@@ -65,9 +78,16 @@ export function applyFrame(projection: Projection, frame: EventFrame): Projectio
       // interrupted — the operator watches nodes go green under a header that
       // still reads "failed", and the only way out is a reload.
       runStatus = 'running'
+      waits.clear()
+    } else if (event.type === 'node_wait' && event.nodeId !== null) {
+      const payload = NodeWaitPayloadSchema.safeParse(event.payload)
+      if (payload.success) {
+        if (payload.data.state === 'queued') waits.set(event.nodeId, payload.data.holder)
+        else waits.delete(event.nodeId)
+      }
     }
   }
 
   if (applied === 0) return projection
-  return { cursor: Math.max(projection.cursor, frame.cursor), statuses, runStatus }
+  return { cursor: Math.max(projection.cursor, frame.cursor), statuses, runStatus, waits }
 }

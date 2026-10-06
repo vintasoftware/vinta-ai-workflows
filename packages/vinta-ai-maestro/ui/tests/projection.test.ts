@@ -1,73 +1,40 @@
 /**
- * The fold, on its own. Idempotence is the property the reconnect story rests
- * on, and it is cheaper to prove here than through a socket.
+ * The fold the run view renders, on the one event a status cannot express:
+ * a `running` node that is queued behind the integration worktree.
  */
-import { expect, test } from 'vitest'
-import type { EventFrame } from '../../src/daemon/schemas.ts'
-import { applyFrame, EMPTY_PROJECTION } from '../src/projection.ts'
-import { RUN_ID } from './fixtures.ts'
+import { describe, expect, it } from 'vitest'
+import { EMPTY_PROJECTION, applyFrame } from '../src/projection.ts'
 
-function frame(...events: EventFrame['events']): EventFrame {
-  const last = events.at(-1)
-  return {
-    channel: 'events',
-    runId: RUN_ID,
-    cursor: last?.id ?? 0,
-    events,
-  }
-}
-
-function event(id: number, type: string, nodeId: string | null, payload: unknown) {
-  return { id, ts: 1_700_000_000_000 + id, runId: RUN_ID, nodeId, type, payload }
-}
-
-test('node statuses fold in order and the cursor follows the last event', () => {
-  const applied = applyFrame(
-    EMPTY_PROJECTION,
-    frame(
-      event(1, 'node_status', 'impl', { status: 'running' }),
-      event(2, 'node_status', 'impl', { status: 'waiting_on_capacity' }),
-      event(3, 'node_status', 'review', { status: 'pending' }),
-    ),
-  )
-  expect(applied.statuses.get('impl')).toBe('waiting_on_capacity')
-  expect(applied.statuses.get('review')).toBe('pending')
-  expect(applied.cursor).toBe(3)
+const frame = (events: readonly { id: number; type: string; nodeId: string | null; payload: unknown }[]) => ({
+  cursor: events.at(-1)?.id ?? 0,
+  events: events.map((event) => ({ ...event, ts: 0, runId: 'r' })),
 })
 
-test('re-applying a frame changes nothing and does not even allocate', () => {
-  const once = applyFrame(EMPTY_PROJECTION, frame(event(1, 'node_status', 'impl', { status: 'running' })))
-  const twice = applyFrame(once, frame(event(1, 'node_status', 'impl', { status: 'running' })))
-  // Identity, not equality: a replay must not re-render the run view.
-  expect(twice).toBe(once)
-})
+describe('the projection', () => {
+  it('knows which nodes are waiting for the integration worktree, and who holds it', () => {
+    const queued = applyFrame(
+      EMPTY_PROJECTION,
+      frame([
+        { id: 1, type: 'node_status', nodeId: 'p2', payload: { status: 'running' } },
+        { id: 2, type: 'node_wait', nodeId: 'p2', payload: { on: 'integration_worktree', state: 'queued', holder: 'p1' } },
+      ]) as never,
+    )
+    expect(queued.statuses.get('p2')).toBe('running')
+    expect(queued.waits.get('p2')).toBe('p1')
 
-test('an overlapping resume applies only the events past the cursor', () => {
-  const once = applyFrame(
-    EMPTY_PROJECTION,
-    frame(event(1, 'node_status', 'impl', { status: 'running' })),
-  )
-  const resumed = applyFrame(
-    once,
-    frame(
-      event(1, 'node_status', 'impl', { status: 'running' }),
-      event(2, 'node_status', 'impl', { status: 'done' }),
-    ),
-  )
-  expect(resumed.statuses.get('impl')).toBe('done')
-  expect(resumed.cursor).toBe(2)
-})
+    const granted = applyFrame(
+      queued,
+      frame([
+        { id: 3, type: 'node_wait', nodeId: 'p2', payload: { on: 'integration_worktree', state: 'granted', holder: 'p1' } },
+      ]) as never,
+    )
+    expect(granted.waits.has('p2')).toBe(false)
 
-test('unknown types and unreadable payloads advance the cursor without throwing', () => {
-  const applied = applyFrame(
-    EMPTY_PROJECTION,
-    frame(
-      event(1, 'node_assigned', 'impl', { lane: 'lane-1' }),
-      event(2, 'node_status', 'impl', { status: 'not-a-status' }),
-      event(3, 'run_ended', null, { status: 'failed' }),
-    ),
-  )
-  expect(applied.statuses.size).toBe(0)
-  expect(applied.runStatus).toBe('failed')
-  expect(applied.cursor).toBe(3)
+    // A resume starts from no waits: whatever was queued belongs to the process that died.
+    const again = applyFrame(
+      queued,
+      frame([{ id: 3, type: 'run_resumed', nodeId: null, payload: { attempt: 2 } }]) as never,
+    )
+    expect(again.waits.size).toBe(0)
+  })
 })

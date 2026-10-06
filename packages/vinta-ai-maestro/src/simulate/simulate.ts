@@ -162,7 +162,14 @@ interface EffectRecord {
  * has no answer a projection could supply.
  */
 export async function simulate(options: SimulateOptions): Promise<SimulationReport> {
-  const { workflow } = options
+  // A deferred phase parks the real scheduler on a question nobody is here to
+  // answer. The projection answers it the only way a schedule can be
+  // projected: as if the operator starts each one the moment its dependencies
+  // land. The soak itself is not modelled, which the page's reader knows.
+  const workflow: Workflow = {
+    ...options.workflow,
+    nodes: options.workflow.nodes.map(({ deferred: _deferred, ...node }) => node),
+  }
   const clock = new VirtualClock()
   // Strict FIFO. The aging window is a wall-clock affordance measured in
   // hundreds of milliseconds; against durations measured in minutes every

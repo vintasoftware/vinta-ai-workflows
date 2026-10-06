@@ -82,9 +82,53 @@ export class ConflictFixerRefused extends Error {
   }
 }
 
+/**
+ * A fix round that outlived its time limit and was stopped.
+ *
+ * A fixer is an agent in a loop with the conflicted files and whatever
+ * commands it chooses to run, and nothing bounded that loop: the observed
+ * round spent hours re-running a test suite that could not reach its
+ * database, holding the one integration worktree while three phases queued
+ * behind it. The merge is abandoned (the integrator does that for any throw)
+ * and the phase fails with this message, which is identifiers and a number.
+ */
+export class ConflictFixerTimeout extends Error {
+  constructor(
+    readonly nodeId: string,
+    readonly round: number,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `conflict fixer round ${round} for ${nodeId} exceeded its ${Math.round(timeoutMs / 60_000)} minute ` +
+        'limit and was stopped',
+    )
+    this.name = 'ConflictFixerTimeout'
+  }
+}
+
+/**
+ * A fix round ended from outside — the run was interrupted. Distinct from a
+ * round that finished, so the integrator abandons the merge rather than
+ * reading the half-done resolution as a round spent.
+ */
+export class ConflictFixerInterrupted extends Error {
+  constructor(readonly nodeId: string, readonly round: number) {
+    super(`conflict fixer round ${round} for ${nodeId} was interrupted`)
+    this.name = 'ConflictFixerInterrupted'
+  }
+}
+
+/** The default time one fix round may take. */
+export const DEFAULT_FIXER_TIMEOUT_MS = 20 * 60_000
+
 /** One method, so the scheduler can inject a real agent and a test a spy. */
 export interface ConflictFixer {
   fix(request: ConflictRequest): Promise<void>
+  /**
+   * Ends the round in progress, if any — the run is being torn down. Optional
+   * because a spy has nothing to end.
+   */
+  interrupt?(): Promise<void>
 }
 
 /** One conflict's staffing: the capability to spawn with, never a session. */
@@ -142,6 +186,8 @@ export interface AgentConflictFixerOptions {
    * written, and this is the seam that finally lets the caller do it.
    */
   readonly record?: (nodeId: string, entry: TranscriptEntry) => void
+  /** How long one round may run before it is stopped. `DEFAULT_FIXER_TIMEOUT_MS` when absent. */
+  readonly timeoutMs?: number
 }
 
 /**
@@ -158,7 +204,16 @@ export interface AgentConflictFixerOptions {
  * id; the reason that distinction is load-bearing is written down there.
  */
 export function createAgentConflictFixer(options: AgentConflictFixerOptions): ConflictFixer {
+  /** The round's session while it runs, so a teardown can end it. */
+  let live: { kill(): Promise<void> } | null = null
+  let interrupted = false
+  const timeoutMs = options.timeoutMs ?? DEFAULT_FIXER_TIMEOUT_MS
   return {
+    async interrupt(): Promise<void> {
+      if (live === null) return
+      interrupted = true
+      await live.kill().catch(() => {})
+    },
     async fix(request: ConflictRequest): Promise<void> {
       const staffed = options.staff?.(request) ?? null
       const context =
@@ -204,12 +259,31 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       // merge, not in the lane on the phase, and reading it as the review fixer
       // would be reading it as the wrong job.
       const by: Attribution = { role: CONFLICT_FIXER_ROLE }
-      for await (const event of outcome.session.events) {
-        // `attribute` for §7's reason: the operator's steering arrives on this
-        // same stream, echoed back by the adapter, and must not be filed as the
-        // agent's words.
-        options.record?.(request.nodeId, { ...event, by: attribute(event, by) })
+      live = outcome.session
+      // The drain, against the clock. A timer firing kills the session, which
+      // ends the stream; the timeout is then the round's result rather than
+      // whatever the stream said last.
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        void outcome.session.kill().catch(() => {})
+      }, timeoutMs)
+      try {
+        for await (const event of outcome.session.events) {
+          // `attribute` for §7's reason: the operator's steering arrives on this
+          // same stream, echoed back by the adapter, and must not be filed as the
+          // agent's words.
+          options.record?.(request.nodeId, { ...event, by: attribute(event, by) })
+        }
+      } finally {
+        clearTimeout(timer)
+        live = null
       }
+      if (interrupted) {
+        interrupted = false
+        throw new ConflictFixerInterrupted(request.nodeId, request.round)
+      }
+      if (timedOut) throw new ConflictFixerTimeout(request.nodeId, request.round, timeoutMs)
     },
   }
 }

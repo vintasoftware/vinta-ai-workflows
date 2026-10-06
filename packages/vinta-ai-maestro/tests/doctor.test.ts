@@ -668,6 +668,39 @@ describe('vinta-ai-maestro doctor', () => {
     })
   })
 
+  describe('compose gates', () => {
+    it('warns about a docker compose run or exec with no -T, naming the field', async () => {
+      // With no terminal attached, compose fails with "the input device is not
+      // a TTY" before the command inside the container starts.
+      const base = greenOptions()
+      const workflow = WorkflowSchema.parse({
+        ...base.workflow,
+        gates: {
+          unit: { cmd: 'docker compose run --rm api python -m pytest', scoped_cmd: 'docker compose run --rm -T api pytest {changed_files}' },
+          lint: { cmd: 'docker-compose exec web ruff check .' },
+          types: { cmd: 'docker compose run --rm --no-TTY api mypy' },
+        },
+        project: { migrate_cmd: 'docker compose run --rm -T api python manage.py migrate', commands: { test: 'docker compose exec api pytest' } },
+      })
+      const report = await runDoctor({ ...base, workflow })
+
+      const check = find(report.checks, 'compose-tty')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('gates.unit.cmd')
+      expect(check.label).toContain('gates.lint.cmd')
+      expect(check.label).toContain('project.commands.test')
+      expect(check.label).not.toContain('scoped_cmd')
+      expect(check.label).not.toContain('gates.types')
+      expect(check.label).not.toContain('migrate_cmd')
+      expect(check.remedy).toContain('-T')
+    })
+
+    it('says nothing for commands that do not go through compose', async () => {
+      const report = await runDoctor(greenOptions())
+      expect(report.checks.find((check) => check.id === 'compose-tty')).toBeUndefined()
+    })
+  })
+
   describe('env files', () => {
     /** A real repository, because the check asks git what is tracked and what is ignored. */
     const realRepo = async (

@@ -850,6 +850,11 @@
             "minLength": 1,
             "pattern": "^[a-z0-9][a-z0-9-]*$"
           },
+          "deferred": {
+            "description": "Why this phase must not start on its own — \"deferred until the flag has soaked two weeks at 100% in production\". A deferred phase is not dispatched when its dependencies are done: it parks on a question naming this reason, and the operator answers `start` (now) or `stop` (fail it, blocking what depends on it). Without it the scheduler would run a soak-gated flag removal the moment its dependencies merged.",
+            "type": "string",
+            "minLength": 1
+          },
           "max_fix_rounds": {
             "description": "Fix rounds a phase may spend on red gates, and unsuccessful iterations each review turn may run, before the operator is asked whether to keep going (§16). Absent — the default — sets no limit: the fixer works until the gates are green and the review loop until the reviewer approves. A fix round is a fixer turn; a review iteration is one pass of the review loop that returned blockers. When a set budget runs out the shipped pipeline asks rather than fails: `continue` grants the same budget again, `stop` fails the phase and hands it to `--on-failure`.",
             "type": "integer",

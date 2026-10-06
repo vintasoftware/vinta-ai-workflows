@@ -302,6 +302,14 @@ export interface StartedRun {
    * do it on the way out of a request that returned hours ago.
    */
   readonly finished: Promise<RunOutcome>
+  /**
+   * The process is ending on a signal. Kills every live agent turn and gate,
+   * the fix round in progress and any merge standing in the integration
+   * worktree, and ends the run `interrupted` — resumable, with nothing left
+   * running behind it. Resolves once the kills are sent; `finished` settles
+   * after the drain.
+   */
+  interrupt(): Promise<void>
 }
 
 export interface RunOutcome {
@@ -549,7 +557,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
       const report = await scheduler.run()
       // A paused run has not ended in the sense §13.6 means: it will be picked
       // up again, and a post-mortem now would describe half of it as the whole.
-      if (report.halted === 'paused') return { report, postMortem: null }
+      if (report.halted === 'paused' || report.halted === 'interrupted') return { report, postMortem: null }
       // `scheduler.run` journalled `run_ended`, which is the one moment a
       // post-mortem is true (§13.6).
       return { report, postMortem: emitPostMortem(journal, runId, options.waveResults ?? host.waveResults) }
@@ -566,7 +574,15 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     }
   })()
 
-  return { ok: true, runId, registered, finished }
+  return {
+    ok: true,
+    runId,
+    registered,
+    finished,
+    interrupt: async () => {
+      await Promise.all([scheduler.halt('interrupted'), host.interrupt?.()])
+    },
+  }
 }
 
 /**

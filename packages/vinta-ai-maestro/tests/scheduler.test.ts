@@ -4545,3 +4545,93 @@ describe('a merge commit git refused', () => {
     expectDrained(r)
   })
 })
+
+describe('a deferred phase', () => {
+  const SOAK = 'until the flag has soaked two weeks at 100% in production.'
+  const deferredWorkflow = (): Workflow =>
+    makeWorkflow([node('a'), node('b', ['a'], { deferred: SOAK }), node('c', ['b'])])
+
+  it('parks on a question once its dependencies are done, and starts at the operator’s word', async () => {
+    const r = rig(deferredWorkflow())
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['b'] === 'awaiting_human', 'the deferred question')
+
+    // `a` ran; nothing ran for `b`, and `c` behind it is untouched.
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['a'])
+    expect(r.scheduler.statuses['c']).toBe('pending')
+    const [question] = questionsOf(r, 'b')
+    expect(question?.question).toContain(SOAK)
+    expect(question?.choices).toEqual(['start', 'stop'])
+
+    r.scheduler.answer('b', { human: { answer: 'start' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['a', 'b', 'c'])
+    expectDrained(r)
+  })
+
+  it('fails on `stop`, with the plan’s reason, and blocks what depends on it', async () => {
+    const r = rig(deferredWorkflow())
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['b'] === 'awaiting_human', 'the deferred question')
+
+    r.scheduler.answer('b', { human: { answer: 'stop' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'failed', c: 'blocked' })
+    expect(report.failures['b']).toContain('deferred phase not started')
+    expect(report.failures['b']).toContain('soaked')
+    expectDrained(r)
+  })
+
+  it('is left pending by a pause, and asked again on the next run', async () => {
+    const r = rig(deferredWorkflow())
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['b'] === 'awaiting_human', 'the deferred question')
+
+    await r.scheduler.halt('paused')
+    const report = await running
+
+    expect(report.halted).toBe('paused')
+    expect(report.statuses).toMatchObject({ a: 'done', b: 'pending', c: 'pending' })
+    expect(r.journal.pendingQuestions('run-1')).toEqual([])
+    expectDrained(r)
+  })
+
+  it('is not answered unattended, however long the window', async () => {
+    const r = rig(deferredWorkflow(), { retryAfterMs: 60_000 })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['b'] === 'awaiting_human', 'the deferred question')
+    await r.advance(60_000 * 64)
+    expect(r.scheduler.statuses['b']).toBe('awaiting_human')
+    expect(answersOf(r)).toEqual([])
+    r.scheduler.answer('b', { human: { answer: 'stop' } })
+    await running
+    expectDrained(r)
+  })
+})
+
+describe('an interrupted run', () => {
+  it('kills the live turn like a cancel and ends resumable like a pause', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.halt('interrupted')
+    r.stall.release()
+    const report = await running
+
+    expect(report.halted).toBe('interrupted')
+    expect(
+      r.journal.events('run-1').filter((event) => event.type === 'run_ended').map((event) => event.payload),
+    ).toEqual([{ status: 'interrupted' }])
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'session_ended', result: 'interrupted' }),
+    )
+    // Nothing started after the signal, and nothing is left running.
+    expect(r.adapter.spawned).toHaveLength(1)
+    expect(report.statuses).toEqual({ a: 'pending', b: 'pending' })
+    expectDrained(r)
+  })
+})

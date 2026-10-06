@@ -15,9 +15,10 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { AgentTask } from '../src/harness/adapter.ts'
+import type { AgentEvent, AgentTask, HarnessAdapter } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import {
+  ConflictFixerTimeout,
   createAgentConflictFixer,
   type ConflictFixer,
   type ConflictRequest,
@@ -1493,5 +1494,117 @@ describe('GitCommandError', () => {
     } finally {
       clearRedactions()
     }
+  })
+})
+
+describe('a phase branch another lane still has checked out', () => {
+  it('is released from that lane so the phase can move', async () => {
+    // Thirty-nine attempts in a row failed with `fatal: 'plan/…/phase-p13' is
+    // already used by worktree at '…/crew-1'` after the crew assignment moved
+    // the phase to another desk and nothing moved the old desk off its branch.
+    const repo = await makeRepo()
+    const one = await repo.lane('crew-1')
+    const two = await repo.lane('crew-2')
+    const integrator = new Integrator({ plan: plan([node('a')]), integrationPath: repo.integ, fixer: spyFixer() })
+    await integrator.startNode('a', one)
+    await repo.commit(one, { 'a.ts': 'attempt 1\n' }, 'phase a: attempt 1')
+    // Uncommitted work in the old lane, which a detach must not touch.
+    await writeFile(join(one, 'scratch.ts'), 'wip\n')
+    const tip = run(one, 'rev-parse', 'HEAD')
+
+    const branch = await integrator.startNode('a', two, true)
+
+    expect(run(two, 'symbolic-ref', '--short', 'HEAD')).toBe(branch)
+    expect(run(two, 'rev-parse', 'HEAD')).toBe(tip)
+    // The old lane is detached at the same commit, its tree exactly as it was.
+    expect(() => run(one, 'symbolic-ref', '--quiet', 'HEAD')).toThrow()
+    expect(run(one, 'rev-parse', 'HEAD')).toBe(tip)
+    expect(existsSync(join(one, 'scratch.ts'))).toBe(true)
+  })
+})
+
+/** A session that never ends on its own: the fixer looping on a check. */
+function hangingAdapter(): { adapter: HarnessAdapter; killed: () => number; spawned: () => number } {
+  let killed = 0
+  let spawned = 0
+  const adapter: HarnessAdapter = {
+    id: 'hanging',
+    capabilities: {
+      inject: false,
+      interrupt: false,
+      resume: false,
+      pty: false,
+      permissionControl: false,
+      autoCompact: false,
+    },
+    preflight: async () => ({ installed: true, authenticated: true, version: '0' }),
+    spawn: async () => {
+      spawned += 1
+      let end!: () => void
+      const ended = new Promise<void>((resolve) => {
+        end = resolve
+      })
+      return {
+        ok: true,
+        session: {
+          id: 'hang-1',
+          events: {
+            async *[Symbol.asyncIterator]() {
+              yield { type: 'session_started', sessionId: 'hang-1' } as AgentEvent
+              await ended
+              yield { type: 'session_ended', result: 'interrupted' } as AgentEvent
+            },
+          },
+          send: async () => {},
+          interrupt: async () => {},
+          kill: async () => {
+            killed += 1
+            end()
+          },
+        },
+      }
+    },
+  }
+  return { adapter, killed: () => killed, spawned: () => spawned }
+}
+
+describe('a fix round with a time limit', () => {
+  it('is stopped when it runs over, and the phase fails with the worktree clean', async () => {
+    const repo = await conflictingPair()
+    const { adapter, killed } = hangingAdapter()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: createAgentConflictFixer({ adapter, model: 'm', timeoutMs: 50 }),
+    })
+
+    const failure = await integrator.prepareBase('c').then(() => null, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(ConflictFixerTimeout)
+    expect((failure as Error).message).toContain('exceeded its 0 minute limit')
+    expect(killed()).toBe(1)
+    expect(midMerge(repo.integ)).toBe(false)
+  })
+
+  it('can be interrupted from outside, which ends the round', async () => {
+    const repo = await conflictingPair()
+    const { adapter, killed, spawned } = hangingAdapter()
+    const fixer = createAgentConflictFixer({ adapter, model: 'm', timeoutMs: 60_000 })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+
+    const preparing = integrator.prepareBase('c').then(() => 'done', () => 'failed')
+    // Until the round is actually running: the merge takes a moment to conflict.
+    for (let i = 0; i < 200 && spawned() === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 25))
+    await fixer.interrupt?.()
+    expect(await preparing).toBe('failed')
+
+    expect(killed()).toBe(1)
+    // Nothing to interrupt afterwards is not an error.
+    await fixer.interrupt?.()
+    expect(midMerge(repo.integ)).toBe(false)
   })
 })

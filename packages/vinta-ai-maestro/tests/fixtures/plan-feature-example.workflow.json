@@ -177,6 +177,7 @@
     {
       "id": "p5",
       "name": "Remove the bookmark-folders feature flag",
+      "deferred": "until the bookmark-folders flag has soaked two weeks at 100% in production with no rollback or incident attributed.",
       "depends_on": [
         {
           "node": "p2",
