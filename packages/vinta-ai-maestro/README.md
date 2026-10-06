@@ -99,6 +99,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. A run whose job is still running is kept. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
+| `status <run-id>` | The run's state and every phase's, including a phase queued behind the integration worktree (and who holds it) — which otherwise reads `running` with nothing running. |
 | `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
 
 There are also `judge-hook` and `guard-hook`, which are internal: they are the hooks `--permission judged` and [the gate guard](#the-gate-guard) install, and claude-code runs them, not you.
@@ -305,6 +306,24 @@ naming them — when a gitignored file has a tracked example (`.env.example`,
 `local.py.example`) and nothing declares it. A resume gives each existing lane
 the declared files it lacks and leaves the ones it has, so amending the list
 reaches lanes that are already there.
+
+### Deferred phases — `nodes[].deferred`
+
+A phase the plan says must not start on its own — the flag removal that waits
+for a soak — carries `deferred` with the reason. When its dependencies are done
+the run asks instead of starting it: `start` runs it now, `stop` fails it with
+the reason and blocks what depends on it. Nothing answers that question for
+you, whatever `--retry-after` says.
+
+### Compose commands need `-T`
+
+A gate runs with no terminal. A command that goes through `docker compose run`
+or `exec` without `-T` fails with "the input device is not a TTY" before the
+command inside the container starts; `doctor` warns about every such line in
+the gates and the `project` block. A compose-delivered database's service in
+`compose.publish` also gives the lane `<connection_url_var>_HOST`: the same
+connection string on the published host port, for anything that must run on
+the host.
 
 ### Git hooks — `project.hooks`
 

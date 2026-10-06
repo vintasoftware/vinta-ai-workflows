@@ -426,7 +426,7 @@ Watch for the accidental version of this: making an in-repo phase `**Depends on*
 
 ### Flag-removal phase depends on everything
 
-The mandatory final flag-removal phase depends on **every** gated phase — it deletes the branches they added. Say so in its `**Depends on**:` line. It sits alone in the deepest wave and is deferred by the executor anyway (soak-gated), so this edge costs nothing and documents the real constraint.
+The mandatory final flag-removal phase depends on **every** gated phase — it deletes the branches they added. Say so in its `**Depends on**:` line. It sits alone in the deepest wave, so this edge costs nothing and documents the real constraint. **The executor does not know it is soak-gated unless the workflow says so**: give that node `deferred` (see the mapping table) carrying the soak condition, or the scheduler starts it the moment its dependencies merge.
 
 ### Never give time estimates
 
@@ -611,6 +611,7 @@ First key in the file is `"$schema"`, pointing at `https://github.com/vintasoftw
 | `nodes[].gates` | The gate ids this phase must pass, in the order they should run. **Omit the key** when they are the run's `defaults.gates` (the plan's or the project's `maestro.defaults.gates`). **`[]` is an ungated phase** — its gate step passes without running anything — and is for a phase that genuinely has nothing to check, declared with `defaults.allow_ungated_phases: true`; `vinta-ai-maestro validate` refuses a phase that resolves to no gates otherwise. One observed run finished twelve phases without a single check because every node carried `"gates": []` where the author meant "the project's". |
 | `nodes[].crew` | The id from this phase's `**Assigned to**:` line. **Required on every node of a staffed workflow** — a half-staffed document is refused, because the executor would be running two staffing rules at once. |
 | `nodes[].model` / `nodes[].harness` | **Omit `model` entirely on a staffed workflow** — the member carries it, and a node setting both is refused. `harness` only when this one phase runs on a different CLI than `defaults`. |
+| `nodes[].deferred` | The phase's soak or wait condition, as prose, on every phase the Execution graph marks **deferred** — the flag-removal phase above all. A deferred phase is not started when its dependencies merge: the executor parks it on a question naming this text, and a person answers `start` when the condition holds (or `stop`). Omit on every other phase. Without it the scheduler runs a soak-gated flag removal the moment the phases it depends on land. |
 | `nodes[].max_fix_rounds` | Omit. Absent means no limit: the fixer works until the gates are green and the review loop until the reviewer approves. Set it to cap the fix rounds a phase may spend on red gates, and the review iterations each review turn may run, before the operator is asked. When a phase spends a set budget, the executor asks the operator whether to continue rather than failing the phase. Set one only on a phase you want a person to look at if it drags on — an expensive suite, a phase with a known risk of going in circles. |
 | `nodes[].pipeline` | Omit. A per-phase pipeline is for a phase that genuinely runs a different lifecycle, which is rare enough that needing it is a signal to re-read the plan. |
 | `pipelines` | **Omit.** The executor ships `standard-phase` — see "The pipeline block". |
@@ -622,7 +623,7 @@ Rules the mapping depends on:
 - **Never invent a model id.** Pick the tier from the rubric under "Staff the plan", then read the id out of [resources/ai-models.yaml](resources/ai-models.yaml). Ids drift; tiers don't.
 - **The roster is the same decision as the Crew table.** `crew` transcribes it: one entry per row, `tier` from the Tier column, `model` from that tier in `ai-models.yaml`. A member the table does not list, or a row with no `crew` entry, means the two were edited separately.
 - **A gate is a command; a chore is an agent.** Both run per phase and that is where the resemblance stops. A gate is a shell line that says pass or fail and decides whether the phase merges. A chore is a turn that *changes* the diff — the review loop's fixes, the comment pass, a changelog entry — and it runs only once the phase's gates are green. Only the `review` chore stands between a phase and its merge; any other chore that fails is recorded and the phase carries on to its final gate run. Anything you can express as a command belongs in `gates`, where it is cached and queued and costs no model time.
-- **Gate commands must be commands the repo actually runs today.** Read them out of the project's task runner (`package.json` scripts, `Makefile`, `pyproject.toml`, CI config) rather than guessing a conventional one. A gate that doesn't exist fails every phase identically, and looks like a code problem.
+- **Gate commands must be commands the repo actually runs today.** Read them out of the project's task runner (`package.json` scripts, `Makefile`, `pyproject.toml`, CI config) rather than guessing a conventional one. A gate that doesn't exist fails every phase identically, and looks like a code problem. A command that goes through `docker compose run` or `exec` needs `-T`: a gate runs with no terminal, and without it compose fails with "the input device is not a TTY" before the command starts (`doctor` warns about it).
 - **The graph must agree with the Execution graph table.** Same nodes, same edges, same waves — they are two renderings of one set of `**Depends on**:` lines, so derive both from the lines rather than transcribing one from the other. A disagreement means one was hand-edited, and the executor flags it.
 - **`plan_context_refs` is anchors, never prose.** It names sections of the plan; it never restates them. A summary written into the JSON is a second copy that drifts the first time someone edits the plan, and the whole point of the field is that the implementer reads what the plan actually says.
 
@@ -985,6 +986,7 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
     {
       "id": "p5",
       "name": "Remove the bookmark-folders feature flag",
+      "deferred": "until the bookmark-folders flag has soaked two weeks at 100% in production with no rollback or incident attributed.",
       "depends_on": [
         {
           "node": "p2",
@@ -1017,7 +1019,7 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
 }
 ```
 
-Read the three renderings against each other: `p2` and `p3` both name only `p1`, so they sit in wave 2 and run at once; `p4` names both, so it is wave 3; `p5` names every gated phase, so it is wave 4 and alone there. `p2` and `p4` both touch `apps/bookmarks/api/views.py` — allowed, because the edge between them puts them in different waves; had they been same-wave, that overlap is what "Same-wave phases must not fight over the same files" is about.
+Read the three renderings against each other: `p2` and `p3` both name only `p1`, so they sit in wave 2 and run at once; `p4` names both, so it is wave 3; `p5` names every gated phase, so it is wave 4 and alone there — and carries `deferred`, so once `p4` merges the executor asks rather than starts it. `p2` and `p4` both touch `apps/bookmarks/api/views.py` — allowed, because the edge between them puts them in different waves; had they been same-wave, that overlap is what "Same-wave phases must not fight over the same files" is about.
 
 No node carries a `model`. `p1` and `p5` are the Tier 1 phases and run on `tier1`'s model because that is who took them — the roster says it once instead of two nodes repeating an id that goes stale on the next model bump.
 
@@ -1188,7 +1190,7 @@ When in doubt, model the plan after a recent example in `ai-plans/` — look for
 <!-- e2e:end -->
 - [ ] Feature flag declared in **Guiding Decisions** (key, scope, default, flip-on criterion) **unless** **Guiding Decisions** explicitly justifies "no flag — purely additive surface".
 - [ ] ≥1 test per gated phase asserts flag-off behavior unchanged.
-- [ ] If flag declared, **final entry under Phased Rollout is dedicated flag-removal phase** with prerequisite (soak window), full deletion touch list, `grep` acceptance check.
+- [ ] If flag declared, **final entry under Phased Rollout is dedicated flag-removal phase** with prerequisite (soak window), full deletion touch list, `grep` acceptance check — and its workflow node carries `deferred` with that prerequisite.
 - [ ] No time estimates anywhere.
 - [ ] Cross-repo phases labeled `Phase Nb`, deploy ordering called out.
 - [ ] Risk & Rollout Notes covers locks, partitions, backfills, rollback.
