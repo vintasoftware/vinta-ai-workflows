@@ -1,49 +1,46 @@
 /**
- * The run's spokesperson: one agent that reads the journal and answers the
- * operator in prose.
+ * The run coordinator: one agent per run that watches it, fixes what is wrong
+ * with it, and tunes how it executes — and the one an operator talks to.
  *
- * A parallel run is eight phases in eight worktrees, and until now the only way
- * to learn what happened to one was to read a status table, open three
- * transcripts and correlate them by hand. This is the thing you can ask
- * instead — what is blocked, why p1 died, what it would take to move on.
+ * It does not orchestrate. The scheduler dispatches phases, the integrator
+ * merges waves, the gates decide what passes; none of that moves here. What
+ * moved here is everything a person used to have to notice and do by hand
+ * while a run went on without them: a phase whose agent loops on a database it
+ * cannot reach, an `env_files` entry nobody declared, a gate command missing
+ * its reuse flag, a phase queued for an hour behind a fix round that hung, an
+ * error maestro logged about itself at three in the morning.
  *
- * Three decisions shape it, and each is a decision *against* something.
+ * **It is woken, not polled by a person.** `coordinator/loop.ts` wakes it when
+ * a phase fails, an attempt errors, maestro logs an error, a phase waits too
+ * long for the integration worktree, or a phase or gate crosses a cost
+ * threshold. The operator can also ask it anything, in the same conversation:
+ * one session holds both, so "what did you do about p7?" has an answer.
  *
- * **It is not in the permission path.** The obvious thought, once an agent has
- * been refused something, is to put a smarter agent in front of the refusals.
- * But a phase makes hundreds of tool calls — one node in one real run made 179 —
- * and a model turn before each is latency and cost spent on questions like "may
- * I run ruff", which should never have been questions. Permissions are settled
- * structurally instead, once per spawn and for free (`harness/read-access.ts`).
- * What reaches a person is a *decision* — a gate failed, a review said no — and
- * that is what this explains.
+ * **It acts through the run's own API, with a token of its own.** From its
+ * shell it drives `vinta-ai-maestro`: tell a running agent something, redirect
+ * it, pause, abort or retry a phase, answer a question, amend the live run,
+ * and run a command in a lane or the integration worktree with that
+ * worktree's environment. Every one of those is attributed to it in the
+ * journal, and what it may not do is refused where the request lands, not
+ * merely discouraged in its brief (`coordinator/policy.ts`): it may change
+ * *how* the run executes, never *what* the plan builds, and it may never make
+ * a check weaker. It answers only questions a `--retry-after` timer could
+ * answer, never one a person is holding, and it cannot halt the run.
  *
- * **It reads a digest, not the transcripts.** Piping every agent's output into
- * a second agent would make the monitor the most expensive thing in the run and
- * tie its cost to the work rather than to the questions. The digest is bounded
- * by construction: statuses, failure reasons, pending questions, the last few
- * refusals, one trimmed last word per phase. A one-hour run and a one-day run
- * produce digests of about the same size.
+ * **It is not in the permission path**, for the reason it never was: a phase
+ * makes hundreds of tool calls, and a model turn before each would make the
+ * coordinator the most expensive thing in the run. Permissions are settled
+ * structurally, once per spawn (`harness/read-access.ts`).
  *
- * **Its authority is a closed vocabulary, not a file handle.** It cannot answer
- * §9.1's question — that is resolved by the operator through the endpoint it
- * has always used, because an agent that could quietly approve its colleagues'
- * work would turn a checkpoint into a formality, and the checkpoint is the
- * point.
+ * **It reads a digest first, not the transcripts.** The digest is bounded by
+ * construction — statuses, failure reasons, pending questions, the last few
+ * refusals, one trimmed last word per phase — and it is the index: enough to
+ * know which phase is worth opening.
  *
- * What it *can* do, since runs began tuning themselves, is propose a change to
- * how the run executes: a gate's command, a gate's timeout, a phase's fix
- * budget, a phase's model (`intervention/`). It proposes; it never writes. The
- * proposal is a document validated against a schema and applied by host code
- * through §9's amend path, so the set of things the monitor may change is the
- * set of verbs that exist rather than whatever a model with an editor decides
- * to try. It still cannot touch what a phase *builds* — no dependency, no
- * brief, no phase added or removed — and there is no verb through which it
- * could.
- *
- * It needs no lane — it writes nothing and runs in the repository — and it is
- * built on demand, including for a run that finished days ago, which is when
- * "why did this fail" is usually asked.
+ * Built per run and kept for the run (`cli/serve.ts`), so the operator's
+ * questions and the wake-ups share one session and one turn at a time. For a
+ * run that is not live — asked about days later — it has no token and no
+ * powers, and reads.
  */
 import { dirname, join } from 'node:path'
 
@@ -233,161 +230,122 @@ export function describe(digest: RunDigest): string {
   return lines.join('\n')
 }
 
+/** How the coordinator reaches the run, when the run is live. */
+export interface CoordinatorReach {
+  /** The run id every command takes. */
+  readonly runId: string
+}
+
 /**
- * The monitor's standing instructions — its brief, not the operator's question.
+ * The coordinator's standing instructions.
  *
- * **It is told how to go and look, not only what happened.** The first version
- * summarised a digest and nothing else, and read exactly as thin as that
- * sounds: it could say a phase had failed and never say what the phase had
- * actually written. It has a shell and it runs in the repository, so the honest
- * brief is the one that hands it the map — where the lanes are, which branch
- * each phase committed to, where the plan lives, where the journal lives — and
- * expects it to read the diff before it draws a conclusion.
+ * **It is told how to go and look, and what it may do once it has.** The
+ * first version of this agent summarised a digest and could say a phase had
+ * failed without ever saying what the phase had written; the second could
+ * look but not touch, and an operator found it "sort of useless" — it could
+ * explain the database the agents could not reach and do nothing about it.
  *
- * The digest stays because it is the index: cheap, bounded, and enough to know
- * *which* phase is worth a closer look. What changed is that a closer look is
- * now possible.
+ * **The project's commands run in a worktree's own environment or not at
+ * all.** A shell in the main checkout does not have a lane's database,
+ * compose project or ports, so a test run from there contends with the lanes
+ * instead of observing them; one monitor reported a port conflict in a gate
+ * that had never run. `exec` runs the command in the job, with the worktree's
+ * environment, which is what makes "run the failing test yourself" safe to
+ * say at all.
+ *
+ * **What it may not do is listed as plainly as what it may.** A model told
+ * only what it can do will find a way to want it, and the server refuses the
+ * rest anyway; saying so up front saves the turn it would spend finding out.
  */
-export function brief(digest: RunDigest): string {
+export function brief(digest: RunDigest, live: CoordinatorReach | null): string {
+  const run = digest.runId
   return [
-    'You are the technical project manager for a parallel implementation run. Several',
-    'coding agents work in isolated git worktrees on phases of one plan. You do not',
-    'write code and you do not approve anything — you find out what is true and tell',
-    'the operator.',
+    'You are the run coordinator for a parallel implementation run. Several coding',
+    'agents work in isolated git worktrees on phases of one plan. You do not orchestrate:',
+    'the scheduler dispatches phases, merges waves and runs gates. Your job is to keep the',
+    'run healthy and moving — find out what is wrong, fix what is broken around the',
+    'agents, steer the ones that are stuck, and tune how the run executes — and to tell the',
+    'operator, plainly, what you found and what you did.',
     '',
-    'You have a shell, and your working directory is the repository. Use it. The run',
-    'state below is an index, not the evidence; when it matters, go and look:',
+    'Your working directory is the repository. The run state below is an index, not the',
+    'evidence; when it matters, go and look:',
     '',
     `- **The plan.** ${digest.planRef ?? 'named in the workflow document under ai-plans/'}.`,
-    '  Each phase names the section of it that briefs the agent. Read the brief before',
-    '  judging whether a phase did what it was asked.',
-    '- **What a phase actually wrote.** Every phase has a worktree and a branch:',
-    '  `git -C <worktree> diff <base>...<branch>` for the change, `git -C <worktree>`',
-    '  `log --oneline <base>..<branch>` for the commits, `git -C <worktree> status`',
-    '  `--porcelain` for work it never committed. A phase that failed with an empty',
-    '  diff and a phase that failed having written six files are different failures.',
-    '- **The run’s own record.** The journal is SQLite at',
-    `  \`${digest.storePath}/flow.db\`: the \`events\` table carries every status change,`,
-    '  lease and session decision as JSON in `payload_json`. Transcripts are JSONL',
-    `  under \`${digest.storePath}/runs/<run>/nodes/<node>/transcript.jsonl\` — one`,
-    '  event per line, with `permission_denied` and `error` rows explaining refusals.',
-    '  Gate logs sit beside them.',
+    '  Each phase names the section of it that briefs the agent.',
+    '- **What a phase wrote.** `git -C <worktree> diff <base>...<branch>`,',
+    '  `git -C <worktree> log --oneline <base>..<branch>`, `git -C <worktree> status --porcelain`.',
+    '- **The run’s record.** The journal is SQLite at',
+    `  \`${digest.storePath}/flow.db\`; the \`events\` table carries every status change, gate`,
+    '  result, wait and decision as JSON in `payload_json`. Transcripts are JSONL under',
+    `  \`${digest.storePath}/runs/<run>/nodes/<node>/transcript.jsonl\`, gate logs beside them`,
+    '  under `gates/`. The integration worktree’s own gate logs are under `nodes/_integration/`.',
+    `- **Maestro’s own log** — \`vinta-ai-maestro logs ${run}\` for this run’s job.`,
     '',
-    '**Read, never run.** Git commands, the journal and the logs are yours. The',
-    'project’s own commands are not: do not run its tests, its gates, its linters, or',
-    '`docker compose` anything. Each lane holds its own compose project, its own',
-    'database and its own ports, and that isolation lives in an environment your',
-    'shell does not have — so the project’s commands run from here contend with the',
-    'lanes instead of observing them, and what they report is an artifact of your',
-    'running them. A monitor that did this once reported "the final gate fails on a',
-    'port conflict" when no gate had run at all, and the operator believed it. Gate',
-    'results come from `gate_result` rows in the journal and from the gate logs; if',
-    'no gate has run, the honest answer is that none has.',
+    ...(live === null ? notLive() : powers(run)),
     '',
-    'Answer specifically and briefly. Name phases by id, say what your evidence was —',
-    'the command you ran, the line you read — and say plainly when you could not find',
-    'out rather than filling the gap. If a phase waits on the operator, explain what',
-    'the question means and what each answer would do; the operator decides, not you.',
+    'Answer specifically and briefly. Name phases by id, say what your evidence was — the',
+    'command you ran, the line you read — and say plainly when you could not find out.',
     '',
     '--- run state ---',
     describe(digest),
   ].join('\n')
 }
 
-/**
- * The brief for an intervention turn, which is a different job from a question.
- *
- * The conversational monitor is asked something and answers it. This one is
- * woken by a threshold, with nobody waiting, and has to decide whether the run
- * is mis-*configured* or merely doing hard work slowly. Three things are
- * therefore said here that `brief` does not say.
- *
- * **What it may change, in full, including what it may not.** A model told
- * only what it can do will find a way to want it. The list of what has no verb
- * is as load-bearing as the list of verbs: without it, a monitor that decides
- * the real problem is phase 4's dependency on phase 2 will propose *something*
- * in the space it does have, and the something will be a gate command.
- *
- * **That proposing nothing is the expected outcome.** A model woken up and
- * shown a threshold will infer that it is supposed to act, and that inference
- * is wrong most of the time: most slow phases are slow because the work is
- * hard. This is why `changes` may be empty and why the brief says so twice.
- *
- * **Where to look, in order of what actually answers the question.** The gate
- * log is first because that is where a mis-tuned gate announces itself — a
- * suite re-creating its database says so, every run, in the first lines it
- * prints.
- *
- * The read-only rule from `brief` is repeated verbatim rather than referenced,
- * and matters more here: this turn runs while lanes are live, and a monitor
- * that ran the project's own test command to "check" a gate would contend with
- * the very phases it was woken up about.
- */
-export function interveneBrief(digest: RunDigest, triggerLines: string, allowed: string): string {
+function notLive(): string[] {
   return [
-    'You are the technical project manager for a parallel implementation run, and this',
-    'is not a question from a person — a threshold fired and nobody is waiting for you.',
-    'Your job is to decide whether this run is *mis-configured* or simply doing hard',
-    'work slowly, and to propose a change only in the first case.',
+    '**This run is not live**, so there is nothing to act on: read, and explain. Do not run',
+    'the project’s own commands — its tests, gates, linters, `docker compose` — from here:',
+    'they would run without any lane’s environment and report on your shell, not the run.',
+  ]
+}
+
+function powers(run: string): string[] {
+  return [
+    '--- what you can do ---',
+    'Every command below talks to this run’s job with your own token, and every one is',
+    'recorded as yours.',
     '',
-    '--- what crossed a threshold ---',
-    triggerLines,
+    `- \`vinta-ai-maestro status ${run}\` — every phase’s state, what it waits on.`,
+    `- \`vinta-ai-maestro node context ${run} <phase> "<text>"\` — tell a running agent something`,
+    '  (it arrives as from the run coordinator). The cheapest fix for an agent going in circles.',
+    `- \`vinta-ai-maestro node redirect ${run} <phase> "<instruction>"\` — interrupt its turn and`,
+    '  give it a new instruction.',
+    `- \`vinta-ai-maestro node pause|abort|retry ${run} <phase>\` — abort fails the phase and blocks`,
+    '  its dependents until a retry; retry runs a failed phase again from a cold start.',
+    `- \`vinta-ai-maestro node answer ${run} <phase> "<choice>"\` — answer the question a phase is`,
+    '  parked on, when it is one a `--retry-after` timer could answer (a failure’s retry/stop, an',
+    '  agent’s own question, a refused merge commit).',
+    `- \`vinta-ai-maestro workflow ${run}\` prints the run’s definition as it stands;`,
+    `  \`vinta-ai-maestro amend ${run} <file.json>\` applies an edited copy to the live run. A`,
+    '  phase that is running cannot take a change to itself until it stops.',
+    `- \`vinta-ai-maestro exec ${run} <lane|integration> -- <command>\` — run a command in a lane or`,
+    '  the integration worktree with that worktree’s environment (its database, compose project,',
+    '  ports). In `integration` it holds the worktree, so no merge moves underneath it. Lane',
+    '  names are in `status` and in the run state below.',
     '',
-    '**Most of the time the right answer is to change nothing.** A phase that has been',
-    'running for an hour is usually a phase whose work takes an hour. You are looking',
-    'for a specific and narrower thing: a cost the run is paying that the *plan* could',
-    'stop it paying. The example this exists for is a test suite whose command omits a',
-    'reuse-database flag, so every gate run in every lane rebuilds the database before',
-    'the first assertion. That is visible in the gate log, it repeats identically, and',
-    'it has nothing to do with the code any phase is writing.',
+    '--- how to act ---',
+    '- Look before you act, and make the smallest change that fixes the cause. Most slow',
+    '  phases are slow because the work is hard; doing nothing is often right.',
+    '- The project’s own commands — tests, gates, linters, `docker compose` — only ever through',
+    '  `exec`, never from the repository root.',
+    '- A lane whose phase is running belongs to its agent. Tell the agent (`node context`), or',
+    '  pause the phase first, before you change files there. Change the integration worktree',
+    '  only through `exec`, which holds it.',
+    '- Prefer reversible actions: commit rather than discard; never `git reset --hard`,',
+    '  `git clean`, a force-push, or deleting a branch, a lane or a database.',
     '',
-    '--- what you may change ---',
-    allowed,
-    '',
-    'You may change **how the run executes**. You may never change **what it builds**:',
-    'there is no way to express a change to a phase’s dependencies, its brief, its',
-    'touch list, the base branch, its pipeline, or the set of phases. If you conclude',
-    'the plan itself is wrong, say so in `summary` and propose no changes — that',
-    'sentence reaches a person, and it is the useful output in that case.',
-    '',
-    '--- where to look ---',
-    `- **Gate logs** — \`${digest.storePath}/runs/<run>/nodes/<node>/gates/<gate>.log\`.`,
-    '  Start here. A mis-tuned gate repeats the same wasted work in its first lines,',
-    '  every single run, in every lane.',
-    '- **The journal** — SQLite at `flow.db`. `gate_result` rows carry each gate’s',
-    '  duration and whether it was a cache hit, so "this gate costs the same twelve',
-    '  minutes every time" is a query rather than an impression. A `timed_out` row',
-    '  also carries `timeout`: `quiet_ms` near the timeout is a gate that hung,',
-    '  small `quiet_ms` with `load_1m` well above `cpus` is a host that was too busy.',
-    '- **Transcripts** — JSONL under `runs/<run>/nodes/<node>/`. What the agent was',
-    '  actually doing with the hour, which is how you tell hard work from a loop.',
-    `- **The plan** — ${digest.planRef ?? 'named in the workflow document under ai-plans/'}.`,
-    '  What the phase was asked for, before you judge how long it should take.',
-    '',
-    '**Read, never run.** Git commands, the journal and the logs are yours. The',
-    'project’s own commands are not: do not run its tests, its gates, its linters, or',
-    '`docker compose` anything. Each lane holds its own compose project, its own',
-    'database and its own ports, and that isolation lives in an environment your',
-    'shell does not have — so the project’s commands run from here contend with the',
-    'lanes instead of observing them. That matters more on this turn than on any',
-    'other: the phases you were woken about are running right now, and timing a gate',
-    'by running it yourself would slow the thing you are measuring.',
-    '',
-    '--- how to answer ---',
-    'Reply with a single JSON object and nothing else — no prose around it, no code',
-    'fence. It must match this shape:',
-    '',
-    '  {"schema_version": 1,',
-    '   "summary": "<one paragraph: what you found, changing anything or not>",',
-    '   "changes": [ <zero or more of the verbs listed above> ]}',
-    '',
-    'Every change needs an `evidence` field naming what you actually read — the log',
-    'line, the durations, the command you ran. It is the only account of this decision',
-    'that anyone will see, because nobody is watching it being made.',
-    '',
-    '--- run state ---',
-    describe(digest),
-  ].join('\n')
+    '--- what you may not do ---',
+    'These are refused by the run itself (`coordinator_forbidden`); do not look for a way',
+    'around them — say what you would have done and why, and the operator decides.',
+    '- Change what the plan builds: add or remove phases, change dependencies, briefs, touch',
+    '  lists, the base branch, pipelines, chores, a deferred phase’s condition.',
+    '- Make a check weaker: drop a gate or a chore from a phase or the defaults, remove or',
+    '  rewrite a gate’s command (a gate whose `tuning.allowed_flags` lists a flag may gain it),',
+    '  change a judge gate, change `hooks`, allow ungated phases, narrow `gate_scope`, lower',
+    '  `wave_gates`.',
+    '- Answer a question that is the operator’s — a deferred phase’s start, a plan’s human',
+    '  gate, a phase the operator paused — or pause or stop the whole run.',
+  ]
 }
 
 /**
@@ -433,8 +391,15 @@ export interface MonitorOptions {
    * they ran out would be gone exactly when a stalled run needs explaining.
    */
   readonly fallbacks?: ModelFallbacks
-  /** Where it runs. The repository, not a lane — it writes nothing. */
+  /** Where it runs: the repository. It reaches lanes through `exec`. */
   readonly cwd: string
+  /**
+   * The environment that gives it its powers — the run's API, its own token,
+   * the run id and the launcher on `PATH` — read on every turn, because the
+   * job only knows them once its daemon is listening. Undefined for a run that
+   * is not live, which then gets the read-only brief.
+   */
+  readonly env?: () => Readonly<Record<string, string>> | undefined
   /**
    * Where the conversation is written, so it survives the tab.
    *
@@ -457,6 +422,8 @@ export interface MonitorOptions {
  */
 export class Monitor {
   #session: string | null = null
+  /** One turn at a time: the operator's questions and the wake-ups share a session. */
+  #turn: Promise<unknown> = Promise.resolve()
   readonly #options: MonitorOptions
   /** The model it is on now: `options.model`, until that runs out of quota. */
   #model: string
@@ -503,19 +470,49 @@ export class Monitor {
     return this.#model
   }
 
+  /** Runs `work` after every turn already queued, so two never share the session at once. */
+  #serial<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.#turn.then(work, work)
+    this.#turn = next.catch(() => undefined)
+    return next
+  }
+
+  /** The operator asks something. */
   async ask(digest: RunDigest, question: string): Promise<string> {
+    return await this.#serial(() => this.#converse(digest, '--- the operator asks ---', question, true))
+  }
+
+  /**
+   * Something woke the coordinator (`coordinator/loop.ts`). The same session
+   * the operator talks to, so what it did on one wake-up is what it knows on
+   * the next one and what it can tell the operator about.
+   */
+  async wake(digest: RunDigest, triggerLines: string): Promise<string> {
+    return await this.#serial(() =>
+      this.#converse(
+        digest,
+        '--- you were woken because ---',
+        [
+          triggerLines,
+          '',
+          'Nobody is waiting for this turn. Find out what is going on; act if, and only if, a',
+          'change will help; and end with a short summary for the operator: what you saw, what',
+          'you did (the commands), and what you left for them to decide.',
+        ].join('\n'),
+        false,
+      ),
+    )
+  }
+
+  async #converse(digest: RunDigest, heading: string, text: string, fromOperator: boolean): Promise<string> {
     this.#refresh()
+    const env = this.#options.env?.()
     const cold = this.#session === null
     const prompt = cold
-      ? `${brief(digest)}\n\n--- the operator asks ---\n${question}`
-      : [
-          'The run has moved on since your last answer. Here is its state now.',
-          '',
-          describe(digest),
-          '',
-          '--- the operator asks ---',
-          question,
-        ].join('\n')
+      ? `${brief(digest, env === undefined ? null : { runId: digest.runId })}\n\n${heading}\n${text}`
+      : ['The run has moved on since your last turn. Here is its state now.', '', describe(digest), '', heading, text].join(
+          '\n',
+        )
 
     const outcome = await this.#spawn({
       // Not a node. The id is a label for the journal and the logs, and it
@@ -524,6 +521,7 @@ export class Monitor {
       cwd: this.#options.cwd,
       prompt,
       model: this.#model,
+      ...(env === undefined ? {} : { env }),
       ...(cold ? {} : { resumeSessionId: this.#session as string }),
     })
 
@@ -533,7 +531,7 @@ export class Monitor {
       // a new one costs a digest rather than an error message.
       if (outcome.kind === 'stale_session' && !cold) {
         this.#session = null
-        return await this.ask(digest, question)
+        return await this.#converse(digest, heading, text, fromOperator)
       }
       // The kind is a fixed token. The adapter's message may quote a harness,
       // and this string reaches a browser (§11).
@@ -542,76 +540,25 @@ export class Monitor {
 
     // The operator's words, in the record, before the answer exists — so a
     // question whose answer never arrives is still visibly a question that was
-    // asked, rather than nothing at all.
-    this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
-      type: 'user_message',
-      text: question,
-      // The operator's, not the monitor's — the same §7 rule a phase's
-      // transcript follows (`journal/transcript.ts`).
-      by: { role: OPERATOR_ROLE },
-    })
+    // asked, rather than nothing at all. A wake-up's reason is not anyone's
+    // words; the `coordinator_woke` event is its record.
+    if (fromOperator) {
+      this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
+        type: 'user_message',
+        text,
+        // The operator's, not the coordinator's — the same §7 rule a phase's
+        // transcript follows (`journal/transcript.ts`).
+        by: { role: OPERATOR_ROLE },
+      })
+    }
 
-    // Journalled **as it arrives**, not joined and written at the end.
-    //
-    // The end was where the whole answer used to appear, which is why a
-    // conversation with the monitor was a question, a spinner, and then a wall
-    // of text: nothing existed to show until the turn was over. Now the record
-    // grows while the turn runs, and anything reading the conversation back —
-    // this daemon's own endpoint, a reloaded tab — sees a monitor thinking
-    // rather than a monitor that has not answered yet.
-    //
-    // `thinking` is kept for the same reason it is kept in a phase's
-    // transcript: it is most of what there is to see while a model works, and
-    // dropping it was what left the browser with nothing to render but a word.
+    // Journalled **as it arrives**, so anything reading the conversation back
+    // — this daemon's own endpoint, a reloaded tab — sees a coordinator
+    // thinking rather than one that has not answered yet. `thinking` is kept
+    // because it is most of what there is to see while a model works.
     const said: string[] = []
     for await (const event of outcome.session.events) {
       if (event.type === 'session_started') this.#session = event.sessionId
-      if (event.type !== 'thinking' && event.type !== 'assistant_text') continue
-      if (event.type === 'assistant_text') said.push(event.text)
-      if (event.text.trim() === '') continue
-      this.#options.journal?.appendTranscript(digest.runId, MONITOR_NODE, {
-        type: event.type,
-        text: event.text,
-        by: { role: MONITOR_ROLE },
-      })
-    }
-    return said.join('\n').trim()
-  }
-
-  /**
-   * One intervention turn: a threshold fired, and this is what came back.
-   *
-   * **Always a cold session, never the conversation’s.** Two reasons, and both
-   * are about the answer rather than the cost. The operator’s conversation is
-   * prose and this turn must reply with one JSON object, and a session that has
-   * been answering in paragraphs for an hour is being asked to do something it
-   * has spent that hour not doing. And an intervention has to be a reading of
-   * the run *now* — a session carrying its own earlier conclusions about why
-   * phase 3 is slow will re-reach them, which is precisely the thrash the
-   * ledger exists to prevent, arrived at inside one context instead of across
-   * two.
-   *
-   * Returns the raw text. Parsing is the caller’s, because the caller is what
-   * owns the schema and what has somewhere to put a malformed answer — a
-   * monitor that threw on bad JSON would lose the summary along with it.
-   */
-  async intervene(digest: RunDigest, triggerLines: string, allowed: string): Promise<string> {
-    const outcome = await this.#spawn({
-      nodeId: `monitor:${digest.runId}`,
-      cwd: this.#options.cwd,
-      prompt: interveneBrief(digest, triggerLines, allowed),
-      model: this.#model,
-    })
-
-    if (!outcome.ok) throw new MonitorUnavailable(outcome.kind)
-
-    // Journalled into the same conversation the operator reads, so a change
-    // the run made to itself is visible where a person is already looking
-    // rather than only in a file beside the run. `thinking` is kept for the
-    // reason it is kept everywhere else here: it is most of what there is to
-    // see while a model works.
-    const said: string[] = []
-    for await (const event of outcome.session.events) {
       if (event.type !== 'thinking' && event.type !== 'assistant_text') continue
       if (event.type === 'assistant_text') said.push(event.text)
       if (event.text.trim() === '') continue

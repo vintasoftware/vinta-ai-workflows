@@ -83,12 +83,13 @@ export const POSTMORTEM_SCHEMA_URL =
 export const POSTMORTEM_FILENAME = 'postmortem.json'
 
 /**
- * Where the monitor's own account of each self-amendment lives, in the same
- * directory. Named here because this artifact points at it and must not
- * duplicate it: the reasoning, the evidence and the gate command are prose
- * about a repository, and this file is read by an agent in another session.
+ * Where the coordinator's own account of each self-amendment lives, relative
+ * to the run directory: its conversation, which holds what woke it, what it
+ * read and what it did. Named here because this artifact points at it and
+ * must not duplicate it: that account is prose about a repository, and this
+ * file is read by an agent in another session.
  */
-export const INTERVENTION_RECORD_FILENAME = 'interventions.jsonl'
+export const INTERVENTION_RECORD_FILENAME = 'nodes/_monitor-conversation/transcript.jsonl'
 
 const Id = z
   .string()
@@ -249,9 +250,9 @@ export const InterventionFindingSchema = z
     record_ref: z
       .string()
       .describe(
-        'Where the monitor’s own account of this change lives, relative to the run directory. ' +
-          'The reasoning, the evidence and the command are prose about a repository and stay ' +
-          'there; this artifact carries what can be counted.',
+        'Where the run coordinator’s own account of this change lives, relative to the run ' +
+          'directory: its conversation. The reasoning, the evidence and the commands are prose ' +
+          'about a repository and stay there; this artifact carries what can be counted.',
       ),
   })
   .describe(
@@ -588,11 +589,12 @@ export function postMortem(
         continue
       }
       case 'workflow_amended': {
-        // Only the run's own. An operator's edit is a person deciding
-        // something, and scoring it as though the run had chosen it would
-        // credit or blame the wrong party.
+        // Only the run's own: the coordinator's, or the monitor's before it
+        // became one. An operator's edit is a person deciding something, and
+        // scoring it as though the run had chosen it would credit or blame the
+        // wrong party.
         const { author, targets, amendment } = event.payload
-        if (author !== 'monitor') continue
+        if (author !== 'monitor' && author !== 'coordinator') continue
         selfAmendments.push({ amendment, ts: event.ts, targets: targets ?? [] })
         continue
       }

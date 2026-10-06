@@ -56,6 +56,9 @@ import { errorFields, installCrashHandlers, redactValue } from '../log/index.ts'
 import { reportLogFailures, toLogSetup, type LogValues } from './logging.ts'
 import { jobArgs, resumeRefusal, toRunPolicy, type JobTarget, type RunPolicy } from './policy.ts'
 import { monitorFactory, toBind, untilSignalled, type Bind } from './serve.ts'
+import { createErrorFeed, tapErrors } from '../coordinator/errors.ts'
+import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
+import { launcherPath } from '../run/start.ts'
 
 /** How long a signalled run gets to kill its agents and drain before the process goes anyway. */
 const INTERRUPT_DEADLINE_MS = 15_000
@@ -97,7 +100,7 @@ export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
                  agents run somewhere that cannot reach loopback.
   --port <n>     Defaults to 0 — an OS-assigned port.
   --on-failure, --retries, --retry-after, --permission, --system-one,
-  --no-intervene, --log-level, --log-stderr, --log-detail
+  --no-coordinator, --log-level, --log-stderr, --log-detail
                  As for \`vinta-ai-maestro ui --help\`, which documents each.`
 
 export interface RunDeps {
@@ -165,6 +168,7 @@ export async function runCommand(
         'log-stderr': { type: 'boolean' },
         'log-detail': { type: 'string' },
         'no-intervene': { type: 'boolean' },
+        'no-coordinator': { type: 'boolean' },
       },
       allowPositionals: true,
     })
@@ -355,7 +359,17 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
     journal.close()
     return USAGE
   }
-  const log = logging.logger
+  // Errors maestro logs about this run's job wake its coordinator.
+  const errors = createErrorFeed()
+  const log = tapErrors(logging.logger, errors.push)
+
+  // One coordinator for the run, behind both the conversation endpoint and the
+  // loop that wakes it. Its powers — the job's API with a token of its own, and
+  // the launcher on PATH — exist once the daemon is listening.
+  let coordinatorEnv: Readonly<Record<string, string>> | undefined
+  const coordinators = monitorFactory(journal, bind.repoPath, permission, (id) =>
+    id === runId ? coordinatorEnv : undefined,
+  )
 
   let daemon: Daemon
   try {
@@ -363,7 +377,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       journal,
       logger: log,
       warn: (message) => io.err(message),
-      monitorFor: monitorFactory(journal, bind.repoPath, permission),
+      monitorFor: coordinators,
       // The app is `ui`'s to serve. This listener is for the run's agents and
       // for the commands that reach the run through `job.json`.
       serveUi: false,
@@ -383,6 +397,13 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
   }
 
   redactValue(daemon.token)
+  redactValue(daemon.coordinatorToken)
+  coordinatorEnv = {
+    [MAESTRO_URL_ENV]: daemon.url,
+    [MAESTRO_TOKEN_ENV]: daemon.coordinatorToken,
+    [MAESTRO_RUN_ENV]: runId,
+    ...launcherPath(journal.root),
+  }
   const startedAt = Date.now()
   const record = (state: 'starting' | 'running'): void =>
     writeJob(bind.repoPath, {
@@ -440,10 +461,10 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
       ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
       ...(deps.waveResults === undefined ? {} : { waveResults: deps.waveResults }),
-      // The watchdog that lets a run tune itself (`intervention/`). The factory
-      // is the same one the monitor endpoint uses, so an intervention turn is
-      // the same agent on the same model as the one an operator can ask.
-      monitorFor: monitorFactory(journal, bind.repoPath, permission),
+      // The coordinator's loop (`coordinator/`). The same factory, and so the
+      // same coordinator, the conversation endpoint above serves.
+      monitorFor: coordinators,
+      errors,
       ...(policy.intervene ? {} : { intervene: false }),
       onHalt: (mode) => {
         log.info('run.halt_requested', { run: runId, mode })

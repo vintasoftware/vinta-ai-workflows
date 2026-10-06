@@ -55,7 +55,7 @@ const DEFAULT_TICK_MS = 10_000
 const NOT_STARTED: ReadonlySet<NodeStatus> = new Set<NodeStatus>(['pending', 'blocked'])
 
 /** Amendments whose targets a reload leaves alone. */
-const PINNING_AUTHORS = new Set(['operator', 'monitor', undefined])
+const PINNING_AUTHORS = new Set(['operator', 'monitor', 'coordinator', undefined])
 
 export type ReloadOutcome =
   | { readonly kind: 'unchanged' }

@@ -75,6 +75,16 @@ export interface HostWiring {
   readonly recycleLane?: (name: string) => Promise<void>
   /** One lane's environment, for the agent about to run in it. */
   readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
+  /**
+   * A lane by name, or the integration worktree (`integration`), as a place to
+   * run a command by hand: its path and its environment. Null for a name the
+   * pool does not have.
+   */
+  readonly workspace?: (
+    target: string,
+  ) => { readonly path: string; readonly env: Readonly<Record<string, string>> } | null
+  /** Runs `work` holding the integration worktree's queue, as `label`. */
+  readonly holdIntegration?: <T>(label: string, work: () => Promise<T>) => Promise<T>
   readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
   /**
    * The `gate` verb's port, once the run's pools exist.
@@ -413,6 +423,16 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // Read through the pool rather than captured, because a recycle that had to
     // re-provision hands back a different `Lane` object for the same slot.
     laneEnv: (name: string) => ({ ...pool.lane(name).env, ...options.agentEnv }),
+    // Where `exec` runs a command by hand: a lane, or the integration worktree,
+    // with the same environment its agents and gates get — the lane's own
+    // database and compose project, which a shell in the main checkout does
+    // not have.
+    workspace: (target: string) => {
+      if (target === 'integration') return { path: integrationPath, env: { ...integration.env, ...options.agentEnv } }
+      const lane = pool.lanes.find((candidate) => candidate.name === target)
+      return lane === undefined ? null : { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
+    },
+    holdIntegration: (label, work) => executor.integration(work, null, label),
     // The same cache the executor was given, so a gate an agent ran is a hit
     // for the `gate` node afterwards. Two caches over one project would be two
     // databases in one file's place and the hits would land in whichever one

@@ -29,6 +29,7 @@ import type {
 } from '../src/harness/adapter.ts'
 import { MockAdapter, type MockScript } from '../src/harness/mock.ts'
 import { ConflictFixerRefused } from '../src/integration/fixer.ts'
+import { CoordinatorForbidden } from '../src/coordinator/actor.ts'
 import { GitCommandError } from '../src/integration/git.ts'
 import type { CommitDecision, CommitFailure } from '../src/integration/integrator.ts'
 import type { TurnRefusal } from '../src/harness/adapter.ts'
@@ -2238,6 +2239,26 @@ describe('§9 operations', () => {
     expectDrained(r)
   })
 
+  it('labels the coordinator’s context as its own, to the agent and in the journal', async () => {
+    // An implementer told "stop rerunning the suite" should know a colleague
+    // said it, not the person who owns the run; the record says the same.
+    const r = rig(makeWorkflow([node('a')]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.addContext('a', 'the database is on port 55432', 'coordinator')
+    r.stall.release()
+    await running
+
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'user_message', text: 'From the run coordinator: the database is on port 55432' }),
+    )
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'add_context', text: 'the database is on port 55432', delivery: 'sent', by: 'coordinator' },
+    ])
+    expectDrained(r)
+  })
+
   it('queues added context for a harness that cannot inject, and delivers it on the resume', async () => {
     const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), {
       stall: true,
@@ -3674,6 +3695,39 @@ describe('a failed phase the operator can retry', () => {
       expectDrained(r)
     })
 
+    it('lets the coordinator answer what a timer could, attributed to it', async () => {
+      // The coordinator stands in for `--retry-after`, never for a person: a
+      // failure's retry/stop is exactly what it is woken to decide once it has
+      // fixed what made the phase fail.
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), { onFailure: 'retry', retries: 0 })
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'offer')
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } }, 'coordinator')
+      await running
+      const answered = r.journal.events('run-1').filter((event) => event.type === 'human_answered')
+      expect(answered.map((event) => event.payload)).toEqual([expect.objectContaining({ answer: 'stop', by: 'coordinator' })])
+      expectDrained(r)
+    })
+
+    it('refuses the coordinator an answer the operator is holding', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'offer')
+      await r.scheduler.pause('a')
+
+      expect(() => r.scheduler.answer('a', { human: { answer: 'retry' } }, 'coordinator')).toThrow(CoordinatorForbidden)
+      expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expectDrained(r)
+    })
+
     it('keeps going rather than stalling at a cap', async () => {
       const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
         onFailure: 'retry',
@@ -4577,6 +4631,19 @@ describe('a deferred phase', () => {
   const SOAK = 'until the flag has soaked two weeks at 100% in production.'
   const deferredWorkflow = (): Workflow =>
     makeWorkflow([node('a'), node('b', ['a'], { deferred: SOAK }), node('c', ['b'])])
+
+  it('is never started by the coordinator: no timer may answer it, so neither may it', async () => {
+    const r = rig(deferredWorkflow())
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['b'] === 'awaiting_human', 'the deferred question')
+
+    expect(() => r.scheduler.answer('b', { human: { answer: 'start' } }, 'coordinator')).toThrow(CoordinatorForbidden)
+    expect(r.adapter.spawned.map((task) => task.nodeId)).toEqual(['a'])
+
+    r.scheduler.answer('b', { human: { answer: 'stop' } })
+    await running
+    expectDrained(r)
+  })
 
   it('parks on a question once its dependencies are done, and starts at the operator’s word', async () => {
     const r = rig(deferredWorkflow())

@@ -104,6 +104,7 @@ export interface PolicyValues {
   readonly retries?: string | undefined
   readonly 'retry-after'?: string | undefined
   readonly 'no-intervene'?: boolean | undefined
+  readonly 'no-coordinator'?: boolean | undefined
 }
 
 /** `null` on a bad flag, already reported; the message names the flag. */
@@ -157,7 +158,9 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
     ...(retries === undefined ? {} : { retries }),
     ...(values['retry-after'] === undefined ? {} : { retryAfter: values['retry-after'] }),
     ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-    intervene: values['no-intervene'] !== true,
+    // `--no-intervene` is the flag's name from before the monitor became the
+    // coordinator, and still works.
+    intervene: values['no-intervene'] !== true && values['no-coordinator'] !== true,
   }
 }
 
@@ -190,7 +193,7 @@ export function jobArgs(
   if (policy.onFailure !== undefined) args.push('--on-failure', policy.onFailure)
   if (policy.retries !== undefined) args.push('--retries', String(policy.retries))
   if (policy.retryAfter !== undefined) args.push('--retry-after', policy.retryAfter)
-  if (!policy.intervene) args.push('--no-intervene')
+  if (!policy.intervene) args.push('--no-coordinator')
   if (log['log-level'] !== undefined) args.push('--log-level', log['log-level'])
   if (log['log-detail'] !== undefined) args.push('--log-detail', log['log-detail'])
   args.push('--log-stderr')

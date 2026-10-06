@@ -23,9 +23,10 @@
  */
 import type { GateGuardPort } from '../guard/guard.ts'
 import type { AmendRunner } from '../amend/amend.ts'
-import type { NodeStatus, OperatorDelivery } from '../journal/events.ts'
+import type { Actor, NodeStatus, OperatorDelivery } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion } from './schemas.ts'
+import type { ExecPort } from '../coordinator/exec.ts'
 import type {
   AgentGateHopOptions,
   AgentGateResult,
@@ -45,18 +46,18 @@ export interface RunControl {
   /** Live node statuses. The journal projection is authoritative; this is the peek. */
   readonly statuses: Readonly<Record<string, NodeStatus>>
   /** §9.1 — the answer enters the guard context as `human.answer` and resumes the node. */
-  answer(nodeId: string, facts: GuardContext): void | Promise<void>
+  answer(nodeId: string, facts: GuardContext, actor?: Actor): void | Promise<void>
   /** §9 — `session.send(text)`, or queued for the next resume. */
-  addContext(nodeId: string, text: string): Operated
+  addContext(nodeId: string, text: string, actor?: Actor): Operated
   /** §9 — interrupt, then send the new instruction. */
-  redirect(nodeId: string, instruction: string): Operated
+  redirect(nodeId: string, instruction: string, actor?: Actor): Operated
   /**
    * §9 — finish the current turn, then `await_human`; on a node already
    * parked on a question, hold it there (`held`).
    */
-  pause(nodeId: string): Operated
+  pause(nodeId: string, actor?: Actor): Operated
   /** §9 — kill the session, mark failed, block dependents. */
-  abortNode(nodeId: string): Operated
+  abortNode(nodeId: string, actor?: Actor): Operated
   /**
    * Run a failed node again, and unblock what its failure blocked.
    *
@@ -231,6 +232,8 @@ export interface DaemonRun {
    * Absent on a host that cannot end a run early, and then both refuse.
    */
   readonly halt?: (mode: 'paused' | 'cancelled') => Promise<void>
+  /** `vinta-ai-maestro exec`: a command run by hand in a lane or the integration worktree. */
+  readonly exec?: ExecPort
 }
 
 /** What the daemon asks on a judged session's behalf. The input never leaves the call. */
@@ -271,25 +274,25 @@ export function runControl(
     get statuses() {
       return scheduler.statuses
     },
-    answer: (nodeId, facts) => scheduler.answer(nodeId, facts),
+    answer: (nodeId, facts, actor) => scheduler.answer(nodeId, facts, actor),
     addContext:
       operations.addContext ??
       (addContext === undefined
         ? unsupported('add_context')
-        : (nodeId, text) => addContext.call(scheduler, nodeId, text)),
+        : (nodeId, text, actor) => addContext.call(scheduler, nodeId, text, actor)),
     redirect:
       operations.redirect ??
       (redirect === undefined
         ? unsupported('redirect')
-        : (nodeId, instruction) => redirect.call(scheduler, nodeId, instruction)),
+        : (nodeId, instruction, actor) => redirect.call(scheduler, nodeId, instruction, actor)),
     pause:
       operations.pause ??
-      (pause === undefined ? unsupported('pause') : (nodeId) => pause.call(scheduler, nodeId)),
+      (pause === undefined ? unsupported('pause') : (nodeId, actor) => pause.call(scheduler, nodeId, actor)),
     abortNode:
       operations.abortNode ??
       (abortNode === undefined
         ? unsupported('abort')
-        : (nodeId) => abortNode.call(scheduler, nodeId)),
+        : (nodeId, actor) => abortNode.call(scheduler, nodeId, actor)),
     ...(own === undefined ? {} : { question: own }),
     // Optional all the way through: a host without it answers "unsupported"
     // rather than accepting a retry it will not perform.

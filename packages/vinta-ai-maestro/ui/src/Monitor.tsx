@@ -121,7 +121,7 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
 
   return (
     <Panel
-      title="Monitor"
+      title="Coordinator"
       className="monitor"
       data-monitor
       expandable
@@ -182,7 +182,7 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
         </p>
       )}
 
-      {failed && <ErrorNote>The monitor could not be reached.</ErrorNote>}
+      {failed && <ErrorNote>The run coordinator could not be reached.</ErrorNote>}
 
       <form
         className="flex items-start gap-2"
@@ -194,7 +194,7 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
         <textarea
           className="min-h-16 flex-1 resize-y rounded-md border bg-background px-2.5 py-2 text-sm"
           data-field="question"
-          aria-label="Ask the monitor about this run"
+          aria-label="Ask the run coordinator about this run"
           placeholder="Why did p1 fail?"
           value={text}
           onChange={(event) => setText(event.target.value)}

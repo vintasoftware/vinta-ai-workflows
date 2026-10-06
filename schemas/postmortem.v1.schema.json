@@ -489,7 +489,7 @@
               },
               "record_ref": {
                 "type": "string",
-                "description": "Where the monitor’s own account of this change lives, relative to the run directory. The reasoning, the evidence and the command are prose about a repository and stay there; this artifact carries what can be counted."
+                "description": "Where the run coordinator’s own account of this change lives, relative to the run directory: its conversation. The reasoning, the evidence and the commands are prose about a repository and stay there; this artifact carries what can be counted."
               }
             },
             "required": [

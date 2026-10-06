@@ -46,7 +46,10 @@ import {
 import { MONITOR_ROLE } from '../journal/transcript.ts'
 import { type AgentAsk, AgentAskSchema, encodeAnswers } from '../questions/agent-questions.ts'
 import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
-import type { Workflow } from '../types.ts'
+import { WorkflowSchema, type Workflow } from '../types.ts'
+import type { Actor } from '../journal/events.ts'
+import { CoordinatorForbidden } from '../coordinator/actor.ts'
+import { coordinatorRefusals } from '../coordinator/policy.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
@@ -74,6 +77,7 @@ import {
   HumanQuestionSchema,
   MonitorAskSchema,
   NoArgsRequestSchema,
+  ExecRequestSchema,
   OperationResponseSchema,
   RedirectRequestSchema,
   StartRunRequestSchema,
@@ -173,6 +177,14 @@ const LogQuerySchema = z.object({
 export interface ApiOptions {
   readonly journal: Journal
   readonly token: string
+  /**
+   * The run coordinator's own token (`coordinator/`). A request carrying it is
+   * the coordinator's: attributed to it in the journal, and held to what it
+   * may do — no halting the run, no editor saves, amendments only within
+   * `coordinator/policy.ts`, answers only to questions a timer could answer.
+   * Absent for a host with no coordinator.
+   */
+  readonly coordinatorToken?: string
   /** Live view of the registry — a run registered after start is reachable. */
   readonly runs: ReadonlyMap<string, DaemonRun>
   /** Where the built UI lives. Defaults to this package's `dist/ui`. */
@@ -254,6 +266,9 @@ export function createApi(options: ApiOptions): Hono {
   const ui = createStaticHandler(options.uiDir ?? DEFAULT_UI_DIR)
   const log = options.logger ?? nullLogger()
   const logDir = options.logDir ?? logDirFor(journal.root)
+  /** Requests the coordinator's token authenticated. Everyone else is the operator. */
+  const actors = new WeakMap<Request, Actor>()
+  const actorOf = (c: Context): Actor => actors.get(c.req.raw) ?? 'operator'
   /**
    * Monitor turns in flight, by run. The one piece of state this module keeps.
    *
@@ -329,7 +344,11 @@ export function createApi(options: ApiOptions): Hono {
   /** §11: every request, without exception, including the ones that 404. */
   app.use('*', async (c, next) => {
     const presented = presentedToken(c.req.header('authorization'), new URL(c.req.url))
-    if (!tokenMatches(options.token, presented)) return fail(c, 401, 'unauthorized')
+    if (options.coordinatorToken !== undefined && tokenMatches(options.coordinatorToken, presented)) {
+      actors.set(c.req.raw, 'coordinator')
+    } else if (!tokenMatches(options.token, presented)) {
+      return fail(c, 401, 'unauthorized')
+    }
     await next()
   })
 
@@ -698,8 +717,66 @@ export function createApi(options: ApiOptions): Hono {
         { path: '', code: 'invalid_json', message: 'Body is not valid JSON' },
       ])
     }
-    const outcome = await amendHere(runId, proposed, run)
+    const outcome = await amendHere(runId, proposed, run, actorOf(c))
     return outcome.ok ? c.json(outcome.body) : fail(c, 409, outcome.code, outcome.issues)
+  })
+
+  /**
+   * One shell command run by hand in a live run's lane or its integration
+   * worktree, with that worktree's environment (`coordinator/exec.ts`). The
+   * answer streams: one JSON object per line, `{"output": "…"}` as the
+   * command prints and `{"exit": <code>}` last. Closing the request ends the
+   * command. In the integration worktree the command holds the worktree's
+   * queue until it exits.
+   *
+   * The command and what it prints are repository content and stay out of the
+   * daemon's log; the journal records the target, who ran it and its exit code.
+   */
+  app.post('/api/runs/:runId/exec', async (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    if (run.exec === undefined) return fail(c, 501, 'exec_unsupported')
+    const body = await readBody(c, ExecRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    const { target, command } = body.value
+    if (!run.exec.knows(target)) return fail(c, 404, 'unknown_target')
+
+    const actor = actorOf(c)
+    const port = run.exec
+    const abort = new AbortController()
+    c.req.raw.signal.addEventListener('abort', () => abort.abort(), { once: true })
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (frame: Readonly<Record<string, unknown>>): void => {
+          try {
+            controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`))
+          } catch {
+            // The client went away; the abort below ends the command.
+          }
+        }
+        const started = Date.now()
+        const code = (await port.run({ target, command, actor }, (output) => send({ output }), abort.signal)) ?? 127
+        journal.append({
+          runId,
+          type: 'workspace_exec',
+          payload: { target, exit_code: code, duration_ms: Date.now() - started, ...(actor === 'coordinator' ? { by: actor } : {}) },
+        })
+        log.info('runs.exec', { run: runId, target, actor, exit_code: code })
+        send({ exit: code })
+        try {
+          controller.close()
+        } catch {
+          // Already cancelled.
+        }
+      },
+      cancel() {
+        abort.abort()
+      },
+    })
+    return new Response(stream, { headers: { 'content-type': 'application/x-ndjson' } })
   })
 
   app.post('/api/runs/:runId/guard', async (c) => {
@@ -910,23 +987,23 @@ export function createApi(options: ApiOptions): Hono {
   // run's control port, and answers with a code — never with what went wrong
   // inside, which is the one place agent output could leak into a response.
   app.post('/api/runs/:runId/nodes/:nodeId/context', (c) =>
-    operate(c, AddContextRequestSchema, (run, nodeId, body) =>
-      run.control.addContext(nodeId, body.text),
+    operate(c, AddContextRequestSchema, (run, nodeId, body, actor) =>
+      run.control.addContext(nodeId, body.text, actor),
     ),
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/redirect', (c) =>
-    operate(c, RedirectRequestSchema, (run, nodeId, body) =>
-      run.control.redirect(nodeId, body.instruction),
+    operate(c, RedirectRequestSchema, (run, nodeId, body, actor) =>
+      run.control.redirect(nodeId, body.instruction, actor),
     ),
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/pause', (c) =>
-    operate(c, NoArgsRequestSchema, (run, nodeId) => run.control.pause(nodeId)),
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => run.control.pause(nodeId, actor)),
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/abort', (c) =>
-    operate(c, NoArgsRequestSchema, (run, nodeId) => run.control.abortNode(nodeId)),
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => run.control.abortNode(nodeId, actor)),
   )
 
   /** §9.1 — the answer enters the guard context as `human.answer`. */
@@ -946,14 +1023,18 @@ export function createApi(options: ApiOptions): Hono {
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/answer', (c) =>
-    operate(c, AnswerRequestSchema, (run, nodeId, body) =>
-      run.control.answer(nodeId, {
-        human: {
-          // An agent's answers travel as one encoded string, so the journal
-          // and the guard context carry them the way they carry any answer.
-          answer: body.answers === undefined ? (body.answer ?? null) : encodeAnswers(body.answers),
+    operate(c, AnswerRequestSchema, (run, nodeId, body, actor) =>
+      run.control.answer(
+        nodeId,
+        {
+          human: {
+            // An agent's answers travel as one encoded string, so the journal
+            // and the guard context carry them the way they carry any answer.
+            answer: body.answers === undefined ? (body.answer ?? null) : encodeAnswers(body.answers),
+          },
         },
-      }),
+        actor,
+      ),
     ),
   )
 
@@ -974,6 +1055,9 @@ export function createApi(options: ApiOptions): Hono {
    * never reaches this branch.
    */
   const halt = (mode: 'paused' | 'cancelled') => async (c: Context) => {
+    // The coordinator lives inside the run it would be ending, and ending a run
+    // is a decision about the whole of it: the operator's.
+    if (actorOf(c) === 'coordinator') return fail(c, 403, 'coordinator_forbidden')
     const body = await readBody(c, NoArgsRequestSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
     const found = resolveRead(c)
@@ -1112,6 +1196,9 @@ export function createApi(options: ApiOptions): Hono {
   })
 
   app.put('/api/workflows/:id', async (c) => {
+    // The plan documents are the operator's; the coordinator amends a live
+    // run through `/amend`, where its policy is checked.
+    if (actorOf(c) === 'coordinator') return fail(c, 403, 'coordinator_forbidden')
     const id = c.req.param('id') ?? ''
     if (!isWorkflowId(id)) return fail(c, 400, 'invalid_workflow_id')
 
@@ -1263,12 +1350,35 @@ export function createApi(options: ApiOptions): Hono {
     runId: string,
     proposed: unknown,
     run: DaemonRun | undefined,
+    actor: Actor = 'operator',
   ): Promise<
     | { readonly ok: true; readonly body: AmendResponse }
     | { readonly ok: false; readonly code: string; readonly issues: Issue[] }
   > {
+    if (actor === 'coordinator') {
+      // Checked against the run as it stands, before anything moves. A
+      // proposal that is not a workflow at all falls through to `amendRun`,
+      // which refuses it with located issues.
+      const parsed = WorkflowSchema.safeParse(proposed)
+      if (parsed.success) {
+        const refusals = coordinatorRefusals(journal.readWorkflow(runId), parsed.data)
+        if (refusals.length > 0) {
+          return {
+            ok: false,
+            code: 'coordinator_forbidden',
+            issues: refusals.map((issue) => ({ path: issue.path.join('.'), code: 'coordinator_forbidden', message: issue.message })),
+          }
+        }
+      }
+    }
     const runner = amendRunner(run)
-    const result = await amendRun({ journal, runId, proposed, ...(runner === undefined ? {} : { runner }) })
+    const result = await amendRun({
+      journal,
+      runId,
+      proposed,
+      ...(runner === undefined ? {} : { runner }),
+      ...(actor === 'coordinator' ? { author: 'coordinator' as const } : {}),
+    })
     if (!result.ok) return { ok: false, code: result.code, issues: toWireIssues(result.issues, result.code) }
     return {
       ok: true,
@@ -1401,7 +1511,7 @@ export function createApi(options: ApiOptions): Hono {
   async function operate<T>(
     c: Context,
     schema: z.ZodType<T>,
-    apply: (run: DaemonRun, nodeId: string, body: T) => unknown,
+    apply: (run: DaemonRun, nodeId: string, body: T, actor: Actor) => unknown,
   ): Promise<Response> {
     const found = resolveNode(c)
     if ('response' in found) return found.response
@@ -1417,8 +1527,11 @@ export function createApi(options: ApiOptions): Hono {
 
     let result: unknown
     try {
-      result = await apply(found.run, found.node.node_id, body.value)
-    } catch {
+      result = await apply(found.run, found.node.node_id, body.value, actorOf(c))
+    } catch (error) {
+      // A refusal of the coordinator is its own code: it is not a failure of
+      // the operation, and the coordinator reads it to know to stop asking.
+      if (error instanceof CoordinatorForbidden) return fail(c, 403, 'coordinator_forbidden')
       // Codes only. The thrown message belongs to a harness or a scheduler and
       // is not this layer's to relay into a browser.
       return fail(c, 409, 'operation_failed')
@@ -1706,7 +1819,7 @@ const STATUS_FOR: Readonly<Record<RunStartRefusal, 404 | 409>> = {
  */
 function fail(
   c: Context,
-  status: 400 | 401 | 404 | 409 | 501 | 503,
+  status: 400 | 401 | 403 | 404 | 409 | 501 | 503,
   error: string,
   issues?: Issue[],
 ): Response {
