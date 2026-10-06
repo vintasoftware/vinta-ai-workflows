@@ -150,6 +150,8 @@ export interface CrewConflictFixerOptions {
   readonly record?: (nodeId: string, entry: TranscriptEntry) => void
   /** `defaults.model_fallbacks`, passed straight through. */
   readonly fallbacks?: ModelFallbacks
+  /** One round's time limit, passed straight through. */
+  readonly timeoutMs?: number
 }
 
 /**
@@ -170,6 +172,7 @@ export function createCrewConflictFixer(options: CrewConflictFixerOptions): Conf
     model: options.defaults.model,
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.fallbacks === undefined ? {} : { fallbacks: options.fallbacks }),
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     staff: (request: ConflictRequest) => {
       const top = highestTierImplementer(options.crewAssignments(), request.nodes, options.crew)
       if (top === null) return null

@@ -40,6 +40,8 @@ const RUN_TONES: Readonly<Record<RunStatus, Tone>> = {
   // it; a cancelled one is over and asks nothing of anybody.
   paused: 'wait',
   cancelled: 'idle',
+  // A signal ended the process. Resumable, and somebody has to do it.
+  interrupted: 'attention',
 }
 
 export function nodeTone(status: NodeStatus): Tone {

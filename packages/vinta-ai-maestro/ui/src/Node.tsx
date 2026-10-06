@@ -194,6 +194,13 @@ export function NodeView({
       </div>
 
       {error !== null && <ErrorNote>{error}</ErrorNote>}
+      {projection.waits.has(nodeId) && status === 'running' && (
+        <Hint className="muted" data-waiting="integration_worktree">
+          Waiting for the integration worktree
+          {projection.waits.get(nodeId) === null ? '' : ` — held by ${projection.waits.get(nodeId)}`}.
+          Nothing is running for this phase until it is free.
+        </Hint>
+      )}
       {notice !== null && (
         <Hint className="muted" data-notice>
           {notice}

@@ -26,8 +26,11 @@
  *   and the run ends `paused`, resumable;
  * - `stop` — live turns and gates are killed and the run ends `cancelled`,
  *   which `--resume` refuses;
- * - a signal (SIGHUP, SIGINT, SIGTERM) — the run ends `failed`, resumable, as
- *   a closed terminal always left it.
+ * - a signal (SIGHUP, SIGINT, SIGTERM) — every live agent turn and gate is
+ *   killed, a fix round and any merge standing in the integration worktree
+ *   are ended, and the run ends `interrupted`, resumable. It used to end
+ *   `failed` with the agents left running as orphans, still editing the
+ *   worktree mid-merge.
  *
  * **Teardown is asymmetric on purpose.** The port, the databases and the caches
  * are closed in a `finally`; the *lanes are not*. §8 is explicit that a
@@ -53,6 +56,11 @@ import { errorFields, installCrashHandlers, redactValue } from '../log/index.ts'
 import { reportLogFailures, toLogSetup, type LogValues } from './logging.ts'
 import { jobArgs, resumeRefusal, toRunPolicy, type JobTarget, type RunPolicy } from './policy.ts'
 import { monitorFactory, toBind, untilSignalled, type Bind } from './serve.ts'
+
+/** How long a signalled run gets to kill its agents and drain before the process goes anyway. */
+const INTERRUPT_DEADLINE_MS = 15_000
+/** How long the daemon's port and sockets get to close on the way out. */
+const CLOSE_DEADLINE_MS = 5_000
 
 export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
        vinta-ai-maestro run --resume <runId> [options]
@@ -497,24 +505,36 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
 
     if (ended !== 'finished') {
       abandoned = true
+      if (ended === 'signalled') {
+        // The agents first. They are their own process groups, and a process
+        // that exits without ending them leaves them running: an implementer
+        // and its test suite went on editing the integration worktree, mid-
+        // merge, after the daemon they reported to was gone. `interrupt`
+        // kills every live turn and gate, the fix round and the merge, and the
+        // scheduler then ends the run `interrupted` itself. Bounded, because a
+        // kill that does not land must not keep this process alive.
+        log.warn('run.interrupted', { run: runId })
+        const interrupted = await Promise.race([
+          started.interrupt().then(() => started.finished).then(() => true),
+          new Promise<false>((resolve_) => setTimeout(() => resolve_(false), INTERRUPT_DEADLINE_MS).unref()),
+        ])
+        if (!interrupted) log.warn('run.interrupt_forced', { run: runId })
+      }
       // **Written before anything is closed, and this is the whole point of
-      // handling the signal at all.** The scheduler is still mid-run and will
-      // never reach its own `run_ended`, because this process is about to end
-      // underneath it. Without this line the run stays `running` in the journal
-      // for ever — indistinguishable, to the run list and to the UI, from one
-      // still in flight — and the operator has a zombie instead of something
-      // they can pick up again.
-      //
-      // A signal is `failed`: the run did not complete, and the node rows say
-      // exactly how far it got. `--resume` accepts it. A cancel that outlived
-      // its deadline is still a cancel.
-      const status = ended === 'forced' ? 'cancelled' : 'failed'
-      journal.append({ runId, type: 'run_ended', payload: { status } })
+      // handling the signal at all.** Without it the run stays `running` in
+      // the journal for ever — indistinguishable, to the run list and to the
+      // UI, from one still in flight — and the operator has a zombie instead
+      // of something they can pick up again. The scheduler writes its own
+      // `run_ended` when the interrupt drained in time; this is for when it did
+      // not, or for a cancel that outlived its deadline.
+      const status = ended === 'forced' ? 'cancelled' : 'interrupted'
+      if (journal.run(runId)?.status === 'running') {
+        journal.append({ runId, type: 'run_ended', payload: { status } })
+      }
       if (ended === 'forced') {
         log.warn('run.cancel_forced', { run: runId })
         io.err(`vinta-ai-maestro: run ${runId} stopped; some steps did not wind down in time.`)
       } else {
-        log.warn('run.interrupted', { run: runId })
         io.err(`vinta-ai-maestro: run ${runId} interrupted.`)
         io.err(`vinta-ai-maestro: resume it with: vinta-ai-maestro run --resume ${runId}`)
       }
@@ -576,8 +596,13 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
     removeJob(bind.repoPath, runId, process.pid)
     // The run's own handles are closed by `started.finished`, which owns them
     // whether or not anyone awaits it. What is left is what *this process*
-    // opened around the run: the port and the journal.
-    await daemon.close()
+    // opened around the run: the port and the journal. Bounded: a browser
+    // socket that will not close held one observed shutdown open indefinitely
+    // (`daemon.closing sockets=1`), and a port is not worth a process.
+    await Promise.race([
+      daemon.close(),
+      new Promise<void>((resolve_) => setTimeout(resolve_, CLOSE_DEADLINE_MS).unref()),
+    ])
     // **Not closed on the abandoned paths, and this is not an oversight.** The
     // scheduler is still running there — nobody awaited `finished` — and it
     // holds this exact journal: closing it underneath a live run turns every

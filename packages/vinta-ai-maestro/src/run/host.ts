@@ -27,7 +27,7 @@ import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
 import type { ConflictFixer } from '../integration/fixer.ts'
-import { gitLines } from '../integration/git.ts'
+import { gitLines, gitOk } from '../integration/git.ts'
 import {
   type CommitDecision,
   type CommitFailure,
@@ -119,6 +119,12 @@ export interface HostWiring {
    * shared worktree usable without a person.
    */
   readonly bindCommitDecision?: (decide: (failure: CommitFailure) => Promise<CommitDecision>) => void
+  /**
+   * Ends what the scheduler cannot: a conflict-fixer round in progress, and a
+   * merge left standing in the integration worktree. For a run interrupted by
+   * a signal. Absent for an injected executor.
+   */
+  readonly interrupt?: () => Promise<void>
   /**
    * Handles this process opened. Never the lanes: §8 leaves worktrees, branches
    * and databases in place for the human who has to read what happened — and,
@@ -233,26 +239,27 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   let current = workflow
   // Bound by `bindCommitDecision` once a scheduler exists to ask through.
   let decideCommit: ((failure: CommitFailure) => Promise<CommitDecision>) | null = null
+  const fixer = conflictFixer(
+    workflow,
+    adapters,
+    // The same overlay every lane's agent gets. The fixer is an agent: it
+    // reports progress and asks for gates over the same `MAESTRO_URL` /
+    // `MAESTRO_TOKEN` / `MAESTRO_RUN` triple, and without it a fix round is
+    // the one agent turn in a run that cannot talk back to the daemon.
+    { ...integration.env, ...options.agentEnv },
+    () => journal.crewAssignments(runId),
+    // Into the incoming phase's own transcript, beside the implementer, fixer
+    // and chore turns that produced the branches now being merged — which is
+    // where somebody asking "why does the merge look like this" is already
+    // reading. Its `by.role` is what keeps it distinguishable from them.
+    (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
+  )
   const integrator = new RecordingIntegrator({
     // `Workflow` satisfies `IntegrationPlan` structurally.
     plan: workflow,
     integrationPath,
     ...(options.planBranch === undefined ? {} : { runBase: options.planBranch }),
-    fixer: conflictFixer(
-      workflow,
-      adapters,
-      // The same overlay every lane's agent gets. The fixer is an agent: it
-      // reports progress and asks for gates over the same `MAESTRO_URL` /
-      // `MAESTRO_TOKEN` / `MAESTRO_RUN` triple, and without it a fix round is
-      // the one agent turn in a run that cannot talk back to the daemon.
-      { ...integration.env, ...options.agentEnv },
-      () => journal.crewAssignments(runId),
-      // Into the incoming phase's own transcript, beside the implementer, fixer
-      // and chore turns that produced the branches now being merged — which is
-      // where somebody asking "why does the merge look like this" is already
-      // reading. Its `by.role` is what keeps it distinguishable from them.
-      (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
-    ),
+    fixer,
     /**
      * The gate a conflict resolution has to pass before it is committed.
      *
@@ -343,6 +350,14 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     cache,
     integrationEnv: { ...integration.env, ...options.agentEnv },
     ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
+    onIntegrationWait: (nodeId, state, holder) => {
+      journal.append({
+        runId,
+        nodeId,
+        type: 'node_wait',
+        payload: { on: 'integration_worktree', state, holder },
+      })
+    },
   })
 
   const rebasePlan = createRebaser({
@@ -374,6 +389,9 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       current = amended
       executor.adopt(amended)
       integrator.adopt(amended)
+      // The pool too: a single-use lane re-provisioned after this point gets
+      // the amended `env_files`, not the ones the run started with.
+      pool.adoptProject(projectSpec(amended.project))
       for (const broker of brokers) broker.adopt(amended)
     },
     recycleLane: async (name: string) => {
@@ -381,6 +399,16 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     },
     bindCommitDecision: (decide) => {
       decideCommit = decide
+    },
+    // The run is being torn down by a signal. The scheduler ends the turns it
+    // holds; this ends the one it does not — a fix round — and leaves the
+    // shared worktree with no merge in progress, which is the state every
+    // resume and every later phase needs it in.
+    interrupt: async () => {
+      await fixer.interrupt?.()
+      if (await gitOk(integrationPath, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])) {
+        await gitOk(integrationPath, ['merge', '--abort'])
+      }
     },
     // Read through the pool rather than captured, because a recycle that had to
     // re-provision hands back a different `Lane` object for the same slot.

@@ -145,6 +145,12 @@ function showRun(
   const state = runState(row, job)
   const nodes = journal.nodes(runId)
   const asking = new Set(journal.pendingQuestions(runId).map((question) => question.nodeId))
+  const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, string | null>()
+  const waitNote = (nodeId: string): string => {
+    if (!waiting.has(nodeId)) return ''
+    const holder = waiting.get(nodeId)
+    return ` — waiting for the integration worktree${holder === null || holder === undefined ? '' : ` (held by ${holder})`}`
+  }
 
   if (json) {
     io.out(
@@ -161,6 +167,8 @@ function showRun(
           wave: node.wave,
           harness: node.harness,
           asking: asking.has(node.node_id),
+          waitingOn: waiting.has(node.node_id) ? 'integration_worktree' : null,
+          heldBy: waiting.get(node.node_id) ?? null,
         })),
       }),
     )
@@ -180,7 +188,7 @@ function showRun(
       ['PHASE', 'STATUS', 'WAVE', 'HARNESS'],
       nodes.map((node) => [
         node.node_id,
-        asking.has(node.node_id) ? `${node.status} — asking` : node.status,
+        (asking.has(node.node_id) ? `${node.status} — asking` : node.status) + waitNote(node.node_id),
         String(node.wave),
         node.harness,
       ]),

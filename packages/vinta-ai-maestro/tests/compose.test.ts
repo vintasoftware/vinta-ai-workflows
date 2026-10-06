@@ -17,6 +17,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  hostReachableUrl,
   type ComposeConfig,
   allocatePorts,
   findComposeFile,
@@ -180,5 +181,20 @@ describe('compose isolation', () => {
     // cannot be granted the same port — and released, so compose can take them.
     const again = await allocatePorts(1, first as number)
     expect(again).toEqual([first])
+  })
+})
+
+describe('a host-reachable URL for a compose database', () => {
+  it('swaps the service name for the lane’s published port, and nothing else', () => {
+    const published = [{ service: 'db', target: 5432, published: 54321, envVar: 'LANE_PORT_DB_5432' }]
+    expect(hostReachableUrl('postgres://app:pw@db:5432/app_test?sslmode=disable', published)).toBe(
+      'postgres://app:pw@127.0.0.1:54321/app_test?sslmode=disable',
+    )
+    // The default port when the URL names none.
+    expect(hostReachableUrl('postgres://db/app', published)).toBe('postgres://127.0.0.1:54321/app')
+    // Nothing published for that service, or that port: no host URL to offer.
+    expect(hostReachableUrl('postgres://redis:6379/0', published)).toBeNull()
+    expect(hostReachableUrl('postgres://db:5433/app', published)).toBeNull()
+    expect(hostReachableUrl('not a url', published)).toBeNull()
   })
 })

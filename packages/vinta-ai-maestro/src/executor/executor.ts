@@ -146,6 +146,12 @@ export interface RunExecutorOptions {
   /** Injected in tests, and on a platform with no notification channel. */
   readonly notifier?: Notifier
   /**
+   * Told when a node queues behind the integration worktree and when it is
+   * let in — the one wait a node can be in that no status shows. The host
+   * journals it as `node_wait`.
+   */
+  readonly onIntegrationWait?: (nodeId: string, state: 'queued' | 'granted', holder: string | null) => void
+  /**
    * The operator's classifier (§17). Absent when the run was started without
    * `--system-one`: judge gates then answer as unavailable, and no built-in
    * judge runs.
@@ -216,6 +222,10 @@ export class RunEffectExecutor implements EffectExecutor {
    * once would otherwise interleave a `checkout -B` with someone else's merge.
    * `LanePool` serializes its `worktree add` calls for the same reason.
    */
+  /** The node whose merge is in the integration worktree now, for `node_wait`. */
+  #integrationHolder: string | null = null
+  /** Turns taken or waiting for the integration worktree. */
+  #integrationDepth = 0
   #integrationTurn: Promise<unknown> = Promise.resolve()
   /**
    * Set when a node's `git_merge` built the final wave, and spent by that
@@ -636,7 +646,7 @@ export class RunEffectExecutor implements EffectExecutor {
     if (typeof from === 'string') {
       await git(lane.path, resume ? ['checkout', branch] : ['checkout', '-B', branch, from])
     } else {
-      await this.#integration(() => integrator.startNode(nodeId, lane.path, resume))
+      await this.#integration(() => integrator.startNode(nodeId, lane.path, resume), nodeId)
     }
 
     this.#options.journal.append({
@@ -705,7 +715,7 @@ export class RunEffectExecutor implements EffectExecutor {
       // skills always pushed them: they are what a person resuming or landing
       // the plan by hand starts from.
       await this.#pushFrom(this.#options.integrationPath, result.branch)
-    })
+    }, nodeId)
     // Opened by this node's own `open_pr`, not here. `git_merge` runs before
     // `open_pr` in the phase pipeline, so a plan PR opened now would be written
     // before the last phase's PR exists and could not list it.
@@ -1153,8 +1163,25 @@ export class RunEffectExecutor implements EffectExecutor {
   }
 
   /** Serializes work in the single integration worktree. */
-  async #integration<T>(work: () => Promise<T>): Promise<T> {
-    const turn = this.#integrationTurn.then(work, work)
+  async #integration<T>(work: () => Promise<T>, nodeId: string | null = null): Promise<T> {
+    // Decided at the call, not when the work starts: two callers in one tick
+    // must see each other, and the holder is whoever got here first.
+    const queued = this.#integrationDepth > 0
+    const holder = queued ? this.#integrationHolder : null
+    this.#integrationDepth += 1
+    if (!queued) this.#integrationHolder = nodeId ?? '?'
+    if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'queued', holder)
+    const held = async (): Promise<T> => {
+      this.#integrationHolder = nodeId ?? '?'
+      if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'granted', holder)
+      try {
+        return await work()
+      } finally {
+        this.#integrationDepth -= 1
+        if (this.#integrationDepth === 0) this.#integrationHolder = null
+      }
+    }
+    const turn = this.#integrationTurn.then(held, held)
     // Swallowed on the chain only: the caller still sees the rejection.
     this.#integrationTurn = turn.catch(() => undefined)
     return await turn
@@ -1174,8 +1201,8 @@ export class RunEffectExecutor implements EffectExecutor {
    * Exposed rather than given a second queue of its own, because two queues
    * over one worktree serialize nothing.
    */
-  async integration<T>(work: () => Promise<T>): Promise<T> {
-    return await this.#integration(work)
+  async integration<T>(work: () => Promise<T>, nodeId: string | null = null): Promise<T> {
+    return await this.#integration(work, nodeId)
   }
 }
 

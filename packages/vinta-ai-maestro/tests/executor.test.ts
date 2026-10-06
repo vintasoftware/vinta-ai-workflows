@@ -217,6 +217,8 @@ function setup(
      * answer — `standard-phase`'s exhausted budget answers itself `stop` (§16.5).
      */
     readonly retryAfterMs?: number
+    /** `RunExecutorOptions.onIntegrationWait`, recorded. */
+    readonly onIntegrationWait?: (nodeId: string, state: 'queued' | 'granted', holder: string | null) => void
     /** The operator's classifier (§17). */
     readonly systemOne?: SystemOne
   } = {},
@@ -297,6 +299,7 @@ function setup(
     notifier,
     ...(cache === undefined ? {} : { cache }),
     ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
+    ...(options.onIntegrationWait === undefined ? {} : { onIntegrationWait: options.onIntegrationWait }),
   })
 
   const harnesses = new Set<string>([workflow.defaults.harness])
@@ -1727,3 +1730,35 @@ describe('System One in run_gate', () => {
     expect(rig.journal.events(RUN_ID).filter((event) => event.type === 'gate_result')).toHaveLength(1)
   })
 }, REAL_RUN_TIMEOUT_MS)
+
+describe('the integration worktree’s queue', () => {
+  it('says who waited behind whom, and when they were let in', async () => {
+    // Three phases queued behind one looping fixer read `running` with no
+    // agent process: a frozen run, to anyone watching. The wait is a fact the
+    // journal now carries.
+    const waits: [string, string, string | null][] = []
+    const rig = setup(() => goldenWorkflow({}), {
+      onIntegrationWait: (nodeId, state, holder) => waits.push([nodeId, state, holder]),
+    })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    const first = rig.executor.integration(() => held, 'p1')
+    const second = rig.executor.integration(async () => 'in', 'p2')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(waits).toEqual([['p2', 'queued', 'p1']])
+
+    release()
+    await first
+    expect(await second).toBe('in')
+    expect(waits).toEqual([
+      ['p2', 'queued', 'p1'],
+      ['p2', 'granted', 'p1'],
+    ])
+    // An uncontended turn is not a wait.
+    await rig.executor.integration(async () => undefined, 'p3')
+    expect(waits).toHaveLength(2)
+  })
+})

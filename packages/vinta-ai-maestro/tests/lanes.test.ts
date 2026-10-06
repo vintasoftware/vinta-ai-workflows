@@ -365,6 +365,22 @@ describe('lane pool', () => {
     expect(readFileSync(join(repo, '.env'), 'utf8')).toBe('SHARED=1\n')
   })
 
+  it('copies the env files the run declares *now*, not the ones it started with', async () => {
+    // Amended mid-run to declare `.env.docker`: a single-use lane re-provisioned
+    // after that — and a reusable one recycled — used to read the list loaded
+    // at job start, so the file disappeared again with every hand-over.
+    await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+    await writeFile(join(repo, '.env.docker'), 'DOCKER=1\n', 'utf8')
+    const pool = await provision({ ...sqliteProject(), envFiles: ['.env'] }, 1)
+    const lane = pool.lanes[0] as Lane
+    expect(existsSync(join(lane.path, '.env.docker'))).toBe(false)
+
+    pool.adoptProject({ ...sqliteProject(), envFiles: ['.env', '.env.docker'] })
+    await pool.recycle(lane.name)
+
+    expect(readFileSync(join(lane.path, '.env.docker'), 'utf8')).toBe('DOCKER=1\n')
+  })
+
   it('refuses to provision when a declared env file is not there', async () => {
     // Fail closed. The alternative is a lane that provisions cleanly and then
     // cannot boot its stack, four steps later, wearing an unrelated error.

@@ -679,8 +679,40 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reviewer members and every `role`, rename `before_gate` to `after_review`,
   delete `reviewer_model`, and add the `review` chore.
 
+### Added
+
+- **Maestro: `nodes[].deferred`** (additive). A phase carrying it — the
+  soak-gated flag removal `plan-feature` now emits it on — is not dispatched
+  when its dependencies merge; it parks on a question naming the reason, and
+  the operator answers `start` or `stop`. The scheduler used to run such a
+  phase immediately.
+- **Maestro: `node_wait` and the "waiting for the integration worktree"
+  state.** A phase queued behind the integration worktree journals who holds
+  it; `status` and the node view show it. It used to read `running` with no
+  agent process, which looked like a frozen run.
+- **Maestro: `interrupted` run status.** A signal to the job now kills every
+  live agent turn and gate, the fix round in progress and any merge standing
+  in the integration worktree, and ends the run `interrupted` (resumable)
+  instead of `failed` with orphaned agents still editing the worktree. The
+  daemon's close is bounded so an open browser socket cannot hang shutdown.
+- **Maestro: `doctor` warns about `docker compose run`/`exec` without `-T`**
+  in gates and the `project` block, and `plan-feature` says so.
+
 ### Fixed
 
+- **Maestro: a phase that moved lanes can check out its branch.** The branch
+  is released from the sibling worktree that still had it (detached at its
+  commit, tree untouched) before the new lane takes it. Git's "already used
+  by worktree" refusal failed one phase 39 attempts in a row.
+- **Maestro: a conflict-fixer round has a time limit** (20 minutes by
+  default) and is told to verify only the files it touched; one round spent
+  hours re-running a suite that could not reach its database while three
+  phases queued behind it.
+- **Maestro: recreated lanes read the amended `env_files`.** The pool takes
+  the amended `project` block, so a single-use lane re-provisioned mid-run no
+  longer loses files declared after the run started. A compose-delivered
+  database whose service is in `compose.publish` also gets
+  `<connection_url_var>_HOST`, the same URL on the published host port.
 - **Maestro: a merge commit git refuses no longer leaves the integration
   worktree mid-merge.** A pre-commit hook failing in the integration worktree
   left `MERGE_HEAD` behind, and every phase whose base was built there then

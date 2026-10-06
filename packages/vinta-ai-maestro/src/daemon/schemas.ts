@@ -53,7 +53,7 @@ const NODE_STATUSES = [
   'done',
   'failed',
 ] as const satisfies readonly NodeStatus[]
-const RUN_STATUSES = ['running', 'done', 'failed', 'paused', 'cancelled'] as const satisfies readonly RunStatus[]
+const RUN_STATUSES = ['running', 'done', 'failed', 'paused', 'cancelled', 'interrupted'] as const satisfies readonly RunStatus[]
 
 export type _NodeStatusCovered = Covers<NodeStatus, (typeof NODE_STATUSES)[number]>
 export type _RunStatusCovered = Covers<RunStatus, (typeof RUN_STATUSES)[number]>

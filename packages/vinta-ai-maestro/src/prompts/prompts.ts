@@ -279,6 +279,11 @@ export function composeConflictPrompt(context: ConflictContext): string {
         ]),
     `Phase briefs: ${context.promptRefs.join(' ')}`,
     'Resolve for both phases’ intents. Never resolve with --ours or --theirs.',
+    'Verify only the files you touched — a typecheck or the tests that cover',
+    'them. Do not run the whole suite, and do not loop on a check that cannot',
+    'run here: the integrator runs both phases’ gates on your resolution once',
+    'you stop. This round has a time limit, and other phases are queued behind',
+    'this worktree while you hold it.',
   ].join('\n')
 }
 

@@ -45,6 +45,7 @@ import {
   type ComposeIsolation,
   findComposeFile,
   planComposeIsolation,
+  hostReachableUrl,
   readComposeConfig,
 } from './compose.ts'
 import {
@@ -418,8 +419,23 @@ export class LanePool {
 
   private constructor(options: PoolOptions) {
     this.#options = options
+    this.#project = options.project
     this.#templatesDir = join(options.poolRoot, '.templates')
     this.#summaryDir = join(options.repoPath, '.vinta-ai-workflows', 'worktrees')
+  }
+
+  /**
+   * The project as the run has it now. `adoptProject` replaces it: a lane
+   * that is single-use is re-provisioned between phases from *this*, and a
+   * run that provisioned without `.env.docker` and was amended to declare it
+   * used to re-provision from the copy loaded at job start — the amendment
+   * reached no recreated lane, and the file disappeared again each time.
+   */
+  #project: ProjectSpec
+
+  /** Takes the amended `project` block (§9). What the next provision, recycle and copy read. */
+  adoptProject(project: ProjectSpec): void {
+    this.#project = project
   }
 
   static async provision(options: PoolOptions): Promise<LanePool> {
@@ -522,7 +538,7 @@ export class LanePool {
     // The shared servers first: a recycle resets databases and may re-run the
     // project's own setup against them, and a server that fell over mid-run
     // would otherwise fail every phase after it rather than this one hand-off.
-    await prepareInfrastructure(this.#options.project, this.#options.repoPath)
+    await prepareInfrastructure(this.#project, this.#options.repoPath)
     // Before either path, because both destroy the working tree: one cleans it,
     // the other deletes the directory outright.
     await this.#preserveWork(lane)
@@ -837,6 +853,14 @@ export class LanePool {
     const compose = await this.#isolateCompose(name, composeProject)
     if (compose !== null) {
       Object.assign(env, compose.isolation.env)
+      // Beside the in-network URL, never instead of it: the project's own
+      // compose commands need the service name, and a bare host-side runner
+      // needs the published port.
+      for (const db of databases) {
+        if (db.delivery !== 'compose') continue
+        const host = hostReachableUrl(db.connectionUrl, compose.isolation.published)
+        if (host !== null) env[`${db.connectionUrlVar}_HOST`] = host
+      }
       // The base file stays relative — the lane carries its own tracked copy —
       // while the override is absolute, because it lives outside the worktree
       // and a bare name would not resolve from the compose project directory.
@@ -905,7 +929,7 @@ export class LanePool {
    * to declare.
    */
   async #configureHooks(lanePath: string): Promise<void> {
-    if (this.#options.project.hooks !== false) return
+    if (this.#project.hooks !== false) return
     const empty = join(lanePath, '.git-hooks-disabled')
     await mkdir(empty, { recursive: true })
     // A worktree's `.git` is a file, and `--worktree` needs `extensions
@@ -1034,7 +1058,7 @@ export class LanePool {
    * mean re-planning ports a running executor has already been handed.
    */
   async #composeConfig(): Promise<{ config: ComposeConfig; baseFile: string } | null> {
-    if (this.#options.project.compose === undefined) return null
+    if (this.#project.compose === undefined) return null
     if (this.#compose === undefined) {
       const read =
         this.#options.readCompose ??
@@ -1060,7 +1084,7 @@ export class LanePool {
     const found = await this.#composeConfig()
     if (found === null) return null
 
-    const settings = this.#options.project.compose ?? {}
+    const settings = this.#project.compose ?? {}
     const isolation = await planComposeIsolation(found.config, {
       composeProject,
       ...(settings.publish === undefined ? {} : { publish: settings.publish }),
@@ -1087,7 +1111,7 @@ export class LanePool {
     lanePath: string,
     options: { readonly onlyMissing?: boolean } = {},
   ): Promise<void> {
-    for (const file of this.#options.project.envFiles ?? []) {
+    for (const file of this.#project.envFiles ?? []) {
       const source = join(this.#options.repoPath, file)
       if (!existsSync(source)) throw new LaneEnvFileError(name, file)
       const destination = join(lanePath, file)
@@ -1106,7 +1130,7 @@ export class LanePool {
    * re-derive those would be a second implementation of this file.
    */
   async #setup(lane: Lane): Promise<void> {
-    const { setupCmd } = this.#options.project
+    const { setupCmd } = this.#project
     if (setupCmd === undefined) return
     try {
       await sh(setupCmd, lane.path, lane.env)

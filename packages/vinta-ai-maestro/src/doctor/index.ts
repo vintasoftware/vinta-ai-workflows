@@ -995,6 +995,43 @@ export function checkGates(workflow: Workflow): CheckResult[] {
   ]
 }
 
+/** A `docker compose run` / `exec` line that will try to allocate a terminal. */
+const COMPOSE_TTY = /\bdocker(?:\s+|-)compose\b(?:\s+--?[\w-]+(?:\s+\S+)?)*\s+(run|exec)\b(?![^|&;]*(?:\s-T\b|\s--no-TTY\b|\s--no-tty\b))/i
+
+/**
+ * Commands that run `docker compose run` or `exec` without `-T`.
+ *
+ * A gate runs with no terminal, and compose then fails with "the input device
+ * is not a TTY" before the command inside the container starts — a red gate
+ * that names nothing in the project. Checked on every command line a run
+ * executes: the gates, both forms, and the project's own commands.
+ */
+export function checkComposeTty(workflow: Workflow): CheckResult[] {
+  const offenders: string[] = []
+  for (const [id, gate] of Object.entries(workflow.gates)) {
+    if (isJudgeGate(gate)) continue
+    if (COMPOSE_TTY.test(gate.cmd)) offenders.push(`gates.${id}.cmd`)
+    if (gate.scoped_cmd !== undefined && COMPOSE_TTY.test(gate.scoped_cmd)) offenders.push(`gates.${id}.scoped_cmd`)
+  }
+  const project = workflow.project
+  if (project !== undefined) {
+    if (COMPOSE_TTY.test(project.migrate_cmd)) offenders.push('project.migrate_cmd')
+    if (project.setup_cmd !== undefined && COMPOSE_TTY.test(project.setup_cmd)) offenders.push('project.setup_cmd')
+    for (const [key, command] of Object.entries(project.commands)) {
+      if (typeof command === 'string' && COMPOSE_TTY.test(command)) offenders.push(`project.commands.${key}`)
+    }
+  }
+  if (offenders.length === 0) return []
+  return [
+    flag(
+      'compose-tty',
+      `docker compose run/exec without -T, which fails with no terminal: ${offenders.join(', ')}`,
+      'warn',
+      'add -T (or --no-TTY) after `run`/`exec`: docker compose run --rm -T <service> …',
+    ),
+  ]
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const { workflow, repoPath } = options
   const gitBin = options.bins?.git ?? 'git'
@@ -1044,6 +1081,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ...servers,
     disk,
     ...checkGates(workflow),
+    ...checkComposeTty(workflow),
     ...envFiles,
     ...briefs,
     ...branches,
