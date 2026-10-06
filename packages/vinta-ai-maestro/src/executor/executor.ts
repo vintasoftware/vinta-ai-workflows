@@ -179,8 +179,8 @@ export class WaveGateError extends Error {
   ) {
     super(
       `wave ${wave} merged, but gate "${gateId}" failed on the merged tree (exit ${exitCode}) — ` +
-        'the phases each passed it narrowed to their own changes, so this is a regression ' +
-        `between them. Log: ${logPath}`,
+        'the phases each passed their own gates, so this is a regression between them. ' +
+        `Log: ${logPath}`,
     )
     this.name = 'WaveGateError'
   }
@@ -214,8 +214,13 @@ export class RunEffectExecutor implements EffectExecutor {
   #waves: ReadonlyMap<string, number>
   readonly #lanes: ReadonlyMap<string, ExecutorLane>
   readonly #notifier: Notifier
-  /** Which nodes of each wave have reached their `git_merge`. See `#lastOfWave`. */
-  readonly #arrived = new Map<number, Set<string>>()
+  /**
+   * The nodes that reached their `git_merge` in this process. See
+   * `#lastOfWave`, which also counts the ones the journal calls `done`.
+   */
+  readonly #arrived = new Set<string>()
+  /** Waves whose completing turn is queued behind the integration worktree. */
+  readonly #queuedBuilds = new Set<number>()
   /**
    * One integration worktree, one queue. Every merge and every conductor-owned
    * tracking write happens in the same checkout, and two nodes finishing at
@@ -701,38 +706,168 @@ export class RunEffectExecutor implements EffectExecutor {
     // the wave is complete, and which branches make it up. The merge itself is
     // queued behind the integration worktree and an amendment can land before
     // it runs, so deriving the membership later would let the wave that was
-    // declared complete and the wave that is merged be different sets.
-    const members = this.#waveMembers(wave)
-    if (!this.#lastOfWave(nodeId, members)) return {}
+    // declared complete and the wave that is merged be different sets. Every
+    // wave's membership is read here, because this turn may build more than
+    // its own (`#buildWaves`).
+    const plan = this.#wavePlan()
+    if (!this.#lastOfWave(nodeId, plan.get(wave) ?? [])) return {}
+    // Marked before the queue, so a turn ahead of this one leaves the wave to it.
+    this.#queuedBuilds.add(wave)
     // Read with the membership, for the same reason: the plan this node counted
     // its wave against is the plan whose last wave this is or is not.
-    const final = wave === this.#finalWave()
+    const final = this.#finalWave()
+    let built: readonly number[] = []
     await this.#integration(async () => {
-      const result = await this.#options.integrator.mergeWave(wave, members, nodeId)
-      await this.#waveGates(nodeId, wave, members)
-      // Pushed, because the plan PR is opened from the last one and a PR needs
-      // a head the forge has seen. The rest are pushed for the same reason the
-      // skills always pushed them: they are what a person resuming or landing
-      // the plan by hand starts from.
-      await this.#pushFrom(this.#options.integrationPath, result.branch)
+      this.#queuedBuilds.delete(wave)
+      built = await this.#buildWaves(nodeId, wave, plan)
     }, nodeId)
     // Opened by this node's own `open_pr`, not here. `git_merge` runs before
     // `open_pr` in the phase pipeline, so a plan PR opened now would be written
     // before the last phase's PR exists and could not list it.
-    if (final) this.#planPrDue = { wave, by: nodeId }
+    if (built.includes(final)) this.#planPrDue = { wave: final, by: nodeId }
     return {}
   }
 
   /**
-   * The full form of every gate this wave's phases ran narrowed, once, on the
-   * merged tree in the integration worktree.
+   * Builds `wave`, after any earlier wave the run never built and before any
+   * later one that completed while this one was missing. Returns the waves it
+   * built.
    *
-   * Only those gates. A gate with no `scoped_cmd` already ran in full on every
-   * phase, and running it again here would be a second full suite per wave
-   * bought to answer a question that was already answered for each phase —
-   * the cross-phase case it would add is real, and is what `gate_scope: full`
-   * plus this wave gate are not trying to be. What *was* skipped is the full
-   * suite itself, and this is where it is paid back.
+   * **Why a turn may build more than its own wave.** A wave is built by the
+   * turn that completes it, and that used to be the whole rule. Two things
+   * break it. A run that restarts mid-wave had its earlier arrivals counted in
+   * memory only, so no phase was ever last and the wave was never built; and a
+   * wave can complete before the wave under it does — a wave-6 phase depends on
+   * *some* wave-5 phase, not all of them. Either way the next wave's build ran
+   * `checkout -B wave-6 wave-5` against a branch that did not exist, and the
+   * phase failed on git's exit 128, every retry, until somebody built `wave-5`
+   * by hand. So a turn looks down first: a missing wave whose phases are all in
+   * is built now, and one whose phases are not is left to its own last phase,
+   * which then builds this one too on its way up.
+   *
+   * **"Built" is read from git, not remembered.** A wave is built when its
+   * branch has the wave under it and every member's branch tip in its history,
+   * and its last wave gate was not red. That survives a restart, holds for a
+   * run journalled before `wave_built` existed, and says "not built" for
+   * exactly the waves that need building again — one whose phase was retried
+   * and moved its tip, or one under a wave that was rebuilt.
+   *
+   * A wave whose own completing turn is still queued behind the integration
+   * worktree (`#queuedBuilds`) is left to that turn either way, so no wave is
+   * built twice by two turns that both saw it complete.
+   */
+  async #buildWaves(
+    nodeId: string,
+    wave: number,
+    plan: ReadonlyMap<number, readonly string[]>,
+  ): Promise<readonly number[]> {
+    const built: number[] = []
+    for (let earlier = 1; earlier < wave; earlier += 1) {
+      const members = plan.get(earlier) ?? []
+      if (await this.#waveBuilt(earlier, members)) continue
+      // Not complete, or complete with its own building turn still queued
+      // behind this one: either way that turn builds it and then this wave.
+      if (!this.#waveComplete(members) || this.#queuedBuilds.has(earlier)) {
+        this.#options.journal.append({
+          runId: this.#options.runId,
+          nodeId,
+          type: 'wave_deferred',
+          payload: { wave, missing: earlier },
+        })
+        return built
+      }
+      await this.#buildWave(nodeId, earlier, members)
+      built.push(earlier)
+    }
+    // Its own wave always: a retried phase expects the rebuild, and the wave
+    // gates, that its failed attempt did not get.
+    await this.#buildWave(nodeId, wave, plan.get(wave) ?? [])
+    built.push(wave)
+    for (let later = wave + 1; plan.has(later); later += 1) {
+      const members = plan.get(later) ?? []
+      // A later wave whose own completing turn is queued is that turn's to build.
+      if (!this.#waveComplete(members) || this.#queuedBuilds.has(later)) break
+      if (await this.#waveBuilt(later, members)) continue
+      await this.#buildWave(nodeId, later, members)
+      built.push(later)
+    }
+    return built
+  }
+
+  /** One wave: merge, the merged-tree gates, push, record. */
+  async #buildWave(nodeId: string, wave: number, members: readonly string[]): Promise<void> {
+    const result = await this.#options.integrator.mergeWave(wave, members, nodeId)
+    await this.#waveGates(nodeId, wave, members, result.conflicts.length > 0)
+    // Pushed, because the plan PR is opened from the last one and a PR needs
+    // a head the forge has seen. The rest are pushed for the same reason the
+    // skills always pushed them: they are what a person resuming or landing
+    // the plan by hand starts from.
+    await this.#pushFrom(this.#options.integrationPath, result.branch)
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId,
+      type: 'wave_built',
+      payload: { wave, members: [...members], conflicts: result.conflicts.length },
+    })
+  }
+
+  /**
+   * Whether `wave`'s branch already carries the wave under it and every
+   * member's branch. Wave 1's base is the run's own base, which a mid-run
+   * config commit moves; it is caught up at the next wave rather than
+   * counted against this one.
+   */
+  async #waveBuilt(wave: number, members: readonly string[]): Promise<boolean> {
+    const integrator = this.#options.integrator
+    const cwd = this.#options.integrationPath
+    const branch = integrator.waveBranch(wave)
+    if (!(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]))) return false
+    const parts = [
+      ...(wave > 1 ? [integrator.waveBranch(wave - 1)] : []),
+      ...members.map((member) => integrator.nodeBranch(member)),
+    ]
+    for (const part of parts) {
+      if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', part, branch]))) return false
+    }
+    return !this.#waveRed(wave)
+  }
+
+  /**
+   * Whether the last thing the journal says about this wave is a red wave
+   * gate. Such a branch has every member merged and is still not built: the
+   * turn that merged it failed on the merged tree, and building on top of it
+   * would carry the regression up.
+   */
+  #waveRed(wave: number): boolean {
+    let red = false
+    for (const event of this.#options.journal.events(this.#options.runId)) {
+      const payload = event.payload as { wave?: number; exit_code?: number }
+      if (payload.wave !== wave) continue
+      if (event.type === 'wave_built') red = false
+      else if (event.type === 'wave_gate_result' && payload.exit_code !== 0) red = true
+    }
+    return red
+  }
+
+  /**
+   * The gates that run in full, once each, on the wave's merged tree in the
+   * integration worktree.
+   *
+   * Two reasons for one, and the set is their union:
+   *
+   * - **The payback.** Under `gate_scope: scoped` each phase ran a gate
+   *   narrowed to its own changes, and the full suite it skipped runs here,
+   *   on every wave, whatever `wave_gates` says.
+   * - **The cross-phase check** (`defaults.wave_gates`). Every phase is green
+   *   on its own branch, and two parallel phases can still disagree — one
+   *   observed wave had a signal sender omit a keyword argument its sibling's
+   *   receiver required, and 22 tests failed on the merged tree that no gate
+   *   ever ran on. This used to be declared out of scope; it is now paid for
+   *   where it is cheapest to pay. `final` checks the last wave with every gate
+   *   in the plan, before the plan PR opens, and any wave whose merge needed a
+   *   conflict resolution — a resolution is new code nobody's gate saw.
+   *   `every` checks every wave, which costs a full suite per wave and names
+   *   the wave that introduced a disagreement. `off` is the old behaviour.
    *
    * Without the scheduler's pools, for `verify`'s reason: the node running this
    * is inside its own `integrate` step and may still hold the pool a suite
@@ -741,12 +876,15 @@ export class RunEffectExecutor implements EffectExecutor {
    * Red fails the merge, and with it the node that built the wave — the wave
    * branch is left as it is for whoever picks it up.
    */
-  async #waveGates(nodeId: string, wave: number, members: readonly string[]): Promise<void> {
-    if (this.#workflow.defaults.gate_scope !== 'scoped') return
-    const ids = [...new Set(members.flatMap((member) => this.#node(member)?.gates ?? []))]
-    for (const gateId of ids) {
+  async #waveGates(
+    nodeId: string,
+    wave: number,
+    members: readonly string[],
+    conflicted: boolean,
+  ): Promise<void> {
+    for (const gateId of this.#waveGateIds(wave, members, conflicted)) {
       const gate = this.#workflow.gates[gateId]
-      if (gate === undefined || isJudgeGate(gate) || gate.scoped_cmd === undefined) continue
+      if (gate === undefined || isJudgeGate(gate)) continue
       const logPath = this.#options.journal.gateLogPath(
         this.#options.runId,
         WAVE_GATE_NODE,
@@ -776,6 +914,27 @@ export class RunEffectExecutor implements EffectExecutor {
     }
   }
 
+  /** Which gates `#waveGates` runs on this wave, in first-declared order. */
+  #waveGateIds(wave: number, members: readonly string[], conflicted: boolean): readonly string[] {
+    const { gate_scope: scope, wave_gates: mode } = this.#workflow.defaults
+    const gatesOf = (ids: readonly string[]): string[] => ids.flatMap((id) => this.#node(id)?.gates ?? [])
+    const own = gatesOf(members)
+    const ids: string[] = []
+    if (scope === 'scoped') {
+      ids.push(
+        ...own.filter((id) => {
+          const gate = this.#workflow.gates[id]
+          return gate !== undefined && !isJudgeGate(gate) && gate.scoped_cmd !== undefined
+        }),
+      )
+    }
+    if (mode === 'every' || (mode === 'final' && conflicted)) ids.push(...own)
+    if (mode !== 'off' && wave === this.#finalWave()) {
+      ids.push(...gatesOf(this.#workflow.nodes.map((node) => node.id)))
+    }
+    return [...new Set(ids)]
+  }
+
   /** The highest wave in the plan as it stands — the branch carrying every phase. */
   #finalWave(): number {
     let last = 0
@@ -783,24 +942,35 @@ export class RunEffectExecutor implements EffectExecutor {
     return last
   }
 
-  /** The wave's phases, in plan order — the tie-break every merge order uses. */
-  #waveMembers(wave: number): string[] {
-    return this.#workflow.nodes
-      .filter((node) => this.#waves.get(node.id) === wave)
-      .map((node) => node.id)
+  /** Every wave's phases, in plan order — the tie-break every merge order uses. */
+  #wavePlan(): Map<number, string[]> {
+    const plan = new Map<number, string[]>()
+    for (const node of this.#workflow.nodes) {
+      const wave = this.#waves.get(node.id)
+      if (wave === undefined) continue
+      plan.set(wave, [...(plan.get(wave) ?? []), node.id])
+    }
+    return plan
   }
 
   /**
    * Records that this node reached its merge, and answers whether it is the
    * last of its wave to do so.
    *
-   * Counted here rather than read out of the node statuses, because a node
-   * asking this question is inside its own `integrate` step and is therefore
-   * still `running` — and so is every sibling that got here first, since none
-   * of them is `done` until its own pipeline reaches a final state. Two nodes
-   * of one wave finishing together would each see the other unfinished and
-   * neither would build the wave branch. The count is taken synchronously,
-   * before any await, so the two cannot interleave.
+   * A member has arrived when it reached its merge **in this process**, or
+   * when the journal calls it `done`. Neither alone is enough:
+   *
+   * - The statuses alone miss the siblings inside their own `integrate` step,
+   *   which are still `running` — two nodes of one wave finishing together
+   *   would each see the other unfinished and neither would build the wave.
+   *   The in-memory count is taken synchronously, before any await, so the
+   *   two cannot interleave.
+   * - The in-memory count alone forgets every arrival before a restart. A
+   *   `done` phase is not run again on a resume, so it never arrives again:
+   *   one run that restarted three times never built waves 2 to 5, because in
+   *   each some phases had merged before a restart and the rest after. A
+   *   phase that was mid-merge when the process died is `pending` on the
+   *   resume (`Scheduler.#seed`) and arrives again on its own.
    *
    * `members` is handed in rather than derived, so that the set this counts
    * against is exactly the set the merge will merge. A node an amendment adds
@@ -809,14 +979,23 @@ export class RunEffectExecutor implements EffectExecutor {
    * merged from a branch that was never cut.
    */
   #lastOfWave(nodeId: string, members: readonly string[]): boolean {
-    const wave = this.#waves.get(nodeId) as number
-    const arrived = this.#arrived.get(wave) ?? new Set<string>()
-    arrived.add(nodeId)
-    this.#arrived.set(wave, arrived)
+    this.#arrived.add(nodeId)
     // Counted against the same list the merge will use, rather than against a
     // size read separately: an amendment between the two readings would make
     // the wave "complete" at a count that no longer matches what is merged.
-    return members.every((member) => arrived.has(member))
+    return this.#waveComplete(members)
+  }
+
+  /** Every member arrived: merged in this process, or `done` in the journal. */
+  #waveComplete(members: readonly string[]): boolean {
+    if (members.length === 0) return false
+    const done = new Set(
+      this.#options.journal
+        .nodes(this.#options.runId)
+        .filter((row) => row.status === 'done')
+        .map((row) => row.node_id),
+    )
+    return members.every((member) => this.#arrived.has(member) || done.has(member))
   }
 
   /**

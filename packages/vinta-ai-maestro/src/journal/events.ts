@@ -645,11 +645,32 @@ interface NodePayloads {
     readonly harness: string
   }
   /**
-   * The full form of a gate, run once on a wave's merged tree because the
-   * wave's phases ran it narrowed (`defaults.gate_scope: scoped`). Filed
+   * The full form of a gate, run once on a wave's merged tree: because the
+   * wave's phases ran it narrowed (`defaults.gate_scope: scoped`), or because
+   * `defaults.wave_gates` asks for the merged tree to be checked. Filed
    * against the node whose merge built the wave; its log is the integration
    * worktree's, under `wave-<N>-<gate>`.
    */
+  /**
+   * A wave branch built: `members` merged, in plan order, onto the wave before
+   * it. Filed against the node whose turn built it, which is not always one of
+   * its members — a wave that could not be built when it completed (an earlier
+   * wave was still missing) is built by whichever turn builds that earlier one.
+   */
+  wave_built: {
+    readonly wave: number
+    readonly members: readonly string[]
+    readonly conflicts: number
+  }
+  /**
+   * A phase reached its wave merge and the wave could not be built yet, because
+   * an earlier wave is not built and still has phases running. Whoever
+   * completes that earlier wave builds this one after it.
+   */
+  wave_deferred: {
+    readonly wave: number
+    readonly missing: number
+  }
   wave_gate_result: {
     readonly wave: number
     readonly gate: string

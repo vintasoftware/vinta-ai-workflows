@@ -651,6 +651,8 @@ export class Journal {
       case 'gate_started':
       case 'gate_result':
       case 'wave_gate_result':
+      case 'wave_built':
+      case 'wave_deferred':
       case 'bare_gate_blocked':
       case 'bare_gate_detected':
       case 'chore_result':
