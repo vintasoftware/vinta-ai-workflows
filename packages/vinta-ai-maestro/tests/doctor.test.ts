@@ -19,10 +19,16 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { stringify } from 'yaml'
 import { afterAll, describe, expect, it } from 'vitest'
-import { formatDoctorReport, runDoctor, type CheckResult, type DoctorOptions } from '../src/doctor/index.ts'
+import {
+  exampleTarget,
+  formatDoctorReport,
+  runDoctor,
+  type CheckResult,
+  type DoctorOptions,
+} from '../src/doctor/index.ts'
 import { writeSummary, type WorktreeSummaryInput } from '../src/lanes/summary.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 import { fakeCli, fakeCliFromSource } from './support/fake-cli.ts'
@@ -138,13 +144,16 @@ const workflow = (harnessOverride?: Workflow['defaults']['harness']): Workflow =
     schema_version: 1,
     id: 'doctor-fixture',
     base_branch: 'main',
-    defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+    // Every phase gated, because an all-green environment is one where the
+    // gate check passes too; the ungated case has its own test below.
+    defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase', gates: ['unit'] },
     resources: { lane: { capacity: 2, kind: 'worktree' } },
+    gates: { unit: { cmd: 'true' } },
     nodes: [
-      { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' },
+      { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['unit'] },
       ...(harnessOverride === undefined
         ? []
-        : [{ id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', harness: harnessOverride }]),
+        : [{ id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', harness: harnessOverride, gates: ['unit'] }]),
     ],
   })
 
@@ -620,6 +629,112 @@ describe('vinta-ai-maestro doctor', () => {
     })
   })
 
+  describe('gates', () => {
+    it('warns when a phase runs no gate at all, naming it', async () => {
+      // Twelve phases finished without a check in one observed run: every
+      // node carried `gates: []` where its author meant "the project's".
+      const base = greenOptions()
+      const ungated = WorkflowSchema.parse({
+        ...base.workflow,
+        defaults: { ...base.workflow.defaults, gates: undefined },
+        nodes: [
+          { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['unit'] },
+          { id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', gates: [] },
+          { id: 'p3', name: 'Three', prompt_ref: 'plan.md#phase-3' },
+        ],
+      })
+      const report = await runDoctor({ ...base, workflow: ungated })
+
+      const check = find(report.checks, 'gates')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('2 of 3 phases')
+      expect(check.label).toContain('p2, p3')
+      expect(check.remedy).toContain('allow_ungated_phases')
+      // A warning, so the run can still start — the plan's author was told.
+      expect(report.exitCode).toBe(0)
+    })
+
+    it('passes an ungated phase the plan declared as such', async () => {
+      const base = greenOptions()
+      const declared = WorkflowSchema.parse({
+        ...base.workflow,
+        defaults: { ...base.workflow.defaults, gates: undefined, allow_ungated_phases: true },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+      })
+      const report = await runDoctor({ ...base, workflow: declared })
+
+      expect(find(report.checks, 'gates').status).toBe('pass')
+      expect(find(report.checks, 'gates').label).toContain('allow_ungated_phases')
+    })
+  })
+
+  describe('env files', () => {
+    /** A real repository, because the check asks git what is tracked and what is ignored. */
+    const realRepo = async (
+      tracked: Readonly<Record<string, string>>,
+      ignore: string,
+    ): Promise<string> => {
+      const root = makeTemp()
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root })
+      for (const [path, body] of Object.entries(tracked)) {
+        await mkdir(join(root, dirname(path)), { recursive: true })
+        await writeFile(join(root, path), body, 'utf8')
+      }
+      await writeFile(join(root, '.gitignore'), ignore, 'utf8')
+      execFileSync('git', ['add', '-A'], { cwd: root })
+      execFileSync('git', ['-c', 'user.email=f@x.invalid', '-c', 'user.name=f', 'commit', '-q', '-m', 'fixture'], { cwd: root })
+      return root
+    }
+
+    it('warns, by name, when gitignored files have tracked examples and env_files is empty', async () => {
+      // The observed run: `.env`, `.env.docker` and the local settings module
+      // all ignored, all with examples, none declared — and `doctor` passed.
+      const root = await realRepo(
+        {
+          '.env.example': 'A=1\n',
+          '.env.docker.example': 'B=1\n',
+          'app/settings/local.py.example': 'DEBUG = True\n',
+          'README.md': 'x\n',
+        },
+        '.env\n.env.docker\napp/settings/local.py\n',
+      )
+      const base = greenOptions()
+      const report = await runDoctor({ ...base, repoPath: root, bins: { ...base.bins, git: 'git' } })
+
+      const check = find(report.checks, 'env-files')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('.env, .env.docker, app/settings/local.py')
+      expect(check.remedy).toContain('maestro.project.env_files')
+    })
+
+    it('fails a declared env file that is not in the checkout, and passes one that is', async () => {
+      const root = await realRepo({ '.env.example': 'A=1\n' }, '.env\n.env.docker\n')
+      await writeFile(join(root, '.env'), 'A=1\n', 'utf8')
+      const base = greenOptions()
+      const report = await runDoctor({
+        ...base,
+        repoPath: root,
+        bins: { ...base.bins, git: 'git' },
+        project: { databases: {}, migrateCmd: 'true', envFiles: ['.env', '.env.docker'] },
+      })
+
+      expect(find(report.checks, 'env-file:.env').status).toBe('pass')
+      const missing = find(report.checks, 'env-file:.env.docker')
+      expect(missing.status).toBe('fail')
+      expect(missing.remedy).toContain('.env.docker')
+      expect(report.exitCode).toBe(1)
+      // Declared and present: nothing undeclared is left to warn about.
+      expect(report.checks.find((check) => check.id === 'env-files')).toBeUndefined()
+    })
+
+    it('says so when nothing is gitignored with a tracked example', async () => {
+      const root = await realRepo({ 'README.md': 'x\n' }, 'node_modules\n')
+      const base = greenOptions()
+      const report = await runDoctor({ ...base, repoPath: root, bins: { ...base.bins, git: 'git' } })
+      expect(find(report.checks, 'env-files').status).toBe('pass')
+    })
+  })
+
   it('fails when the disk cannot hold lanes + 1 worktrees', async () => {
     const base = greenOptions()
     // Two lanes plus the integration worktree at 1 PiB each: no volume fits it.
@@ -708,5 +823,19 @@ describe('vinta-ai-maestro doctor', () => {
     const rendered = formatDoctorReport(report)
     expect(rendered).not.toContain('fatal:')
     expect(rendered).not.toContain('not a working tree')
+  })
+})
+
+describe('example files', () => {
+  it('names the file an example stands for', () => {
+    expect(exampleTarget('.env.example')).toBe('.env')
+    expect(exampleTarget('.env.docker.example')).toBe('.env.docker')
+    expect(exampleTarget('config/settings.sample')).toBe('config/settings')
+    expect(exampleTarget('app/settings/local.example.py')).toBe('app/settings/local.py')
+    expect(exampleTarget('app/settings/local.py.example')).toBe('app/settings/local.py')
+    expect(exampleTarget('phpunit.xml.dist')).toBe('phpunit.xml')
+    expect(exampleTarget('README.md')).toBeNull()
+    // `.example` as a directory name is not an example file.
+    expect(exampleTarget('docs.example/index.md')).toBeNull()
   })
 })

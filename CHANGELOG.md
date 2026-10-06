@@ -681,6 +681,80 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Maestro: a merge commit git refuses no longer leaves the integration
+  worktree mid-merge.** A pre-commit hook failing in the integration worktree
+  left `MERGE_HEAD` behind, and every phase whose base was built there then
+  failed in its own setup on `git checkout exited 1` — four phases, up to
+  twenty-three attempts each, in one run. The integrator now keeps the
+  resolution as a commit under `refs/vinta-ai-maestro/resolutions/<node>`,
+  abandons the merge, and asks the phase whose merge it is: `commit`,
+  `commit --no-verify`, or `abort merge` (the unattended answer under
+  `--retry-after`). A retry reuses the kept resolution. Before any checkout,
+  the integrator refuses a worktree that is mid-merge, mid-rebase or
+  mid-cherry-pick *by name* (`integration worktree is mid-merge: a merge of
+  plan/x/phase-b into plan/x/integ-c …`). A conflict fixer that could not run
+  abandons the merge it was handed.
+- **Maestro: `GitCommandError` carries git's stderr.** The redacted, bounded
+  tail of what git said is in the error, in `node.attempt_failed`, in the
+  journal's `node_error` and so in the UI — `git commit exited 1: …No module
+  named 'settings.local'` instead of `git commit exited 1`. The integrator's
+  own errors (`UnresolvedConflictError` among them) keep their messages too
+  instead of being reported as their class name.
+- **Maestro: a setup failure that repeats is not retried unattended.** A phase
+  that fails before any agent ran, twice in a row on the same line, is parked
+  on its question without `--retry-after`'s self-answer, and the question
+  says why.
+- **Maestro: `project.env_files` reaches adopted lanes.** A resume gives each
+  lane the declared files it lacks and never overwrites one it has, so
+  amending the list reaches lanes that already exist. `doctor` fails a
+  declared file missing from the checkout and warns, by name, when a
+  gitignored file has a tracked example (`.env.example`,
+  `settings/local.py.example`) and nothing declares it.
+- **Maestro: a phase with no gates is no longer a silent pass.** `validate`
+  refuses a node that resolves to an empty `gates` list and `doctor` warns
+  naming the phases, unless the plan sets `defaults.allow_ungated_phases:
+  true` (new, additive). Twelve phases had finished without a check because
+  every node carried `gates: []` where its author meant "the project's".
+- **Maestro: a refused conflict-fixer spawn is backpressure.** A plan limit or
+  quota refusal while spawning the fixer parks the phase on the harness's
+  wait (`waiting_on_capacity`) instead of failing it and retrying on a timer.
+- **Maestro: `createdb` / `dropdb` reach the server `server_url` names.** The
+  template and lane commands pass `-h`, `-p` and `-U` from the URL; they used
+  the local socket, which is not a Docker-published server. The password stays
+  off the command line (`PGPASSWORD` or `~/.pgpass`).
+- **Maestro: `vinta-ai-maestro` resolves from inside every lane.** The daemon
+  writes a launcher for itself into `.vinta-ai-maestro/bin/` and puts it first
+  on the agents' `PATH`, so `with` and `gate` work when maestro is a project
+  devDependency reached through `node_modules/.bin` or `npx`.
+- **Maestro: agents are told a compose-delivered database is unreachable from
+  the host.** The implementer prompt names the connection variables that
+  resolve only inside the lane's compose network and says to run the suite
+  through the project's commands or the gate verb.
+- **Maestro: an editor save writes a patch even when the stored file does not
+  validate.** A cross-reference error in the committed file (a chore the
+  project no longer declares) made the save write the whole resolved document
+  — a hundred-line diff for a one-field edit. The shape is now enough to diff
+  against.
+- **Maestro: `purge <run-id>` forgets the run in `flow.db` too.** The UI went
+  on listing, and offering to resume, a run whose directory was gone.
+- **Maestro: the monitor thinks with the model the run declares now.** It was
+  built once at job start; an amendment to the crew's models reached it only
+  after a pause and resume.
+- **Maestro: `run` says where the run's state lives.** The store is the
+  checkout's, so a `ui` started in another checkout of the same repository
+  (the main one, while the run is in a worktree) lists other runs; the output
+  now names the store and the `--repo` to pass.
+- **plan-feature: `project.env_files` and the gate/chore inheritance rules.**
+  The skill told authors env-file copying did not belong in the `project`
+  block, which left every lane without `.env`; it now tells them to find the
+  gitignored files the project's hooks, gates and settings need (`*.example`
+  siblings, compose `env_file:` lines, the settings module) and to declare
+  them — once, in `.vinta-ai-workflows.yaml` under `maestro.project.env_files`,
+  or in the workflow. It also states plainly that `gates: []` and
+  `defaults.chores: []` mean *none* rather than "the project's", that an
+  override of a project gate must carry `type`, and that `vinta-ai-maestro
+  validate` must exit 0 before the plan is handed over. `vinta-bootstrap-ai-tools`
+  asks about `env_files` when it writes the `maestro:` section.
 - **Maestro: wave merges again use the membership the executor counted.**
   `RecordingIntegrator.mergeWave` dropped it, so in production a merge fell
   back to the integrator's own reading of the wave. That reading could differ

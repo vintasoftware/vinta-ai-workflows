@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ownDocument } from '../src/config/own.ts'
 import { loadProjectConfig, parseProjectConfig, type ProjectConfig } from '../src/config/project-config.ts'
 import { resolveDocument, resolveWorkflow } from '../src/config/resolve.ts'
-import { isJudgeGate, type Gate, type Workflow } from '../src/types.ts'
+import { isJudgeGate, type Gate, type Workflow, WorkflowSchema } from '../src/types.ts'
 
 const commandOf = (gate: Gate | undefined): string | undefined =>
   gate === undefined || isJudgeGate(gate) ? undefined : gate.cmd
@@ -244,6 +244,24 @@ describe('what an editor save writes', () => {
     expect(own.resources).toEqual({ lane: { capacity: 2, kind: 'worktree' } })
     // And the result resolves to what the editor showed.
     expect(resolved(own, config)).toEqual(resolved(edited, null))
+  })
+
+  it('still writes only the edit when the stored file has a cross-reference error', () => {
+    // A `defaults.chores` entry the project no longer declares: the file does
+    // not *validate*, but it has a shape, and that shape is what the editor
+    // showed. Writing the posted document whole here — every default made
+    // explicit, every project value copied in — was a hundred-line diff for a
+    // one-field edit over a committed file.
+    const stored = plan({ defaults: { model: 'sonnet', chores: ['vanished'] } })
+    const shown = WorkflowSchema.parse(resolveDocument(stored, config))
+    const edited = structuredClone(shown)
+    edited.nodes[0] = { ...edited.nodes[0]!, name: 'Renamed' }
+
+    const own = ownDocument(edited, stored, config) as Record<string, any>
+    expect(own.nodes[0]).toEqual({ id: 'p1', name: 'Renamed', prompt_ref: 'plan.md#phase-1' })
+    expect(own.defaults).toEqual({ model: 'sonnet', chores: ['vanished'] })
+    // The project's pool stayed the project's; only the plan's own lane is here.
+    expect(own.resources).toEqual({ lane: { capacity: 2, kind: 'worktree' } })
   })
 
   it('copies a whole pool into the plan when one of its fields is edited', () => {

@@ -85,6 +85,7 @@ import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter
 import type {
   ChoreStatus,
   GatePoolPhase,
+  HumanAnswer,
   HumanQuestion,
   NodeStatus,
   OperatorDelivery,
@@ -97,7 +98,16 @@ import {
   type Attribution,
   OPERATOR_ROLE,
 } from '../journal/transcript.ts'
+import { ConflictFixerRefused } from '../integration/fixer.ts'
 import { GitCommandError } from '../integration/git.ts'
+import {
+  COMMIT_DECISIONS,
+  type CommitDecision,
+  type CommitFailure,
+  IntegrationCommitError,
+  IntegrationWorktreeBusyError,
+  UnresolvedConflictError,
+} from '../integration/integrator.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
@@ -152,6 +162,28 @@ interface Turn {
 /** The answers `#offerRetry` understands. `retry with ` carries a member id. */
 const RETRY = 'retry'
 const STOP = 'stop'
+/**
+ * Identical setup failures in a row before the unattended retry is withheld:
+ * the first is an attempt, the second is the proof it is deterministic.
+ */
+const REPEATED_SETUP_FAILURES = 2
+
+/** The three answers to a merge commit git refused, as the operator sees them. */
+const COMMIT_NOW = 'commit'
+const COMMIT_NO_VERIFY = 'commit --no-verify'
+const ABORT_MERGE = 'abort merge'
+const COMMIT_CHOICES = [COMMIT_NOW, COMMIT_NO_VERIFY, ABORT_MERGE] as const
+
+/** The operator's words into the integrator's; anything unrecognised aborts. */
+function commitDecisionOf(answer: HumanAnswer | undefined): CommitDecision {
+  if (answer === COMMIT_NOW) return 'commit'
+  if (answer === COMMIT_NO_VERIFY) return 'no-verify'
+  if (typeof answer === 'string' && (COMMIT_DECISIONS as readonly string[]).includes(answer)) {
+    return answer as CommitDecision
+  }
+  return 'abort'
+}
+
 /** The login question's affirmative: the operator has logged the harness in. */
 const LOGGED_IN = 'logged in'
 const RETRY_WITH = 'retry with '
@@ -593,6 +625,23 @@ interface NodeState {
   quickFailures: number
   /** `clock.now()` when this attempt got its lane: what `quickFailures` measures from. */
   attemptStartedAt: number
+  /**
+   * Whether this attempt has asked a harness for an agent — a spawn or a
+   * chore turn reached the effect door. False until then, so a failure with
+   * it still false happened in *setup*: the lane recycle, the branch cut, the
+   * base merge. Reset per attempt.
+   */
+  agentRan: boolean
+  /**
+   * The setup failure the attempts before this one ended in, when they all
+   * ended in the same one: the reason, and how many attempts in a row. A
+   * setup failure that repeats verbatim is deterministic — a worktree that is
+   * mid-merge, a hook that cannot import a module — and retrying it unattended
+   * buys the same line again. Cleared by an attempt that got past setup.
+   */
+  setupFailure: { readonly reason: string; readonly count: number } | null
+  /** Questions the host asked through `askNode`. Keeps their effect ids apart. */
+  hostAsks: number
   laneLease: Lease | null
   /**
    * The roster member holding this node, or null when the workflow is
@@ -665,10 +714,22 @@ function failureReason(error: unknown): string {
   ) {
     return String(error.message)
   }
-  // A subcommand and an exit status, which is the same kind of thing every
-  // other branch here returns — and the difference between "Error" and
-  // "git commit exited 1" for the failures this package actually hits.
+  // A subcommand, an exit status and the redacted tail of git's stderr —
+  // the difference between "Error", "git commit exited 1", and a line that
+  // says which hook refused the commit and why.
   if (error instanceof GitCommandError) return error.message
+  // The integrator's own: branch names, node ids, paths, a kept ref, and the
+  // git line above. Each one was reported as its bare class name before —
+  // `UnresolvedConflictError`, with the pair of nodes and the contested paths
+  // it had carefully composed dropped on the floor.
+  if (
+    error instanceof IntegrationCommitError ||
+    error instanceof IntegrationWorktreeBusyError ||
+    error instanceof UnresolvedConflictError ||
+    error instanceof ConflictFixerRefused
+  ) {
+    return error.message
+  }
   const named = error as { name?: unknown; code?: unknown }
   const name = typeof named.name === 'string' ? named.name : 'Error'
   return typeof named.code === 'string' ? `${name}: ${named.code}` : name
@@ -843,6 +904,9 @@ export class Scheduler {
       unattended: 0,
       quickFailures: 0,
       attemptStartedAt: 0,
+      agentRan: false,
+      setupFailure: null,
+      hostAsks: 0,
       laneLease: null,
       gateLease: null,
       gateHeld: [],
@@ -1454,7 +1518,22 @@ export class Scheduler {
         if (error instanceof Aborted) return
         if (error instanceof Halted) return this.#unwindHalted(state)
 
-        if (error instanceof CapacityRetry) {
+        // A conflict fixer the harness would not start, for a reason that
+        // ends by itself (§6.1). The fixer spawns outside admission control —
+        // it has no slot to wait in — so its refusal arrives here as an error,
+        // and it is handed to admission after the fact exactly as a window
+        // closing mid-turn is: the harness parks, this node joins the wait,
+        // and nothing is retried against a plan limit on a timer. Observed as
+        // a phase failing on `plan-limit-reached` and `--retry-after` trying
+        // it again every window, for as long as the limit lasted.
+        const refusal = error instanceof ConflictFixerRefused ? error.refusal : null
+        const retry =
+          refusal === null
+            ? error
+            : this.#capacityRetryFor(error as ConflictFixerRefused, state, refusal)
+
+        if (retry instanceof CapacityRetry) {
+          const error = retry
           // §15's ledger does not survive a *re-attempt*. A capacity refusal
           // re-drives this pipeline from its initial state, so the branch the
           // last attempt built is gone and `#prepareLane` will recycle the
@@ -1697,6 +1776,7 @@ export class Scheduler {
    */
   #restartAttempt(state: NodeState): void {
     state.fixRounds = 0
+    state.agentRan = false
     // For the same reason the budget goes: the next attempt re-drives the
     // pipeline from its initial state, so the gate that was red and the verdict
     // that was `fail` belong to a run that no longer exists. Carried over, they
@@ -1906,13 +1986,26 @@ export class Scheduler {
       // branch is a ref, and a retry resumes it); uncommitted work does not.
       // A number is not repository content, and it is the difference between
       // an informed "retry" and a surprised one.
-      question: `This phase failed. Try it again?${await this.#uncommittedNote(state)}`,
+      question:
+        `This phase failed. Try it again?${await this.#uncommittedNote(state)}` +
+        this.#repeatedSetupNote(state),
       kind: 'choice',
       choices: this.#retryChoices(state),
     })
     state.parkedEffectId = effectId
 
-    const cancel = this.#armUnattendedRetry(state)
+    // A setup failure that has now repeated verbatim is not going to pass on
+    // the third timer either. The question still waits for a person; only the
+    // self-answer is withheld. One observed run retried four such phases
+    // between four and twenty-three times each, every one on the same line.
+    const repeated = this.#repeatedSetupFailure(state)
+    if (repeated) {
+      this.#log.warn('node.unattended_retry_withheld', {
+        node: state.node.id,
+        setup_repeats: state.setupFailure?.count ?? 0,
+      })
+    }
+    const cancel = repeated ? () => {} : this.#armUnattendedRetry(state)
     const facts = await this.#park(state)
     cancel()
     if (state.aborted) return false
@@ -1925,6 +2018,21 @@ export class Scheduler {
     if (member !== null && this.#workflow.crew[member] !== undefined) state.retryMember = member
     this.#restartAttempt(state)
     return true
+  }
+
+  /** Whether the last attempts all died in setup on one and the same line. */
+  #repeatedSetupFailure(state: NodeState): boolean {
+    return (state.setupFailure?.count ?? 0) >= REPEATED_SETUP_FAILURES
+  }
+
+  /** The sentence that says why this question will not answer itself. */
+  #repeatedSetupNote(state: NodeState): string {
+    if (!this.#repeatedSetupFailure(state)) return ''
+    const count = state.setupFailure?.count ?? 0
+    return (
+      ` It has failed during setup, before any agent ran, ${count} times in a row with the same ` +
+      'error, so it will not be retried unattended: fix the cause, then retry.'
+    )
   }
 
   /**
@@ -2150,6 +2258,8 @@ export class Scheduler {
         // gate, a chore, a question. Shut under a halt.
         if (this.#halt !== null) throw new Halted()
         const verb = invocation.effect.definitionId
+        // Past setup: from here a failure is the phase's, not the machinery's.
+        if (verb === 'spawn_agent' || verb === 'run_chore') state.agentRan = true
         if (verb === 'spawn_agent') return this.#observe(state, await this.#spawnTurn(state, invocation))
         if (verb === 'run_chore') return this.#observe(state, await this.#chores(state, invocation))
         if (verb === 'run_gate') await this.#acquireGate(state, invocation)
@@ -2953,6 +3063,111 @@ export class Scheduler {
   }
 
   /** Failure containment: exactly the transitive dependents, and nothing else. */
+  /**
+   * The wait a refused fixer spawn joins, through the same `refusedMidTurn`
+   * a window closing under a turn goes through. Returns the error unchanged
+   * when admission answers anything but a retry, which it does not today —
+   * every capacity kind parks — but which this must not assume.
+   */
+  #capacityRetryFor(
+    refused: ConflictFixerRefused,
+    state: NodeState,
+    refusal: NonNullable<ConflictFixerRefused['refusal']>,
+  ): unknown {
+    this.#log.warn('node.fixer_refused', {
+      node: state.node.id,
+      harness: refused.harness,
+      model: refused.model,
+      kind: refused.kind,
+    })
+    const parked = this.#options.admission.refusedMidTurn(refused.harness, state.node.id, refusal, {
+      model: refused.model,
+      fallbacks: this.#workflow.defaults.model_fallbacks,
+    })
+    return parked.status === 'retry' ? new CapacityRetry(parked.wait) : refused
+  }
+
+  /**
+   * Parks a running node on a question the *host* has to ask — today, what
+   * to do about a merge commit git refused (`CommitFailure`) — and returns
+   * the answer. The node must be in flight: the integrator asks from inside
+   * the node's own `git_branch` or `git_merge` effect, which is the only time
+   * the question has somebody to be about.
+   *
+   * The same park every other question uses, so the node reads
+   * `awaiting_human`, the UI offers the choices, `answer` resumes it, a halt
+   * withdraws it (the throw reaches the integrator, which cleans up after
+   * itself), and `--retry-after` answers `unattendedAnswer` for an operator
+   * who is not there — which for a refused commit is `abort`, the one answer
+   * that leaves the shared worktree usable by everyone else.
+   */
+  async askNode(
+    nodeId: string,
+    question: HumanQuestion,
+    unattendedAnswer: string | null = null,
+  ): Promise<HumanAnswer | undefined> {
+    const state = this.#stateOf(nodeId)
+    if (state.status !== 'running' || state.resume !== null) {
+      throw new Error(`node "${nodeId}" is ${state.status}; only a running node can be asked`)
+    }
+    state.hostAsks += 1
+    const effectId = `host:${nodeId}:${state.hostAsks}`
+    this.#ask(state, effectId, question)
+    state.parkedEffectId = effectId
+    state.unattendedAnswer = unattendedAnswer
+    const cancel = this.#armUnattendedAnswer(state)
+    try {
+      const facts = await this.#park(state)
+      return facts.human?.['answer']
+    } finally {
+      cancel()
+    }
+  }
+
+  /**
+   * What to do about a merge commit git refused, asked of the operator on the
+   * node whose merge it is (`CommitFailure.forNode`). The integrator's
+   * `onCommitFailure` seam, bound by the host.
+   *
+   * The reason is journalled as a `node_error` first, for the same reason
+   * `#recordAttemptFailure` journals before `#recover` asks: the question
+   * carries no git output (§11), so without the record the operator is
+   * shown three buttons and nothing about why.
+   */
+  async decideCommit(failure: CommitFailure): Promise<CommitDecision> {
+    const state = this.#stateOf(failure.forNode)
+    this.#log.error('node.commit_refused', {
+      node: state.node.id,
+      incoming: failure.nodeId,
+      branch: failure.branch,
+      attempt: failure.attempt,
+      ...errorFields(failure.error),
+    })
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'node_error',
+      payload: {
+        reason: `merge of ${failure.incoming} into ${failure.branch}: ${failure.error.message}`,
+        attempt: state.retries + state.autoRetries + 1,
+      },
+    })
+    const answer = await this.askNode(
+      failure.forNode,
+      {
+        question:
+          `git refused to commit the resolved merge of ${failure.incoming} into ${failure.branch} ` +
+          `(git commit exited ${failure.error.exitCode ?? 'abnormally'}` +
+          `${failure.attempt > 1 ? `, ${failure.attempt} times` : ''}). ` +
+          'The resolution passed the gates. Commit it now, commit it past the hooks, or abort the merge?',
+        kind: 'choice',
+        choices: [...COMMIT_CHOICES],
+      },
+      ABORT_MERGE,
+    )
+    return commitDecisionOf(answer)
+  }
+
   #fail(state: NodeState, reason: string): void {
     state.failure = reason
     this.#setStatus(state, 'failed', reason)
@@ -3002,10 +3217,22 @@ export class Scheduler {
    * even that.
    */
   #recordAttemptFailure(state: NodeState, reason: string, error?: unknown): void {
+    // A failure before any agent ran is the machinery's, and one that repeats
+    // verbatim is deterministic: counted, so `#offerRetry` can stop retrying
+    // it unattended. A failure after an agent ran clears the count — the
+    // setup got through, whatever happened next.
+    const setup = !state.agentRan
+    state.setupFailure = !setup
+      ? null
+      : state.setupFailure?.reason === reason
+        ? { reason, count: state.setupFailure.count + 1 }
+        : { reason, count: 1 }
     this.#log.error('node.attempt_failed', {
       node: state.node.id,
       attempt: state.retries + state.autoRetries + 1,
       reason,
+      setup,
+      ...(setup && state.setupFailure !== null ? { setup_repeats: state.setupFailure.count } : {}),
       ...(error === undefined ? {} : errorFields(error)),
     })
     this.#options.journal.append({

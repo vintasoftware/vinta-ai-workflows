@@ -1878,6 +1878,29 @@ describe('vinta-ai-maestro purge', () => {
     expect(existsSync(runDir(dir, 'run-b'))).toBe(true)
   })
 
+  it('forgets the purged run in the journal too, so the UI stops listing it', async () => {
+    const dir = storeWithRuns('run-a', 'run-b')
+    const fixture = parseWorkflow(workflowJson([node('a')]))
+    if (!fixture.ok) throw new Error('fixture workflow is invalid')
+    const seeded = openJournal(dir)
+    seeded.createRun('run-a', fixture.workflow)
+    seeded.createRun('run-b', fixture.workflow)
+    seeded.append({ runId: 'run-a', nodeId: 'a', type: 'node_status', payload: { status: 'done' } })
+    seeded.close()
+
+    expect(await purgeCommand(['run-a', '--repo', dir, '--yes'], recorder().io)).toBe(OK)
+
+    const journal = openJournal(dir)
+    try {
+      expect(journal.runs().map((row) => row.id)).toEqual(['run-b'])
+      expect(journal.events('run-a')).toEqual([])
+      expect(journal.nodes('run-a')).toEqual([])
+      expect(journal.nodes('run-b')).toHaveLength(1)
+    } finally {
+      journal.close()
+    }
+  })
+
   it('asks before deleting, and a refusal deletes nothing', async () => {
     const dir = storeWithRuns('run-a')
     const refused = recorder(false)
@@ -2269,6 +2292,11 @@ describe('vinta-ai-maestro run, in the background', () => {
     expect(printed).toContain('run bg-run started (job pid 4242)')
     expect(printed).toContain('vinta-ai-maestro status bg-run')
     expect(printed).toContain('vinta-ai-maestro stop bg-run')
+    // Where the run's state is, because a `ui` started in another checkout of
+    // the same repository — the main one, while this run is in a worktree —
+    // will not list it.
+    expect(printed).toContain(`${dir}/.vinta-ai-maestro`)
+    expect(printed).toContain(`--repo ${dir}`)
     // The job's token is in `job.json` and nowhere else.
     expect(printed).not.toContain('secret-token')
   })

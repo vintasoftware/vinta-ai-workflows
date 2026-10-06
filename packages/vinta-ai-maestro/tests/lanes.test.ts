@@ -1005,6 +1005,23 @@ describe('lane pool', () => {
       expect(worktreePaths(repo)).toHaveLength(4)
     })
 
+    it('gives an adopted lane the env files it lacks, and keeps the ones it has', async () => {
+      // `env_files` amended between the attempt that died and the resume —
+      // the ordinary way a run provisioned without `.env.docker` gets it.
+      // Before this the resume skipped the copy wholesale, so the amendment
+      // reached no existing lane and every hook in them kept failing for it.
+      await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+      await writeFile(join(repo, '.env.docker'), 'DOCKER=1\n', 'utf8')
+      const killed = await provision({ ...sqliteProject(), envFiles: ['.env'] }, 1)
+      const lane = killed.lanes[0] as Lane
+      await writeFile(join(lane.path, '.env'), 'SHARED=1\nPHASE=1\n', 'utf8')
+
+      await provision({ ...sqliteProject(), envFiles: ['.env', '.env.docker'] }, 1, { adopt: true })
+
+      expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\nPHASE=1\n')
+      expect(readFileSync(join(lane.path, '.env.docker'), 'utf8')).toBe('DOCKER=1\n')
+    })
+
     it('leaves an env file the phase edited exactly as the phase left it', async () => {
       // `#copyEnvFiles` is the quiet one of the skipped steps: it would restore
       // the main checkout's copy over a file the agent had changed, and nothing
@@ -1215,8 +1232,33 @@ describe('database strategy selection', () => {
     const q = (name: string) => shellQuote(name)
     expect(one.cloneCmd).toContain(`-T ${q('app_wt_template')}`)
     expect(two.cloneCmd).toContain(`-T ${q('app_wt_template')}`)
-    expect(one.resetCmd).toContain(`dropdb --if-exists ${q('app_wt_run_1_lane_1')}`)
+    expect(one.resetCmd).toContain(`--if-exists ${q('app_wt_run_1_lane_1')}`)
     expect(one.connectionUrl).toContain('application_name=wt-run-1-lane-1')
+  })
+
+  it('points the client tools at the server the URL names', () => {
+    // `createdb` reads nothing from `DATABASE_URL`: without `-h`/`-p` it uses
+    // the local socket, which is not the container the project publishes on
+    // 5433 — and every template setup failed against a server that was up.
+    const published: PostgresSpec = { ...external, serverUrl: 'postgres://app@127.0.0.1:5433' }
+    const q = (value: string) => shellQuote(value)
+    const flags = `-h ${q('127.0.0.1')} -p ${q('5433')} -U ${q('app')}`
+
+    const template = planTemplate('dev', published, '/pool/.templates')
+    expect(template?.setupCmd).toBe(
+      `dropdb ${flags} --if-exists ${q('app_wt_template')} && createdb ${flags} ${q('app_wt_template')}`,
+    )
+    const lane = planDatabase('dev', published, ctx('run-1-lane-1'))
+    expect(lane.cloneCmd).toBe(`createdb ${flags} -T ${q('app_wt_template')} ${q('app_wt_run_1_lane_1')}`)
+    expect(lane.resetCmd).toContain(`dropdb ${flags} --if-exists`)
+    // The password stays off the command line: the tools take it from the
+    // environment or ~/.pgpass, and the lane summary records these commands.
+    const withPassword: PostgresSpec = { ...external, serverUrl: 'postgres://app:hunter2@db:5432' }
+    expect(planDatabase('dev', withPassword, ctx('run-1-lane-1')).cloneCmd).not.toContain('hunter2')
+    // A bare host and port stay as they were: no flags for defaults git gave.
+    expect(planTemplate('dev', external, '/pool/.templates')?.setupCmd).toContain(
+      `dropdb -h ${q('localhost')} -p ${q('5432')} --if-exists`,
+    )
   })
 
   it('gives a compose-delivered database no template and no reset', () => {

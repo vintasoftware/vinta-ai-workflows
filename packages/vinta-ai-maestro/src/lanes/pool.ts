@@ -760,6 +760,14 @@ export class LanePool {
    * being resumed is the same loss as deleting its files, arriving as a test
    * suite that suddenly sees an empty database.
    *
+   * An env file the lane does not *have* is a different matter. `env_files`
+   * can be amended between the attempt that died and the resume — that is
+   * the ordinary way a run that provisioned without `.env.docker` gets it —
+   * and skipping the copy wholesale meant the amendment reached no existing
+   * lane: every one of them kept missing the file, and every hook and
+   * `manage.py` call in them kept failing for it. So an adopted lane is given
+   * each declared file it lacks, and never one it already has.
+   *
    * Everything else runs, because everything else derives the lane rather than
    * building it. `#configureHooks` and `#isolateCompose` are idempotent and
    * write outside the working tree; the descriptor below is a pure function of
@@ -788,7 +796,7 @@ export class LanePool {
     if (!adopt) await this.#git(['worktree', 'add', '-b', branch, path, baseRef])
     await this.#copyDeps(path)
     await this.#configureHooks(path)
-    if (!adopt) await this.#copyEnvFiles(name, path)
+    await this.#copyEnvFiles(name, path, { onlyMissing: adopt })
 
     const databases: DatabasePlan[] = []
     for (const role of ROLES) {
@@ -1074,11 +1082,17 @@ export class LanePool {
    * a symlink every one of those lines would land in the main checkout's
    * `.env` instead, where it would then be wrong for every lane at once.
    */
-  async #copyEnvFiles(name: string, lanePath: string): Promise<void> {
+  async #copyEnvFiles(
+    name: string,
+    lanePath: string,
+    options: { readonly onlyMissing?: boolean } = {},
+  ): Promise<void> {
     for (const file of this.#options.project.envFiles ?? []) {
       const source = join(this.#options.repoPath, file)
       if (!existsSync(source)) throw new LaneEnvFileError(name, file)
       const destination = join(lanePath, file)
+      // An adopted lane keeps the copy it has — a phase may have edited it.
+      if (options.onlyMissing === true && existsSync(destination)) continue
       await mkdir(dirname(destination), { recursive: true })
       await copyFile(source, destination)
     }

@@ -262,6 +262,9 @@ async function launchRun(request: RunRequest): Promise<number> {
   io.out(`  ui       vinta-ai-maestro ui${repo}`)
   io.out(`  pause    vinta-ai-maestro pause ${runId}${repo}`)
   io.out(`  stop     vinta-ai-maestro stop ${runId}${repo}`)
+  // The store is the checkout's (§11), so a UI started in another checkout —
+  // the main one, while this run is in a worktree — lists other runs.
+  io.out(`  (this run's state lives in ${bind.repoPath}/.vinta-ai-maestro; from another checkout, pass --repo ${bind.repoPath})`)
   return OK
 }
 

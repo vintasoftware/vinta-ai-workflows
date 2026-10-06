@@ -320,6 +320,36 @@ describe('the plan view', () => {
 // ---------------------------------------------------------------------------
 
 describe('vinta-ai-maestro validate', () => {
+  it('refuses a phase with no gates unless the plan allows it', async () => {
+    // The observed emission: `gates: []` on every node, read by its author as
+    // "the project's gates", executed as "no gates". Twelve phases merged
+    // without a single check having run.
+    const dir = repo()
+    editWorkflow(dir, (doc) => {
+      const nodes = doc.nodes as { id: string; gates?: string[] }[]
+      for (const node of nodes.slice(1)) node.gates = []
+    })
+
+    const io = recordingIo()
+    expect(await validateCommand([join(dir, WORKFLOW_FILE), '--repo', dir, '--json'], io)).toBe(1)
+    const report = JSON.parse(io.outs[0] ?? '{}') as { ok: boolean; issues: { path: string; message: string }[] }
+    expect(report.ok).toBe(false)
+    expect(report.issues.map((issue) => issue.path)).toEqual([
+      'nodes[1].gates',
+      'nodes[2].gates',
+      'nodes[3].gates',
+      'nodes[4].gates',
+    ])
+    expect(report.issues[0]?.message).toContain('no gates')
+    expect(report.issues[0]?.message).toContain('allow_ungated_phases')
+
+    // Declared as intended, it passes.
+    editWorkflow(dir, (doc) => {
+      doc.defaults = { ...(doc.defaults as Record<string, unknown>), allow_ungated_phases: true }
+    })
+    expect(await validateCommand([join(dir, WORKFLOW_FILE), '--repo', dir], recordingIo())).toBe(0)
+  })
+
   it('passes the worked example and says how big it is', async () => {
     const dir = repo()
     const io = recordingIo()

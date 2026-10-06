@@ -295,15 +295,16 @@ describe('the command lines a lane summary records', () => {
     const ctx = { laneName: 'r1-lane-1', lanePath: '/pool/r1-lane-1', templatesDir: '/pool/.t' }
 
     // `createdb`/`dropdb` are real programs on both platforms and `&&` means
-    // the same thing in both shells, so only the quoting moves.
+    // the same thing in both shells, so only the quoting moves — the host the
+    // URL names included, since the tools read nothing from the URL itself.
     expect(planDatabase('dev', spec, ctx, 'linux').cloneCmd).toBe(
-      "createdb -T 'app_wt_template' 'app_wt_r1_lane_1'",
+      "createdb -h 'localhost' -T 'app_wt_template' 'app_wt_r1_lane_1'",
     )
     expect(planDatabase('dev', spec, ctx, 'win32').cloneCmd).toBe(
-      'createdb -T "app_wt_template" "app_wt_r1_lane_1"',
+      'createdb -h "localhost" -T "app_wt_template" "app_wt_r1_lane_1"',
     )
     expect(planDatabase('dev', spec, ctx, 'win32').resetCmd).toBe(
-      'dropdb --if-exists "app_wt_r1_lane_1" && createdb -T "app_wt_template" "app_wt_r1_lane_1"',
+      'dropdb -h "localhost" --if-exists "app_wt_r1_lane_1" && createdb -h "localhost" -T "app_wt_template" "app_wt_r1_lane_1"',
     )
   })
 })

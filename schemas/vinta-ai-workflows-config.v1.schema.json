@@ -339,7 +339,7 @@
       "additionalProperties": false,
       "properties": {
         "defaults": {
-          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `model_fallbacks`, `max_session_turns`.",
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`.",
           "type": "object",
           "properties": {
             "harness": {
@@ -378,6 +378,10 @@
                 "scoped",
                 "full"
               ]
+            },
+            "allow_ungated_phases": {
+              "type": "boolean",
+              "description": "Whether a phase that resolves to no gates is acceptable. Off (the default): `vinta-ai-maestro validate` refuses the workflow and `doctor` warns, because an ungated phase passes its gate step without running anything."
             },
             "model_fallbacks": {
               "description": "Model id → the model to run instead once the first is out of quota or credits. A `quota` refusal on a listed model retries on the fallback instead of parking the harness; later spawns of that model go straight to the fallback until the vendor's stated reset, or for the rest of the run. A plan's own map replaces this one whole.",

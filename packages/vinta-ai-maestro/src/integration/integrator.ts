@@ -32,11 +32,12 @@
  * Every field in every error and result here is an identifier — a node id, a
  * branch name, a path. Diffs, hunks and file contents stay in the worktree.
  */
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { ConflictFixer, ConflictRequest } from './fixer.ts'
-import { git, gitLines, gitOk } from './git.ts'
+import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
 
@@ -116,6 +117,108 @@ export class UnresolvedConflictError extends Error {
   }
 }
 
+/**
+ * The integration worktree was found in the middle of a merge, a rebase or a
+ * cherry-pick that nothing in this run is conducting.
+ *
+ * It is shared state, and that is what makes this worth its own error: a
+ * `checkout` refused in a lane fails one phase, while one refused here fails
+ * every phase whose base is built here, with the same one-line reason each
+ * time. The observed run failed four phases between four and twenty-three
+ * times each on `git checkout exited 1` before a person opened `.git/` and
+ * found `MERGE_HEAD`. So the worktree is inspected *before* any checkout, and
+ * the answer names the operation and both branches — which is what somebody
+ * finishing or aborting it by hand needs, and all they need.
+ *
+ * Nothing here is resolved automatically. A merge left in place is either a
+ * conflict `UnresolvedConflictError` handed to a person, or a person's own
+ * work in progress; both are theirs to conclude.
+ */
+export class IntegrationWorktreeBusyError extends Error {
+  constructor(
+    readonly operation: 'merge' | 'rebase' | 'cherry-pick',
+    /** What is being merged, rebased or picked — a branch name where git can say, else a short sha. */
+    readonly incoming: string | null,
+    /** The branch checked out, or null when HEAD is detached. */
+    readonly into: string | null,
+  ) {
+    const what = incoming === null ? `a ${operation}` : `a ${operation} of ${incoming}`
+    super(
+      `integration worktree is mid-${operation}: ${what}${into === null ? '' : ` into ${into}`} ` +
+        `was started and never concluded. Finish it (git ${operation} --continue) or ` +
+        `undo it (git ${operation} --abort) in the integration worktree, then retry.`,
+    )
+    this.name = 'IntegrationWorktreeBusyError'
+  }
+}
+
+/** What the operator may answer when a resolution's commit is refused. */
+export const COMMIT_DECISIONS = ['commit', 'no-verify', 'abort'] as const
+export type CommitDecision = (typeof COMMIT_DECISIONS)[number]
+
+/** A merge commit git would not make — a hook refused it, typically. Identifiers and git's own words. */
+export interface CommitFailure {
+  /** The incoming phase — the one whose branch was being merged, as a conflict record names it. */
+  readonly nodeId: string
+  /**
+   * The phase this merge is being made *for*: the one whose base is being
+   * built, or whose turn built the wave. It is the node that is running, and
+   * so the one a question about this commit is parked on — the incoming
+   * phase may be long done.
+   */
+  readonly forNode: string
+  /** The branch being merged into. */
+  readonly branch: string
+  /** The branch whose merge was being committed. */
+  readonly incoming: string
+  readonly error: GitCommandError
+  /** How many times the commit has been refused in this merge, 1-based. */
+  readonly attempt: number
+}
+
+/**
+ * The commit that would have concluded a resolved merge was refused and the
+ * merge was abandoned — by the operator's choice, or because nobody was there
+ * to choose.
+ *
+ * **The worktree is clean when this is thrown.** That is the invariant this
+ * class exists to state. The first version of the commit step let a refused
+ * `git commit` propagate as-is, which left `MERGE_HEAD` in a worktree every
+ * other phase's base is built in: from then on each of them failed in its own
+ * setup, before any agent ran, on an error that named none of this. A failed
+ * commit in a shared worktree is a failure for *everyone* until the worktree
+ * is clean again, so cleaning it is not optional and not the retry's job.
+ *
+ * The resolution itself is not lost. It is written as a commit under
+ * `preservedRef` (see `Integrator.preserveResolution`) before the merge is
+ * abandoned — a merge commit made with `commit-tree`, which runs no hook — so
+ * that a person can `git merge <ref>` it once the hook is fixed, and a retry
+ * of the phase reuses it rather than spending another fixer round.
+ */
+export class IntegrationCommitError extends Error {
+  constructor(
+    /** The incoming phase, as `CommitFailure.nodeId`. */
+    readonly nodeId: string,
+    readonly branch: string,
+    readonly incoming: string,
+    override readonly cause: GitCommandError,
+    readonly preservedRef: string | null,
+    readonly decision: CommitDecision | 'unanswered',
+  ) {
+    super(
+      `${cause.message}. The merge of ${incoming} into ${branch} was abandoned` +
+        (decision === 'abort' ? " at the operator's word" : '') +
+        (preservedRef === null
+          ? '; the resolution could not be kept.'
+          : `; the resolution is kept at ${preservedRef} and the retry will reuse it.`),
+    )
+    this.name = 'IntegrationCommitError'
+  }
+}
+
+/** Where a refused resolution is kept. One ref per incoming phase; the newest wins. */
+export const RESOLUTION_REFS = 'refs/vinta-ai-maestro/resolutions'
+
 export interface IntegratorOptions {
   readonly plan: IntegrationPlan
   /** The dedicated integration worktree: every merge and every fix happens here. */
@@ -144,6 +247,24 @@ export interface IntegratorOptions {
    * count and a branch name (§11).
    */
   readonly onConflict?: (conflict: ReportedConflict) => void
+  /**
+   * Asked what to do when git refuses to commit a resolved merge — a
+   * pre-commit hook that fails in the integration worktree, almost always.
+   *
+   * Three answers. `commit` tries the same commit again, hooks and all, for an
+   * operator who has just fixed whatever the hook wanted. `no-verify` commits
+   * past the hooks, once, for this merge: the resolution has already passed
+   * `verify`, which runs the phases' own gates, so the hook is the only check
+   * being skipped and the operator is the one skipping it. `abort` gives up
+   * the merge — the resolution is preserved first — and fails the phase with
+   * the reason.
+   *
+   * Absent, the answer is `abort`: an integrator with nobody to ask must still
+   * leave the worktree usable for every other phase. The caller that *can* ask
+   * routes this to the operator (the scheduler's node question), and under an
+   * unattended run answers `abort` for them once the retry window passes.
+   */
+  readonly onCommitFailure?: (failure: CommitFailure) => Promise<CommitDecision>
   /** Overridden in tests so `gh` is never invoked against a real remote. */
   readonly ghPath?: string
   /**
@@ -274,6 +395,11 @@ export class Integrator {
     const [first, ...rest] = base.nodes as string[]
     const cwd = this.#options.integrationPath
 
+    // Before any checkout — including the one the prepared-base path below
+    // makes. A worktree mid-merge refuses every checkout with the same terse
+    // line, and the only useful answer names the merge.
+    await this.#assertIdle(cwd)
+
     // **A base that is already correct is kept, conflicts and all.**
     //
     // This used to reset and re-merge unconditionally, which is right exactly
@@ -302,7 +428,7 @@ export class Integrator {
 
     const merged = [first as string]
     for (const dep of rest) {
-      const conflict = await this.#merge(base.branch, dep, merged)
+      const conflict = await this.#merge(base.branch, dep, merged, nodeId)
       // Reported wherever the host wants it. Without this a conflict resolved
       // while *preparing a base* was recorded nowhere at all — `mergeWave`'s
       // conflicts reach the post-mortem through its return value, and this
@@ -426,10 +552,15 @@ export class Integrator {
    * decides completeness, and the two answers have to come from one reading.
    * Omitting it falls back to this object's own plan, which is correct for
    * `createRebaser` and for any caller with no such window.
+   *
+   * `forNode` is the phase whose turn is building this wave — what a question
+   * about a refused merge commit is parked on (`CommitFailure.forNode`).
+   * Absent, the incoming phase stands in.
    */
-  async mergeWave(wave: number, members?: readonly string[]): Promise<WaveResult> {
+  async mergeWave(wave: number, members?: readonly string[], forNode?: string): Promise<WaveResult> {
     const cwd = this.#options.integrationPath
     const branch = this.waveBranch(wave)
+    await this.#assertIdle(cwd)
     await git(cwd, ['checkout', '-B', branch, this.waveBranch(wave - 1)])
     // Wave 1 starts at the plan branch's tip, so it already has every commit
     // made there. A later wave starts at the wave before it, which was cut
@@ -441,7 +572,7 @@ export class Integrator {
     const merged: string[] = []
     const conflicts: ConflictRecord[] = []
     for (const nodeId of members ?? this.nodesAt(wave)) {
-      const conflict = await this.#merge(branch, nodeId, merged)
+      const conflict = await this.#merge(branch, nodeId, merged, forNode ?? nodeId)
       if (conflict) {
         conflicts.push(conflict)
         // Reported as it happens as well as returned at the end: the return
@@ -589,6 +720,7 @@ export class Integrator {
     into: string,
     nodeId: string,
     alreadyMerged: readonly string[],
+    forNode: string,
   ): Promise<ConflictRecord | null> {
     const cwd = this.#options.integrationPath
     const incoming = this.nodeBranch(nodeId)
@@ -598,6 +730,21 @@ export class Integrator {
 
     const paths = await this.#conflictedPaths()
     const nodes = await this.#owners(paths, alreadyMerged, nodeId)
+    // A resolution of exactly this merge that a refused commit left behind
+    // (`preserveResolution`): the fixer's work, already past `verify`, waiting
+    // for a commit the hook would allow. Taken over the conflicted merge
+    // rather than redone — one fixer round is minutes and real money. The
+    // kept commit descends from HEAD, so merging it cannot conflict; should
+    // it fail anyway, the original conflicted merge is put back for the fixer.
+    const kept = await this.#keptResolution(cwd, nodeId, incoming)
+    if (kept !== null) {
+      await this.#abandonMerge(cwd)
+      if (await gitOk(cwd, ['merge', '--no-ff', '--no-edit', kept])) {
+        return { nodes, paths, rounds: 0 }
+      }
+      await this.#abandonMerge(cwd)
+      await gitOk(cwd, ['merge', '--no-ff', '--no-edit', incoming])
+    }
     const request = {
       cwd,
       into,
@@ -609,7 +756,19 @@ export class Integrator {
     } satisfies Omit<ConflictRequest, 'round'>
 
     for (let round = 1; round <= this.#maxFixRounds; round += 1) {
-      await this.#options.fixer.fix({ ...request, round })
+      try {
+        await this.#options.fixer.fix({ ...request, round })
+      } catch (error) {
+        // A fixer that could not run — refused for capacity, a harness that
+        // died — has resolved nothing, and the merge it was handed must not
+        // outlive it: the next thing to touch this worktree is another
+        // phase's base, and a merge left here fails that phase's setup instead
+        // of this one's spawn. Abandoned, so the retry starts the merge
+        // afresh. Only an unresolved conflict (below) is left standing on
+        // purpose.
+        await this.#abandonMerge(cwd)
+        throw error
+      }
       if (await this.#unresolved(paths)) continue
 
       // **A fixer that committed its own resolution is the ordinary case, not a
@@ -642,13 +801,16 @@ export class Integrator {
       if (await this.#merging(cwd)) {
         // The merge is still git's to conclude, so `--no-edit` takes the
         // message it already prepared. This is the path that always worked.
-        await git(cwd, ['commit', '--no-edit'])
+        await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'])
       } else if (await this.#staged(cwd)) {
         // A fixer that committed and then refined — round 2 after a `verify`
         // refusal, typically. There is no prepared message to take, so this
         // one is written here: branch names and a round number, which are
         // identifiers (§11).
-        await git(cwd, ['commit', '-m', `Resolve ${incoming} conflict (round ${round})`])
+        await this.#commitResolution(cwd, nodeId, forNode, into, incoming, [
+          '-m',
+          `Resolve ${incoming} conflict (round ${round})`,
+        ])
       } else if (!(await this.#contains(cwd, incoming))) {
         // Nothing in progress, nothing to commit, and the incoming phase is
         // not in this history: the fixer cleared the conflict by throwing the
@@ -663,6 +825,177 @@ export class Integrator {
     // The conflicted merge is left in place deliberately: it is the only copy
     // of what the fixer tried, and it is what a human continuing by hand needs.
     throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds)
+  }
+
+  /**
+   * `git commit <args>` for a resolution, and what happens when git says no.
+   *
+   * A hook is the usual reason: the integration worktree runs the repository's
+   * hooks exactly as a lane does (`project.hooks`), and a `pre-commit` chain
+   * that imports a gitignored settings module the worktree never received
+   * fails every commit here while passing in the operator's own checkout. One
+   * such refusal used to leave `MERGE_HEAD` behind and fail every later phase
+   * in its setup; see `IntegrationCommitError`.
+   *
+   * So the loop is: ask (`onCommitFailure`) and do as told, and whatever ends
+   * it — `abort`, no one to ask, or the asking itself failing, which is what a
+   * halt looks like from here — the merge is abandoned with the resolution
+   * preserved first, and the worktree is left clean.
+   */
+  async #commitResolution(
+    cwd: string,
+    nodeId: string,
+    forNode: string,
+    into: string,
+    incoming: string,
+    args: readonly string[],
+  ): Promise<void> {
+    let extra: readonly string[] = []
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await git(cwd, ['commit', ...extra, ...args])
+        return
+      } catch (error) {
+        if (!(error instanceof GitCommandError)) throw error
+        const refused = error
+        let decision: CommitDecision
+        try {
+          decision =
+            this.#options.onCommitFailure === undefined
+              ? 'abort'
+              : await this.#options.onCommitFailure({
+                  nodeId,
+                  forNode,
+                  branch: into,
+                  incoming,
+                  error: refused,
+                  attempt,
+                })
+        } catch (asking) {
+          // The question could not be asked or was withdrawn — a halt, an
+          // abort. The worktree still has to be clean for whoever comes next.
+          await this.preserveResolution(cwd, nodeId, incoming)
+          await this.#abandonMerge(cwd)
+          throw asking
+        }
+        if (decision === 'commit') {
+          extra = []
+          continue
+        }
+        if (decision === 'no-verify') {
+          extra = ['--no-verify']
+          continue
+        }
+        const preserved = await this.preserveResolution(cwd, nodeId, incoming)
+        await this.#abandonMerge(cwd)
+        throw new IntegrationCommitError(nodeId, into, incoming, refused, preserved, decision)
+      }
+    }
+  }
+
+  /**
+   * Keeps whatever is staged as a commit under `RESOLUTION_REFS`, with the
+   * same parents the merge commit would have had, and returns the ref — or
+   * null when nothing could be kept.
+   *
+   * `write-tree` + `commit-tree` + `update-ref`: plumbing, which runs no hook,
+   * which is the point — the hook is what refused the commit. The ref is
+   * outside `refs/heads`, so no branch listing shows it and no lane can cut
+   * from it by accident; `git merge <ref>` in the integration worktree, or the
+   * next `prepareBase`, is how it is used.
+   */
+  async preserveResolution(cwd: string, nodeId: string, incoming: string): Promise<string | null> {
+    try {
+      const tree = (await git(cwd, ['write-tree'])).trim()
+      const parents = (await this.#merging(cwd)) ? ['-p', 'HEAD', '-p', 'MERGE_HEAD'] : ['-p', 'HEAD']
+      const commit = (
+        await git(cwd, [
+          'commit-tree',
+          tree,
+          ...parents,
+          '-m',
+          `Resolve ${incoming} conflict (kept by vinta-ai-maestro: the commit was refused)`,
+        ])
+      ).trim()
+      const ref = `${RESOLUTION_REFS}/${nodeId}`
+      await git(cwd, ['update-ref', ref, commit])
+      return ref
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * A resolution kept by `preserveResolution` for this phase, when it is still
+   * the resolution of *this* merge — its parents are the branch's current tip
+   * and the incoming branch's. Anything else is stale and ignored.
+   *
+   * Asked while the conflicted merge is in progress, so "the branch's tip" is
+   * `HEAD`: a merge in progress has not moved it.
+   */
+  async #keptResolution(cwd: string, nodeId: string, incoming: string): Promise<string | null> {
+    const ref = `${RESOLUTION_REFS}/${nodeId}`
+    const [line] = await gitLines(cwd, ['rev-list', '--parents', '-n', '1', ref]).catch(() => [])
+    if (line === undefined) return null
+    const [, ...parents] = line.split(' ')
+    const head = (await git(cwd, ['rev-parse', 'HEAD'])).trim()
+    const tip = (await git(cwd, ['rev-parse', incoming])).trim()
+    return parents.length === 2 && parents[0] === head && parents[1] === tip ? ref : null
+  }
+
+  /**
+   * Leaves no merge in progress: `merge --abort` while one is, and otherwise a
+   * reset of the index and tree to HEAD, which is what a refused `commit -m`
+   * of a staged refinement needs. Best effort — the worktree may already be
+   * clean.
+   */
+  async #abandonMerge(cwd: string): Promise<void> {
+    if (await this.#merging(cwd)) {
+      await gitOk(cwd, ['merge', '--abort'])
+      return
+    }
+    await gitOk(cwd, ['reset', '--hard', 'HEAD'])
+  }
+
+  /**
+   * Refuses to work in a worktree that is mid-merge, mid-rebase or
+   * mid-cherry-pick, naming what it found (`IntegrationWorktreeBusyError`).
+   *
+   * Read-only. Asked before every checkout this class makes in the integration
+   * worktree, because git's own refusal for that state is one line that names
+   * neither the operation nor the branches.
+   */
+  async #assertIdle(cwd: string): Promise<void> {
+    const gitDir = (await git(cwd, ['rev-parse', '--absolute-git-dir'])).trim()
+    const operation = await this.#operationInProgress(cwd, gitDir)
+    if (operation === null) return
+    const into = (await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => '')).trim()
+    const headRef =
+      operation === 'merge' ? 'MERGE_HEAD' : operation === 'rebase' ? 'REBASE_HEAD' : 'CHERRY_PICK_HEAD'
+    const named = (
+      await git(cwd, ['name-rev', '--name-only', '--refs=refs/heads/*', '--no-undefined', headRef]).catch(
+        () => '',
+      )
+    ).trim()
+    const sha = (await git(cwd, ['rev-parse', '--short', headRef]).catch(() => '')).trim()
+    const incoming = named !== '' ? named.replace(/[~^].*$/, '') : sha !== '' ? sha : null
+    throw new IntegrationWorktreeBusyError(operation, incoming, into === '' ? null : into)
+  }
+
+  async #operationInProgress(
+    cwd: string,
+    gitDir: string,
+  ): Promise<'merge' | 'rebase' | 'cherry-pick' | null> {
+    if (await gitOk(cwd, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])) return 'merge'
+    if (
+      (await gitOk(cwd, ['rev-parse', '--verify', '--quiet', 'REBASE_HEAD'])) ||
+      existsSync(join(gitDir, 'rebase-merge')) ||
+      existsSync(join(gitDir, 'rebase-apply'))
+    ) {
+      return 'rebase'
+    }
+    if (await gitOk(cwd, ['rev-parse', '--verify', '--quiet', 'CHERRY_PICK_HEAD'])) return 'cherry-pick'
+    return null
   }
 
   /**

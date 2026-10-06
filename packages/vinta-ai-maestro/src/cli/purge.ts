@@ -24,18 +24,21 @@
  *   loses the link and not the somewhere else.
  *
  * What it removes is the run *directory* — the frozen workflow snapshot, the
- * transcripts, the raw streams and the gate logs. It does not touch `flow.db`:
- * the event log carries opaque identifiers only (§11), it is the source of
- * truth every projection is rebuilt from, and dropping it would take the
- * post-mortem down with the transcripts it was supposed to replace.
+ * transcripts, the raw streams and the gate logs — and the run's rows in
+ * `flow.db`. The rows used to be kept, on the argument that the event log is
+ * opaque identifiers only (§11) and the post-mortem folds from it; what that
+ * bought was a UI that listed, and offered to resume, a run whose snapshot
+ * was gone. A purged run is purged: write the post-mortem first.
  */
+import { existsSync } from 'node:fs'
 import { readdir, rm } from 'node:fs/promises'
 import { basename, join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { liveJob } from '../job/job.ts'
+import { openJournal } from '../journal/journal.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
-import { laneRootFor, runsRootFor } from './paths.ts'
+import { laneRootFor, runsRootFor, storeFor } from './paths.ts'
 import { findReapable, reap, type Reapable } from './reap.ts'
 
 export const PURGE_USAGE = `usage: vinta-ai-maestro purge [run-id] [--repo <dir>] [--yes] [--dry-run]
@@ -171,6 +174,7 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
   }
 
   for (const target of targets) await rm(target, { recursive: true, force: true })
+  forgetRuns(repoPath, targets.map((target) => basename(target)))
   for (const summary of reapable.summaries) await rm(summary, { force: true })
   const failures = wantsLanes
     ? await reap(repoPath, reapable, { branches: parsed.values.branches === true })
@@ -186,6 +190,17 @@ export async function purgeCommand(argv: readonly string[], io: Io): Promise<num
     return FAILED
   }
   return OK
+}
+
+/** The journal's rows for runs whose directories are gone. No store, nothing to forget. */
+function forgetRuns(repoPath: string, runIds: readonly string[]): void {
+  if (runIds.length === 0 || !existsSync(join(storeFor(repoPath), 'flow.db'))) return
+  const journal = openJournal(repoPath)
+  try {
+    for (const runId of runIds) journal.deleteRun(runId)
+  } finally {
+    journal.close()
+  }
 }
 
 /**

@@ -12,6 +12,7 @@ export {
   errorFields,
   errorKind,
   isLevel,
+  redactText,
   redactValue,
   sanitize,
   setErrorDetail,

@@ -498,6 +498,20 @@ export class Journal {
     return join(dir, `${gateId}.log`)
   }
 
+  /**
+   * Forgets a run: its events and every projection folded from them. For
+   * `purge`, which removes the run directory — and until this existed left
+   * the rows behind, so the UI went on listing, and offering to resume, a run
+   * whose transcripts, gate logs and frozen workflow were gone.
+   */
+  deleteRun(runId: string): void {
+    this.db.transaction(() => {
+      for (const table of ['events', 'runs', 'nodes', 'questions']) {
+        this.db.prepare(`DELETE FROM ${table} WHERE ${table === 'runs' ? 'id' : 'run_id'} = ?`).run(runId)
+      }
+    })()
+  }
+
   close(): void {
     this.db.close()
   }

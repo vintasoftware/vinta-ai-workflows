@@ -518,6 +518,50 @@ describe('the project’s commands', () => {
     expect(bare).not.toContain('The project’s commands')
     expect(bare).toContain('then the scoped suite')
   })
+
+  it('tells the implementer a compose-delivered database is unreachable from the host', () => {
+    // `server_url` names the server as the compose network sees it, so a
+    // bare `pytest` on the host reads a `DATABASE_URL` it cannot connect to —
+    // and then debugs that, with its fix rounds.
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      project: {
+        migrate_cmd: 'docker compose run --rm api python manage.py migrate',
+        commands: { test: 'docker compose run --rm api python -m pytest' },
+        databases: {
+          test: {
+            engine: 'postgres',
+            delivery: 'compose',
+            name: 'app_test',
+            server_url: 'postgres://db:5432',
+            connection_url_var: 'TEST_DATABASE_URL',
+          },
+        },
+      },
+    })
+    const prompt = compose('api-layer', 'implementer', { workflow })
+
+    expect(prompt).toContain('inside its own compose stack')
+    expect(prompt).toContain('`TEST_DATABASE_URL` (test)')
+    expect(prompt).toContain('cannot reach it')
+    // And nothing of the kind for a database on a shared, host-reachable server.
+    const external = WorkflowSchema.parse({
+      ...diamond(),
+      project: {
+        migrate_cmd: 'true',
+        databases: {
+          test: {
+            engine: 'postgres',
+            delivery: 'external',
+            name: 'app_test',
+            server_url: 'postgres://localhost:5432',
+            connection_url_var: 'TEST_DATABASE_URL',
+          },
+        },
+      },
+    })
+    expect(compose('api-layer', 'implementer', { workflow: external })).not.toContain('compose stack')
+  })
 })
 
 describe('agent-held resource leases', () => {
