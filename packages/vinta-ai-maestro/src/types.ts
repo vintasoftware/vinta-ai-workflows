@@ -192,6 +192,10 @@ export type GateType = (typeof GATE_TYPES)[number]
 export const GATE_SCOPES = ['scoped', 'full'] as const
 export type GateScope = (typeof GATE_SCOPES)[number]
 
+/** When the project's gates run in full on a merged wave (`defaults.wave_gates`). */
+export const WAVE_GATES = ['off', 'final', 'every'] as const
+export type WaveGates = (typeof WAVE_GATES)[number]
+
 /** What `scoped_cmd` may name. Substituted shell-quoted, space-separated. */
 export const SCOPE_PLACEHOLDERS = ['{changed_files}', '{touches}'] as const
 
@@ -808,6 +812,21 @@ export const DefaultsSchema = z.strictObject({
     .describe(
       '`scoped` — the default — runs a gate’s `scoped_cmd` on phase gates and its full `cmd` on ' +
         'the gate that re-runs after a wave merge. `full` runs `cmd` everywhere.',
+    ),
+  wave_gates: z
+    .enum(WAVE_GATES)
+    .default('final')
+    .describe(
+      'When the phases\u2019 gates run in full on a merged wave, in the integration worktree. Each ' +
+        'phase passes its gates on its own branch, and two parallel phases can each be green and ' +
+        'disagree with each other \u2014 a sender and a receiver of one signal, say \u2014 which only a ' +
+        'merged tree shows. `final` \u2014 the default \u2014 runs every gate of the plan once on the last ' +
+        'wave before the plan PR opens, and the wave\u2019s phases\u2019 gates on any wave whose merge ' +
+        'needed a conflict resolution. `every` runs the wave\u2019s phases\u2019 gates on every wave as ' +
+        'well, which costs one full suite per wave and catches a disagreement at the wave that ' +
+        'introduced it. `off` runs none of these. Under `gate_scope: scoped` the full form of a ' +
+        'narrowed gate still runs on each wave whatever this says: that is where the suite the ' +
+        'phases skipped is paid back.',
     ),
   chores: z
     .array(Id)

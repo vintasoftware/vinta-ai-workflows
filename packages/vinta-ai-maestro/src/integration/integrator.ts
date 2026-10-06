@@ -177,6 +177,21 @@ export interface CommitFailure {
 }
 
 /**
+ * A wave was asked to build on a wave branch that does not exist. Names the
+ * missing wave, which is the fact an operator needs; git's own refusal ("not
+ * a commit", exit 128) reads like a corrupted ref.
+ */
+export class WaveNotBuiltError extends Error {
+  constructor(
+    readonly wave: number,
+    readonly branch: string,
+  ) {
+    super(`wave ${wave} was never built: ${branch} does not exist`)
+    this.name = 'WaveNotBuiltError'
+  }
+}
+
+/**
  * The commit that would have concluded a resolved merge was refused and the
  * merge was abandoned — by the operator's choice, or because nobody was there
  * to choose.
@@ -593,7 +608,15 @@ export class Integrator {
     const cwd = this.#options.integrationPath
     const branch = this.waveBranch(wave)
     await this.#assertIdle(cwd)
-    await git(cwd, ['checkout', '-B', branch, this.waveBranch(wave - 1)])
+    const under = this.waveBranch(wave - 1)
+    // Named, rather than left to `checkout`'s exit 128: "is not a commit" sent
+    // one operator looking for a corrupted ref, when the wave had simply never
+    // been built. The executor builds missing waves first; this is the
+    // backstop for any other caller.
+    if (wave > 1 && !(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${under}`]))) {
+      throw new WaveNotBuiltError(wave - 1, under)
+    }
+    await git(cwd, ['checkout', '-B', branch, under])
     // Wave 1 starts at the plan branch's tip, so it already has every commit
     // made there. A later wave starts at the wave before it, which was cut
     // before anything committed to the plan branch since — a config change

@@ -23,7 +23,7 @@
  */
 import type { GateGuardPort } from '../guard/guard.ts'
 import type { AmendRunner } from '../amend/amend.ts'
-import type { NodeStatus } from '../journal/events.ts'
+import type { NodeStatus, OperatorDelivery } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion } from './schemas.ts'
 import type {
@@ -33,6 +33,13 @@ import type {
 } from '../resources/agent-gates.ts'
 import type { AgentLeaseGrant, AgentLeaseHop } from '../resources/agent-leases.ts'
 
+/**
+ * What an operation did, where the host can say: the scheduler's operations
+ * answer with the delivery they journalled, so the API can report `ignored`
+ * instead of an `ok` that did nothing.
+ */
+export type Operated = void | OperatorDelivery | Promise<void | OperatorDelivery>
+
 /** The five operations of §9, plus the two reads `Scheduler` already exposes. */
 export interface RunControl {
   /** Live node statuses. The journal projection is authoritative; this is the peek. */
@@ -40,13 +47,16 @@ export interface RunControl {
   /** §9.1 — the answer enters the guard context as `human.answer` and resumes the node. */
   answer(nodeId: string, facts: GuardContext): void | Promise<void>
   /** §9 — `session.send(text)`, or queued for the next resume. */
-  addContext(nodeId: string, text: string): void | Promise<void>
+  addContext(nodeId: string, text: string): Operated
   /** §9 — interrupt, then send the new instruction. */
-  redirect(nodeId: string, instruction: string): void | Promise<void>
-  /** §9 — finish the current turn, then `await_human`. */
-  pause(nodeId: string): void | Promise<void>
+  redirect(nodeId: string, instruction: string): Operated
+  /**
+   * §9 — finish the current turn, then `await_human`; on a node already
+   * parked on a question, hold it there (`held`).
+   */
+  pause(nodeId: string): Operated
   /** §9 — kill the session, mark failed, block dependents. */
-  abortNode(nodeId: string): void | Promise<void>
+  abortNode(nodeId: string): Operated
   /**
    * Run a failed node again, and unblock what its failure blocked.
    *

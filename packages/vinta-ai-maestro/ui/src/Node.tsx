@@ -125,8 +125,10 @@ export function NodeView({
     setError(null)
     setNotice(null)
     try {
-      await client.operate(runId, nodeId, operation, body)
-      setNotice(done)
+      const delivery = await client.operate(runId, nodeId, operation, body)
+      // The daemon says when nothing happened; the button's own message would
+      // claim otherwise.
+      setNotice(delivery === 'ignored' ? 'Nothing to do: the node has nothing for that to act on now.' : done)
       setReloads((count) => count + 1)
     } catch (cause: unknown) {
       setError(messageOf(cause))
@@ -199,6 +201,11 @@ export function NodeView({
           Waiting for the integration worktree
           {projection.waits.get(nodeId) === null ? '' : ` — held by ${projection.waits.get(nodeId)}`}.
           Nothing is running for this phase until it is free.
+        </Hint>
+      )}
+      {projection.held.has(nodeId) && status === 'awaiting_human' && (
+        <Hint className="muted" data-held>
+          Paused by the operator. No unattended timer answers this question; your answer releases it.
         </Hint>
       )}
       {notice !== null && (

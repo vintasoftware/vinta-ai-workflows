@@ -37,4 +37,28 @@ describe('the projection', () => {
     )
     expect(again.waits.size).toBe(0)
   })
+
+  it('knows which parked nodes the operator paused, until someone answers', () => {
+    const held = applyFrame(
+      EMPTY_PROJECTION,
+      frame([
+        { id: 1, type: 'node_status', nodeId: 'p13', payload: { status: 'awaiting_human' } },
+        { id: 2, type: 'node_operation', nodeId: 'p13', payload: { op: 'pause', delivery: 'held' } },
+      ]) as never,
+    )
+    expect(held.held.has('p13')).toBe(true)
+
+    const answered = applyFrame(
+      held,
+      frame([{ id: 3, type: 'human_answered', nodeId: 'p13', payload: { effect_id: 'e', answer: 'retry' } }]) as never,
+    )
+    expect(answered.held.has('p13')).toBe(false)
+
+    // An ignored pause holds nothing.
+    const ignored = applyFrame(
+      EMPTY_PROJECTION,
+      frame([{ id: 1, type: 'node_operation', nodeId: 'p1', payload: { op: 'pause', delivery: 'ignored' } }]) as never,
+    )
+    expect(ignored.held.size).toBe(0)
+  })
 })

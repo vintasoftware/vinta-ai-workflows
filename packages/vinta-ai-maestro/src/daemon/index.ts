@@ -50,6 +50,7 @@ export {
   NodeDetailSchema,
   NodeSummarySchema,
   OkResponseSchema,
+  OperationResponseSchema,
   RedirectRequestSchema,
   ResourceStateSchema,
   RunEdgeSchema,

@@ -37,6 +37,7 @@ import {
   FrameSchema,
   NodeDetailSchema,
   OkResponseSchema,
+  OperationResponseSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
   RunUsageResponseSchema,
@@ -1243,6 +1244,22 @@ describe('§9 operations', () => {
     })
   }
 
+  it('says when an operation did nothing, rather than an ok', async () => {
+    // `POST …/pause` on a node that was not running answered `{ok: true}`,
+    // and the operator took the unattended retry as stopped.
+    const r = await rig()
+    r.daemon.register({
+      runId: RUN_ID,
+      control: runControl({ statuses: {}, answer: () => {}, pause: () => 'ignored' }),
+      pools: r.pools,
+      admission: { ceiling: () => 1, inFlight: () => 0, wakeAt: () => undefined },
+    })
+
+    const paused = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/pause`, { method: 'POST', body: {} })
+    expect(paused.status).toBe(200)
+    expect(OperationResponseSchema.parse(paused.body)).toEqual({ ok: true, delivery: 'ignored' })
+  })
+
   it('forwards an answer as the guard context human.answer (§9.1)', async () => {
     const r = await rig()
     const result = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/answer`, {
@@ -1894,11 +1911,11 @@ describe('human gates', () => {
       .filter((event) => event.type === 'node_operation')
       .map((event) => event.payload as { op: string; delivery: string })
     expect(operations).toEqual([
-      // Node `a` is parked, so both steering messages queue; the pause is a
-      // recorded no-op on a node that is already waiting for the operator.
+      // Node `a` is parked, so both steering messages queue; the pause holds
+      // it there, so no unattended timer would answer for the operator.
       { op: 'add_context', text: 'watch the unique index', delivery: 'queued' },
       { op: 'redirect', text: 'use a migration', delivery: 'queued' },
-      { op: 'pause', delivery: 'ignored' },
+      { op: 'pause', delivery: 'held' },
       { op: 'abort', delivery: 'sent' },
       // …and both are delivered into the guard context when `a` resumes.
       { op: 'add_context', text: 'watch the unique index', delivery: 'delivered' },

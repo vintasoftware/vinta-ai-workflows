@@ -3647,6 +3647,33 @@ describe('a failed phase the operator can retry', () => {
       expectDrained(r)
     })
 
+    it('does not answer for a node the operator paused while it was parked', async () => {
+      // An operator paused a phase parked on its failure question, to keep its
+      // unattended retry out of the integration worktree during a manual
+      // repair. The pause was recorded as ignored and the timer fired anyway.
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'offer')
+      expect(await r.scheduler.pause('a')).toBe('held')
+      expect(r.journal.heldNodes('run-1')).toEqual(new Set(['a']))
+
+      await r.advance(60_000 * 10)
+      expect(r.adapter.spawned.length).toBe(1)
+      expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+
+      // A person's answer releases it, and the hold with it.
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
+      expect(r.journal.heldNodes('run-1')).toEqual(new Set())
+      expect(await r.scheduler.pause('a')).toBe('ignored')
+      expectDrained(r)
+    })
+
     it('keeps going rather than stalling at a cap', async () => {
       const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
         onFailure: 'retry',

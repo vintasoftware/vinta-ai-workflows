@@ -170,6 +170,12 @@ interface Rig {
   readonly workflow: Workflow
   readonly journal: Journal
   readonly executor: RunEffectExecutor
+  /**
+   * A new executor over the same journal, repository and integrator: what a
+   * job restart or a resume builds. Everything the old one held in memory is
+   * gone.
+   */
+  restart(): void
   /** The one the executor was given — amended in the §9 tests, as the host does. */
   readonly integrator: Integrator
   readonly pools: ResourcePools
@@ -221,6 +227,8 @@ function setup(
     readonly onIntegrationWait?: (nodeId: string, state: 'queued' | 'granted', holder: string | null) => void
     /** The operator's classifier (§17). */
     readonly systemOne?: SystemOne
+    /** What resolves a merge conflict. Absent, the fixer does nothing. */
+    readonly fix?: (cwd: string) => Promise<void>
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-executor-'))
@@ -268,7 +276,7 @@ function setup(
   const integrator = new Integrator({
     plan: workflow,
     integrationPath: integ,
-    fixer: { fix: async () => undefined },
+    fixer: { fix: async (request) => await options.fix?.(request.cwd) },
     // Never a real `gh`, and never a real remote.
     ghPath: join(root, 'no-such-gh'),
   })
@@ -288,7 +296,7 @@ function setup(
     },
   }
 
-  const executor = createRunExecutor({
+  const makeExecutor = (): RunEffectExecutor => createRunExecutor({
     workflow,
     runId: RUN_ID,
     journal,
@@ -301,6 +309,7 @@ function setup(
     ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
     ...(options.onIntegrationWait === undefined ? {} : { onIntegrationWait: options.onIntegrationWait }),
   })
+  let executor = makeExecutor()
 
   const harnesses = new Set<string>([workflow.defaults.harness])
   for (const node of workflow.nodes) if (node.harness) harnesses.add(node.harness)
@@ -321,7 +330,12 @@ function setup(
     lanes,
     workflow,
     journal,
-    executor,
+    get executor() {
+      return executor
+    },
+    restart() {
+      executor = makeExecutor()
+    },
     pools,
     adapters,
     notifications,
@@ -1212,15 +1226,212 @@ describe('the git verbs', () => {
     await expect(rig.invoke('p2', 'git_merge')).rejects.toThrow(/wave 1 merged, but gate "unit" failed/)
   })
 
-  it('runs no wave gate when phases already ran the full command', async () => {
+  it('runs no wave gate when phases already ran the full command and wave_gates is off', async () => {
     const rig = setup(() =>
-      WorkflowSchema.parse({ ...scopedPeers('true')(), defaults: { ...twoPeers().defaults, gate_scope: 'full' } }),
+      WorkflowSchema.parse({
+        ...scopedPeers('true')(),
+        defaults: { ...twoPeers().defaults, gate_scope: 'full', wave_gates: 'off' },
+      }),
     )
     await work(rig, 'p1', 0)
     await work(rig, 'p2', 1)
     await rig.invoke('p1', 'git_merge')
     await rig.invoke('p2', 'git_merge')
     expect(rig.journal.events(RUN_ID).some((event) => event.type === 'wave_gate_result')).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // Wave completion across a restart, and waves built out of order
+  // -------------------------------------------------------------------------
+
+  const builtWaves = (rig: Rig): number[] =>
+    rig.journal
+      .events(RUN_ID)
+      .filter((event) => event.type === 'wave_built')
+      .map((event) => (event.payload as { wave: number }).wave)
+
+  const markDone = (rig: Rig, nodeId: string): void => {
+    rig.journal.append({ runId: RUN_ID, nodeId, type: 'node_status', payload: { status: 'done' } })
+  }
+
+  it('builds a wave whose phases merged on both sides of a restart, exactly once', async () => {
+    // The observed run: some phases of a wave reached `git_merge` before the
+    // job restarted and the rest after. Arrivals were counted in memory, so
+    // after the restart no phase was ever last and the wave was never built.
+    const rig = setup(twoPeers)
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    await rig.invoke('p1', 'git_merge')
+    markDone(rig, 'p1')
+
+    rig.restart()
+    await rig.invoke('p2', 'git_merge')
+
+    const wave1 = waveBranch(rig.workflow, 1)
+    expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p1'), wave1)).toBe(true)
+    expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p2'), wave1)).toBe(true)
+    expect(builtWaves(rig)).toEqual([1])
+  })
+
+  /** p1 and p2 in wave 1, p3 on p1 alone in wave 2. */
+  const ragged = (): Workflow =>
+    WorkflowSchema.parse({
+      ...twoPeers(),
+      id: 'ragged',
+      nodes: [
+        ...twoPeers().nodes,
+        {
+          id: 'p3',
+          name: 'Three',
+          prompt_ref: 'plan.md#3',
+          depends_on: [{ node: 'p1', artifact: 'the thing p1 built' }],
+        },
+      ],
+    })
+
+  it('builds a wave the run never built before building the wave on top of it', async () => {
+    // A run damaged before this fix: wave 1's phases are all done, and wave 1
+    // does not exist. The next wave's build used to run `checkout -B wave-2
+    // wave-1` and fail on git's exit 128, every retry.
+    const rig = setup(twoNodes)
+    await work(rig, 'p1', 0)
+    markDone(rig, 'p1')
+    rig.restart()
+    await work(rig, 'p2', 1)
+    await rig.invoke('p2', 'git_merge')
+
+    expect(builtWaves(rig)).toEqual([1, 2])
+    expect(isAncestor(rig.repo, waveBranch(rig.workflow, 1), waveBranch(rig.workflow, 2))).toBe(true)
+    expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p1'), waveBranch(rig.workflow, 2))).toBe(true)
+  })
+
+  it('defers a wave that completes before the wave under it, and builds both once that one does', async () => {
+    // A wave-2 phase depends on *some* wave-1 phase, so it can finish while a
+    // sibling of its dependency is still running.
+    const rig = setup(ragged)
+    await work(rig, 'p1', 0)
+    await rig.invoke('p1', 'git_merge')
+    await work(rig, 'p3', 2)
+
+    await expect(rig.invoke('p3', 'git_merge')).resolves.toEqual({})
+    expect(hasBranch(rig.repo, waveBranch(rig.workflow, 2))).toBe(false)
+    const deferred = rig.journal.events(RUN_ID).filter((event) => event.type === 'wave_deferred')
+    expect(deferred.map((event) => ({ node: event.nodeId, ...event.payload }))).toEqual([
+      { node: 'p3', wave: 2, missing: 1 },
+    ])
+
+    await work(rig, 'p2', 1)
+    await rig.invoke('p2', 'git_merge')
+    expect(builtWaves(rig)).toEqual([1, 2])
+    expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p3'), waveBranch(rig.workflow, 2))).toBe(true)
+  })
+
+  it('names a missing wave rather than failing on git exit 128', async () => {
+    const rig = setup(twoNodes)
+    await expect(rig.integrator.mergeWave(2, ['p2'])).rejects.toThrow(
+      `wave 1 was never built: ${waveBranch(rig.workflow, 1)} does not exist`,
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // defaults.wave_gates: the merged tree is checked
+  // -------------------------------------------------------------------------
+
+  /** `twoNodes` with one full-only gate on each phase, counted. */
+  const countedChain =
+    (counter: string, waveGates?: 'off' | 'final' | 'every') => (): Workflow =>
+      WorkflowSchema.parse({
+        ...twoNodes(),
+        defaults: {
+          ...twoNodes().defaults,
+          gate_scope: 'full',
+          ...(waveGates === undefined ? {} : { wave_gates: waveGates }),
+        },
+        gates: { unit: { cmd: renderGate({ append: { path: counter, line: 'full' } }) } },
+        nodes: twoNodes().nodes.map((node) => ({ ...node, gates: ['unit'] })),
+      })
+
+  const counterFile = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-wave-gate-'))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    return join(dir, 'ran')
+  }
+
+  const ranCount = (counter: string): number =>
+    existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n').length : 0
+
+  const mergeChain = async (rig: Rig): Promise<void> => {
+    await work(rig, 'p1', 0)
+    await rig.invoke('p1', 'git_merge')
+    await work(rig, 'p2', 1)
+    await rig.invoke('p2', 'git_merge')
+  }
+
+  it('runs the plan’s gates in full on the final wave by default', async () => {
+    // Every phase green on its own branch was the whole check: a signal sender
+    // and its sibling's receiver disagreed, and 22 tests failed on a merged
+    // tree no gate ever ran on.
+    const counter = counterFile()
+    const rig = setup(countedChain(counter))
+    await mergeChain(rig)
+
+    expect(ranCount(counter)).toBe(1)
+    const rows = rig.journal.events(RUN_ID).filter((event) => event.type === 'wave_gate_result')
+    expect(rows.map((row) => ({ node: row.nodeId, wave: (row.payload as { wave: number }).wave }))).toEqual([
+      { node: 'p2', wave: 2 },
+    ])
+  })
+
+  it('fails the final wave when the merged tree is red, before the plan PR', async () => {
+    const rig = setup(() =>
+      WorkflowSchema.parse({
+        ...twoNodes(),
+        defaults: { ...twoNodes().defaults, gate_scope: 'full' },
+        gates: { unit: { cmd: renderGate({ exit: 1 }) } },
+        nodes: twoNodes().nodes.map((node) => ({ ...node, gates: ['unit'] })),
+      }),
+    )
+    await work(rig, 'p1', 0)
+    await rig.invoke('p1', 'git_merge')
+    await work(rig, 'p2', 1)
+    await expect(rig.invoke('p2', 'git_merge')).rejects.toThrow(/wave 2 merged, but gate "unit" failed/)
+    expect(builtWaves(rig)).toEqual([1])
+  })
+
+  it('runs them on every wave under wave_gates: every, and on none under off', async () => {
+    const every = counterFile()
+    await mergeChain(setup(countedChain(every, 'every')))
+    expect(ranCount(every)).toBe(2)
+
+    const off = counterFile()
+    await mergeChain(setup(countedChain(off, 'off')))
+    expect(ranCount(off)).toBe(0)
+  })
+
+  it('runs a wave’s gates in full when its merge needed a conflict resolution', async () => {
+    const counter = counterFile()
+    const conflicting = (): Workflow =>
+      WorkflowSchema.parse({
+        ...ragged(),
+        defaults: { ...twoPeers().defaults, gate_scope: 'full' },
+        gates: { unit: { cmd: renderGate({ append: { path: counter, line: 'full' } }) } },
+        nodes: ragged().nodes.map((node) => ({ ...node, gates: ['unit'] })),
+      })
+    const rig = setup(conflicting, {
+      fix: async (cwd) => {
+        writeFileSync(join(cwd, 'shared.txt'), 'both\n')
+      },
+    })
+    for (const [nodeId, index] of [['p1', 0], ['p2', 1]] as const) {
+      await work(rig, nodeId, index)
+      const lane = rig.lanes[index] as ExecutorLane
+      writeFileSync(join(lane.path, 'shared.txt'), `${nodeId}\n`)
+      g(lane.path, 'add', '--all')
+      g(lane.path, 'commit', '-m', `${nodeId} shared`)
+      await rig.invoke(nodeId, 'git_merge')
+    }
+    // Wave 1 is not the final wave (p3 is), so only the conflict ran it.
+    expect(ranCount(counter)).toBe(1)
   })
 
   it('produces the expected ancestry, and degrades cleanly with no gh', async () => {

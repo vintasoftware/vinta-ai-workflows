@@ -26,7 +26,7 @@
  */
 import { z } from 'zod'
 import type { HarnessCapabilities } from '../harness/adapter.ts'
-import type { NodeStatus, RunStatus } from '../journal/events.ts'
+import type { NodeStatus, OperatorDelivery, RunStatus } from '../journal/events.ts'
 import { AgentAnswersSchema, AgentAskSchema } from '../questions/shape.ts'
 import { WorkflowSchema } from '../types.ts'
 import {
@@ -57,6 +57,8 @@ const RUN_STATUSES = ['running', 'done', 'failed', 'paused', 'cancelled', 'inter
 
 export type _NodeStatusCovered = Covers<NodeStatus, (typeof NODE_STATUSES)[number]>
 export type _RunStatusCovered = Covers<RunStatus, (typeof RUN_STATUSES)[number]>
+const OPERATOR_DELIVERIES = ['sent', 'queued', 'delivered', 'held', 'ignored'] as const satisfies readonly OperatorDelivery[]
+export type _OperatorDeliveryCovered = Covers<OperatorDelivery, (typeof OPERATOR_DELIVERIES)[number]>
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -175,6 +177,16 @@ export const StartRunResponseSchema = z.strictObject({ runId: z.string() })
 // ---------------------------------------------------------------------------
 
 export const OkResponseSchema = z.strictObject({ ok: z.literal(true) })
+
+/**
+ * What a §9 node operation answers with. `delivery` is what the scheduler
+ * journalled — `ignored` when the node had nothing for the operation to act
+ * on, which an `ok` alone used to hide. Absent for a host that does not say.
+ */
+export const OperationResponseSchema = z.strictObject({
+  ok: z.literal(true),
+  delivery: z.enum(OPERATOR_DELIVERIES).optional(),
+})
 
 export const AgentLeaseGrantSchema = z.strictObject({
   leaseId: z.string().min(1),

@@ -1650,6 +1650,10 @@ describe('vinta-ai-maestro run, composed', () => {
     const dir = sqliteRepo()
     const path = writeJson(dir, 'workflow.json', {
       ...assemblyWorkflow([node('a'), node('b', ['a'])]),
+      // These two gates are a probe of the lane's database, not a suite: `seed`
+      // leaves the row `check` refuses. Run back to back on the merged tree,
+      // as `wave_gates: final` would, the probe fails by design.
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'phase', wave_gates: 'off' },
       project: {
         migrate_cmd: 'node scripts/migrate.mjs',
         databases: {

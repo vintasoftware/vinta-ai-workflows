@@ -146,7 +146,9 @@ function showRun(
   const nodes = journal.nodes(runId)
   const asking = new Set(journal.pendingQuestions(runId).map((question) => question.nodeId))
   const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, string | null>()
+  const held = state === 'running' ? journal.heldNodes(runId) : new Set<string>()
   const waitNote = (nodeId: string): string => {
+    if (held.has(nodeId)) return ' — paused by operator'
     if (!waiting.has(nodeId)) return ''
     const holder = waiting.get(nodeId)
     return ` — waiting for the integration worktree${holder === null || holder === undefined ? '' : ` (held by ${holder})`}`
@@ -169,6 +171,7 @@ function showRun(
           asking: asking.has(node.node_id),
           waitingOn: waiting.has(node.node_id) ? 'integration_worktree' : null,
           heldBy: waiting.get(node.node_id) ?? null,
+          pausedByOperator: held.has(node.node_id),
         })),
       }),
     )

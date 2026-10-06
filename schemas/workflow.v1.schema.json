@@ -393,6 +393,16 @@
             "full"
           ]
         },
+        "wave_gates": {
+          "default": "final",
+          "description": "When the phases’ gates run in full on a merged wave, in the integration worktree. Each phase passes its gates on its own branch, and two parallel phases can each be green and disagree with each other — a sender and a receiver of one signal, say — which only a merged tree shows. `final` — the default — runs every gate of the plan once on the last wave before the plan PR opens, and the wave’s phases’ gates on any wave whose merge needed a conflict resolution. `every` runs the wave’s phases’ gates on every wave as well, which costs one full suite per wave and catches a disagreement at the wave that introduced it. `off` runs none of these. Under `gate_scope: scoped` the full form of a narrowed gate still runs on each wave whatever this says: that is where the suite the phases skipped is paid back.",
+          "type": "string",
+          "enum": [
+            "off",
+            "final",
+            "every"
+          ]
+        },
         "chores": {
           "default": [],
           "description": "The chores every phase runs unless it names its own. Most chores are run-wide — a comment pass, a changelog entry — and repeating them on every node is how one phase ends up quietly missing one.",
