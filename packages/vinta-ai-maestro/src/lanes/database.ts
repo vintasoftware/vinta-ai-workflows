@@ -98,6 +98,35 @@ const sq = (value: string, platform?: Platform): string => shellQuote(value, pla
 const dbSuffix = (laneName: string): string => laneName.replaceAll('-', '_')
 
 /**
+ * The `-h`, `-p` and `-U` a `createdb` / `dropdb` needs to reach the server
+ * `server_url` names, or nothing when the URL names nothing.
+ *
+ * The client tools read none of their connection settings from the URL the
+ * application reads, and without these they use their own defaults — the
+ * local socket, port 5432, the current user — which is a different server
+ * from the one `DATABASE_URL` points at the moment the project's Postgres is
+ * a container with a published port. Every template setup then failed
+ * against a server that was up, reachable and running the project's data.
+ *
+ * The password is deliberately not here: it would put a credential on a
+ * command line the lane summary records. `PGPASSWORD` in the daemon's
+ * environment, or `~/.pgpass`, is how the tools already take one.
+ */
+export function serverFlags(serverUrl: string, platform?: Platform): string {
+  let url: URL
+  try {
+    url = new URL(serverUrl)
+  } catch {
+    return ''
+  }
+  const flags: string[] = []
+  if (url.hostname !== '') flags.push('-h', sq(url.hostname, platform))
+  if (url.port !== '') flags.push('-p', sq(url.port, platform))
+  if (url.username !== '') flags.push('-U', sq(decodeURIComponent(url.username), platform))
+  return flags.length === 0 ? '' : `${flags.join(' ')} `
+}
+
+/**
  * Where one role's template file lives.
  *
  * The repo-relative `spec.path` is flattened into a single filename rather than
@@ -138,11 +167,12 @@ export function planTemplate(
   if (spec.delivery === 'compose') return null
 
   const name = `${spec.name}_wt_template`
+  const server = serverFlags(spec.serverUrl, platform)
   // `&&` means the same thing in both shells; only the quoting differs.
   return {
     role,
     name,
-    setupCmd: `dropdb --if-exists ${sq(name, platform)} && createdb ${sq(name, platform)}`,
+    setupCmd: `dropdb ${server}--if-exists ${sq(name, platform)} && createdb ${server}${sq(name, platform)}`,
     env: { [spec.connectionUrlVar]: `${spec.serverUrl}/${name}` },
   }
 }
@@ -192,6 +222,7 @@ export function planDatabase(
 
   const template = `${spec.name}_wt_template`
   const forkedName = `${spec.name}_wt_${dbSuffix(ctx.laneName)}`
+  const server = serverFlags(spec.serverUrl, platform)
   return {
     role,
     engine: 'postgres',
@@ -200,9 +231,9 @@ export function planDatabase(
     connectionUrlVar: spec.connectionUrlVar,
     // application_name makes a runaway lane greppable in pg_stat_activity.
     connectionUrl: `${spec.serverUrl}/${forkedName}?application_name=wt-${ctx.laneName}`,
-    cloneCmd: `createdb -T ${sq(template, platform)} ${sq(forkedName, platform)}`,
+    cloneCmd: `createdb ${server}-T ${sq(template, platform)} ${sq(forkedName, platform)}`,
     resetCmd:
-      `dropdb --if-exists ${sq(forkedName, platform)} && ` +
-      `createdb -T ${sq(template, platform)} ${sq(forkedName, platform)}`,
+      `dropdb ${server}--if-exists ${sq(forkedName, platform)} && ` +
+      `createdb ${server}-T ${sq(template, platform)} ${sq(forkedName, platform)}`,
   }
 }

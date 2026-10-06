@@ -575,6 +575,7 @@ function renderImplementer(materials: Materials): string {
     `Your branch is \`${materials.branch}\`, cut from \`${materials.baseBranch}\` — derived from`,
     "this phase's dependencies, not from plan order. Commit straight to it.",
     ...commandBlock(materials),
+    ...composeDatabaseBlock(materials),
     ...gateBlock(materials),
     ...leaseBlock(materials),
     ...planLevel(materials, [
@@ -906,6 +907,42 @@ function commandBlock(materials: Continuation): string[] {
     'only work inside a container, with a specific environment, or against this',
     'lane’s own database, and the bare tool call that looks equivalent is not.',
     ...lines,
+  ]
+}
+
+/**
+ * Where a compose-delivered database is reachable from, and from where it is
+ * not.
+ *
+ * `delivery: compose` boots the lane its own server inside its own compose
+ * project, and `server_url` names that server as the compose network sees it
+ * — `postgres://db:5432`. The lane's `DATABASE_URL` is built from it, so an
+ * agent that runs `pytest` on the host reads a URL whose host resolves only
+ * inside the containers, and debugs a connection refusal that is not a bug.
+ * The project's commands — a `docker compose run …` line — are where the
+ * suite does resolve it, and so is the gate verb, which runs them.
+ */
+function composeDatabaseBlock(materials: Continuation): string[] {
+  const databases = materials.workflow.project?.databases
+  if (databases === undefined) return []
+  const composed = (['dev', 'test'] as const).flatMap((role) => {
+    const database = databases[role]
+    return database?.engine === 'postgres' && database.delivery === 'compose'
+      ? [`- \`${database.connection_url_var}\` (${role})`]
+      : []
+  })
+  if (composed.length === 0) return []
+
+  return [
+    '',
+    '## This lane’s database runs inside its own compose stack',
+    'The connection string in each of these variables names the server as the',
+    'compose network sees it, and it resolves only from inside that network:',
+    ...composed,
+    'A test runner started bare on the host cannot reach it, and a connection',
+    'refusal from one is not a defect in your code. Run the suite through the',
+    'project’s commands above, or through the gate verb, which runs them where the',
+    'database is reachable. Do not rewrite the variable to point somewhere else.',
   ]
 }
 

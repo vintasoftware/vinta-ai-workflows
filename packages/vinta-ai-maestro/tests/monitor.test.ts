@@ -235,6 +235,24 @@ describe('the conversation', () => {
     return { adapter, tasks }
   }
 
+  it('thinks with the model the run declares now, not the one it was built with', async () => {
+    // Built once at job start; an amendment to the crew's models moved the
+    // snapshot and not this, until a pause and resume rebuilt it.
+    const workflow = workflowOf()
+    const journal = journalWith(workflow)
+    const { adapter, tasks } = recorder()
+    let declared = 'dear'
+    const monitor = new Monitor({ adapter, model: 'dear', cwd: '/repo', modelFor: () => declared })
+    const digest = runDigest(journal, RUN, workflow) as NonNullable<ReturnType<typeof runDigest>>
+
+    await monitor.ask(digest, 'first')
+    declared = 'dearer'
+    await monitor.ask(digest, 'second')
+
+    expect(tasks.map((task) => task.model)).toEqual(['dear', 'dearer'])
+    expect(monitor.model).toBe('dearer')
+  })
+
   it('answers in the agent’s own words', async () => {
     const workflow = workflowOf()
     const journal = journalWith(workflow)

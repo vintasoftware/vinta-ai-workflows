@@ -14,9 +14,9 @@
  * changed is applied to the stored file. Untouched fields stay as the file had
  * them — absent where it left them absent — whatever the editor displayed.
  */
-import type { Workflow } from '../types.ts'
+import { WorkflowSchema, type Workflow } from '../types.ts'
 import type { ProjectConfig } from './project-config.ts'
-import { resolveWorkflow } from './resolve.ts'
+import { resolveDocument, resolveWorkflow } from './resolve.ts'
 
 type Json = Record<string, unknown>
 type Segment = string | { readonly id: string }
@@ -31,14 +31,34 @@ const WHOLE_ENTRY_MAPS = ['resources', 'chores', 'crew', 'pipelines']
 const WHOLE_ENTRY_PROJECT_MAPS = ['databases', 'services']
 
 export function ownDocument(posted: Workflow, stored: unknown, config: ProjectConfig | null): unknown {
-  const base = resolveWorkflow(stored, config)
-  // A stored file that does not resolve has no baseline to diff against, and
-  // the posted document is the only description of the plan there is.
-  if (!base.ok || !isObject(stored)) return posted
+  if (!isObject(stored)) return posted
+  const base = baseline(stored, config)
+  // A stored file that does not even take the schema's shape has no baseline
+  // to diff against, and the posted document is the only description of the
+  // plan there is.
+  if (base === null) return posted
 
   const own = structuredClone(stored)
-  apply(own, base.workflow as unknown as Json, diff(base.workflow, posted))
+  apply(own, base as unknown as Json, diff(base, posted))
   return own
+}
+
+/**
+ * What the editor was shown for this file: the resolved document, parsed.
+ *
+ * The full parse first. When that fails on a cross-reference — a chore the
+ * project no longer declares, a gate requiring a pool that was renamed — the
+ * document still has a shape, and the shape is enough to diff against. It
+ * used to be all or nothing, and "nothing" meant writing the posted document
+ * whole: every default made explicit, every project value copied in, a
+ * hundred-line diff over a committed file for a one-field edit, whenever the
+ * file happened to be invalid at the moment it was saved.
+ */
+function baseline(stored: Json, config: ProjectConfig | null): Workflow | null {
+  const full = resolveWorkflow(stored, config)
+  if (full.ok) return full.workflow
+  const shaped = WorkflowSchema.safeParse(resolveDocument(stored, config))
+  return shaped.success ? shaped.data : null
 }
 
 interface Change {

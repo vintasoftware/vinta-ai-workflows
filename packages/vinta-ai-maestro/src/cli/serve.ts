@@ -552,6 +552,15 @@ export function monitorFactory(
       // never writes, so it runs at `auto` rather than refusing to start.
       adapter: new ClaudeCodeAdapter({ permission: permission === 'judged' ? 'auto' : permission }),
       model: monitorModel(workflow),
+      // Off the snapshot as it is *now*, every question: an amendment to the
+      // crew's models reaches the monitor without a pause and resume.
+      modelFor: () => {
+        try {
+          return monitorModel(journal.readWorkflow(runId))
+        } catch {
+          return monitorModel(workflow)
+        }
+      },
       fallbacks: workflow.defaults.model_fallbacks,
       cwd: repoPath,
       // The conversation is written here, so it survives the tab it was had in.

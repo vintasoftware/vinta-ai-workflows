@@ -418,6 +418,16 @@ export interface MonitorOptions {
   /** The dearest model on the roster: this is the reasoning, not the typing. */
   readonly model: string
   /**
+   * The model as the run has it *now*, read on every question.
+   *
+   * A monitor is built once, at job start, from the snapshot as it then was;
+   * an amendment that changes the crew's models — the thing an operator does
+   * when a model is out of credits — moved the snapshot and not this. The
+   * monitor kept thinking with the old model until a pause and resume rebuilt
+   * it. Absent, `model` stands for the whole run, as it did before.
+   */
+  readonly modelFor?: () => string
+  /**
    * `defaults.model_fallbacks`. The dearest model is the likeliest to be the
    * one sold as scarce credits, and a monitor that went unavailable the moment
    * they ran out would be gone exactly when a stalled run needs explaining.
@@ -450,6 +460,8 @@ export class Monitor {
   readonly #options: MonitorOptions
   /** The model it is on now: `options.model`, until that runs out of quota. */
   #model: string
+  /** The model the run last declared, so a declaration that moved is told apart from a fallback. */
+  #declared: string
 
   // A field and an assignment rather than the parameter property its neighbours
   // use. Both are fine for the shipped binary, whose shebang asks for
@@ -459,6 +471,19 @@ export class Monitor {
   constructor(options: MonitorOptions) {
     this.#options = options
     this.#model = options.model
+    this.#declared = options.model
+  }
+
+  /**
+   * Takes a re-declared model before a question. A fallback the quota forced
+   * is kept across questions, as before; what moves the monitor is the
+   * *declaration* changing underneath it — an amendment.
+   */
+  #refresh(): void {
+    const declared = this.#options.modelFor?.() ?? this.#options.model
+    if (declared === this.#declared) return
+    this.#declared = declared
+    this.#model = declared
   }
 
   /** A spawn down the fallback chain; the model it landed on is kept for the next one. */
@@ -479,6 +504,7 @@ export class Monitor {
   }
 
   async ask(digest: RunDigest, question: string): Promise<string> {
+    this.#refresh()
     const cold = this.#session === null
     const prompt = cold
       ? `${brief(digest)}\n\n--- the operator asks ---\n${question}`
