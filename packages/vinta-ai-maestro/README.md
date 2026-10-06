@@ -99,6 +99,8 @@ Every command runs against a project checkout — your project, not this one. `-
 | `node <context\|redirect\|pause\|abort\|retry\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, or `ignored`, which exits 1). |
 | `workflow <run-id>` | Prints the run's workflow as it stands now, every amendment applied. |
 | `amend <run-id> <workflow.json>` | Applies an edited workflow to a live run (§9's amend: refused while a phase it would move is running). |
+| `land <run-id> [--close]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base; `--close` closes those with a comment. |
+| `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch after the run into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Stops at a conflict, leaving that branch as it was. |
 | `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. A run whose job is still running is kept. |
@@ -109,6 +111,23 @@ Every command runs against a project checkout — your project, not this one. `-
 There are also `judge-hook` and `guard-hook`, which are internal: they are the hooks `--permission judged` and [the gate guard](#the-gate-guard) install, and claude-code runs them, not you.
 
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
+
+### After the run
+
+- **Land it with one PR.** Merge the plan PR (the final wave branch into your
+  base branch) with a merge commit, and nothing else; every phase and
+  integration PR says it is a review unit. `vinta-ai-maestro land <run-id>`
+  shows the state of all of them, and `--close` closes the ones whose work has
+  landed.
+- **A fix after the run** goes on the phase branch, so its PR is right; then
+  `vinta-ai-maestro propagate <run-id> <phase>` carries it into the
+  integration and wave branches, the plan PR's included.
+- **A `done` run stops its compose stacks**, keeping their volumes, and prints
+  how to remove the lanes and volumes when you are done with them. `status`
+  and `doctor` list what finished runs still have running or on disk.
+- **Crew substitution** is capped by `defaults.substitution` (default
+  `up_one_tier`): a warm session never moves a phase up a tier, and `status`,
+  the run view and the post-mortem show every phase that ran above its plan.
 
 ### The run coordinator
 

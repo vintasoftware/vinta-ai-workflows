@@ -688,6 +688,24 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Maestro: `land` and `propagate`.** `land <run-id>` says how a finished
+  run lands — the plan PR, with a merge commit, and nothing else — lists every
+  phase and integration PR with its state, and marks the ones whose work is
+  already in the base (every commit they add is a merge of commits the base
+  has, such as a GitHub "Update branch"); `--close` closes those with a
+  comment. `propagate <run-id> <phase>` carries a fix made on a phase branch
+  after the run into every `integ-*` and `wave-*` branch that contains it,
+  keeping the wave chain, and stops at a conflict with the branch untouched.
+- **Maestro: `defaults.substitution`** (`same_tier` | `up_one_tier` | `any`,
+  additive, default `up_one_tier`). A busy member's phase may go at most to
+  the next tier the roster has, and a warm session no longer moves a phase up
+  a tier unless `any`. **Behavior change:** runs that relied on warm-session
+  promotion to a higher tier now stay at the planned tier; set `any` to keep
+  it. Substitutions above plan are shown in `status`, the run view and the
+  post-mortem.
+- **Maestro: post-mortem findings** `failure_causes`, `crew_substitutions`,
+  `operations` and `cross_phase_failures`, and `wave_conflicts[].where`
+  (additive). `plan-feature` reads them.
 - **Maestro: the run coordinator.** The run's monitor becomes its
   coordinator: one agent per run that is woken when a phase fails, an attempt
   errors, maestro logs an error about itself, a phase waits 20 minutes for
@@ -744,6 +762,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Maestro: PRs say how the plan lands.** Every phase and integration PR is
+  marked as a review unit that lands through the plan PR, and the plan PR says
+  to merge it alone; it used to offer two landing paths, and a 36-PR landing
+  resolved the same conflicts several times by hand. A phase PR also names the
+  sibling phases its base leaves out, so a CI failure in their area is not
+  read as its own.
+- **Maestro: the post-mortem reports what happened.** Conflicts are read from
+  the journal, base merges included, so a run that restarted no longer
+  reports none; amendments and operator operations, failure causes, crew
+  substitutions and cross-phase failures on merged waves are recorded.
+- **Maestro: a finished run stops its compose stacks** (volumes kept) and
+  prints how to remove its lanes and volumes; `status` and `doctor` list what
+  runs that are over left running or on disk. One run left twenty containers,
+  five worktrees and a job process up a day and a half after it was done.
 - **Maestro: wave branches are built across a restart.** Wave completion was
   counted in memory, so a run that restarted with some phases of a wave merged
   before and the rest after never built that wave, and the next wave failed on

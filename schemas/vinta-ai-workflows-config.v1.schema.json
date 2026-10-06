@@ -339,7 +339,7 @@
       "additionalProperties": false,
       "properties": {
         "defaults": {
-          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `wave_gates` (`off` | `final` | `every`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`.",
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `wave_gates` (`off` | `final` | `every`), `substitution` (`same_tier` | `up_one_tier` | `any`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`.",
           "type": "object",
           "properties": {
             "harness": {
@@ -378,6 +378,15 @@
                 "scoped",
                 "full"
               ]
+            },
+            "substitution": {
+              "type": "string",
+              "enum": [
+                "same_tier",
+                "up_one_tier",
+                "any"
+              ],
+              "description": "How far above the member the plan named a phase may be moved. `up_one_tier` (the default): a busy member's phase may go to the next tier up the roster has, and a warm session never moves a phase up. `same_tier`: a peer at the same tier or wait. `any`: any tier above, warm sessions included."
             },
             "wave_gates": {
               "type": "string",
