@@ -149,7 +149,13 @@ describe('propagate', () => {
     const lanes = realpathSync(join(dir, '.vinta-ai-maestro', 'lanes'))
     g(dir, 'worktree', 'add', '-q', join(lanes, 'run-integ'), P('wave-2'))
 
-    const own = (path: string): boolean => path.startsWith(lanes)
+    // One spelling for both sides: git prints Windows paths with forward
+    // slashes, and Windows paths ignore case.
+    const spell = (path: string): string => {
+      const native = realpathSync.native(path)
+      return process.platform === 'win32' ? native.toLowerCase() : native
+    }
+    const own = (path: string): boolean => spell(path).startsWith(spell(lanes))
     expect(await propagate({ repoPath: dir, planId: 'x', nodeId: 'p1', phaseBase: 'main', ownWorktrees: own })).toMatchObject({
       kind: 'done',
     })

@@ -765,10 +765,8 @@ export class LanePool {
     return true
   }
 
-  #git(args: readonly string[]): Promise<unknown> {
-    const turn = this.#gitTurn.then(() =>
-      run('git', [...args], { cwd: this.#options.repoPath }),
-    )
+  #git(args: readonly string[], cwd: string = this.#options.repoPath): Promise<unknown> {
+    const turn = this.#gitTurn.then(() => run('git', [...args], { cwd }))
     this.#gitTurn = turn.catch(() => undefined)
     return turn
   }
@@ -980,20 +978,23 @@ export class LanePool {
     // not available here because the agent runs its own git. So: worktree
     // config, with the extension enabled first.
     //
-    // **The extension goes through `#git`, which serializes; the `--worktree`
-    // write does not need to.** `extensions.worktreeConfig` is a
-    // repository-wide key, so enabling it writes the *shared* `.git/config` —
-    // one file, whichever worktree asks — and git takes `.git/config.lock` to
-    // do it. Called per lane out of the provisioning `Promise.all`, the lanes
-    // collided on that lock: `could not lock config file …: File exists`, and
-    // the pool refused. A fresh provision never showed it, because
-    // `worktree add` goes through the same turn and staggered the lanes apart
-    // — so this was a bug only on the path that skips `worktree add`, which is
-    // `adopt`, which is every resume of a project with `hooks: false`. The
-    // second write lands in `.git/worktrees/<name>/config.worktree`, a
-    // different file per lane, and stays parallel.
+    // **Both go through `#git`, which serializes.** `extensions.worktreeConfig`
+    // is a repository-wide key, so enabling it writes the *shared*
+    // `.git/config` — one file, whichever worktree asks — and git takes
+    // `.git/config.lock` to do it. Called per lane out of the provisioning
+    // `Promise.all`, the lanes collided on that lock: `could not lock config
+    // file …: File exists`, and the pool refused. That was a bug only on the
+    // path that skips `worktree add` (which goes through the same turn and
+    // staggers the lanes), which is `adopt`, which is every resume of a project
+    // with `hooks: false`.
+    //
+    // The `--worktree` write lands in a file of its own per lane, but git
+    // *reads* the shared `.git/config` to make it. On Windows a read that
+    // meets another lane's write — git replaces the file by renaming its lock
+    // over it — fails outright: `unable to access '.git/config': Permission
+    // denied`, seen on CI. So it takes the same turn.
     await this.#git(['config', 'extensions.worktreeConfig', 'true'])
-    await gitIn(lanePath, ['config', '--worktree', 'core.hooksPath', empty])
+    await this.#git(['config', '--worktree', 'core.hooksPath', empty], lanePath)
   }
 
   /**

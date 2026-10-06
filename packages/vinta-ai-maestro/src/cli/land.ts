@@ -209,11 +209,16 @@ export async function propagateCommand(argv: readonly string[], io: Io): Promise
   }
 }
 
-/** A path as git reports a worktree: symlinks resolved, so a temp directory compares equal. */
+/**
+ * A path in one spelling: symlinks resolved (a temp directory is often one),
+ * separators native, and case folded on Windows, whose paths ignore it.
+ */
 function real(path: string): string {
+  let resolved: string
   try {
-    return realpathSync(path)
+    resolved = realpathSync.native(path)
   } catch {
-    return resolve(path)
+    resolved = resolve(path)
   }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }

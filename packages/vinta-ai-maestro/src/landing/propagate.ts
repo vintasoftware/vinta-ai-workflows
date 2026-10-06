@@ -153,8 +153,9 @@ async function worktreeBranches(repoPath: string): Promise<Map<string, string>> 
   for (const line of out.split('\n')) {
     if (line.startsWith('worktree ')) path = line.slice('worktree '.length)
     if (line.startsWith('branch refs/heads/') && path !== null) {
-      // The main checkout is never released: it is the operator's.
-      if (resolve(path) !== resolve(repoPath)) held.set(line.slice('branch refs/heads/'.length), path)
+      // The main checkout is never released: it is the operator's. Resolved,
+      // because git prints Windows paths with forward slashes.
+      if (resolve(path) !== resolve(repoPath)) held.set(line.slice('branch refs/heads/'.length), resolve(path))
     }
   }
   return held
