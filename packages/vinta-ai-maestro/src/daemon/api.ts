@@ -174,6 +174,30 @@ const LogQuerySchema = z.object({
   q: z.string().max(200).optional(),
 })
 
+/**
+ * Everything an agent's token may reach (§11). These are what `with`, `gate`
+ * and the judge and guard hooks call, and nothing else a lane runs needs the
+ * API for. The list is the whole of the agent's authority: an agent that could
+ * reach the §9 operations, `/amend`, `/exec`, `/pause`, `/stop` or the editor
+ * would be steering its own run as the operator.
+ *
+ * Matched against the path Hono routes on, so a path this admits is one only
+ * the handlers named here can answer: `[^/]+` holds because the router keeps
+ * an encoded `/` encoded.
+ */
+const AGENT_ROUTES: readonly { readonly method: string; readonly path: RegExp }[] = [
+  { method: 'POST', path: /^\/api\/runs\/[^/]+\/leases$/ },
+  { method: 'PUT', path: /^\/api\/runs\/[^/]+\/leases\/[^/]+$/ },
+  { method: 'DELETE', path: /^\/api\/runs\/[^/]+\/leases\/[^/]+$/ },
+  { method: 'POST', path: /^\/api\/runs\/[^/]+\/gates$/ },
+  { method: 'POST', path: /^\/api\/runs\/[^/]+\/permission$/ },
+  { method: 'POST', path: /^\/api\/runs\/[^/]+\/guard$/ },
+]
+
+export function agentMayReach(method: string, path: string): boolean {
+  return AGENT_ROUTES.some((route) => route.method === method && route.path.test(path))
+}
+
 export interface ApiOptions {
   readonly journal: Journal
   readonly token: string
@@ -185,6 +209,13 @@ export interface ApiOptions {
    * Absent for a host with no coordinator.
    */
   readonly coordinatorToken?: string
+  /**
+   * The token a run's lanes are handed (`VINTA_AI_MAESTRO_TOKEN`). It reaches
+   * only `AGENT_ROUTES` — the agent's own leases and gates, and the two hooks
+   * that ask on its behalf — and is answered `403 agent_forbidden` everywhere
+   * else. Absent for a host that hands its lanes no token of their own.
+   */
+  readonly agentToken?: string
   /** Live view of the registry — a run registered after start is reachable. */
   readonly runs: ReadonlyMap<string, DaemonRun>
   /** Where the built UI lives. Defaults to this package's `dist/ui`. */
@@ -341,11 +372,19 @@ export function createApi(options: ApiOptions): Hono {
     else log.debug('api.request', fields)
   })
 
-  /** §11: every request, without exception, including the ones that 404. */
+  /**
+   * §11: every request, without exception, including the ones that 404.
+   *
+   * The agent's token is held to its routes here, before anything is routed,
+   * rather than left to each handler to remember. Its routes read no actor, so
+   * it is not given one.
+   */
   app.use('*', async (c, next) => {
     const presented = presentedToken(c.req.header('authorization'), new URL(c.req.url))
     if (options.coordinatorToken !== undefined && tokenMatches(options.coordinatorToken, presented)) {
       actors.set(c.req.raw, 'coordinator')
+    } else if (options.agentToken !== undefined && tokenMatches(options.agentToken, presented)) {
+      if (!agentMayReach(c.req.method, c.req.path)) return fail(c, 403, 'agent_forbidden')
     } else if (!tokenMatches(options.token, presented)) {
       return fail(c, 401, 'unauthorized')
     }
