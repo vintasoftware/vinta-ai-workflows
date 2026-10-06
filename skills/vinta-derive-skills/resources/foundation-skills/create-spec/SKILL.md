@@ -17,6 +17,22 @@ Ask below in batched, numbered chunks. Skip group only when prompt **explicitly*
 
 For finite-set answers, **list options**. Provide one-sentence **why** so they understand implications.
 
+### Pick the interview surface first — browser or chat
+
+When `ai-tools/skills/interview-ui/SKILL.md` exists in the project, ask once before the first batch, via `AskUserQuestion`: *"Where do you want to make the spec decisions?"* — `In the browser (one decision per screen, with diagrams)` or `Here in chat`. Browser needs Node ≥ 18 and a browser on this machine; when in doubt, say so and default to chat. When the skill is absent, interview in chat; don't mention the browser.
+
+**Browser surface.** Follow `ai-tools/skills/interview-ui/SKILL.md`. Everything below about *what* to ask still holds — groups A–I, the clarity loop, the read-back, the exit conditions. What changes is *how*:
+
+- Each numbered question below becomes one **decision** in a round file (`interview-round.v1`). Its `*Why:*` line is the decision's `why`. Its finite options become `input.options[]`, each with a `consequences` line saying what picking it means for the spec and the plan (a new phase, a one-way door, a dependency). Mark your recommended default. Genuinely open questions (A2, C1) are `text` inputs.
+- `context` quotes back what you already know that bears on the decision — the user's earlier answers, repo facts you found. Use a Mermaid fence for flows and state machines (groups C and D especially). Add an `explainer` doc under `docs/` whenever the options need a comparison table or a sequence diagram to be weighed.
+- Round 1 covers groups A–C. Later groups depend on the journeys and states those answers reveal, so they go in round 2 onward with that context quoted back. Never put all nine groups in one round.
+- The clarity loop is the next round: `replies[]` answers every user question from the previous `answers` file; re-ask any decision an answer could change.
+- The read-back is a `kind: "readback"` round: `summary` carries the one-paragraph decision read-back, and a single `confirm` decision carries `Looks good` / `Some corrections (I'll list)` / `More to clarify` / `Stop, rethink` with `allow_other: true`.
+- `waived` answers are explicit "not applicable" — **Decisions → Negative scope** or "n/a", never **Open questions**. `note` fields are quoted, not paraphrased.
+- In chat, say only which round is ready and at what URL. The decisions happen in the browser.
+
+**Chat surface.** Continue below as written.
+
 ### Use `AskUserQuestion` for finite-choice questions
 
 Every interview question with discrete answer set — yes/no, named option, finite enum, hypothesis-vs-known-requirement, idempotency mode, concurrency rule — **must** issue via `AskUserQuestion` tool. `AskUserQuestion` = Claude Code's name; on other harnesses use the equivalent structured question tool (OpenCode `question`, Codex `request_user_input`, Cursor `AskQuestion`, Copilot `askQuestions`, Gemini `ask_user` — see **Asking the human** in [AGENTS.md](../../../AGENTS.md)).

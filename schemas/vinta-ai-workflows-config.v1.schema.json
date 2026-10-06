@@ -238,6 +238,11 @@
           "type": "string",
           "enum": ["enabled", "disabled"]
         },
+        "interview-ui": {
+          "description": "Run decision-heavy interviews (create-spec Step 0 today) as a full-screen browser form instead of a chat exchange: one decision per screen with context, Markdown/Mermaid explainers, and per-option consequences; the in-page chat is for questions to the agent, not decisions. Copy-verbatim foundation skill (bucket A), opt-in. Ships `scripts/interview-ui.mjs` (zero-dep Node ≥ 18 localhost server + `start` / `wait` / `stop` CLI) and `resources/index.html` (the shell). Rounds and answers are JSON (`interview-round.v1` / `interview-answers.v1`) under `.vinta-ai-workflows/interviews/<slug>/`. When `enabled`, `create-spec` offers the browser surface at the start of its interview.",
+          "type": "string",
+          "enum": ["enabled", "disabled"]
+        },
         "deslop-comments": {
           "description": "Rewrite comments and doc blocks touched during the current task into Simple English — strip AI-slop vocabulary and negative framing, comment-only (no renames, no behavior change). Copy-verbatim foundation skill (bucket A), always shipped: `vinta-ai-maestro`'s `deslop` chore runs it on every phase once the review approves, and `integrate-phase` / `amend-plan` run it over the PR-context prose they write. Set `disabled` only if a project deliberately opts out of both comment passes.",
           "type": "string",

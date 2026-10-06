@@ -30,6 +30,38 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **New optional foundation skill: `interview-ui`** — run decision-heavy
+  interviews as a full-screen browser form instead of a chat exchange. One
+  decision per screen with the context the agent already knows, Markdown +
+  Mermaid (or HTML) explainers, option cards that state each option's
+  consequences, the recommended default marked, and an in-page question panel
+  for asking the agent (questions, not decisions — the agent replies in the
+  next round). Round-based and file-based, so it works the same under Claude
+  Code, Codex, Cursor, and Copilot: the agent writes
+  `.vinta-ai-workflows/interviews/<slug>/rounds/round-NN.json`, blocks on
+  `interview-ui.mjs wait`, and resumes when the browser submits
+  `answers/round-NN.json`. Source:
+  [skills/vinta-derive-skills/resources/foundation-skills/interview-ui/](skills/vinta-derive-skills/resources/foundation-skills/interview-ui/)
+  — `SKILL.md`, the zero-dependency Node ≥ 18 localhost server + CLI
+  [scripts/interview-ui.mjs](skills/vinta-derive-skills/resources/foundation-skills/interview-ui/scripts/interview-ui.mjs)
+  (`start` / `wait` / `stop` / `status` / `serve`; binds `127.0.0.1` only,
+  serves files only from the interview's `docs/`), the shell
+  [resources/index.html](skills/vinta-derive-skills/resources/foundation-skills/interview-ui/resources/index.html),
+  and a sample round under `resources/examples/`. Copied verbatim as a whole
+  directory (bucket A), opt-in via the bootstrap's **Optional foundation
+  skills** question 7.
+- **Two new JSON Schemas**:
+  [`schemas/interview-round.v1.schema.json`](schemas/interview-round.v1.schema.json)
+  (agent → browser: groups, decisions, options with `consequences` /
+  `recommended` / `tags`, inline or file explainers, `replies[]`, `readback`
+  rounds) and
+  [`schemas/interview-answers.v1.schema.json`](schemas/interview-answers.v1.schema.json)
+  (browser → agent: per-decision `answered` / `waived` / `skipped` with
+  values, free text and notes, plus `questions[]` for the agent). Inventory
+  rows added to `schemas/README.md`.
+- **Config schema field `foundation_skills.interview-ui`** (`enabled` /
+  `disabled`). Additive — no schema major bump. Emitted by the bootstrap
+  Step 0.5 YAML; existing projects can add it by hand or on the next sync.
 - **Plan review: a page for a plan before it runs, and a chat with the agent
   that wrote it.** Maestro's UI gains a **Plans** section. `vinta-ai-maestro
   review open <workflow.json>` serves it and prints a link straight to the
@@ -463,6 +495,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`create-spec` offers a browser surface for its Step 0 interview.** When
+  `ai-tools/skills/interview-ui/` exists, the skill asks once whether to make
+  decisions in the browser or in chat. In browser mode the question bank,
+  clarity loop, read-back, and exit conditions are unchanged; each question
+  becomes a decision with `why`, quoted-back `context`, options with
+  consequences, and explainer docs, written one round at a time (A–C first,
+  later groups once the journeys are known). Projects without `interview-ui`
+  see no change.
+- **Bootstrap `Optional foundation skills` group grows to eight questions**
+  (`interview-ui` is question 7; `handoff-to-client` moves to 8).
 - **`review-phase` runs the thermo-nuclear review loop.** On the skills path
   (`implement-plan`, `amend-plan`, `systematic-debugging`), each phase is now
   reviewed by `thermo-nuclear-review-loop`, the loop maestro's `review` chore
