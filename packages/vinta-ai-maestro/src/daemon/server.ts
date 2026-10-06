@@ -1,5 +1,6 @@
 /**
- * The daemon process: one HTTP listener, one WebSocket path, one token.
+ * The daemon process: one HTTP listener, one WebSocket path, the operator's
+ * token — and two narrower ones, held by the run coordinator and the agents.
  *
  * §11's four rules are enforced here rather than described:
  *
@@ -11,7 +12,9 @@
  *   a container — so it is allowed and announced. The warning names the host
  *   and never the token.
  * - **The token on every request.** Enforced by the API's own middleware for
- *   HTTP, and by `#upgrade` below for the WebSocket.
+ *   HTTP, and by `#upgrade` below for the WebSocket. Only the operator's token
+ *   opens a socket or is forwarded to a job; the coordinator's and the agents'
+ *   reach the HTTP API alone, and there only what `api.ts` lets them.
  * - **Rejected at the handshake.** An unauthenticated upgrade is answered with
  *   a plain `401` on the raw socket and the socket is destroyed — the protocol
  *   switch never happens, so there is no moment at which an unauthenticated
@@ -105,6 +108,12 @@ export interface Daemon {
    * request carrying it is the coordinator's (`coordinator/`). Never logged.
    */
   readonly coordinatorToken: string
+  /**
+   * The token a run's lanes are handed: accepted by the HTTP API only, and
+   * there only for the agent's own leases, gates and hooks (`AGENT_ROUTES` in
+   * `api.ts`). Never logged.
+   */
+  readonly agentToken: string
   /** Makes a run reachable. Runs are registered as they start. */
   register(run: DaemonRun): void
   /**
@@ -126,6 +135,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const host = options.host ?? LOOPBACK
   const token = options.token ?? createToken()
   const coordinatorToken = createToken()
+  const agentToken = createToken()
   const log = options.logger ?? nullLogger()
   const runs = new Map<string, DaemonRun>()
   // Read through a getter below, so `acceptRuns` after boot is visible to a
@@ -146,6 +156,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     journal: options.journal,
     token,
     coordinatorToken,
+    agentToken,
     runs,
     get runStarter(): RunStartPort | undefined {
       return starter
@@ -164,6 +175,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const server = createServer((req, res) => {
     // Forwarded only once the token checks: an unauthenticated request falls
     // through to the API, whose middleware answers it `401` like any other.
+    // The operator's token and no other: the request leaves carrying the job's
+    // operator token, so forwarding on an agent's would hand the agent the run.
     if (upstream !== undefined) {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? LOOPBACK}`)
       const runId = runOfPath(url.pathname)
@@ -225,6 +238,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     port: address.port,
     token,
     coordinatorToken,
+    agentToken,
     register(run: DaemonRun): void {
       runs.set(run.runId, run)
       log.info('daemon.run_registered', { run: run.runId })
@@ -280,6 +294,8 @@ function upgrade(context: UpgradeContext): void {
   const { req, socket, head, log } = context
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? LOOPBACK}`)
 
+  // The operator's token only. A socket carries PTY takeover, which types into
+  // an agent's session — not a channel the agent's own token may open.
   if (!tokenMatches(context.token, presentedToken(req.headers.authorization, url))) {
     log.warn('ws.refused', { reason: 'unauthorized' })
     return refuse(socket, 401, 'Unauthorized')

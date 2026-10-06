@@ -398,6 +398,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
 
   redactValue(daemon.token)
   redactValue(daemon.coordinatorToken)
+  redactValue(daemon.agentToken)
   coordinatorEnv = {
     [MAESTRO_URL_ENV]: daemon.url,
     [MAESTRO_TOKEN_ENV]: daemon.coordinatorToken,

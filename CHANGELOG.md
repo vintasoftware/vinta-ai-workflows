@@ -2658,6 +2658,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing produces a merge commit full of markers that passes into the wave
   branch unnoticed.
 
+### Security
+
+- **Maestro: lane agents hold a token of their own.** A run's agents used to
+  reach its API with the operator's token (`VINTA_AI_MAESTRO_TOKEN`), so an
+  agent could steer, abort, amend, `exec` in, pause or stop its own run, or
+  save a workflow from the editor, as the operator. They now get an agent
+  token that reaches only their own leases (`with`), `gate`, and the
+  permission-judge and gate-guard hooks; every other route answers
+  `403 agent_forbidden`. It does not open the WebSocket (and so no PTY
+  takeover), `ui` never forwards it to a run's job, and it is redacted from
+  the logs like the other tokens. Nothing to migrate: lanes are handed the new
+  token when a run starts or resumes.
+
 > The repository also gained `packages/vinta-ai-maestro/`, the workspace package
 > that executes these workflows. It is published as its own npm package,
 > `vinta-ai-maestro`, carrying the same version as `vinta-ai-workflows`, and is

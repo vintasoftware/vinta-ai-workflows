@@ -398,7 +398,9 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
             ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
             agentEnv: {
               [MAESTRO_URL_ENV]: daemon.url,
-              [MAESTRO_TOKEN_ENV]: daemon.token,
+              // The agents' own token, never the operator's: it reaches the lease,
+              // gate and hook routes and nothing that steers the run.
+              [MAESTRO_TOKEN_ENV]: daemon.agentToken,
               [MAESTRO_RUN_ENV]: runId,
               // The daemon's own launcher first on PATH, so the lease and gate
               // verbs the prompts name resolve from inside every lane however

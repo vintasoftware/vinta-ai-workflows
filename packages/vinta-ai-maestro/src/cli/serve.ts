@@ -360,6 +360,8 @@ export async function serveCommand(
   // From here on the token is a registered secret: a field that somehow
   // carried it is written as `<redacted>` rather than as access to the UI.
   redactValue(daemon.token)
+  redactValue(daemon.coordinatorToken)
+  redactValue(daemon.agentToken)
 
   daemon.acceptRuns(
     jobStarter({
