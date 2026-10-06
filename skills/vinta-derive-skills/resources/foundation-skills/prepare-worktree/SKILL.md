@@ -1,6 +1,6 @@
 ---
 name: prepare-worktree
-description: Provision a fully-runnable git worktree for parallel feature work so a long-running plan (or experiment) can build, test, lint, run migrations, and hit databases without disturbing the main checkout — or other parallel worktrees. Reads the active plan (when given one) plus the project's `.gitignore`, package manifests, env templates, and docker config to decide what to symlink, what to copy, what to fork (DBs, env files, compose project names, test databases, sandboxes). Use when the user says "set up a worktree for plan X", "create an isolated env for this feature", "I want to run two plans in parallel without breaking the main checkout", or when [implement-plan](../implement-plan/SKILL.md) opts in via Step 0 question (c). NOT for one-off branch switches that don't need a separate runnable copy of the app.
+description: Provision a fully-runnable git worktree for parallel feature work so a long-running plan (or experiment) can build, test, lint, run migrations, and hit databases without disturbing the main checkout — or other parallel worktrees. Reads the active plan (when given one) plus the project's `.gitignore`, package manifests, env templates, and docker config to decide what to copy (every dependency tree gets its own per-worktree copy, never a symlink), what to fork (DBs, env files, compose project names, test databases, sandboxes), and what little may be symlinked. Use when the user says "set up a worktree for plan X", "create an isolated env for this feature", "I want to run two plans in parallel without breaking the main checkout", or when [implement-plan](../implement-plan/SKILL.md) opts in via Step 0 question (c). NOT for one-off branch switches that don't need a separate runnable copy of the app.
 ---
 
 # Prepare worktree
@@ -9,8 +9,8 @@ Provision a git worktree the agent (or human) can `cd` into and immediately `lin
 
 A bare `git worktree add` is not enough. The runnable parts of any non-trivial app live in *ignored* files and dirs (`node_modules/`, `.env*`, `venv/`, `vendor/`, local SQLite DBs, `.localstack/`, `docker-compose.override.yml`, etc.). This skill walks those ignored paths and decides, per-path:
 
-- **Symlink** — when the file/dir is read-only-ish from the feature's perspective (dep install with no new deps, a frozen `.envrc`, a static fixture set).
-- **Copy** — when the feature mutates it (`node_modules/` for a `pnpm add`, `.env` for a new var, the migrations dir).
+- **Copy** — every dependency tree (`node_modules/`, `vendor/`, `venv/`, …), always, whether or not the plan adds deps. Also anything the feature mutates (`.env` for a new var, the migrations dir). Copies are copy-on-write clones where the filesystem supports them, so they cost little disk. Dependency dirs are **never** symlinked, because tools resolve real paths. A symlinked `node_modules` sends bundler / test-runner / type-checker caches, `postinstall` output and any install back into the main checkout, where they collide with other worktrees and trip the sandbox.
+- **Symlink** — only small, genuinely read-only files the feature never touches (a frozen `.envrc`, a static fixture set). Never a dependency dir.
 - **Fork** — when sharing would corrupt the main checkout's state (`db.sqlite3`, a local Postgres DB used by tests, a docker-compose project name).
 
 The output is a worktree that is the **same shape as the main checkout** from the perspective of every dev command in the project, plus a short summary file recording every fork decision so teardown is mechanical.
@@ -19,14 +19,29 @@ The output is a worktree that is the **same shape as the main checkout** from th
 
 - A plan / spec that takes hours-to-days where parallel work in the main checkout would be disruptive (a long migration, a refactor, a feature you want to experiment on while still serving customer support out of `main`).
 - Two-or-more concurrent plans where each needs its own running app + own DB state.
+- **A lane pool for one plan** — [implement-plan](../implement-plan/SKILL.md) implements independent phases concurrently and calls this skill once per lane (plus once for an integration worktree). See **Provisioning a pool** below.
 - A risky migration where the user wants the migration to run against a forked DB, then walk the diff before promoting.
-- [implement-plan](../implement-plan/SKILL.md) Step 0 (c) — when the user opts in, that orchestrator runs this skill once before phase 1, captures the resulting path, and threads it through every subagent's prompt.
+- [implement-plan](../implement-plan/SKILL.md) Step 0 (c) — when the user opts in, that orchestrator runs this skill before the first phase (once for a sequential run, once per lane plus one integration worktree for a parallel run), captures the resulting paths, and threads each lane's through its own subagent prompts.
 
 ## When NOT to use
 
 - A small branch switch with no dep churn / no DB writes — `git switch -c …` is enough.
+- Inside an [implement-plan](../implement-plan/SKILL.md) run when `.vinta-ai-workflows.yaml` sets `commands.worktree_prepare`. The conductor runs the project's own command instead, and only comes back to this skill as a fallback when that command fails.
 - The project has no ignored runnable state (rare — usually means the project is so simple a worktree adds friction with no upside).
 - The user is on a filesystem that doesn't support symlinks (Windows non-NTFS volumes, some corporate fileshares). Fall back to copy-only and warn the user up front.
+
+## Provisioning a pool (several worktrees for one plan)
+
+A caller that needs N isolated lanes invokes this skill N times — once per lane, with distinct names (`plan-<id>-lane-1`, `plan-<id>-lane-2`, …, plus `plan-<id>-integ` for merges). Nothing about the flow changes per invocation, but four things must hold across them:
+
+1. **Names are the isolation key.** Every forked DB name, compose project name, redis index, and S3 prefix already derives from `<worktree-name>` — distinct names give distinct everything. Never provision two lanes with the same name.
+2. **Answer the interview once, reuse the answers.** The caller passes the same plan and the same strategy answers to every lane. Don't re-interview per lane.
+3. **Provision lanes concurrently when the caller asks for it** — the expensive part of a lane (dependency copy or install, DB clone, summary write) shares nothing between lanes and should overlap. But **two steps must be serialized**, and skipping either corrupts something:
+   - **`git worktree add` itself.** Git rewrites `.git/worktrees/` metadata on every add, and concurrent adds against one repository clobber each other's entries. Add the worktrees one at a time, then do the per-lane work in parallel. This is forced by git, not a choice.
+   - **The DB template.** Create or refresh the template DB once, then let each lane clone from it — that clone is what makes N lanes cost N cheap copies instead of N full provisions.
+4. **Record a `reset_cmd`** for each forked DB (see the summary schema). A pooled lane gets reused for a later phase on a different base, and the caller must be able to return its DB to a fresh state without re-provisioning. A lane whose DBs have no `reset_cmd` is single-use — say so in the report so the caller re-provisions instead of reusing it.
+
+Disk is the real constraint: N lanes means N dep trees and N DB copies. Run the **Sanity checks** disk probe against `N ×` the estimate, not `1 ×`, and warn the caller before the first lane if the pool won't fit.
 
 ## Inputs (Step 0 — interview)
 
@@ -38,7 +53,7 @@ Use `AskUserQuestion` for every finite-choice question. Open prose only when the
    - `Plan-driven — point me at a plan file` → ask for path; read it in the **Plan inspection** step below.
    - `Freeform — just isolate the env, no plan to consult` → skip **Plan inspection**; default every "does the feature do X?" question to "unsure → fork to be safe".
 
-2. **Worktree name** (used as the dir name + as the suffix appended to DB names / docker project names). Default = kebab(plan's feature name) when plan-driven; else ask the user.
+2. **Worktree name** (used as the dir name + as the suffix appended to DB names / docker project names). Default = kebab(plan's feature name) when plan-driven; else ask via `AskUserQuestion`, offering kebab(current branch name) and kebab(the task the user described) as candidates (free text covers any other name).
 
 3. **Worktree root**. Default = `.claude/worktrees/<name>/` when the runtime (claude-code, codex) writes worktrees there; else `../<repo-name>-wt-<name>/` (a sibling dir of the main checkout, so relative-path tooling that walks up keeps working). Read `.vinta-ai-workflows.yaml` → `run_options.prepare-worktree.worktree_root` for a project override.
 
@@ -46,7 +61,7 @@ Use `AskUserQuestion` for every finite-choice question. Open prose only when the
 
 Read the plan once and extract (don't ask the user to repeat what's already written):
 
-- **New dependencies?** Scan the plan's **Data Model Changes**, **Phased Rollout**, and **Guiding Decisions** sections for `pnpm add`, `npm install`, `pip install`, `poetry add`, `cargo add`, `go get`, `Gemfile` edits. If yes → record `deps_change: true`. Drives the `node_modules` / `vendor/` / `venv/` decision in the **Inventory ignored runnable state** step.
+- **New dependencies?** Scan the plan's **Data Model Changes**, **Phased Rollout**, and **Guiding Decisions** sections for `pnpm add`, `npm install`, `pip install`, `poetry add`, `cargo add`, `go get`, `Gemfile` edits. If yes → record `deps_change: true`. The worktree gets its own dependency copy either way; this flag decides whether that copy is refreshed by a reinstall right away (see the **Dep dirs** sub-step).
 - **Migrations / data-model changes?** Look at the plan's **Data Model Changes** section, plus `alembic`, `manage.py makemigrations`, `prisma migrate`, `knex migrate`, `goose`, `sqlx migrate`, schema files (`.sql`, `schema.prisma`, `models.py`). If yes → record `schema_change: true`. Drives the DB fork decision in the **Database fork** step.
 - **New env vars?** Look for `process.env.<NEW>`, `os.environ['<NEW>']`, `.env.example` edits, `config.<new>` reads. If yes → record `env_change: true`. Drives the `.env` copy-vs-symlink decision in the **Inventory ignored runnable state** step.
 - **Touches test infra?** New fixtures, factories, seed scripts, a custom `pytest` plugin, a new `vitest` setup file. If yes → record `test_infra_change: true`. Drives whether the worktree gets its own per-suite scratch dir (`tmp/`, `__snapshots__/`, `playwright-report/`).
@@ -58,7 +73,7 @@ If freeform (the **Scope** step's first answer was `Freeform`): set every flag t
 
 - `git worktree list` — current worktrees + their branches. Refuse to provision a second worktree for the same branch.
 - `git status` of the main checkout — refuse to provision if main has uncommitted changes on a branch you're about to fork from, **unless** the user explicitly says "use HEAD as the worktree base" (record their answer; worktree base = `head` instead of the default `origin/<default-branch>`).
-- Disk space — `df -h .` of the worktree root's filesystem. Warn if `< 2 × du -sh node_modules/` (or equivalent for the project's primary dep dir).
+- Disk space — `df -h .` of the worktree root's filesystem. Warn if `< 2 × du -sh node_modules/` (or equivalent for the project's primary dep dir). Every worktree carries its own dependency copy. On a copy-on-write filesystem (APFS, btrfs, XFS with reflink, ReFS) a clone costs close to nothing until it diverges, but budget the full size anyway: the clone falls back to a plain copy across filesystems, and on ext4 / NTFS.
 - Filesystem symlink support — `ln -s /tmp/test-symlink /tmp/.prepare-worktree-symlink-probe && rm /tmp/.prepare-worktree-symlink-probe`. If symlinks aren't supported, flip every "symlink" decision below to "copy" and warn the user.
 
 ## Step 1 — Create the worktree
@@ -82,7 +97,7 @@ Common categories (extend per project):
 
 | Category | Typical paths | Default decision (no plan info) |
 |---|---|---|
-| Dep dirs | `node_modules/`, `vendor/`, `venv/`, `.venv/`, `target/`, `bin/`, `obj/` | Symlink (deps_change=false) / Copy + reinstall (deps_change=true) |
+| Dep dirs | `node_modules/`, `vendor/`, `venv/`, `.venv/`, `target/`, `bin/`, `obj/` | Copy (clone) or reinstall — **never symlink**. Add a reinstall when deps_change=true |
 | Build / cache | `dist/`, `build/`, `.next/`, `.turbo/`, `.cache/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/` | Skip (rebuilt on next run) |
 | Env files | `.env`, `.env.local`, `.env.development`, `.env.test`, `.envrc` | Copy (env_change=true) / Symlink (env_change=false), then mutate per the **Database fork** + **Docker / compose isolation** steps |
 | Local DBs | `db.sqlite3`, `*.sqlite`, `data/`, `pgdata/`, `.localstack/` | Fork (schema_change=true) / Symlink (schema_change=false) |
@@ -95,13 +110,29 @@ Record every decision in `.vinta-ai-workflows/worktrees/<name>.yaml` (see the **
 
 ### 2a — Dep dirs
 
-`deps_change = false` → `ln -s <main>/node_modules <worktree>/node_modules` (and same for `vendor/`, `venv/`, …). Save disk + skip `pnpm install`.
+Every worktree gets its **own** copy of every dependency dir. Never `ln -s` one back to the main checkout, even when the plan adds no deps. A symlinked dep dir looks read-only, but it is not:
 
-`deps_change = true` → copy or reinstall:
-- **Copy** (`cp -aR <main>/node_modules <worktree>/`) — fast, but only correct if the package manager doesn't keep absolute paths inside (pnpm's `node_modules/.pnpm/` stores relative symlinks → safe; some yarn PnP setups bake absolute paths → reinstall instead).
-- **Reinstall** (`pnpm install`, `npm ci`, `pip install -r requirements.txt`, `poetry install`, `cargo build`, `go mod download`) — slow but always correct.
+- Tools resolve real paths. Bundler, test-runner and type-checker caches (`node_modules/.cache/`, `node_modules/.vite/`), `postinstall` builds and native-module rebuilds follow the link and write into the main checkout.
+- Parallel worktrees then race on that one directory. A phase's install changes the dependency tree under every sibling while they run.
+- The [Filesystem sandbox](#step-55--filesystem-sandbox-os-level-write-guard) makes main read-only, so those writes fail mid-run. The failures look like flaky tooling, not like a sandbox denial.
 
-Default: **copy** for pnpm + npm + cargo + go; **reinstall** for poetry + venv + yarn PnP. Override per-project via `.vinta-ai-workflows.yaml` → `run_options.prepare-worktree.deps_strategy: copy | reinstall`.
+Pick per dep dir:
+
+- **Copy (clone)**: the default for `node_modules/` (npm, pnpm, yarn with `nodeLinker: node-modules`), Go `vendor/`, Ruby `vendor/bundle/` and Cargo `target/`. Use a copy-on-write clone so N worktrees cost about one tree on disk until they diverge. Both commands fall back to a plain copy where cloning isn't supported:
+
+  ```bash
+  # macOS (APFS clonefile)
+  cp -ac <main>/node_modules <worktree>/node_modules
+  # Linux (reflink on btrfs / XFS)
+  cp -a --reflink=auto <main>/node_modules <worktree>/node_modules
+  ```
+
+  `-a` copies symlinks *inside* the tree as links rather than following them. That is what keeps pnpm's relative-link layout (`node_modules/.pnpm/`) valid in the copy. In a pnpm / npm / yarn workspace, copy every member's `node_modules/` (`packages/*/node_modules`, `apps/*/node_modules`), not only the root's. Members' trees are relative links into the root store and only resolve when both are copied.
+- **Reinstall**: required wherever the tree stores absolute paths into the main checkout. Python virtualenvs (`venv/`, `.venv/`) put main's path in `bin/*` shebangs and `pyvenv.cfg`. yarn PnP puts it in `.pnp.cjs`. A copy of either still runs main's interpreter or resolves into main. Create it fresh inside the worktree with the project's own installer (`uv sync`, `poetry install`, `python -m venv .venv && .venv/bin/pip install -r requirements.txt`, `yarn install`). With a warm global package cache this is usually quick.
+
+`deps_change = true` → after the copy, also run the package manager's install inside the worktree (`pnpm install`, `npm install`, `bundle install`, `cargo fetch`, `go mod download`). New packages then land in the worktree's own tree. Because it is a copy, nothing reaches main.
+
+Project default: `.vinta-ai-workflows.yaml` → `skills.prepare-worktree.deps_strategy: copy | reinstall` (default `copy`). Virtualenvs and yarn PnP always reinstall, whatever the default. The legacy value `symlink` is read as `copy`. Say so in the report when you see it, so the user can update the config.
 
 ### 2b — Env files
 
@@ -167,7 +198,7 @@ If `test_infra_change = true` → fork the test DB unconditionally. If `false` a
 
 When the plan has migrations: run them once now against the forked DB so subsequent agent runs in the worktree don't surprise the user. Use the project's standard migration command (`pnpm migrate`, `python manage.py migrate`, `alembic upgrade head`, `prisma migrate dev`, `knex migrate:latest`).
 
-Failure → surface the error, leave the DB un-migrated, ask the user how to proceed (skip, retry, drop and recreate the DB).
+Failure → leave the DB un-migrated and ask via `AskUserQuestion` (header `Migrations`), quoting the error line: `Retry (Recommended)`, `Drop and recreate the DB`, `Skip — leave un-migrated`.
 
 ## Step 4 — Docker / compose isolation (when `compose_change = true` OR project uses compose)
 
@@ -250,7 +281,7 @@ If the **Plan inspection** step inferred the plan doesn't touch any of these: sy
 
 ## Step 5.5 — Filesystem sandbox (OS-level write guard)
 
-Symlinking + threading the worktree path through prompts keeps *cooperative* agents in the worktree, but it's not a guarantee: a buggy agent (often a smaller model spawned for a phase) can resolve an absolute path back to the **main checkout** and silently write there. Those writes never reach the worktree's commit — they sit as uncommitted thrash in the main checkout, and the "missing" edits read as a silent agent failure. Prompt instructions don't stop it; they rely on the agent's goodwill.
+Threading the worktree path through prompts keeps *cooperative* agents in the worktree, but it's not a guarantee: a buggy agent (often a smaller model spawned for a phase) can resolve an absolute path back to the **main checkout** and silently write there. Those writes never reach the worktree's commit — they sit as uncommitted thrash in the main checkout, and the "missing" edits read as a silent agent failure. Prompt instructions don't stop it; they rely on the agent's goodwill.
 
 The deterministic fix is to confine the *process* (not the tool) at the OS filesystem layer: make the main checkout read-only for any command run inside the sandbox, regardless of which agent CLI issues the writes. The bundled [scripts/sandbox-run.sh](scripts/sandbox-run.sh) does this — `sandbox-exec` on macOS, `bwrap` (bubblewrap) on Linux. **This process-wrapping model works for runtimes that spawn subagents as subprocesses** (`codex exec`, a `claude -p` child, a custom runner). Runtimes that run subagents **in-process** — notably claude-code's Task tool, where there's no child command to wrap — use the harness-config guard in [In-process runtimes (claude-code)](#55a--in-process-runtimes-claude-code) instead.
 
@@ -282,7 +313,7 @@ command -v bwrap        >/dev/null && tier=enforced   # Linux
 Escape hatch: `VINTA_SANDBOX=off` makes the wrapper a transparent pass-through (for the rare tool that needs access the sandbox blocks). Record the achieved tier in the summary (next step) so the caller knows whether it's running guaranteed or best-effort.
 
 **Sandbox-mode shared-state rule.** Because main is read-only inside the cage, any path the *run* writes must live in the worktree or in an `--allow`'d dir — never a symlink that resolves back into the main checkout. Two follow-ons:
-- The existing `deps_change=true` → copy/reinstall logic already gives the worktree its own writable `node_modules/` when a phase installs deps; non-churn phases keep the read-only symlink (agents shouldn't write deps anyway — correct).
+- Dependency dirs are already safe: the [Dep dirs](#2a--dep-dirs) sub-step gives every worktree its own writable copy, so caches, installs and native rebuilds write inside the worktree. A dependency symlink back into main would put every one of those writes behind the read-only wall. That is one of the reasons dep dirs are never symlinked.
 - The `.vinta-ai-workflows/` dir (summary YAMLs, prs-context) is shared/symlinked but **written** during a run, so it must be passed as an `--allow` path (or made a real writable dir in the worktree). Record which.
 
 ### 5.5a — In-process runtimes (claude-code)
@@ -334,21 +365,27 @@ flags:
   compose_change: <bool>
 state:
   deps:
-    strategy: symlink | copy | reinstall
+    strategy: copy | reinstall     # never symlink — every worktree owns its dep dirs
     paths: [node_modules, vendor, venv, ...]
   env:
     strategy: symlink | copy
     files: [.env, .envrc, ...]
   dev_db:
     engine: postgres | mysql | sqlite | mongo | redis
-    strategy: fork | share | stub
+    strategy: fork | share | stub     # closed set — see "The summary is read by machine"
     forked_name: <forked db name>   # null when share / stub
     connection_url_var: DATABASE_URL
+    reset_cmd: <shell command that returns this DB to the state of a fresh checkout>
+    # e.g. dropdb <forked> && createdb -T <template> <forked>
+    #      rm -f <path>/db.sqlite3 && <migrate cmd>
+    # null when the engine / setup has no safe reset — callers must then re-provision
+    # instead of reusing this worktree across a migration boundary.
   test_db:
     engine: ...
-    strategy: fork | share
+    strategy: fork | share            # closed set, as above
     forked_name: ...
     connection_url_var: TEST_DATABASE_URL
+    reset_cmd: <same idea, for the test DB>   # null when not resettable
   compose:
     project_name: <repo>_<worktree-name>
     network_strategy: per-worktree | shared-external | host
@@ -371,7 +408,9 @@ state:
     # claude-hook                 → in-process (claude-code) Layer A hook only (file tools)
     # claude-native-sandbox       → in-process (claude-code) Layer A hook + Layer B OS sandbox
     # null                        → tier=none (no guard wired)
-    deny: [<main-checkout-root>]   # subtree(s) made read-only inside the cage
+    deny: [<main-checkout-root>, <worktree-root>]   # subtree(s) made read-only inside the cage
+    # <worktree-root> is the dir that holds the worktrees — denying it blocks writes into
+    # SIBLING lanes when a pool is provisioned; the allow entry below re-opens only this one.
     allow: [<worktree-path>, <main-checkout-root>/.git, <.vinta-ai-workflows-dir>]  # writable exceptions
 notes: |
   <freeform — anything the user / agent should know>
@@ -443,8 +482,16 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 
 ## Rules
 
-- **Symlink for reads, copy for writes, fork for state.** This is the only mental model that scales. Default to fork when unsure — disk is cheap, corrupted main-checkout DBs are not.
+- **Copy deps, copy for writes, fork for state, symlink only what nothing writes.** This is the only mental model that scales. Dependency dirs are always a per-worktree copy (or reinstall), even when they look read-only. Default to fork when unsure — disk is cheap, corrupted main-checkout DBs are not.
 - **Never share a writable DB across worktrees by default.** The race conditions are subtle and the failure mode is silent data corruption.
+### The summary is read by machine
+
+This file is not a note to the next human. [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) parses it to decide whether a lane can be handed to another phase, so **every `|` above is a closed set and every key is required** — `null` is how you say "none", and omitting the key is not the same thing.
+
+A value outside the set makes the lane unusable by the daemon. It does not fail loudly at write time; it fails later, as `doctor` reporting the lane and the field it could not accept, long after the worktree and its forked databases exist. Seen in the wild: a `strategy: create-empty-and-migrate` invented to describe a database that had been created empty and migrated by hand, with `reset_cmd` left off entirely. Neither is in the spec, and the pair cost eleven lanes their readability.
+
+If none of the listed strategies describes what you did, **the honest record is the closest one plus a `note:`** — the schema keeps `note` free-form for exactly this. A database created empty and migrated is a `fork` whose `reset_cmd` re-runs that same creation; a database you could not provision at all is a `stub`. What it must never be is a fourth word.
+
 - **`COMPOSE_PROJECT_NAME` does not isolate `external:`/fixed-`name:` volumes or fixed host ports — always run the [4a](#4a--neutralize-compose-isolation-leaks) generator.** For a compose-delivered DB the data volumes are forked *unconditionally* (independent of `schema_change` and `test_db_strategy`): the worktree runs its own server, and two servers on one volume is corruption. "Share the DB" only ever means share a connection to a single already-running server, never a second server on shared storage. The fix is a generated, out-of-tree override + a `COMPOSE_FILE` line in the copied `.env` — never an edit to any tracked compose file. Verify the volume-differs invariant before declaring the worktree runnable.
 - **Every fork decision lands in `.vinta-ai-workflows/worktrees/<name>.yaml`.** Teardown reads it; humans grep it; agents resuming a stalled plan read it. No decision lives only in conversation memory.
 - **Worktree root governed by runtime conventions.** claude-code uses `.claude/worktrees/`; other harnesses use sibling dirs. Don't fight the harness — match it.
@@ -454,18 +501,19 @@ Every step gated on user confirmation when the worktree has un-pushed branches.
 - **Deny-main, allow-rest — never allow-worktree-only.** Locking everything except the worktree breaks package managers / caches / `$HOME`. Lock only the main checkout subtree; re-allow the worktree (nested under it) and the written `.vinta-ai-workflows` dir. Don't tighten further without testing the project's real lint / test / build / migrate commands inside the cage.
 - **Worktree base = `origin/<default-branch>` by default.** `HEAD` only when the user explicitly confirms; record the choice in the summary.
 - **Refuse to provision a second worktree for the same branch.** Git enforces this — don't try to work around it.
-- **Don't auto-install heavy deps** (e.g. `pnpm install` from scratch) without confirmation when the project's main `node_modules/` is already populated — symlink first, ask if reinstall is needed.
+- **Don't auto-install heavy deps** (e.g. `pnpm install` from scratch) without confirmation when the project's main `node_modules/` is already populated. Clone main's tree first and ask if a reinstall is needed. Ecosystems that must reinstall (virtualenvs, yarn PnP) are the exception: reinstall them without asking.
 
 ## Pitfalls
 
-- **Symlinking `node_modules` for a `pnpm add` phase.** The new package writes back through the symlink into the main checkout's store. Detect dep churn in the **Plan inspection** step and copy/reinstall instead.
+- **Symlinking `node_modules` (or `vendor/`, `venv/`) "because the plan adds no deps".** It still breaks. Tool caches and `postinstall` output write through the link into main, parallel worktrees race on one tree, and the sandbox blocks the writes mid-run. A `pnpm add` in any phase also rewrites main's dependencies. Always copy (clone) or reinstall. See [Dep dirs](#2a--dep-dirs).
+- **Copying only the root `node_modules/` of a workspace.** Workspace members' `node_modules/` are relative links into the root store. Leave them out and the member packages can't resolve their deps in the worktree. Copy every member's tree alongside the root's.
 - **Forking the dev DB but forgetting the test DB.** Tests still hit the shared test DB and stomp on parallel worktrees' fixtures. Both axes need their own decision in the **Database fork** step.
 - **Forgetting `COMPOSE_PROJECT_NAME`.** Containers from worktree-A overwrite worktree-B's containers; volumes get nuked. Set it in `.env` so every `docker compose` call inherits.
 - **Trusting `COMPOSE_PROJECT_NAME` to isolate `external:`/fixed-`name:` volumes and fixed host ports — it does NOT.** These defeat the project-name namespace: every worktree's compose stack mounts the SAME external/named volume and binds the SAME host port. For a DB volume that means two server processes on one data directory — the 2026-07-17 corruption incident (a worktree's `docker compose down` deleted the shared `postmaster.pid` and the main checkout's Postgres self-terminated). The fix is the [4a](#4a--neutralize-compose-isolation-leaks) generated out-of-tree override, never an edit to the tracked compose file. Verify the invariant (Verification step 6), don't assume it.
 - **Confusing "share the DB" (a connection to one running server) with "share the data volume" (a second server on shared storage).** The first can be safe when `schema_change = false`; the second is always corruption. `schema_change = false` and `test_db_strategy` never authorize a shared compose data volume — see [3a](#3a--dev--app-database).
 - **Writing the compose override to the worktree-root `docker-compose.override.yml`.** It's auto-loaded (convenient) but often a *tracked* file — the generated override then shows up in the diff and one `git add -A` leaks it into main. Write it under `<summary_dir>/` and wire it in via `COMPOSE_FILE` in the COPIED `.env` ([4a](#4a--neutralize-compose-isolation-leaks)).
 - **Sharing a Redis DB without per-worktree prefix.** Tests writing `user:123` collide across worktrees. Pick an index OR a key prefix.
-- **Copying `node_modules` for yarn PnP / absolute-path setups.** The copy carries baked-in paths from the main checkout. Reinstall instead — pnpm's relative-symlink store is the safe-to-copy exception.
+- **Copying a tree that stores absolute paths (Python virtualenvs, yarn PnP).** The copy keeps paths into the main checkout, so it runs main's interpreter or resolves into main's files. Reinstall instead. pnpm's relative-link store is safe to copy, as long as the copy keeps links as links (`cp -a`, never `cp -L`).
 - **Forgetting to `--allow` the `.vinta-ai-workflows` dir under sandbox.** It's shared/symlinked but the run *writes* it (summary YAMLs, prs-context). If it's not an `--allow` exception, those writes hit the read-only main subtree and fail mid-run. Pass it alongside the worktree path.
 - **Assuming the sandbox is always there.** `bwrap` needs user namespaces enabled — some hardened kernels and CI images disable them. Probe (`command -v bwrap`); on `tier=none` degrade to the post-run check, don't silently believe writes are blocked.
 - **Over-tightening into an allow-worktree-only cage.** Tempting, but it breaks every tool that writes outside the repo (npm cache, `~/.config`, `$TMPDIR`). The deny-main model is the one that needs no per-stack allowlist tuning.

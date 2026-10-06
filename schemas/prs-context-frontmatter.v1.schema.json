@@ -8,8 +8,6 @@
     "schema_version",
     "plan_id",
     "feature_name",
-    "phase_id",
-    "phase_title",
     "branch",
     "base",
     "created_at",
@@ -34,24 +32,30 @@
       "pattern": "^[A-Z][A-Z0-9_]*$",
       "minLength": 1
     },
+    "kind": {
+      "description": "Which PR this file opens. `phase` (the default when absent): one phase's branch into its dependency-derived base. `integration`: a multi-dependency phase's `plan/<plan-id>/integ-<phase-id>` branch into the default branch, so the phase PR stacked on it can land. `plan`: the final wave branch (or, under modular commits, the plan branch) into the default branch — the PR that lands the whole plan.",
+      "type": "string",
+      "enum": ["phase", "integration", "plan"],
+      "default": "phase"
+    },
     "phase_id": {
-      "description": "Phase id verbatim from the plan's `Phased Rollout` section (e.g. `1`, `4a`, `2.5`).",
+      "description": "Phase id verbatim from the plan's `Phased Rollout` section (e.g. `1`, `4a`, `2.5`). Required unless `kind` is `plan`; for `kind: integration` it is the phase whose `integ-` branch this is.",
       "type": "string",
       "pattern": "^[0-9]+(\\.[0-9]+)?[a-z]?$",
       "minLength": 1
     },
     "phase_title": {
-      "description": "Phase title verbatim from the plan's `Phased Rollout` section.",
+      "description": "Phase title verbatim from the plan's `Phased Rollout` section. Required unless `kind` is `plan`.",
       "type": "string",
       "minLength": 1
     },
     "branch": {
-      "description": "Source branch the PR opens from. Default convention `plan/<plan-id-kebab>/phase-<phase.id>`.",
+      "description": "Source branch the PR opens from. `plan/<plan-id-kebab>/phase-<phase.id>` for a phase, `plan/<plan-id-kebab>/integ-<phase.id>` for an integration PR, the final `plan/<plan-id-kebab>/wave-<N>` (or `plan/<plan-id-kebab>` under modular commits) for the plan PR.",
       "type": "string",
       "minLength": 1
     },
     "base": {
-      "description": "Target branch. Either the project's default branch (`main`) or the previous phase's stacked branch.",
+      "description": "Target branch. A phase PR targets its dependency-derived base (the default branch, a dependency's phase branch, or its `integ-` branch); integration and plan PRs target the default branch.",
       "type": "string",
       "minLength": 1
     },
@@ -73,5 +77,12 @@
         { "const": "" }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "description": "Every PR but the plan PR belongs to one phase.",
+      "if": { "not": { "properties": { "kind": { "const": "plan" } }, "required": ["kind"] } },
+      "then": { "required": ["phase_id", "phase_title"] }
+    }
+  ]
 }

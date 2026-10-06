@@ -48,9 +48,9 @@ After bootstrap, the project ships with **three foundation skills** that take a 
    └─────────────────┘      Phased Rollout, Touch List, Risks)
             │
             ▼
-   ┌─────────────────┐    one stacked branch per phase + tracking file
-   │  implement-plan │───►  plan/<feature>/phase-1, phase-2, ...
-   └─────────────────┘      pushed to GitHub / GitLab / etc.
+   ┌─────────────────┐    one branch per phase (independent phases run in
+   │  implement-plan │───►  parallel lanes) + a tracking dir
+   └─────────────────┘      plan/<feature>/phase-1, phase-2, wave-1, ...
 ```
 
 You also get: an `AGENTS.md` tuned to the codebase — a regular file at the repo root, with per-vendor aliases (`CLAUDE.md`, `.github/copilot-instructions.md`) symlinked to it — project-specific sub-agents and skills derived from the actual stack, and per-vendor wiring so Claude Code / Codex / Cursor / Copilot all see the same artifacts.
@@ -80,7 +80,7 @@ The bootstrap skills are **one-shot**. They scaffold the project once and are re
 - **Goals + Non-goals** — what's in / out of scope.
 - **Guiding Decisions** — feature flag (key, scope, default, flip-on criterion if any), storage shape, tenant scoping, API contract, schema rules. Load-bearing — every phase reaches back here.
 - **Data Model Changes** — migrations + rollout order.
-- **Phased Rollout** — each phase declares: `id`, `title`, `goal`, `Suggested AI model` (per vendor — implement-plan picks the cheapest available), `reusable_skills` (other project skills the implementer should invoke), `Changes`, `Tests`, `Acceptance`, plus flags for `is_cross_repo` and `is_flag_removal` (both deferred).
+- **Phased Rollout** — opens with a **Crew** table (the implementers this plan is staffed with, each with a tier; every implementer keeps one worktree and one session for the whole run, and the `.workflow.json` transcribes the same roster). Reviews are not staffed: both `implement-plan` and `vinta-ai-maestro` review each phase with `thermo-nuclear-review-loop`, which spawns its own reviewer. Then each phase declares: `id`, `title`, `goal`, `Assigned to` (which crew member takes it — implement-plan resolves their tier to the cheapest available model), `reusable_skills` (other project skills the implementer should invoke), `Changes`, `Tests`, `Acceptance`, plus flags for `is_cross_repo` and `is_flag_removal` (both deferred).
 - **Risk & Rollout Notes**, **Open Questions**, **Touch List**.
 
 Phases are sized so the slowest path (e.g. cross-repo producer wiring, external integration approval) starts in Phase 1 and fast in-repo work fills in behind. Large mutation phases get split (`4a / 4b / 4c`) rather than monolithic.
@@ -99,41 +99,44 @@ Phases are sized so the slowest path (e.g. cross-repo producer wiring, external 
 2. **Pick the model from the plan's per-phase suggestion.** Filter to what the runtime can actually run, choose the cheapest survivor. Capability gap on retry → escalate one tier; after Tier 4, stop and surface to the user.
 3. **Spawn the right agent type.** `implementer` by default; switch to a stack-specialist (`migration-author`, `deploy-author`, etc.) when that role's risk dominates the phase.
 4. **Implementer runs inner + outer loop.** Inner: lint → scoped tests → typecheck on touched files; iterate until green. Outer (only after inner is green): full build + full test suite + e2e where applicable. Never commits, pushes, or proceeds with a red gate.
-5. **Three-layer review** before merging the phase branch:
-   - **Layer 1 — mechanical**: read every diff, confirm outer gate ran green, scope-creep + secrets scan.
-   - **Layer 2 — plan compliance**: walk every "Changes" item, every "Tests" entry, the Acceptance line, AGENTS.md conventions, any reusable-skill compliance, feature-flag wiring, cross-phase consistency.
-   - **Layer 3 — independent reviewer**: spawn a fresh `reviewer` agent with no implementation context. Findings triaged BLOCKER / SHOULD-FIX / NIT.
-6. **Fix loop**: each finding → spawn a `fixer` agent (separate session) that re-runs inner + outer loops; orchestrator never edits directly. Repeat until all three layers are clean.
+5. **Review loop** before integrating the phase. `review-phase` runs the `thermo-nuclear-review-loop` skill with the orchestrator as the loop's host. One reviewer sub-agent, with no implementation context and one tier above the tier the implementer ran at, reviews the phase diff against the phase body and the plan's **Goals** and **Guiding Decisions**. Its findings go back to the phase's own implementer, which verifies each one, fixes the justified ones, rejects the rest with counter-evidence, re-runs the gates and commits the round. A question only a person can settle (an unreachable scenario, a scope call, a destructive step) comes to you as a structured question. The orchestrator never edits code.
+6. **Loop until the reviewer approves.** The reviewer re-reads the whole diff on every pass, and the phase passes only on its explicit approval. After 20 passes that still return blockers, the orchestrator pauses and asks whether to continue for 20 more, stop the phase unapproved, or amend the plan.
 
-**Branch model — one branch per phase, stacked:**
+**Branch model — one branch per phase, based on that phase's dependencies:**
+
+Every phase in the plan declares what it needs (`**Depends on**: Phase 1 (the `BookmarkFolder` model), …`). That line — not the phase's number — decides both when it runs and what it branches from.
 
 ```bash
-# First executed phase — branches from the default branch.
+# A phase with no dependencies — branches from the default branch.
 git checkout main && git pull --ff-only
 git checkout -b plan/<feature-kebab>/phase-1
-# implementer's commits land here
 git push -u origin plan/<feature-kebab>/phase-1
 
-# Phase 2 stacks on phase 1 — never branches back to main.
+# A phase depending on exactly one phase — branches from it.
 git checkout plan/<feature-kebab>/phase-1
 git checkout -b plan/<feature-kebab>/phase-2
 git push -u origin plan/<feature-kebab>/phase-2
 
-# Phase 3 stacks on phase 2, etc.
+# A phase depending on several — branches from a merge of them.
+git checkout -B plan/<feature-kebab>/integ-4 plan/<feature-kebab>/phase-2
+git merge --no-ff plan/<feature-kebab>/phase-3
+git checkout -b plan/<feature-kebab>/phase-4
 ```
 
-Each phase's PR (or branch, depending on the project's PR policy captured at bootstrap) targets the previous phase's branch, not `main`. This keeps the diff per PR scoped to a single phase, makes review manageable, and lets the team merge phases sequentially as approvals land — earlier phases ship to production while later ones are still in review.
+Each phase's PR (or branch, depending on the project's PR policy captured at bootstrap) targets its own base, not `main`. This keeps the diff per PR scoped to a single phase, makes review manageable, and lets the team merge as approvals land. A plan whose phases form a chain produces exactly the classic stack; a plan with independent phases produces several short stacks, reunited by per-wave integration branches (`plan/<feature-kebab>/wave-<N>`).
+
+**Parallel phases.** Because the plan carries a dependency graph, `implement-plan` implements independent phases **at the same time** — one worktree lane per phase in flight, each with its own dev + test database and compose stack, so concurrent test runs don't collide. A phase starts the moment every phase it depends on is green and a lane frees up; a failed phase blocks only its dependents while the rest of the plan keeps going. On by default (`run_options.implement-plan.parallel_phases`, capped by `max_parallel_lanes`, default 3), it requires `prepare-worktree` and refuses to run rather than silently falling back to sequential when worktrees aren't available. A chain-shaped plan runs one phase at a time — same scheduler, one lane.
 
 **Alternative: modular commits.** Teams that prefer one branch + one PR per plan can set `policies.commit_strategy: modular-commits` in `.vinta-ai-workflows.yaml`. Under that mode, every phase pushes its **atomic unit commits** (one per service, use-case wire-up, init export, serializer field, refactor, or bug fix — tests in the same commit as code) to a single `plan/<feature-kebab>` branch; the PR opens once after Phase 1 review and gets updated as later phases push. The third option, `commit_strategy: ask`, prompts `implement-plan` at Step 0 (alongside the existing `pause_between_phases` / `generate_inline_comments` opt-ins) and caches the answer in the tracking file. Default is `stacked-branches` — the model documented above. See [`schemas/vinta-ai-workflows-config.v1.schema.json`](schemas/vinta-ai-workflows-config.v1.schema.json) for the field definition.
 
-**Tracking file** — `ai-plans/TRACKING_<feature-kebab>.md`. The orchestrator writes it from `git diff` + the agent's report (not the agent's narration). Records: completed phases (status, model used, branch, base, e2e+screenshots when applicable, 5–15 line summary), current phase, remaining phases, deferred phases. Acts as the durable context handoff between phase prompts. Deleted on plan completion.
+**Tracking directory** — `ai-plans/TRACKING_<feature-kebab>/`. The orchestrator writes it from `git diff` + the agent's report (not the agent's narration): `run.md` for run options, the resolved dependency graph, and the lane pool; one `phase-<id>.md` per phase (status, model used, branch, base, wave, e2e+screenshots when applicable, 5–15 line summary); `waves/wave-<N>.md` for each integration merge. It is a directory rather than one file so concurrent lanes never write the same path — each phase's entry is committed on that phase's own branch, which keeps wave merges clean. Acts as the durable context handoff between phase prompts, scoped per phase to its own dependencies. Deleted on plan completion.
 
 **Phases the orchestrator never auto-executes:**
 
 - **Cross-repo phases** (`is_cross_repo: true`) — work in another repository. Marked deferred in tracking; orchestrator continues to the next in-repo phase. Don't block on cross-repo work.
 - **Flag-removal phase** (always the last phase when a feature flag exists). Gated on real-world soak signal — handled by a dedicated flag-removal skill, not `implement-plan`. Marked deferred; orchestrator ends the run with a hand-off note.
 
-**Failure handling:** if a phase fails Layer 1 / 2 / 3 + fixer escalation, orchestrator stops, posts the agent's report, and asks how to proceed. It does not silently rerun, skip, or escalate models without the user.
+**Failure handling:** if a phase's gates stay red after escalation, or its review stops unapproved, orchestrator stops, posts the agent's report, and asks how to proceed. It does not silently rerun, skip, or escalate models without the user.
 
 #### PR creation: single flow via `prs-context` + `open-pr.sh`
 
@@ -194,7 +197,7 @@ The script bails early with `missing dependency: <name>` if any are absent. If a
 
 # Day 3+ — execution
 /implement-plan        # orchestrator runs phase 1 → phase 2 → ... → phase N-1
-                       # each phase: implementer + reviewer + fixer agents,
+                       # each phase: implementer + a review loop until approval,
                        # one stacked branch + PR per phase
 # merge phase branches sequentially as approvals land
 # soak phase 1 in prod → soak phase 2 → ...
@@ -217,12 +220,12 @@ Quick inventory of what `vinta-bootstrap-ai-tools` writes into your repo's `ai-t
 The 0.2.0 alpha line adds five foundation skills and restructures plan execution. Two ship in every bootstrapped project, three are opt-in:
 
 - **`handoff` (always)** — writes a session-continuation doc to `.vinta-ai-workflows/handoffs/` so a fresh session, a different agent, or a teammate can resume in-flight work without re-deriving context. Write mode gathers the goal, what's verified vs. still assumed, decisions and the alternatives rejected, landmines, and the single concrete next step **from the repo, never from memory**. Resume mode reads a handoff and re-checks its claims against the repo before trusting them.
-- **`deslop-comments` (always)** — rewrites the comments and doc blocks a task touched into Simple English, stripping AI-slop vocabulary and negative framing. Comment-only: no renames, no behavior change. It's wired into the review flow — `review-phase` Layer 2 gained a comment-hygiene check and dispatches a `fixer` to run this skill on any comment-slop finding — and is also invokable standalone ("deslop these comments").
-- **`prepare-worktree` (opt-in)** — provisions a fully-runnable git worktree for parallel plan work so a long-running plan can build, test, migrate, and hit databases without disturbing the main checkout. It reads the plan plus `.gitignore` / manifests / env / docker config and decides per ignored path whether to symlink, copy, or fork (dev DB, env files, compose project name). It also ships an OS-level write-guard — `sandbox-run.sh` (`sandbox-exec` / `bwrap`) for subprocess runtimes and a `PreToolUse` hook for Claude Code's in-process subagents — so a stray write back to the main checkout fails at the kernel layer instead of relying on a cooperative "stay in the worktree" instruction. `implement-plan` Step 0 question (c) opts a run into it.
-- **`thermo-nuclear-code-quality-review` (opt-in)** — a deliberately harsh, on-demand structural-maintainability audit of a diff (abstraction quality, giant files, spaghetti-condition growth) that hunts for "code-judo" reframes collapsing whole branches / helpers / modes / layers rather than polishing them. Read-only — it reports findings and hands each fix to a `fixer`. `review-phase` Layer 3 now applies a condensed version of this lens on every phase and escalates to the full audit only when a phase touches core architecture, crosses ~1,000 lines, or surfaces a structural smell too big to fix inline.
+- **`deslop-comments` (always)** — rewrites the comments and doc blocks a task touched into Simple English, stripping AI-slop vocabulary and negative framing. Comment-only: no renames, no behavior change. `integrate-phase` / `amend-plan` run it over the PR-context prose they write, `vinta-ai-maestro` runs it as each phase's `deslop` chore, and it is also invokable standalone ("deslop these comments").
+- **`prepare-worktree` (opt-in)** — provisions a fully-runnable git worktree for parallel plan work so a long-running plan can build, test, migrate, and hit databases without disturbing the main checkout. It reads the plan plus `.gitignore` / manifests / env / docker config and gives every worktree its own copy of the dependency dirs (never a symlink) and decides per remaining ignored path whether to copy, fork, or share (dev DB, env files, compose project name). It also ships an OS-level write-guard — `sandbox-run.sh` (`sandbox-exec` / `bwrap`) for subprocess runtimes and a `PreToolUse` hook for Claude Code's in-process subagents — so a stray write back to the main checkout fails at the kernel layer instead of relying on a cooperative "stay in the worktree" instruction. `implement-plan` Step 0 question (c) opts a run into it, and parallel phase execution requires it — one lane per concurrent phase.
+- **`thermo-nuclear-code-quality-review` (opt-in)** — a deliberately harsh, on-demand structural-maintainability audit of a diff (abstraction quality, giant files, spaghetti-condition growth) that hunts for "code-judo" reframes collapsing whole branches / helpers / modes / layers rather than polishing them. Read-only — it reports findings and hands each fix to a `fixer`. The per-phase review loop already applies a structural-simplification lens on every phase; this is the deliberate deep audit for when a change touches core architecture, crosses ~1,000 lines, or carries a structural smell worth a dedicated pass.
 - **`handoff-to-client` (opt-in, API-only repos)** — generates a self-contained markdown document for the client teams consuming the repo's API: every endpoint / operation added, changed, deprecated, or removed on the current branch vs. the default branch, with request/response shapes derived from the code, auth + error changes, breaking-change flags judged from the strictest plausible client, one realistic example per operation, and per-platform migration notes. Template-rendered from `skills.handoff-to-client.*` config (required `client_platforms`, plus `api_style` / `api_spec_path` / `output_dir`).
 
-Alongside the new skills, **`implement-plan` was decomposed into a modular plan-execution unit** — a thin conductor plus three co-shipped single-purpose sub-skills (`implement-phase`, `review-phase`, `integrate-phase`). `review-phase` is now the one review implementation shared by `implement-plan`, `amend-plan`, and `systematic-debugging`. The behavior is unchanged; the split is for reviewability and determinism. Two more knobs land in `.vinta-ai-workflows.yaml`: **`agent_models`** (set a tier per `reviewer` / `fixer` / `worktree_prep` / `integrate` so the review sub-agents and mechanical steps aren't stuck on the runtime default), and **E2E tests are now opt-in** in both `plan-feature` and `implement-plan` (they make runs materially slower; default off, re-enable per-run or per-project).
+Alongside the new skills, **`implement-plan` was decomposed into a modular plan-execution unit** — a thin conductor plus three co-shipped single-purpose sub-skills (`implement-phase`, `review-phase`, `integrate-phase`). `review-phase` is now the one review implementation shared by `implement-plan`, `amend-plan`, and `systematic-debugging`. The behavior is unchanged; the split is for reviewability and determinism. Two more knobs land in `.vinta-ai-workflows.yaml`: **`agent_models`** (set a tier per `fixer` / `worktree_prep` / `integrate` so the merge-conflict fixer and mechanical steps aren't stuck on the runtime default; `reviewer` is deprecated and ignored since 0.7.0, because the review runs one tier above the implementer), and **E2E tests are now opt-in** in both `plan-feature` and `implement-plan` (they make runs materially slower; default off, re-enable per-run or per-project).
 
 ### Foundation skills (project-agnostic)
 
@@ -236,18 +239,19 @@ Land at `ai-tools/skills/<name>/SKILL.md`. Always-on unless flagged optional.
 | [`open-pr-from-context`](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/SKILL.md) | always | Publish a `.vinta-ai-workflows/prs-context/<feature>/<phase>.md` file as a real PR + inline comments via `gh` / `glab`. Bundles [`open-pr.sh`](skills/vinta-derive-skills/resources/foundation-skills/open-pr-from-context/scripts/open-pr.sh). |
 | `implement-plan` | always (generated) | Phase-by-phase plan execution. Thin **conductor**: parses the plan, resolves one `WORKROOT`, and runs a fixed pipeline per phase (`implement-phase` → `review-phase` → `integrate-phase`), tracking + reporting. Generated from a template with project commands + branch / PR / co-author policy. |
 | `implement-phase` | always (unit) | Plan-execution sub-skill co-shipped with `implement-plan`: compose the implementer prompt, pick the model, spawn one implementer subagent for a single phase. |
-| `review-phase` | always (unit) | Plan-execution sub-skill: the three-layer review (mechanical / plan-compliance / independent reviewer) + fix loop. Shared by `implement-plan`, `amend-plan`, and `systematic-debugging`. |
+| `review-phase` | always (unit) | Plan-execution sub-skill: runs the `thermo-nuclear-review-loop` over one phase with the conductor as host — one reviewer sub-agent one tier above the implementer, the phase's own implementer fixing, questions to the human, until the reviewer explicitly approves. Shared by `implement-plan`, `amend-plan`, and `systematic-debugging`. |
 | `integrate-phase` | always (unit) | Plan-execution sub-skill: push the reviewed phase along the project's commit strategy + open the PR via context file. Under `commit_strategy = ask`, ships as `integrate-phase-stacked` + `integrate-phase-modular`. |
 | `amend-plan` | always (generated) | History-rewriting companion to `implement-plan` — revises in-flight plans, amends prior-phase commits, force-pushes, rebases stacked downstream branches. Reuses `review-phase` + `implement-phase`'s shared prompt loop. |
 | [`handoff`](skills/vinta-derive-skills/resources/foundation-skills/handoff/SKILL.md) | always | Session-continuation handoff doc → `.vinta-ai-workflows/handoffs/`. **Write** captures goal, verified-vs-unverified state, decisions + rejected alternatives, landmines, and the single next step — gathered from the repo, never memory. **Resume** verifies a handoff's claims against the repo before continuing from its next step. |
-| [`deslop-comments`](skills/vinta-derive-skills/resources/foundation-skills/deslop-comments/SKILL.md) | always | Rewrite comments + doc blocks touched during a task into Simple English, and delete the ones that shouldn't exist at all — where-used lists, another module's internals, restatements of the code, deferred-work notes, paths not taken (comment-only; no renames, no behavior change). `review-phase` Layer 2 depends on it, `integrate-phase` / `amend-plan` run it over the PR-context file, and it's invokable standalone. |
+| [`deslop-comments`](skills/vinta-derive-skills/resources/foundation-skills/deslop-comments/SKILL.md) | always | Rewrite comments + doc blocks touched during a task into Simple English, and delete the ones that shouldn't exist at all — where-used lists, another module's internals, restatements of the code, deferred-work notes, paths not taken (comment-only; no renames, no behavior change). `integrate-phase` / `amend-plan` run it over the PR-context file, `vinta-ai-maestro` runs it as each phase's `deslop` chore, and it's invokable standalone. |
+| [`thermo-nuclear-review-loop`](skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-review-loop/SKILL.md) | always | Review-and-fix loop over a change: the running agent spawns one reviewer sub-agent, verifies its findings, fixes the justified ones and answers the rest, until the reviewer explicitly approves under a strict code-quality standard. Scope questions go to the human instead of being assumed. It is the per-phase review on both execution paths: `review-phase` runs it with the conductor as host, and `vinta-ai-maestro` runs it as each phase's `review` chore once the gates are green. Also invokable standalone. |
 | `write-unit-test` | default-on (generated) | Write durable unit tests for a unit of behavior, enforcing six framework-agnostic rules + this project's captured test conventions, with runner- and stack-specific best-practice packs. Ships automatically whenever a unit-test framework is detected (set `disabled` to opt out). Generated from a template; config under `skills.write-unit-test.*`. See below. |
 | `systematic-debugging` | **opt-in** | Root-cause-first debugging with project-specific repro commands + MCP evidence-gathering (error tracking, traces, logs, metrics, alerts). Renders from a catalogue of observability MCP servers the user declares. |
 | `add-e2e-test` | **opt-in** | Add an e2e test. Body covers e2e framework, page-object pattern, auth/storage-state, seed helpers, tenant scoping, screenshot conventions. |
 | `add-env-var` | **opt-in** | Propagate a new env var through every layer (`.env.example`, build tool envPrefix, build cache hash, app config, AGENTS.md, CI, deploy injection). |
 | [`add-one-off-script`](skills/vinta-derive-skills/resources/foundation-skills/add-one-off-script/SKILL.md) | **opt-in** | Author one-off operational scripts (backfills, cleanups, ad-hoc fixes). Ships a `BaseOneOffScript` class (Python + TS) enforcing dry-run default, idempotency, batched DB ops, segmented CSV backups, signal-safe interruption, multi-sink logging. |
-| [`prepare-worktree`](skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md) | **opt-in** | Provision a fully-runnable git worktree for parallel plan work — reads the plan + `.gitignore` + manifests + env / docker config and decides per ignored path whether to **symlink / copy / fork** (dev DB, env files, compose project name). Ships an OS-level write-guard (`sandbox-run.sh` + a Claude Code `PreToolUse` hook) so stray writes to the main checkout fail at the kernel layer. `implement-plan` Step 0 question (c) opts a run into it. |
-| [`thermo-nuclear-code-quality-review`](skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/SKILL.md) | **opt-in** | Deliberately harsh structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — hunting "code-judo" reframes that collapse whole branches / helpers / modes / layers. Read-only; hands each fix to `fixer`. `review-phase` Layer 3 runs a condensed lens every phase and escalates to this full audit on core-architecture / ~1000-line / structurally-smelly phases. |
+| [`prepare-worktree`](skills/vinta-derive-skills/resources/foundation-skills/prepare-worktree/SKILL.md) | **opt-in** | Provision a fully-runnable git worktree for parallel plan work — reads the plan + `.gitignore` + manifests + env / docker config and gives each worktree its **own dependency copy** (never a symlink) and decides per remaining ignored path whether to **copy / fork / share** (dev DB, env files, compose project name). Ships an OS-level write-guard (`sandbox-run.sh` + a Claude Code `PreToolUse` hook) so stray writes to the main checkout fail at the kernel layer. `implement-plan` Step 0 question (c) opts a run into it, and parallel phase execution requires it — one lane per concurrent phase. |
+| [`thermo-nuclear-code-quality-review`](skills/vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/SKILL.md) | **opt-in** | Deliberately harsh structural-maintainability audit of a diff — abstraction quality, giant files, spaghetti-condition growth — hunting "code-judo" reframes that collapse whole branches / helpers / modes / layers. Read-only; hands each fix to `fixer`. The per-phase review loop carries a condensed structural lens; this is the deliberate deep audit on top of it. |
 | `handoff-to-client` | **opt-in** | (API-only repos) Generate a self-contained API-change handoff doc for the client teams consuming the repo's API — every endpoint / operation added / changed / deprecated / removed vs the default branch, with request/response shapes, auth + error changes, breaking-change flags, one example per operation, and per-platform migration notes. Template-rendered from `skills.handoff-to-client.*` config (client platforms, API style, spec path). |
 
 #### `write-unit-test` in depth
@@ -281,10 +285,26 @@ Land at `ai-tools/agents/<name>.yaml` (canonical YAML; `setup-ai-tools.mjs` emit
 | Agent | Access | Role |
 |---|---|---|
 | `implementer` | read-write | Default coder for one plan phase. Reads AGENTS.md + plan + phase body, runs inner + outer test gates, reports back. Never branches, pushes, opens PRs, or adds AI co-author trailers. |
-| `reviewer` | read-only | Adversarial reviewer. Reads phase + diff + AGENTS.md, outputs `BLOCKER` / `SHOULD-FIX` / `NIT` findings with `file:line`. Does not edit. |
-| `fixer` | read-write | Applies one reviewer finding (or one named test failure). Smallest correct change, re-runs gates, reports. |
+| `reviewer` | read-only | Adversarial reviewer for reviews the team asks for. Reads phase + diff + AGENTS.md, outputs `BLOCKER` / `SHOULD-FIX` / `NIT` findings with `file:line`. Does not edit. `review-phase` does not use it: its loop spawns a general-purpose reviewer, so one standard applies. |
+| `fixer` | read-write | Resolves one merge conflict between phases, applies one review finding handed over cold, or fixes one named test failure. Smallest correct change, re-runs gates, reports. |
 
 Stack templates may add specialists like `migration-author` (Django) or `deploy-author` (Medplum) — see disclaimer above.
+
+### Integrations (external tools)
+
+Integrations are external tools that ship their own skill. The bootstrap asks about each one. When one is enabled, the tool's own CLI installs and updates its skill. This package never copies, renders or edits that skill. Enabling one is recorded under `integrations` in `.vinta-ai-workflows.yaml`.
+
+| Integration | What it adds |
+|---|---|
+| [`pr-review-canvas`](https://github.com/vintasoftware/pr-review-canvas) | A review canvas for every PR an agent opens: the diff grouped by topic, with attention points for the reviewer, shared as a PR comment and read in a local app (`pr-review serve`). `integrate-phase` runs `/pr-review-canvas <n>` after `open-pr.sh` publishes the PR. `plan-feature` adds an `after_pr` `review-canvas` chore so that [vinta-ai-maestro](packages/vinta-ai-maestro/README.md#chores-about-the-pr--when-after_pr) does the same on each phase PR. Offered only for GitHub / GitLab projects where agents open PRs. |
+
+The tool itself is a machine-level install, like `gh`, and the bootstrap never installs it:
+
+```bash
+npm install -g @vintasoftware/pr-review-canvas
+```
+
+When the CLI is present, the bootstrap runs `pr-review install-skill --claude-dir ai-tools/skills --codex-dir ai-tools/skills`, so one copy in `ai-tools/skills/pr-review-canvas/` serves every vendor. Refresh it with `pr-review upgrade`, and check it with `pr-review doctor`. Do not edit the copy: the tool stamps a hash into it and reports an edited copy as stale. Sharing and other settings live in the tool's own `pr-review.config.yml`.
 
 ## Staying in sync with upstream
 
@@ -571,6 +591,8 @@ vinta-ai-workflows/
 ```
 
 `vinta-bootstrap-ai-tools` is the entry point — walks a fresh repo, runs the others in order. The rest can also be invoked individually to refresh a single artifact.
+
+The repository is also a pnpm workspace. `packages/` holds **private, unpublished** packages that are not part of what `install` puts in your project — the `files` whitelist excludes the directory. The one worth knowing about is [`packages/vinta-ai-maestro`](packages/vinta-ai-maestro/README.md): an opt-in daemon that executes the `ai-plans/<feature>.workflow.json` files `plan-feature` emits, scheduling independent phases across worktree lanes. Each phase there is implemented, gated, then reviewed by its own implementer through the `thermo-nuclear-review-loop` skill until the loop's reviewer approves, comment-cleaned by `deslop-comments`, and gated once more before it integrates. Nothing requires it; the skills path runs the same plans with no daemon installed.
 
 ### Why the `vinta-` prefix?
 

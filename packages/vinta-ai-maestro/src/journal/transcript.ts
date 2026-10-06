@@ -1,0 +1,123 @@
+/**
+ * What a line of `transcript.jsonl` is, beyond the harness event inside it.
+ *
+ * A phase's transcript already held every agent that worked on it — the
+ * scheduler appends to `state.node.id` for every spawn, whatever the role — so
+ * an implementer's output, the reviewer's, and three fix rounds' all landed in
+ * one file, in order, indistinguishable. Reading it back, the one question you
+ * could not answer was *who said this*, which is the question a transcript of
+ * four agents is mostly for.
+ *
+ * The role was in scope at the append and simply not written down. So each line
+ * carries an `Attribution` now, and the two things that were missing from the
+ * file entirely — gate runs — are entries in it.
+ *
+ * Two constraints shaped the shape.
+ *
+ * - **Sibling keys, not an envelope.** `{ ...event, by }` rather than
+ *   `{ event, by }`, because a transcript is append-only and years of lines
+ *   already exist without it. Every reader — the API, the monitor's digest
+ *   scan, the browser — keeps working on the old lines and gets more from the
+ *   new ones. An envelope would have made every line before this commit
+ *   unreadable, which for a record of what happened is not a migration, it is
+ *   a deletion.
+ * - **Identifiers only (§11).** A role, a slot, a gate id, an exit code. The
+ *   gate's *output* is not here: it is in `gateLogPath`'s file, which the node
+ *   endpoint already serves, and copying it into the transcript would put a
+ *   second copy of the repository's test output in a second place.
+ */
+import type { AgentEvent } from '../harness/adapter.ts'
+import type { AgentAsk } from '../questions/shape.ts'
+
+/**
+ * Who produced a line.
+ *
+ * `role` is deliberately a plain string rather than the `AGENT_ROLES` union.
+ * The pipeline is data (`types.ts`), a workflow may name a role this build has
+ * never heard of, and a transcript written by a newer daemon must stay readable
+ * by an older browser. The two roles here that are not agent roles at all —
+ * `gate` and `monitor` — are the same argument from the other direction.
+ */
+export interface Attribution {
+  readonly role: string
+  /** The session slot the turn ran on (§15). Absent where a turn has none. */
+  readonly slot?: string
+  /**
+   * The chore a `chore`-role turn was running. Absent on every other role.
+   *
+   * `role` alone is not enough here in the way it is for the others: a phase
+   * runs one implementer and one reviewer, but it may run three chores, on the
+   * same slot, one after another. Without the id they are one undifferentiated
+   * stretch of the same file — which is the exact problem `Attribution` was
+   * added to fix, one level further down.
+   */
+  readonly chore?: string
+}
+
+/**
+ * A gate run, as the transcript records it.
+ *
+ * Not an `AgentEvent` and deliberately not smuggled in as one. The tempting
+ * cheap version is a `tool_use` named `gate:unit`, which would need no new kind
+ * anywhere — and would be a lie in the record about what ran, in the one file
+ * whose whole job is to say what ran.
+ */
+export interface GateRunEvent {
+  readonly type: 'gate_run'
+  readonly gate: string
+  readonly exitCode: number
+  /** The runner's own token: `passed`, `failed`, `timeout`. */
+  readonly status: string
+  /** A cached verdict did not run anything, and the row should not imply it did. */
+  readonly cached: boolean
+}
+
+/**
+ * An agent stopped to ask the operator something (`src/questions`).
+ *
+ * Written by the scheduler, not the harness: the agent said it in a report or
+ * a tool call, and this is the reading of that the node parked on. Here rather
+ * than in the journal because the questions are the agent's prose (§11) — the
+ * journal's `human_question` row carries `effectId` and a fixed sentence, and
+ * the API finds this entry by that id to render the card.
+ */
+export interface AgentQuestionEvent extends AgentAsk {
+  readonly type: 'agent_question'
+  readonly effectId: string
+}
+
+/** One line of `transcript.jsonl`. */
+export type TranscriptEntry = (AgentEvent | GateRunEvent | AgentQuestionEvent) & {
+  readonly by?: Attribution
+}
+
+/** The roles the daemon itself writes, for the ones no workflow declares. */
+export const GATE_ROLE = 'gate'
+export const MONITOR_ROLE = 'monitor'
+/**
+ * The agent that resolves a merge conflict.
+ *
+ * Distinct from the pipeline's `fixer`, which answers a reviewer's findings in
+ * the phase's own lane. This one works in the integration worktree on a merge
+ * of two phases' branches, and its turn lands in the incoming phase's
+ * transcript alongside them — so filing it as `fixer` would put two different
+ * jobs under one name in the file whose whole purpose is saying who did what.
+ */
+export const CONFLICT_FIXER_ROLE = 'conflict-fixer'
+
+/**
+ * The operator, and the one attribution that is not the turn's.
+ *
+ * §7: the operator's own steering is never attributed to the agent. That is
+ * easy to get wrong here, because steering does not arrive out of band — the
+ * adapter injects it and *echoes it back* as a `user_message` on the session's
+ * own event stream, so it reaches the append inside the same loop as everything
+ * the model said, and stamping the loop's role would file the operator's words
+ * under the implementer that received them.
+ */
+export const OPERATOR_ROLE = 'operator'
+
+/** Whether an entry is the operator's rather than the turn it arrived in. */
+export function attribute(event: { readonly type: string }, turn: Attribution): Attribution {
+  return event.type === 'user_message' ? { role: OPERATOR_ROLE } : turn
+}

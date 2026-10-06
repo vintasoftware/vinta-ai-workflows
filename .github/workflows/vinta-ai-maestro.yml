@@ -1,0 +1,148 @@
+name: vinta-ai-maestro
+
+# The package's own suite, on every platform it claims to run on.
+#
+# The Windows leg is the point of this file. `packages/vinta-ai-maestro` was written
+# and polished on macOS and Linux; its Windows support was written by reading
+# the code, which is worth something and is not worth a claim. This job is
+# where "it works on Windows" stops being an assertion — the platform seam in
+# `src/platform/platform.ts` decides both branches from either machine, but
+# only a real `windows-latest` runner can say whether `taskkill /t` ends the
+# tree, whether `cmd.exe` parses the command lines that seam builds, and
+# whether ConPTY and the two native modules load at all.
+#
+# Three platforms, one job definition. A step that only makes sense on one of
+# them would be a step whose failure on the others nobody notices.
+
+on:
+  push:
+    # Both long-lived branches. `alpha` is where PRs land, so a push to it is an
+    # integration event — the first moment several approved PRs meet — and it is
+    # exactly where a cross-PR breakage shows up. Running only on `main` meant
+    # nothing checked the merge until a stable release was already being cut.
+    branches: [main, alpha]
+    paths:
+      - 'packages/vinta-ai-maestro/**'
+      - 'packages/design-system/**'
+      - '.github/workflows/vinta-ai-maestro.yml'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+  pull_request:
+    paths:
+      - 'packages/vinta-ai-maestro/**'
+      - 'packages/design-system/**'
+      - '.github/workflows/vinta-ai-maestro.yml'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# A push that lands while an earlier run is still going supersedes it.
+concurrency:
+  group: vinta-ai-maestro-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: packages/vinta-ai-maestro
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      # Every platform reports. A Windows failure must not hide a Linux one,
+      # and on the first runs of this job the Windows leg is the one with
+      # something to say.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      # Before checkout, so it applies to the checkout itself. Git for Windows
+      # sets `core.autocrlf=true` system-wide, which rewrites every checked-out
+      # file's line endings — and a gate, a fixture and a golden file all
+      # compare bytes. Left on, this job would test a tree that no other
+      # platform has. Operators on Windows may well have it enabled; that is a
+      # documented caveat in the README, not something to bake into CI.
+      - name: Check out with the bytes that were committed
+        run: git config --global core.autocrlf false
+        working-directory: .
+
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # `--frozen-lockfile` is the default in CI and is named anyway: a run that
+      # silently resolved a different tree would not be testing this commit.
+      # This also runs the package's postinstall (`scripts/fix-node-pty.mjs`)
+      # and builds better-sqlite3 and node-pty, both native — which is itself
+      # part of what the Windows leg is verifying.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        working-directory: .
+
+      # The UI is built on the workspace's design system, which has its own
+      # typecheck, tests and Biome lint. They run here rather than in a job of
+      # their own because a token or component change is only ever verified by
+      # the app that renders it, and that app is this one.
+      - name: Design system — typecheck, lint, test
+        run: pnpm run typecheck && pnpm run lint && pnpm test
+        working-directory: packages/design-system
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # The published artifact, built the way `prepack` builds it: `tsc` to
+      # `dist/`, the UI bundle into `dist/ui`, and the shebang corrected on the
+      # way out. Tailwind generates only the classes it scans, so the UI half
+      # is also the one check that the design system's sources are reachable
+      # from this package's stylesheet.
+      - name: Build
+        run: pnpm run build
+
+      # The suite runs under Vitest, which transpiles. The shipped entry point
+      # does not: it is plain JS started by plain `node`, and the whole module
+      # graph behind it — two native modules included — is only exercised by
+      # actually starting the binary. So it is started. `--help` costs nothing
+      # and touches everything.
+      - name: The built CLI starts under this platform's Node
+        run: node dist/cli/bin.js --help
+
+      # The source entry point, which is how the repo runs the CLI without
+      # building. It asks Node for `--experimental-transform-types` from its own
+      # shebang; the built one must not, and the build asserts that.
+      - name: The source entry point still starts too
+        run: node --experimental-transform-types --disable-warning=ExperimentalWarning src/cli/bin.ts --help
+
+      # What `npx vinta-ai-maestro` actually does, and the failure this job did
+      # not previously catch: Node refuses to strip or transform types anywhere
+      # under `node_modules`, so a package whose `bin` points at a `.ts` file
+      # installs fine and then dies on first run with
+      # ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING. Packing and installing is
+      # the only place that shows up — every check above runs from a checkout,
+      # where stripping is allowed.
+      #
+      # `pnpm pack` rather than `npm pack`: the manifest carries `workspace:*`
+      # specifiers, and only pnpm rewrites them to real versions.
+      - name: The packed tarball installs and runs from node_modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/vinta-ai-maestro-*.tgz
+          ./node_modules/.bin/vinta-ai-maestro --help

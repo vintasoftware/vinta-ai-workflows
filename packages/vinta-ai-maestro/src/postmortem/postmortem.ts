@@ -1,0 +1,1317 @@
+/**
+ * The plan post-mortem (§13.6).
+ *
+ * A run knows five things the plan's author could not: which declared
+ * dependencies never mattered, which undeclared ones turned up at gate time,
+ * which same-wave phases actually collided, which phases took a wildly
+ * different amount of time than their wave placement assumed — and, since runs
+ * began tuning themselves, what the run changed about its own plan and whether
+ * doing so helped. This module folds a finished run's journal against its own
+ * frozen workflow and emits that as a schema-versioned artifact `plan-feature`
+ * reads when planning the next feature in the same repo. It is the only thing
+ * that makes the planner and the executor compound rather than merely coexist.
+ *
+ * **The fifth finding closes a loop that was otherwise open.** A run can amend
+ * itself now (§9.2): a watchdog wakes the monitor, and the monitor may retune a
+ * gate's command, its timeout, a phase's fix budget or a phase's model. Nobody
+ * is watching when it happens. Without this finding there is no way to learn
+ * that the feature is making runs *worse*, and no way for the next plan to
+ * start out already carrying the change this run had to discover — which is the
+ * whole point: a project whose `unit` gate wants `--reuse-db` should pay for
+ * finding that out once.
+ *
+ * **The source is structural, like `analytics.ts`'s and `usage.ts`'s.**
+ * `Journal` satisfies `PostMortemSource` and so does a fake, which is what lets
+ * these findings be tested against a journal whose timestamps are chosen rather
+ * than measured — `Journal.append` stamps `Date.now()`, so a real one cannot
+ * express "this phase ran eight times longer than its wave".
+ *
+ * **Two of the four findings are not in the journal at all, and are handled
+ * differently for a reason.**
+ *
+ * A third — `missing_dependencies` — is now journalled well enough to be
+ * worth reading. `gate_result` records each gate's id, exit code and status,
+ * so the window a phase spent broken is the window one *named gate* spent
+ * red, and the common recovery shape (gate fails, fixer runs, gate passes,
+ * node never marked `failed`) is visible at all. It is still ordering
+ * evidence, not proof: the finding says an undeclared phase landed while a
+ * named gate was red, not that landing it is what turned the gate green.
+ *
+ * Conflicts are *observed*, but by `src/integration/`, in process: `mergeWave`
+ * returns `ConflictRecord`s and no event carries them. So they are an *input*
+ * here — pass the integrator's wave results — and their absence is a `gaps[]`
+ * entry, never an empty finding. "No conflicts were recorded" and "nobody told
+ * us about conflicts" are different sentences and a planner acts on them
+ * differently.
+ *
+ * Dependency *use* is not observed by anything. Nothing in the event
+ * vocabulary, the projections or the transcripts records that a node consumed
+ * what an upstream node built: the log has status transitions, lane
+ * assignments and session ids. The schedule cannot stand in for it either — an
+ * edge whose upstream finished long before the dependent started looks
+ * identical whether the dependent needed it or not, and the whole value of
+ * this finding to the *next* plan is that it is trustworthy. So
+ * `unused_dependencies` is reported only from evidence that does not exist
+ * yet, and today the artifact carries the gap instead. This is the finding
+ * most likely to be fabricated; it is not fabricated here.
+ *
+ * **An unfinished run is refused, not reported as partial.** `analytics.ts`
+ * reports partial figures because its consumer is a live view where "so far"
+ * is the useful answer. A post-mortem's consumer is a planning agent in a
+ * different session, hours or weeks later, reading a file: a half-run that
+ * says a phase never conflicted, or that a dependency was never used, is worse
+ * than no file. There is exactly one moment a post-mortem is true, and it is
+ * after `run_ended`.
+ *
+ * Node ids, phase waves, repository paths, epoch milliseconds and counts. No
+ * transcript text, no diff hunks, no repository contents, and deliberately not
+ * even the plan's own `artifact` prose off the dependency edges — the artifact
+ * is read by an agent in another session, which makes it exactly the place
+ * where leaked content would be least visible and most harmful.
+ */
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { z } from 'zod'
+import { computeWaves, transitiveDependents } from '../graph.ts'
+import type { NodeStatus, StoredEvent } from '../journal/events.ts'
+import type { Workflow } from '../types.ts'
+
+export const POSTMORTEM_SCHEMA_URL =
+  'https://github.com/vintasoftware/vinta-ai-workflows/schemas/postmortem.v1.schema.json'
+
+/** Written into the run directory, beside the frozen `workflow.json`. */
+export const POSTMORTEM_FILENAME = 'postmortem.json'
+
+/**
+ * Where the monitor's own account of each self-amendment lives, in the same
+ * directory. Named here because this artifact points at it and must not
+ * duplicate it: the reasoning, the evidence and the gate command are prose
+ * about a repository, and this file is read by an agent in another session.
+ */
+export const INTERVENTION_RECORD_FILENAME = 'interventions.jsonl'
+
+const Id = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]*$/, 'must be lowercase kebab-case')
+  .min(1)
+
+// ---------------------------------------------------------------------------
+// The artifact
+// ---------------------------------------------------------------------------
+
+export const EdgeSchema = z
+  .strictObject({
+    node: Id.describe('The dependent phase.'),
+    depends_on: Id.describe('The upstream phase the edge names.'),
+  })
+  .describe(
+    'One dependency edge, by id. The plan’s own `artifact` prose is deliberately ' +
+      'not carried: the reader has the plan, and this file must stay free of repository text.',
+  )
+
+export const MissingDependencySchema = z
+  .strictObject({
+    node: Id.describe('The phase that failed and later passed.'),
+    depends_on: Id.describe('The undeclared phase that landed in between.'),
+    failed_at_ms: z.number().int().describe('When the phase first failed.'),
+    landed_at_ms: z.number().int().describe('When the undeclared phase reached `done`.'),
+    passed_at_ms: z.number().int().describe('When the phase finally reached `done`.'),
+    gate: Id.optional().describe(
+      'The gate whose recorded result is the evidence: it failed at `failed_at_ms` and ' +
+        'passed at `passed_at_ms`. Absent when the run recorded no gate result for the ' +
+        'phase and the window came from its status transitions instead — a weaker signal, ' +
+        'flagged in `gaps`.',
+    ),
+  })
+  .describe(
+    'A dependency the run discovered and the plan did not declare: the phase failed, an ' +
+      'undeclared phase landed, and only then did it pass. The evidence is still ordering — ' +
+      'a recorded gate result narrows the window to one gate and rules out an unrelated ' +
+      'failure, but it does not prove the undeclared phase is what fixed it. Confirm the ' +
+      'edge against the plan before adding it.',
+  )
+
+export const WaveConflictSchema = z
+  .strictObject({
+    wave: z.number().int().min(1).describe('The wave whose merge produced the conflict.'),
+    nodes: z.array(Id).min(2).describe('The phases that both own the contested paths.'),
+    paths: z.array(z.string()).describe('Repository paths that conflicted. Paths, never hunks.'),
+    fix_rounds: z
+      .number()
+      .int()
+      .min(0)
+      .describe('Conflict-fixer rounds the resolution took. High is a strong split signal.'),
+  })
+  .describe('Two same-wave phases that actually fought over the same code at integration.')
+
+export const DurationDivergenceSchema = z
+  .strictObject({
+    node: Id,
+    wave: z.number().int().min(1),
+    span_ms: z.number().int().describe('Dispatch to final settle, including fix rounds.'),
+    wave_baseline_ms: z
+      .number()
+      .int()
+      .describe('Median span of the *other* dispatched phases in the same wave.'),
+    ratio: z.number().describe('`span_ms / wave_baseline_ms`, rounded to two decimals.'),
+    direction: z
+      .enum(['longer', 'shorter'])
+      .describe('`longer`: the phase set the wave’s wall clock on its own.'),
+  })
+  .describe(
+    'A phase whose real duration was wildly out of line with its wave placement — which is ' +
+      'exactly what makes the next plan’s parallelism estimate wrong.',
+  )
+
+export const GateCostSchema = z
+  .strictObject({
+    gate: Id,
+    runs: z
+      .number()
+      .int()
+      .min(1)
+      .describe('Verdicts recorded for this gate, over every phase and every fix round.'),
+    cached_runs: z
+      .number()
+      .int()
+      .min(0)
+      .describe('Of those, the ones the result cache served. They cost this run nothing.'),
+    ran_ms: z
+      .number()
+      .int()
+      .min(0)
+      .describe(
+        'Summed runtime of the verdicts the run actually paid for — the runner’s own ' +
+          'measurement, not the distance between two journal rows. Cache hits are excluded.',
+      ),
+    slowest_ms: z
+      .number()
+      .int()
+      .min(0)
+      .describe('The slowest single paid run. What a `timeout_s` is set against.'),
+    cache_saved_ms: z
+      .number()
+      .int()
+      .min(0)
+      .describe(
+        'Summed runtime of the cache hits: what those gates cost the last time they really ' +
+          'ran. An estimate of time saved, never additive with `ran_ms`.',
+      ),
+    failed_runs: z.number().int().min(0).describe('Verdicts that came back red.'),
+    timed_out_runs: z
+      .number()
+      .int()
+      .min(0)
+      .describe('Verdicts killed at `timeout_s`. The most expensive kind of run there is.'),
+  })
+  .describe(
+    'What one gate cost the run. A plan is sized against this: the gate that dominates ' +
+      '`ran_ms` is the one whose pool capacity decides the wall clock, and a gate whose ' +
+      '`runs` far exceeds its phases is a fix loop re-paying for the same suite.',
+  )
+
+/**
+ * How much cheaper a gate has to get before the change is called an
+ * improvement. Ten per cent either way, so ordinary run-to-run variance is
+ * `unchanged` rather than a verdict.
+ */
+export const INTERVENTION_EFFECT_BAND = 0.1
+
+export const INTERVENTION_EFFECTS = ['cheaper', 'dearer', 'unchanged', 'unmeasured'] as const
+
+export const InterventionFindingSchema = z
+  .strictObject({
+    amendment: z
+      .number()
+      .int()
+      .min(1)
+      .describe('The amendment ordinal, matching the run’s `workflow_amended` history.'),
+    at_ms: z.number().int().describe('When the run amended itself.'),
+    target: z
+      .string()
+      .min(1)
+      .describe('What it changed, as the ledger keys it — `gate:<id>` or `node:<id>`.'),
+    effect: z
+      .enum(INTERVENTION_EFFECTS)
+      .describe(
+        '`cheaper` / `dearer` / `unchanged` compare the gate’s mean uncached duration before ' +
+          'and after. `unmeasured` means the journal cannot answer — a phase-level change, ' +
+          'or a gate with no runs on one side of the amendment.',
+      ),
+    before_ms: z
+      .number()
+      .int()
+      .optional()
+      .describe('Mean uncached duration of this gate before the amendment. Absent when unmeasured.'),
+    after_ms: z.number().int().optional().describe('The same, after. Absent when unmeasured.'),
+    runs_before: z.number().int().min(0).optional(),
+    runs_after: z.number().int().min(0).optional(),
+    record_ref: z
+      .string()
+      .describe(
+        'Where the monitor’s own account of this change lives, relative to the run directory. ' +
+          'The reasoning, the evidence and the command are prose about a repository and stay ' +
+          'there; this artifact carries what can be counted.',
+      ),
+  })
+  .describe(
+    'One amendment a run made to itself, and what happened to the thing it changed. The ' +
+      'effect is a comparison of measured durations, not a claim of cause: a gate that got ' +
+      'cheaper across an amendment did so while other things were also changing.',
+  )
+
+export const GAP_KINDS = [
+  'blocking_cause_unrecorded',
+  'dependency_use_unrecorded',
+  'gate_result_unrecorded',
+  'gate_durations_unrecorded',
+  'integration_record_unavailable',
+  'intervention_effect_unmeasured',
+] as const
+
+export const PostMortemGapSchema = z
+  .strictObject({
+    kind: z.enum(GAP_KINDS),
+    needs: z.string().describe('What would have to be recorded for the finding to exist.'),
+    edges: z.array(EdgeSchema).optional().describe('The edges the gap applies to.'),
+    nodes: z.array(Id).optional().describe('The phases the gap applies to.'),
+    gates: z.array(Id).optional().describe('The gates the gap applies to.'),
+  })
+  .describe(
+    'A finding this run could not produce, and why. Carried in the artifact rather than ' +
+      'thrown or defaulted to an empty list: a reader that treats an empty finding as ' +
+      '“nothing happened” has to reach past an explicit statement that nothing was recorded.',
+  )
+
+export const CriticalPathSchema = z
+  .strictObject({
+    nodes: z
+      .array(
+        z.strictObject({
+          node: Id,
+          wave: z.number().int(),
+          span_ms: z.number().int().min(0),
+        }),
+      )
+      .describe('The chain in the order it ran, each with the time it was running.'),
+    span_ms: z.number().int().min(0).describe('The chain’s total. The floor this graph could reach.'),
+    share_of_elapsed: z
+      .number()
+      .min(0)
+      .max(1)
+      .describe('How much of the run’s wall clock this one chain accounts for.'),
+  })
+  .describe(
+    'The dependency chain that decided how long the run took. A plan is re-drawn against ' +
+      'this: shortening any other phase changes nothing, and the only way to a faster run ' +
+      'is a shallower graph or a cheaper phase on this list.',
+  )
+
+export const IdleCapacitySchema = z
+  .strictObject({
+    lane_capacity: z.number().int().min(1).describe('Lanes the plan asked to be provisioned.'),
+    peak_concurrency: z
+      .number()
+      .int()
+      .min(0)
+      .describe('The most phases that were ever running at once. The width the graph reached.'),
+    lane_ms_provisioned: z.number().int().min(0),
+    lane_ms_used: z.number().int().min(0).describe('Summed phase spans — one lane each, while running.'),
+    idle_share: z.number().min(0).max(1).describe('Provisioned lane time no phase occupied.'),
+  })
+  .describe(
+    'What the run paid for and did not use. A lane is a worktree, a forked database and a ' +
+      'desk for a crew member, and a plan that is never as wide as its lane count bought ' +
+      'all three for nothing — which is a fact about the graph, not about the machine.',
+  )
+
+export const PostMortemSchema = z
+  .strictObject({
+    $schema: z
+      .string()
+      .optional()
+      .describe('Optional URL of this schema, for editor validation. Ignored at runtime.'),
+    schema_version: z.literal(1).describe('Schema major version. Bumped only on breaking changes.'),
+    run_id: z.string().min(1),
+    workflow_id: Id.describe('The workflow this run executed.'),
+    plan_ref: z
+      .string()
+      .optional()
+      .describe('The human-readable plan the workflow was emitted alongside, if it named one.'),
+    run: z
+      .strictObject({
+        status: z.enum(['done', 'failed']),
+        started_at_ms: z.number().int(),
+        ended_at_ms: z.number().int(),
+        elapsed_ms: z.number().int(),
+        node_count: z.number().int().min(1),
+        wave_count: z.number().int().min(1),
+      })
+      .describe('The run this describes. Always finished — an unfinished run has no post-mortem.'),
+    findings: z.strictObject({
+      unused_dependencies: z
+        .array(EdgeSchema)
+        .describe(
+          'Edges whose artifact the dependent never needed. Empty on every run today: nothing ' +
+            'observes dependency use, and the schedule cannot substitute. See `gaps`.',
+        ),
+      missing_dependencies: z.array(MissingDependencySchema),
+      wave_conflicts: z.array(WaveConflictSchema),
+      /**
+       * Only gates the run recorded a verdict for, in the workflow's own
+       * declaration order. A declared gate that never ran is absent rather
+       * than a row of zeros: an absence and a measured zero are different
+       * claims, and the second is the one a planner would act on.
+       */
+      gate_costs: z.array(GateCostSchema),
+      duration_divergences: z.array(DurationDivergenceSchema),
+      /**
+       * Null on a run whose nodes never recorded a span — a run that stopped
+       * before anything was dispatched. Null rather than an empty object,
+       * because "no chain" and "a chain of length zero" are different claims.
+       */
+      critical_path: CriticalPathSchema.nullable(),
+      idle_capacity: IdleCapacitySchema.nullable(),
+      /**
+       * Empty means the run never amended itself, which is derivable and
+       * true — unlike `unused_dependencies`, whose emptiness is a gap.
+       */
+      interventions: z
+        .array(InterventionFindingSchema)
+        .describe(
+          'Amendments the run made to itself (§9.2), oldest first. Empty means it made none, ' +
+            'which is a fact rather than a gap: `workflow_amended` rows say who wrote them.',
+        ),
+    }),
+    gaps: z.array(PostMortemGapSchema),
+  })
+  .describe(
+    'What one finished `vinta-ai-maestro` run learned about the plan that produced it: dependencies ' +
+      'that were never used, dependencies discovered missing, same-wave phases that conflicted, ' +
+      'phases whose duration diverged from their wave, what each gate cost, and changes the ' +
+      'run made to its own plan while it ran. Ids, waves, paths, durations and counts only.',
+  )
+
+export type PostMortem = z.infer<typeof PostMortemSchema>
+export type Edge = z.infer<typeof EdgeSchema>
+export type MissingDependency = z.infer<typeof MissingDependencySchema>
+export type WaveConflict = z.infer<typeof WaveConflictSchema>
+export type GateCost = z.infer<typeof GateCostSchema>
+export type DurationDivergence = z.infer<typeof DurationDivergenceSchema>
+export type CriticalPath = z.infer<typeof CriticalPathSchema>
+export type IdleCapacity = z.infer<typeof IdleCapacitySchema>
+export type InterventionFinding = z.infer<typeof InterventionFindingSchema>
+export type InterventionEffect = (typeof INTERVENTION_EFFECTS)[number]
+export type PostMortemGap = z.infer<typeof PostMortemGapSchema>
+export type GapKind = (typeof GAP_KINDS)[number]
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+
+/**
+ * The slice of the journal this module needs. Structural on purpose — see the
+ * module comment.
+ */
+export interface PostMortemSource {
+  readWorkflow(runId: string): Workflow
+  events(runId: string, sinceId?: number): readonly StoredEvent[]
+}
+
+/**
+ * One wave's integration outcome. `WaveResult` from `src/integration/` satisfies
+ * this structurally; an `UnresolvedConflictError` — a conflict no fixer round
+ * settled, which is the strongest split signal there is — converts into one
+ * conflict entry
+ * with its `nodes`, `paths` and `rounds`.
+ */
+export interface IntegrationWaveRecord {
+  readonly wave: number
+  readonly conflicts: readonly {
+    readonly nodes: readonly string[]
+    readonly paths: readonly string[]
+    readonly rounds: number
+  }[]
+}
+
+export interface PostMortemOptions {
+  /**
+   * The integrator's wave results. Conflicts are never journalled, so omitting
+   * this is reported as a gap rather than as "no conflicts". Pass `[]` for a
+   * run that integrated with none.
+   */
+  readonly integration?: readonly IntegrationWaveRecord[]
+  /** How many times a span must miss its wave baseline to be a divergence. Default 4. */
+  readonly divergenceFactor?: number
+  /**
+   * Spans below this are never divergences however wrong the ratio is: a phase
+   * that took two seconds instead of four teaches the next plan nothing.
+   * Default one minute.
+   */
+  readonly noiseFloorMs?: number
+}
+
+/** A run that has not ended. There is exactly one moment a post-mortem is true. */
+export class RunNotFinishedError extends Error {
+  readonly runId: string
+
+  constructor(runId: string) {
+    super(
+      `run "${runId}" has not ended: a post-mortem describes a finished run, and a partial ` +
+        'one would be read as fact by a planner in another session. Use `analyzeRun` for a ' +
+        'run in progress.',
+    )
+    this.name = 'RunNotFinishedError'
+    this.runId = runId
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The fold
+// ---------------------------------------------------------------------------
+
+const SETTLED: ReadonlySet<NodeStatus> = new Set<NodeStatus>(['done', 'failed', 'blocked'])
+
+/** One journalled gate verdict: gate id, when, how it went, and what it cost. */
+interface GateRun {
+  readonly gate: string
+  readonly ts: number
+  readonly passed: boolean
+  readonly timedOut: boolean
+  /**
+   * The runner's own measurement, or `null` for a verdict written before the
+   * runner measured itself. `null` rather than 0, so a gate whose runtime was
+   * never recorded is reported as a gap instead of as free.
+   */
+  readonly durationMs: number | null
+  /** Served from the result cache: `durationMs` is what it cost when it last ran. */
+  readonly cached: boolean
+}
+
+/** One amendment the run made to itself (§9.2), as the journal records it. */
+interface SelfAmendment {
+  readonly amendment: number
+  readonly ts: number
+  readonly targets: readonly string[]
+}
+
+interface Trace {
+  wave: number | null
+  startedAtMs: number | null
+  settledAtMs: number | null
+  firstFailedAtMs: number | null
+  lastDoneAtMs: number | null
+  /** Every `gate_result` for this node, in commit order. */
+  gates: GateRun[]
+}
+
+const newTrace = (): Trace => ({
+  wave: null,
+  startedAtMs: null,
+  settledAtMs: null,
+  firstFailedAtMs: null,
+  lastDoneAtMs: null,
+  gates: [],
+})
+
+/**
+ * Derives the post-mortem for a finished run.
+ *
+ * Throws `RunNotFinishedError` when the run has not ended, and a plain `Error`
+ * when the log does not describe a run at all — both are "there is nothing
+ * true to say yet", not findings.
+ */
+export function postMortem(
+  source: PostMortemSource,
+  runId: string,
+  options: PostMortemOptions = {},
+): PostMortem {
+  const workflow = source.readWorkflow(runId)
+  const events = source.events(runId, 0)
+
+  let startedAtMs: number | null = null
+  let endedAtMs: number | null = null
+  let status: 'done' | 'failed' = 'done'
+  const traces = new Map<string, Trace>()
+  const selfAmendments: SelfAmendment[] = []
+
+  const traceOf = (nodeId: string): Trace => {
+    const existing = traces.get(nodeId)
+    if (existing !== undefined) return existing
+    const fresh = newTrace()
+    traces.set(nodeId, fresh)
+    return fresh
+  }
+
+  for (const event of events) {
+    switch (event.type) {
+      case 'run_started':
+        startedAtMs = event.ts
+        continue
+      case 'run_ended':
+        endedAtMs = event.ts
+        // The artifact's schema is `done | failed`, and `plan-feature` reads it
+        // as "did this plan land". A run an operator cancelled did not; a
+        // paused one has not yet, and its post-mortem is not written until it
+        // ends some other way.
+        status = event.payload.status === 'done' ? 'done' : 'failed'
+        continue
+      case 'node_registered':
+        traceOf(event.nodeId).wave = event.payload.wave
+        continue
+      case 'node_status': {
+        const trace = traceOf(event.nodeId)
+        const next = event.payload.status
+        if (next === 'running' && trace.startedAtMs === null) trace.startedAtMs = event.ts
+        if (SETTLED.has(next)) trace.settledAtMs = event.ts
+        // Both edges of a re-attempt: the first failure is when the run learned
+        // something was missing, the last `done` is when it stopped being.
+        if (next === 'failed' && trace.firstFailedAtMs === null) trace.firstFailedAtMs = event.ts
+        if (next === 'done') trace.lastDoneAtMs = event.ts
+        continue
+      }
+      case 'gate_result': {
+        const { gate, status, duration_ms: durationMs, cached } = event.payload
+        traceOf(event.nodeId).gates.push({
+          gate,
+          ts: event.ts,
+          passed: status === 'passed',
+          timedOut: status === 'timed_out',
+          // Typed as required, absent in practice on an older journal — this
+          // module reads what is on disk, not what the type promises.
+          durationMs:
+            typeof durationMs === 'number' && Number.isFinite(durationMs)
+              ? Math.max(0, Math.round(durationMs))
+              : null,
+          cached: cached === true,
+        })
+        continue
+      }
+      case 'workflow_amended': {
+        // Only the run's own. An operator's edit is a person deciding
+        // something, and scoring it as though the run had chosen it would
+        // credit or blame the wrong party.
+        const { author, targets, amendment } = event.payload
+        if (author !== 'monitor') continue
+        selfAmendments.push({ amendment, ts: event.ts, targets: targets ?? [] })
+        continue
+      }
+      default:
+        // Lane assignments, questions and steering describe how a node spent
+        // its time, which is `analytics.ts`'s subject and not this module's.
+        continue
+    }
+  }
+
+  if (startedAtMs === null) throw new Error(`run "${runId}" has no run_started event`)
+  if (endedAtMs === null) throw new RunNotFinishedError(runId)
+
+  const waves = computeWaves(workflow.nodes)
+  const waveOf = (id: string): number => traces.get(id)?.wave ?? waves.get(id) ?? 1
+  // Computed once: `gaps` reports the entries this could not score, so the
+  // two must be looking at the same list.
+  const selfChanges = interventions(selfAmendments, traces, endedAtMs)
+
+  return PostMortemSchema.parse({
+    $schema: POSTMORTEM_SCHEMA_URL,
+    schema_version: 1,
+    run_id: runId,
+    workflow_id: workflow.id,
+    ...(workflow.plan_ref === undefined ? {} : { plan_ref: workflow.plan_ref }),
+    run: {
+      status,
+      started_at_ms: startedAtMs,
+      ended_at_ms: endedAtMs,
+      elapsed_ms: endedAtMs - startedAtMs,
+      node_count: workflow.nodes.length,
+      wave_count: Math.max(...waves.values()),
+    },
+    findings: {
+      // Not derivable from anything this module can see. The gap below says
+      // what would make it derivable; guessing here is the failure mode.
+      unused_dependencies: [],
+      missing_dependencies: missingDependencies(workflow, traces),
+      wave_conflicts: waveConflicts(options.integration),
+      duration_divergences: durationDivergences(workflow, traces, waveOf, options),
+      gate_costs: gateCosts(workflow, traces),
+      critical_path: criticalPath(workflow, traces, waveOf, endedAtMs - startedAtMs),
+      idle_capacity: idleCapacity(workflow, traces, endedAtMs - startedAtMs),
+      interventions: selfChanges,
+    },
+    gaps: gaps(workflow, traces, options, selfChanges),
+  } satisfies PostMortem)
+}
+
+// ---------------------------------------------------------------------------
+// Findings
+// ---------------------------------------------------------------------------
+
+/**
+ * The dependency chain that decided how long the run took.
+ *
+ * Walked backwards from whichever phase settled last, each step taking the
+ * dependency that settled latest — the one that step was waiting for. What
+ * comes out is the chain that has to get shorter for the run to get shorter:
+ * every phase *off* it could be made instant and the wall clock would not move.
+ *
+ * Reported because nothing else says it and the planner needs it.
+ * `plan-feature` reads these artifacts before it draws the next set of
+ * dependency lines, and a run whose graph was six deep and two wide — holding
+ * three lanes, one of them idle for most of a day — produced an artifact that
+ * mentioned neither depth nor width. The schedule was the dominant cost of that
+ * run and the only part of it a plan controls.
+ *
+ * **It measures the chain, not the blame.** A phase can start late because a
+ * crew member was busy rather than because its dependency had not landed, and
+ * that wait is invisible from here. The `blocking_cause_unrecorded` gap says so
+ * out loud rather than this quietly reporting a chain shorter than the run's.
+ */
+function criticalPath(
+  workflow: Workflow,
+  traces: ReadonlyMap<string, Trace>,
+  waveOf: (id: string) => number,
+  elapsedMs: number,
+): CriticalPath | null {
+  const spanOf = (id: string): number | null => {
+    const trace = traces.get(id)
+    if (trace?.startedAtMs == null || trace.settledAtMs == null) return null
+    return Math.max(0, trace.settledAtMs - trace.startedAtMs)
+  }
+  const settledAt = (id: string): number | null => traces.get(id)?.settledAtMs ?? null
+
+  const ran = workflow.nodes.filter((node) => spanOf(node.id) !== null)
+  if (ran.length === 0) return null
+
+  const depsOf = new Map(workflow.nodes.map((node) => [node.id, node.depends_on.map((d) => d.node)]))
+  // The last phase to settle is what the run was waiting for at the end.
+  let cursor = ran.reduce((latest, node) =>
+    (settledAt(node.id) as number) > (settledAt(latest.id) as number) ? node : latest,
+  ).id
+
+  const chain: string[] = []
+  const seen = new Set<string>()
+  while (!seen.has(cursor)) {
+    seen.add(cursor)
+    chain.push(cursor)
+    // Of this phase's dependencies, the one that settled last is the one it
+    // waited on; the others had already landed and cost it nothing.
+    const blocking = (depsOf.get(cursor) ?? [])
+      .filter((id) => settledAt(id) !== null)
+      .reduce<string | null>(
+        (latest, id) =>
+          latest === null || (settledAt(id) as number) > (settledAt(latest) as number) ? id : latest,
+        null,
+      )
+    if (blocking === null) break
+    cursor = blocking
+  }
+  chain.reverse()
+
+  const nodes = chain.map((id) => ({ node: id, wave: waveOf(id), span_ms: spanOf(id) as number }))
+  const spanMs = nodes.reduce((sum, entry) => sum + entry.span_ms, 0)
+  return {
+    nodes,
+    span_ms: spanMs,
+    // Guarded rather than trusted: a run reporting zero elapsed would divide by
+    // it, and the schema's 0..1 bound would reject the NaN — turning a clock
+    // oddity into a failure to write the artifact at all.
+    share_of_elapsed: elapsedMs <= 0 ? 0 : Math.min(1, spanMs / elapsedMs),
+  }
+}
+
+/**
+ * Lane time bought and not used, and the width the graph actually reached.
+ *
+ * `peak_concurrency` is the honest answer to "was this plan parallel". A plan
+ * declaring three lanes that never ran more than two phases at once paid for a
+ * third worktree, a third forked database and a third desk for the length of
+ * the run and got none of them back — a fact about the graph rather than about
+ * the machine, which is why it belongs in what the planner reads.
+ *
+ * Swept from the phase spans rather than counted off lane assignments: a lane
+ * is held for a phase's whole span, and `node_assigned` records which lane
+ * rather than for how long.
+ */
+function idleCapacity(
+  workflow: Workflow,
+  traces: ReadonlyMap<string, Trace>,
+  elapsedMs: number,
+): IdleCapacity | null {
+  const spans: { from: number; to: number }[] = []
+  for (const node of workflow.nodes) {
+    const trace = traces.get(node.id)
+    if (trace?.startedAtMs == null || trace.settledAtMs == null) continue
+    spans.push({ from: trace.startedAtMs, to: Math.max(trace.startedAtMs, trace.settledAtMs) })
+  }
+  if (spans.length === 0) return null
+
+  // A sweep over the edges: +1 where a phase starts, -1 where one settles, and
+  // the running maximum is the most lanes ever occupied at once. Ties settle
+  // before they start (`a.delta - b.delta`), so a phase handed a lane the
+  // instant another released it does not read as two.
+  const edges = [
+    ...spans.map((span) => ({ at: span.from, delta: 1 })),
+    ...spans.map((span) => ({ at: span.to, delta: -1 })),
+  ].sort((a, b) => a.at - b.at || a.delta - b.delta)
+  let live = 0
+  let peak = 0
+  for (const edge of edges) {
+    live += edge.delta
+    peak = Math.max(peak, live)
+  }
+
+  const capacity = workflow.resources['lane']?.capacity ?? 1
+  const provisioned = capacity * Math.max(0, elapsedMs)
+  const used = spans.reduce((sum, span) => sum + (span.to - span.from), 0)
+  return {
+    lane_capacity: capacity,
+    peak_concurrency: peak,
+    lane_ms_provisioned: provisioned,
+    lane_ms_used: used,
+    // Clamped at both ends: a phase whose span outlives the run's own
+    // `run_ended` would otherwise produce a negative share and fail the parse.
+    idle_share: provisioned <= 0 ? 0 : Math.min(1, Math.max(0, (provisioned - used) / provisioned)),
+  }
+}
+
+/**
+ * The window a phase spent broken: when it first went red, and when the same
+ * thing went green again.
+ *
+ * Gate results are preferred over status transitions, and are the reason this
+ * finding is worth reading. A node that fails a gate, runs a fixer and passes
+ * never reaches `node_status: failed` at all — the pipeline recovered — so
+ * before gate results were journalled the single most common shape of a
+ * missing dependency was invisible here. Gate evidence also names *which*
+ * gate, which rules out the unrelated-failure reading: the same command went
+ * red and then green with an undeclared phase landing in between.
+ *
+ * The status window remains the fallback, unchanged, for a run whose gates
+ * recorded nothing (a host that supplies no `run_gate` body) and for a node
+ * that failed outright and was re-run.
+ */
+function recoveryWindow(
+  trace: Trace | undefined,
+): { readonly failedAt: number; readonly passedAt: number; readonly gate?: string } | undefined {
+  for (const [index, run] of (trace?.gates ?? []).entries()) {
+    if (run.passed) continue
+    const recovered = trace?.gates.find(
+      (later, at) => at > index && later.gate === run.gate && later.passed && later.ts > run.ts,
+    )
+    if (recovered !== undefined) {
+      return { failedAt: run.ts, passedAt: recovered.ts, gate: run.gate }
+    }
+  }
+
+  const failedAt = trace?.firstFailedAtMs
+  const passedAt = trace?.lastDoneAtMs
+  if (failedAt == null || passedAt == null || passedAt <= failedAt) return undefined
+  return { failedAt, passedAt }
+}
+
+/**
+ * A phase that failed, and passed only after a phase it does not depend on had
+ * landed.
+ *
+ * Two exclusions keep the suggestion actionable rather than merely true. A
+ * candidate already reachable through the declared graph is not a missing
+ * edge — the plan says it comes first, so saying it again buys nothing. And a
+ * candidate downstream of the failing phase cannot become its dependency: that
+ * edge is a cycle, and the real reading is that the two phases are one.
+ */
+function missingDependencies(
+  workflow: Workflow,
+  traces: ReadonlyMap<string, Trace>,
+): MissingDependency[] {
+  const found: MissingDependency[] = []
+  const deps = new Map(workflow.nodes.map((n) => [n.id, n.depends_on.map((d) => d.node)]))
+  const ancestors = (id: string): Set<string> => {
+    const seen = new Set<string>()
+    const queue = [id]
+    while (queue.length > 0) {
+      for (const dep of deps.get(queue.shift() as string) ?? []) {
+        if (seen.has(dep)) continue
+        seen.add(dep)
+        queue.push(dep)
+      }
+    }
+    return seen
+  }
+
+  for (const node of workflow.nodes) {
+    const window = recoveryWindow(traces.get(node.id))
+    if (window === undefined) continue
+    const { failedAt, passedAt } = window
+
+    const declared = ancestors(node.id)
+    const downstream = new Set(transitiveDependents(workflow.nodes, node.id))
+    for (const candidate of workflow.nodes) {
+      if (candidate.id === node.id) continue
+      if (declared.has(candidate.id) || downstream.has(candidate.id)) continue
+      const landedAt = traces.get(candidate.id)?.lastDoneAtMs
+      if (landedAt == null || landedAt <= failedAt || landedAt >= passedAt) continue
+      found.push({
+        node: node.id,
+        depends_on: candidate.id,
+        failed_at_ms: failedAt,
+        landed_at_ms: landedAt,
+        passed_at_ms: passedAt,
+        ...(window.gate === undefined ? {} : { gate: window.gate }),
+      })
+    }
+  }
+  return found
+}
+
+/**
+ * Same-wave phases that actually fought, straight off the integration record.
+ *
+ * A record naming one node is dropped: the integrator always names the
+ * incoming node and adds the same-wave peers that touched the contested paths,
+ * so a lone name means the merge collided with history from earlier waves —
+ * true, and not a fact about two peers being wrongly parallel.
+ */
+function waveConflicts(
+  integration: readonly IntegrationWaveRecord[] | undefined,
+): WaveConflict[] {
+  if (integration === undefined) return []
+  const conflicts: WaveConflict[] = []
+  for (const wave of integration) {
+    for (const conflict of wave.conflicts) {
+      const nodes = [...new Set(conflict.nodes)]
+      if (nodes.length < 2) continue
+      conflicts.push({
+        wave: wave.wave,
+        nodes,
+        paths: [...conflict.paths],
+        fix_rounds: conflict.rounds,
+      })
+    }
+  }
+  return conflicts
+}
+
+/**
+ * Phases whose span was wildly out of line with the rest of their wave.
+ *
+ * The baseline is the median of the *other* dispatched phases in the wave,
+ * leave-one-out: comparing against a median the outlier is inside pulls the
+ * baseline towards it, and in a wave of two that hides the divergence
+ * completely. A wave with one dispatched phase has no baseline and is skipped
+ * — a wave of one is a correct plan, not a finding.
+ */
+function durationDivergences(
+  workflow: Workflow,
+  traces: ReadonlyMap<string, Trace>,
+  waveOf: (id: string) => number,
+  options: PostMortemOptions,
+): DurationDivergence[] {
+  const factor = options.divergenceFactor ?? 4
+  const noiseFloorMs = options.noiseFloorMs ?? 60_000
+
+  const spans = new Map<string, number>()
+  for (const node of workflow.nodes) {
+    const trace = traces.get(node.id)
+    if (trace?.startedAtMs == null || trace.settledAtMs == null) continue
+    spans.set(node.id, Math.max(0, trace.settledAtMs - trace.startedAtMs))
+  }
+
+  const found: DurationDivergence[] = []
+  for (const node of workflow.nodes) {
+    const span = spans.get(node.id)
+    if (span === undefined) continue
+    const wave = waveOf(node.id)
+    const others = [...spans]
+      .filter(([id]) => id !== node.id && waveOf(id) === wave)
+      .map(([, ms]) => ms)
+    if (others.length === 0) continue
+
+    const baseline = median(others)
+    if (baseline === 0) continue
+    const ratio = span / baseline
+    if (Math.max(span, baseline) < noiseFloorMs) continue
+    if (ratio < factor && ratio > 1 / factor) continue
+
+    found.push({
+      node: node.id,
+      wave,
+      span_ms: span,
+      wave_baseline_ms: Math.round(baseline),
+      ratio: Math.round(ratio * 100) / 100,
+      direction: ratio >= factor ? 'longer' : 'shorter',
+    })
+  }
+  return found
+}
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 1) return sorted[middle] as number
+  return ((sorted[middle - 1] as number) + (sorted[middle] as number)) / 2
+}
+
+// ---------------------------------------------------------------------------
+// What the run could not tell you
+// ---------------------------------------------------------------------------
+
+/**
+ * What each gate cost the run, folded over every phase and every fix round.
+ *
+ * This is the figure the *next* plan is sized against, and the only one in the
+ * artifact that speaks about the gates rather than the phases. A plan chooses
+ * `max_parallel_lanes` and a gate pool's capacity together; without the gate's
+ * own runtime, the second half of that choice is made by feel. `runs` is what
+ * makes the total legible — the same twenty minutes is a slow suite when it is
+ * one run and a fix loop re-paying for the same suite when it is twelve.
+ *
+ * Cache hits are counted and their time is kept in its own column. Adding
+ * `cache_saved_ms` to `ran_ms` would report a run as having spent time it
+ * specifically did not spend, and reading them as one number is exactly the
+ * mistake an agent consuming this file would make if they shared a field.
+ *
+ * Declaration order, and only gates the run recorded — the ordering and
+ * presence rules `critical_path` and `duration_divergences` already follow.
+ */
+function gateCosts(workflow: Workflow, traces: ReadonlyMap<string, Trace>): GateCost[] {
+  interface Tally {
+    runs: number
+    cachedRuns: number
+    ranMs: number
+    slowestMs: number
+    cacheSavedMs: number
+    failedRuns: number
+    timedOutRuns: number
+  }
+
+  const tallies = new Map<string, Tally>()
+  for (const trace of traces.values()) {
+    for (const run of trace.gates) {
+      const tally = tallies.get(run.gate) ?? {
+        runs: 0,
+        cachedRuns: 0,
+        ranMs: 0,
+        slowestMs: 0,
+        cacheSavedMs: 0,
+        failedRuns: 0,
+        timedOutRuns: 0,
+      }
+      tallies.set(run.gate, tally)
+      tally.runs += 1
+      if (!run.passed && !run.timedOut) tally.failedRuns += 1
+      if (run.timedOut) tally.timedOutRuns += 1
+      if (run.durationMs === null) continue
+      if (run.cached) {
+        tally.cachedRuns += 1
+        tally.cacheSavedMs += run.durationMs
+        continue
+      }
+      tally.ranMs += run.durationMs
+      tally.slowestMs = Math.max(tally.slowestMs, run.durationMs)
+    }
+  }
+
+  // A gate the run recorded but the frozen workflow no longer declares is
+  // still reported, after the declared ones. An amendment (§9) can drop a gate
+  // from under verdicts already on the tape, and dropping those rows would
+  // unspend time the run really paid.
+  const declared = Object.keys(workflow.gates)
+  const rest = [...tallies.keys()].filter((gate) => !declared.includes(gate)).sort()
+  const costs: GateCost[] = []
+  for (const gate of [...declared, ...rest]) {
+    const tally = tallies.get(gate)
+    if (tally === undefined) continue
+    costs.push({
+      gate,
+      runs: tally.runs,
+      cached_runs: tally.cachedRuns,
+      ran_ms: tally.ranMs,
+      slowest_ms: tally.slowestMs,
+      cache_saved_ms: tally.cacheSavedMs,
+      failed_runs: tally.failedRuns,
+      timed_out_runs: tally.timedOutRuns,
+    })
+  }
+  return costs
+}
+
+/**
+ * What the run changed about itself, and what happened to the thing it changed.
+ *
+ * ## What "what happened" can honestly mean here
+ *
+ * The only measurable target is a gate, and the only measurement is its
+ * duration. So the comparison is: the mean of every *uncached* run of that
+ * gate before the amendment, against the mean of every uncached run after it.
+ * Cached hits are excluded because a hit reports the duration of the run that
+ * filled the cache — it would drag the mean toward whichever side of the
+ * amendment that run happened to fall on, which is the one number that must
+ * not be borrowed across the boundary being measured.
+ *
+ * **It is a comparison, not a claim of cause, and the schema says so.** A gate
+ * that got cheaper across an amendment did so while phases were also finishing,
+ * lanes recycling and caches warming. The finding is worth carrying anyway
+ * because the alternative is carrying nothing: an autonomous editor whose
+ * changes are never measured is one nobody can tell is making runs worse. What
+ * makes it safe to carry is that a planner reading `cheaper` is reading a
+ * measured before and after, both present in the record, rather than a verdict.
+ *
+ * ## Windows
+ *
+ * Each amendment's "before" runs from the previous amendment of the *same
+ * target* (or the start of the run) and its "after" runs to the next one (or
+ * the end). The ledger forbids a second change to one target, so in practice
+ * every window is the whole run; the bound is here because a fold that silently
+ * mixed two changes' effects would be wrong in exactly the case somebody
+ * loosened the ledger to investigate.
+ *
+ * ## Why a phase-level change is `unmeasured` rather than guessed
+ *
+ * `rebudget_fixes` and `retier_phase` change what a phase costs, and a phase
+ * runs once. There is no before to compare an after against — the only
+ * candidate baseline is other phases, which are different work. Reporting a
+ * number here would be reporting the difference between two phases as though it
+ * were the effect of the change, and the reader has no way to tell that from a
+ * real measurement. So it is `unmeasured`, and `gaps` says what would fix it.
+ */
+function interventions(
+  amendments: readonly SelfAmendment[],
+  traces: ReadonlyMap<string, Trace>,
+  endedAtMs: number,
+): InterventionFinding[] {
+  if (amendments.length === 0) return []
+
+  // Every uncached, measured run of every gate, in time order. One pass, then
+  // sliced per window — the alternative walks the traces once per amendment.
+  const samples = new Map<string, { ts: number; durationMs: number }[]>()
+  for (const trace of traces.values()) {
+    for (const run of trace.gates) {
+      if (run.cached || run.durationMs === null) continue
+      const list = samples.get(run.gate) ?? []
+      list.push({ ts: run.ts, durationMs: run.durationMs })
+      samples.set(run.gate, list)
+    }
+  }
+  for (const list of samples.values()) list.sort((a, b) => a.ts - b.ts)
+
+  const ordered = [...amendments].sort((a, b) => a.ts - b.ts)
+
+  return ordered.flatMap((amendment) =>
+    amendment.targets.map((target): InterventionFinding => {
+      const base = {
+        amendment: amendment.amendment,
+        at_ms: amendment.ts,
+        target,
+        record_ref: INTERVENTION_RECORD_FILENAME,
+      }
+
+      const gate = target.startsWith('gate:') ? target.slice('gate:'.length) : null
+      if (gate === null) return { ...base, effect: 'unmeasured' as const }
+
+      const window = boundsFor(ordered, target, amendment)
+      const runs = samples.get(gate) ?? []
+      const before = runs.filter((run) => run.ts >= window.from && run.ts < amendment.ts)
+      const after = runs.filter((run) => run.ts > amendment.ts && run.ts <= window.to)
+
+      if (before.length === 0 || after.length === 0) {
+        return {
+          ...base,
+          effect: 'unmeasured' as const,
+          runs_before: before.length,
+          runs_after: after.length,
+        }
+      }
+
+      const beforeMs = mean(before.map((run) => run.durationMs))
+      const afterMs = mean(after.map((run) => run.durationMs))
+      return {
+        ...base,
+        effect: effectOf(beforeMs, afterMs),
+        before_ms: Math.round(beforeMs),
+        after_ms: Math.round(afterMs),
+        runs_before: before.length,
+        runs_after: after.length,
+      }
+    }),
+  )
+
+  /** The window this amendment owns for `target`: to the neighbouring ones. */
+  function boundsFor(
+    all: readonly SelfAmendment[],
+    target: string,
+    self: SelfAmendment,
+  ): { from: number; to: number } {
+    const touching = all.filter((entry) => entry.targets.includes(target))
+    const previous = touching.filter((entry) => entry.ts < self.ts).at(-1)
+    const next = touching.find((entry) => entry.ts > self.ts)
+    return { from: previous?.ts ?? 0, to: next?.ts ?? endedAtMs }
+  }
+}
+
+function mean(values: readonly number[]): number {
+  return values.reduce((total, value) => total + value, 0) / values.length
+}
+
+function effectOf(beforeMs: number, afterMs: number): InterventionEffect {
+  if (beforeMs === 0) return 'unchanged'
+  const change = (afterMs - beforeMs) / beforeMs
+  if (change <= -INTERVENTION_EFFECT_BAND) return 'cheaper'
+  if (change >= INTERVENTION_EFFECT_BAND) return 'dearer'
+  return 'unchanged'
+}
+
+function gaps(
+  workflow: Workflow,
+  traces: ReadonlyMap<string, Trace>,
+  options: PostMortemOptions,
+  interventionFindings: readonly InterventionFinding[],
+): PostMortemGap[] {
+  const found: PostMortemGap[] = []
+
+  const unscored = interventionFindings.filter((finding) => finding.effect === 'unmeasured')
+  if (unscored.length > 0) {
+    found.push({
+      kind: 'intervention_effect_unmeasured',
+      nodes: unscored
+        .filter((finding) => finding.target.startsWith('node:'))
+        .map((finding) => finding.target.slice('node:'.length)),
+      needs:
+        'a measurement that survives the change. A gate is scored by comparing its own ' +
+        'uncached durations either side of the amendment, and that needs runs on both ' +
+        'sides — an amendment made near the end of a run has none after it. A phase-level ' +
+        'change (a fix budget, a model) has no before at all: the phase runs once, and the ' +
+        'only candidate baseline is a different phase doing different work. Scoring these ' +
+        'would mean reporting the difference between two phases as though it were the ' +
+        'effect of the change, which a reader could not tell from a real measurement.',
+    })
+  }
+
+
+  const edges: Edge[] = workflow.nodes.flatMap((node) =>
+    node.depends_on.map((dep) => ({ node: node.id, depends_on: dep.node })),
+  )
+
+  // Only where there is a chain to misattribute. `critical_path` is the finding
+  // a reader is most likely to over-trust — it looks like an explanation of the
+  // wall clock and is only an explanation of the *graph* — but a plan with no
+  // edges has no ordering for this to be wrong about.
+  if (edges.length > 0 && [...traces.values()].some((trace) => trace.startedAtMs !== null)) {
+    found.push({
+      kind: 'blocking_cause_unrecorded',
+      needs:
+        'an event recording why a ready phase was not dispatched — the resource it was ' +
+        'queued on, or the crew member it was waiting for. The journal records when a ' +
+        'phase started and when it settled, so a gap between a dependency landing and the ' +
+        'dependent starting is visible but unattributed: a busy lane, a busy crew member ' +
+        'and an operator who had not answered a question all look identical. So ' +
+        '`critical_path` is the chain the *graph* forced, and a run can be longer than it ' +
+        'for reasons this artifact cannot name.',
+    })
+  }
+
+  if (edges.length > 0) {
+    found.push({
+      kind: 'dependency_use_unrecorded',
+      edges,
+      needs:
+        'an event recording, per node, which of its declared dependencies its work actually ' +
+        'consumed — the implementer naming the `depends_on` entries it used, or a per-node ' +
+        'record of the symbols and paths the phase branch read. The journal carries status ' +
+        'transitions, lane assignments and session ids; nothing observes consumption. The ' +
+        'schedule is not a substitute: an edge whose upstream finished long before the ' +
+        'dependent started looks identical whether the artifact was needed or ignored, so ' +
+        'every edge above is unproven in both directions and none is reported as unused.',
+    })
+  }
+
+  // Gate results *are* journalled now, so this gap narrowed from "every failed
+  // node" to "the failed nodes this run recorded none for" — a host that
+  // supplies no `run_gate` body, or a node that failed before reaching a gate.
+  // Their `missing_dependencies` entries carry no `gate` and rest on the node's
+  // status transitions alone, which is the weaker evidence the reader must know
+  // about. Nodes whose gates *were* recorded are no longer listed here: keeping
+  // them would be a stale gap, which is its own kind of lie.
+  const unrecorded = workflow.nodes
+    .map((node) => node.id)
+    .filter((id) => {
+      const trace = traces.get(id)
+      return trace?.firstFailedAtMs != null && trace.gates.length === 0
+    })
+  if (unrecorded.length > 0) {
+    found.push({
+      kind: 'gate_result_unrecorded',
+      nodes: unrecorded,
+      needs:
+        'a `gate_result` event for these phases — gate id, exit code and status, which the ' +
+        'executor writes for every gate it runs. This run recorded none for them, so a ' +
+        'failure in their gate log is a failure of unknown cause and any ' +
+        '`missing_dependencies` entry naming them is ordering evidence (failed, then an ' +
+        'undeclared phase landed, then passed) rather than a failure of one identified ' +
+        'gate; confirm the edge against the plan before adding it.',
+    })
+  }
+
+  // Verdicts whose runtime the journal never carried. Their counts in
+  // `gate_costs` are complete and their milliseconds are short by however long
+  // those runs took — which is unknown, not zero, and a gate reported as free
+  // is the one number here a planner would act on hardest.
+  const unmeasured = [
+    ...new Set(
+      [...traces.values()].flatMap((trace) =>
+        trace.gates.filter((run) => run.durationMs === null).map((run) => run.gate),
+      ),
+    ),
+  ].sort()
+  if (unmeasured.length > 0) {
+    found.push({
+      kind: 'gate_durations_unrecorded',
+      gates: unmeasured,
+      needs:
+        '`duration_ms` on the `gate_result` events the executor writes — the runner’s own ' +
+        'measurement of the gate. This run recorded a verdict for these gates without one, ' +
+        'which is what a journal written before the runner measured itself looks like. ' +
+        'Their `gate_costs` durations are a floor: the missing runs are unmeasured, not free.',
+    })
+  }
+
+  if (options.integration === undefined) {
+    found.push({
+      kind: 'integration_record_unavailable',
+      needs:
+        'the integrator’s wave results, passed as `options.integration`. `mergeWave` returns ' +
+        'its `ConflictRecord`s in process and no event carries them, so this run cannot say ' +
+        'whether same-wave phases conflicted. `wave_conflicts` being empty here means ' +
+        'unrecorded, not clean.',
+    })
+  }
+
+  return found
+}
+
+// ---------------------------------------------------------------------------
+// Emission
+// ---------------------------------------------------------------------------
+
+/** Beside the frozen workflow: run-scoped facts live in the run directory. */
+export function postMortemPath(journalRoot: string, runId: string): string {
+  return join(journalRoot, 'runs', runId, POSTMORTEM_FILENAME)
+}
+
+export function serializePostMortem(report: PostMortem): string {
+  return `${JSON.stringify(report, null, 2)}\n`
+}
+
+/** Writes the artifact into the run directory and returns where it landed. */
+export function writePostMortem(journalRoot: string, report: PostMortem): string {
+  const path = postMortemPath(journalRoot, report.run_id)
+  writeFileSync(path, serializePostMortem(report))
+  return path
+}
+
+/** Reads one back. The consumer side of the contract, for anything that ingests these. */
+export function parsePostMortem(
+  raw: unknown,
+): { readonly ok: true; readonly report: PostMortem } | { readonly ok: false; readonly issues: z.ZodError } {
+  const result = PostMortemSchema.safeParse(raw)
+  return result.success ? { ok: true, report: result.data } : { ok: false, issues: result.error }
+}

@@ -3,9 +3,9 @@
 Source-of-truth fragments for the **plan-execution skill family** that
 `vinta-derive-skills` renders into a target project's `ai-tools/skills/`:
 
-- `implement-plan` (conductor) — parse → classify → resolve `WORKROOT` → per-phase loop → track → report.
+- `implement-plan` (conductor) — parse → classify → build the dependency graph → resolve a `WORKROOT` per lane → scheduler loop (several phases at a time) → wave integration → track → report.
 - `implement-phase` — compose prompt + pick model + spawn implementer (one phase).
-- `review-phase` — three-layer review + fix loop (shared by all three conductors).
+- `review-phase` — the thermo-nuclear review loop over one phase's diff, hosted by the conductor (shared by all three conductors).
 - `integrate-phase` — push + open PR via context file (commit-strategy-resolved).
 - `amend-plan` (conductor) — history-rewriting topology; reuses `review-phase` + the implementer-prompt partial.
 
@@ -31,12 +31,53 @@ Partials and shells are **not** `SKILL.md` files, so they legitimately keep `{{.
 
 ## The `WORKROOT` seam (why worktree branching is gone)
 
-The conductor resolves three values **once** (see `partials/worktree-seam.md#WORKROOT_RESOLUTION`) and passes them to every sub-skill as data:
+The conductor resolves three values **once per lane** (see `partials/worktree-seam.md#WORKROOT_RESOLUTION`) and passes them to every sub-skill as data:
 
 | Value | `use_worktree = false` | `use_worktree = true` |
 |---|---|---|
-| `WORKROOT` | `<main_checkout>` | `<worktree_path>` |
+| `WORKROOT` | `<main_checkout>` | `<worktree_path>` — this lane's, when a pool is provisioned |
 | `BASE_BRANCH` | `{{DEFAULT_BRANCH}}` | `<worktree_branch>` |
-| `SANDBOX_TIER` | `none` | `enforced` \| `none` (probed by prepare-worktree) |
+| `SANDBOX_TIER` | `none` | `enforced` \| `none` (probed per lane) |
+
+Worktrees come from one of two **provisioners**, picked once per run: the project's own `commands.worktree_prepare` when it is set, else the `prepare-worktree` skill. The command gets a fixed `VINTA_WORKTREE_*` environment and must create a runnable worktree at the given path and branch. It may also write the summary YAML; the conductor then post-checks it with git. Both provisioners yield the same `worktree_path` / `worktree_branch` / `worktree_summary` / `sandbox_tier`, so nothing downstream of `WORKROOT_RESOLUTION` knows which one ran. The full contract lives in that block.
 
 Every `git` / lint / test / build call in every sub-skill uses `git -C <WORKROOT>` **uniformly** — no `if use_worktree` inside them. Only two genuine conditionals remain, each local and data-driven: the `SANDBOX_TIER`-gated spawn wrap in `implement-phase`, and the `WORKROOT != main_checkout`-gated stray-write check in `review-phase`.
+
+## The dispatched-agent seam (`partials/dispatched-agent.md`)
+
+One rule, two shapes, because it has to hold at both ends of the unit: **the agent doing a phase never dispatches.**
+
+| Block | Consumed by | What it owns |
+|---|---|---|
+| `CONDUCTOR_ENTRY_GUARD` | `implement-plan`, `implement-phase`, `review-phase`, `amend-plan` | Refuses entry to an agent that was itself handed one phase — by another conductor, or by an external orchestrator such as [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro). The conductor is already running; it is what spawned the reader. |
+| `NO_NESTED_DISPATCH` | `implementer-prompt.md#INNER_OUTER_LOOP` → the composed prompt in `implement-phase` and `amend-plan` 4b | Tells the spawned implementer to do the work in its own session. |
+
+The cost this prevents is not duplicated orchestration — it is lost context. A phase agent is reused (review findings, a chore over its own diff, often the next phase), and that reuse only buys anything because the session that read the codebase is the session that gets the next turn. A sub-agent's reading dies with the sub-agent, leaving the parent holding a summary and every later turn starting cold.
+
+## The needs-input seam (`implementer-prompt.md#NEEDS_INPUT` + `partials/relay-questions.md`)
+
+A dispatched agent cannot reach the human: Claude Code and Codex refuse their question tool outside the root session, and a question written into a report is lost in the transcript. So the question travels as data, in the shape of the harness tool's own input.
+
+| Block | Consumed by | What it owns |
+|---|---|---|
+| `implementer-prompt.md#NEEDS_INPUT` | the composed prompt in `implement-phase` (via `FULL`) and `amend-plan` 4b | Tells the phase agent to stop at a clean point and return `status: NEEDS_INPUT` with a `questions:` block (header, question, options with label + description, multi-select) instead of guessing or asking in prose. |
+| `relay-questions.md#RELAY` | `implement-phase`, `review-phase`, `amend-plan` | The orchestrator passes the block to `AskUserQuestion` unchanged, records the answer in tracking, and continues the same agent with it. |
+
+The shape is defined once, in the **Asking the human** section every project's `AGENTS.md` carries ([source](../../../vinta-write-agents-md/resources/asking-the-human.md)). [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) parses the same block from a dispatched agent's report and renders it as a question card, so a plan run under the daemon and one run under the skills unblock the same way.
+
+## The parallel-lanes seam (`partials/parallel-lanes.md`)
+
+The plan gives every phase a `**Depends on**:` line. The conductor turns those into a DAG and dispatches a phase the moment its dependencies are green and a lane is free. Six blocks:
+
+| Block | Consumed by | What it owns |
+|---|---|---|
+| `DAG_PARSE` | `implement-plan` Step 0 | graph build, wave derivation, cycle / unknown-id / file-overlap validation |
+| `LANE_WORKTREE_POOL` | `implement-plan` Step 0.5 | pool sizing + provisioning, lane reuse + DB reset, teardown; the hard refusal when worktrees are unavailable |
+| `LANE_TOPOLOGY` | `implement-plan` (linked, not included, from `integrate-phase`) | per-phase base branch from `depends_on`, `integ-{id}` merge bases, `wave-{N}` integration branches, merge-conflict handling |
+| `LANE_SCHEDULER` | `implement-plan` Step 1 | the dispatch loop, tie-breaking, failure containment, the pause gate under concurrency |
+| `TRACKING_DIR` | `implement-plan` | the `TRACKING_{plan-id}/` directory + its ownership rules |
+| `SIBLING_LANE_ISOLATION` | `worktree-seam.md#STRAY_WRITE_CHECK` → `implement-phase` (re-run by `review-phase` after each fix round) | the stray-write guard extended across sibling lanes |
+
+**Sequential execution is `max_parallel_lanes = 1`**, running the same blocks — there is no separate sequential code path to keep in sync.
+
+**Why tracking is a directory.** Lanes commit on branches that later merge. One shared file would conflict at every wave merge for no reason. `run.md` is conductor-owned, `phase-{id}.md` is written only by the lane that ran that phase, on that phase's own branch — so no two branches ever touch the same path and the merges are clean by construction.

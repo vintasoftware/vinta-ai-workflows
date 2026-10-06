@@ -23,10 +23,11 @@ This orchestrator runs six sub-skills in order. Each is its own SKILL.md so it c
 2. [vinta-write-agents-md](../vinta-write-agents-md/SKILL.md) — synthesize the root `AGENTS.md` from the inventory + a focused interview for what the analysis can't see.
 3. [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) — author `ai-tools/agents/*.yaml`. Always emits the foundation trio (`implementer`, `reviewer`, `fixer`); adds stack-specific specialists when the user supplies a template for a matched stack.
 4. [vinta-derive-skills](../vinta-derive-skills/SKILL.md) — author `ai-tools/skills/*/SKILL.md`. Always copies the project-agnostic foundation set (`plan-feature`, `create-spec`, `create-qa-use-cases`) verbatim from its bundled resources. Generates `implement-plan` from a parameterized template using project specifics. Asks the user whether the optional `add-e2e-test` and `add-env-var` skills are needed. Asks for stack-specific templates per matched stack.
-5. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) — copy the canonical `setup-ai-tools.mjs` into `ai-tools/scripts/`, wire the package script alias, run setup, verify all vendor paths resolve.
+   - *Optional, after step 4:* [Generate the worktree command](#optional-step--generate-the-worktree-command) — only when the `prepare-worktree` answer was `generate a provisioning script`. Writes `prepare.sh` / `teardown.sh` into the project from bundled templates.
+5. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) — copy the canonical `setup-ai-tools.mjs` into `ai-tools/scripts/`, wire the package script alias, run setup, verify all vendor paths resolve. Then install the skills of any enabled integration (D.2) through that tool's own CLI.
 6. [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md) — find any pre-existing implementation plans / feature specs scattered across the repo (`docs/`, `specs/`, `plans/`, root markdown, etc.) and propose moving them to the canonical layout `ai-plans/YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md`. Read-only by default; every rename is gated on per-file user approval. Skipped automatically when the analysis finds no candidates.
 
-Each sub-skill returns a short status report. Don't run the next sub-skill until the previous finished cleanly. If a sub-skill fails or surfaces ambiguity, surface that to the user and resolve before continuing.
+Each sub-skill returns a short status report. Don't run the next sub-skill until the previous finished cleanly. If a sub-skill fails or surfaces ambiguity, resolve it with the user before continuing — as an `AskUserQuestion` with concrete options (e.g. `Retry <sub-skill> (Recommended)`, `Skip it, continue`, `Stop`), never as a prose question at the end of the status report.
 
 ### Sibling skill — `create-qa-use-cases`
 
@@ -47,7 +48,7 @@ If the repo already has an `AGENTS.md` (at the root, or at the legacy `ai-tools/
 
 ## Interview (Step 0 — before any sub-skill runs)
 
-Use `AskUserQuestion` for finite-choice questions; iterate plain prose for open-ended ones. Same convention as [plan-feature](../plan-feature/SKILL.md) and [create-spec](../create-spec/SKILL.md).
+Every question goes through `AskUserQuestion` — the harness's structured question tool, which renders clickable options plus a free-text field. On harnesses other than Claude Code, use the equivalent tool listed in [asking-the-human](../vinta-write-agents-md/resources/asking-the-human.md), and follow its shape rules: 2–4 options, recommended first with ` (Recommended)`, no "Other" option, up to 4 questions per call (3 on Codex). For open-ended questions, offer the candidates the analysis found (detected commands, paths, environments, branch names) as options; the free-text field covers the rest. Plain prose only when there is no candidate at all, one question per message.
 
 ### A. Scope
 
@@ -93,7 +94,17 @@ These bleed across sub-skills, so capture once now:
 
    **Additional conventions (optional).** Open prose: *"Any recurring test conventions the four fields above don't capture? (e.g. 'co-locate tests as `*.test.ts` next to source', 'name tests `should_<behavior>_when_<condition>`', 'mock HTTP with our recorded-cassette helper'.)"* On an existing project, seed this from the extras `vinta-analyze-codebase` surfaced and let the user trim. Each entry lands in `skills.write-unit-test.additional_conventions[]`. Leave empty when there's nothing project-specific — the universal rules + framework pack already cover the essentials.
 
-10. **Agent model tiers (optional).** The plan-execution family picks the **implementer** model per phase from the plan itself, but the **reviewer**, **fixer**, and the mechanical steps (**worktree prep**, **opening the PR / integrate**) have no model input unless the project sets one. Offer to pin each to a **tier** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml` — so review runs on a capable model while cheap mechanical work runs on a cheap one. `AskUserQuestion`: `Use recommended defaults (reviewer 3, fixer 2, worktree prep 1, integrate 1)`, `Customize each`, `Leave unset — every spawn uses the runtime default`. On `Customize each`, ask a per-role tier (1–4) for `reviewer` / `fixer` / `worktree_prep` / `integrate`. Land the chosen tiers in `.vinta-ai-workflows.yaml` `agent_models`; omit any role the user leaves unset (unset → runtime default). Recommend the defaults for most teams; recommend `Leave unset` only when the runtime exposes a single model anyway. Note `worktree_prep` is a no-op unless `prepare-worktree` is enabled, and setting `worktree_prep` / `integrate` makes `implement-plan` delegate those steps to a cheap subagent instead of running them inline.
+10. **Agent model tiers (optional).** The plan-execution family picks the **implementer** model per phase from the plan itself, and `review-phase` runs its reviewer one tier above the implementer, so neither is asked here. The merge-conflict **fixer** and the mechanical steps (**worktree prep**, **opening the PR / integrate**) have no model input unless the project sets one. Offer to pin each to a **tier** (1–4) into the same table `plan-feature` uses — `ai-tools/skills/plan-feature/resources/ai-models.yaml` — so cheap mechanical work runs on a cheap model. `AskUserQuestion`: `Use recommended defaults (fixer 2, worktree prep 1, integrate 1)`, `Customize each`, `Leave unset — every spawn uses the runtime default`. On `Customize each`, ask a per-role tier (1–4) for `fixer` / `worktree_prep` / `integrate`. Never ask for or emit `reviewer`: `agent_models.reviewer` is deprecated and ignored. Land the chosen tiers in `.vinta-ai-workflows.yaml` `agent_models`; omit any role the user leaves unset (unset → runtime default). Recommend the defaults for most teams; recommend `Leave unset` only when the runtime exposes a single model anyway. Note `worktree_prep` is a no-op unless `prepare-worktree` is enabled, and setting `worktree_prep` / `integrate` makes `implement-plan` delegate those steps to a cheap subagent instead of running them inline.
+
+11. **`vinta-ai-maestro` defaults (optional).** Every plan `plan-feature` writes ships a `.workflow.json` that [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) executes, and most of what is in it repeats from plan to plan: which gates every phase runs, the pool the test suite contends for, the review and comment-hygiene chores. A `maestro:` section here holds those once, and each plan states only what is different. `AskUserQuestion` (header `Maestro`): `Set project defaults (Recommended)`, `Skip — plans carry everything themselves`. Recommend skipping only when the team does not run maestro.
+
+   On `Set project defaults`, capture:
+   - **Gates every phase runs.** Multi-select `AskUserQuestion` over the types the commands above give a command for: `typecheck` (from `commands.build`), `lint`, `test` (from `commands.test_unit`), and `e2e` only when `add-e2e-test` is enabled. → `maestro.defaults.gates`.
+   - **A different command for maestro.** `AskUserQuestion` per selected type: `Same as commands.* (Recommended)`, `Different for maestro (I'll give it)`. Teams pick a different one when lanes need a flag the inner loop does not, e.g. `pytest --reuse-db -n auto`. → `maestro.gates.<type>.cmd`. `implement-plan` keeps running `commands.*`.
+   - **Scoped gates.** Only when `test` (or `lint`) is selected: should a phase's gate run narrowed to the files the phase changed, with the full command run once per merged wave? `AskUserQuestion`: `Yes — scoped per phase, full per wave (Recommended)`, `No — full command every phase`. On `Yes`, propose a template with `{changed_files}` for the detected runner (`vitest related {changed_files} --run`, `jest --findRelatedTests {changed_files}`, `pytest --testmon {changed_files}`, `ruff check {changed_files}`) and confirm it. It lands in `commands.test_unit_scoped` / `commands.lint_scoped`, where `implement-plan` reads it too. `No` sets `maestro.defaults.gate_scope: full`.
+   - **A test-suite pool.** `AskUserQuestion`: `One suite at a time (Recommended for DB-backed suites)`, `Two at a time`, `No limit`. A limit emits `maestro.resources.test-suite` (`kind: semaphore`, `capacity` 1 or 2) and `maestro.gates.test.requires: [test-suite]`. Then offer the runner's command patterns as the pool's `match` (`pytest*`, `uv run pytest*`, `pnpm test*`), which makes agents take the lease before running tests by hand.
+
+   Everything here is a default under every plan. A plan's own `.workflow.json` overrides any of it, and a commit to this file on a running plan's branch (`plan/<workflow-id>/base`) is applied to that run.
 
 ### D. Optional foundation skills
 
@@ -109,16 +120,33 @@ Eight skills are part of the foundation set but aren't always needed. Ask explic
    - **Primary language.** `AskUserQuestion`: `Python`, `TypeScript`. Auto-pick from `inventory.frameworks` when one language clearly dominates; ask only when polyglot. Drives which `BaseOneOffScript` template gets staged at `<scripts_dir>/_base.{py,ts}`.
    - **S3 bucket + prefix.** Open prose. Empty bucket disables S3 upload (filesystem copy stays authoritative). The skill also reads the `ONE_OFF_S3_BUCKET` / `ONE_OFF_S3_PREFIX` env vars at runtime, so leaving the config blank is fine if the team prefers env-only.
 
-5. **`prepare-worktree`** — does the team want to run long-running plans / experiments inside an isolated git worktree (its own runnable copy of the app, with its own dev + test DB, env files, docker-compose project name) instead of swapping branches in the main checkout? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for any project with long migrations, multi-day plans, or teams where parallel concurrent work in the same checkout is common (one dev shipping a feature while another runs a migration; an agent driving `implement-plan` for hours while the human keeps coding on `main`). Skip for solo projects where branch-switching in place is unproblematic.
+5. **`prepare-worktree`** — does the team want to run long-running plans / experiments inside an isolated git worktree (its own runnable copy of the app, with its own dev + test DB, env files, docker-compose project name) instead of swapping branches in the main checkout? `AskUserQuestion` options: `Yes — enable the skill`, `Yes — we provision with our own script/command`, `Yes — generate a provisioning script for this project`, `No — skip`. The second option is for teams that already have a provisioning script, and the third writes one for them. Both make provisioning deterministic and LLM-free: `implement-plan` runs the command instead of the skill (see the follow-ups below). Recommend the third for teams that want worktrees but have no script, when runs are frequent or parallel: the provisioning decisions are made once at bootstrap instead of by a model on every lane. Recommend it over the skill when inventory found an existing worktree script (`commands.worktree_candidates`): a `bin/*worktree*` / `scripts/*worktree*` file, or a Makefile / `justfile` / `package.json` target with `worktree` in its name. Recommend `Yes` for any project with long migrations, multi-day plans, or teams where parallel concurrent work in the same checkout is common (one dev shipping a feature while another runs a migration; an agent driving `implement-plan` for hours while the human keeps coding on `main`). Skip for solo projects where branch-switching in place is unproblematic.
 
-   **Follow-up only when `prepare-worktree` = Yes — worktree defaults.** Three short questions land under `skills.prepare-worktree.*`:
+   **Follow-up only when `prepare-worktree` = own script/command.** The skill does not ship (`foundation_skills.prepare-worktree: disabled`). Worktrees stay available, because `implement-plan` treats a configured command as the provisioner.
+   - **Prepare command.** `AskUserQuestion` (header `Worktree cmd`): one option per `commands.worktree_candidates` entry, as its invocation (`./bin/new-worktree`, `make worktree`, …); free text for any other. Prose only when nothing was found. Lands in `commands.worktree_prepare`. Show the user the contract their script must honor. It runs from the repo root with `VINTA_WORKTREE_NAME`, `VINTA_WORKTREE_PATH`, `VINTA_WORKTREE_BRANCH`, `VINTA_WORKTREE_BASE_REF`, `VINTA_WORKTREE_KIND`, `VINTA_MAIN_CHECKOUT`, `VINTA_PLAN_PATH` and `VINTA_WORKTREE_SUMMARY` set. It must create a runnable worktree at that path on that new branch, and exit non-zero on failure. Writing the summary YAML is optional. The full text is the `commands.worktree_prepare` description in the config schema. If their existing script takes positional arguments instead, offer a wrapper invocation (`./bin/new-worktree "$VINTA_WORKTREE_NAME" "$VINTA_WORKTREE_PATH"`) as the candidate.
+   - **Teardown command.** `AskUserQuestion` (header `Teardown`): the candidates found, plus `No teardown command — just git worktree remove`. Note on that option that any DB, volume or cache the prepare command creates would be left behind. Lands in `commands.worktree_teardown`; omit the key on `No`.
+   - **Worktree root.** Same question as in the skill follow-up below. Lands in `skills.prepare-worktree.worktree_root`; the conductor uses it to build `VINTA_WORKTREE_PATH`. The deps / test-DB strategy questions are skill-only, so skip them.
+   - The `implement-plan` worktree default and the parallel-execution follow-ups below apply as they do for the skill.
+
+   **Follow-up only when `prepare-worktree` = generate a provisioning script.** The skill does not ship (`foundation_skills.prepare-worktree: disabled`). The scripts are written by the optional [Generate the worktree command](#optional-step--generate-the-worktree-command) step after derive-skills; here, capture only what Step 0.5 needs:
+   - **Script directory.** `AskUserQuestion` (header `Script dir`): `scripts/worktree (Recommended)`, `bin/worktree`, plus any existing scripts directory the inventory found. Free text covers other paths. Step 0.5 emits `commands.worktree_prepare: <dir>/prepare.sh` and `commands.worktree_teardown: <dir>/teardown.sh`.
+   - **Worktree root.** Same question as in the skill follow-up below; lands in `skills.prepare-worktree.worktree_root`.
+   - The `implement-plan` worktree default and the parallel-execution follow-ups below apply as they do for the skill.
+
+   **Follow-up only when `prepare-worktree` = Yes — enable the skill — worktree defaults.** Three short questions land under `skills.prepare-worktree.*`:
    - **Worktree root.** `AskUserQuestion`: `.claude/worktrees` (claude-code convention; the runtime's `EnterWorktree` puts them there), `../<repo-name>-wt-` (sibling dirs of the main checkout — survives across runtimes; relative-path tooling that walks up still works). Auto-pick the first when claude-code is the only selected vendor; ask when multiple vendors are in the **Scope** group's vendor coverage answer.
-   - **Default deps strategy when the plan does NOT install new deps.** `AskUserQuestion`: `symlink` (fastest, reuses main's `node_modules` / `vendor/` / `venv/`), `copy` (defensive; safe for pnpm + npm + cargo + go; risky for yarn PnP + venv), `reinstall` (slowest, always correct). Recommend `symlink` for pnpm / npm / cargo / go projects; `reinstall` for poetry / yarn PnP.
+   - **Default deps strategy.** Every worktree gets its own dependency dirs and never symlinks main's. `AskUserQuestion`: `copy` (copy-on-write clone of main's `node_modules` / `vendor/` — fast and close to free on disk on APFS / btrfs / XFS; right for npm / pnpm / cargo / go / bundler), `reinstall` (run the package manager fresh in the worktree — slower, but always correct). Recommend `copy`, except `reinstall` for poetry / uv / venv / yarn PnP projects, whose trees store absolute paths into the main checkout. The skill reinstalls virtualenvs and yarn PnP regardless of this default.
    - **Default test-DB strategy.** `AskUserQuestion`: `fork-on-schema-change` (default — only forks when the plan body shows migrations), `always-fork` (defensive — every worktree gets its own test DB regardless), `share` (only safe for solo work; flaky cross-worktree test runs are the cost).
 
    **Follow-up — `implement-plan` default for worktree opt-in.** `AskUserQuestion`: should the `implement-plan` Step 0 question (c) — "run phases in a worktree?" — default to `Yes` or `No`? Lands in `run_options.implement-plan.use_worktree`. Recommend `No` for solo projects + short plans; `Yes` for teams that already use worktrees as part of their workflow.
 
-   **Follow-up only when `systematic-debugging` = Yes — observability MCP server inventory.** Open prose, not multi-select. Ask the user to name every MCP server already wired up that exposes observability data, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. Cross-check the answers against any MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.) — if a server is configured but the user didn't mention it, ask whether it carries observability data. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
+   **Follow-up — parallel phase execution.** Two questions, both landing under `run_options.implement-plan`:
+   - **Default for Step 0 question (e)?** `AskUserQuestion`: when a plan's dependency graph says several phases are independent, should `implement-plan` implement them **concurrently** (one worktree lane each) by default, or one at a time? Lands in `run_options.implement-plan.parallel_phases`. **Recommend `Yes` (the schema default)** — it is the whole reason the plan carries a dependency graph. Recommend `No` when review capacity is the team's bottleneck (a fan of simultaneous PRs helps nobody), when the repo has a merge queue that serializes anyway, or when developer machines are too small to run several app copies.
+   - **Lane cap.** `AskUserQuestion`: `2`, `3` (default), `4`, `6`. Lands in `run_options.implement-plan.max_parallel_lanes`. Each lane is a full runnable checkout — deps, forked dev + test DBs, its own compose project. Size it to the machine, not to the plan; the runtime caps it again at the widest wave.
+
+   Both are skipped, and `parallel_phases` is emitted as `false`, when `prepare-worktree` = No (neither the skill nor a command) — parallel execution has a hard worktree requirement and `implement-plan` refuses rather than degrading.
+
+   **Follow-up only when `systematic-debugging` = Yes — observability MCP server inventory.** First read the MCP servers actually configured in the project's AI tooling (`.mcp.json`, `~/.claude/mcp_servers.json`, `.codex/mcp.json`, etc.). Then ask a multi-select `AskUserQuestion` (header `MCP servers`): *"Which of these MCP servers expose observability data (errors, traces, logs, metrics)?"*, one option per configured server (up to 4; split into further calls when there are more). The free-text field takes any server not listed, in whatever shorthand the team uses (`sentry`, `datadog`, `our-internal-traces`, `grafana-prod`, etc.). When nothing is configured, ask the same thing in prose. The intent is not to pick from a fixed catalogue — that goes stale fast — but to give the systematic-debugging agent a starter list of servers to introspect at Phase 0. The selection lands in `skills.systematic-debugging.observability_mcp_servers` of `.vinta-ai-workflows.yaml` (free-form string array). Empty array is allowed but warn the user that Phase 0 collapses to "local logs only" and production-only bugs without telemetry become a guess factory. The agent will discover specific tool names + categories (error tracking, traces, logs, metrics, alerts, deploys, dashboards) from the live MCP tool list at runtime — see [vinta-derive-skills/resources/systematic-debugging-mcp-tools.md](../vinta-derive-skills/resources/systematic-debugging-mcp-tools.md) for the evidence categories baked into the rendered SKILL.md.
 
    **Cache scaffolding.** Preflight state lives at `.vinta-ai-workflows/cache.yaml` ([`mcp-preflight-cache.v1`](../../schemas/mcp-preflight-cache.v1.schema.json)). The bootstrap orchestrator must:
 
@@ -126,7 +154,7 @@ Eight skills are part of the foundation set but aren't always needed. Ask explic
    - Do **not** seed the cache file at bootstrap. The first debug run preflights all configured servers and writes the file then. An empty / missing `.vinta-ai-workflows/cache.yaml` is a valid initial state.
    - Mention to the user how to refresh: delete the file to re-preflight everything, or edit one entry's `status` to `dirty` to refresh that one server. Token rotated → cache will catch the auth error on the next call and flip the entry to `dirty` automatically.
 
-6. **`thermo-nuclear-code-quality-review`** — does the team want an opt-in, deliberately harsh structural-maintainability audit available on demand (abstraction quality, giant files, spaghetti-condition growth), separate from the standard per-phase review? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for long-lived codebases where structural drift is a real cost, or teams that already run deep quality passes before merging large work. It ships as a user-invoked skill and is also the escalation target for the `review-phase` Layer 3 structural-simplification lens; it is never auto-run on every diff. No follow-up config — the body is project-agnostic.
+6. **`thermo-nuclear-code-quality-review`** — does the team want an opt-in, deliberately harsh structural-maintainability audit available on demand (abstraction quality, giant files, spaghetti-condition growth), separate from the standard per-phase review? `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for long-lived codebases where structural drift is a real cost, or teams that already run deep quality passes before merging large work. It ships as a user-invoked skill, a deeper pass on top of the structural lens the per-phase review loop already applies; it is never auto-run on every diff. No follow-up config — the body is project-agnostic.
 
 7. **`interview-ui`** — does the team want spec interviews (and, later, other decision-heavy interviews) to run as a full-screen browser form instead of a chat exchange? One decision per screen, with the context the agent already knows, Markdown/Mermaid explainers, and each option's consequences in view; the in-page chat is for questions to the agent, not decisions. `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for teams where product or non-engineering stakeholders answer the spec interview, or whenever specs carry state machines and trade-offs that are hard to weigh in chat. Skip for solo engineers who prefer staying in the terminal. Requires Node ≥ 18 and a browser on the machine running the agent. No follow-up config — the body is project-agnostic; `create-spec` asks per interview whether to use the browser or chat.
 
@@ -139,6 +167,16 @@ Eight skills are part of the foundation set but aren't always needed. Ask explic
    - **Output dir.** Default `.vinta-ai-workflows/client-handoffs`. Override if the team wants handoffs committed (e.g. `docs/api-changes/`) — note that the default lives under the gitignored `.vinta-ai-workflows/`, so docs there must be shared manually.
 
 If the user answers "No" to any of the eight, that skill won't ship. If the user answers "Yes" to `add-e2e-test` / `add-env-var` but doesn't have a template, derive-skills drafts one via interview. `systematic-debugging` is always template-rendered — no per-project drafting interview, just the MCP-server inventory above. `add-one-off-script` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/add-one-off-script/](../vinta-derive-skills/resources/foundation-skills/add-one-off-script/) — its body is project-agnostic; the per-project variability lives in the `skills.add-one-off-script.*` config block above and in env vars consumed at runtime. `prepare-worktree` is also copied verbatim from [vinta-derive-skills/resources/foundation-skills/prepare-worktree/](../vinta-derive-skills/resources/foundation-skills/prepare-worktree/) — same pattern: project-agnostic body, per-project defaults under `skills.prepare-worktree.*`. `thermo-nuclear-code-quality-review` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/](../vinta-derive-skills/resources/foundation-skills/thermo-nuclear-code-quality-review/) with no follow-up config — its body is fully project-agnostic. `interview-ui` is copied verbatim from [vinta-derive-skills/resources/foundation-skills/interview-ui/](../vinta-derive-skills/resources/foundation-skills/interview-ui/) as a whole directory (SKILL.md + `scripts/interview-ui.mjs` + `resources/index.html` + `resources/examples/`) with no follow-up config. `handoff-to-client` is always template-rendered from [vinta-derive-skills/resources/handoff-to-client-template.md](../vinta-derive-skills/resources/handoff-to-client-template.md) — no per-project drafting interview, just the client-handoff config follow-up above.
+
+### D.2 Integrations (external tools)
+
+Integrations are external tools that ship their own skill. They are not foundation skills: this package bundles none of their content. When one is enabled, the tool's own CLI installs its skill, and this flow only wires that skill in. Ask once per integration:
+
+1. **`pr-review-canvas`** ([PR Review Canvas](https://github.com/vintasoftware/pr-review-canvas), CLI `pr-review`). Should agents generate a review canvas for every PR they open? A canvas is the PR's diff grouped by topic, with attention points for the reviewer. It is shared as a PR comment and read in a local review app (`pr-review serve`). Ask **only when** `project.code_host` is `github` or `gitlab` **and** the `pr_creation` policy (C.4) is `agents-create`. Otherwise set `disabled` without asking: the tool supports only those two hosts, and with `branches-only` no agent opens a PR to attach a canvas to. `AskUserQuestion` options: `Yes — enable`, `No — skip`. Recommend `Yes` for teams that review agent-written PRs, where a large multi-phase diff is the normal case. Default to `Yes` when [vinta-analyze-codebase](../vinta-analyze-codebase/SKILL.md) already found the tool in use: a `pr-review-canvas` skill classified `integration`, or a `pr-review.config.yml`.
+
+   Mention the requirements in the question: Node.js 22+, a logged-in `gh` or `glab`, and Claude Code or Codex as the agent. Do **not** install the CLI. Like `open-pr.sh`'s `yq` / `jq` / `gh`, it is a machine-level dependency the user installs. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) checks for it and prints `npm install -g @vintasoftware/pr-review-canvas` when it is missing.
+
+   No follow-up config. The tool's own settings (sharing on/off, high-risk paths, prompt overrides) live in its `pr-review.config.yml` at the repo root, and the tool owns that file.
 
 ### E. Existing AI artifacts (per-artifact disposition)
 
@@ -158,7 +196,9 @@ For each artifact, read it (frontmatter + body), then ask the user via `AskUserQ
   - `Keep in current vendor path, don't touch` — leaves it where it is. AGENTS.md may reference it; downstream skill setup won't manage it.
   - `Drop` — delete (rare; usually the user wants to migrate).
 
-  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `interview-ui`, `deslop-comments`, `handoff`, `handoff-to-client`, `write-unit-test`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
+  **Integration-owned skills** (name matches an integration under D.2 — today `pr-review-canvas`) get no question. Leave them where they are. Their tool owns them through its own marker file (`.pr-review-install`), and its `doctor` / `upgrade` commands manage them. When the integration is `enabled` and the existing copy sits in a real `.claude/skills/` or `.agents/skills/` directory rather than in `ai-tools/skills/`, tell the user once. [vinta-install-ai-tools-setup](../vinta-install-ai-tools-setup/SKILL.md) installs a fresh copy into `ai-tools/skills/`, so the old copy becomes redundant once the vendor directory is a symlink.
+
+  Foundation-shape skills (name matches `plan-feature`, `create-spec`, `create-qa-use-cases`, `implement-plan`, `implement-phase`, `review-phase`, `integrate-phase`, `amend-plan`, `add-e2e-test`, `add-env-var`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `interview-ui`, `thermo-nuclear-review-loop`, `deslop-comments`, `handoff`, `handoff-to-client`, `write-unit-test`) get an extra option: `Replace with Vinta foundation version` — overwrites with the canonical foundation content, preserving the user's name. Useful when the existing version is stale. (`implement-phase` / `review-phase` / `integrate-phase` are the plan-execution sub-skills co-shipped with `implement-plan`; replace them as a unit.)
 
 - **Sub-agents** (each under any vendor `agents/` dir):
   - `Migrate to ai-tools/agents/<name>.yaml` — converts vendor-specific format → canonical YAML; `setup-ai-tools.mjs` re-emits per-vendor copies.
@@ -200,9 +240,9 @@ Rules:
 - When in doubt, reference DESIGN.md — do not invent new values
 ```
 
-Globs may need tuning for the project's actual UI file extensions (Svelte-only projects, RN `.tsx`, etc.). Ask the user once if the analysis surfaced a UI framework not covered by the default glob list; otherwise ship the defaults.
+Globs may need tuning for the project's actual UI file extensions (Svelte-only projects, RN `.tsx`, etc.). When the analysis surfaced a UI framework not covered by the default glob list, ask once via `AskUserQuestion`: `Add <framework> globs (Recommended)` (name the globs you'd add), `Ship the defaults`. Otherwise ship the defaults.
 
-After Step 0: read back the captured decisions (including every per-artifact disposition), confirm via `AskUserQuestion` (`Looks good`, `Some corrections (I'll list)`, `Stop, rethink`).
+After Step 0: read back the captured decisions (including every per-artifact disposition), confirm via `AskUserQuestion` (`Looks good (Recommended)`, `Some corrections (I'll list)`, `Stop, rethink`).
 
 The dispositions become inputs to:
 
@@ -216,7 +256,7 @@ Captured interview state lands in **one** YAML file at the repo root: `.vinta-ai
 
 This file is the **only** source of truth for project-wide settings. Every downstream sub-skill (4 → 6 below) reads from it instead of receiving values via in-conversation state. Every meta-skill ([vinta-sync-ai-tools](../vinta-sync-ai-tools/SKILL.md), [vinta-update-project-skills](../vinta-update-project-skills/SKILL.md)) reads + rewrites it.
 
-Write the file now (before any sub-skill runs). Populate from the interview groups **Scope**, **Stack detection**, **Project conventions**, **Optional foundation skills**, and **Existing AI artifacts**:
+Write the file now (before any sub-skill runs). Populate from the interview groups **Scope**, **Stack detection**, **Project conventions**, **Optional foundation skills**, **Integrations**, and **Existing AI artifacts**:
 
 ```yaml
 # yaml-language-server: $schema=./node_modules/vinta-ai-workflows/schemas/vinta-ai-workflows-config.v1.schema.json
@@ -239,9 +279,13 @@ commands:
   format: <derived>
   build: <derived>
   test_unit: <Project conventions → Test framework(s)>
-  test_unit_scoped: <derived from monorepo shape>
+  test_unit_scoped: <C.11 scoped-gates template with {changed_files} when confirmed; else derived from monorepo shape>
+  lint_scoped: <C.11 scoped lint template; omit unless confirmed>
   test_unit_new_pattern: <derived>
   e2e: <only when foundation_skills.add-e2e-test = enabled>
+  # Only when the prepare-worktree answer was "own script/command" or "generate".
+  worktree_prepare: <own-command follow-up → prepare command | generate follow-up → <script dir>/prepare.sh>
+  worktree_teardown: <own-command follow-up → teardown command, omitted on "No teardown command" | generate follow-up → <script dir>/teardown.sh>
 
 policies:
   pr_creation: <Project conventions → PR creation policy>
@@ -275,10 +319,11 @@ foundation_skills:
   add-env-var: <Optional foundation skills → add-env-var answer → enabled | disabled>
   systematic-debugging: <Optional foundation skills → systematic-debugging answer → enabled | disabled>
   add-one-off-script: <Optional foundation skills → add-one-off-script answer → enabled | disabled>
-  prepare-worktree: <Optional foundation skills → prepare-worktree answer → enabled | disabled>
+  prepare-worktree: <Optional foundation skills → prepare-worktree answer → enabled | disabled; disabled for "own script/command" and "generate">
   thermo-nuclear-code-quality-review: <Optional foundation skills → thermo-nuclear-code-quality-review answer → enabled | disabled>
   interview-ui: <Optional foundation skills → interview-ui answer → enabled | disabled>
-  deslop-comments: enabled  # always ships — review-phase Layer 2 comment-hygiene + fix loop and the integrate-phase PR-context prose pass depend on it
+  thermo-nuclear-review-loop: enabled  # always ships — review-phase runs it over every phase, and so does the review chore of every maestro workflow plan-feature writes
+  deslop-comments: enabled  # always ships — the integrate-phase / amend-plan PR-context prose pass and maestro's deslop chore depend on it
   handoff: enabled  # always ships — project-agnostic session-continuation handoff docs
   handoff-to-client: <Optional foundation skills → handoff-to-client answer → enabled | disabled; only asked for API-only repos>
   write-unit-test: <enabled when a unit-test framework was detected (Project conventions → Test framework(s)); disabled when none found — default-on, not an opt-in>
@@ -288,13 +333,15 @@ foundation_agents:
   reviewer: enabled
   fixer: enabled
 
+integrations:
+  pr-review-canvas: <Integrations → pr-review-canvas answer → enabled | disabled; disabled without asking when code_host ∉ {github, gitlab} or pr_creation = branches-only>
+
 # Only emit the roles the user chose in the "Agent model tiers" question (C.10).
 # Omit the whole block on "Leave unset"; omit any individual role left unset.
 # Each value is a tier (1–4) into ai-tools/skills/plan-feature/resources/ai-models.yaml.
 agent_models:
-  reviewer: <C.10 → reviewer tier, default 3>
   fixer: <C.10 → fixer tier, default 2>
-  worktree_prep: <C.10 → worktree_prep tier, default 1; omit when prepare-worktree disabled>
+  worktree_prep: <C.10 → worktree_prep tier, default 1; omit when prepare-worktree disabled (including the own-command case — a command runs inline)>
   integrate: <C.10 → integrate tier, default 1>
 
 stacks: <Stack detection → matched stacks>
@@ -306,8 +353,28 @@ run_options:
     generate_inline_comments: false
     full_test_suite: false  # default: each phase's outer gate runs scoped tests only; set true to run the full suite every phase
     use_worktree: <Optional foundation skills → prepare-worktree follow-up → default for Step 0 question (c); false unless team opted in>
+    parallel_phases: <Optional foundation skills → parallel-execution follow-up → default for Step 0 question (e); true when worktrees are available (skill enabled or own command) and the team didn't opt out, false otherwise>
+    max_parallel_lanes: <parallel-execution follow-up → lane cap, default 3; omit when parallel_phases is false>
   amend-plan:
     blast_radius_signal_threshold: 2
+
+# Only emit on C.11 → "Set project defaults". Omit the whole block on "Skip".
+# Defaults UNDER every plan's .workflow.json: the plan wins wherever it says
+# something. Emit only the keys the user answered; nothing here repeats a
+# value maestro would derive from `commands` on its own.
+maestro:
+  defaults:
+    gates: <C.11 → gates every phase runs, e.g. [typecheck, lint, test]>
+    gate_scope: <C.11 → omit for "scoped" (the default); `full` on "No — full command every phase">
+  gates:
+    test:
+      cmd: <C.11 → maestro-only test command; omit to use commands.test_unit>
+      requires: [test-suite]  # only with a test-suite pool
+  resources:
+    test-suite:  # only on a pool limit
+      capacity: <1 | 2>
+      kind: semaphore
+      match: <C.11 → runner command patterns, e.g. ['pytest*', 'uv run pytest*']>
 
 skills:
   # Only emit this block when foundation_skills.systematic-debugging = enabled.
@@ -332,10 +399,11 @@ skills:
     db_isolation: <C.9 → transaction-rollback | truncate | recreate | framework-default>
     additional_conventions: <C.9 → free-form array of extra conventions inferred/supplied; [] when none>
 
-  # Only emit this block when foundation_skills.prepare-worktree = enabled.
+  # Only emit this block when foundation_skills.prepare-worktree = enabled, or when
+  # commands.worktree_prepare is set — then emit worktree_root + summary_dir only.
   prepare-worktree:
     worktree_root: <prepare-worktree follow-up — `.claude/worktrees` | `../<repo>-wt-`>
-    deps_strategy: <prepare-worktree follow-up — symlink | copy | reinstall>
+    deps_strategy: <prepare-worktree follow-up — copy | reinstall>
     compose_network: per-worktree
     test_db_strategy: <prepare-worktree follow-up — fork-on-schema-change | always-fork | share>
     summary_dir: .vinta-ai-workflows/worktrees
@@ -358,6 +426,14 @@ skills:
 Validate the file against the schema before writing — if any required field is unresolved, route back to the relevant interview question. Don't write a partial config.
 
 Existing-project case: `.vinta-ai-workflows.yaml` already present → that's a re-bootstrap. Show the existing config, ask via `AskUserQuestion`: `Keep existing config and refresh sub-skills only`, `Re-interview and overwrite`, `Stop`. The `Refresh sub-skills only` path is the common case for older projects whose config was written by an earlier `vinta-bootstrap-ai-tools`.
+
+## Optional step — Generate the worktree command
+
+Runs after [vinta-derive-skills](../vinta-derive-skills/SKILL.md) (step 4) and before the install step, **only** when the `prepare-worktree` answer (D.5) was `Yes — generate a provisioning script for this project`. Skip it silently otherwise.
+
+It writes `<script dir>/lib.sh`, `prepare.sh` and `teardown.sh` into the project, plus `gen-compose-worktree-override.sh` when the project uses docker compose. The source is the bundled templates in [resources/worktree-command/](resources/worktree-command/). The templates carry the `commands.worktree_prepare` contract, already tested: env resolution, `--dry-run`, sanity checks, `git worktree add`, rollback of a half-made worktree, compose isolation, the full summary YAML, and a teardown that refuses dirty worktrees and never runs `down -v`. This step fills only the **PROJECT STEPS** regions with this project's dependency, env, database and service handling, decided from the inventory, plus a few structured questions.
+
+Follow [resources/worktree-command/README.md](resources/worktree-command/README.md): read before write in the chosen directory, render the placeholders, fill the regions, then verify (`bash -n`, a `--dry-run`, and an optional real smoke test the user opts into). It returns a status report like every sub-skill. On failure, the README's fix question can fall back to the `prepare-worktree` skill, which also updates `.vinta-ai-workflows.yaml`.
 
 ## Stack templates — detection only, content is user-supplied
 
@@ -406,7 +482,8 @@ ai-tools/
 │   ├── plan-feature/SKILL.md            ← always (copied verbatim from derive-skills resources)
 │   ├── create-spec/SKILL.md             ← always (copied verbatim)
 │   ├── create-qa-use-cases/SKILL.md     ← always (copied verbatim)
-│   ├── deslop-comments/SKILL.md         ← always (copied verbatim; review-phase Layer 2 comment-hygiene + fix loop and the integrate-phase PR-context prose pass depend on it)
+│   ├── thermo-nuclear-review-loop/SKILL.md ← always (copied verbatim; the review chore of every maestro workflow plan-feature writes runs it)
+│   ├── deslop-comments/SKILL.md         ← always (copied verbatim; the integrate-phase / amend-plan PR-context prose pass and maestro's deslop chore depend on it)
 │   ├── handoff/SKILL.md                 ← always (copied verbatim; session-continuation handoff docs under .vinta-ai-workflows/handoffs/)
 │   ├── implement-plan/SKILL.md          ← always (conductor; generated from template, project-specific)
 │   ├── implement-phase/SKILL.md         ← always (plan-execution unit; co-shipped with implement-plan)
@@ -428,13 +505,14 @@ ai-tools/
 │   │       ├── one_off_script_base.py
 │   │       └── one_off_script_base.ts
 │   ├── prepare-worktree/SKILL.md       ← optional — only if user opts in (verbatim copy; project-agnostic body, defaults under skills.prepare-worktree.*)
-│   ├── thermo-nuclear-code-quality-review/SKILL.md ← optional — only if user opts in (verbatim copy; deep structural-maintainability audit, escalation target for review-phase Layer 3)
+│   ├── thermo-nuclear-code-quality-review/SKILL.md ← optional — only if user opts in (verbatim copy; deliberate deep structural-maintainability audit, run on request)
 │   ├── interview-ui/                    ← optional — only if user opts in (verbatim copy of the whole dir; browser form for decision-heavy interviews, used by create-spec Step 0)
 │   │   ├── SKILL.md
 │   │   ├── scripts/interview-ui.mjs     ← zero-dep Node localhost server + start / wait / stop CLI
 │   │   └── resources/
 │   │       ├── index.html               ← the shell (one decision per screen, Markdown + Mermaid, question panel)
 │   │       └── examples/                ← sample round + explainer doc
+│   ├── pr-review-canvas/                ← integration — only when integrations.pr-review-canvas = enabled and `pr-review` is installed. Written by `pr-review install-skill`, never by this flow; owned through its `.pr-review-install` marker, refreshed by `pr-review upgrade`
 │   ├── run-one-off-script-django/       ← optional sister skill — only when stack matches + user supplies template (authors Jupyter notebook / mgmt command runner + JupyterRuntime / DjangoMgmtRuntime adapter in the per-script folder)
 │   ├── run-one-off-script-medplum/      ← optional sister skill — only when stack matches + user supplies template (authors Medplum bot + MedplumBotRuntime adapter in the per-script folder)
 │   └── <stack-specific skills>/SKILL.md ← only if user supplied templates
@@ -446,6 +524,12 @@ ai-tools/
 │   └── <stack-specific>.yaml            ← only if user supplied templates
 └── scripts/
     └── setup-ai-tools.mjs               ← copied from install-ai-tools-setup resources
+
+<script dir>/                             ← only when D.5 = generate (default scripts/worktree/); the project owns these
+├── prepare.sh                            ← commands.worktree_prepare
+├── teardown.sh                           ← commands.worktree_teardown
+├── lib.sh                                ← shared plumbing, sourced by both
+└── gen-compose-worktree-override.sh      ← only when the project uses docker compose
 
 DESIGN.md                                 ← preserved at repo root if pre-existing (never overwritten)
 .cursor/rules/design.mdc                  ← only when DESIGN.md exists, user opted Wire it in,
@@ -463,9 +547,9 @@ Plus the symlinks + per-vendor generated files, set up by the install step. The 
 
 Foundation skills break into three buckets — see [vinta-derive-skills](../vinta-derive-skills/SKILL.md) for the full mechanics:
 
-- **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`, `deslop-comments`, `handoff`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs). `deslop-comments` always ships because `review-phase`'s Layer 2 comment-hygiene check + fix loop dispatch it, and `integrate-phase` / `amend-plan` run it over the PR-context file. `handoff` always ships because its session-continuation body is fully project-agnostic.
+- **Always copy verbatim**: `plan-feature`, `create-spec`, `create-qa-use-cases`, `thermo-nuclear-review-loop`, `deslop-comments`, `handoff`. Bundled with the bootstrap skill set; project-agnostic enough to ship as-is (with light path scrubs). `deslop-comments` always ships because `integrate-phase` / `amend-plan` run it over the PR-context file and maestro's `deslop` chore runs it on every phase. `thermo-nuclear-review-loop` always ships because it is the per-phase review on both execution paths: `review-phase` runs it with the conductor as host, and the `review` chore of every `vinta-ai-maestro` workflow `plan-feature` writes runs it on a phase once its gates are green. `handoff` always ships because its session-continuation body is fully project-agnostic.
 - **Always generate**: the plan-execution unit — `implement-plan` (conductor) + its co-shipped sub-skills `implement-phase` / `review-phase` / `integrate-phase`, plus `amend-plan` (conductor). Bodies have too much project-specific content (test commands, branch convention, PR + co-author policy, agent dispatch) — generated from parameterized templates + shared partials using interview answers + inventory. The sub-skills are not independently opt-in; they always ship with the conductors. `write-unit-test` is also template-rendered but **conditionally generated** — it ships whenever a unit-test framework was detected (not an opt-in question, not ask-first): the rendered body bakes in the project's test command + captured `skills.write-unit-test.*` conventions, and the verbatim packs land in its `resources/packs/` — one runner pack for the detected test framework plus a stack pack per matched stack (Django / FastAPI / Flask / Medplum / React / Next.js / TanStack Start / React Router / Prisma / pure-package), so framework-specific advice only ships when that framework is present. A few stack packs also apply a one-time project-setup step at derive time (e.g. Medplum wires the two FHIR-indexing Vitest setup files — `test.globalSetup.ts` + `test.setup.ts` — into the Vitest config so `MockClient` search filtering works) — a project mutation done once, not per test.
-- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `interview-ui`, `handoff-to-client`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, and (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes; if no → don't ship. `thermo-nuclear-code-quality-review`: if yes → copy the bundled SKILL.md verbatim (no follow-up config); if no → don't ship. `interview-ui`: if yes → copy the whole bundled directory verbatim (SKILL.md + `scripts/` + `resources/`; no follow-up config); if no → don't ship — `create-spec` then interviews in chat only. `handoff-to-client`: asked only for API-only repos; if yes → render the bundled template using `skills.handoff-to-client.*` (client platforms, API style, spec path, output dir) from its follow-ups; if no → don't ship.
+- **Optional, ask first**: `add-e2e-test`, `add-env-var`, `systematic-debugging`, `add-one-off-script`, `prepare-worktree`, `thermo-nuclear-code-quality-review`, `interview-ui`, `handoff-to-client`. Skipped by default; orchestrator asks via `AskUserQuestion` whether the project has the relevant flow at all. `add-e2e-test` / `add-env-var`: if yes + user has a template → copy + adapt; if yes + no template → draft from scratch via interview; if no → don't ship. `systematic-debugging`: if yes → render the bundled template plus the per-tool MCP catalogue blocks for the observability tools selected in its follow-up; if no → don't ship. `add-one-off-script`: if yes → copy the bundled SKILL.md verbatim plus the language-specific `BaseOneOffScript` template (`one_off_script_base.py` / `one_off_script_base.ts`) chosen via its follow-up; if no → don't ship. `prepare-worktree`: if yes → copy the bundled SKILL.md verbatim, populate `skills.prepare-worktree.*` defaults from its follow-ups, (when the user opted in via the worktree-default follow-up) flip `run_options.implement-plan.use_worktree` to `true` so `implement-plan`'s Step 0 question (c) defaults to yes, and emit `run_options.implement-plan.parallel_phases` + `max_parallel_lanes` from the parallel-execution follow-up; if own script/command → don't ship, and emit `commands.worktree_prepare` / `commands.worktree_teardown`; if generate → don't ship, emit the same keys pointing at `<script dir>/prepare.sh` / `teardown.sh`, and run the [Generate the worktree command](#optional-step--generate-the-worktree-command) step after derive-skills; if no → don't ship, and emit `parallel_phases: false` (parallel execution cannot run without worktrees). `thermo-nuclear-code-quality-review`: if yes → copy the bundled SKILL.md verbatim (no follow-up config); if no → don't ship. `handoff-to-client`: asked only for API-only repos; if yes → render the bundled template using `skills.handoff-to-client.*` (client platforms, API style, spec path, output dir) from its follow-ups; if no → don't ship.
 
 Stack-specific skills + agents land in the target only when the user provides templates for them. If they don't have templates yet, the orchestrator records the detected stacks + skill categories as a TODO list the user can address later via [vinta-derive-skills](../vinta-derive-skills/SKILL.md) / [vinta-derive-subagents](../vinta-derive-subagents/SKILL.md) standalone runs.
 
@@ -473,7 +557,8 @@ Stack-specific skills + agents land in the target only when the user provides te
 
 - **Read before write.** Always check what's in the target repo first. Don't clobber existing AGENTS.md / skills / agents without an explicit confirmation in Step 0.
 - **Stack templates are starting points, not finals.** Each copied skill / agent must be reviewed against the actual project (interview the user about specifics) and edited where the template's assumptions don't fit.
-- **Don't fabricate conventions.** If `vinta-analyze-codebase` doesn't find a thing, ask the user. Don't write "Use bulk_create instead of loop+save" into AGENTS.md just because Django was detected — confirm the team actually follows it.
+- **Every stop for input is a structured question.** See [asking-the-human](../vinta-write-agents-md/resources/asking-the-human.md). A prose question at the end of a long report is the failure mode — the user has to hunt for it and type the answer.
+- **Don't fabricate conventions.** If `vinta-analyze-codebase` doesn't find a thing, ask the user (`AskUserQuestion`, offering what you did find as candidates). Don't write "Use bulk_create instead of loop+save" into AGENTS.md just because Django was detected — confirm the team actually follows it.
 - **Foundation skills are universal.** Every project gets `add-env-var`, `add-e2e-test`, `plan-feature`, `implement-plan`, `create-spec`, `create-qa-use-cases`. The bodies need light per-project edits (test commands, branch conventions) — `vinta-derive-skills` handles that.
 - **Foundation agents are universal.** `implementer` / `reviewer` / `fixer` always. Stack specialists (`deploy-author` for Medplum, `migration-author` for Django) only when the stack matches.
 - **Don't run install-ai-tools-setup until AGENTS.md + agents YAMLs + skills exist.** The setup script reads these files; running it on an empty `ai-tools/` produces nothing useful.
@@ -497,6 +582,7 @@ After all sub-skills finish:
 3. Each selected vendor's directory has the expected files: `.claude/agents/*.md`, `.cursor/agents/*.md`, `.github/agents/*.agent.md`, `.codex/agents/*.toml`.
 4. Spot-check one skill, one agent: open SKILL.md / `<agent>.yaml` and confirm content describes THIS project (not a copy-pasted template with `<placeholder>` strings).
 5. If the project uses Claude Code: in a new session, ask Claude to invoke one of the project-specific skills. Confirm it loads + the body looks right.
-6. If [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md) ran: `ls ai-plans/` lists the migrated docs in canonical `YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md` form. `git status` shows the renames staged (or already committed). No plan/spec markdown left orphaned in `docs/`, `specs/`, or repo root unless the user explicitly skipped them.
+6. If the worktree command was generated: `bash -n` passes on `<script dir>/*.sh`, `<script dir>/prepare.sh vinta-smoke --dry-run` prints a plausible plan, and `.vinta-ai-workflows.yaml` points `commands.worktree_prepare` / `commands.worktree_teardown` at the generated files.
+7. If [vinta-migrate-plans-specs](../vinta-migrate-plans-specs/SKILL.md) ran: `ls ai-plans/` lists the migrated docs in canonical `YYYY-MM-DD-{FEATURE_NAME}_{PLAN|SPEC}.md` form. `git status` shows the renames staged (or already committed). No plan/spec markdown left orphaned in `docs/`, `specs/`, or repo root unless the user explicitly skipped them.
 
 End the run with a one-paragraph summary: what was created, what was skipped (per `--only`), what manual edits the user should review.

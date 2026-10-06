@@ -9,12 +9,17 @@ Conventions for any AI agent (Claude Code, Codex, Cursor, Copilot, …) editing 
 - `vinta-ai-workflows.mjs` — single-file Node CLI (`install` / `update` / `uninstall` / `list`). Dependency-free. Node ≥ 18.
 - `skills/<name>/SKILL.md` — the `vinta-`-prefixed bootstrap skills users invoke after installing.
 - `skills/vinta-derive-skills/resources/foundation-skills/<name>/` — **foundation-skill templates** that get copied verbatim into target projects' `ai-tools/skills/` at bootstrap time. These are *content shipped to other repos*, not source compiled here.
-- `skills/vinta-derive-skills/resources/plan-execution/` — the **plan-execution unit**: thin shell templates (`shell/{implement-plan,implement-phase,review-phase,integrate-phase,amend-plan}-template.md`) that `<!-- include -->` shared fragments from `partials/` (implementer prompt, model pick, review layers, worktree/`WORKROOT` seam, PR-context, commit-strategy bodies). `vinta-derive-skills` expands includes → substitutes `{{…}}` → writes one `ai-tools/skills/<name>/SKILL.md` per shell. See [plan-execution/README.md](skills/vinta-derive-skills/resources/plan-execution/README.md).
+- `skills/vinta-derive-skills/resources/plan-execution/` — the **plan-execution unit**: thin shell templates (`shell/{implement-plan,implement-phase,review-phase,integrate-phase,amend-plan}-template.md`) that `<!-- include -->` shared fragments from `partials/` (implementer prompt, model pick, review loop, worktree/`WORKROOT` seam, dispatched-agent guard, PR-context, commit-strategy bodies). `vinta-derive-skills` expands includes → substitutes `{{…}}` → writes one `ai-tools/skills/<name>/SKILL.md` per shell. See [plan-execution/README.md](skills/vinta-derive-skills/resources/plan-execution/README.md).
 - `skills/vinta-derive-skills/resources/systematic-debugging-template.md` — the other placeholder-rendered skill body (opt-in).
 - `skills/vinta-bootstrap-ai-tools/resources/stacks/<stack>/notes.md` — per-stack detection signals + skill / agent categories. **Notes only — no ready-made content.**
 - `schemas/*.v1.schema.json` — JSON Schema Draft 2020-12 definitions for every YAML payload the skills produce or consume. `schemas/README.md` documents versioning.
-- `scripts/*.mjs` — **source-side maintenance scripts** run by CI, never shipped (excluded from the `files` whitelist). `check-ai-models.mjs` is the nightly freshness check for the `plan-feature` AI model tier table (`resources/ai-models.yaml`): it checks the cited ids against a **free, no-key model aggregator** (models.dev, with LiteLLM's JSON as fallback) — detection needs network access but no API keys — and on drift (a cited id disappeared, or a newer same-family model shipped) has an LLM propose an updated table that `.github/workflows/check-ai-models.yml` opens as a PR. The LLM proposal is the only step that wants a key (`ANTHROPIC_API_KEY`), and it's optional. May use devDependencies (e.g. `yaml`) — this does **not** weaken the CLI's zero-runtime-deps property, which only concerns `dependencies` + `vinta-ai-workflows.mjs`.
+- `scripts/*.mjs` — **source-side maintenance scripts** run by CI, never shipped (excluded from the `files` whitelist). `validate-schemas.mjs` compiles every schema under `schemas/` and checks its fixtures (`npm test` runs it). `check-ai-models.mjs` is the nightly freshness check for the `plan-feature` AI model tier table (`resources/ai-models.yaml`): it checks the cited ids against a **free, no-key model aggregator** (models.dev, with LiteLLM's JSON as fallback) — detection needs network access but no API keys — and on drift (a cited id disappeared, or a newer same-family model shipped) has an LLM propose an updated table that `.github/workflows/check-ai-models.yml` opens as a PR. The LLM proposal is the only step that wants a key (`ANTHROPIC_API_KEY`), and it's optional. May use devDependencies (e.g. `yaml`) — this does **not** weaken the CLI's zero-runtime-deps property, which only concerns `dependencies` + `vinta-ai-workflows.mjs`.
 - `CHANGELOG.md` — Keep a Changelog format, SemVer.
+
+The repo is also a **pnpm workspace** (`pnpm-workspace.yaml`, `packages/*`). The root `package.json` is still the published `vinta-ai-workflows` package and is *also* the workspace root — nothing moved, and the root's `files` whitelist excludes `packages/` so workspace members are never published as part of it. **The CLI's zero-runtime-deps property covers the root `dependencies` only**; workspace packages carry their own dependencies freely and do not weaken it.
+
+- `packages/vinta-ai-maestro/` — code-orchestrated parallel execution of `plan-feature` plans (the daemon `implement-plan` describes in prose). TypeScript, strict, tested with Vitest. See [SPEC.md](packages/vinta-ai-maestro/SPEC.md) — that spec is the authority; read it before changing anything here. Source of truth for `schemas/workflow.v1.schema.json`, which is **generated** from `src/types.ts`.
+- `packages/vinta-dag-editor/` — framework-agnostic Web Component rendering and editing plan DAGs. Private (unpublished); mirrors [`vinta-state-machine-editor`](https://github.com/vintasoftware/vinta-state-machine-editor)'s architecture and conventions deliberately, so extraction to npm later is a publish rather than a refactor.
 
 The repo is **self-recursive**: it authors skills it itself does not run. Don't try to "test" a skill by invoking it inside this repo — invoke it inside a target project after `npx vinta-ai-workflows install`.
 
@@ -44,19 +49,31 @@ Vendor auto-discovery is wired via committed symlinks at the repo root — no pe
 
 ## How to verify changes
 
-There is no build or lint config in this repo. Verification is a short fixed list:
+The **skills side** of this repo (`skills/`, `dev-skills/`, `schemas/`, `vinta-ai-workflows.mjs`) has no build or lint config; verification there is the short fixed list below. The **workspace packages under `packages/`** do have real tooling — see the last rows of the table.
 
 | Change touches | Verification |
 |---|---|
 | `skills/vinta-install-ai-tools-setup/resources/setup-ai-tools.mjs` | `npm test` runs the generator against a temporary target project and checks its generated files. |
+| `skills/vinta-bootstrap-ai-tools/resources/worktree-command/*-template.sh` | `npm test` renders the templates into a temporary git repo and drives the `commands.worktree_prepare` contract end to end: dry run, provision, the conductor's post-checks, teardown, re-provision, the dirty-worktree refusal and the database guards. Keep the scripts Bash 3.2 compatible (macOS's system bash). |
 | `vinta-ai-workflows.mjs` | `node vinta-ai-workflows.mjs list` from repo root must succeed. `node vinta-ai-workflows.mjs install --tool claude-code --target /tmp/scratch --dry-run` must print a plausible plan. |
-| any `*.json` under `schemas/` | `python3 -c "import json; json.load(open('schemas/<file>'))"`. For non-trivial edits, validate a known-good payload against it with `ajv-cli` if available. |
+| any `*.json` under `schemas/` | `pnpm install` once, then `npm run validate-schemas` — compiles every schema (Ajv, strict 2020-12) and checks `tests/schema-fixtures/<schema-stem>/{valid,invalid}/`. A changed rule gets fixtures proving it: one `valid/` payload it allows, one `invalid/` payload per thing it forbids. |
 | any Python in `skills/.../resources/*.py` | `python3 -m py_compile <path>`. These files are templates copied into target projects, but they must be syntactically valid Python so consumers don't get a broken paste. |
 | any TypeScript in `skills/.../resources/*.ts` | TS templates carry `// @ts-nocheck` because they reference Node + `@aws-sdk` types that are not present in this repo. Don't remove the directive. Manual read-through is the verification — if you have a target project handy, paste the file there and run `tsc --noEmit` to confirm. |
 | any `SKILL.md` body | Frontmatter must include `name:` (kebab-case, matches dir name) + `description:` (dense one-liner). Body is rendered markdown — no `{{PLACEHOLDER}}` strings should survive in foundation-skill copies (they survive only in `*-template.md` files under `resources/`). |
 | `scripts/check-ai-models.mjs` or `resources/ai-models.yaml` | `npm install --no-save yaml && node scripts/check-ai-models.mjs --no-llm` (no API keys needed; detection queries the free models.dev aggregator over the network and prints a per-vendor report. **Exit 1 just means drift was found, not a failure** — exit 2 is a real error). Validate the YAML against `schemas/ai-models.v1.schema.json` if `ajv-cli` is available. |
 
-`run-in-background` long verifications when convenient. There is nothing else to run — no Vitest, Jest, pytest, ruff, eslint, biome wired up in this repo.
+`run-in-background` long verifications when convenient.
+
+| Change touches | Verification |
+|---|---|
+| anything under `packages/vinta-ai-maestro/` | From that directory: `pnpm run typecheck` and `pnpm test`. Both must pass. |
+| `packages/vinta-ai-maestro/src/types.ts` | Additionally `pnpm --filter vinta-ai-maestro schema:gen` and commit the regenerated `schemas/workflow.v1.schema.json` — a test fails when the committed file drifts from the zod source. Never hand-edit that JSON. |
+| `packages/vinta-ai-maestro/src/review/document.ts` | Additionally `pnpm --filter vinta-ai-maestro review:schema:gen` and commit the regenerated `schemas/plan-review.v1.schema.json` — `tests/review.test.ts` fails when the committed file drifts. |
+| anything under `packages/vinta-dag-editor/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (Biome, configured in `biome.jsonc` to the repo's style rather than Biome's defaults). |
+| anything under `packages/design-system/` | From that directory: `pnpm run typecheck`, `pnpm test`, and `pnpm run lint` (same Biome setup). Then from `packages/vinta-ai-maestro/`: `pnpm run typecheck`, `pnpm test` and `pnpm run ui:build` — the app is the only consumer, and Tailwind only emits classes it can scan, so the build is the check that a new component's classes reach the bundle. |
+| `pnpm-workspace.yaml`, root `package.json`, or anything that could reach the published package | `npm pack --dry-run` at the root must list **exactly** the same files as before the change, and root `dependencies` must stay absent. |
+
+Beyond the above there is nothing else to run — no Jest, pytest, ruff, or eslint anywhere in this repo, and no lint or build on the skills side.
 
 ## Layout rules
 
@@ -81,7 +98,7 @@ There is no build or lint config in this repo. Verification is a short fixed lis
 
 ## Skill / schema authoring rules
 
-- **`AskUserQuestion` for finite-choice questions** in any new skill. Open prose only when answers are genuinely free-form. This is the convention every existing skill follows; new skills must too.
+- **Every stop for human input is a structured question.** Any new skill asks through `AskUserQuestion` (read as "the harness's structured question tool" — the per-vendor names and the question shape live in [asking-the-human.md](skills/vinta-write-agents-md/resources/asking-the-human.md)): 2–4 concrete options with descriptions, the recommended one first, no "Other" option. Open questions still offer the candidates the agent found; prose only when there is no candidate at all. Never write "ask the user", "confirm with the user" or "wait for go" without naming the question and its options. Instructions to a **sub-agent** never say "ask the user" — sub-agents return `status: NEEDS_INPUT` ([implementer-prompt.md#NEEDS_INPUT](skills/vinta-derive-skills/resources/plan-execution/partials/implementer-prompt.md)) and the orchestrator relays it ([relay-questions.md](skills/vinta-derive-skills/resources/plan-execution/partials/relay-questions.md)).
 - **Step 0 interview is non-negotiable** for skills that produce per-project artifacts. Don't draft from a one-line prompt; interrogate first.
 - **Read before write.** Any skill that touches existing files (AGENTS.md, project skills, sub-agents) must read + reconcile first; never blind-overwrite.
 - **Foundation set is a unit.** `plan-feature` + `create-spec` + `open-pr-from-context` always ship together and reference each other. `create-qa-use-cases` ships **only when `add-e2e-test` is enabled** (it seeds e2e specs); `plan-feature`'s e2e content lives inside `<!-- e2e:start/end -->` markers that derive-skills strips for no-e2e projects. If you change one, audit the cross-links in the others — and confirm no e2e cross-link dangles when e2e is off.
@@ -91,7 +108,19 @@ There is no build or lint config in this repo. Verification is a short fixed lis
   3. Step 0.5 YAML emission in `vinta-bootstrap-ai-tools/SKILL.md`.
   4. Whichever downstream skill consumes it knows how.
   5. CHANGELOG entry.
-  Skipping any step leaves the field orphaned. **Standalone resource schemas** (e.g. `ai-models.v1.schema.json`, which validates a data file a single skill reads — not a per-project produced artifact) have a lighter contract: the schema file + a `schemas/README.md` inventory row + the one consuming skill + a CHANGELOG entry. No bootstrap interview, no Step 0.5 emission.
+  Skipping any step leaves the field orphaned.
+- **Integrations are external tools, not foundation skills.** An entry under `integrations` in the config schema (today `pr-review-canvas`) names a tool whose CLI installs its own skill into `ai-tools/skills/<name>/`. Bundle none of its content here, and give it no `foundation-skills/` directory. The release pre-flight's "every enum has a directory" check covers `foundation_skills` only. The ripple contract above still applies: schema entry, bootstrap question (group D.2), Step 0.5 emission, the consumer (`vinta-install-ai-tools-setup` step 7b plus whatever reads the flag at runtime), and a CHANGELOG entry. Never auto-install the tool's CLI. Print the install command instead, as `open-pr.sh` does for `gh`. **Standalone resource schemas** (e.g. `ai-models.v1.schema.json`, which validates a data file a single skill reads — not a per-project produced artifact) have a lighter contract: the schema file + a `schemas/README.md` inventory row + the one consuming skill + a CHANGELOG entry. No bootstrap interview, no Step 0.5 emission.
+
+## Branch model
+
+Two long-lived branches, and which one you are on decides what may be cut from it.
+
+- **`alpha`** — where work lands. Every PR targets it, and every alpha pre-release (`X.Y.Z-alphaN`) is tagged on it. This is the default branch for day-to-day work.
+- **`main`** — the stable line. `alpha` merges here when a series is ready, and stable tags (`X.Y.Z`) are cut here.
+
+So the normal path is: branch off `alpha` → PR into `alpha` → alphas ship from `alpha` → `alpha` merges to `main` → the stable graduates on `main`.
+
+The [`release`](dev-skills/release/SKILL.md) skill asserts this rather than inferring it: an alpha asked for on `main`, or a stable asked for on `alpha`, stops with the reason instead of being reinterpreted. It never switches branches or merges for you.
 
 ## CHANGELOG + version policy
 
@@ -101,16 +130,17 @@ There is no build or lint config in this repo. Verification is a short fixed lis
   - **Patch** — bug fixes, doc fixes, internal refactors invisible to consumers.
   - **Minor** — new skills, new opt-in fields, additive schema fields (no major bump on the schema itself), new CLI flags with backward-compatible defaults.
   - **Major** — removed skill, breaking schema change (new `v<N+1>` schema file), CLI flag rename without alias, default-behavior flip.
+  - **Alpha** — a pre-release of the next stable, tagged `X.Y.Z-alphaN` on `alpha` and published under the `alpha` dist-tag. The CHANGELOG section stays **open** across an alpha series: bullets accumulate under the `[X.Y.Z]` placeholder until the stable graduates and dates it.
 - Bump `package.json` `version` in the same commit that adds the entry. Don't bump just to bump.
 
 ## Git + PR rules
 
 - **Conventional Commits** for new commits where it fits (`feat:`, `fix:`, `docs:`, `refactor:`). Existing history is mixed — match what the change is, don't retrofit. Keep subject under 72 chars.
 - **One commit = one logical change.** Don't bundle a schema rev with a CLI flag rename with a CHANGELOG sweep. Each is its own commit.
-- **Never amend a published commit.** Always a new commit. Force-push only your own short-lived branch with `--force-with-lease`, never `--force`. Never force-push `main`.
+- **Never amend a published commit.** Always a new commit. Force-push only your own short-lived branch with `--force-with-lease`, never `--force`. Never force-push `alpha` or `main` — both are published branches other people and the release tags depend on.
 - **AI co-author trailers allowed** on commits authored by an agent (`Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` or whichever model). Skip trailers on pure human commits.
 - **Don't commit unless asked.** The user explicitly drives `git commit`; agents draft, propose, and wait for approval.
-- **PRs target `main`.** Description carries: summary (1–3 bullets), test plan (verification commands you ran), CHANGELOG entry pointer if applicable.
+- **PRs target `alpha`**, not `main` — see **Branch model**. A stacked PR targets the branch below it in the stack, and is retargeted to `alpha` when that one merges. Description carries: summary (1–3 bullets), test plan (verification commands you ran), CHANGELOG entry pointer if applicable.
 
 ## Self-recursive bootstrap
 

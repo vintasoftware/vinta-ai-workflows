@@ -1,0 +1,1234 @@
+import Database from 'better-sqlite3'
+import { execFileSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readlink,
+  realpath,
+  rm,
+  statfs,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { planDatabase, planTemplate, type PostgresSpec } from '../src/lanes/database.ts'
+import { DiskProbeError } from '../src/lanes/disk.ts'
+import {
+  LaneAdoptError,
+  type Lane,
+  LanePool,
+  LaneRecycleError,
+  type PoolOptions,
+  type ProjectSpec,
+  WIP_REFS,
+} from '../src/lanes/pool.ts'
+import { readSummary } from '../src/lanes/summary.ts'
+import { shellQuote } from '../src/platform/platform.ts'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const PACKAGE_ROOT = join(HERE, '..')
+
+/**
+ * Materializes `tests/fixtures/repo/` into a temp dir as a real git repo.
+ *
+ * The dependency tree is symlinked in rather than installed, which is what lets
+ * the fixture's `node scripts/migrate.mjs` resolve `better-sqlite3` without an
+ * install per test. A linked tree is mirrored into each lane as a link, so the
+ * pool never copies this package's whole `node_modules`.
+ */
+async function materializeFixtureRepo(root: string): Promise<string> {
+  const repo = join(root, 'source')
+  await cp(join(HERE, 'fixtures', 'repo'), repo, { recursive: true })
+  await symlink(join(PACKAGE_ROOT, 'node_modules'), join(repo, 'node_modules'))
+
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo })
+  git('init', '-b', 'main')
+  git('config', 'user.email', 'fixture@example.invalid')
+  git('config', 'user.name', 'fixture')
+  // No background writer in a tree this suite is about to delete. git starts
+  // detached maintenance of its own accord after ordinary operations, and it
+  // writes `.git/objects/maintenance.lock` and then removes it — so a
+  // recursive delete racing it fails on `lstat` of a file that existed a
+  // moment ago. That surfaced as `ENOENT … maintenance.lock` in teardown on
+  // macOS, from a process nothing in this file started. It is also one fewer
+  // git holding a handle on Windows, where that is what `EBUSY` is made of.
+  git('config', 'maintenance.auto', 'false')
+  git('config', 'gc.auto', '0')
+  git('add', '-A')
+  git('commit', '-m', 'fixture')
+  return repo
+}
+
+const sqliteProject = (): ProjectSpec => ({
+  migrateCmd: 'node scripts/migrate.mjs',
+  databases: {
+    dev: {
+      engine: 'sqlite',
+      delivery: 'file',
+      path: 'db.sqlite3',
+      connectionUrlVar: 'DATABASE_URL',
+    },
+    test: {
+      engine: 'sqlite',
+      delivery: 'file',
+      path: 'db.test.sqlite3',
+      connectionUrlVar: 'TEST_DATABASE_URL',
+    },
+  },
+})
+
+/** A compose-delivered database: no template, therefore no reset. */
+const composeProject = (): ProjectSpec => ({
+  migrateCmd: 'true',
+  databases: {
+    dev: {
+      engine: 'postgres',
+      delivery: 'compose',
+      name: 'app',
+      serverUrl: 'postgres://localhost:5432',
+      connectionUrlVar: 'DATABASE_URL',
+    },
+  },
+})
+
+/**
+ * Rows in a lane's test database, with the connection closed before the count
+ * is returned.
+ *
+ * The close is the point. On Windows a directory cannot be removed while any
+ * handle into it is open, so a `Database` left open by an assertion is not a
+ * leak that the garbage collector eventually tidies — it is an `EBUSY` in this
+ * suite's own teardown, blaming a temp directory that nothing in the product
+ * is holding. `finally` rather than a close after the read, so a failing query
+ * fails the test instead of poisoning the cleanup too.
+ */
+const widgetCount = (databasePath: string): number => {
+  const db = new Database(databasePath, { readonly: true })
+  try {
+    return db.prepare('SELECT count(*) FROM widgets').pluck().get() as number
+  } finally {
+    db.close()
+  }
+}
+
+const envVar = (lane: Lane, key: string): string => {
+  const value = lane.env[key]
+  if (!value) throw new Error(`lane "${lane.name}" has no ${key}`)
+  return value
+}
+
+/**
+ * The worktrees git knows about, as **git** spells them.
+ *
+ * `git worktree list` prints forward slashes on Windows too — git speaks posix
+ * paths everywhere — while `mkdtemp` hands the test a native `C:\…` path, so
+ * comparing the two directly failed on a separator rather than on anything the
+ * test is about. Both sides are normalised to git's spelling, which is the one
+ * that is the same on every platform.
+ */
+const gitPath = (path: string): string => path.replaceAll('\\', '/')
+
+const worktreePaths = (repo: string): string[] =>
+  execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo, encoding: 'utf8' })
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => gitPath(line.slice('worktree '.length)))
+
+describe('lane pool', () => {
+  let root: string
+  let repo: string
+  let poolRoot: string
+  let migrateLog: string
+  const previousLog = process.env.VINTA_FIXTURE_MIGRATE_LOG
+
+  beforeEach(async () => {
+    // realpath: macOS resolves /var to /private/var, and git reports the real
+    // path back, so worktree comparisons need the resolved form.
+    root = await realpath(await mkdtemp(join(tmpdir(), 'vinta-ai-maestro-lanes-')))
+    repo = await materializeFixtureRepo(root)
+    poolRoot = join(root, 'pool')
+    migrateLog = join(root, 'migrate.log')
+    // The fixture's migrate command appends a line per invocation, so template
+    // creations are counted from outside the pool rather than from a counter
+    // the pool keeps about itself.
+    process.env.VINTA_FIXTURE_MIGRATE_LOG = migrateLog
+  })
+
+  afterEach(async () => {
+    if (previousLog === undefined) delete process.env.VINTA_FIXTURE_MIGRATE_LOG
+    else process.env.VINTA_FIXTURE_MIGRATE_LOG = previousLog
+    // Retried rather than attempted once, because of what this tree is: a git
+    // repo the suite has spawned `git` against and a pool of sqlite files it
+    // has opened. On Windows a directory cannot be removed while any handle
+    // into it is open, and a child that has already exited can still be holding
+    // one for a moment afterwards — `EBUSY` on `rmdir …\source`, from nothing
+    // that is still running. Every handle this suite owns is closed by the time
+    // it gets here; `maxRetries` covers the ones the OS has not let go of yet,
+    // backing off linearly between attempts.
+    //
+    // Still awaited and still allowed to throw. A teardown that swallowed this
+    // would leave a temp directory per run behind forever and say nothing.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  })
+
+  const provision = (
+    project: ProjectSpec,
+    laneCount = 3,
+    extra: Partial<PoolOptions> = {},
+  ): Promise<LanePool> =>
+    LanePool.provision({
+      repoPath: repo,
+      poolRoot,
+      runId: 'run-1',
+      laneCount,
+      baseRef: 'main',
+      project,
+      ...extra,
+    })
+
+  const migrated = (): string[] =>
+    readFileSync(migrateLog, 'utf8').split('\n').filter(Boolean)
+
+  it('provisions N lanes plus one integration worktree', async () => {
+    const pool = await provision(sqliteProject())
+
+    expect(pool.lanes).toHaveLength(3)
+    expect(pool.integration.kind).toBe('integration')
+
+    const paths = [...pool.lanes, pool.integration].map((lane) => lane.path)
+    expect(new Set(paths).size).toBe(4)
+    for (const path of paths) expect(existsSync(join(path, '.git'))).toBe(true)
+
+    // The main checkout plus the four provisioned worktrees, and nothing else.
+    expect(worktreePaths(repo)).toHaveLength(5)
+  })
+
+  it('creates each template exactly once and clones it into every lane', async () => {
+    const pool = await provision(sqliteProject())
+    const all = [...pool.lanes, pool.integration]
+
+    // One migrate run per template — the dev one and the test one — and not one
+    // per lane, which is the whole reason N lanes are affordable.
+    const templates = migrated()
+    expect(templates).toHaveLength(2)
+    expect(new Set(templates).size).toBe(2)
+    for (const template of templates) {
+      expect(template.startsWith(join(poolRoot, '.templates'))).toBe(true)
+    }
+
+    const devTemplate = templates.find((path) => path.includes('dev-'))
+    expect(devTemplate).toBeDefined()
+    const templateBytes = readFileSync(devTemplate as string)
+    for (const lane of all) {
+      expect(readFileSync(join(lane.path, 'db.sqlite3'))).toEqual(templateBytes)
+    }
+  })
+
+  it('gives every lane its own test database and compose project name', async () => {
+    const pool = await provision(sqliteProject())
+    const all = [...pool.lanes, pool.integration]
+
+    const testDbs = all.map((lane) => envVar(lane, 'TEST_DATABASE_URL'))
+    expect(new Set(testDbs).size).toBe(4)
+
+    const projects = all.map((lane) => lane.composeProject)
+    expect(new Set(projects).size).toBe(4)
+
+    // Both land in the summary, which is what a restarted daemon reads back.
+    const summaries = await Promise.all(
+      all.map((lane) => readSummary(join(repo, '.vinta-ai-workflows', 'worktrees'), lane.name)),
+    )
+    expect(new Set(summaries.map((s) => s.state.compose.project_name)).size).toBe(4)
+    expect(new Set(summaries.map((s) => s.state.test_db?.forked_name)).size).toBe(4)
+  })
+
+  it('resets a lane database back to the template', async () => {
+    const pool = await provision(sqliteProject())
+    const lane = pool.lanes[0] as Lane
+    const testDb = envVar(lane, 'TEST_DATABASE_URL')
+
+    const runSuite = () =>
+      execFileSync('node', ['tests/widgets.mjs'], {
+        cwd: lane.path,
+        env: { ...process.env, ...lane.env },
+      })
+    runSuite()
+
+    const write = new Database(testDb)
+    write.prepare('INSERT INTO widgets (label) VALUES (?)').run('dirty')
+    write.close()
+    expect(widgetCount(testDb)).toBe(1)
+
+    const recycled = await pool.recycle(lane.name)
+
+    expect(recycled.path).toBe(lane.path)
+    expect(widgetCount(testDb)).toBe(0)
+    runSuite()
+  })
+
+  it('puts a reused worktree back on its own base, with nothing of the last phase in it', async () => {
+    const pool = await provision(sqliteProject())
+    const lane = pool.lanes[0] as Lane
+    const git = (...args: string[]) =>
+      execFileSync('git', args, {
+        cwd: lane.path,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+
+    // A phase, as the executor runs one: its own branch cut in the lane, a
+    // commit on it, and a scratch file nobody tracked.
+    git('checkout', '-B', 'phase/a', 'main')
+    await writeFile(join(lane.path, 'implemented.txt'), 'phase a', 'utf8')
+    git('add', '-A')
+    git('commit', '-m', 'phase a')
+    await writeFile(join(lane.path, 'scratch.txt'), 'x', 'utf8')
+
+    await pool.recycle(lane.name)
+
+    // Back on the lane's own branch at its own base — not on the previous
+    // phase's, which is where the next phase would otherwise start.
+    expect(git('rev-parse', '--abbrev-ref', 'HEAD')).toBe(lane.branch)
+    expect(git('rev-parse', 'HEAD')).toBe(git('rev-parse', 'main'))
+    expect(existsSync(join(lane.path, 'implemented.txt'))).toBe(false)
+    expect(existsSync(join(lane.path, 'scratch.txt'))).toBe(false)
+    expect(git('status', '--porcelain')).toBe('')
+
+    // The phase branch itself survives: integration still has to merge it.
+    expect(git('rev-parse', '--verify', 'phase/a')).toMatch(/^[0-9a-f]{40}$/)
+    // And the lane can still run: its dependency tree was not cleaned
+    // away with the phase's leftovers.
+    expect(existsSync(join(lane.path, 'node_modules'))).toBe(true)
+    execFileSync('node', ['tests/widgets.mjs'], {
+      cwd: lane.path,
+      env: { ...process.env, ...lane.env },
+    })
+  })
+
+  it('refuses loudly, naming only the lane, when a lane will not recycle', async () => {
+    const pool = await provision(sqliteProject())
+    const lane = pool.lanes[0] as Lane
+
+    // The template the reset copies back is gone, so the reset cannot run.
+    await rm(join(poolRoot, '.templates'), { recursive: true, force: true })
+
+    const failure = await pool.recycle(lane.name).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(LaneRecycleError)
+    expect((failure as LaneRecycleError).lane).toBe(lane.name)
+    expect((failure as LaneRecycleError).stage).toBe('database')
+    // §11: the reset command and whatever it printed never reach the message.
+    expect((failure as Error).message).not.toContain('cp ')
+    expect((failure as Error).message).not.toContain('.templates')
+  })
+
+  it('re-provisions a single-use lane instead of reusing it', async () => {
+    const pool = await provision(composeProject(), 2)
+    const lane = pool.lanes[0] as Lane
+
+    expect(lane.reusable).toBe(false)
+    const summary = await readSummary(join(repo, '.vinta-ai-workflows', 'worktrees'), lane.name)
+    expect(summary.state.dev_db?.reset_cmd).toBeNull()
+
+    const marker = join(lane.path, 'left-behind')
+    await writeFile(marker, 'x', 'utf8')
+
+    const fresh = await pool.recycle(lane.name)
+
+    expect(fresh.path).toBe(lane.path)
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(lane.path, '.git'))).toBe(true)
+    expect(worktreePaths(repo)).toHaveLength(4)
+    expect(pool.lanes[0]).toBe(fresh)
+  })
+
+  it('gives every lane its own copy of the project’s env files', async () => {
+    await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+    const pool = await provision({ ...sqliteProject(), envFiles: ['.env'] }, 2)
+
+    for (const lane of pool.lanes) {
+      expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\n')
+    }
+
+    // A copy, not a link — the property the whole field exists for. Lane
+    // provisioning appends lane-specific lines to these files, and through a
+    // symlink every one of them would land in the main checkout instead.
+    const [first] = pool.lanes as [Lane]
+    await writeFile(join(first.path, '.env'), 'SHARED=1\nLANE=1\n', 'utf8')
+    expect(readFileSync(join(repo, '.env'), 'utf8')).toBe('SHARED=1\n')
+  })
+
+  it('refuses to provision when a declared env file is not there', async () => {
+    // Fail closed. The alternative is a lane that provisions cleanly and then
+    // cannot boot its stack, four steps later, wearing an unrelated error.
+    await expect(provision({ ...sqliteProject(), envFiles: ['.env.docker'] }, 1)).rejects.toThrow(
+      /\.env\.docker/,
+    )
+  })
+
+  it('restores an env file the phase edited when the lane is recycled', async () => {
+    await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+    const pool = await provision({ ...sqliteProject(), envFiles: ['.env'] }, 1)
+    const lane = pool.lanes[0] as Lane
+
+    await writeFile(join(lane.path, '.env'), 'SHARED=1\nMEDDLED=1\n', 'utf8')
+    await pool.recycle(lane.name)
+
+    // `git clean` cannot do this: the file is ignored, so the clean leaves it
+    // exactly as the previous phase left it. A lane is its env as much as it is
+    // its rows, and both go back.
+    expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\n')
+  })
+
+  // Writes the lane's own cwd-relative receipt out of the lane's own
+  // environment, so what it proves is that the hook ran *in the lane* and *with
+  // its env* rather than in the daemon's directory with the daemon's.
+  const SETUP_RECEIPT = 'setup.receipt'
+  const writesReceipt =
+    `node -e "require('fs').writeFileSync('${SETUP_RECEIPT}', ` +
+    `process.env.DATABASE_URL + '|' + process.env.COMPOSE_PROJECT_NAME)"`
+
+  it('runs the project’s setup command in the lane, with the lane’s environment', async () => {
+    const pool = await provision({ ...sqliteProject(), setupCmd: writesReceipt }, 2)
+
+    for (const lane of pool.lanes) {
+      const written = readFileSync(join(lane.path, SETUP_RECEIPT), 'utf8')
+      expect(written).toBe(`${envVar(lane, 'DATABASE_URL')}|${lane.composeProject}`)
+    }
+  })
+
+  it('runs the setup command again every time the lane is recycled', async () => {
+    // Which is why its contract says idempotent. The receipt is untracked, so
+    // the recycle's own `git clean` deletes it — a receipt standing afterwards
+    // can only have been written again, which is the assertion.
+    const pool = await provision({ ...sqliteProject(), setupCmd: writesReceipt }, 1)
+    const lane = pool.lanes[0] as Lane
+    expect(existsSync(join(lane.path, SETUP_RECEIPT))).toBe(true)
+
+    await pool.recycle(lane.name)
+
+    expect(existsSync(join(lane.path, SETUP_RECEIPT))).toBe(true)
+  })
+
+  it('says why when the setup command fails', async () => {
+    // The first version of this carried a lane name and nothing else, on a §11
+    // reading that turned out to be the wrong one: an operator whose setup
+    // command died of a missing settings module saw "could not provision the
+    // lane pool under …", and finding the real cause took a hand-rolled replay
+    // with the lane environment reconstructed. §11 keeps repository *contents*
+    // out of the record — an exit code and a bounded stderr tail are the same
+    // class of thing as a harness refusal's own explanation, which this package
+    // already decided to carry after an afternoon lost to the same shape of
+    // silence.
+    const failure = await provision(
+      {
+        ...sqliteProject(),
+        setupCmd: 'node -e "console.error(\'ModuleNotFoundError: settings.local\'); process.exit(3)"',
+      },
+      1,
+    ).then(
+      () => null,
+      (error: unknown) => error as Error,
+    )
+
+    expect(failure?.name).toBe('LaneSetupError')
+    expect(failure?.message).toContain('exited 3')
+    expect(failure?.message).toContain('ModuleNotFoundError: settings.local')
+    // The command line itself still does not appear: the lane, the code and
+    // what the command said are enough to act on.
+    expect(failure?.message).not.toContain('node -e')
+  })
+
+  it('bounds how much of a failing setup command’s output it carries', async () => {
+    const failure = await provision(
+      {
+        ...sqliteProject(),
+        setupCmd: `node -e "console.error('x'.repeat(4000)); process.exit(1)"`,
+      },
+      1,
+    ).then(
+      () => null,
+      (error: unknown) => error as Error,
+    )
+
+    // Bounded, and the *tail* — a stack trace puts the cause last.
+    expect(failure?.message.length).toBeLessThan(700)
+    expect(failure?.message).toContain('…')
+  })
+
+  // The config `docker compose config` would have printed, supplied directly:
+  // the real read shells out to docker, and what is under test here is the
+  // wiring around it rather than compose's own parser.
+  const readCompose = async () => ({
+    baseFile: 'docker-compose.yml',
+    config: {
+      name: 'app',
+      services: { db: { ports: [{ target: 5432, published: '5432' }] } },
+      volumes: { dbdata: { name: 'app_dbdata', external: true } },
+    },
+  })
+
+  it('gives each lane its own compose override, outside the worktree', async () => {
+    const pool = await provision({ ...sqliteProject(), compose: {} }, 2, { readCompose })
+
+    for (const lane of pool.lanes) {
+      const composeFile = envVar(lane, 'COMPOSE_FILE')
+      const [base, override] = composeFile.split(delimiter)
+
+      // The base stays relative — the lane carries its own tracked copy — and
+      // the override is absolute, because it lives outside the worktree and a
+      // bare name would not resolve from the compose project directory.
+      expect(base).toBe('docker-compose.yml')
+      expect(isAbsolute(override as string)).toBe(true)
+      expect(existsSync(override as string)).toBe(true)
+
+      // And never at the worktree root. `docker-compose.override.yml` there is
+      // auto-loaded, which is convenient, and is also frequently a *tracked*
+      // file — writing this into it would put the lane's isolation into the
+      // phase's commit and from there into the merge.
+      expect(existsSync(join(lane.path, 'docker-compose.override.yml'))).toBe(false)
+
+      const written = readFileSync(override as string, 'utf8')
+      expect(written).toContain('ports: !override []')
+      expect(written).toContain(`name: "${lane.composeProject}_dbdata"`)
+    }
+
+    // Two lanes, two volume names. One would be two postmasters on one PGDATA.
+    const overrides = pool.lanes.map((lane) => envVar(lane, 'COMPOSE_FILE'))
+    expect(new Set(overrides).size).toBe(2)
+  })
+
+  it('records the forked volumes in the summary, which is the teardown manifest', async () => {
+    const pool = await provision({ ...sqliteProject(), compose: {} }, 1, { readCompose })
+    const lane = pool.lanes[0] as Lane
+
+    const summary = await readSummary(join(repo, '.vinta-ai-workflows', 'worktrees'), lane.name)
+
+    // A volume on this list is a `docker volume rm` target; one that is not is
+    // a volume somebody else is still using.
+    expect(summary.state.compose.forked_volumes).toEqual([
+      { key: 'dbdata', name: `${lane.composeProject}_dbdata`, reason: 'external: true' },
+    ])
+    expect(summary.state.compose.ports_stripped_from).toEqual(['db'])
+    expect(summary.state.compose.base_compose_file).toBe('docker-compose.yml')
+  })
+
+  it('leaves a project with no compose file entirely alone', async () => {
+    // Which is the fixture repo. No compose file means no docker call and no
+    // `COMPOSE_FILE`, not an empty override nobody asked for.
+    const pool = await provision({ ...sqliteProject(), compose: {} }, 1)
+    const lane = pool.lanes[0] as Lane
+
+    expect(lane.env['COMPOSE_FILE']).toBeUndefined()
+    expect(lane.compose).toBeNull()
+  })
+
+  it('gives each lane its own namespace inside one shared service', async () => {
+    const receipts = join(root, 'created')
+    const pool = await provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+            // Stands in for `rabbitmqadmin declare vhost` and the like: proof
+            // the command ran, per lane, with its own namespace substituted.
+            createCmd: `node -e "require('fs').appendFileSync(process.argv[1], '{namespace},')" ${receipts}`,
+            resetCmd: `node -e "require('fs').appendFileSync(process.argv[1], 'r{namespace},')" ${receipts}`,
+          },
+        ],
+      },
+      2,
+    )
+
+    // One server. Three namespaces — two lanes and the integration worktree,
+    // which takes the slot after the last lane rather than sharing one.
+    expect(pool.lanes.map((lane) => envVar(lane, 'REDIS_URL'))).toEqual([
+      'redis://localhost:6379/0',
+      'redis://localhost:6379/1',
+    ])
+    expect(envVar(pool.integration, 'REDIS_URL')).toBe('redis://localhost:6379/2')
+    expect(readFileSync(receipts, 'utf8').split(',').filter(Boolean).sort()).toEqual(['0', '1', '2'])
+  })
+
+  it('empties a lane’s namespace when the lane is handed to the next phase', async () => {
+    const receipts = join(root, 'reset')
+    const pool = await provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+            resetCmd: `node -e "require('fs').appendFileSync(process.argv[1], '{namespace}')" ${receipts}`,
+          },
+        ],
+      },
+      1,
+    )
+    const lane = pool.lanes[0] as Lane
+
+    await pool.recycle(lane.name)
+
+    // The same stage as the database reset, because it is the same kind of
+    // thing: state the previous phase left that the next one must not read.
+    expect(readFileSync(receipts, 'utf8')).toBe('0')
+    // And the lane keeps its slot across the hand-over — a lane whose redis
+    // database moved between phases is a lane that lost its own state.
+    expect(envVar(pool.lane(lane.name), 'REDIS_URL')).toBe('redis://localhost:6379/0')
+  })
+
+  it('refuses a pool larger than a shared service has room for, before creating anything', async () => {
+    const tooMany = provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 2,
+          },
+        ],
+      },
+      3,
+    )
+
+    await expect(tooMany).rejects.toThrow(/raise its capacity, or run fewer lanes/)
+    expect(existsSync(poolRoot)).toBe(false)
+    expect(worktreePaths(repo)).toEqual([gitPath(repo)])
+    expect(existsSync(migrateLog)).toBe(false)
+  })
+
+  /**
+   * A phase ran four sessions, reported SUCCESS with a green inner loop, and
+   * never ran `git commit`: its deliverables were untracked files. The reviewer
+   * reads the committed diff, so it saw nothing and reported "not implemented
+   * at all"; the fix rounds ran out; and then the lane was recycled and the
+   * files were deleted. The prompts now insist on committing — and this is the
+   * floor under that, for every way an agent can still end a turn with work on
+   * disk and nothing on the branch.
+   */
+  describe('uncommitted work in a lane that is being handed on', () => {
+    const dirtyLane = async (pool: LanePool): Promise<Lane> => {
+      const lane = pool.lanes[0] as Lane
+      // On the phase branch, which is where a real lane is when it fails.
+      execFileSync('git', ['checkout', '-B', 'plan/p/phase-a'], {
+        cwd: lane.path,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      await writeFile(join(lane.path, 'deliverable.ts'), 'export const real = true\n', 'utf8')
+      return lane
+    }
+
+    /** Every rescued tree in this repository. */
+    const rescues = (): string[] =>
+      execFileSync('git', ['for-each-ref', '--format=%(refname)', WIP_REFS], {
+        cwd: repo,
+        encoding: 'utf8',
+      })
+        .split('\n')
+        .filter(Boolean)
+
+    const filesIn = (ref: string): string =>
+      execFileSync('git', ['ls-tree', '-r', '--name-only', ref], { cwd: repo, encoding: 'utf8' })
+
+    it('is kept, rather than destroyed', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+
+      await pool.recycle(lane.name)
+
+      const [ref] = rescues()
+      expect(ref).toBeDefined()
+      expect(filesIn(ref as string)).toContain('deliverable.ts')
+    })
+
+    it('never moves the phase branch, because a phase branch is a base', async () => {
+      // The first version committed onto the checked-out branch, which is the
+      // obvious implementation and is wrong: a lane's dirty tree holds gate
+      // artifacts as often as deliverables, and a phase branch is the base of
+      // its dependents. A gate's scratch file went into phase a, which put it in
+      // phase b's base and failed b's gate — a failure nothing in b caused.
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+      const before = execFileSync('git', ['rev-parse', 'plan/p/phase-a'], {
+        cwd: repo,
+        encoding: 'utf8',
+      }).trim()
+
+      await pool.recycle(lane.name)
+
+      expect(
+        execFileSync('git', ['rev-parse', 'plan/p/phase-a'], {
+          cwd: repo,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe(before)
+      // And the rescue is outside refs/heads, so nothing merges it by accident.
+      expect(rescues()[0]).toContain('refs/vinta-ai-maestro/wip/')
+    })
+
+    it('is authored by the tool, never by the agent', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+
+      await pool.recycle(lane.name)
+
+      // Nothing anywhere may claim a phase finished work it did not.
+      const author = execFileSync('git', ['log', '--format=%an', '-1', rescues()[0] as string], {
+        cwd: repo,
+        encoding: 'utf8',
+      }).trim()
+      expect(author).toBe('vinta-ai-maestro')
+    })
+
+    it('keeps one rescue per recycle rather than overwriting the last', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      await dirtyLane(pool)
+      const lane = pool.lanes[0] as Lane
+
+      await pool.recycle(lane.name)
+      await writeFile(join(lane.path, 'second.ts'), 'x\n', 'utf8')
+      await pool.recycle(lane.name)
+
+      // A lane is recycled once per phase it serves; one ref per lane would let
+      // the second rescue delete the first.
+      expect(rescues()).toHaveLength(2)
+    })
+
+    it('does nothing at all to a clean lane', async () => {
+      const pool = await provision(sqliteProject(), 1)
+      const lane = pool.lanes[0] as Lane
+
+      await pool.recycle(lane.name)
+
+      // A recycle of a lane that committed its work is the ordinary case and
+      // must stay free of side effects.
+      expect(rescues()).toEqual([])
+    })
+
+    it('survives the lane that is torn down rather than cleaned', async () => {
+      // The worse of the two paths: this one deletes the worktree outright, so
+      // an untracked file has nowhere to survive except a commit object.
+      const pool = await provision(composeProject(), 1)
+      const lane = await dirtyLane(pool)
+      expect(lane.reusable).toBe(false)
+
+      await pool.recycle(lane.name)
+
+      expect(filesIn(rescues()[0] as string)).toContain('deliverable.ts')
+    })
+
+    it('leaves the lane own index alone', async () => {
+      // The rescue stages into a scratch index. Staging into the real one would
+      // hand the next phase a worktree with someone else's changes staged.
+      const pool = await provision(sqliteProject(), 1)
+      const lane = await dirtyLane(pool)
+
+      await pool.recycle(lane.name)
+
+      expect(existsSync(join(lane.path, '.git-wip-index'))).toBe(false)
+      const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {
+        cwd: lane.path,
+        encoding: 'utf8',
+      })
+      expect(staged.trim()).toBe('')
+    })
+  })
+
+  /**
+   * A project whose databases are `delivery: external` and whose services point
+   * at one Redis has no long-lived containers of its own — the shape the schema
+   * recommends — and that makes some *other* stack a hard dependency of every
+   * run. `setup_cmd` cannot start it: that runs per lane, long after the
+   * template database was created on a server that had to be up already for
+   * `createdb` to work at all.
+   */
+  describe('the project’s prepare_cmd', () => {
+    /** Appends one marker to the file named as argv[1]. */
+    const appends = (path: string, mark: string): string =>
+      `node -e "require('fs').appendFileSync(process.argv[1], '${mark}')" ${path}`
+
+    it('runs before the template databases are built', async () => {
+      // Both write to the migrate log, so their *order* is readable. The
+      // fixture's own migrate command appends to it too, and a marker landing
+      // first is the whole assertion: the server was made ready before
+      // anything asked it for a database.
+      const pool = await provision(
+        { ...sqliteProject(), prepareCmd: appends(migrateLog, 'prepared') },
+        1,
+      )
+
+      expect(pool.lanes).toHaveLength(1)
+      expect(readFileSync(migrateLog, 'utf8').startsWith('prepared')).toBe(true)
+    })
+
+    it('runs again before every recycle, so a server that died comes back', async () => {
+      const log = join(root, 'prepare.log')
+      const pool = await provision({ ...sqliteProject(), prepareCmd: appends(log, 'x') }, 1)
+      const lane = pool.lanes[0] as Lane
+      expect(readFileSync(log, 'utf8')).toBe('x')
+
+      await pool.recycle(lane.name)
+
+      expect(readFileSync(log, 'utf8')).toBe('xx')
+    })
+
+    it('refuses the run, with the exit code and the reason', async () => {
+      const failure = await provision(
+        {
+          ...sqliteProject(),
+          prepareCmd: 'node -e "console.error(\'Cannot connect to the Docker daemon\'); process.exit(1)"',
+        },
+        1,
+      ).then(
+        () => null,
+        (error: unknown) => error as Error,
+      )
+
+      expect(failure?.name).toBe('LanePrepareError')
+      expect(failure?.message).toContain('exited 1')
+      expect(failure?.message).toContain('Cannot connect to the Docker daemon')
+      // And says what the failure *means*: "a command failed" is not the point,
+      // "nothing this run needs is listening" is.
+      expect(failure?.message).toContain('shared servers')
+    })
+  })
+
+  it('gives a service’s create_cmd the lane’s own environment', async () => {
+    // `reset_cmd` always had it and `create_cmd` did not, so a `create_cmd`
+    // that reached for `docker compose` ran against the lane's own compose file
+    // with no project name and no override — booting a stack on the project's
+    // fixed host ports, which is the collision the override exists to prevent.
+    const receipt = join(root, 'create.env')
+    const pool = await provision(
+      {
+        ...sqliteProject(),
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+            createCmd: `node -e "require('fs').appendFileSync(process.argv[1], process.env.COMPOSE_PROJECT_NAME + '|' + process.env.REDIS_URL + ';')" ${receipt}`,
+          },
+        ],
+      },
+      1,
+    )
+    const lane = pool.lanes[0] as Lane
+    const wrote = readFileSync(receipt, 'utf8').split(';').filter(Boolean)
+
+    // Appended rather than written, because the integration worktree runs
+    // `create_cmd` too and takes the slot after the last lane — a receipt that
+    // overwrote would only ever show whichever finished last.
+    expect(wrote).toContain(`${lane.composeProject}|redis://localhost:6379/0`)
+    expect(wrote).toContain(`${pool.integration.composeProject}|redis://localhost:6379/1`)
+  })
+
+  it('points a lane at empty hooks when the project asks', async () => {
+    // A lane is a worktree that has never been committed in, and a
+    // `language: system` pre-commit chain reads that as a fresh machine — one
+    // project's hooks built a 510 MB virtualenv before allowing the first
+    // commit, per lane. Committing is not optional here, so a hook chain that
+    // makes it expensive makes the whole design expensive.
+    const pool = await provision({ ...sqliteProject(), hooks: false }, 1)
+    const lane = pool.lanes[0] as Lane
+
+    const configured = execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+      cwd: lane.path,
+      encoding: 'utf8',
+    }).trim()
+    expect(configured).toBe(join(lane.path, '.git-hooks-disabled'))
+
+    // And only this worktree: the operator's own checkout keeps its hooks.
+    expect(() =>
+      execFileSync('git', ['config', '--get', 'core.hooksPath'], { cwd: repo, stdio: 'ignore' }),
+    ).toThrow()
+  })
+
+  it('leaves hooks alone by default', async () => {
+    const pool = await provision(sqliteProject(), 1)
+    const lane = pool.lanes[0] as Lane
+
+    expect(() =>
+      execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+        cwd: lane.path,
+        stdio: 'ignore',
+      }),
+    ).toThrow()
+  })
+
+  describe('the dependency tree', () => {
+    /** Swaps the fixture's linked `node_modules` for a real one, with a pnpm-style relative link. */
+    const realDependencyTree = async (): Promise<void> => {
+      const deps = join(repo, 'node_modules')
+      await unlink(deps)
+      await mkdir(join(deps, '.store', 'pkg'), { recursive: true })
+      await writeFile(join(deps, '.store', 'pkg', 'index.js'), 'module.exports = 1\n')
+      if (process.platform !== 'win32') await symlink(join('.store', 'pkg'), join(deps, 'pkg'))
+    }
+
+    it('gives every lane its own copy, so a lane’s writes never reach the main checkout', async () => {
+      await realDependencyTree()
+      const pool = await provision({ migrateCmd: 'true', databases: {} }, 2)
+
+      for (const lane of pool.lanes) {
+        const deps = join(lane.path, 'node_modules')
+        expect((await lstat(deps)).isSymbolicLink()).toBe(false)
+        expect(readFileSync(join(deps, '.store', 'pkg', 'index.js'), 'utf8')).toContain('1')
+        // Verbatim: still relative, so it resolves inside the lane's own tree.
+        if (process.platform !== 'win32') {
+          expect(await readlink(join(deps, 'pkg'))).toBe(join('.store', 'pkg'))
+        }
+        await writeFile(join(deps, '.cache-from-lane'), lane.name)
+      }
+
+      expect(existsSync(join(repo, 'node_modules', '.cache-from-lane'))).toBe(false)
+      // Staged outside the worktree, and nothing of the staging left behind.
+      for (const lane of pool.lanes) {
+        expect(existsSync(`${lane.path}.node_modules-copy`)).toBe(false)
+      }
+    })
+
+    it('keeps the lane’s own tree across a recycle', async () => {
+      await realDependencyTree()
+      const pool = await provision({ migrateCmd: 'true', databases: {} }, 1)
+      const lane = pool.lanes[0] as Lane
+      await writeFile(join(lane.path, 'node_modules', 'installed-by-phase'), '')
+
+      await pool.recycle(lane.name)
+
+      expect(existsSync(join(lane.path, 'node_modules', 'installed-by-phase'))).toBe(true)
+    })
+
+    it('mirrors a main checkout whose tree is itself a link, instead of copying through it', async () => {
+      const pool = await provision({ migrateCmd: 'true', databases: {} }, 1)
+      const lane = pool.lanes[0] as Lane
+
+      expect((await lstat(join(lane.path, 'node_modules'))).isSymbolicLink()).toBe(true)
+      expect(await realpath(join(lane.path, 'node_modules'))).toBe(
+        await realpath(join(repo, 'node_modules')),
+      )
+    })
+  })
+
+  it('refuses on the N× disk probe before provisioning anything', async () => {
+    const { bavail, bsize } = await statfs(root)
+    const available = bavail * bsize
+
+    await expect(
+      LanePool.provision({
+        repoPath: repo,
+        poolRoot,
+        runId: 'run-1',
+        laneCount: 3,
+        baseRef: 'main',
+        project: sqliteProject(),
+        // Fits once over, not four times over — which is exactly the failure
+        // mode a 1× probe would wave through.
+        perLaneBytes: Math.floor(available / 2),
+      }),
+    ).rejects.toThrow(DiskProbeError)
+
+    expect(existsSync(poolRoot)).toBe(false)
+    expect(worktreePaths(repo)).toEqual([gitPath(repo)])
+    expect(existsSync(migrateLog)).toBe(false)
+  })
+
+  /**
+   * A run's process is killed. Its worktrees are still on disk, and whatever
+   * the agents had not committed is still in them — which is, for an untracked
+   * deliverable, the only copy of it. Resuming has to take those over: creating
+   * them again is exactly the destruction `reap` refuses to perform, carried
+   * out by the step that was meant to get the run going again.
+   */
+  describe('adopting the worktrees a killed run left standing', () => {
+    /**
+     * A lane in the state a kill leaves one: on its phase branch, with a
+     * deliverable nobody committed and rows a phase's suite wrote.
+     *
+     * The branch is the part that matters to what is under test. The
+     * integrator puts a lane on `plan/<id>/phase-<n>` for the duration of a
+     * phase, so a run killed *while working* — the only kind with uncommitted
+     * work to lose — is never sitting on `wt/<name>`.
+     */
+    const abandoned = async (pool: LanePool): Promise<Lane> => {
+      const lane = pool.lanes[0] as Lane
+      execFileSync('git', ['checkout', '-B', 'plan/p/phase-a'], {
+        cwd: lane.path,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      await writeFile(join(lane.path, 'deliverable.ts'), 'export const real = true\n', 'utf8')
+      const db = new Database(envVar(lane, 'TEST_DATABASE_URL'))
+      try {
+        db.prepare('INSERT INTO widgets (label) VALUES (?)').run('mid-phase')
+      } finally {
+        db.close()
+      }
+      return lane
+    }
+
+    it('keeps the uncommitted work in the worktree, and the rows under it', async () => {
+      const project = sqliteProject()
+      const killed = await provision(project, 2)
+      const lane = await abandoned(killed)
+
+      const resumed = await provision(project, 2, { adopt: true })
+
+      // The whole point. An untracked deliverable has nowhere else to be.
+      expect(existsSync(join(lane.path, 'deliverable.ts'))).toBe(true)
+      // And the database clone is skipped for the same reason: returning the
+      // lane's rows to the template is the same loss wearing a different hat,
+      // and it reaches the resumed phase as a suite that suddenly sees an
+      // empty database.
+      expect(widgetCount(envVar(resumed.lane(lane.name), 'TEST_DATABASE_URL'))).toBe(1)
+      // The same worktree, taken over — not a second one beside it.
+      expect(resumed.lane(lane.name).path).toBe(lane.path)
+      expect(worktreePaths(repo)).toHaveLength(4)
+    })
+
+    it('leaves an env file the phase edited exactly as the phase left it', async () => {
+      // `#copyEnvFiles` is the quiet one of the skipped steps: it would restore
+      // the main checkout's copy over a file the agent had changed, and nothing
+      // downstream would report that anything had happened.
+      await writeFile(join(repo, '.env'), 'SHARED=1\n', 'utf8')
+      const project = { ...sqliteProject(), envFiles: ['.env'] }
+      const killed = await provision(project, 1)
+      const lane = killed.lanes[0] as Lane
+      await writeFile(join(lane.path, '.env'), 'SHARED=1\nPHASE=1\n', 'utf8')
+
+      await provision(project, 1, { adopt: true })
+
+      expect(readFileSync(join(lane.path, '.env'), 'utf8')).toBe('SHARED=1\nPHASE=1\n')
+    })
+
+    /**
+     * The resume that could not start at all.
+     *
+     * `#configureHooks` enables `extensions.worktreeConfig`, and that key is
+     * repository-wide: the write lands in the *shared* `.git/config`, which git
+     * takes `.git/config.lock` to edit. Four lanes provisioning concurrently
+     * are four writers of one file. A fresh provision never saw it, because
+     * `worktree add` goes through the pool's serialized git turn and staggered
+     * the lanes apart; `adopt` skips `worktree add`, so every lane arrived at
+     * the shared config in the same tick and the pool refused with
+     * "could not lock config file …: File exists" — on every resume of a
+     * project with `hooks: false`.
+     *
+     * Three lanes plus the integration worktree, which is the smallest pool
+     * that has more than one concurrent writer.
+     */
+    it('adopts every lane when the project disables hooks', async () => {
+      const project = { ...sqliteProject(), hooks: false }
+      const killed = await provision(project, 3)
+      const lane = await abandoned(killed)
+
+      const resumed = await provision(project, 3, { adopt: true })
+
+      expect(resumed.lanes).toHaveLength(3)
+      // The work the resume exists for, still there.
+      expect(existsSync(join(lane.path, 'deliverable.ts'))).toBe(true)
+      // The same four worktrees, and the hooks still pointed away per lane —
+      // `#configureHooks` runs on an adopted lane and has to be idempotent.
+      expect(worktreePaths(repo)).toHaveLength(5)
+      for (const adopted of resumed.lanes) {
+        const configured = execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+          cwd: adopted.path,
+          encoding: 'utf8',
+        }).trim()
+        expect(configured).toBe(join(adopted.path, '.git-hooks-disabled'))
+      }
+    })
+
+    it('describes an adopted lane exactly as provisioning described it', async () => {
+      // A `Lane` is derived from `(name, kind, index, project, repoPath)` and
+      // discovered from nothing, which is the property that lets resume exist
+      // at all: every caller — the scheduler, the executor, `recycle` — gets a
+      // descriptor it cannot tell apart from a provisioned one, so none of them
+      // needs to know that resuming is a thing that happens.
+      const project: ProjectSpec = {
+        ...sqliteProject(),
+        compose: {},
+        services: [
+          {
+            id: 'redis',
+            namespace: 'index',
+            url: 'redis://localhost:6379',
+            urlVar: 'REDIS_URL',
+            capacity: 16,
+          },
+        ],
+      }
+      const killed = await provision(project, 2, { readCompose })
+      const before = [...killed.lanes, killed.integration]
+
+      const resumed = await provision(project, 2, { adopt: true, readCompose })
+
+      expect([...resumed.lanes, resumed.integration]).toEqual(before)
+    })
+
+    it('provisions a lane the killed run never reached', async () => {
+      // Per worktree, not per pool: a run that died partway through
+      // provisioning left some lanes standing and never created the rest, and
+      // an all-or-nothing decision would have to destroy the survivors to get
+      // the missing one.
+      const project = sqliteProject()
+      const killed = await provision(project, 1)
+      const lane = killed.lanes[0] as Lane
+      await writeFile(join(lane.path, 'deliverable.ts'), 'x\n', 'utf8')
+
+      const resumed = await provision(project, 2, { adopt: true })
+
+      const fresh = resumed.lanes[1] as Lane
+      expect(existsSync(join(fresh.path, '.git'))).toBe(true)
+      // Provisioned in full, not half: its database was cloned from the
+      // template the way a first run clones one.
+      expect(widgetCount(envVar(fresh, 'TEST_DATABASE_URL'))).toBe(0)
+      expect(existsSync(join(lane.path, 'deliverable.ts'))).toBe(true)
+      expect(worktreePaths(repo)).toHaveLength(4)
+    })
+
+    it('does not charge the disk probe for worktrees it is not creating', async () => {
+      // The probe sizes N new worktrees, and an adopted one is not new — its
+      // bytes were spent by the run that died. Charging for them refuses a
+      // resume that needs no new space at all, and refuses it harder the more
+      // lanes survived.
+      const project = sqliteProject()
+      await provision(project, 2)
+      const { bavail, bsize } = await statfs(root)
+
+      const resumed = await provision(project, 2, {
+        adopt: true,
+        // Enough per lane that three of them would not fit twice over — the
+        // estimate that makes the first pool impossible and this one free.
+        perLaneBytes: Math.floor((bavail * bsize) / 2),
+      })
+
+      expect(resumed.lanes).toHaveLength(2)
+    })
+
+    it('refuses a directory that is not a worktree, rather than failing inside git', async () => {
+      // `worktree add` fails on any path that already exists, so falling
+      // through would reach the operator as git's own sentence about a path,
+      // naming no lane and reading like a bug in the pool. The other
+      // resolution is worse: adopting a directory that is not this lane's
+      // hands the phase somebody else's tree, and the first thing a phase does
+      // with a tree is commit it.
+      await mkdir(join(poolRoot, 'run-1-lane-1'), { recursive: true })
+
+      const failure = await provision(sqliteProject(), 1, { adopt: true }).then(
+        () => null,
+        (error: unknown) => error as Error,
+      )
+
+      expect(failure?.name).toBe('LaneAdoptError')
+      expect((failure as LaneAdoptError).lane).toBe('run-1-lane-1')
+      expect(failure?.message).toContain('not a linked git worktree')
+      // It says what to do about it, and it is not git talking.
+      expect(failure?.message).toContain('reap the lane')
+      expect(failure?.message).not.toContain('fatal:')
+    })
+
+    it('refuses a worktree that belongs to some other repository', async () => {
+      // A `.git` file is not enough to prove whose lane this is. The two sides
+      // are compared by the commit `wt/<name>` resolves to on each — never by
+      // matching paths, which is the comparison `reap` explains loses to
+      // Windows on separators, drive-letter case and 8.3 short names.
+      const other = await materializeFixtureRepo(join(root, 'elsewhere'))
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-b', 'wt/run-1-lane-1', join(poolRoot, 'run-1-lane-1'), 'main'],
+        // git narrates this one on stderr, and it is the suite's own setup
+        // rather than anything under test.
+        { cwd: other, stdio: ['ignore', 'pipe', 'pipe'] },
+      )
+
+      const failure = await provision(sqliteProject(), 1, { adopt: true }).then(
+        () => null,
+        (error: unknown) => error as Error,
+      )
+
+      expect(failure?.name).toBe('LaneAdoptError')
+      expect(failure?.message).toContain('wt/run-1-lane-1')
+    })
+
+    it('is off unless it is asked for', async () => {
+      // A first run expects every one of these paths to be absent, and a
+      // surprise there is a surprise — not something to absorb silently.
+      const project = sqliteProject()
+      await provision(project, 1)
+
+      await expect(provision(project, 1)).rejects.toThrow()
+    })
+  })
+})
+
+describe('database strategy selection', () => {
+  // No server and no container: these are the decisions, not their execution.
+  const external: PostgresSpec = {
+    engine: 'postgres',
+    delivery: 'external',
+    name: 'app',
+    serverUrl: 'postgres://localhost:5432',
+    connectionUrlVar: 'DATABASE_URL',
+  }
+  const ctx = (laneName: string) => ({
+    laneName,
+    lanePath: `/pool/${laneName}`,
+    templatesDir: '/pool/.templates',
+  })
+
+  it('clones every external lane database from one shared template', () => {
+    const template = planTemplate('dev', external, '/pool/.templates')
+    expect(template?.name).toBe('app_wt_template')
+
+    const one = planDatabase('dev', external, ctx('run-1-lane-1'))
+    const two = planDatabase('dev', external, ctx('run-1-lane-2'))
+
+    expect(one.forkedName).toBe('app_wt_run_1_lane_1')
+    expect(two.forkedName).toBe('app_wt_run_1_lane_2')
+    // Quoted through the platform seam rather than with POSIX quotes written
+    // out. The subject here is the *command* `planDatabase` builds — that it
+    // clones from the shared template and drops by the lane's own name — and
+    // on Windows those names are wrapped for `cmd.exe`, which has no use for
+    // single quotes. Writing the POSIX form by hand asserted this module's
+    // behaviour on one platform and `shellQuote`'s on the other; `shellQuote`
+    // has its own tests in `platform.test.ts` for the quoting itself.
+    const q = (name: string) => shellQuote(name)
+    expect(one.cloneCmd).toContain(`-T ${q('app_wt_template')}`)
+    expect(two.cloneCmd).toContain(`-T ${q('app_wt_template')}`)
+    expect(one.resetCmd).toContain(`dropdb --if-exists ${q('app_wt_run_1_lane_1')}`)
+    expect(one.connectionUrl).toContain('application_name=wt-run-1-lane-1')
+  })
+
+  it('gives a compose-delivered database no template and no reset', () => {
+    const compose: PostgresSpec = { ...external, delivery: 'compose' }
+
+    expect(planTemplate('dev', compose, '/pool/.templates')).toBeNull()
+
+    const plan = planDatabase('dev', compose, ctx('run-1-lane-1'))
+    // The lane boots its own server on its own volume, so the name is unchanged
+    // and there is nothing to clone from — hence nothing to reset to.
+    expect(plan.forkedName).toBe('app')
+    expect(plan.cloneCmd).toBeNull()
+    expect(plan.resetCmd).toBeNull()
+  })
+})

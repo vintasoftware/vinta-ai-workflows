@@ -1,0 +1,1230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vintasoftware/vinta-ai-workflows/schemas/workflow.v1.schema.json",
+  "title": "vinta-ai-maestro workflow",
+  "description": "An executable plan: the phase DAG, the pipelines phases run through, the capacity pools they contend for, and the gates they must pass. Layered over the project’s own configuration (`.vinta-ai-workflows.yaml`) when it is loaded. Lives at `ai-plans/<feature-kebab>.workflow.json` in a target project, emitted by `plan-feature` alongside the human-readable plan and executed by `vinta-ai-maestro`. GENERATED from packages/vinta-ai-maestro/src/types.ts — edit there, not here. See schemas/README.md for versioning rules.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional URL of this schema, for editor validation. Ignored at runtime.",
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "number",
+      "const": 1,
+      "description": "Schema major version. Bumped only on breaking changes."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Stable identifier for this workflow. Used in branch names."
+    },
+    "plan_ref": {
+      "description": "The human-readable plan this was emitted alongside.",
+      "type": "string"
+    },
+    "plan_context_refs": {
+      "default": [],
+      "description": "Sections of the plan that bound every phase rather than any one of them — its Goals + Non-goals and its Guiding Decisions. Each is a file-and-anchor reference in the same form as `prompt_ref` (`ai-plans/PLAN.md#1-goals`), resolved by the same resolver and handed to the implementer verbatim, marked as plan-level. Empty — the default — means the prompts carry the phase brief alone.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "base_branch": {
+      "description": "What dependency-free nodes branch from, and what the plan PR targets. Absent takes `project.default_branch` from `.vinta-ai-workflows.yaml`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "migrate_cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The project’s own migrate command. Run once per template database — never per lane, which is what makes the Nth lane cost a copy rather than a provision."
+        },
+        "databases": {
+          "default": {},
+          "description": "Roles a lane forks. An undeclared role means the lane has no database of its own.",
+          "type": "object",
+          "properties": {
+            "dev": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "sqlite"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Env var the project reads its connection string from, set per lane."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "path",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "postgres"
+                    },
+                    "delivery": {
+                      "type": "string",
+                      "enum": [
+                        "external",
+                        "compose"
+                      ],
+                      "description": "`external` forks a database on an already-running server — the cheap mode, and the one to prefer for pooling. `compose` boots the lane its own server on its own forked volume, which has no template to clone from and therefore no reset: such a lane is single-use and is re-provisioned rather than reset."
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The main checkout’s database name. Lane names derive from it."
+                    },
+                    "server_url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The server, without the database path segment, e.g. `postgres://localhost:5432`."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "delivery",
+                    "name",
+                    "server_url",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "One forked database a lane gets its own copy of."
+            },
+            "test": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "sqlite"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Repo-relative path of the database file, e.g. `db.sqlite3`. Copied per lane."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Env var the project reads its connection string from, set per lane."
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "path",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "const": "postgres"
+                    },
+                    "delivery": {
+                      "type": "string",
+                      "enum": [
+                        "external",
+                        "compose"
+                      ],
+                      "description": "`external` forks a database on an already-running server — the cheap mode, and the one to prefer for pooling. `compose` boots the lane its own server on its own forked volume, which has no template to clone from and therefore no reset: such a lane is single-use and is re-provisioned rather than reset."
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The main checkout’s database name. Lane names derive from it."
+                    },
+                    "server_url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The server, without the database path segment, e.g. `postgres://localhost:5432`."
+                    },
+                    "connection_url_var": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "engine",
+                    "delivery",
+                    "name",
+                    "server_url",
+                    "connection_url_var"
+                  ],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "One forked database a lane gets its own copy of."
+            }
+          },
+          "additionalProperties": false
+        },
+        "env_files": {
+          "default": [],
+          "description": "Repo-relative ignored files every lane needs its own COPY of — `.env`, `.env.docker`, `.envrc`. Copied, never symlinked: lane provisioning appends to them (a connection string, a compose override path), and a symlink would write those lane-specific lines back into the main checkout. A declared file that is missing fails provisioning rather than producing a lane whose stack cannot boot.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "commands": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "lint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "typecheck": {
+              "type": "string",
+              "minLength": 1
+            },
+            "test": {
+              "description": "The whole suite.",
+              "type": "string",
+              "minLength": 1
+            },
+            "test_one": {
+              "description": "A single test or a subtree. The agent appends the target, so end it accordingly.",
+              "type": "string",
+              "minLength": 1
+            },
+            "migrate": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "description": "The project’s own command lines, handed to every agent verbatim. A fixed vocabulary rather than free-form, because the prompt has to be able to say which one step 3 of the working instructions means. Declaring these is how an agent stops guessing: a project whose suite only runs inside a container, or only against a lane-specific database, has no way of telling one otherwise, and `pytest` is a plausible guess that is wrong in exactly that project."
+        },
+        "hooks": {
+          "default": "run",
+          "description": "Whether the repository’s git hooks run on commits made inside a lane. `run` is the default and is what a developer’s own checkout does. `skip` points the lane at an empty `core.hooksPath`, for the case this exists for: a `language: system` pre-commit chain that, in a worktree that has never been committed in, builds a virtualenv per lane before it will let a commit through — observed as four failed commit attempts, one of them a two-minute timeout, and a 510 MB `.venv` per lane. The gates still run; this only stops each lane paying a whole-environment install to make a commit.",
+          "type": "string",
+          "enum": [
+            "run",
+            "skip"
+          ]
+        },
+        "services": {
+          "default": {},
+          "description": "Shared servers each lane gets its own namespace inside, by id. One postgres, one redis, one rabbit on the machine, with a database / db index / vhost per lane — which is the difference between six lanes being viable on a laptop and not. The alternative a project falls into without this is booting a server per lane, or sharing one with no isolation at all.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "enum": [
+                  "index",
+                  "name"
+                ],
+                "description": "How this lane’s namespace inside the shared server is derived. `index` is a small integer, for a server with a fixed number of slots — redis’s sixteen databases are the case it exists for. `name` is a token derived from the lane, for a server that names things freely: a vhost, a bucket prefix, a schema."
+              },
+              "url": {
+                "description": "The shared server, without the per-lane segment — `redis://localhost:6379`. Omit it where the namespace *is* the value: an object-storage prefix has no URL to hang off, and the variable then carries the bare token.",
+                "type": "string",
+                "minLength": 1
+              },
+              "url_var": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Env var the lane reads this service’s address from."
+              },
+              "capacity": {
+                "default": 16,
+                "description": "How many distinct namespaces the server has. Only meaningful for `index`, where a pool larger than this is refused before anything is created — two lanes on one redis database is the bug this exists to prevent, and reaching it by arithmetic is no better than reaching it by neglect.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "create_cmd": {
+                "description": "Run once per lane, in the lane. `{namespace}`, `{url}` and `{lane}` are substituted. Declaring a vhost is a `rabbitmqadmin` invocation this package has no business knowing; a project that needs none declares none.",
+                "type": "string",
+                "minLength": 1
+              },
+              "reset_cmd": {
+                "description": "Empties this lane’s namespace when the lane is handed to the next phase. Same substitutions. A service without one keeps whatever the last phase left in it, which for a cache is usually right and for a queue usually is not — declaring this is how a project says which of those it has.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "namespace",
+              "url_var"
+            ],
+            "additionalProperties": false,
+            "description": "A shared server each lane gets its own namespace inside."
+          }
+        },
+        "compose": {
+          "default": {
+            "enabled": true,
+            "publish": [],
+            "shared_volumes": []
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "Whether lane provisioning generates a compose override. On by default, and it does nothing at all in a project with no compose file. Where there is one and docker cannot answer, provisioning fails rather than quietly producing lanes that share a data volume — set this to false to say that is genuinely what you want.",
+              "type": "boolean"
+            },
+            "publish": {
+              "default": [],
+              "description": "Services that must keep a reachable host port, republished on one this lane was granted instead of the one the project pinned. Empty is the default and is usually right outright: where the project’s own test command runs inside compose, services reach each other by container DNS on the lane’s own network and a published port buys nothing but a collision. The granted port reaches the lane as `LANE_PORT_<SERVICE>_<CONTAINER_PORT>`.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "shared_volumes": {
+              "default": [],
+              "description": "Volume keys that leak past the project name and are to be left leaking. The escape hatch for the one decision this cannot make for you: re-pinning a shared dependency volume is correct, and it costs every lane the install that sharing it was avoiding. A read-only cache with no dependency churn in the plan is safe here. A data volume never is — that is two servers on one data directory, which is the bug this exists to prevent.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "additionalProperties": false,
+          "description": "How a lane’s compose stack is isolated past `COMPOSE_PROJECT_NAME`."
+        },
+        "prepare_cmd": {
+          "description": "Run in the repository root **before anything else a run does** — before the preflight, before the template databases, before the first worktree. Its job is to make the shared servers this project’s lanes connect to reachable: `docker compose up -d --wait db redis` for a stack in the root checkout, `brew services start postgresql` for a host install, nothing at all for a project whose lanes boot their own. `setup_cmd` cannot do this — it runs per lane, long after the template database has been created on a server that had to be up already. MUST be idempotent: it runs again before every lane recycle, which is what restores a server that died mid-run. Note that `--wait` only waits for services that declare a `healthcheck`; without one it returns as soon as the container is started, and `createdb` races the server.",
+          "type": "string",
+          "minLength": 1
+        },
+        "setup_cmd": {
+          "description": "The project’s own lane-setup command, run inside each freshly provisioned lane with that lane’s environment applied. The escape hatch for whatever a project needs that no field here describes. It MUST be idempotent: it runs again every time the lane is recycled for another phase.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "migrate_cmd"
+      ],
+      "additionalProperties": false,
+      "description": "What a lane needs to be a working checkout of this project. Optional: with no project block a lane is a worktree and nothing else."
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "harness": {
+          "default": "claude-code",
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "codex",
+            "opencode"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pipeline": {
+          "default": "standard-phase",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "gates": {
+          "description": "The gates every phase must pass unless it names its own. Resolved into each node when the workflow is loaded, with the same override rule as `chores`: a node’s own list — `[]` included — replaces this one.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "gate_scope": {
+          "default": "scoped",
+          "description": "`scoped` — the default — runs a gate’s `scoped_cmd` on phase gates and its full `cmd` on the gate that re-runs after a wave merge. `full` runs `cmd` everywhere.",
+          "type": "string",
+          "enum": [
+            "scoped",
+            "full"
+          ]
+        },
+        "chores": {
+          "default": [],
+          "description": "The chores every phase runs unless it names its own. Most chores are run-wide — a comment pass, a changelog entry — and repeating them on every node is how one phase ends up quietly missing one.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "model_fallbacks": {
+          "default": {},
+          "description": "Model id → the model to run instead once the first is out of quota (§6.1). A `quota` refusal on a model listed here does not park the harness: the spawn is retried at once on the fallback, and every later spawn of that model on the same harness goes straight to the fallback until the vendor’s stated reset, or for the rest of the run when it stated none. Chains are followed; a fallback refused for quota too means the account is out, not the model, and the harness parks as it would have.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "max_session_turns": {
+          "default": 12,
+          "description": "Turns one reused session slot may take before the next spawn starts fresh (§15.5). A shared session only ever grows; without a ceiling a long node eventually dies on a context-window error that reads as a broken harness.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "additionalProperties": false
+    },
+    "crew": {
+      "default": {},
+      "description": "The agents this plan is staffed with, by id. Empty — the default — means the workflow is unstaffed and every node falls back to `model` / `defaults.model`, which is how workflows written before rosters existed keep running.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "tier": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4,
+            "description": "Difficulty tier this member is staffed at, per the plan skill’s rubric. It is a floor on what they may be handed, and the ordering the scheduler substitutes along."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The model this tier resolves to for this run."
+          },
+          "harness": {
+            "description": "Overrides defaults.harness for this member.",
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "description": {
+            "description": "Why the plan staffed this tier.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tier",
+          "model"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "resources": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Maximum concurrent holders. A starting hint for `lane` — see admission control."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "worktree",
+              "semaphore"
+            ],
+            "description": "`worktree` pools are provisioned lanes; `semaphore` pools are pure counters."
+          },
+          "match": {
+            "description": "Command patterns that need this pool — `pytest*`, `pnpm test*`. `*` matches any run of characters and the rest is literal, compared against the whole command line with whitespace collapsed. On a harness that can enforce it, an agent running a matching command without `vinta-ai-maestro with <pool> --` in front of it is refused and told to take the lease. A guardrail against habit, not a sandbox: `bash -c` or a script that runs the same suite is not seen. Only meaningful on a `semaphore` pool.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capacity",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "description": "Named capacity pools. `lane` is required."
+    },
+    "gates": {
+      "default": {},
+      "description": "Gates by id. A command gate with a `type` may omit `cmd` and inherit it from the project. Gates the project configures by type (`maestro.gates.<type>`, or a `commands.*` line) are also available under the type’s name without being declared here.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "description": "What kind of check this is. A typed gate takes any field it does not set — `cmd`, `scoped_cmd`, `requires`, `timeout_s` — from the project: `maestro.gates.<type>` in `.vinta-ai-workflows.yaml`, then the matching `commands.*` line there (`test` → `test_unit`, `lint` → `lint`, `typecheck` → `build`, `e2e` → `e2e`). A field set here wins over both.",
+                "type": "string",
+                "enum": [
+                  "test",
+                  "lint",
+                  "typecheck",
+                  "e2e"
+                ]
+              },
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Shell command run in the node’s lane. Not an agent. The full check."
+              },
+              "scoped_cmd": {
+                "description": "The same check narrowed to what the phase changed, run by a phase gate under `defaults.gate_scope: scoped`. `{changed_files}` is the files the lane changed against the phase’s base and `{touches}` the node’s Touch List, each substituted shell-quoted and space-separated. The command must accept any path it is given — `vitest related {changed_files} --run`, `jest --findRelatedTests {changed_files}` — because a source file with no tests is a normal member of the list. When a placeholder would substitute nothing, `cmd` runs instead.",
+                "type": "string",
+                "minLength": 1
+              },
+              "requires": {
+                "default": [],
+                "description": "Resource pool ids acquired before the gate runs, in canonical order.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                }
+              },
+              "timeout_s": {
+                "default": 1800,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "tuning": {
+                "type": "object",
+                "properties": {
+                  "allowed_flags": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "Flags the monitor may ADD to this gate’s command, verbatim and whole. Matched as exact argv tokens, so `--reuse-db` permits `--reuse-db` and nothing else — not `--reuse-db-and-more`, and not a flag that merely starts the same way. A flag taking a separate value (`-n auto`) is written as the two tokens it is. Removing or rewriting an existing token is never permitted, whatever is listed here: the proposed command must be this one’s tokens, in order, plus additions."
+                  }
+                },
+                "required": [
+                  "allowed_flags"
+                ],
+                "additionalProperties": false,
+                "description": "What an autonomous retune of this gate may do. Absent — the default — means the command is not the monitor’s to touch."
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "judge": {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "description": "The question, inline. Exactly one of `question` and `question_ref` is required.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "question_ref": {
+                    "description": "Where the question lives, in `prompt_ref` form (`ai-plans/PLAN.md#no-phi-in-logs`), resolved off the lane like a phase brief.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "labels": {
+                    "default": [
+                      "yes",
+                      "no"
+                    ],
+                    "description": "The closed set the classifier chooses among. The default makes it a yes/no question.",
+                    "minItems": 2,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "fail_on": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "The labels that fail the gate. Their combined score is compared against `threshold`, so `[\"architectural\", \"schema\"]` fails on the two together and not on either alone."
+                  },
+                  "threshold": {
+                    "default": 0.5,
+                    "description": "The gate fails when the `fail_on` labels together score at least this much.",
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "input": {
+                    "default": "diff",
+                    "description": "What is judged. `diff` is the lane against the phase’s base, uncommitted work included.",
+                    "type": "string",
+                    "enum": [
+                      "diff"
+                    ]
+                  },
+                  "max_input_bytes": {
+                    "default": 204800,
+                    "description": "A larger input is not sent. The gate then counts as unavailable — a truncated diff would be judged on the part that happened to fit.",
+                    "type": "integer",
+                    "minimum": 1024,
+                    "maximum": 9007199254740991
+                  },
+                  "on_unavailable": {
+                    "default": "pass",
+                    "description": "What a question nobody answered means: no classifier configured, unreachable, or an oversized input. `pass` — the default — keeps a judge gate advisory; `fail` is for a check the phase must not merge without.",
+                    "type": "string",
+                    "enum": [
+                      "pass",
+                      "fail"
+                    ]
+                  }
+                },
+                "required": [
+                  "fail_on"
+                ],
+                "additionalProperties": false
+              },
+              "requires": {
+                "default": [],
+                "description": "Resource pool ids acquired before the gate runs. Rarely needed: a judge holds no lane resource.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                }
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "judge"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "chores": {
+      "default": {},
+      "description": "Agent turns a phase runs beside its gates, by id. A gate judges and a chore changes the tree, so they are separate registries — see ChoreSchema.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "description": "The instruction, inline. Exactly one of `prompt` and `prompt_ref` is required.",
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt_ref": {
+            "description": "Where the instruction lives, in `prompt_ref` form (`ai-plans/PLAN.md#deslop`), resolved by the same resolver as a phase brief. Prefer it over `prompt` for anything longer than a sentence: it keeps the text reviewable in the plan rather than in a JSON string.",
+            "type": "string",
+            "minLength": 1
+          },
+          "skill": {
+            "description": "A skill the agent should use, named in the prompt rather than passed as a harness flag — codex and opencode have no skills, and a chore that only works on one harness is a chore that silently does nothing on the other two.",
+            "type": "string",
+            "minLength": 1
+          },
+          "session": {
+            "default": "main",
+            "description": "The session slot this turn continues (§15). `main` — the default — is the implementer’s: the agent that wrote the phase already holds the brief, the diff and its own reasons, and that is most of what makes a chore cheap. A slot no other effect names starts a fresh session every time and pays for a cold context.",
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "description": "Overrides the model the phase’s implementer would otherwise run at. A mechanical pass does not need the tier the phase was staffed at.",
+            "type": "string",
+            "minLength": 1
+          },
+          "when": {
+            "default": "after_review",
+            "description": "When the chore runs. `review` runs it once the phase’s gates are green, as the phase’s code review: the turn ends with a `VERDICT: pass` or `VERDICT: fail` line, and the phase moves on only when every review chore passed. `after_review` — the default — runs it once the review approved, before the gates run again on the final tree. `after_pr` runs it once the phase is merged, pushed and its pull request is open, for work about the PR rather than the diff (a review canvas, a PR comment). An `after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be `on_failure: fail`.",
+            "type": "string",
+            "enum": [
+              "review",
+              "after_review",
+              "after_pr"
+            ]
+          },
+          "on_failure": {
+            "default": "continue",
+            "description": "`continue` — the default — journals a failed chore and moves on. A chore is polish, and losing an implemented phase to one that timed out is the worse trade. `fail` is for a chore whose output the phase is not correct without. A `review` chore ignores it: a review that did not approve, for any reason, is put to the operator.",
+            "type": "string",
+            "enum": [
+              "continue",
+              "fail"
+            ]
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "nodes": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "depends_on": {
+            "default": [],
+            "description": "Empty means the node branches from base_branch and may start immediately.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "The upstream node id."
+                },
+                "artifact": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "What this node needs from the upstream one — a model, a symbol, a migration, an endpoint. Required: it is what the implementer prompt uses to explain what the phase builds on, and a bare id with no reason is usually a plan smell."
+                }
+              },
+              "required": [
+                "node",
+                "artifact"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "prompt_ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Where the phase brief lives, e.g. `plan.md#phase-1`."
+          },
+          "touches": {
+            "default": [],
+            "description": "Touch List. Same-wave overlap is warned about, never refused.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pipeline": {
+            "description": "Overrides defaults.pipeline.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "gates": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "chores": {
+            "description": "The chores this phase runs, in order. Optional rather than defaulted, and that is the whole of its override rule: absent takes `defaults.chores`, and a list — `[]` included — replaces it. Merging instead would leave no way to skip a run-wide chore on the one phase it makes no sense for.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "harness": {
+            "description": "Overrides defaults.harness.",
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "model": {
+            "description": "Overrides defaults.model. Mutually exclusive with `crew`, which carries a model.",
+            "type": "string"
+          },
+          "crew": {
+            "description": "The member this phase is assigned to. Their tier is the floor for it: a busier roster may hand the phase to a free member at that tier or above, never below.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "max_fix_rounds": {
+            "description": "Fix rounds a phase may spend on red gates, and unsuccessful iterations each review turn may run, before the operator is asked whether to keep going (§16). Absent — the default — sets no limit: the fixer works until the gates are green and the review loop until the reviewer approves. A fix round is a fixer turn; a review iteration is one pass of the review loop that returned blockers. When a set budget runs out the shipped pipeline asks rather than fails: `continue` grants the same budget again, `stop` fails the phase and hands it to `--on-failure`.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prompt_ref"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pipelines": {
+      "default": {},
+      "description": "Pipelines this workflow authors. Optional: `defaults.pipeline` may name one the package ships (see BUILT_IN_PIPELINES), and a declared id shadows a built-in of the same name. A pipeline is machinery, not plan data — requiring every emitted workflow to carry a verbatim copy would duplicate it into every plan, and a fix to the shipped one would never reach a plan already written.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "states": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "position": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Canvas position."
+                },
+                "onEnter": {
+                  "default": [],
+                  "description": "Effects run on entering the state.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "run_chore",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify",
+                          "grant_fix_rounds"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "onLeave": {
+                  "default": [],
+                  "description": "Effects run on leaving the state.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "run_chore",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify",
+                          "grant_fix_rounds"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "color": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "position"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "transitions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "Source state id."
+                },
+                "to": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "description": "Target state id."
+                },
+                "trigger": {
+                  "description": "Event name that fires this transition.",
+                  "type": "string"
+                },
+                "guard": {
+                  "description": "Opaque boolean expression over the documented guard context (review.verdict, gate.exit_code, human.answer, fix_rounds, node.*, run.*). Evaluated by a restricted evaluator with no host access.",
+                  "type": "string"
+                },
+                "effects": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9-]*$",
+                        "description": "Unique within its containing state or transition."
+                      },
+                      "definitionId": {
+                        "type": "string",
+                        "enum": [
+                          "spawn_agent",
+                          "run_gate",
+                          "run_chore",
+                          "git_branch",
+                          "git_merge",
+                          "git_push",
+                          "open_pr",
+                          "write_tracking",
+                          "await_human",
+                          "notify",
+                          "grant_fix_rounds"
+                        ],
+                        "description": "Which catalog verb this effect invokes."
+                      },
+                      "name": {
+                        "description": "Display label. Falls back to definitionId.",
+                        "type": "string"
+                      },
+                      "params": {
+                        "default": {},
+                        "description": "Arguments for the verb.",
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "enabled": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {},
+                        "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "definitionId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "data": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+                }
+              },
+              "required": [
+                "id",
+                "from",
+                "to"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "initialStateIds": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "finalStateIds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "data": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {},
+            "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+          }
+        },
+        "required": [
+          "states",
+          "initialStateIds"
+        ],
+        "additionalProperties": false,
+        "description": "A per-phase pipeline, authored in vinta-state-machine-editor."
+      }
+    },
+    "data": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {},
+      "description": "Host-owned passthrough. Preserved verbatim and never interpreted."
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "defaults",
+    "resources",
+    "nodes"
+  ],
+  "additionalProperties": false
+}

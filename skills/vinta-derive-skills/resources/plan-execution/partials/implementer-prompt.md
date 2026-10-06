@@ -1,4 +1,4 @@
-<!-- Partial: implementer-prompt — the token-efficient per-phase prompt. FULL = the forward-implementation prompt used by implement-phase. INNER_OUTER_LOOP = the read→edit→inner→outer verification steps (1–6), reused verbatim by amend-plan's 4b (which appends its own amend-specific commit / no-push tail instead of the commit-strategy block). The {If run_options.use_worktree = true:} markers are runtime gates the agent reads at execution time; derive-skills strips them entirely when foundation_skills.prepare-worktree is disabled (use_worktree can only ever be false). -->
+<!-- Partial: implementer-prompt — the token-efficient per-phase prompt. FULL = the forward-implementation prompt used by implement-phase. NEEDS_INPUT = the "return your questions, don't ask in prose" contract every phase-work subagent prompt carries (FULL includes it; amend-plan's 4b includes it on its own). INNER_OUTER_LOOP = the read→edit→inner→outer verification steps (1–6), reused verbatim by amend-plan's 4b (which appends its own amend-specific commit / no-push tail instead of the commit-strategy block). The {If run_options.use_worktree = true:} and {If run_options.parallel_phases = true:} markers are runtime gates the agent reads at execution time; derive-skills strips both entirely when foundation_skills.prepare-worktree is disabled (use_worktree can only ever be false, and parallel execution requires a worktree). -->
 
 <!-- block-begin: FULL -->
 ```
@@ -14,16 +14,23 @@ every lint / test / build / migrate call runs there.
   `<WORKROOT>` is an isolated git worktree — do NOT touch the main checkout; its DB,
   env, and compose stack are intentionally separated. See `<WORKROOT>/WORKTREE.md` for
   what's forked vs shared (deps, dev DB, test DB, compose project name, env file).
-  {If run_options.sandbox_tier = enforced:} Writes to the main checkout are OS-blocked —
-  if you see `Operation not permitted` / `EROFS` on a write, you used a main-checkout
-  path by mistake; redo it against this worktree path.
-Branch base for this phase: `<phase-specific base>` — the orchestrator already created
-your phase branch there; commit straight to it.
+  {If run_options.sandbox_tier = enforced:} Writes outside this worktree are OS-blocked —
+  if you see `Operation not permitted` / `EROFS` on a write, you used a path outside
+  `<WORKROOT>` by mistake; redo it against this worktree path.
+{If run_options.parallel_phases = true:}
+  Other phases of this plan are being implemented **right now**, in sibling worktrees
+  next to yours. Never read or write any path outside `<WORKROOT>` — a sibling's tree is
+  mid-edit and mid-test, and a write there corrupts someone else's phase. Anything you
+  need from another phase is either already in your base branch or is a dependency the
+  plan failed to declare — say so in your report rather than reaching for it.
+Branch base for this phase: `<phase.base_branch>` — derived from this phase's
+**Depends on** set, not from plan order. The orchestrator already created your phase
+branch there; commit straight to it.
 
 ## Read first
 1. AGENTS.md — repo conventions.
 2. {{PLAN_DIR}}/{plan-filename}, the **Goals + Non-goals**, **Guiding Decisions**, **Data Model Changes** sections and YOUR phase body inside **Phased Rollout**.
-{If run_options.use_worktree = true:} 3. `WORKTREE.md` at the worktree root — fork map (which dirs symlink to main vs are independent copies).
+{If run_options.use_worktree = true:} 3. `WORKTREE.md` at the worktree root — fork map (what is forked, copied, or shared with main). Dependency dirs are always this worktree's own copy. Install / cache writes there never reach main.
 
 ## Plan-level decisions (from Goals + Non-goals + Guiding Decisions)
 {Goals + Non-goals verbatim}
@@ -32,8 +39,11 @@ your phase branch there; commit straight to it.
   Feature flag: `{flag-key}` — scope `{per-tenant|per-request}`, default `{false|true}`.
   Wire reads + writes per the plan's **Guiding Decisions** entry. Off-flag path = byte-for-byte pre-feature behavior.
 
-## What was already implemented in prior phases
-{Tracking file "Completed Phases" section. First executed phase: "Nothing yet — this is the first phase."}
+## What your phase builds on
+{The `phase-{id}.md` tracking summaries for this phase's transitive dependencies, in
+wave order. No dependencies: "Nothing yet — this phase starts from `<BASE_BRANCH>`."
+Sibling phases running in parallel are deliberately NOT listed: their work is not in
+your base branch and you must not code against it.}
 
 ## Your tasks (Phase {id} only)
 {phase.body verbatim, including Goal / Spec use-case / Feature flag / Changes / Tests / Acceptance lines}
@@ -45,11 +55,13 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 
 {{DEPENDENCY_LICENSE_BLOCK}}
 
+<!-- include: partials/implementer-prompt.md#NEEDS_INPUT -->
+
 <!-- include: partials/implementer-prompt.md#INNER_OUTER_LOOP -->
 {{PER_PHASE_COMMIT_BLOCK}}
 
 ## Required output (single final report)
-- Status: SUCCESS or FAILURE (and why).
+- Status: SUCCESS, FAILURE (and why), or NEEDS_INPUT (with the `questions:` block above).
 - Files created/modified (paths only).
 - 5–15 line summary of what you implemented and key decisions.
 {{E2E_REPORT_FIELD}}
@@ -57,8 +69,38 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 - Anything you couldn't do (with explanation).
 ```
 
-**Don't** dump the full plan into every prompt. Tracking summaries replace prior phases as context. Always include the **Goals + Non-goals** and **Guiding Decisions** sections plus the relevant **Data Model Changes** subsection — load-bearing decisions; phases reach back frequently.
+**Don't** dump the full plan into every prompt. Dependency-closure tracking summaries replace prior phases as context. Always include the **Goals + Non-goals** and **Guiding Decisions** sections plus the relevant **Data Model Changes** subsection — load-bearing decisions; phases reach back frequently.
 <!-- block-end: FULL -->
+
+<!-- block-begin: NEEDS_INPUT -->
+## When you need a human decision
+You run as a subagent. You cannot reach the human, and a question written into
+your report gets lost in the transcript. When you hit a decision the plan does not
+settle and you should not make alone, do not guess and do not finish with a prose
+question. Examples: an ambiguous or contradictory requirement, a dependency the
+license policy blocks, a change outside this phase's scope, a destructive or
+irreversible step.
+
+Stop at a clean point. Finished, verified work may stay committed; leave
+unfinished work uncommitted. Then return this as your whole final report:
+
+    status: NEEDS_INPUT
+    blocked_on: <one line: the decision you need>
+    done_so_far: <one line: what is finished, and which files it touched>
+    questions:        # 1-4 questions; each must make sense without the transcript
+      - header: <12 chars max, e.g. "License">
+        question: <full question ending in "?", with the evidence needed to answer it: file:line, package, error line>
+        multi_select: false
+        options:      # 2-4 options; recommended first, its label ending in " (Recommended)"
+          - label: <1-5 words>
+            description: <what happens if the human picks this>
+          - label: <1-5 words>
+            description: <what happens if the human picks this>
+
+Do not add an "Other" option. The human always gets a free-text field. The
+orchestrator shows your questions as a clickable prompt, then resumes you (or
+spawns a new agent) with the answers.
+<!-- block-end: NEEDS_INPUT -->
 
 <!-- block-begin: INNER_OUTER_LOOP -->
 ## Working instructions
@@ -71,8 +113,10 @@ Project skills available: {{PROJECT_SKILLS_LIST}}
 4. Iterate 2–3 until **new tests pass individually** and the scoped suite is green. Do **not** advance to step 5 with red scoped tests.
 5. **Outer gate — local verification, only after step 4 is green.** All MUST pass before staging:
    a. **Type / build:** `{{BUILD_CMD}}` — repo-wide, always.
-   b. **Tests:** by default run only the **scoped suite** `{{SCOPED_TEST_PATTERN}}` for the apps/files you touched — the new tests already passed individually in step 4b, so this re-confirms the touched surface without paying for the whole repo.
+   b. **Tests:** by default run only the **scoped suite** `{{SCOPED_TEST_PATTERN}}` for the apps/files you touched — the new tests already passed individually in step 4b, so this re-confirms the touched surface without paying for the whole repo. When that line contains `{changed_files}` or `{touches}`, it is a template: replace `{changed_files}` with the files this phase changed against its base (`git diff --name-only --diff-filter=d <base>...HEAD` plus uncommitted and untracked work) and `{touches}` with the phase's Touch List, each path shell-quoted and space-separated. If a placeholder would be empty, run `{{TEST_CMD}}` instead.
       {If run_options.full_test_suite = true:} run the **full test suite** `{{TEST_CMD}}` instead of the scoped suite — this phase guards against regressions in untouched code too.
    {{E2E_OUTER_GATE_LINE}}
 6. Outer gate fails → return step 2 (fix regression), re-run inner loop, then 5a/5b/5c. **Never** commit, push, or proceed while any gate is red.
+
+<!-- include: partials/dispatched-agent.md#NO_NESTED_DISPATCH -->
 <!-- block-end: INNER_OUTER_LOOP -->

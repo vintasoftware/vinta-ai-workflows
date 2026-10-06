@@ -1,0 +1,1925 @@
+/**
+ * Prompt composition: what each role is actually told.
+ *
+ * Every other test in this suite injects a mock adapter or a recording
+ * executor, so none of them ever exercised what a real agent is handed. That is
+ * how `spawn_agent`'s `prompt_template` reached a release consumed by nothing
+ * and every role received `node.prompt_ref` as its entire prompt — an
+ * implementer copes, a review never states the verdict the executor reads,
+ * and the phase goes to the operator over a review nobody could approve.
+ *
+ * Two assertions here are about correctness rather than wording:
+ *
+ * - **A sibling's work is never in an implementer's context.** The diamond
+ *   below is the case: a wave-2 node is told about its own dependency and
+ *   nothing about the phase running beside it, whose commits are not in its
+ *   base branch.
+ * - **The review chore's verdict line is asserted against the executor's own
+ *   parser**, by feeding the exact line the prompt demands through
+ *   `RunEffectExecutor`. A copy of the regex here would agree with itself
+ *   forever while the two halves drifted apart.
+ */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+
+import { createRunExecutor } from '../src/executor/index.ts'
+import { Integrator } from '../src/integration/integrator.ts'
+import { openJournal, type NodeRow } from '../src/journal/journal.ts'
+import type { EffectInvocation } from '../src/pipeline/effects.ts'
+import {
+  composeConflictPrompt,
+  composeSpawnPrompt,
+  dependencyClosure,
+  PromptError,
+  readVerdict,
+  resolveBrief,
+  VERDICT_MARKER,
+  type ChorePrompt,
+  type PromptJournal,
+  type Reorientation,
+} from '../src/prompts/index.ts'
+import { ChoreSchema, SideEffectSchema, WorkflowSchema, type Workflow } from '../src/types.ts'
+
+const RUN_ID = 'run-1'
+
+const cleanups: (() => void)[] = []
+
+afterEach(() => {
+  for (const cleanup of cleanups.splice(0).reverse()) cleanup()
+})
+
+// ---------------------------------------------------------------------------
+// Rig
+// ---------------------------------------------------------------------------
+
+/**
+ * The diamond: one root, two phases that run in parallel off it, one that joins
+ * them. `api-layer` and `web-ui` are the siblings — neither may ever appear in
+ * the other's context.
+ */
+function diamond(): Workflow {
+  return WorkflowSchema.parse({
+    schema_version: 1,
+    id: 'bookmarks',
+    base_branch: 'main',
+    defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+    resources: { lane: { capacity: 2, kind: 'worktree' } },
+    gates: { unit: { cmd: 'pnpm test', requires: [] } },
+    nodes: [
+      { id: 'db-schema', name: 'Schema', prompt_ref: 'plan.md#db-schema' },
+      {
+        id: 'api-layer',
+        name: 'API',
+        prompt_ref: 'plan.md#api-layer',
+        gates: ['unit'],
+        depends_on: [{ node: 'db-schema', artifact: 'the Folder model' }],
+      },
+      {
+        id: 'web-ui',
+        name: 'Web UI',
+        prompt_ref: 'plan.md#web-ui',
+        depends_on: [{ node: 'db-schema', artifact: 'the Folder model' }],
+      },
+      {
+        id: 'docs',
+        name: 'Docs',
+        prompt_ref: 'plan.md#docs',
+        depends_on: [
+          { node: 'api-layer', artifact: 'the /folders endpoints' },
+          { node: 'web-ui', artifact: 'the folder tree component' },
+        ],
+      },
+    ],
+  })
+}
+
+/**
+ * The two plan-level sections `plan_context_refs` points at, written into the
+ * same plan file the phase briefs come from. Headings as `plan-feature`'s "Plan
+ * structure" numbers them, which is what makes their anchors knowable.
+ */
+const PLAN_SECTIONS = {
+  '1. Goals': [
+    '1. Let a user group bookmarks into folders.',
+    '',
+    'Non-goals:',
+    '- Sharing a folder with another user.',
+    '- Paginating the folder tree.',
+  ].join('\n'),
+  '2. Guiding Decisions': [
+    '| Decision | Resolution |',
+    '|---|---|',
+    '| **Storage shape** | Adjacency list on `parent_id` — writes dominate reads. |',
+  ].join('\n'),
+} as const
+
+const GOALS_REF = 'plan.md#1-goals'
+const DECISIONS_REF = 'plan.md#2-guiding-decisions'
+
+/** The diamond, plus the plan-level anchors every phase is bounded by. */
+function diamondWithPlanContext(): Workflow {
+  return WorkflowSchema.parse({
+    ...diamond(),
+    plan_context_refs: [GOALS_REF, DECISIONS_REF],
+  })
+}
+
+/** The diamond, with `api-layer`'s fix-round budget — and so its review budget — set. */
+function diamondWithFixRounds(rounds: number): Workflow {
+  const base = diamond()
+  return WorkflowSchema.parse({
+    ...base,
+    nodes: base.nodes.map((node) =>
+      node.id === 'api-layer' ? { ...node, max_fix_rounds: rounds } : node,
+    ),
+  })
+}
+
+/** A checkout holding the plan every `prompt_ref` above points at. */
+function workspace(sections: Readonly<Record<string, string>> = {}): string {
+  const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-prompts-'))
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+  const body = Object.entries({
+    'db-schema': 'Add the Folder model and its migration.',
+    'api-layer': 'Add REST endpoints for folders.',
+    'web-ui': 'Add the folder tree component.',
+    docs: 'Document the folders feature.',
+    ...sections,
+  }).flatMap(([anchor, text]) => [`## ${anchor}`, '', text, ''])
+  writeFileSync(join(dir, 'plan.md'), `${body.join('\n')}\n`)
+  return dir
+}
+
+/** The journal as prompt composition reads it: final reports, and node rows. */
+function journalStub(options: {
+  readonly reports?: Readonly<Record<string, string>>
+  readonly rows?: readonly Partial<NodeRow>[]
+}): PromptJournal {
+  return {
+    tailTranscript: (_runId: string, nodeId: string): unknown[] => {
+      const report = options.reports?.[nodeId]
+      return report === undefined ? [] : [{ type: 'assistant_text', text: report }]
+    },
+    nodes: (): NodeRow[] =>
+      (options.rows ?? []).map((row) => ({
+        run_id: RUN_ID,
+        node_id: '',
+        status: 'running',
+        wave: 1,
+        lane: null,
+        branch: null,
+        base_branch: null,
+        harness: 'claude-code',
+        session_id: null,
+        ...row,
+      })),
+  }
+}
+
+/** One composed prompt, with everything defaulted to the diamond's world. */
+function compose(
+  nodeId: string,
+  template: unknown,
+  options: {
+    readonly workflow?: Workflow
+    readonly dir?: string | null
+    readonly reports?: Readonly<Record<string, string>>
+    readonly rows?: readonly Partial<NodeRow>[]
+    readonly facts?: EffectInvocation['context']
+    /** §15.3: this turn continues a session that already ran. */
+    readonly continuation?: boolean
+    /** §15.2: that session last ran on a different node. */
+    readonly reorientation?: Reorientation
+    /** The chore a `chore`-template turn is running. */
+    readonly chore?: ChorePrompt
+  } = {},
+): string {
+  const workflow = options.workflow ?? diamond()
+  const node = workflow.nodes.find((candidate) => candidate.id === nodeId)
+  if (node === undefined) throw new Error(`no node "${nodeId}"`)
+  return composeSpawnPrompt({
+    template,
+    workflow,
+    node,
+    runId: RUN_ID,
+    journal: journalStub({
+      ...(options.reports === undefined ? {} : { reports: options.reports }),
+      ...(options.rows === undefined ? {} : { rows: options.rows }),
+    }),
+    workspace: options.dir === undefined ? workspace() : options.dir,
+    facts: options.facts ?? {},
+    ...(options.continuation === undefined ? {} : { continuation: options.continuation }),
+    ...(options.reorientation === undefined ? {} : { reorientation: options.reorientation }),
+    ...(options.chore === undefined ? {} : { chore: options.chore }),
+  })
+}
+
+/** A chore as the scheduler resolves one, with the schema's own defaults on it. */
+const chore = (chore: Record<string, unknown>, id = 'deslop'): ChorePrompt => ({
+  id,
+  chore: ChoreSchema.parse(chore),
+})
+
+/** The instruction `plan-feature` writes into every plan's review chore. */
+const REVIEW_INSTRUCTION =
+  'Run the thermo-nuclear-review-loop skill over this phase’s diff until its reviewer approves it.'
+
+/** The phase's review (§16), as a plan declares it: a chore with `when: 'review'`. */
+const reviewChore = (fields: Record<string, unknown> = {}): ChorePrompt =>
+  chore(
+    { prompt: REVIEW_INSTRUCTION, skill: 'thermo-nuclear-review-loop', when: 'review', ...fields },
+    'review',
+  )
+
+/** A red gate, as `run_gate` states it. */
+const RED_GATE = {
+  gate: { id: 'unit', exit_code: 1, status: 'failed', log_ref: '/runs/run-1/gates/unit.log' },
+} as const
+
+/** The generic no-delegation sentence, which wraps mid-phrase in the rendered prompt. */
+const NO_SUB_AGENTS = /Do not spawn,\s+dispatch or delegate to a sub-agent/
+
+// ---------------------------------------------------------------------------
+// 1. The implementer gets the brief itself
+// ---------------------------------------------------------------------------
+
+describe('the implementer prompt', () => {
+  it('carries the phase brief resolved from prompt_ref, not the reference', () => {
+    const prompt = compose('db-schema', 'implementer')
+
+    expect(prompt).toContain('Add the Folder model and its migration.')
+    expect(prompt).toContain('You are implementing db-schema: Schema of plan bookmarks')
+    // The reference is where the brief lives, not something to hand an agent.
+    expect(prompt.trim()).not.toBe('plan.md#db-schema')
+  })
+
+  it('names the lane, the branch and the base the phase was cut from', () => {
+    const dir = workspace()
+    const prompt = compose('api-layer', 'implementer', {
+      dir,
+      rows: [
+        {
+          node_id: 'api-layer',
+          branch: 'plan/bookmarks/phase-api-layer',
+          base_branch: 'plan/bookmarks/phase-db-schema',
+        },
+      ],
+    })
+
+    expect(prompt).toContain(dir)
+    expect(prompt).toContain('plan/bookmarks/phase-api-layer')
+    expect(prompt).toContain('plan/bookmarks/phase-db-schema')
+  })
+
+  it('tells a phase with no dependencies that it starts from the base branch', () => {
+    expect(compose('db-schema', 'implementer')).toContain(
+      'Nothing yet — this phase starts from `main`.',
+    )
+  })
+
+  /**
+   * It used to assert the gate's declared command line was printed. That is
+   * what the implementers were running by hand — outside the cache, outside the
+   * pool, and four times a phase before the gate node ran it a fifth. The id
+   * and the verb are the whole listing now; the command stays on the daemon's
+   * side, which is the point of the verb.
+   */
+  it('names the gates the phase has to survive, as the command that runs one', () => {
+    const prompt = compose('api-layer', 'implementer')
+
+    expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+    expect(prompt).not.toContain('unit: `pnpm test`')
+  })
+})
+
+/**
+ * A phase ran four sessions, reported `## Status: SUCCESS` with a green inner
+ * loop, and never once ran `git commit`. Its deliverables were untracked files.
+ * The review reads the committed diff, so it reported "phase not implemented
+ * at all"; the fixer re-implemented, also without committing; the fix rounds
+ * ran out; and the lane was then recycled and the files deleted.
+ *
+ * Every instruction that agent had was *about* committing — "never commit while
+ * a gate is red" — and not one of them said it had to. An agent that reads its
+ * instructions carefully and never commits was following them.
+ */
+describe('committing is part of the work', () => {
+  const writers = ['implementer', 'fixer'] as const
+
+  it.each(writers)('tells the %s the phase is judged on commits', (role) => {
+    const prompt = compose('api-layer', role)
+
+    expect(prompt).toContain('Committing is part of the work, not after it')
+    expect(prompt).toContain('git status --porcelain')
+    // Named concretely, because "commit your work" is what it already implied.
+    expect(prompt).toContain('reviewed and merged **from the commits on')
+  })
+
+  it.each(writers)('tells the %s to stage by path, never with -A', (role) => {
+    // Projects keep untracked local files at the worktree root — env files the
+    // pool copied in, a virtualenv a hook built, a database file — and sweeping
+    // those onto the phase branch is its own kind of damage.
+    expect(compose('api-layer', role)).toContain('never `git add -A`')
+  })
+
+  it('says it again in the continuations, which are the turns that end phases', () => {
+    // A delta that dropped this would leave the *last* writer the least told.
+    for (const role of writers) {
+      expect(compose('api-layer', role, { continuation: true })).toContain(
+        'Committing is part of the work',
+      )
+    }
+  })
+
+  /**
+   * The prompt used to say both "the turn is not complete until `git status` is
+   * empty of your work" and "never commit while a gate is red". Whenever the
+   * gate could not be turned green inside the turn — most of why fix rounds
+   * exist — that is a contradiction with a `never` on one side, and agents
+   * resolved it the way the stronger word points: they committed nothing. The
+   * review then found a full tree and an empty diff, and a fix round went on
+   * re-implementing work that was already sitting on the disk.
+   */
+  describe('a red gate changes the report, not the decision to commit', () => {
+    it.each(writers)('never forbids the %s from committing', (role) => {
+      for (const prompt of [
+        compose('api-layer', role),
+        compose('api-layer', role, { continuation: true }),
+      ]) {
+        expect(prompt).not.toMatch(/[Nn]ever commit/)
+        expect(prompt).not.toContain('must all pass before you commit')
+      }
+    })
+
+    it.each(writers)('tells the %s to commit a phase that failed', (role) => {
+      expect(compose('api-layer', role)).toContain('Commit whether or not you succeeded')
+    })
+  })
+})
+
+/**
+ * An implementer started five commands with `run_in_background: true` and ended
+ * its turn with "I'll wait for the test result notification before continuing to
+ * the outer gate." There is no notification — a headless session ends when the
+ * turn ends, and whatever it backgrounded dies with it. Three sessions ended
+ * that way, with no report and no commit.
+ *
+ * Nothing had told it otherwise, and believing a tool that offers backgrounding
+ * will still be there afterwards is not an unreasonable thing to believe.
+ */
+describe('background work', () => {
+  const writers = ['implementer', 'fixer'] as const
+
+  it.each(writers)('forbids it to the %s, and says why', (role) => {
+    const prompt = compose('api-layer', role)
+
+    expect(prompt).toContain('Run everything in the foreground')
+    expect(prompt).toContain('run_in_background')
+    // The reason, not only the rule: an agent told a bare "do not" has no way
+    // to generalise to the `&` it was about to type instead.
+    expect(prompt).toContain('This session is headless')
+  })
+
+  it('says it in the continuations too', () => {
+    for (const role of writers) {
+      expect(compose('api-layer', role, { continuation: true })).toContain(
+        'Run everything in the foreground',
+      )
+    }
+  })
+})
+
+/**
+ * claude-code agents were dispatching their phase to a sub-agent and reporting
+ * its summary back. Every role is affected and the cost is cumulative: the
+ * session that is kept warm across phases learns nothing, so the reorientation
+ * a cross-phase turn opens with — "everything you learned still holds" — holds
+ * over a paragraph, and each phase pays a cold agent's first turn again.
+ *
+ * The conductor skills are named in the prompt and asserted here, because the
+ * pull is a skill the runtime surfaced on its own: `implement-phase` ships into
+ * these same repositories, its description matches "you are implementing P3 of
+ * plan X", and its content is "spawn exactly one implementer subagent".
+ *
+ * The review chore is the one exception, and has its own tests below: it is
+ * allowed exactly one sub-agent, the reviewer.
+ */
+describe('no sub-agents', () => {
+  const roles = ['implementer', 'fixer', 'chore'] as const
+
+  const composeRole = (role: (typeof roles)[number], continuation: boolean): string =>
+    compose('api-layer', role, {
+      continuation,
+      ...(role === 'chore' ? { chore: chore({ prompt: 'Tidy up.' }) } : {}),
+    })
+
+  it.each(roles)('forbids delegation to the %s, and says what it costs', (role) => {
+    const prompt = composeRole(role, false)
+
+    expect(prompt).toContain('Do this work in this session, yourself')
+    expect(prompt).toMatch(NO_SUB_AGENTS)
+    expect(prompt).toContain('Task/Agent tool')
+    // The reason, not only the rule. Without it the agent has no way to weigh
+    // delegating a search, which is the form it takes once the work is banned.
+    expect(prompt).toContain('pays for a cold start')
+    // And the skills that are the actual pull, by name.
+    expect(prompt).toContain('`implement-phase`')
+    expect(prompt).toContain('never follow its spawn steps')
+  })
+
+  it.each(roles)('says it to the %s on a continuation too', (role) => {
+    expect(composeRole(role, true)).toContain('Do this work in this session, yourself')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 1a. The project's own commands
+// ---------------------------------------------------------------------------
+
+/**
+ * Every agent that runs something in the lane, under the label a test name
+ * reads well with. The review chore is on the list: it fixes what its reviewer
+ * finds, so it runs the inner loop as much as anyone.
+ */
+const RUNNERS: readonly (readonly [string, string, { readonly chore?: ChorePrompt }])[] = [
+  ['implementer', 'implementer', {}],
+  ['fixer', 'fixer', {}],
+  ['review chore', 'chore', { chore: reviewChore() }],
+]
+
+/**
+ * An agent told to "run the scoped suite" and given no command runs the one it
+ * knows. In a project whose suite only runs as `docker compose run --rm api
+ * python -m pytest …`, a bare `pytest` fails against a database it cannot see,
+ * for reasons that have nothing to do with the phase's code — and the agent
+ * then debugs *that*, with its fix rounds.
+ *
+ * So the project states its commands and every agent that will run something is
+ * handed them, with the one instruction that matters: these exactly, not the
+ * tool underneath them.
+ */
+describe('the project’s commands', () => {
+  const withCommands = (): Workflow => {
+    const base = diamond()
+    return WorkflowSchema.parse({
+      ...base,
+      project: {
+        migrate_cmd: 'make migrate',
+        commands: {
+          lint: 'make lint',
+          test: 'make test',
+          test_one: 'make test',
+          migrate: 'make migrate',
+        },
+      },
+    })
+  }
+
+  it.each(RUNNERS)('hands them to the %s, which is who runs them', (_label, template, options) => {
+    const prompt = compose('api-layer', template, { ...options, workflow: withCommands() })
+
+    expect(prompt).toContain('The project’s commands')
+    expect(prompt).toContain('Lint: `make lint`')
+    expect(prompt).toContain('The whole suite: `make test`')
+    // Glossed, so the agent knows what each one is *for* — `test_one` takes a
+    // target appended to it and `test` does not, and nothing but the gloss says
+    // so when both are spelled `make test`.
+    expect(prompt).toContain('One test, or one subtree — append the target: `make test`')
+  })
+
+  it('tells the implementer to use them rather than the tool underneath', () => {
+    const prompt = compose('api-layer', 'implementer', { workflow: withCommands() })
+
+    expect(prompt).toContain('Use these exactly as written')
+    // The inner loop points at them by name. An instruction to "run the scoped
+    // suite" sitting above a list the agent was never told to use is the same
+    // prompt it had before.
+    expect(prompt).toContain('through the project’s commands')
+  })
+
+  it('omits only the commands the project did not declare', () => {
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      project: { migrate_cmd: 'true', commands: { lint: 'make lint' } },
+    })
+    const prompt = compose('api-layer', 'implementer', { workflow })
+
+    expect(prompt).toContain('Lint: `make lint`')
+    expect(prompt).not.toContain('The whole suite')
+  })
+
+  it('changes nothing at all for a workflow that declares none', () => {
+    // A field added after a plan was written cannot make that plan's prompts
+    // worse. The section disappears, and so does the sentence pointing at it.
+    const bare = compose('api-layer', 'implementer')
+
+    expect(bare).not.toContain('The project’s commands')
+    expect(bare).toContain('then the scoped suite')
+  })
+})
+
+describe('agent-held resource leases', () => {
+  it.each(RUNNERS)(
+    'tells the %s how heavy inner-loop commands reach the pool',
+    (_label, template, options) => {
+      const base = diamond()
+      const workflow = WorkflowSchema.parse({
+        ...base,
+        resources: {
+          ...base.resources,
+          'test-suite': { capacity: 1, kind: 'semaphore' },
+        },
+      })
+      const prompt = compose('api-layer', template, { ...options, workflow })
+
+      expect(prompt).toContain('Resource leases for heavy commands')
+      expect(prompt).toContain('vinta-ai-maestro with test-suite -- <command>')
+      expect(prompt).toContain('Do not run that command bare')
+    },
+  )
+
+  it('does not advertise a lease when the workflow has only its lane pool', () => {
+    expect(compose('api-layer', 'implementer')).not.toContain('Resource leases for heavy commands')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 1b. Plan-level context: the plan's own bounds, verbatim and labelled
+// ---------------------------------------------------------------------------
+
+/**
+ * `prompt_ref` gives a phase its body and nothing else, so an implementer that
+ * never read the plan's **Non-goals** scope-creeps and one that never read its
+ * **Guiding Decisions** re-litigates them. `plan_context_refs` names those
+ * sections as file-and-anchor references — the same form `prompt_ref` uses, so
+ * one resolver serves both — and they reach the prompt whole.
+ *
+ * Two properties matter more than the wording:
+ *
+ * - **Verbatim.** A paraphrased non-goal is a boundary an agent argues with.
+ *   The assertions compare against what the resolver itself returns.
+ * - **Labelled as the plan's.** Pasted next to a phase brief, "we are not
+ *   building X" reads as "build X". So the block is under its own heading,
+ *   ahead of the phase's tasks, and says which of the two it is.
+ *
+ * Two prompts carry it: the implementer's, and a cold review chore's, whose
+ * reviewer measures scope creep against the non-goals.
+ */
+describe('plan-level context', () => {
+  /** A checkout whose plan carries the phase bodies and the plan-level sections. */
+  const planned = (): string => workspace(PLAN_SECTIONS)
+
+  it('carries the plan’s Goals, Non-goals and Guiding Decisions verbatim', () => {
+    const dir = planned()
+    const prompt = compose('api-layer', 'implementer', {
+      dir,
+      workflow: diamondWithPlanContext(),
+    })
+
+    // Verbatim means exactly what the resolver read, not a rendering of it.
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', GOALS_REF))
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', DECISIONS_REF))
+    expect(prompt).toContain('- Sharing a folder with another user.')
+    expect(prompt).toContain('| **Storage shape** | Adjacency list on `parent_id` — writes dominate reads. |')
+  })
+
+  it('marks it as the plan’s, not the phase’s, and puts it before the tasks', () => {
+    const prompt = compose('api-layer', 'implementer', {
+      dir: planned(),
+      workflow: diamondWithPlanContext(),
+    })
+
+    // The framing is the load-bearing part: a non-goal read as a task is the
+    // exact failure this section would otherwise introduce.
+    expect(prompt).toContain('## Plan-level decisions — the whole plan’s, not this phase’s')
+    expect(prompt).toContain('they bound your phase rather than describe it')
+    expect(prompt).toContain('do not build it, and do not treat it as a')
+    expect(prompt).toContain('is the phase brief further down, and only that.')
+
+    const planLevel = prompt.indexOf('## Plan-level decisions')
+    const tasks = prompt.indexOf('## Your tasks (api-layer only)')
+    expect(planLevel).toBeGreaterThan(-1)
+    expect(tasks).toBeGreaterThan(planLevel)
+    // The phase brief still stands on its own, under its own heading.
+    expect(prompt.slice(tasks)).toContain('Add REST endpoints for folders.')
+  })
+
+  it('gives a cold review chore the same sections, framed as what scope creep is measured against', () => {
+    const dir = planned()
+    const prompt = compose('api-layer', 'chore', {
+      dir,
+      workflow: diamondWithPlanContext(),
+      chore: reviewChore(),
+    })
+
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', GOALS_REF))
+    expect(prompt).toContain(resolveBrief(dir, 'api-layer', DECISIONS_REF))
+    expect(prompt).toContain('## Plan-level decisions — the whole plan’s, not this phase’s')
+    expect(prompt).toContain('Hand them to the reviewer with the phase brief')
+    expect(prompt).toContain('a change serving a non-goal\nis scope creep')
+    // A review that failed the phase for not delivering the whole plan would be
+    // worse than one with no non-goals at all.
+    expect(prompt).toContain('the brief is all it was asked for')
+    expect(prompt.indexOf('## Plan-level decisions')).toBeLessThan(
+      prompt.indexOf('## The stated requirement'),
+    )
+  })
+
+  it('does not give it to an after_review chore, which only tidies the diff', () => {
+    const prompt = compose('api-layer', 'chore', {
+      dir: planned(),
+      workflow: diamondWithPlanContext(),
+      chore: chore({ prompt: 'Tidy up.' }),
+    })
+
+    expect(prompt).not.toContain('Plan-level decisions')
+    expect(prompt).not.toContain('Sharing a folder with another user.')
+  })
+
+  it('does not give it to the fixer, whose brief is exactly one red gate', () => {
+    const prompt = compose('api-layer', 'fixer', {
+      dir: planned(),
+      workflow: diamondWithPlanContext(),
+      facts: RED_GATE,
+    })
+
+    expect(prompt).not.toContain('Plan-level decisions')
+    expect(prompt).not.toContain('Sharing a folder with another user.')
+    expect(prompt).toContain('Change nothing unrelated.')
+  })
+
+  it('composes exactly as before when the workflow names no plan-level context', () => {
+    // The whole output, byte for byte: the field's absence may not move a
+    // single character of what an implementer was already handed.
+    const dir = workspace()
+    const prompt = compose('db-schema', 'implementer', { dir })
+
+    expect(prompt).toBe(IMPLEMENTER_WITHOUT_PLAN_CONTEXT(dir))
+    expect(prompt).not.toContain('Plan-level')
+  })
+
+  it('fails loudly on an anchor that does not resolve, naming the node and the ref', () => {
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      plan_context_refs: ['plan.md#no-such-section'],
+    })
+    const dir = planned()
+    const attempt = (): string => compose('api-layer', 'implementer', { dir, workflow })
+
+    expect(attempt).toThrow(PromptError)
+    expect(attempt).toThrow(/node "api-layer".*plan_context_refs.*plan\.md#no-such-section/)
+  })
+
+  it('never puts the plan’s text into that error', () => {
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      plan_context_refs: ['plan.md#no-such-section'],
+    })
+    const dir = planned()
+
+    try {
+      compose('api-layer', 'implementer', { dir, workflow })
+      expect.unreachable('an unresolvable plan-context anchor must throw')
+    } catch (error) {
+      const message = (error as Error).message
+      expect(message).not.toContain('Sharing a folder with another user.')
+      expect(message).not.toContain('Adjacency list')
+      expect(message).not.toContain('Add REST endpoints for folders.')
+    }
+  })
+})
+
+/**
+ * The implementer prompt with no `plan_context_refs`, lane path parameterised.
+ * Pinned rather than described, because "composes exactly as before" is a claim
+ * about every character.
+ *
+ * It is a golden of the *plan-context* feature's blast radius, not a freeze on
+ * the prompt: a deliberate change elsewhere in the implementer brief updates
+ * this fixture, and what the test still guarantees is that adding or omitting
+ * plan-level context moves nothing else.
+ */
+const IMPLEMENTER_WITHOUT_PLAN_CONTEXT = (dir: string): string =>
+  `You are implementing db-schema: Schema of plan bookmarks.
+
+## Working location
+Work entirely inside \`${dir}\`. cd into it before any command:
+every git, lint, test and build call runs there. Other phases of this plan may
+be running right now in sibling worktrees next to yours — never read or write
+any path outside your own. Anything you need from another phase is either
+already in your base branch or is a dependency the plan failed to declare; say
+so in your report rather than reaching for it.
+Your branch is \`HEAD\`, cut from \`main\` — derived from
+this phase's dependencies, not from plan order. Commit straight to it.
+
+## What your phase builds on
+Nothing yet — this phase starts from \`main\`.
+
+## Your tasks (db-schema only)
+## db-schema
+
+Add the Folder model and its migration.
+
+## Working instructions
+1. Read the code paths your changes touch before you write anything.
+2. Implement, matching the patterns already in the repository.
+3. Inner loop, scoped to what you touched: lint clean, then each new test on
+   its own, then the scoped suite. Do not go on while any of them is red.
+4. Outer gate, once the inner loop is green. Run every one of these yourself
+   and read what it returns — step 3 does not speak for them, and the phase is
+   judged on these:
+   - the repository’s own type/build check and its test suite.
+5. A red outer gate sends you back to step 2, for as long as you have room to
+   work. It is not a reason to leave the work uncommitted — see below.
+
+## Do this work in this session, yourself
+You are the agent that implements this phase — not an orchestrator for one. Do not spawn,
+dispatch or delegate to a sub-agent (claude-code’s Task/Agent tool, or whatever
+your harness calls the same thing) for any part of it: not the work, not a
+search of the codebase, not a second opinion on your own output. Read, run and
+write yourself.
+This session is reused across phases and rounds, and a later turn will open by
+telling you that what you learned about this repository still holds. It holds
+only because this session is what learned it. A sub-agent’s reading of the code
+ends when the sub-agent does, so a delegated turn leaves you holding its summary
+and nothing else, and every turn after it pays for a cold start.
+A project skill that tells you to spawn an implementer, reviewer or fixer —
+\`implement-plan\`, \`implement-phase\`, \`review-phase\`, \`amend-plan\`, anything
+shaped like them — is written for the orchestrator that dispatches phases. That
+orchestrator is already running: it is what spawned you, and its job is not this
+turn’s. Take what such a skill says about this repository’s conventions, gates
+and commit rules; never follow its spawn steps.
+
+## Run everything in the foreground
+Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached
+processes you intend to come back to. This session is headless: it ends when
+your turn ends, nothing will notify you, and anything still running is killed
+with it. A turn that finishes by waiting for a background result finishes
+having done nothing, and the phase is then judged on an empty branch.
+Long commands are fine — run them and wait for them to return.
+
+## Committing is part of the work, not after it
+Your phase is reviewed and merged **from the commits on \`HEAD\`**. The
+review reads \`git diff main...HEAD\` and nothing else:
+a file you wrote and did not commit does not exist as far as the rest of this
+run is concerned, and the lane it sits in is reset before the next phase.
+
+So the turn is not complete until \`git status --porcelain\` is empty of your
+work. Stage **by explicit path** — never \`git add -A\` or \`git add .\`, because
+this worktree holds local files that are not yours to commit — then commit to
+\`HEAD\`. The repository's own git hooks run when you do; if one
+rewrites your files, stage the result and commit again rather than bypassing
+it.
+
+**Commit whether or not you succeeded.** A gate you could not turn green, a
+test you could not make pass, a phase you got half way through: none of them
+is a reason to end the turn with the work only on disk. Commit it and report
+FAILURE, saying what is still red. A commit is not a claim that the phase is
+finished — it is what makes the work exist for the gates, for the review, and
+for the next turn on this branch. The alternative is not "a clean branch": it
+is a phase that is gated and reviewed as though you had written nothing, and
+then deleted with the lane.
+
+## Write the pull request description
+Before your final report, write \`.vinta-ai-workflows/prs-context/bookmarks/phase-db-schema.md\`
+(create the directories). **Do not commit it** — it describes the change rather
+than being part of it.
+Two sections, exactly these headings:
+
+\`\`\`markdown
+# Title
+
+<one line, imperative, under 72 characters>
+
+# Description
+
+<what this phase changed and why, in Simple English. Lead with the change a
+reviewer is about to read. Name the decisions you took and anything you
+deliberately left out. Say what you could not do. No preamble, no restating
+the phase brief — it is linked from the PR already.>
+\`\`\`
+
+This is what a human reads on the pull request, so write it for them rather
+than for the orchestrator. If you leave the placeholders in, it is discarded
+and the PR falls back to a summary built from gate results.
+
+## When you need a human decision
+Some decisions are not yours: a requirement the brief leaves ambiguous or
+contradicts, a dependency whose license is unclear, a change outside this
+phase, a destructive or irreversible step. Do not guess, and do not end with a
+question in prose — nobody reads it. Do not call a question tool either
+(AskUserQuestion and the like): nobody is attached to this session to answer it.
+Commit what is finished and verified, then end your turn with this block and
+nothing after it:
+
+\`\`\`yaml
+status: NEEDS_INPUT
+blocked_on: <one line: the decision you need>
+done_so_far: <one line: what is finished and committed>
+questions:            # 1 to 4; each must make sense without the transcript
+  - header: <12 characters at most, e.g. "Storage">
+    question: <the full question, with the evidence needed to answer it: file:line, error>
+    multi_select: false
+    options:          # 2 to 4; the one you recommend first, ending " (Recommended)"
+      - label: <1 to 5 words>
+        description: <what happens if the operator picks it>
+      - label: <1 to 5 words>
+        description: <what happens if the operator picks it>
+\`\`\`
+Do not add an "Other" option: the operator can always type their own answer.
+This session resumes with the answers, and you continue from where you stopped.
+
+## Required output (a single final report)
+- Status: SUCCESS or FAILURE, and why — or the NEEDS_INPUT block above, alone.
+- Files created or modified, paths only.
+- A 5–15 line summary of what you implemented and the decisions you took.
+- Deviations from the phase body above, and your reasoning.
+- Anything you could not do, with an explanation.
+`
+
+// ---------------------------------------------------------------------------
+// 2. The correctness rule: the dependency closure, never a sibling
+// ---------------------------------------------------------------------------
+
+describe('the dependency closure', () => {
+  const reports = {
+    'db-schema': 'SCHEMA REPORT: added Folder with a parent_id column.',
+    'api-layer': 'API REPORT: added GET and POST /folders.',
+    'web-ui': 'UI REPORT: added the folder tree component.',
+  }
+
+  it('tells a wave-2 phase about its dependency and nothing about its sibling', () => {
+    const prompt = compose('api-layer', 'implementer', { reports })
+
+    // Its own dependency, with the artifact the plan says it needs and the
+    // report that phase actually filed.
+    expect(prompt).toContain('db-schema')
+    expect(prompt).toContain('the Folder model')
+    expect(prompt).toContain('SCHEMA REPORT: added Folder with a parent_id column.')
+
+    // Its sibling ran in parallel, in another worktree, and its commits are not
+    // in this phase's base branch. Describing them would make this implementer
+    // code against files it cannot see.
+    expect(prompt).not.toContain('web-ui')
+    expect(prompt).not.toContain('UI REPORT')
+    expect(prompt).not.toContain('the folder tree component')
+  })
+
+  it('gives a joining phase the whole transitive closure, in wave order', () => {
+    const prompt = compose('docs', 'implementer', { reports })
+
+    expect(prompt).toContain('SCHEMA REPORT')
+    expect(prompt).toContain('API REPORT')
+    expect(prompt).toContain('UI REPORT')
+    expect(prompt.indexOf('SCHEMA REPORT')).toBeLessThan(prompt.indexOf('API REPORT'))
+  })
+
+  it('is an ancestor walk: a sibling and a dependent are both outside it', () => {
+    const nodes = diamond().nodes
+    expect(dependencyClosure(nodes, 'api-layer')).toEqual(['db-schema'])
+    expect(dependencyClosure(nodes, 'docs')).toEqual(['db-schema', 'api-layer', 'web-ui'])
+    expect(dependencyClosure(nodes, 'db-schema')).toEqual([])
+  })
+
+  it('says so when a dependency filed no report, rather than inventing one', () => {
+    expect(compose('api-layer', 'implementer')).toContain('No report recorded')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3. An unresolvable reference fails loudly
+// ---------------------------------------------------------------------------
+
+describe('an unresolvable prompt_ref', () => {
+  const missingFile = (): Workflow => {
+    const workflow = diamond()
+    return {
+      ...workflow,
+      nodes: workflow.nodes.map((node) =>
+        node.id === 'db-schema' ? { ...node, prompt_ref: 'no-such-plan.md#db-schema' } : node,
+      ),
+    }
+  }
+
+  it('names the node and the reference when the file is not there', () => {
+    expect(() => compose('db-schema', 'implementer', { workflow: missingFile() })).toThrow(
+      PromptError,
+    )
+    expect(() => compose('db-schema', 'implementer', { workflow: missingFile() })).toThrow(
+      /node "db-schema".*no-such-plan\.md#db-schema/,
+    )
+  })
+
+  /**
+   * What this looked like in practice: a plan sitting untracked in the
+   * operator's checkout, and two nodes failing against a path spelled
+   * perfectly. A lane is a fresh worktree of the base branch, so an
+   * uncommitted plan is in exactly one place the run cannot look — and the old
+   * wording sent people to check a spelling that was already right.
+   */
+  it('says which directory it looked in, and why a plan is often not in it', () => {
+    const dir = workspace()
+
+    try {
+      resolveBrief(dir, 'db-schema', 'no-such-plan.md#db-schema')
+      expect.unreachable('a missing file must throw')
+    } catch (error) {
+      const message = (error as Error).message
+      // The lane it resolved against, not the checkout the operator is in.
+      expect(message).toContain(dir)
+      expect(message).toContain('fresh worktree of the base branch')
+      expect(message).toMatch(/uncommitted|another branch/)
+    }
+  })
+
+  it('names the node and the reference when the anchor is not in the file', () => {
+    const dir = workspace()
+    expect(() => resolveBrief(dir, 'db-schema', 'plan.md#no-such-anchor')).toThrow(
+      /node "db-schema".*plan\.md#no-such-anchor/,
+    )
+  })
+
+  it('never puts the brief into the error it raises', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-prompts-'))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    writeFileSync(join(dir, 'plan.md'), '## other\n\nSECRET BRIEF TEXT\n')
+
+    try {
+      resolveBrief(dir, 'db-schema', 'plan.md#db-schema')
+      expect.unreachable('an unresolvable anchor must throw')
+    } catch (error) {
+      expect((error as Error).message).not.toContain('SECRET BRIEF TEXT')
+    }
+  })
+
+  it('reads a whole file when the reference carries no anchor', () => {
+    const dir = workspace()
+    expect(resolveBrief(dir, 'db-schema', 'plan.md')).toContain('Add the Folder model')
+  })
+
+  it('takes the section down to the next heading of the same depth', () => {
+    const dir = workspace()
+    const brief = resolveBrief(dir, 'api-layer', 'plan.md#api-layer')
+    expect(brief).toContain('Add REST endpoints for folders.')
+    expect(brief).not.toContain('Add the folder tree component.')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4. The review chore's protocol is the executor's parser
+// ---------------------------------------------------------------------------
+
+describe('the review verdict', () => {
+  for (const continuation of [false, true]) {
+    const form = continuation ? 'continued' : 'cold'
+
+    it(`asks the ${form} review for a line the executor’s own parser reads back as pass`, async () => {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
+      expect(await readBackVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
+    })
+
+    it(`asks the ${form} review for a line the executor’s own parser reads back as fail`, async () => {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
+      expect(await readBackVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
+    })
+
+    it(`asks the ${form} review for a line the exported parser reads, in both outcomes`, () => {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
+
+      // Asserted through the exported marker, so a rename moves both halves.
+      expect(readVerdict(verdictLine(prompt, 'pass'))).toBe('pass')
+      expect(readVerdict(verdictLine(prompt, 'fail'))).toBe('fail')
+    })
+  }
+
+  it('fails closed when a review says nothing — which is why the ask matters', async () => {
+    expect(readVerdict('I looked at the diff and it seems fine.')).toBeUndefined()
+    expect(await readBackVerdict('I looked at the diff and it seems fine.')).toBe('fail')
+  })
+})
+
+/** The exact line the composed prompt tells the review to end on. */
+function verdictLine(prompt: string, outcome: 'pass' | 'fail'): string {
+  const line = prompt
+    .split('\n')
+    .map((candidate) => candidate.trim())
+    .find((candidate) => candidate === `${VERDICT_MARKER} ${outcome}`)
+  if (line === undefined) {
+    throw new Error(`the review prompt never asks for "${VERDICT_MARKER} ${outcome}"`)
+  }
+  return line
+}
+
+/**
+ * What the production executor makes of a review chore whose last words were
+ * exactly `text` — the real `RunEffectExecutor`, over a real transcript, with
+ * the invocation `run_chore` builds for a review chore, so this is the parser
+ * itself rather than a copy of its regex.
+ */
+async function readBackVerdict(text: string): Promise<unknown> {
+  const workflow = diamond()
+  const root = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-prompts-run-'))
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+  const journal = openJournal(join(root, 'state'))
+  cleanups.push(() => journal.close())
+  journal.createRun(RUN_ID, workflow)
+
+  journal.appendTranscript(RUN_ID, 'api-layer', { type: 'assistant_text', text })
+  journal.appendTranscript(RUN_ID, 'api-layer', { type: 'session_ended', result: 'ok' })
+
+  const executor = createRunExecutor({
+    workflow,
+    runId: RUN_ID,
+    journal,
+    integrator: new Integrator({
+      plan: workflow,
+      integrationPath: join(root, 'integ'),
+      fixer: { fix: async () => undefined },
+      ghPath: join(root, 'no-such-gh'),
+    }),
+    integrationPath: join(root, 'integ'),
+    laneRoot: join(root, 'lanes'),
+    notifier: { notify: async () => true },
+  })
+
+  const invocation: EffectInvocation = {
+    effect: SideEffectSchema.parse({
+      id: 'e-review',
+      definitionId: 'spawn_agent',
+      params: { role: 'chore', prompt_template: 'chore', verdict: true },
+    }),
+    origin: { kind: 'onEnter', stateId: 'review' },
+    context: { node: { id: 'api-layer' } },
+  }
+  // The scheduler already ran the turn; this body only reads what it meant.
+  const outcome = await executor.execute(invocation)
+  return outcome.facts?.review?.['verdict']
+}
+
+// ---------------------------------------------------------------------------
+// 5. The fixer is told which gate failed, and only that
+// ---------------------------------------------------------------------------
+
+describe('the fixer prompt', () => {
+  it('carries the gate’s log reference when a gate is what failed', () => {
+    const prompt = compose('api-layer', 'fixer', {
+      // A transcript that ends on a review's verdict is not what this turn
+      // answers: the facts of the turn decide, never the transcript.
+      reports: { 'api-layer': 'VERDICT: pass' },
+      facts: RED_GATE,
+    })
+
+    expect(prompt).toContain('You are fixing api-layer')
+    expect(prompt).toContain('Gate unit failed with exit code 1')
+    expect(prompt).toContain('/runs/run-1/gates/unit.log')
+    expect(prompt).not.toContain('VERDICT: pass')
+  })
+
+  it('says so when the orchestrator did not record which gate failed, in both forms', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'fixer', { continuation })
+
+      expect(prompt).toContain('the orchestrator did not record which')
+      expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+    }
+  })
+
+  it('answers the red verify gate after a review that passed', () => {
+    // review → polish → verify red: the review's pass is still in the facts, and
+    // the gate after it is what this fixer is answering.
+    const prompt = compose('api-layer', 'fixer', {
+      facts: {
+        gate: { id: 'unit', exit_code: 2, log_ref: 'gates/unit.log' },
+        review: { verdict: 'pass' },
+      },
+    })
+
+    expect(prompt).toContain('Gate unit failed with exit code 2.')
+    expect(prompt).toContain('Its output is at gates/unit.log')
+  })
+
+  it('fixes the gate and nothing beside it: no findings, no review protocol', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'fixer', { continuation, facts: RED_GATE })
+
+      expect(prompt).toContain('Do not weaken, skip or')
+      expect(prompt).toContain('Change nothing unrelated.')
+      expect(prompt).toContain('message naming the gate it fixes')
+      expect(prompt).not.toContain('finding')
+      expect(prompt).not.toContain('review-ledger')
+      expect(prompt).not.toContain(VERDICT_MARKER)
+    }
+  })
+
+  it('carries the phase body, so a fix is checked against what was asked for', () => {
+    expect(compose('api-layer', 'fixer')).toContain('Add REST endpoints for folders.')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5b. The chore prompt: a general slot that must not widen into a second
+// implementation round
+// ---------------------------------------------------------------------------
+
+describe('the chore prompt', () => {
+  it('carries the chore’s own instruction, inline', () => {
+    const prompt = compose('api-layer', 'chore', {
+      chore: chore({ prompt: 'Rewrite the comments this phase wrote in Simple English.' }),
+    })
+
+    expect(prompt).toContain('Rewrite the comments this phase wrote in Simple English.')
+    expect(prompt).toContain('You are running the `deslop` chore over api-layer')
+  })
+
+  it('resolves an instruction that lives in the plan, like a phase brief', () => {
+    const dir = workspace({ deslop: 'Delete the comments that restate the code.' })
+    const prompt = compose('api-layer', 'chore', {
+      dir,
+      chore: chore({ prompt_ref: 'plan.md#deslop' }),
+    })
+
+    expect(prompt).toContain('Delete the comments that restate the code.')
+    expect(prompt).not.toContain('plan.md#deslop')
+  })
+
+  it('names the file and the field when the instruction does not resolve', () => {
+    expect(() =>
+      compose('api-layer', 'chore', { chore: chore({ prompt_ref: 'missing.md#nope' }) }),
+    ).toThrow(/chores\.deslop\.prompt_ref/)
+  })
+
+  it('bounds the scope to this phase’s diff and forbids widening it', () => {
+    const dir = workspace()
+    const prompt = compose('api-layer', 'chore', {
+      dir,
+      chore: chore({ prompt: 'Rewrite the comments.' }),
+      rows: [
+        {
+          node_id: 'api-layer',
+          branch: 'plan/bookmarks/phase-api-layer',
+          base_branch: 'plan/bookmarks/phase-db-schema',
+        },
+      ],
+    })
+
+    expect(prompt).toContain(
+      'git diff plan/bookmarks/phase-db-schema...plan/bookmarks/phase-api-layer',
+    )
+    expect(prompt).toContain('Do what the chore says and nothing else')
+    expect(prompt).toContain('This is not another implementation')
+  })
+
+  /**
+   * `after_review` is the default timing — deslop and the like, run once the
+   * review approved and before the final gate run — and it keeps the rules a
+   * chore always had: the gates are not its business, and it decides nothing.
+   */
+  it('runs after the review by default, leaves the gates alone, and states no verdict', () => {
+    const tidy = chore({ prompt: 'Tidy up.' })
+    expect(tidy.chore.when).toBe('after_review')
+
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', { continuation, chore: tidy })
+
+      expect(prompt).toContain("Do not run this phase's gates")
+      expect(prompt).not.toContain(VERDICT_MARKER)
+      expect(prompt).not.toContain('status: NEEDS_INPUT')
+      expect(prompt).not.toContain('Exactly one reviewer sub-agent')
+      // The review chore is what carries each of these, so the pair proves the
+      // absences above are a difference between timings and not dead strings.
+      const review = compose('api-layer', 'chore', { continuation, chore: reviewChore() })
+      expect(review).toContain(VERDICT_MARKER)
+      expect(review).toContain('status: NEEDS_INPUT')
+      expect(review).not.toContain("Do not run this phase's gates")
+    }
+  })
+
+  it('names a skill when the chore declares one, with a fallback for harnesses that have none', () => {
+    const prompt = compose('api-layer', 'chore', {
+      chore: chore({ prompt: 'Tidy up.', skill: 'deslop-comments' }),
+    })
+
+    expect(prompt).toContain('`deslop-comments` skill')
+    expect(prompt).toContain('If your harness has no such skill')
+  })
+
+  it('says nothing about a chore skill when the chore declares none', () => {
+    const prompt = compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })
+
+    // Narrowed from a bare `not.toContain('skill')`: the no-delegation section
+    // names the conductor skills on purpose, and it is in every prompt.
+    expect(prompt).not.toContain('skill for this')
+    expect(prompt).not.toContain('If your harness has no such skill')
+  })
+
+  it('carries the phase brief on a cold turn, as context rather than as work', () => {
+    const prompt = compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })
+
+    expect(prompt).toContain('Add REST endpoints for folders.')
+    expect(prompt).toContain('It is not a list of work to do')
+  })
+
+  it('drops the brief on a continuation but keeps the instruction', () => {
+    // §15.3's rule cuts one way and not the other: the session holds the phase
+    // and has never been told to do the chore.
+    const prompt = compose('api-layer', 'chore', {
+      continuation: true,
+      chore: chore({ prompt: 'Rewrite the comments.' }),
+    })
+
+    expect(prompt).toContain('Rewrite the comments.')
+    expect(prompt).toContain('same session — but a')
+    expect(prompt).not.toContain('Add REST endpoints for folders.')
+  })
+
+  it('still demands a commit: a chore’s work merges from the branch like any other', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', {
+        continuation,
+        chore: chore({ prompt: 'Tidy up.' }),
+      })
+      expect(prompt).toContain('Committing is part of the work')
+    }
+  })
+
+  it('fails loudly when a chore template is spawned with no chore', () => {
+    expect(() => compose('api-layer', 'chore')).toThrow(PromptError)
+    expect(() => compose('api-layer', 'chore')).toThrow(/needs a chore/)
+  })
+})
+
+describe('the after_pr chore prompt', () => {
+  const canvas = () =>
+    chore(
+      { prompt: 'Run /pr-review-canvas on this PR.', skill: 'pr-review-canvas', when: 'after_pr' },
+      'review-canvas',
+    )
+  const pr = { pr: { opened: true, url: 'https://github.com/acme/app/pull/42', number: 42 } }
+
+  it('names the PR it is about, on both forms', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', { continuation, facts: pr, chore: canvas() })
+      expect(prompt).toContain('https://github.com/acme/app/pull/42 (number 42)')
+      expect(prompt).toContain('Run /pr-review-canvas on this PR.')
+      expect(prompt).toContain('Use the `pr-review-canvas` skill')
+    }
+  })
+
+  it('forbids edits and drops the commit protocol: the phase is already merged', () => {
+    for (const continuation of [false, true]) {
+      const prompt = compose('api-layer', 'chore', { continuation, facts: pr, chore: canvas() })
+      expect(prompt).toContain('Do not edit, stage, commit or push anything')
+      expect(prompt).not.toContain('Committing is part of the work')
+      expect(prompt).not.toContain("Do not run this phase's gates")
+      expect(prompt).not.toContain(VERDICT_MARKER)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5c. The review chore: the phase's review, run by the agent that wrote it (§16)
+// ---------------------------------------------------------------------------
+
+/**
+ * The review is a chore on the implementer's own session. It spawns exactly one
+ * reviewer, fixes what holds up, rejects what does not with evidence, and loops
+ * until the reviewer approves or its budget runs out — then ends on the
+ * `VERDICT:` line the executor reads. Every rule the other turns are held to
+ * that this one bends is bent here on purpose, and asserted.
+ */
+describe('the review chore prompt', () => {
+  const BRIEF = 'Add REST endpoints for folders.'
+  const rows = [
+    {
+      node_id: 'api-layer',
+      branch: 'plan/bookmarks/phase-api-layer',
+      base_branch: 'plan/bookmarks/phase-db-schema',
+    },
+  ] as const
+
+  const review = (
+    options: { readonly continuation?: boolean; readonly workflow?: Workflow; readonly chore?: ChorePrompt } = {},
+  ): string => compose('api-layer', 'chore', { rows, chore: reviewChore(), ...options })
+
+  it('opens cold as the phase’s review, with the brief as the stated requirement', () => {
+    const prompt = review()
+
+    expect(prompt).toContain('You are running the `review` chore over api-layer: API of plan bookmarks')
+    expect(prompt).toContain(REVIEW_INSTRUCTION)
+    expect(prompt).toContain('This turn is the phase’s code review')
+    expect(prompt).toContain('phase’s gates are already green')
+    expect(prompt).toContain('Passing gates are not approval.')
+    // The scope and the baseline, over the branches the journal recorded.
+    expect(prompt).toContain(
+      'git diff plan/bookmarks/phase-db-schema...plan/bookmarks/phase-api-layer',
+    )
+    expect(prompt).toContain('baseline `plan/bookmarks/phase-db-schema`')
+    // The requirement is printed, under its own heading, for the reviewer.
+    expect(prompt).toContain('The stated requirement is the phase brief printed below')
+    const requirement = prompt.indexOf('## The stated requirement')
+    expect(requirement).toBeGreaterThan(-1)
+    expect(prompt.slice(requirement)).toContain(BRIEF)
+  })
+
+  it('continues the implementer’s session without re-sending the brief', () => {
+    const cold = review()
+    const continued = review({ continuation: true })
+
+    expect(continued).toContain('same session — but a')
+    expect(continued).toContain('This turn is the `review` chore')
+    expect(continued).toContain(REVIEW_INSTRUCTION)
+    expect(continued).toContain('The stated requirement is the phase brief already in this session')
+    // Each absence paired with the cold prompt that carries it.
+    expect(cold).toContain(BRIEF)
+    expect(continued).not.toContain(BRIEF)
+    expect(cold).toContain('## The stated requirement')
+    expect(continued).not.toContain('## The stated requirement')
+  })
+
+  it('does not re-send the plan-level sections on a continuation', () => {
+    const options = { dir: workspace(PLAN_SECTIONS), workflow: diamondWithPlanContext() }
+    const cold = compose('api-layer', 'chore', { ...options, chore: reviewChore() })
+    const continued = compose('api-layer', 'chore', {
+      ...options,
+      continuation: true,
+      chore: reviewChore(),
+    })
+
+    expect(cold).toContain('- Sharing a folder with another user.')
+    expect(continued).not.toContain('- Sharing a folder with another user.')
+    expect(continued).not.toContain('Plan-level decisions')
+    expect(continued).toContain('with the plan-level decisions when you were given them')
+  })
+
+  it('names the skill when the chore sets one, and says this prompt wins', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('Use the `thermo-nuclear-review-loop` skill for this')
+      expect(prompt).toContain('Where the skill and this prompt disagree, this prompt wins.')
+      expect(prompt).toContain('If your')
+      expect(prompt).toContain('harness has no such skill')
+    }
+  })
+
+  it('runs the loop from the prompt alone when the chore names no skill', () => {
+    const prompt = review({ chore: chore({ prompt: REVIEW_INSTRUCTION, when: 'review' }, 'review') })
+
+    expect(prompt).not.toContain('skill for this')
+    expect(prompt).toContain('Spawn one reviewer')
+  })
+
+  it('lists the gates as the verb that runs them, and tells it to run them', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('## The outer gate — ask the orchestrator to run it')
+      expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+      expect(prompt).not.toContain('unit: `pnpm test`')
+      expect(prompt).toContain('After each round of fixes, run the inner loop')
+      expect(prompt).not.toContain("Do not run this phase's gates")
+    }
+  })
+
+  it('allows exactly one reviewer sub-agent and nothing else delegated', () => {
+    // The control: every other chore carries the generic no-delegation rule.
+    expect(compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })).toMatch(
+      NO_SUB_AGENTS,
+    )
+
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('Exactly one reviewer sub-agent for this whole turn')
+      expect(prompt).toContain('send every later pass to that same agent')
+      expect(prompt).toContain('The reviewer is the only sub-agent this turn may use')
+      expect(prompt).not.toMatch(NO_SUB_AGENTS)
+      expect(prompt).not.toContain('Do this work in this session, yourself')
+      // The conductor skills are still the pull, and still named.
+      expect(prompt).toContain('`review-phase`')
+      expect(prompt).toContain('never follow its spawn steps')
+    }
+  })
+
+  it('states the budget from max_fix_rounds, and to stop rather than ask', () => {
+    for (const continuation of [false, true]) {
+      // The schema sets no default: the loop runs until the reviewer approves.
+      const unbounded = review({ continuation })
+      expect(unbounded).toContain('No pass limit. Keep the loop going until the reviewer approves')
+      expect(unbounded).not.toContain('At most')
+
+      const prompt = review({ continuation, workflow: diamondWithFixRounds(2) })
+      expect(prompt).toContain('At most 2 passes that come back with blockers')
+      expect(prompt).toContain('do not ask whether to keep going')
+      expect(prompt).toContain('the orchestrator asks the operator')
+    }
+  })
+
+  it('makes a budget of zero one pass, not none', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation, workflow: diamondWithFixRounds(0) })
+
+      expect(prompt).toContain('One pass. If the reviewer does not approve on its first pass, stop there')
+      expect(prompt).toContain('the orchestrator asks')
+      expect(prompt).not.toContain('At most 0')
+    }
+  })
+
+  it('puts a decision that is not the agent’s to a person, through the NEEDS_INPUT block', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('## What goes to a person instead of into the code')
+      expect(prompt).toContain('the block under "When you need a human decision"')
+      expect(prompt).toContain('## When you need a human decision')
+      expect(prompt).toContain('status: NEEDS_INPUT')
+      expect(prompt).toContain('Do not call a question tool either')
+    }
+  })
+
+  it('commits each round, so the reviewer can read it', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+
+      expect(prompt).toContain('Commit each round as one commit whose message names the findings')
+      expect(prompt).toContain('Committing is part of the work')
+      expect(prompt).toContain('Run everything in the foreground')
+    }
+  })
+
+  it('ends on the VERDICT protocol, as the last section of the prompt', () => {
+    for (const continuation of [false, true]) {
+      const prompt = review({ continuation })
+      const last = prompt.slice(prompt.lastIndexOf('\n## ') + 1)
+
+      expect(last.startsWith('## Required output')).toBe(true)
+      expect(last).toContain(`    ${VERDICT_MARKER} pass`)
+      expect(last).toContain(`    ${VERDICT_MARKER} fail`)
+      expect(last).toContain('means the reviewer explicitly approved the phase')
+      expect(last).toContain('a turn that ends')
+      expect(last).toContain('without it counts as a failed review')
+      expect(last).toContain('so it must be the last thing you write')
+      // A turn stopping for a decision ends on the NEEDS_INPUT block instead,
+      // which the same prompt also tells it to end on, alone.
+      expect(prompt.trimEnd().endsWith('the turn alone, with no verdict after it.')).toBe(true)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6. prompt_template is the seam
+// ---------------------------------------------------------------------------
+
+describe('prompt_template', () => {
+  it('selects the role’s composition', () => {
+    expect(compose('api-layer', 'implementer')).toContain('You are implementing api-layer')
+    expect(compose('api-layer', 'fixer')).toContain('You are fixing api-layer')
+    expect(compose('api-layer', 'chore', { chore: reviewChore() })).toContain(
+      'You are running the `review` chore over api-layer',
+    )
+  })
+
+  it('fails loudly on a template nothing composes', () => {
+    expect(() => compose('api-layer', 'archaeologist')).toThrow(PromptError)
+    expect(() => compose('api-layer', 'archaeologist')).toThrow(
+      /node "api-layer".*archaeologist.*implementer, fixer, chore, conflict-fixer/,
+    )
+  })
+
+  it('no longer composes a reviewer: the review is a chore', () => {
+    expect(() => compose('api-layer', 'reviewer')).toThrow(PromptError)
+  })
+
+  it('refuses a conflict-fixer template: a conflict is not a phase', () => {
+    expect(() => compose('api-layer', 'conflict-fixer')).toThrow(/integrator/)
+  })
+
+  it('hands back the reference where a pipeline declared no template', () => {
+    expect(compose('api-layer', undefined)).toBe('plan.md#api-layer')
+  })
+
+  it('hands back the reference where the lane has no worktree — a projection', () => {
+    // `simulate.ts` drives the real scheduler over lanes that were never
+    // provisioned: nothing spawns, and its report promises identifiers only.
+    expect(compose('api-layer', 'implementer', { dir: null })).toBe('plan.md#api-layer')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7. The conflict fixer's prompt is the same one the integrator sends
+// ---------------------------------------------------------------------------
+
+describe('the conflict-fixer prompt', () => {
+  it('carries identifiers and plan references, and the one rule that matters', () => {
+    const prompt = composeConflictPrompt({
+      into: 'plan/bookmarks/wave-2',
+      incoming: 'plan/bookmarks/phase-web-ui',
+      nodes: ['api-layer', 'web-ui'],
+      paths: ['src/folders.ts'],
+      promptRefs: ['plan.md#api-layer', 'plan.md#web-ui'],
+    })
+
+    expect(prompt).toContain('plan/bookmarks/phase-web-ui')
+    expect(prompt).toContain('src/folders.ts')
+    expect(prompt).toContain('plan.md#web-ui')
+    expect(prompt).toContain('--ours')
+    // Nothing claims authorship on an unstaffed run: there is nobody to name.
+    expect(prompt).not.toContain('You implemented')
+  })
+
+  /**
+   * The fixer is now the member who wrote one side (`integration/staffing.ts`),
+   * and that changes how it should resolve — the temptation is to keep your own
+   * half and call it merged. It is told together with the reason it cannot
+   * treat that as memory: a fresh session in the integration worktree, not the
+   * lane the phase was written in.
+   */
+  it('names the phases the fixer implemented, and refuses to let that stand as memory', () => {
+    const prompt = composeConflictPrompt({
+      into: 'plan/bookmarks/wave-2',
+      incoming: 'plan/bookmarks/phase-web-ui',
+      nodes: ['api-layer', 'web-ui'],
+      paths: ['src/folders.ts'],
+      promptRefs: ['plan.md#api-layer', 'plan.md#web-ui'],
+      implemented: ['api-layer'],
+    })
+
+    expect(prompt).toContain('You implemented api-layer')
+    expect(prompt).toContain('fresh')
+    expect(prompt).toContain('do not privilege your own side')
+    // Identifiers and plan references only (§11) — no path outside `paths`,
+    // no hunk, nothing a diff could have leaked into.
+    expect(prompt).not.toContain('<<<<<<<')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. Continuation: the same role, told only what is new (§15.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * A continued turn is handed to a session that already holds the phase brief,
+ * the plan's bounds and its own prior work, so its prompt is a delta. Re-sending
+ * the brief there is not a wasted prefix — it instructs an agent to implement
+ * what it has already implemented.
+ *
+ * Every "does not contain" below is paired, in the same test, with the cold
+ * prompt that *does* contain the same string. A negative assertion against a
+ * string the renderer could never emit passes forever and proves nothing; the
+ * positive half is what makes each of these fail when a delta starts re-sending
+ * what the session already has.
+ */
+describe('a continuation prompt', () => {
+  /** The phase brief text and a plan-level line, as the fixtures write them. */
+  const BRIEF = 'Add REST endpoints for folders.'
+  const NON_GOAL = '- Sharing a folder with another user.'
+
+  describe('for the fixer, continuing the implementer’s own session', () => {
+    it('carries the red gate and drops the brief the session already holds', () => {
+      const dir = workspace(PLAN_SECTIONS)
+      const options = { dir, workflow: diamondWithPlanContext(), facts: RED_GATE }
+      const cold = compose('api-layer', 'fixer', options)
+      const continued = compose('api-layer', 'fixer', { ...options, continuation: true })
+
+      // The delta still says what to change: the red gate is the whole point.
+      expect(continued).toContain('Gate unit failed with exit code 1')
+      expect(continued).toContain('Change nothing unrelated.')
+
+      // The cold half proves the brief is something this renderer emits, so the
+      // absence below is a real difference rather than a string that was never
+      // in either prompt.
+      expect(cold).toContain(BRIEF)
+      expect(continued).not.toContain(BRIEF)
+      expect(cold).toContain('## The phase this branch is implementing')
+      expect(continued).not.toContain('## The phase this branch is implementing')
+    })
+
+    it('drops the plan-level sections too, and says why nothing is repeated', () => {
+      const dir = workspace(PLAN_SECTIONS)
+      const workflow = diamondWithPlanContext()
+      const options = { dir, workflow, facts: RED_GATE }
+      // The fixer has never had plan-level context, cold or continued (§ the
+      // module header). The implementer is where those sections do reach a
+      // prompt, so it is the control that proves this fixture carries them.
+      const implementer = compose('api-layer', 'implementer', options)
+      const continued = compose('api-layer', 'fixer', { ...options, continuation: true })
+
+      expect(implementer).toContain(NON_GOAL)
+      expect(implementer).toContain('## Plan-level decisions')
+      expect(continued).not.toContain(NON_GOAL)
+      expect(continued).not.toContain('Plan-level')
+      expect(continued).toContain('none of')
+      expect(continued).toContain('is repeated here')
+    })
+
+    it('carries a red gate the same way the cold prompt does', () => {
+      const continued = compose('api-layer', 'fixer', {
+        reports: { 'api-layer': 'VERDICT: pass' },
+        facts: RED_GATE,
+        continuation: true,
+      })
+
+      expect(continued).toContain('Gate unit failed with exit code 1')
+      expect(continued).toContain('/runs/run-1/gates/unit.log')
+      expect(continued).toContain('`vinta-ai-maestro gate unit`')
+      // The gate, not the review that passed before it — same rule as cold.
+      expect(continued).not.toContain('VERDICT: pass')
+    })
+  })
+
+  describe('for the implementer, resumed rather than re-briefed', () => {
+    it('is a nudge: the lane and the branch, and none of the cold materials', () => {
+      const dir = workspace(PLAN_SECTIONS)
+      const options = { dir, workflow: diamondWithPlanContext(), reports: DEPENDENCY_REPORTS }
+      const cold = compose('api-layer', 'implementer', options)
+      const prompt = compose('api-layer', 'implementer', { ...options, continuation: true })
+
+      expect(prompt).toContain('Resuming api-layer: API')
+      expect(prompt).toContain('Pick up exactly where you left off')
+      expect(prompt).toContain(dir)
+
+      // Each of the three things the session already holds, with the cold
+      // prompt standing as proof that this fixture really produces them.
+      expect(cold).toContain(BRIEF)
+      expect(prompt).not.toContain(BRIEF)
+      expect(cold).toContain('SCHEMA REPORT: added Folder with a parent_id column.')
+      expect(prompt).not.toContain('SCHEMA REPORT')
+      expect(cold).toContain(NON_GOAL)
+      expect(prompt).not.toContain(NON_GOAL)
+    })
+
+    it('tells it to read the worktree before trusting its own memory of it', () => {
+      // A resumed implementer was interrupted by a capacity wait or an operator
+      // takeover (§9), either of which can have moved the lane underneath it.
+      const prompt = compose('api-layer', 'implementer', { continuation: true })
+
+      expect(prompt).toContain('git status')
+      expect(prompt).toContain('say so in your report instead of')
+      expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+    })
+  })
+
+  it('hands back the reference for a lane with no worktree, continued or not', () => {
+    // A projection never continues anything: there is no session and no
+    // checkout, and §15.2's fallback is a cold prompt, not a delta into thin air.
+    expect(compose('api-layer', 'fixer', { dir: null, continuation: true })).toBe(
+      'plan.md#api-layer',
+    )
+  })
+
+  it('is still refused for a conflict-fixer, which has no session to continue', () => {
+    expect(() => compose('api-layer', 'conflict-fixer', { continuation: true })).toThrow(
+      /integrator/,
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8b. The cold path is unchanged
+// ---------------------------------------------------------------------------
+
+/**
+ * `continuation` is a new branch through a module whose other branch was
+ * already shipping. Section 1b pins the implementer's cold output byte for
+ * byte; this pins the fixer's, because "unchanged" is a claim about every
+ * character and a renderer that grew a sibling is exactly the one a shared
+ * helper could quietly reword.
+ */
+describe('the cold prompt', () => {
+  it('composes the fixer exactly as before', () => {
+    const dir = workspace()
+    expect(compose('api-layer', 'fixer', { dir, facts: RED_GATE })).toBe(COLD_FIXER(dir))
+  })
+
+  it('treats an explicit continuation: false exactly as its absence', () => {
+    const dir = workspace()
+    const cases: readonly (readonly [string, { readonly chore?: ChorePrompt }])[] = [
+      ['implementer', {}],
+      ['fixer', {}],
+      ['chore', { chore: chore({ prompt: 'Tidy up.' }) }],
+      ['chore', { chore: reviewChore() }],
+    ]
+    for (const [template, options] of cases) {
+      expect(
+        compose('api-layer', template, { ...options, dir, facts: RED_GATE, continuation: false }),
+      ).toBe(compose('api-layer', template, { ...options, dir, facts: RED_GATE }))
+    }
+  })
+})
+
+/** The dependency reports the closure tests use, reused as a cold-prompt control. */
+const DEPENDENCY_REPORTS = {
+  'db-schema': 'SCHEMA REPORT: added Folder with a parent_id column.',
+} as const
+
+const COLD_FIXER = (dir: string): string =>
+  `You are fixing api-layer: API of plan bookmarks.
+Work entirely inside \`${dir}\`, on branch \`HEAD\`.
+
+## The outer gate — ask the orchestrator to run it
+This plan declares its gates, and the orchestrator runs them for you. Ask for
+one by id, from your own worktree:
+    vinta-ai-maestro gate unit
+It runs the plan’s own command for that gate, in your lane, and exits with the
+gate’s exit code — \`0\` is green. It prints the path to the gate’s output; read
+that file when a gate is red, rather than inferring what broke from the code.
+
+**Run gates this way rather than running their commands yourself.** Three
+things are true of a gate the orchestrator ran and none of them survive a
+command you typed: the result is cached against your lane’s contents, so a
+gate you have already run on an unchanged tree returns instantly the next time
+anyone asks; the machine capacity it needs is queued for rather than taken out
+from under the other lanes; and what runs is the command this plan declares —
+the same one the orchestrator will run to judge this phase. Something you ran
+that resembles the gate is not the gate, and reporting it as one is how a
+phase passes review and fails its gate afterwards. Where the harness allows
+it, a gate’s own command typed by hand is refused before it runs, with the
+\`vinta-ai-maestro gate\` line to use instead — follow it rather than working
+around it.
+
+The gate may run narrowed to the files this phase changed; the full suite
+runs once the phases are merged. Running a single test file of your own in
+the inner loop is fine — it is the gate’s whole command that goes through
+the orchestrator.
+
+Waiting is the expected outcome, not a failure: it queues for capacity and then
+runs a suite. Let it finish — do not interrupt it, add a timeout, or retry it
+in some other form. And if it refuses outright, that is the answer to the gate
+rather than permission to run the command by hand: say so in your report.
+
+## What came back
+Gate unit failed with exit code 1.
+Its output is at /runs/run-1/gates/unit.log — read it first; it says what broke.
+
+## The phase this branch is implementing
+## api-layer
+
+Add REST endpoints for folders.
+
+## How to fix
+Read the gate’s output before the code: it says what broke. Find the cause and
+fix that, in the code this phase changed where you can. Do not weaken, skip or
+delete a test, loosen a lint rule, or narrow a check to make it pass — a gate
+that goes green that way has stopped checking the thing it was there for. If
+the failure is in code this phase did not touch, or the gate itself is broken,
+say so in your report rather than working around it. Change nothing unrelated.
+
+## Verify
+Re-run the inner loop, then run each of these yourself:
+   - \`vinta-ai-maestro gate unit\`
+Keep at it while you have a red gate you know how to fix and room to fix it.
+A gate you cannot turn green is not a reason to keep going until the turn ends:
+commit what you have and report FAILURE naming the gate and what it said. Green
+is what you are aiming at, not the condition for finishing.
+
+## Do this work in this session, yourself
+You are the agent that fixes what came back — not an orchestrator for one. Do not spawn,
+dispatch or delegate to a sub-agent (claude-code’s Task/Agent tool, or whatever
+your harness calls the same thing) for any part of it: not the work, not a
+search of the codebase, not a second opinion on your own output. Read, run and
+write yourself.
+This session is reused across phases and rounds, and a later turn will open by
+telling you that what you learned about this repository still holds. It holds
+only because this session is what learned it. A sub-agent’s reading of the code
+ends when the sub-agent does, so a delegated turn leaves you holding its summary
+and nothing else, and every turn after it pays for a cold start.
+A project skill that tells you to spawn an implementer, reviewer or fixer —
+\`implement-plan\`, \`implement-phase\`, \`review-phase\`, \`amend-plan\`, anything
+shaped like them — is written for the orchestrator that dispatches phases. That
+orchestrator is already running: it is what spawned you, and its job is not this
+turn’s. Take what such a skill says about this repository’s conventions, gates
+and commit rules; never follow its spawn steps.
+
+## Run everything in the foreground
+Do not start background tasks — no \`run_in_background\`, no \`&\`, no detached
+processes you intend to come back to. This session is headless: it ends when
+your turn ends, nothing will notify you, and anything still running is killed
+with it. A turn that finishes by waiting for a background result finishes
+having done nothing, and the phase is then judged on an empty branch.
+Long commands are fine — run them and wait for them to return.
+
+## Committing is part of the work, not after it
+Your phase is reviewed and merged **from the commits on \`HEAD\`**. The
+review reads \`git diff main...HEAD\` and nothing else:
+a file you wrote and did not commit does not exist as far as the rest of this
+run is concerned, and the lane it sits in is reset before the next phase.
+
+So the turn is not complete until \`git status --porcelain\` is empty of your
+work. Stage **by explicit path** — never \`git add -A\` or \`git add .\`, because
+this worktree holds local files that are not yours to commit — then commit to
+\`HEAD\`. The repository's own git hooks run when you do; if one
+rewrites your files, stage the result and commit again rather than bypassing
+it.
+
+**Commit whether or not you succeeded.** A gate you could not turn green, a
+test you could not make pass, a phase you got half way through: none of them
+is a reason to end the turn with the work only on disk. Commit it and report
+FAILURE, saying what is still red. A commit is not a claim that the phase is
+finished — it is what makes the work exist for the gates, for the review, and
+for the next turn on this branch. The alternative is not "a clean branch": it
+is a phase that is gated and reviewed as though you had written nothing, and
+then deleted with the lane.
+Keep this round to one commit where you can — a hook rewrite aside — with a
+message naming the gate it fixes.
+
+## Required output
+- Status: SUCCESS or FAILURE, and why.
+- The commit this round made, by hash, and the files it changed, paths only.
+- Every gate you ran, by id, and what it returned. If you did not run one of
+  the gates listed above, say so and say why rather than leaving it out.
+- What broke, and what you changed to fix it.
+`
+
+it('resolves every node of the diamond against the plan the fixture writes', () => {
+  const dir = workspace()
+  for (const node of diamond().nodes) {
+    expect(resolveBrief(dir, node.id, node.prompt_ref)).not.toBe('')
+  }
+})
+
+// ---------------------------------------------------------------------------
+// A session that outlived its phase
+// ---------------------------------------------------------------------------
+
+describe('a cross-phase continuation', () => {
+  const DOCS_BRIEF = 'Document the folders feature.'
+
+  const carried = (reorientation: Partial<Reorientation> = {}): string =>
+    compose('docs', 'implementer', {
+      continuation: true,
+      reorientation: {
+        priorNodeId: 'api-layer',
+        priorWorkPresent: true,
+        changedFiles: ['apps/api/views.py'],
+        ...reorientation,
+      },
+    })
+
+  /**
+   * The distinction the whole shape turns on. A same-phase continuation is a
+   * delta — the session already holds the brief. This session holds a brief for
+   * work that is *finished*, so withholding the new one would ask an agent to
+   * implement a phase it has never been told about.
+   */
+  it('carries the new phase’s brief in full, unlike a same-phase delta', () => {
+    const prompt = carried()
+    const delta = compose('docs', 'implementer', { continuation: true })
+
+    expect(prompt).toContain(DOCS_BRIEF)
+    expect(delta).not.toContain(DOCS_BRIEF)
+  })
+
+  it('puts the re-orientation before the brief, not after it', () => {
+    const prompt = carried()
+
+    expect(prompt.indexOf('the worktree moved')).toBeLessThan(prompt.indexOf(DOCS_BRIEF))
+  })
+
+  it('names the files that changed, so staleness is checkable rather than vague', () => {
+    expect(carried({ changedFiles: ['a.py', 'b.py'] })).toContain('- a.py')
+    expect(carried({ changedFiles: ['a.py', 'b.py'] })).toContain('- b.py')
+  })
+
+  /**
+   * The single most important sentence in the preamble. An agent that remembers
+   * writing a model and does not know it is absent will code against something
+   * that is not there.
+   */
+  it('says plainly when the previous phase’s work is NOT in this tree', () => {
+    const prompt = carried({ priorWorkPresent: false })
+
+    expect(prompt).toContain('are NOT in this tree')
+    expect(prompt).toContain('Do not rely on it')
+  })
+
+  it('says the opposite when the phase does depend on it', () => {
+    const prompt = carried({ priorWorkPresent: true })
+
+    expect(prompt).toContain('ARE in this tree')
+    expect(prompt).not.toContain('are NOT in this tree')
+  })
+
+  /**
+   * A missing answer is not an empty one. A host with no way to compute the
+   * delta must not produce a prompt that reads as "nothing changed" — that is
+   * the one wording that would make an agent skip re-reading.
+   */
+  it('treats an uncomputable delta as everything stale, never as nothing changed', () => {
+    const prompt = carried({ changedFiles: null })
+
+    expect(prompt).toContain('could not be computed')
+    expect(prompt).toContain('stale')
+    expect(prompt).not.toContain('No file differs')
+  })
+
+  it('says so when genuinely nothing changed', () => {
+    expect(carried({ changedFiles: [] })).toContain('No file differs')
+  })
+
+  /** The reason the session was kept at all — say it, so the agent trusts it. */
+  it('tells the agent its knowledge of the repository still holds', () => {
+    expect(carried()).toContain('everything you learned about this repository still holds')
+  })
+})

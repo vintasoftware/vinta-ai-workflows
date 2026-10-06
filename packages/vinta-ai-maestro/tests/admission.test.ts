@@ -1,0 +1,738 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  AdmissionControl,
+  type AdmissionOptions,
+  type AdmissionOutcome,
+  type CapacityWait,
+  backoffMs,
+} from '../src/admission/admission.ts'
+import type { Clock } from '../src/admission/clock.ts'
+import type { AgentTask } from '../src/harness/adapter.ts'
+import { MockAdapter } from '../src/harness/mock.ts'
+import { Journal, openJournal } from '../src/journal/journal.ts'
+import type { NodeStatus } from '../src/journal/events.ts'
+import { parseWorkflow } from '../src/validate.ts'
+import type { Workflow } from '../src/types.ts'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const RUN = 'run-1'
+
+const golden = (): Workflow => {
+  const result = parseWorkflow(
+    JSON.parse(readFileSync(join(HERE, 'fixtures', 'golden-workflow.json'), 'utf8')),
+  )
+  if (!result.ok) throw new Error('golden workflow fixture is invalid')
+  return result.workflow
+}
+
+const task = (nodeId: string): AgentTask => ({
+  nodeId,
+  cwd: '/tmp/lane-1',
+  prompt: 'implement the widget model',
+  model: 'opus',
+})
+
+/**
+ * Time under test. A capacity wait is minutes to hours long; sleeping through
+ * one would trade a fast suite for a slow one and still not be deterministic.
+ * Timers fire in deadline order so "the harness woke once, then everyone
+ * resumed" is observable rather than a race.
+ */
+class ManualClock implements Clock {
+  #now: number
+  #timers: { at: number; wake: () => void; live: boolean }[] = []
+
+  constructor(start = 1_700_000_000_000) {
+    this.#now = start
+  }
+
+  now(): number {
+    return this.#now
+  }
+
+  at(at: number, wake: () => void): () => void {
+    const timer = { at, wake, live: true }
+    this.#timers.push(timer)
+    return () => {
+      timer.live = false
+    }
+  }
+
+  /** Moves to `now + ms`, firing everything due, earliest deadline first. */
+  advance(ms: number): void {
+    const target = this.#now + ms
+    for (;;) {
+      const due = this.#timers
+        .filter((t) => t.live && t.at <= target)
+        .sort((a, b) => a.at - b.at)[0]
+      if (!due) break
+      due.live = false
+      this.#now = Math.max(this.#now, due.at)
+      due.wake()
+    }
+    this.#now = target
+  }
+
+  get pending(): number {
+    return this.#timers.filter((t) => t.live).length
+  }
+}
+
+/** Yields to the microtask queue so pending admissions settle before we assert. */
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 16; i += 1) await Promise.resolve()
+}
+
+describe('admission control', () => {
+  let projectDir: string
+  let journal: Journal
+  let clock: ManualClock
+  let open: AdmissionControl[]
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-admission-'))
+    journal = openJournal(projectDir)
+    journal.createRun(RUN, golden())
+    clock = new ManualClock()
+    open = []
+  })
+
+  afterEach(() => {
+    for (const control of open) control.close()
+    journal.close()
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  const control = (options: Partial<AdmissionOptions> = {}): AdmissionControl => {
+    const made = new AdmissionControl({
+      journal,
+      runId: RUN,
+      ceilings: { mock: 4 },
+      clock,
+      // A fixed jitter draw keeps every test but the jitter test deterministic.
+      random: () => 0.5,
+      ...options,
+    })
+    open.push(made)
+    return made
+  }
+
+  const statuses = (nodeId: string): NodeStatus[] =>
+    journal
+      .events(RUN)
+      .filter((e) => 'nodeId' in e && e.nodeId === nodeId && e.type === 'node_status')
+      .map((e) => (e.payload as { status: NodeStatus }).status)
+
+  const admitted = (outcome: AdmissionOutcome): void => {
+    if (outcome.status !== 'admitted') throw new Error(`expected admission, got ${outcome.status}`)
+    outcome.release()
+  }
+
+  // §6.1: only `fatal` fails a node. Everything else is backpressure — the node
+  // waits and then runs, and never reaches a failed status on the way.
+  for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient'] as const) {
+    it(`waits and then succeeds after a ${kind} refusal`, async () => {
+      const adapter = new MockAdapter({ spawns: [kind] })
+      const admission = control()
+
+      const refused = await admission.admit(adapter, task('p1'))
+      expect(refused.status).toBe('retry')
+      if (refused.status !== 'retry') return
+      expect(refused.kind).toBe(kind)
+      expect(refused.wakeAt).toBeGreaterThan(clock.now())
+
+      // A caller releases its lane here, then waits. The wait is a promise the
+      // harness's single timer resolves.
+      let woke = false
+      const waiting = refused.wait().then(() => {
+        woke = true
+      })
+      await settle()
+      expect(woke).toBe(false)
+
+      clock.advance(refused.wakeAt - clock.now())
+      await waiting
+      expect(woke).toBe(true)
+
+      admitted(await admission.admit(adapter, task('p1')))
+      expect(adapter.spawned).toHaveLength(1)
+      expect(statuses('p1')).toEqual(['waiting_on_capacity'])
+      expect(statuses('p1')).not.toContain('failed')
+    })
+  }
+
+  /**
+   * The same condition, arriving after the spawn succeeded (`TurnRefusal`).
+   *
+   * A plan window that closes mid-phase used to be an ordinary turn failure:
+   * the node burnt its retries against a closed window and then failed, and its
+   * dependent subtree blocked — the outcome §6.1 exists to prevent. It gets
+   * everything a refused spawn gets, because it is the same fact arriving
+   * later.
+   */
+  describe('a window that closed under a running turn', () => {
+    const closed = { kind: 'quota' as const, reason: 'plan-limit-reached' }
+
+    it('parks the harness until the stated reset and journals the wait', async () => {
+      const admission = control()
+      const resetAt = new Date(clock.now() + 3 * 60 * 60 * 1_000)
+
+      const outcome = admission.refusedMidTurn('mock', 'p1', { ...closed, retryAfter: resetAt })
+
+      expect(outcome.status).toBe('retry')
+      if (outcome.status !== 'retry') return
+      expect(outcome.kind).toBe('quota')
+      // The vendor's fact, not a guessed backoff.
+      expect(outcome.wakeAt).toBe(resetAt.getTime())
+      expect(admission.wakeAt('mock')).toBe(resetAt.getTime())
+      expect(statuses('p1')).toEqual(['waiting_on_capacity'])
+      expect(statuses('p1')).not.toContain('failed')
+
+      let woke = false
+      const waiting = outcome.wait().then(() => {
+        woke = true
+      })
+      await settle()
+      expect(woke).toBe(false)
+
+      clock.advance(resetAt.getTime() - clock.now())
+      await waiting
+      expect(woke).toBe(true)
+    })
+
+    it('makes every later node join that one wait instead of spawning', async () => {
+      // Why the harness is parked and not the node: fifty nodes behind this one
+      // must not each spend a spawn to be told what this turn already learned.
+      const adapter = new MockAdapter()
+      const admission = control()
+
+      admission.refusedMidTurn('mock', 'p1', closed)
+      const second = await admission.admit(adapter, task('p2'))
+
+      expect(second.status).toBe('retry')
+      expect(adapter.spawned).toHaveLength(0)
+      expect(statuses('p2')).toEqual(['waiting_on_capacity'])
+    })
+
+    it('leaves the ceiling alone for a quota, and halves it for a concurrency cap', () => {
+      // The AIMD rule does not change because the refusal arrived later: a plan
+      // window says nothing about how many agents may run at once, and a
+      // concurrency cap says exactly that.
+      const quota = control()
+      quota.refusedMidTurn('mock', 'p1', closed)
+      expect(quota.ceiling('mock')).toBe(4)
+
+      const concurrency = control()
+      concurrency.refusedMidTurn('mock', 'p1', {
+        kind: 'concurrency',
+        reason: 'account-concurrency-cap',
+      })
+      expect(concurrency.ceiling('mock')).toBe(2)
+    })
+
+    it('falls back to backoff when the vendor stated no reset', () => {
+      const admission = control()
+
+      const outcome = admission.refusedMidTurn('mock', 'p1', closed)
+
+      expect(outcome.status).toBe('retry')
+      if (outcome.status !== 'retry') return
+      // The re-probe interval rather than a wait with no end: a window with no
+      // stated reset is discovered by trying again.
+      expect(outcome.wakeAt).toBeGreaterThan(clock.now())
+    })
+  })
+
+  it('fails a fatal refusal immediately, with no wait', async () => {
+    const adapter = new MockAdapter({ spawns: ['fatal'] })
+    const admission = control()
+
+    const outcome = await admission.admit(adapter, task('p1'))
+    expect(outcome.status).toBe('failed')
+    expect(admission.wakeAt('mock')).toBeUndefined()
+    expect(clock.pending).toBe(0)
+    // Nothing was journaled as waiting: a broken harness is not backpressure.
+    expect(statuses('p1')).toEqual([])
+    // And the slot it took is back.
+    expect(admission.inFlight('mock')).toBe(0)
+  })
+
+  it('halves the ceiling on a concurrency refusal and recovers by one per clean run', async () => {
+    const adapter = new MockAdapter()
+    const admission = control({ increaseAfter: 2 })
+    const seen: number[] = [admission.ceiling('mock')]
+
+    const spawnOnce = async (): Promise<void> => {
+      const outcome = await admission.admit(adapter, task('p1'))
+      if (outcome.status === 'admitted') outcome.release()
+      if (outcome.status === 'retry') clock.advance(outcome.wakeAt - clock.now() + 1)
+      seen.push(admission.ceiling('mock'))
+    }
+
+    adapter.refuseNext('concurrency')
+    await spawnOnce() // 4 -> 2
+    await spawnOnce() // clean 1 of 2
+    await spawnOnce() // clean 2 of 2 -> 3
+    await spawnOnce()
+    await spawnOnce() // -> 4
+    await spawnOnce()
+    await spawnOnce() // already at the configured ceiling
+
+    expect(seen).toEqual([4, 2, 2, 3, 3, 4, 4, 4])
+  })
+
+  it('never drops below one and never rises above the configured ceiling', async () => {
+    const adapter = new MockAdapter()
+    const admission = control({ ceilings: { mock: 3 }, increaseAfter: 1 })
+    const seen: number[] = []
+
+    for (let i = 0; i < 4; i += 1) {
+      adapter.refuseNext('rate_limit')
+      const outcome = await admission.admit(adapter, task('p1'))
+      if (outcome.status === 'retry') clock.advance(outcome.wakeAt - clock.now() + 1)
+      seen.push(admission.ceiling('mock'))
+    }
+    expect(seen).toEqual([1, 1, 1, 1]) // 3 -> 1, then floored
+
+    const climb: number[] = []
+    for (let i = 0; i < 4; i += 1) {
+      admitted(await admission.admit(adapter, task('p1')))
+      climb.push(admission.ceiling('mock'))
+    }
+    expect(climb).toEqual([2, 3, 3, 3])
+  })
+
+  it('honors a reported reset time in preference to computed backoff', async () => {
+    const retryAfter = new Date(clock.now() + 3_600_000)
+    const adapter = new MockAdapter({ spawns: ['quota'], retryAfter })
+    // A jitter draw of 1 makes the computed backoff its maximum, so a wake time
+    // equal to `retryAfter` cannot be the backoff by coincidence.
+    const admission = control({ random: () => 1, maxBackoffMs: 60_000 })
+
+    const outcome = await admission.admit(adapter, task('p1'))
+    expect(outcome.status).toBe('retry')
+    if (outcome.status !== 'retry') return
+    expect(outcome.wakeAt).toBe(retryAfter.getTime())
+  })
+
+  it('draws real jitter, bounded by the doubling cap', () => {
+    const base = 1_000
+    const max = 300_000
+    const draws = Array.from({ length: 200 }, () => backoffMs(4, base, max, Math.random))
+    const cap = base * 2 ** 3
+
+    expect(new Set(draws).size).toBeGreaterThan(1)
+    for (const draw of draws) {
+      expect(draw).toBeGreaterThanOrEqual(0)
+      expect(draw).toBeLessThanOrEqual(cap)
+    }
+    // The cap doubles per attempt and then stops at the configured maximum.
+    expect(backoffMs(1, base, max, () => 1)).toBe(base)
+    expect(backoffMs(2, base, max, () => 1)).toBe(2 * base)
+    expect(backoffMs(20, base, max, () => 1)).toBe(max)
+  })
+
+  it('resumes a journaled wait across a restart without re-firing it', async () => {
+    const retryAfter = new Date(clock.now() + 3_600_000)
+    const adapter = new MockAdapter({ spawns: ['quota'], retryAfter })
+    const before: CapacityWait[] = []
+    const first = control({ onWait: (w) => before.push(w) })
+
+    // Two nodes in flight together: the first is refused, and the second —
+    // queued at the start gate behind it — joins that wait without spending a
+    // spawn of its own. One wait window, and §6.1's one notification, not two.
+    const outcomes = await Promise.all([
+      first.admit(adapter, task('p1')),
+      first.admit(adapter, task('p2')),
+    ])
+    const outcome = outcomes[0]!
+    expect(outcomes.map((o) => o.status)).toEqual(['retry', 'retry'])
+    if (outcome.status !== 'retry') return
+    expect(before).toHaveLength(1)
+    expect(before[0]?.wakeAt).toBe(retryAfter.getTime())
+
+    // Simulated restart: every timer, waiter and ceiling in memory is dropped.
+    first.close()
+    const after: CapacityWait[] = []
+    const reopened = control({ onWait: (w) => after.push(w) })
+
+    // The wait resumed at its original wake time, and the operator was not
+    // notified a second time about a window they were already told about.
+    expect(reopened.wakeAt('mock')).toBe(retryAfter.getTime())
+    expect(after).toEqual([])
+
+    // A node admitted during the restored window waits instead of spawning.
+    const parked = await reopened.admit(adapter, task('p2'))
+    expect(parked.status).toBe('retry')
+    if (parked.status !== 'retry') return
+    expect(parked.wakeAt).toBe(retryAfter.getTime())
+    expect(adapter.spawned).toHaveLength(0)
+
+    let woke = false
+    const waiting = parked.wait().then(() => {
+      woke = true
+    })
+    clock.advance(retryAfter.getTime() - clock.now())
+    await waiting
+    expect(woke).toBe(true)
+    expect(reopened.wakeAt('mock')).toBeUndefined()
+
+    // The window is over and the durable record with it: a third boot does not
+    // resurrect the wait.
+    const third = control()
+    expect(third.wakeAt('mock')).toBeUndefined()
+    admitted(await third.admit(adapter, task('p2')))
+  })
+
+  it('never runs more concurrent spawns than the current ceiling', async () => {
+    const adapter = new MockAdapter()
+    const admission = control({ ceilings: { mock: 2 } })
+
+    const pending = ['p1', 'p2', 'p3', 'p4'].map((id) => admission.admit(adapter, task(id)))
+    await settle()
+    expect(adapter.spawned).toHaveLength(2)
+    expect(admission.inFlight('mock')).toBe(2)
+
+    // Releasing one admitted session lets exactly one queued node through.
+    const first = await pending[0]!
+    if (first.status !== 'admitted') throw new Error('expected admission')
+    first.release()
+    await settle()
+    expect(adapter.spawned).toHaveLength(3)
+    expect(admission.inFlight('mock')).toBe(2)
+
+    const second = await pending[1]!
+    if (second.status !== 'admitted') throw new Error('expected admission')
+    second.release()
+    await settle()
+    expect(adapter.spawned).toHaveLength(4)
+    for (const outcome of await Promise.all(pending)) {
+      expect(outcome.status).toBe('admitted')
+    }
+  })
+
+  it('keeps ceilings and waits independent per harness id', async () => {
+    const busy = new MockAdapter({ id: 'busy', spawns: ['concurrency'] })
+    const calm = new MockAdapter({ id: 'calm' })
+    const admission = control({ ceilings: { busy: 4, calm: 4 } })
+
+    const refused = await admission.admit(busy, task('p1'))
+    expect(refused.status).toBe('retry')
+    expect(admission.ceiling('busy')).toBe(2)
+
+    // Pressure on one vendor must not throttle another: `calm` keeps its full
+    // ceiling and is not parked behind `busy`'s timer.
+    expect(admission.ceiling('calm')).toBe(4)
+    expect(admission.wakeAt('calm')).toBeUndefined()
+    admitted(await admission.admit(calm, task('p2')))
+    expect(calm.spawned).toHaveLength(1)
+  })
+
+  /** A spawn that resolves only when the test says so, to observe the start gate. */
+  class GatedAdapter extends MockAdapter {
+    readonly started: string[] = []
+    readonly #open: (() => void)[] = []
+
+    override async spawn(task: AgentTask) {
+      this.started.push(task.nodeId)
+      await new Promise<void>((resolve) => this.#open.push(resolve))
+      return super.spawn(task)
+    }
+
+    /** Lets the oldest spawn in progress report its session. */
+    finishNext(): void {
+      this.#open.shift()?.()
+    }
+  }
+
+  it('starts one spawn at a time per harness, each after the previous has a session', async () => {
+    const adapter = new GatedAdapter()
+    const admission = control({ ceilings: { mock: 4 } })
+
+    const pending = ['p1', 'p2', 'p3'].map((id) => admission.admit(adapter, task(id)))
+    await settle()
+    // Three slots are free, but only one CLI is booting.
+    expect(admission.inFlight('mock')).toBe(3)
+    expect(adapter.started).toEqual(['p1'])
+
+    adapter.finishNext()
+    await settle()
+    expect(adapter.started).toEqual(['p1', 'p2'])
+
+    adapter.finishNext()
+    await settle()
+    adapter.finishNext()
+    for (const outcome of await Promise.all(pending)) admitted(outcome)
+    expect(adapter.started).toEqual(['p1', 'p2', 'p3'])
+  })
+
+  it('lets a refusal reach the spawns queued at the start gate before they spend one', async () => {
+    const adapter = new GatedAdapter({ spawns: ['concurrency'] })
+    const admission = control({ ceilings: { mock: 4 } })
+
+    const pending = ['p1', 'p2', 'p3'].map((id) => admission.admit(adapter, task(id)))
+    await settle()
+    adapter.finishNext() // p1 is refused, parking the harness
+    const outcomes = await Promise.all(pending)
+
+    expect(outcomes.map((o) => o.status)).toEqual(['retry', 'retry', 'retry'])
+    expect(adapter.started).toEqual(['p1'])
+    expect(admission.inFlight('mock')).toBe(0)
+  })
+
+  it('starts spawns together when the start gate is off', async () => {
+    const adapter = new GatedAdapter()
+    const admission = control({ ceilings: { mock: 4 }, serialStart: false })
+
+    const pending = ['p1', 'p2', 'p3'].map((id) => admission.admit(adapter, task(id)))
+    await settle()
+    expect(adapter.started).toEqual(['p1', 'p2', 'p3'])
+    for (let i = 0; i < 3; i += 1) adapter.finishNext()
+    for (const outcome of await Promise.all(pending)) admitted(outcome)
+  })
+
+  it('hands a freed slot to the highest-priority spawn, arrival order breaking ties', async () => {
+    const adapter = new MockAdapter()
+    const admission = control({ ceilings: { mock: 1 } })
+
+    const holder = await admission.admit(adapter, task('holder'))
+    if (holder.status !== 'admitted') throw new Error('expected admission')
+
+    const order: string[] = []
+    const queue = (id: string, priority: number) =>
+      admission.admit(adapter, task(id), { priority }).then((outcome) => {
+        order.push(id)
+        admitted(outcome)
+      })
+    const queued = [queue('leaf', 1), queue('spine', 5), queue('branch', 3), queue('twin', 5)]
+    await settle()
+    expect(order).toEqual([])
+
+    holder.release()
+    await Promise.all(queued)
+    expect(order).toEqual(['spine', 'twin', 'branch', 'leaf'])
+  })
+
+  it('opens the next run at a fresh discovered ceiling and recovers from there', async () => {
+    const adapter = new MockAdapter({ spawns: ['concurrency'] })
+    const first = control({ ceilings: { mock: 8 }, increaseAfter: 1 })
+    const refused = await first.admit(adapter, task('p1'))
+    expect(refused.status).toBe('retry')
+    expect(first.ceiling('mock')).toBe(4)
+    first.close()
+
+    // A later run against the same account, inside the freshness window.
+    clock.advance(60 * 60 * 1_000)
+    const second = control({ ceilings: { mock: 8 }, increaseAfter: 1 })
+    expect(second.ceiling('mock')).toBe(4)
+    // A hint, not a cap: clean spawns still probe back toward the configured value.
+    admitted(await second.admit(adapter, task('p2')))
+    expect(second.ceiling('mock')).toBe(5)
+  })
+
+  it('discards a discovered ceiling once it is stale, or once it has recovered', async () => {
+    const adapter = new MockAdapter({ spawns: ['concurrency'] })
+    const first = control({ ceilings: { mock: 8 } })
+    await first.admit(adapter, task('p1'))
+    first.close()
+
+    clock.advance(7 * 60 * 60 * 1_000) // past the six-hour default
+    const stale = control({ ceilings: { mock: 8 }, increaseAfter: 1 })
+    expect(stale.ceiling('mock')).toBe(8)
+    stale.close()
+
+    // Recovery clears the row too: a run that climbed back leaves no hint.
+    const again = new MockAdapter({ spawns: ['concurrency'] })
+    const throttled = control({ ceilings: { mock: 2 }, increaseAfter: 1 })
+    const outcome = await throttled.admit(again, task('p1'))
+    if (outcome.status === 'retry') clock.advance(outcome.wakeAt - clock.now() + 1)
+    admitted(await throttled.admit(again, task('p2')))
+    expect(throttled.ceiling('mock')).toBe(2)
+    throttled.close()
+    expect(control({ ceilings: { mock: 2 } }).ceiling('mock')).toBe(2)
+  })
+
+  it('never starts a run above its configured ceiling, whatever the hint says', async () => {
+    const adapter = new MockAdapter({ spawns: ['concurrency'] })
+    const first = control({ ceilings: { mock: 8 } })
+    await first.admit(adapter, task('p1'))
+    first.close()
+    expect(control({ ceilings: { mock: 2 } }).ceiling('mock')).toBe(2)
+  })
+
+  it('holds a login refusal for the whole harness until the operator says it is logged in', async () => {
+    const adapter = new MockAdapter({ spawns: ['unauthenticated'] })
+    const admission = control()
+
+    const first = await admission.admit(adapter, task('p1'))
+    expect(first.status).toBe('unauthenticated')
+    // Not a wait, and nothing to do with capacity.
+    expect(admission.wakeAt('mock')).toBeUndefined()
+    expect(admission.ceiling('mock')).toBe(4)
+    expect(admission.inFlight('mock')).toBe(0)
+
+    // Every later spawn is told the same thing without asking the vendor again.
+    expect((await admission.admit(adapter, task('p2'))).status).toBe('unauthenticated')
+    expect(adapter.spawned).toHaveLength(0)
+
+    admission.loggedIn('mock')
+    admitted(await admission.admit(adapter, task('p2')))
+    expect(adapter.spawned).toHaveLength(1)
+  })
+
+  /**
+   * `defaults.model_fallbacks`: a model with its own, smaller allowance — a
+   * frontier tier sold as credits — running out says nothing about the rest of
+   * the harness, so it must not park it.
+   */
+  describe('model fallbacks', () => {
+    const fallbacks = { fable: 'opus' }
+    const on = (nodeId: string, model: string): AgentTask => ({ ...task(nodeId), model })
+
+    /** Refuses every model in `out` for quota, whatever the spawn plan says. */
+    const outOf = (out: ReadonlySet<string>, retryAfter?: Date) => {
+      const adapter = new MockAdapter()
+      const asked: string[] = []
+      const spawn = adapter.spawn.bind(adapter)
+      adapter.spawn = async (spawned: AgentTask) => {
+        asked.push(spawned.model)
+        if (!out.has(spawned.model)) return await spawn(spawned)
+        return {
+          ok: false as const,
+          kind: 'quota' as const,
+          message: 'mock: quota',
+          ...(retryAfter === undefined ? {} : { retryAfter }),
+        }
+      }
+      return { adapter, asked }
+    }
+
+    const fellBack = () =>
+      journal
+        .events(RUN)
+        .filter((e) => e.type === 'node_model_fallback')
+        .map((e) => e.payload)
+
+    it('admits the fallback at once, and leaves the harness unparked', async () => {
+      const { adapter, asked } = outOf(new Set(['fable']))
+      const admission = control()
+
+      const outcome = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+
+      expect(outcome.status).toBe('admitted')
+      if (outcome.status !== 'admitted') return
+      expect(outcome.model).toBe('opus')
+      outcome.release()
+      expect(asked).toEqual(['fable', 'opus'])
+      expect(admission.wakeAt('mock')).toBeUndefined()
+      expect(admission.inFlight('mock')).toBe(0)
+      expect(statuses('p1')).toEqual([])
+      expect(fellBack()).toEqual([{ harness: 'mock', from: 'fable', to: 'opus', known: false }])
+    })
+
+    it('sends every later spawn of that model straight to the fallback', async () => {
+      const { adapter, asked } = outOf(new Set(['fable']))
+      const admission = control()
+
+      admitted(await admission.admit(adapter, on('p1', 'fable'), { fallbacks }))
+      // Hours later: with no reset stated, credits are not assumed to come back.
+      clock.advance(24 * 60 * 60 * 1_000)
+      admitted(await admission.admit(adapter, on('p2', 'fable'), { fallbacks }))
+
+      expect(asked).toEqual(['fable', 'opus', 'opus'])
+      expect(fellBack()).toEqual([
+        { harness: 'mock', from: 'fable', to: 'opus', known: false },
+        { harness: 'mock', from: 'fable', to: 'opus', known: true },
+      ])
+    })
+
+    it('tries the model again once the reset the vendor stated has passed', async () => {
+      const out = new Set(['fable'])
+      const { adapter, asked } = outOf(out, new Date(clock.now() + 60 * 60 * 1_000))
+      const admission = control()
+
+      admitted(await admission.admit(adapter, on('p1', 'fable'), { fallbacks }))
+      out.clear()
+      clock.advance(60 * 60 * 1_000)
+      const outcome = await admission.admit(adapter, on('p2', 'fable'), { fallbacks })
+
+      expect(outcome.status === 'admitted' && outcome.model).toBe('fable')
+      expect(asked).toEqual(['fable', 'opus', 'fable'])
+    })
+
+    it('parks the harness when the fallback is out too, and forgets the model was', async () => {
+      const out = new Set(['fable', 'opus'])
+      const { adapter, asked } = outOf(out)
+      const admission = control()
+
+      const refused = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+
+      // Both refused for quota: the account ran out, not the model.
+      expect(refused.status).toBe('retry')
+      if (refused.status !== 'retry') return
+      expect(refused.kind).toBe('quota')
+      expect(admission.wakeAt('mock')).toBe(refused.wakeAt)
+
+      // So after the wait the model the plan asked for is asked for again.
+      out.clear()
+      clock.advance(refused.wakeAt - clock.now())
+      const outcome = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+      expect(outcome.status === 'admitted' && outcome.model).toBe('fable')
+      expect(asked).toEqual(['fable', 'opus', 'fable'])
+    })
+
+    it('does not fall back on a refusal that is not about quota', async () => {
+      const adapter = new MockAdapter({ spawns: ['rate_limit'] })
+      const admission = control()
+
+      const refused = await admission.admit(adapter, on('p1', 'fable'), { fallbacks })
+
+      expect(refused.status).toBe('retry')
+      expect(admission.wakeAt('mock')).toBeDefined()
+      expect(fellBack()).toEqual([])
+    })
+
+    it('parks as before on a model with no fallback', async () => {
+      const { adapter } = outOf(new Set(['opus']))
+      const admission = control()
+
+      const refused = await admission.admit(adapter, on('p1', 'opus'), { fallbacks })
+
+      expect(refused.status).toBe('retry')
+      expect(admission.wakeAt('mock')).toBeDefined()
+    })
+
+    it('hands a turn whose model ran out mid-turn back with no wait', async () => {
+      const { adapter, asked } = outOf(new Set())
+      const admission = control()
+
+      const outcome = admission.refusedMidTurn(
+        'mock',
+        'p1',
+        { kind: 'quota', reason: 'credits-exhausted' },
+        { model: 'fable', fallbacks },
+      )
+
+      expect(outcome.status).toBe('retry')
+      if (outcome.status !== 'retry') return
+      expect(outcome.wakeAt).toBe(clock.now())
+      await outcome.wait()
+      expect(admission.wakeAt('mock')).toBeUndefined()
+
+      // The re-driven spawn is the one that lands on the fallback.
+      admitted(await admission.admit(adapter, on('p1', 'fable'), { fallbacks }))
+      expect(asked).toEqual(['opus'])
+    })
+  })
+
+  it('rejects a harness with no configured ceiling', async () => {
+    const admission = control()
+    await expect(admission.admit(new MockAdapter({ id: 'unknown' }), task('p1'))).rejects.toThrow(
+      /unknown harness/,
+    )
+  })
+})
