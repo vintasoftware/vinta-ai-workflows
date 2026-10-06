@@ -544,19 +544,26 @@ Two consequences worth stating, because both are load-bearing:
 
 So a wave's membership is decided **once**, synchronously, by the code that decides the wave is complete, and handed to the merge. A wave merge runs behind the integration worktree's queue and an amendment can land between the decision and the execution; a merge that re-derived its own membership would merge a phase that never ran, or count one as arrived and then leave it out. §9's rebase runs in that same worktree and through that same queue, since "the nodes this amendment blocks are idle" says nothing about whether another wave's merge is in flight in that directory.
 
-### 9.2 A run that tunes itself
+### 9.2 The run coordinator
 
-A run can be *mis-tuned* rather than broken: every phase doing what it was asked, every gate reporting honestly, and the whole thing paying for work nobody needs. A test suite whose command omits a reuse-database flag rebuilds that database on every gate run, in every lane, for the length of the run. Nobody needs waking for it, and the post-mortem finds it out an afternoon too late to help the run it happened in.
+A run goes wrong in ways nobody needs to be paged for and somebody needs to act on: an agent looping on a database its lane cannot reach, a phase queued for an hour behind a fix round that hung, an `env_files` entry nobody declared, a gate command missing its reuse flag, an error maestro logged about itself at three in the morning. Each used to wait for a person to happen to look. The first answer to that was a monitor that could read the run and propose four kinds of tuning; an operator found it "sort of useless", because it could explain the problem and do nothing about it, and nothing woke it when maestro itself failed.
 
-So a watchdog wakes the monitor when a phase outruns a threshold (1h) or a gate's cumulative uncached cost outruns a ceiling (30m), and the monitor answers with a **proposal** — a document validated against `schemas/intervention.v1.schema.json` and applied by host code through §9's amend path. It proposes; it never writes. `--no-intervene` turns the whole thing off.
+So every run has a **coordinator**: one agent, built once per run (`cli/serve.ts`'s factory) and the same one the operator talks to in the run view. It does not orchestrate — the scheduler dispatches, the integrator merges, the gates decide — it watches, fixes what is wrong around the agents, and tunes how the run executes.
 
-**Its authority is a closed vocabulary.** Four verbs — `retune_gate`, `retime_gate`, `rebudget_fixes`, `retier_phase`. The line they draw is that the monitor may change **how** the work is executed and never **what** work is done: there is no way to express a change to `depends_on`, `prompt_ref`, `touches`, `base_branch`, `pipeline`, or the set of phases. Not refused at runtime — unrepresentable. Every verb carries `evidence`, which nothing can verify and which is required anyway: it is the only account of a decision nobody watched being made.
+**It is woken** (`coordinator/loop.ts`, every 30 s) by: a phase that failed, an attempt that errored, an error maestro logged about itself (the job's logger is tapped, `coordinator/errors.ts`), a phase queued behind the integration worktree for 20 minutes, a phase running for an hour, a gate whose uncached runs have cost 30 minutes. Each trigger is told once; a burst is one wake; two wakes are at least two minutes apart; a run wakes it at most 24 times. History before the loop started is not news. Every wake is journalled as `coordinator_woke` with the triggers' kinds and ids; what it read and did is in its conversation. `--no-coordinator` (formerly `--no-intervene`) turns the wakes off; the operator can still ask it things.
 
-**A gate command is the one field that needs a permit.** The other three are bounded by their own schema types — set any of them wrongly and a run costs more time or money, and none of them can make a failing gate pass. A command can: `--reuse-db` and `-k not_slow` are the same edit to the same string. Two mechanisms, both applied. The gate must declare `tuning.allowed_flags`, which is a list a human wrote in a committed file — a gate declaring none is not tunable, and that is the default. And the proposed command must be the current one's argv tokens, in order, plus additions; anything that removes or rewrites a token is refused, as is any command with a shell metacharacter in it, because "plus new tokens" says nothing true about a pipeline.
+**It acts through the run's own API, with its own token.** The job's daemon mints a second token for it (`Daemon.coordinatorToken`), and its session's environment carries that token, the job's URL, the run id and the launcher on `PATH`. From its shell it drives the same commands an operator has: `node context|redirect|pause|abort|retry|answer`, `workflow` and `amend`, and `exec <lane|integration> -- <cmd>`, which runs a command in that worktree with its environment and, in the integration worktree, holds the worktree's queue until it exits. Every request with its token is attributed to it — `node_operation.by`, `human_answered.by`, `workflow_amended.author: coordinator`, `workspace_exec.by` — and steering text reaches the agent prefixed "From the run coordinator:".
 
-**A run may do this three times, once per target.** Folded from `workflow_amended` rows, which carry `author` (`operator` | `monitor`) and the targets an autonomous amendment touched. A second opinion about the same gate is oscillation rather than refinement: the monitor cannot see whether its last change helped.
+**What it may not do is refused where the request lands**, never merely discouraged:
 
-**The record splits along §11's line.** Identifiers and targets go in the journal, where the ledger folds them and the API serves them. The monitor's `summary` and each verb's `evidence` are a model's prose about a repository and go in `runs/<run-id>/interventions.jsonl` — one line per attempt, including every attempt that changed nothing, because a refused proposal is an agent trying to do what it may not do with nobody in the room, and that is the record worth keeping.
+- **What the plan builds is the operator's.** An amendment from the coordinator that adds or removes a phase, changes dependencies, a brief, touches, the base branch, a pipeline, chores, the plan documents or a deferred phase's condition is refused `coordinator_forbidden` (`coordinator/policy.ts`).
+- **A check may only get stricter.** No gate or chore dropped from a phase or the defaults, no gate definition removed, no judge gate edited, `tuning` untouched, `hooks` unchanged, `allow_ungated_phases` never turned on, `gate_scope` never narrowed, `wave_gates` never lowered. A gate's command may only gain tokens, in order, from its own `tuning.allowed_flags` — a list a person wrote in a committed file; a gate with no `tuning` block is not tunable. Shell metacharacters make a command untunable, because "plus new tokens" says nothing true about a pipeline.
+- **It answers only what a timer could.** A question is the coordinator's to answer exactly when `--retry-after` could answer it — a failure's retry/stop (including one whose timer was withheld for a repeating setup failure, which is what it is woken to fix), an agent's own questions, a plan question with an `unattended_answer`, a refused merge commit. A deferred start, a plan's human gate, an operator's pause, a harness login and any question the operator is holding (§9's pause) are refused.
+- **It cannot end the run**: `pause` and `stop` of the run, and editor saves of the workflow documents, are refused for its token.
+
+What remains is *how* the run executes — models, harnesses and the crew, fix budgets, gate timeouts and pools, resources, the `project` block's environment, model fallbacks, `wave_gates` upward — and the run's environment itself, through `exec`. Those can make a run slower or dearer when set wrongly; none of them can make a failing check pass.
+
+The post-mortem scores the coordinator's amendments as it scored the monitor's (`interventions`), pointing at its conversation for the reasoning.
 
 ### 9.3 Ending a run early
 
@@ -1016,7 +1023,7 @@ The settings file also asserts `disableAllHooks: false` at the highest precedenc
 
 Decisions are remembered per run, keyed on lane, tool and input, bounded at 512. Only answered decisions are remembered. An agent runs the same test command dozens of times a phase.
 
-What `judged` is **not** is a sandbox. A classifier reads one command line and cannot see what a script it names will do. The editing tools are not judged; they keep the sibling-lane deny rules `auto` has. So `judged` narrows `full` without approaching `auto`: it trades a vendor prompt nobody would answer for one round trip per command. Only claude-code can host it, because neither codex nor opencode offers a per-call hook. `doctor` refuses `judged` for a plan that dispatches elsewhere, and for a config with no `permission` judge. The monitor, which never writes, runs at `auto` under `judged`.
+What `judged` is **not** is a sandbox. A classifier reads one command line and cannot see what a script it names will do. The editing tools are not judged; they keep the sibling-lane deny rules `auto` has. So `judged` narrows `full` without approaching `auto`: it trades a vendor prompt nobody would answer for one round trip per command. Only claude-code can host it, because neither codex nor opencode offers a per-call hook. `doctor` refuses `judged` for a plan that dispatches elsewhere, and for a config with no `permission` judge. The coordinator runs at `auto` under `judged`: it acts through the run's API and `exec`, not through a lane's write grant.
 
 ### 17.7 Not done here
 
@@ -1049,7 +1056,7 @@ A resume reuses the branch as it is. Lanes, the integration worktree and depende
 
 `src/config/reload.ts` polls the branch. When new commits touch the config file or the plan's workflow file, it reads both at the new commit, resolves them, and submits the result to `amendRun` as author `config` with the commit as `source`. Before submitting, the proposal is pinned:
 
-- every target of an `operator` or `monitor` amendment in this run keeps the run's value;
+- every target of an `operator`, `coordinator` or (historical) `monitor` amendment in this run keeps the run's value;
 - every started node keeps its definition;
 - `base_branch` never moves.
 
@@ -1069,7 +1076,7 @@ A claude-code `PreToolUse` hook (`guard-hook`) is installed for every spawn in e
 
 - **opencode enforcement.** Its plugin API could host the guard before a call runs.
 - **A plan branch on a remote.** The reload reads the local ref, and a commit pushed from another machine is not fetched.
-- **Retuning `scoped_cmd`.** The monitor's `retune_gate` changes `cmd` only.
+- **An agent's token is the operator's.** Lane agents reach the job's API with the daemon's own token (for `with` and `gate`), so an agent that called the steering or amend endpoints would be taken for the operator. The coordinator has its own token; lane agents do not yet.
 
 ## 19. Plan review
 
