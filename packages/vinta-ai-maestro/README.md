@@ -135,6 +135,13 @@ starve the rest of the run. The worktree lane itself is not leasable through
 this verb: the current phase already holds it, and asking for it again would
 deadlock against itself.
 
+The verb resolves from inside every lane however maestro was installed. The
+daemon writes a launcher for itself into `.vinta-ai-maestro/bin/` on every run
+start — the Node it runs under, its flags, its own entry file — and puts that
+directory first on the agents' `PATH`. A maestro reached through
+`node_modules/.bin` or `npx` is therefore the same `vinta-ai-maestro` the agent's
+shell finds.
+
 ### Running the outer gate
 
 The gates themselves are not commands an agent should type. A phase's
@@ -269,6 +276,49 @@ layer's entry replaces the lower one's whole. Lists replace (`defaults.gates`,
 (`defaults`, `project`, `project.commands`) merge field by field. A plan with no
 `base_branch` takes `project.default_branch`. `defaults.harness` and
 `defaults.pipeline` default to `claude-code` and `standard-phase`.
+
+**`[]` means none, not "the defaults".** A node with `"gates": []` runs no gate
+and passes its gate step vacuously; a plan with `"defaults": { "chores": [] }`
+runs no chore. To take the project's `maestro.defaults.gates` or
+`maestro.defaults.chores`, omit the key. `validate` refuses a phase that resolves
+to no gates, and `doctor` warns naming it, unless the plan sets
+`defaults.allow_ungated_phases: true` — a plan whose phases genuinely have
+nothing to run.
+
+### The files git does not carry — `project.env_files`
+
+A lane is a worktree, and a worktree has only what git tracks. `.env`,
+`.env.docker`, a `settings/local.py` — the gitignored files every hook,
+`manage.py` call and compose stack in the project reads — reach a lane only if
+`project.env_files` names them, and then each lane gets its own *copy* (never a
+link: provisioning appends lane-specific lines to them). Declare them once, here,
+and every plan inherits them:
+
+```yaml
+maestro:
+  project:
+    env_files: [.env, .env.docker, app/settings/local.py]
+```
+
+`doctor` fails a declared file that is missing from the checkout, and warns —
+naming them — when a gitignored file has a tracked example (`.env.example`,
+`local.py.example`) and nothing declares it. A resume gives each existing lane
+the declared files it lacks and leaves the ones it has, so amending the list
+reaches lanes that are already there.
+
+### Git hooks — `project.hooks`
+
+`run` (the default) runs the repository's hooks on commits made in a lane;
+`skip` points the lane at an empty `core.hooksPath`. The integration worktree
+follows the same setting: the merge commits maestro makes there — a resolved
+conflict, a wave — run the hooks under `run` and skip them under `skip`. When a
+hook refuses one of those commits (typically because it imports a file that is
+not in `env_files`), the worktree is **not** left mid-merge. The resolution is
+kept under `refs/vinta-ai-maestro/resolutions/<node>`, the merge is abandoned,
+and the phase whose merge it is asks: *commit* (hooks again, once you have fixed
+what they wanted), *commit --no-verify* (the resolution already passed the
+phases' gates), or *abort merge*. Under `--retry-after`, nobody there means
+*abort*. The retry reuses the kept resolution.
 
 ### Gate types
 
