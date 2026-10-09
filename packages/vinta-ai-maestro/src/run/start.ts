@@ -115,6 +115,12 @@ export interface StartRunOptions {
    */
   readonly logger?: Logger
   /**
+   * Told what the start is doing, one line per step — the plan branch, then
+   * each step of provisioning. The job prints these, which is what a terminal
+   * waiting on `run` sees while lanes are built. Names and counts only.
+   */
+  readonly progress?: (message: string) => void
+  /**
    * Builds the run's coordinator (`monitor/monitor.ts`), which the loop in
    * `coordinator/loop.ts` wakes when something goes wrong.
    *
@@ -203,6 +209,8 @@ export interface PreflightOptions {
   /** Checked by the doctor: a `judged` run needs a harness that can host it (§17.6). */
   readonly permission?: AgentPermission
   readonly systemOne?: SystemOne
+  /** Told which check is running, so a slow `prepare_cmd` is not silence. */
+  readonly progress?: (message: string) => void
 }
 
 export type PreflightResult =
@@ -218,6 +226,7 @@ export async function preflightRun(options: PreflightOptions): Promise<Preflight
     // shared servers reachable and the preflight's is to check that they are;
     // in the other order the check reports the world as it was, and a project
     // that can bring its own stack up still fails to start.
+    if (project.prepareCmd !== undefined) options.progress?.('running prepare_cmd…')
     await prepareInfrastructure(project, repoPath)
   } catch (error) {
     return {
@@ -229,6 +238,7 @@ export async function preflightRun(options: PreflightOptions): Promise<Preflight
     }
   }
 
+  options.progress?.('checking the environment (git, harnesses, docker, disk)…')
   const report = await runDoctor({
     workflow,
     repoPath,
@@ -350,6 +360,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   let planBranch: { readonly branch: string; readonly head: string } | undefined
   if (options.executor === undefined) {
     let ensured
+    options.progress?.(`preparing plan branch ${planBranchName(workflow.id)}…`)
     try {
       ensured = await ensurePlanBranch(repoPath, workflow.id, workflow.base_branch, { resume })
     } catch {
@@ -414,6 +425,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
               ...launcherPath(journal.root),
             },
             ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
+            ...(options.progress === undefined ? {} : { progress: options.progress }),
           })
         : { executor: options.executor, close: () => {} }
   } catch (error) {

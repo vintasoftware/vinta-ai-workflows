@@ -30,6 +30,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `run` now shows what a slow start is doing.** Until
+  now `run` printed "starting in the background…" and nothing else until the
+  run was up, which can take minutes (`prepare_cmd`, preflight, database
+  templates, lane provisioning). The job now prints a timestamped line per
+  step — plan branch, `prepare_cmd`, environment checks, each database
+  template, each lane ready (`3/5`) — and the launching `run` streams the
+  job's log to the terminal as it is written, with a "still starting…" line
+  after 15 s of quiet. Lines carry names and counts only, never command
+  output. A refused start is no longer printed twice.
+
 - **`vinta-ai-maestro`: `createdb_cmd` / `dropdb_cmd` on a Postgres
   `external` database** (`workflow.v1.schema.json`, optional, defaults
   `createdb` / `dropdb`). They replace only the binary name — in the template

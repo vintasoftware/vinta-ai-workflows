@@ -25,9 +25,11 @@
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process'
 import {
   closeSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -168,6 +170,12 @@ export interface LaunchOptions {
   readonly spawn?: JobSpawner
   /** Defaults to 100 ms. */
   readonly pollMs?: number
+  /**
+   * Called with what the job writes to its log while this waits — whole lines
+   * only, in order, this attempt's output and nothing from earlier ones. What
+   * lets `run` show a slow start instead of sitting silent through it.
+   */
+  readonly onOutput?: (text: string) => void
 }
 
 /**
@@ -197,13 +205,47 @@ export async function launchJob(options: LaunchOptions): Promise<LaunchResult> {
   })
 
   const pollMs = options.pollMs ?? 100
+  // Bytes, not characters: `offset` is a file position, and a line is only
+  // handed on once its newline is in, so a multi-byte character split across
+  // two reads is never cut in half.
+  let shown = offset
+  const relay = (final: boolean): void => {
+    if (options.onOutput === undefined) return
+    const fresh = readBytesFrom(logPath, shown)
+    const end = final ? fresh.length : fresh.lastIndexOf(0x0a) + 1
+    if (end <= 0) return
+    shown += end
+    options.onOutput(fresh.subarray(0, end).toString('utf8'))
+  }
   for (;;) {
     const record = readJob(repoPath, runId)
     if (record !== null && record.pid === child.pid && record.state === 'running') {
+      relay(true)
       return { ok: true, record }
     }
-    if (exited) return { ok: false, output: readFrom(logPath, offset) }
+    if (exited) {
+      relay(true)
+      return { ok: false, output: readFrom(logPath, offset) }
+    }
+    relay(false)
     await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
+}
+
+/** What the file holds past `offset`. Reads only that, not the log of every earlier attempt. */
+function readBytesFrom(path: string, offset: number): Buffer {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const size = fstatSync(fd).size
+    if (size <= offset) return Buffer.alloc(0)
+    const buffer = Buffer.alloc(size - offset)
+    readSync(fd, buffer, 0, buffer.length, offset)
+    return buffer
+  } catch {
+    return Buffer.alloc(0)
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
 

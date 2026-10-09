@@ -181,6 +181,8 @@ export interface ProvisionOptions {
   readonly adapters: Readonly<Record<string, HarnessAdapter>>
   readonly agentEnv: Readonly<Record<string, string>>
   readonly perLaneBytes?: number
+  /** Told what provisioning is doing, one line per step. See `PoolOptions.progress`. */
+  readonly progress?: (message: string) => void
   /**
    * Reuse the lane worktrees already on disk instead of creating them.
    *
@@ -232,6 +234,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     project: projectSpec(workflow.project),
     ...(options.adopt === true ? { adopt: true } : {}),
     ...(options.perLaneBytes === undefined ? {} : { perLaneBytes: options.perLaneBytes }),
+    ...(options.progress === undefined ? {} : { progress: options.progress }),
   })
 
   // Read once, as one object, rather than through `pool.integration` twice.

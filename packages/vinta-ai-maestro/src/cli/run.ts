@@ -62,6 +62,8 @@ import { launcherPath } from '../run/start.ts'
 import type { StackStop } from '../lanes/pool.ts'
 
 /** How long a signalled run gets to kill its agents and drain before the process goes anyway. */
+/** How long a starting job may be quiet before `run` says it is still working. */
+const HEARTBEAT_MS = 15_000
 const INTERRUPT_DEADLINE_MS = 15_000
 /** How long the daemon's port and sockets get to close on the way out. */
 const CLOSE_DEADLINE_MS = 5_000
@@ -139,7 +141,11 @@ export interface RunDeps {
    * How a background run is launched. Defaults to `launchJob`, which spawns a
    * detached copy of this CLI; a test hosts the job in its own process.
    */
-  readonly launch?: (args: readonly string[], runId: string) => Promise<LaunchResult>
+  readonly launch?: (
+    args: readonly string[],
+    runId: string,
+    onOutput?: (text: string) => void,
+  ) => Promise<LaunchResult>
   /** How long a cancelled run may take to drain before it is ended anyway. */
   readonly cancelDeadlineMs?: number
 }
@@ -258,14 +264,43 @@ async function launchRun(request: RunRequest): Promise<number> {
   const { runId } = target
   io.out(`vinta-ai-maestro: starting run ${runId} in the background…`)
   const args = jobArgs(target, bind, policy, request.log)
-  const launched = await (deps.launch ?? ((jobArgv, id) =>
-    launchJob({ repoPath: bind.repoPath, runId: id, args: jobArgv })))(args, runId)
+  // The job's output as it is written, so a start that takes minutes — the
+  // project's `prepare_cmd`, the preflight, lane provisioning — shows what it
+  // is doing instead of sitting silent until the run is up.
+  let streamed = false
+  let lastSign = Date.now()
+  const onOutput = (text: string): void => {
+    streamed = true
+    lastSign = Date.now()
+    for (const line of text.split('\n')) if (line !== '') io.out(`  | ${line}`)
+  }
+  // Silence is not the same as a hang, and from here they look identical: say
+  // the job is still alive whenever it has gone quiet for a while.
+  const began = Date.now()
+  const heartbeat = setInterval(() => {
+    if (Date.now() - lastSign < HEARTBEAT_MS) return
+    lastSign = Date.now()
+    io.out(`vinta-ai-maestro: still starting run ${runId} (${Math.round((Date.now() - began) / 1000)}s)…`)
+  }, 1_000)
+  heartbeat.unref()
+  let launched: LaunchResult
+  try {
+    launched = await (deps.launch ?? ((jobArgv, id, out) =>
+      launchJob({ repoPath: bind.repoPath, runId: id, args: jobArgv, ...(out === undefined ? {} : { onOutput: out }) })))(
+      args,
+      runId,
+      onOutput,
+    )
+  } finally {
+    clearInterval(heartbeat)
+  }
 
   if (!launched.ok) {
     // The job's own words — the doctor report, the refusal — because those
     // are what the operator would have seen had they run it in the foreground.
+    // Already on screen when it was streamed.
     const output = launched.output.trimEnd()
-    if (output !== '') io.err(output)
+    if (output !== '' && !streamed) io.err(output)
     io.err(`vinta-ai-maestro: run ${runId} did not start.`)
     return FAILED
   }
@@ -332,8 +367,16 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
   // Skipped for an injected executor, which owns its own lanes and needs none
   // of what this checks.
   const warnings: string[] = []
+  // One line per startup step, each with the time since the job began. This
+  // process's stdout is the job log, which the launching `run` streams to its
+  // terminal — so these lines are all the feedback a start gives, and a silent
+  // minute in `prepare_cmd` or a database migrate is the thing they are for.
+  const began = Date.now()
+  const progress = (message: string): void =>
+    io.out(`vinta-ai-maestro: [${Math.round((Date.now() - began) / 1000)}s] ${message}`)
   if (deps.executor === undefined) {
     const preflight = await preflightRun({
+      progress,
       workflow,
       repoPath: bind.repoPath,
       // The same condition `startRun` gets `resume` from, so the preflight and
@@ -350,6 +393,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       return FAILED
     }
     warnings.push(...preflight.warnings)
+    progress('environment checks passed.')
   }
 
   const journal = resumeJournal ?? openJournal(bind.repoPath)
@@ -456,6 +500,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       permission,
       ...(systemOne === undefined ? {} : { systemOne }),
       logger: log,
+      progress,
       ...(resumeId === undefined ? {} : { resume: true }),
       ...(sources === undefined ? {} : { sources }),
       ...(policy.onFailure === undefined ? {} : { onFailure: policy.onFailure }),

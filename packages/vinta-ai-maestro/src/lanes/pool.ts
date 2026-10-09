@@ -352,6 +352,13 @@ export interface PoolOptions {
   /** Overrides the measured per-lane disk estimate the N× probe uses. */
   readonly perLaneBytes?: number
   /**
+   * Told what provisioning is doing, one line per step. Provisioning is where a
+   * run spends its first minutes — a database template is built and every lane
+   * is cloned from it — and without this the operator sees nothing until it is
+   * over. Names and counts only, never command output.
+   */
+  readonly progress?: (message: string) => void
+  /**
    * Overrides how the project's compose config is read — the same kind of seam
    * as `perLaneBytes`, and for the same reason. The real one shells out to
    * `docker compose config`, so without this the wiring around it (where the
@@ -492,11 +499,16 @@ export class LanePool {
     // space, on a filesystem already holding every worktree it is about to
     // reuse — a refusal that gets stranger the closer the pool is to correct,
     // because the more lanes survived the more disk the probe demands.
-    await pool.#probeDisk(adopting.filter((adopt) => !adopt).length)
+    const creating = adopting.filter((adopt) => !adopt).length
+    options.progress?.(
+      `checking disk space for ${creating} new worktree${creating === 1 ? '' : 's'}…`,
+    )
+    await pool.#probeDisk(creating)
     // `run` has already done this, before its preflight — earlier than a pool
     // can, and the right place for it. Repeated here so a host that drives the
     // pool directly still gets a reachable server before `createdb` needs one;
     // the command is required to be idempotent, so twice costs nothing.
+    if (options.project.prepareCmd !== undefined) options.progress?.('running prepare_cmd…')
     await prepareInfrastructure(options.project, options.repoPath)
     // Built even when every lane is adopted, and the wasted migrate run is the
     // price of a correct one. The template is not only what a lane is cloned
@@ -508,15 +520,23 @@ export class LanePool {
     // drops and recreates the template alone, never a lane's own fork.
     await pool.#buildTemplates()
 
+    let ready = 0
+    options.progress?.(
+      `provisioning ${names.length} worktree${names.length === 1 ? '' : 's'} (${adopting.filter(Boolean).length} adopted)…`,
+    )
+
     // Lanes share nothing but the source repo, so past the template they are
     // provisioned concurrently.
     // The index is the lane's slot, and it is what an `index`-namespaced
     // service is derived from — so the integration worktree takes the one after
     // the last lane rather than sharing a lane's.
     pool.#all = await Promise.all(
-      names.map(([name, kind], index) =>
-        pool.#provisionWorktree(name, kind, index, adopting[index] === true),
-      ),
+      names.map(async ([name, kind], index) => {
+        const lane = await pool.#provisionWorktree(name, kind, index, adopting[index] === true)
+        ready += 1
+        options.progress?.(`${kind === 'lane' ? 'lane' : 'integration worktree'} ${name} ready (${ready}/${names.length})`)
+        return lane
+      }),
     )
     return pool
   }
@@ -805,6 +825,7 @@ export class LanePool {
       const template = planTemplate(role, spec, this.#templatesDir)
       if (!template) continue
 
+      this.#options.progress?.(`building the ${role} database template and migrating it…`)
       await runDatabaseCommand(template.setupCmd, { cwd: repoPath })
       await sh(project.migrateCmd, repoPath, template.env)
     }

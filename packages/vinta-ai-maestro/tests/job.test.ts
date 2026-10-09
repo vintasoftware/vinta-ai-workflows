@@ -8,7 +8,7 @@
  */
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +18,7 @@ import { runOfPath } from '../src/daemon/proxy.ts'
 import {
   cliSpawner,
   isAlive,
+  jobLogPathFor,
   jobPathFor,
   launchJob,
   liveJob,
@@ -106,6 +107,31 @@ describe('launching a job', () => {
     const result = await launched
     expect(polls).toBe(1)
     expect(result).toEqual({ ok: true, record: record({ pid: 4242, state: 'running' }) })
+  })
+
+  it('relays the job log as whole lines while it waits, this attempt only', async () => {
+    const dir = makeTemp()
+    const logPath = jobLogPathFor(dir, 'r1')
+    mkdirSync(dirname(logPath), { recursive: true })
+    writeFileSync(logPath, 'an earlier attempt\n')
+    const seen: string[] = []
+    const launched = launchJob({
+      repoPath: dir,
+      runId: 'r1',
+      args: ['run'],
+      pollMs: 1,
+      spawn: () => fakeChild(4242),
+      onOutput: (text) => seen.push(text),
+    })
+    appendFileSync(logPath, 'running prepare_cmd…\nhalf a li')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    // The unfinished line is held back until its newline arrives.
+    expect(seen.join('')).toBe('running prepare_cmd…\n')
+    appendFileSync(logPath, 'ne\n')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    writeJob(dir, record({ pid: 4242, state: 'running' }))
+    await launched
+    expect(seen.join('')).toBe('running prepare_cmd…\nhalf a line\n')
   })
 
   it('spawns the real CLI detached, and returns what it said when it refuses', async () => {
