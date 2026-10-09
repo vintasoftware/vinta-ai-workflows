@@ -309,7 +309,16 @@ describe('vinta-ai-maestro doctor', () => {
         const dir = makeTemp()
         const path = writeJson(dir, 'workflow.json', {
           ...workflowJson([node('a')]),
-          project: externalDb(server.url),
+          // `dropdb` is probed now, and a silent socket is no Postgres: stubbed.
+          project: {
+            ...externalDb(server.url),
+            databases: {
+              dev: {
+                ...(externalDb(server.url)['databases'] as { dev: object }).dev,
+                dropdb_cmd: `"${process.execPath}" -e "process.exit(0)" --`,
+              },
+            },
+          },
         })
         const io = recorder()
 

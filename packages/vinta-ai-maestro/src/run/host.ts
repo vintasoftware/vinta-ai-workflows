@@ -39,6 +39,7 @@ import type { StoredEvent } from '../journal/events.ts'
 import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { Journal } from '../journal/journal.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
+import { DatabaseCommandError } from '../lanes/db-command.ts'
 import { LaneAdoptError, LaneEnvFileError, LanePool, LaneSetupError, type StackStop } from '../lanes/pool.ts'
 import { errorKind, sanitize } from '../log/index.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
@@ -573,6 +574,7 @@ export function refusal(error: unknown, workflow: Workflow, laneRoot: string): s
   // the pool buries the one decision the operator has to make.
   if (
     error instanceof LaneSetupError ||
+    error instanceof DatabaseCommandError ||
     error instanceof LaneEnvFileError ||
     error instanceof LaneAdoptError
   ) {

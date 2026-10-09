@@ -584,6 +584,26 @@ const PostgresDatabaseSchema = z.strictObject({
     .min(1)
     .describe('The server, without the database path segment, e.g. `postgres://localhost:5432`.'),
   connection_url_var: z.string().min(1),
+  createdb_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Replaces the `createdb` binary name (default `createdb`) in every command that creates a ' +
+        'lane database. A trusted command prefix, unquoted, like `migrate_cmd`; the `-h`/`-p`/`-U` ' +
+        'flags derived from `server_url` still follow it. Only meaningful for `external`. For a ' +
+        'Postgres in a container whose password the host cannot supply: ' +
+        '`docker compose exec -T db createdb` — the official image trusts connections made from ' +
+        'inside the container, so no password is needed there.',
+    ),
+  dropdb_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Replaces the `dropdb` binary name (default `dropdb`), exactly as `createdb_cmd` does for ' +
+        '`createdb`. Set both together: `docker compose exec -T db dropdb`.',
+    ),
 })
 
 export const DatabaseSchema = z

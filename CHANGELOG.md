@@ -30,6 +30,22 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `createdb_cmd` / `dropdb_cmd` on a Postgres
+  `external` database** (`workflow.v1.schema.json`, optional, defaults
+  `createdb` / `dropdb`). They replace only the binary name — in the template
+  setup, the per-lane clone and the reset — so a project whose Postgres is a
+  container with a password the host cannot supply can set
+  `docker compose exec -T db createdb`. `-h/-p/-U` from `server_url` still
+  follow. Existing workflows are unchanged.
+
+- **`vinta-ai-maestro`: a database password prompt no longer hangs `run`.**
+  Template, clone and reset commands now run with stdin closed, no controlling
+  terminal and a two-minute timeout that ends the whole process tree; a prompt
+  becomes a failed run carrying the command's stderr instead of a job stuck at
+  `starting`. `doctor` now runs the effective `dropdb_cmd --if-exists` against
+  a name that cannot exist and `FAIL`s, naming the missing password, when it
+  cannot authenticate — a server that merely answers used to pass.
+
 - **New optional foundation skill: `interview-ui`** — run decision-heavy
   interviews as a full-screen browser form instead of a chat exchange. One
   decision per screen with the context the agent already knows, Markdown +

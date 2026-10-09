@@ -453,6 +453,48 @@ own is a normal member of `{changed_files}`. `vitest related` and
 only when it has a placeholder. A fixed `pnpm test:patient` is a line for an
 agent to interpret, and the daemon has no agent to do that.
 
+### Lane databases on a Postgres you already run
+
+A `delivery: external` Postgres database is forked on the server `server_url`
+names: one `<name>_wt_template`, built once, then a `createdb -T` clone per lane
+and a `dropdb` + `createdb -T` reset when a lane is recycled. Those are the
+host's own `createdb` and `dropdb`, given `-h`, `-p` and `-U` from `server_url`.
+The password is never put on a command line — `PGPASSWORD` or `~/.pgpass` has to
+supply it.
+
+When the server is a container whose password the host cannot supply, point the
+commands at the container instead:
+
+```yaml
+maestro:
+  project:
+    databases:
+      dev:
+        engine: postgres
+        delivery: external
+        name: app
+        server_url: postgres://app@localhost:5432
+        connection_url_var: DATABASE_URL
+        createdb_cmd: docker compose exec -T db createdb
+        dropdb_cmd: docker compose exec -T db dropdb
+```
+
+`createdb_cmd` and `dropdb_cmd` replace only the binary name, in the template
+setup, the per-lane clone and the reset alike; the `-h`/`-p`/`-U` flags still
+follow, and are valid inside the container. Both default to `createdb` /
+`dropdb`. Each is a trusted command prefix, unquoted, like `migrate_cmd` — it is
+written by the project, not by the plan. The official `postgres` image trusts
+connections made from *inside* the container, so no password is needed there.
+
+These commands cannot hang a run. Each runs with stdin closed, in its own
+process group (so there is no terminal for a client to prompt on) and with a
+two-minute timeout that ends the whole process tree; a timeout or a non-zero
+exit fails the run at once with the command's own stderr. `doctor` runs the
+effective `dropdb_cmd --if-exists` against a name that cannot exist
+(`<name>_wt_doctor_probe`) and reports a `FAIL` when it fails or does not return
+within 15 seconds — usually because no password is available. It probes only a
+server that answers; a dead port is reported by the server check.
+
 ## The plan branch — changing a run while it runs
 
 Every run works on its own branch, `plan/<workflow-id>/base`, cut from

@@ -55,6 +55,7 @@ import {
   planDatabase,
   planTemplate,
 } from './database.ts'
+import { runDatabaseCommand } from './db-command.ts'
 import { DiskProbeError, measureBytes, probePoolDisk } from './disk.ts'
 import { planService, type ServicePlan, type ServiceSpec } from './services.ts'
 import { readSummary, resetPlan, writeSummary, type WorktreeSummary } from './summary.ts'
@@ -72,11 +73,14 @@ const sh = async (
   env: Readonly<Record<string, string>>,
 ): Promise<void> => {
   const shell = shellInvocation(command)
-  await run(shell.file, [...shell.args], {
+  const pending = run(shell.file, [...shell.args], {
     cwd,
     env: { ...process.env, ...env },
     ...spawnOptionsFor(shell),
   })
+  // The daemon is detached: nothing can type into a child that waits on stdin.
+  pending.child.stdin?.end()
+  await pending
 }
 
 /** Who the rescue commit is by. Never the agent: it did not write this commit. */
@@ -593,7 +597,9 @@ export class LanePool {
       // hook runs again, which is why its contract says idempotent.
       await this.#copyEnvFiles(name, lane.path)
       try {
-        for (const command of plan.commands) await sh(command, lane.path, lane.env)
+        for (const command of plan.commands) {
+          await runDatabaseCommand(command, { cwd: lane.path, env: lane.env })
+        }
         // Same stage, because it is the same kind of thing: state the previous
         // phase left behind that the next one must not read.
         for (const service of lane.services) {
@@ -799,7 +805,7 @@ export class LanePool {
       const template = planTemplate(role, spec, this.#templatesDir)
       if (!template) continue
 
-      await sh(template.setupCmd, repoPath, {})
+      await runDatabaseCommand(template.setupCmd, { cwd: repoPath })
       await sh(project.migrateCmd, repoPath, template.env)
     }
   }
@@ -863,7 +869,7 @@ export class LanePool {
         lanePath: path,
         templatesDir: this.#templatesDir,
       })
-      if (plan.cloneCmd && !adopt) await sh(plan.cloneCmd, path, {})
+      if (plan.cloneCmd && !adopt) await runDatabaseCommand(plan.cloneCmd, { cwd: path })
       databases.push(plan)
     }
 

@@ -17,6 +17,7 @@
  */
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { createServer } from 'node:net'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { openJournal } from '../src/journal/journal.ts'
 import { tmpdir } from 'node:os'
@@ -905,6 +906,62 @@ describe('leftovers of finished runs', () => {
       expect(await checkLeftovers(repo, { listStacks: async () => ['x'] })).toEqual([])
     } finally {
       rmSync(repo, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('doctor exercises the database commands', () => {
+  const listening = async () => {
+    const server = createServer((socket) => socket.destroy())
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    return { server, port: typeof address === 'object' && address ? address.port : 0 }
+  }
+
+  const withDatabase = (port: number, dropdbCmd: string): DoctorOptions => ({
+    ...greenOptions(),
+    databaseProbeTimeoutMs: 400,
+    project: {
+      migrateCmd: 'true',
+      databases: {
+        dev: {
+          engine: 'postgres',
+          delivery: 'external',
+          name: 'app',
+          serverUrl: `postgres://app@127.0.0.1:${port}`,
+          connectionUrlVar: 'DATABASE_URL',
+          dropdbCmd,
+        },
+      },
+    },
+  })
+  // A stub `dropdb`: the real one needs a server, and the subject here is what
+  // the check does when the command hangs or succeeds. The trailing `--` keeps
+  // node from reading the appended `-h` as its own `--help`.
+  const stub = (body: string): string => `"${process.execPath}" -e "${body}" --`
+
+  it('fails, naming the missing password, when dropdb hangs on a prompt', async () => {
+    const { server, port } = await listening()
+    try {
+      const report = await runDoctor(withDatabase(port, stub('setTimeout(() => {}, 60000)')))
+      const check = find(report.checks, 'database-commands:dev')
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain("password")
+      expect(check.remedy).toContain('PGPASSWORD')
+      expect(check.remedy).toContain('dropdb_cmd')
+      expect(report.ok).toBe(false)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('passes when the dropdb command succeeds', async () => {
+    const { server, port } = await listening()
+    try {
+      const report = await runDoctor(withDatabase(port, stub('process.exit(0)')))
+      expect(find(report.checks, 'database-commands:dev').status).toBe('pass')
+    } finally {
+      server.close()
     }
   })
 })

@@ -54,6 +54,13 @@ export interface PostgresSpec {
   /** Server the database lives on, without the database path segment. */
   readonly serverUrl: string
   readonly connectionUrlVar: string
+  /**
+   * What stands in for the `createdb` binary name — a trusted command prefix,
+   * unquoted, like `migrate_cmd`. `serverFlags` still follows it.
+   */
+  readonly createdbCmd?: string
+  /** The same for `dropdb`. */
+  readonly dropdbCmd?: string
 }
 
 export type DatabaseSpec = SqliteSpec | PostgresSpec
@@ -93,6 +100,10 @@ export interface LaneDbContext {
 
 /** Quote for whichever shell these commands will reach on this machine. */
 const sq = (value: string, platform?: Platform): string => shellQuote(value, platform)
+
+/** The `createdb` / `dropdb` a Postgres spec runs, defaulting to the host's own. */
+export const createdbOf = (spec: PostgresSpec): string => spec.createdbCmd ?? 'createdb'
+export const dropdbOf = (spec: PostgresSpec): string => spec.dropdbCmd ?? 'dropdb'
 
 /** Lane names are already kebab-case; database identifiers cannot hold dashes. */
 const dbSuffix = (laneName: string): string => laneName.replaceAll('-', '_')
@@ -172,7 +183,9 @@ export function planTemplate(
   return {
     role,
     name,
-    setupCmd: `dropdb ${server}--if-exists ${sq(name, platform)} && createdb ${server}${sq(name, platform)}`,
+    setupCmd:
+      `${dropdbOf(spec)} ${server}--if-exists ${sq(name, platform)} && ` +
+      `${createdbOf(spec)} ${server}${sq(name, platform)}`,
     env: { [spec.connectionUrlVar]: `${spec.serverUrl}/${name}` },
   }
 }
@@ -231,9 +244,9 @@ export function planDatabase(
     connectionUrlVar: spec.connectionUrlVar,
     // application_name makes a runaway lane greppable in pg_stat_activity.
     connectionUrl: `${spec.serverUrl}/${forkedName}?application_name=wt-${ctx.laneName}`,
-    cloneCmd: `createdb ${server}-T ${sq(template, platform)} ${sq(forkedName, platform)}`,
+    cloneCmd: `${createdbOf(spec)} ${server}-T ${sq(template, platform)} ${sq(forkedName, platform)}`,
     resetCmd:
-      `dropdb ${server}--if-exists ${sq(forkedName, platform)} && ` +
-      `createdb ${server}-T ${sq(template, platform)} ${sq(forkedName, platform)}`,
+      `${dropdbOf(spec)} ${server}--if-exists ${sq(forkedName, platform)} && ` +
+      `${createdbOf(spec)} ${server}-T ${sq(template, platform)} ${sq(forkedName, platform)}`,
   }
 }
