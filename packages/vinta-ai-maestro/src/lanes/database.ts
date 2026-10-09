@@ -23,6 +23,7 @@
  * None of them is a git path — those are posix on every platform and are built
  * elsewhere.
  */
+import { createHash } from 'node:crypto'
 import {
   type Platform,
   copyFileCommand,
@@ -108,6 +109,22 @@ export const dropdbOf = (spec: PostgresSpec): string => spec.dropdbCmd ?? 'dropd
 /** Lane names are already kebab-case; database identifiers cannot hold dashes. */
 const dbSuffix = (laneName: string): string => laneName.replaceAll('-', '_')
 
+/** Postgres truncates identifiers past 63 bytes, which would make distinct lanes collide. */
+const PG_IDENTIFIER_MAX = 63
+const HASH_LENGTH = 8
+
+/**
+ * `${base}${tail}` when it fits a Postgres identifier; otherwise the base is
+ * cut and a short hash of the full untruncated name keeps it unique and stable.
+ */
+export const fitDbName = (base: string, tail: string): string => {
+  const full = `${base}${tail}`
+  if (full.length <= PG_IDENTIFIER_MAX) return full
+  const hash = createHash('sha256').update(full).digest('hex').slice(0, HASH_LENGTH)
+  const room = PG_IDENTIFIER_MAX - HASH_LENGTH - 1
+  return `${full.slice(0, room)}_${hash}`
+}
+
 /**
  * The `-h`, `-p` and `-U` a `createdb` / `dropdb` needs to reach the server
  * `server_url` names, or nothing when the URL names nothing.
@@ -177,7 +194,7 @@ export function planTemplate(
   }
   if (spec.delivery === 'compose') return null
 
-  const name = `${spec.name}_wt_template`
+  const name = fitDbName(spec.name, '_wt_template')
   const server = serverFlags(spec.serverUrl, platform)
   // `&&` means the same thing in both shells; only the quoting differs.
   return {
@@ -233,8 +250,8 @@ export function planDatabase(
     }
   }
 
-  const template = `${spec.name}_wt_template`
-  const forkedName = `${spec.name}_wt_${dbSuffix(ctx.laneName)}`
+  const template = fitDbName(spec.name, '_wt_template')
+  const forkedName = fitDbName(spec.name, `_wt_${dbSuffix(ctx.laneName)}`)
   const server = serverFlags(spec.serverUrl, platform)
   return {
     role,

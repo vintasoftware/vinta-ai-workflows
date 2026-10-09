@@ -521,6 +521,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: lane database names stay within Postgres's 63-character
+  identifier limit.** A forked lane database or template whose
+  `<name>_wt_<lane>` form exceeded 63 characters was silently truncated by
+  Postgres, so lanes could collide. Such names are now cut and end in a short
+  hash of the full name (stable and unique per lane); names that already fit
+  are unchanged.
+
 - **`create-spec` offers a browser surface for its Step 0 interview.** When
   `ai-tools/skills/interview-ui/` exists, the skill asks once whether to make
   decisions in the browser or in chat. In browser mode the question bank,

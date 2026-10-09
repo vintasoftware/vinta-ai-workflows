@@ -1249,6 +1249,17 @@ describe('database strategy selection', () => {
     templatesDir: '/pool/.templates',
   })
 
+  it('keeps lane database names within the 63-character Postgres limit, unique per lane', () => {
+    const long = { ...external, name: 'a_rather_long_project_database_name_for_testing' }
+    const one = planDatabase('dev', long, ctx('run-20260101-abcdef-lane-1')).forkedName
+    const two = planDatabase('dev', long, ctx('run-20260101-abcdef-lane-2')).forkedName
+    expect(one.length).toBeLessThanOrEqual(63)
+    expect(two.length).toBeLessThanOrEqual(63)
+    expect(one).not.toBe(two)
+    expect(planDatabase('dev', long, ctx('run-20260101-abcdef-lane-1')).forkedName).toBe(one)
+    expect(planTemplate('dev', long, '/pool/.templates')?.name.length).toBeLessThanOrEqual(63)
+  })
+
   it('clones every external lane database from one shared template', () => {
     const template = planTemplate('dev', external, '/pool/.templates')
     expect(template?.name).toBe('app_wt_template')
