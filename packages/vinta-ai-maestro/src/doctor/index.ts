@@ -35,6 +35,8 @@ import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import { measureBytes, probePoolDisk } from '../lanes/disk.ts'
+import { createdbOf, dropdbOf, serverFlags } from '../lanes/database.ts'
+import { DatabaseCommandError, runDatabaseCommand } from '../lanes/db-command.ts'
 import type { ProjectSpec } from '../lanes/pool.ts'
 import { readSummary, resetPlan } from '../lanes/summary.ts'
 import { commandInvocation, spawnOptionsFor } from '../platform/platform.ts'
@@ -85,6 +87,8 @@ export interface DoctorOptions {
   readonly summaryDir?: string
   /** Overrides the measured per-lane disk estimate. */
   readonly perLaneBytes?: number
+  /** How long the database-command probe may take. Defaults to 15 seconds. */
+  readonly databaseProbeTimeoutMs?: number
   /** Present when the project's databases are known; decides whether compose is needed. */
   readonly project?: ProjectSpec
   /**
@@ -400,6 +404,58 @@ async function checkServers(project: ProjectSpec | undefined): Promise<CheckResu
           ),
     ),
   )
+}
+
+/**
+ * Whether the commands that create lane databases can authenticate.
+ *
+ * `checkServers` only proves something is listening, and a password challenge
+ * is an answer: a run whose `dropdb` had no password passed it, then waited on
+ * a prompt nobody could answer. This runs the effective `dropdb_cmd` itself —
+ * `--if-exists` against a name that cannot exist, so it changes nothing — with
+ * stdin closed and a short timeout. A server that does not answer is left to
+ * `checkServers`; reporting it twice would blame a password for a dead port.
+ */
+async function checkDatabaseCommands(
+  project: ProjectSpec | undefined,
+  timeoutMs: number,
+  repoPath: string,
+): Promise<CheckResult[]> {
+  if (project === undefined) return []
+  const probes: Promise<CheckResult>[] = []
+  for (const [role, db] of Object.entries(project.databases)) {
+    if (db?.engine !== 'postgres' || db.delivery !== 'external') continue
+    const check = `database-commands:${role}`
+    probes.push(
+      (async () => {
+        if (!(await reachable(db.serverUrl))) {
+          return pass(check, `database ${role}: ${dropdbOf(db)} not probed — the server is not up`)
+        }
+        const probe = `${db.name}_wt_doctor_probe`
+        const command = `${dropdbOf(db)} ${serverFlags(db.serverUrl)}--if-exists ${probe}`
+        try {
+          await runDatabaseCommand(command, { cwd: repoPath, timeoutMs })
+          return pass(check, `database ${role}: ${dropdbOf(db)} authenticates`)
+        } catch (error) {
+          const detail =
+            error instanceof DatabaseCommandError
+              ? error.timedOut
+                ? 'timed out'
+                : (error.detail.split('\n').pop() ?? 'failed')
+              : 'failed'
+          return flag(
+            check,
+            `database ${role}: \`${command}\` ${detail} — most likely no password is available`,
+            'fail',
+            'set PGPASSWORD or ~/.pgpass, or set database `dropdb_cmd` / `createdb_cmd` ' +
+              `(now \`${dropdbOf(db)}\` / \`${createdbOf(db)}\`) to a command that needs none, ` +
+              'e.g. `docker compose exec -T db dropdb`',
+          )
+        }
+      })(),
+    )
+  }
+  return await Promise.all(probes)
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,7 +1136,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
         : await adoptedLaneBranches(gitBin, options.poolRoot, options.resumeRunId),
     )
 
-  const [harnesses, git, worktrees, compose, servers, disk, lanes, briefs, branches, envFiles] =
+  const [harnesses, git, worktrees, compose, servers, dbCommands, disk, lanes, briefs, branches, envFiles] =
     await Promise.all([
       Promise.all(
         referencedHarnesses(workflow).map((id) => checkHarness(id, options.bins?.harness?.[id])),
@@ -1089,6 +1145,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       checkWorktrees(gitBin, repoPath),
       checkCompose(dockerBin, needsCompose(options.project)),
       checkServers(options.project),
+      checkDatabaseCommands(options.project, options.databaseProbeTimeoutMs ?? 15_000, repoPath),
       checkDisk(options, laneCount),
       checkLaneSummaries(summaryDir),
       checkBriefs(gitBin, repoPath, workflow),
@@ -1107,6 +1164,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     worktrees,
     compose,
     ...servers,
+    ...dbCommands,
     disk,
     ...checkGates(workflow),
     ...checkComposeTty(workflow),

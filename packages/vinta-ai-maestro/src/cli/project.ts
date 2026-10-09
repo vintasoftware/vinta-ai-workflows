@@ -72,5 +72,7 @@ function databaseSpec(database: ProjectDatabase): DatabaseSpec {
     name: database.name,
     serverUrl: database.server_url,
     connectionUrlVar: database.connection_url_var,
+    ...(database.createdb_cmd === undefined ? {} : { createdbCmd: database.createdb_cmd }),
+    ...(database.dropdb_cmd === undefined ? {} : { dropdbCmd: database.dropdb_cmd }),
   }
 }
