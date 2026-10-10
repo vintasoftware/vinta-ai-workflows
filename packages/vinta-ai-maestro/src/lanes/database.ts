@@ -109,8 +109,13 @@ export const dropdbOf = (spec: PostgresSpec): string => spec.dropdbCmd ?? 'dropd
 /** Lane names are already kebab-case; database identifiers cannot hold dashes. */
 const dbSuffix = (laneName: string): string => laneName.replaceAll('-', '_')
 
-/** Postgres truncates identifiers past 63 bytes, which would make distinct lanes collide. */
-const PG_IDENTIFIER_MAX = 63
+/**
+ * Postgres truncates identifiers past 63 bytes, which would make distinct lanes
+ * collide. Test runners derive further names from ours — Django prepends
+ * `test_`, pytest-xdist appends `_gw<N>`, and projects add their own affixes —
+ * so ours stays well short of the limit instead of just under it.
+ */
+const PG_IDENTIFIER_MAX = 40
 const HASH_LENGTH = 8
 
 /**

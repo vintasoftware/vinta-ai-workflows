@@ -523,11 +523,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`vinta-ai-maestro`: lane database names stay within Postgres's 63-character
-  identifier limit.** A forked lane database or template whose
-  `<name>_wt_<lane>` form exceeded 63 characters was silently truncated by
-  Postgres, so lanes could collide. Such names are now cut and end in a short
-  hash of the full name (stable and unique per lane); names that already fit
-  are unchanged.
+  identifier limit, with room for test-runner affixes.** A forked lane database
+  or template whose `<name>_wt_<lane>` form was too long was silently truncated
+  by Postgres, so lanes could collide — and Django's `test_` prefix plus
+  pytest-xdist's `_gw<N>` suffix push a name that is itself under 63 over it.
+  Names longer than 40 characters are now cut and end in a short hash of the
+  full name (stable and unique per lane); shorter names are unchanged.
 
 - **`create-spec` offers a browser surface for its Step 0 interview.** When
   `ai-tools/skills/interview-ui/` exists, the skill asks once whether to make
