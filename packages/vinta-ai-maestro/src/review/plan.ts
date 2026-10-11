@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { choresFor } from '../chores.ts'
 import { loadProjectConfig, PROJECT_CONFIG_FILE, type ProjectConfig } from '../config/project-config.ts'
 import { resolveDocument, resolveWorkflow } from '../config/resolve.ts'
+import { harnessCapabilities } from '../daemon/harnesses.ts'
 import { computeWaves, findCycle } from '../graph.ts'
 import { composeSpawnPrompt, PromptError, resolveBrief, type PromptJournal } from '../prompts/prompts.ts'
 import { WorkflowSchema, type Workflow } from '../types.ts'
@@ -294,6 +295,10 @@ function materials(repoDir: string, workflow: Workflow): Record<string, PhaseMat
     }
     const prompts: Partial<Record<PromptRole, string>> = {}
     const chores: Record<string, string> = {}
+    // The node's own harness. A crew member on another one would be told to
+    // wait differently; the roster is the run's, not the plan's.
+    const harness = node.harness ?? workflow.defaults.harness
+    const backgroundWork = harnessCapabilities(harness)?.backgroundWork === true
     let error: string | null = null
     try {
       for (const role of PROMPT_ROLES) {
@@ -305,6 +310,8 @@ function materials(repoDir: string, workflow: Workflow): Record<string, PhaseMat
           journal: EMPTY_JOURNAL,
           workspace: repoDir,
           facts: {},
+          backgroundWork,
+          harness,
         })
       }
       for (const { id, chore } of choresFor(workflow, node)) {
@@ -317,6 +324,8 @@ function materials(repoDir: string, workflow: Workflow): Record<string, PhaseMat
           workspace: repoDir,
           facts: {},
           chore: { id, chore },
+          backgroundWork,
+          harness,
         })
       }
     } catch (thrown) {

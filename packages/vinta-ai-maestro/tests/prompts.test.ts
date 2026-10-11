@@ -194,6 +194,10 @@ function compose(
     readonly reorientation?: Reorientation
     /** The chore a `chore`-template turn is running. */
     readonly chore?: ChorePrompt
+    /** The harness keeps a session alive for background work. */
+    readonly backgroundWork?: boolean
+    /** The harness the turn runs on, for its tool names. */
+    readonly harness?: string
   } = {},
 ): string {
   const workflow = options.workflow ?? diamond()
@@ -213,6 +217,8 @@ function compose(
     ...(options.continuation === undefined ? {} : { continuation: options.continuation }),
     ...(options.reorientation === undefined ? {} : { reorientation: options.reorientation }),
     ...(options.chore === undefined ? {} : { chore: options.chore }),
+    ...(options.backgroundWork === undefined ? {} : { backgroundWork: options.backgroundWork }),
+    ...(options.harness === undefined ? {} : { harness: options.harness }),
   })
 }
 
@@ -388,6 +394,69 @@ describe('background work', () => {
         'Run everything in the foreground',
       )
     }
+  })
+
+  /**
+   * Every turn is the same agent in the same session, so how it waits is the
+   * harness's to decide, not the role's. Where the session outlives a turn that
+   * left work running, ending the turn is the wait.
+   */
+  describe('on a harness that keeps the session alive for it', () => {
+    const turns = [
+      ['implementer', 'implementer', {}],
+      ['fixer', 'fixer', {}],
+      ['polish chore', 'chore', { chore: chore({ prompt: 'Tidy up.' }) }],
+    ] as const
+
+    it.each(turns)('lets the %s background a long command and wait by ending its turn', (_, role, extra) => {
+      for (const continuation of [false, true]) {
+        const prompt = compose('api-layer', role, {
+          ...extra,
+          continuation,
+          backgroundWork: true,
+          harness: 'claude-code',
+        })
+
+        expect(prompt).toContain('## Waiting on work you started')
+        expect(prompt).toContain('run_in_background')
+        expect(prompt).toMatch(/end your turn: this session stays open/)
+        expect(prompt).toMatch(/Do\s+not sleep, poll or start a monitor/)
+        // Something that never ends would hold the session open for it.
+        expect(prompt).toContain('a dev server, a watcher')
+        expect(prompt).toContain('Write the report only once nothing you started is still running.')
+        expect(prompt).not.toContain('Run everything in the foreground')
+        expect(prompt).not.toContain('This session is headless')
+        // The verdict rule is the review's alone.
+        expect(prompt).not.toContain('VERDICT')
+      }
+    })
+
+    it.each(turns)('names codex’s own way of backgrounding a command to the %s', (_, role, extra) => {
+      const prompt = compose('api-layer', role, { ...extra, backgroundWork: true, harness: 'codex' })
+
+      expect(prompt).toContain('`exec_command` with a short `yield_time_ms`')
+      expect(prompt).not.toContain('run_in_background')
+    })
+
+    /**
+     * opencode's background work is a background `task` and nothing else, and
+     * these turns may not spawn one. A command sent to the background with `&`
+     * there wakes nobody, so the foreground rule is the true one.
+     */
+    it.each(turns)('keeps the %s in the foreground on opencode, which has no background shell', (_, role, extra) => {
+      const prompt = compose('api-layer', role, { ...extra, backgroundWork: true, harness: 'opencode' })
+
+      expect(prompt).toContain('Run everything in the foreground')
+      expect(prompt).not.toContain('## Waiting on work you started')
+    })
+
+    it('describes rather than guesses on a harness it has no words for', () => {
+      const prompt = compose('api-layer', 'implementer', { backgroundWork: true, harness: 'another' })
+
+      expect(prompt).toContain('your harness’s way of running a command in the background')
+      expect(prompt).not.toContain('run_in_background')
+      expect(prompt).not.toContain('exec_command')
+    })
   })
 })
 
@@ -1344,8 +1413,110 @@ describe('the review chore prompt', () => {
   ] as const
 
   const review = (
-    options: { readonly continuation?: boolean; readonly workflow?: Workflow; readonly chore?: ChorePrompt } = {},
-  ): string => compose('api-layer', 'chore', { rows, chore: reviewChore(), ...options })
+    options: {
+      readonly continuation?: boolean
+      readonly workflow?: Workflow
+      readonly chore?: ChorePrompt
+      readonly backgroundWork?: boolean
+      readonly harness?: string
+    } = {},
+  ): string =>
+    compose('api-layer', 'chore', { rows, chore: reviewChore(), harness: 'claude-code', ...options })
+
+  /**
+   * A resumed reviewer answers in the background whatever the prompt says. On a
+   * harness that ended with the turn, the loop ended every round "waiting on the
+   * reviewer" with no verdict, and each continuation started a fresh reviewer
+   * that met the same end. On one that holds the session open, ending the turn
+   * is how the loop waits.
+   */
+  describe('on a harness that keeps the session alive for background work', () => {
+    it('waits by ending the turn, never by polling, and never states a verdict while waiting', () => {
+      for (const continuation of [false, true]) {
+        const prompt = review({ continuation, backgroundWork: true })
+
+        expect(prompt).toContain('## Waiting on work you started')
+        expect(prompt).toContain('The reviewer’s later passes and the background gates run while you wait.')
+        expect(prompt).toMatch(/end your turn: this session stays open/)
+        expect(prompt).toMatch(/Do\s+not sleep, poll or start a monitor/)
+        expect(prompt).toContain('Never put a VERDICT line in it.')
+        // The rule it replaces would contradict it, so it is gone.
+        expect(prompt).not.toContain('Run everything in the foreground')
+        expect(prompt).not.toContain('This session is headless')
+      }
+    })
+
+    it('spawns the reviewer in the foreground once and resumes it with a message', () => {
+      const prompt = review({ backgroundWork: true })
+
+      expect(prompt).toContain('the Agent tool, in the foreground, so its first pass comes back')
+      expect(prompt).toContain('`SendMessage` to it')
+      expect(prompt).toContain('Exactly one reviewer sub-agent for this whole turn')
+    })
+
+    it('names codex’s sub-agent tools and its background command', () => {
+      const prompt = review({ backgroundWork: true, harness: 'codex' })
+
+      expect(prompt).toContain('`spawn_agent`, then `wait` on it')
+      expect(prompt).toContain('`send_input` to it')
+      expect(prompt).toContain('`exec_command` with a short `yield_time_ms`')
+      expect(prompt).toContain('start both of these at once')
+      expect(prompt).not.toContain('SendMessage')
+      expect(prompt).not.toContain('run_in_background')
+    })
+
+    /**
+     * No background shell on opencode, so the halves swap: the reviewer goes to
+     * the background and the gates run in the foreground beside it. The round
+     * still costs the longer of the two.
+     */
+    it('on opencode, backgrounds the reviewer and runs the gates in the foreground beside it', () => {
+      for (const continuation of [false, true]) {
+        const prompt = review({ continuation, backgroundWork: true, harness: 'opencode' })
+
+        expect(prompt).toContain('the `task` tool, in the foreground, so its first pass comes back')
+        expect(prompt).toContain('the `task` tool with its `task_id` and `background: true`')
+        expect(prompt).toContain('Then send the round to the reviewer, which returns at once')
+        expect(prompt).toContain('`vinta-ai-maestro gate unit`')
+        expect(prompt).not.toContain('start both of these at once')
+        expect(prompt).toContain('The reviewer’s later passes run while you wait.')
+        expect(prompt).toContain('this harness has no background shell')
+        expect(prompt).not.toContain('Run everything in the foreground')
+        expect(prompt).toContain('Never put a VERDICT line in it.')
+      }
+    })
+
+    it('runs a round’s gates in the background beside the reviewer’s next pass', () => {
+      for (const continuation of [false, true]) {
+        const prompt = review({ continuation, backgroundWork: true })
+
+        expect(prompt).toContain('then commit the round as one commit whose message names the findings')
+        expect(prompt).toContain('start both of these at once')
+        expect(prompt).toContain('the gates, as one background command')
+        expect(prompt).toContain('vinta-ai-maestro gate unit')
+        expect(prompt).toContain('- the round, sent to the reviewer.')
+        // An approval alone does not end the loop.
+        expect(prompt).toContain('approval of a commit the gates passed')
+      }
+    })
+
+
+    it('still ends on the VERDICT protocol', () => {
+      const prompt = review({ backgroundWork: true })
+      const last = prompt.slice(prompt.lastIndexOf('\n## ') + 1)
+
+      expect(last.startsWith('## Required output')).toBe(true)
+    })
+  })
+
+  it('keeps the review in the foreground on a harness that ends with the turn', () => {
+    const prompt = review()
+
+    expect(prompt).toContain('Run everything in the foreground')
+    expect(prompt).not.toContain('## Waiting on work you started')
+    expect(prompt).not.toContain('SendMessage')
+    expect(prompt).not.toContain('start both of these at once')
+  })
 
   it('opens cold as the phase’s review, with the brief as the stated requirement', () => {
     const prompt = review()

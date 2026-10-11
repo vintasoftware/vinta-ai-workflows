@@ -2602,6 +2602,10 @@ export class Scheduler {
         workspace: existsSync(cwd) ? cwd : null,
         facts: invocation.context,
         continuation: plan.continuation,
+        // Whether a turn that waits can end and be woken, which decides how
+        // every turn is told to wait on work it started.
+        backgroundWork: adapter.capabilities.backgroundWork,
+        harness: adapter.id,
         // The instruction this turn exists to carry out, on a chore turn and
         // nowhere else. Unlike everything above it, it is passed on a
         // continuation too: the session holds the phase, never the chore.
