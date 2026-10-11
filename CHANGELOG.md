@@ -798,6 +798,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Maestro: an amended gate re-runs instead of returning its old result.**
+  The gate cache matched only the gate's command, so changing a gate's
+  `timeout_s` (the monitor's `retime_gate`) or its `requires` partway through
+  a run reused the result from the old settings on an unchanged tree. The
+  cache now matches every setting that affects the run. Edits to
+  `description` or `tuning` still reuse the result, and so does a
+  `scoped_cmd` edit for runs that use the full `cmd`. Existing
+  `gate-cache.db` entries are dropped once, at the first start after
+  upgrading.
 - **Maestro: PRs say how the plan lands.** Every phase and integration PR is
   marked as a review unit that lands through the plan PR, and the plan PR says
   to merge it alone; it used to offer two landing paths, and a 36-PR landing

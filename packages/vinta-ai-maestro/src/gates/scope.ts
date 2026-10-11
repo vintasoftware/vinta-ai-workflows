@@ -10,9 +10,10 @@
  * them.
  *
  * The result is an ordinary `CommandGate` whose `cmd` is the line that runs.
- * The runner and the cache read only `cmd`, so the cache keys on the rendered
- * command — the same scoped line over the same tree is a hit, and a different
- * set of changed files is a different line and a miss, which is correct.
+ * The runner reads only `cmd`, and the cache keys on it rather than on
+ * `scoped_cmd` (`gateConfigKey`), so the key holds the rendered command — the
+ * same scoped line over the same tree is a hit, and a different set of changed
+ * files is a different line and a miss, which is correct.
  */
 import { git, gitLines } from '../integration/git.ts'
 import { shellQuote } from '../platform/platform.ts'

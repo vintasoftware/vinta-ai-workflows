@@ -4,7 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { GateCache, laneTreeHash, runGateCached } from '../src/gates/cache.ts'
+import Database from 'better-sqlite3'
+import { GateCache, gateConfigKey, laneTreeHash, runGateCached } from '../src/gates/cache.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import type { CommandGate as Gate } from '../src/types.ts'
 import { renderGate, type GateScript } from './support/gate-script.ts'
@@ -176,7 +177,7 @@ describe('gate result caching', () => {
     const first = await run({ gate: slow })
     expect(first.status).toBe('timed_out')
     expect(first.cached).toBe(false)
-    expect(cache.lookup('suite', laneTreeHash(repo), slow.cmd)).toBeUndefined()
+    expect(cache.lookup('suite', laneTreeHash(repo), gateConfigKey(slow))).toBeUndefined()
 
     // A timeout says the gate did not finish, not that the tree is bad: the
     // second attempt must actually run.
@@ -207,6 +208,74 @@ describe('gate result caching', () => {
     expect((await run({ gate: tuned })).cached).toBe(true)
     expect((await run({ gate: before })).cached).toBe(true)
     expect(await runs()).toBe(2)
+  })
+
+  it('misses when an amendment changes the gate’s timeout or its pools, command untouched', async () => {
+    // `retime_gate` moves `timeout_s` and nothing else, and an external edit
+    // can add a pool to `requires`. A pass earned under thirty seconds says
+    // nothing about five, and a suite that was flaky without its database
+    // lock is the reason somebody added one — either way the gate must run.
+    const pools = (): ResourcePools =>
+      new ResourcePools(
+        { 'test-suite': { capacity: 1, kind: 'semaphore' }, db: { capacity: 1, kind: 'semaphore' } },
+        { agingMs: 0 },
+      )
+    const before = gate()
+    await run({ gate: before, pools: pools() })
+
+    const retimed = { ...before, timeout_s: 5 }
+    expect((await run({ gate: retimed, pools: pools() })).cached).toBe(false)
+    expect(await runs()).toBe(2)
+
+    const pooled = { ...retimed, requires: ['test-suite', 'db'] }
+    expect((await run({ gate: pooled, pools: pools() })).cached).toBe(false)
+    expect(await runs()).toBe(3)
+
+    // The order a plan lists its pools in is not part of the gate: they are
+    // acquired in canonical order regardless.
+    const reordered = { ...pooled, requires: ['db', 'test-suite'] }
+    expect((await run({ gate: reordered, pools: pools() })).cached).toBe(true)
+    expect(await runs()).toBe(3)
+  })
+
+  it('still hits when only fields that never reach the run change', async () => {
+    // A description, a granted-but-unused tuning flag, and a scoped template
+    // the full command does not read. Re-running the suite for any of them
+    // would spend the most contended pool to learn what the cache already knows.
+    const before = gate()
+    await run({ gate: before })
+
+    const annotated: Gate = {
+      ...before,
+      description: 'the whole suite',
+      tuning: { allowed_flags: ['--reuse-db'] },
+      scoped_cmd: 'vitest related {changed_files} --run',
+      type: 'test',
+    }
+    expect((await run({ gate: annotated })).cached).toBe(true)
+    expect(await runs()).toBe(1)
+  })
+
+  it('drops a cache keyed on the command alone rather than serving it', async () => {
+    // A `cmd_hash` row cannot say which timeout or pools produced it, so it
+    // answers a narrower question than the key now asks.
+    cache.close()
+    const legacy = new Database(join(store, '.vinta-ai-maestro', 'gate-cache.db'))
+    legacy.exec('DROP TABLE gate_results')
+    legacy.exec(
+      'CREATE TABLE gate_results (gate_id TEXT NOT NULL, tree_hash TEXT NOT NULL, cmd_hash TEXT NOT NULL,' +
+        ' status TEXT NOT NULL, exit_code INTEGER, duration_ms INTEGER NOT NULL, log_path TEXT NOT NULL,' +
+        ' cached_at INTEGER NOT NULL, PRIMARY KEY (gate_id, tree_hash, cmd_hash))',
+    )
+    legacy
+      .prepare('INSERT INTO gate_results VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('suite', laneTreeHash(repo), 'whatever', 'passed', 0, 1, 'x.log', Date.now())
+    legacy.close()
+
+    cache = new GateCache(store)
+    expect((await run()).cached).toBe(false)
+    expect((await run()).cached).toBe(true)
+    expect(await runs()).toBe(1)
   })
 
   it('caches a failing result and returns it as a hit', async () => {

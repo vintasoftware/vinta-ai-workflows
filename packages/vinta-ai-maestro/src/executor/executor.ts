@@ -71,7 +71,7 @@
  * this file puts any of them into a fact, an error, a tracking record or a
  * notification body.
  */
-import { laneTreeHash, type GateCache } from '../gates/cache.ts'
+import { gateConfigKey, laneTreeHash, type GateCache } from '../gates/cache.ts'
 import { phaseGate } from '../gates/scope.ts'
 import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from '../gates/runner.ts'
 import { computeWaves, transitiveDependents } from '../graph.ts'
@@ -492,12 +492,13 @@ export class RunEffectExecutor implements EffectExecutor {
     if (cache === undefined) return { result: await executeGate(options), cached: false }
 
     const treeHash = laneTreeHash(lane.path)
+    const config = gateConfigKey(options.gate)
     if (this.#options.noCache !== true && !rerun) {
-      const hit = cache.lookup(gateId, treeHash, options.gate.cmd)
+      const hit = cache.lookup(gateId, treeHash, config)
       if (hit !== undefined) return { result: hit, cached: true }
     }
     const result = await executeGate(options)
-    cache.store(treeHash, options.gate.cmd, result)
+    cache.store(treeHash, config, result)
     return { result, cached: false }
   }
 
