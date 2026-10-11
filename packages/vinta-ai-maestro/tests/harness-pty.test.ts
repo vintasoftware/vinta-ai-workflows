@@ -93,13 +93,36 @@ afterEach(async () => {
  * and a loaded runner spent it. Nothing is slower when the first `rmdir`
  * succeeds, which is every run on every other platform and most runs on this
  * one.
+ *
+ * On Windows, past that budget, the directory is left behind with a warning
+ * rather than failing the test. CI has run out of fifteen seconds after a test
+ * whose own waits on the helper, the pty leader and the inner child had all
+ * passed (runs 38105258649, 38001803660): whatever still held the directory was
+ * outside the test's process tree — the console host, Defender, the indexer —
+ * and no budget is long enough for a process nobody here can wait on. Runners
+ * are ephemeral, so the leftover costs nothing. This is not
+ * `WINDOWS_TIMING_RETRY`: rerunning the test would not release the handle, and
+ * that flag is for tests whose timing is the subject.
+ *
+ * POSIX stays strict. `rmdir` has no `EBUSY` for an open handle there, so a
+ * failure on macOS or Linux is a real problem and still fails the test.
  */
 const makeTemp = (): string => {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-pty-'))
-  cleanups.push(() =>
-    rmSync(dir, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 }),
-  )
+  cleanups.push(() => removeTemp(dir))
   return dir
+}
+
+const HELD_BY_THE_OS = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY'])
+
+const removeTemp = (dir: string): void => {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 })
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (!isWindows() || code === undefined || !HELD_BY_THE_OS.has(code)) throw error
+    console.warn(`teardown left ${dir} behind: ${code} after the retry budget`)
+  }
 }
 
 /**
