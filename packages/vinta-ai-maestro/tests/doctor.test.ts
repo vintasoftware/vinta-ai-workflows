@@ -704,6 +704,53 @@ describe('vinta-ai-maestro doctor', () => {
     })
   })
 
+  describe('gates that never narrow', () => {
+    it('warns about a test gate that will run in full every phase, naming the ignored scoped line', async () => {
+      // An observed run spent two hours on a 6,528-test suite in every fix
+      // round of every phase: its scoped line had `<app>` where maestro needs
+      // `{changed_files}`, was rightly not inherited, and nothing said so.
+      const base = greenOptions()
+      await writeFile(
+        join(base.repoPath, '.vinta-ai-workflows.yaml'),
+        stringify({
+          commands: {
+            test_unit: 'uv run pytest -n auto',
+            test_unit_scoped: 'uv run pytest <app>/tests/ -n auto',
+          },
+        }),
+      )
+      const workflow = WorkflowSchema.parse({
+        ...base.workflow,
+        gates: { ...base.workflow.gates, test: { type: 'test', cmd: 'uv run pytest -n auto' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['unit', 'test'] }],
+      })
+      const report = await runDoctor({ ...base, workflow })
+
+      const check = find(report.checks, 'gate-scope:test')
+      expect(check.status).toBe('warn')
+      expect(check.label).toContain('every phase')
+      expect(check.label).toContain('commands.test_unit_scoped')
+      expect(check.label).not.toContain('<app>')
+      expect(check.remedy).toContain('{changed_files}')
+      expect(check.remedy).toContain('maestro.defaults.gate_scope: full')
+      expect(formatDoctorReport(report)).toContain('WARN  gate test: runs its full command on every phase')
+      // Slower, not broken: the run can start.
+      expect(report.exitCode).toBe(0)
+    })
+
+    it('says nothing when the run asked for full gates', async () => {
+      const base = greenOptions()
+      const workflow = WorkflowSchema.parse({
+        ...base.workflow,
+        defaults: { ...base.workflow.defaults, gate_scope: 'full' },
+        gates: { ...base.workflow.gates, test: { type: 'test', cmd: 'uv run pytest -n auto' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['test'] }],
+      })
+      const report = await runDoctor({ ...base, workflow })
+      expect(report.checks.filter((check) => check.id.startsWith('gate-scope:'))).toEqual([])
+    })
+  })
+
   describe('env files', () => {
     /** A real repository, because the check asks git what is tracked and what is ignored. */
     const realRepo = async (

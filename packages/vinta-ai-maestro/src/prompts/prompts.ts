@@ -594,7 +594,16 @@ function lastReport(
 function renderReorientation(reorientation: Reorientation, materials: Materials): string {
   const { changedFiles, priorNodeId, priorWorkPresent } = reorientation
   const lines = [
-    '## Before you start: the worktree moved',
+    `## Before you start: your assignment is now ${materials.node.id}`,
+    '',
+    // The objective first, and in so many words. The worktree note below was
+    // once the whole preamble, and an agent woken on a new phase read it as
+    // housekeeping: it reported on the phase it had finished, under the new
+    // phase's name, until the coordinator redirected it by hand.
+    `${priorNodeId} is finished. Do not continue it, report on it or re-verify it, and`,
+    `drop anything still in flight for it — background commands, a reviewer sub-agent,`,
+    `todo items, review findings, a verdict. None of it is owed. Your objective from here`,
+    `on is ${materials.node.id}: ${materials.node.name}, as the brief below states it.`,
     '',
     `You are the same agent, in the same directory (\`${materials.workspace}\`), and`,
     'everything you learned about this repository still holds — where things live, how',

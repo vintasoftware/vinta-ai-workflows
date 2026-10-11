@@ -92,6 +92,7 @@ export const EFFECT_CATALOG: Readonly<Record<EffectId, EffectDefinition>> = {
       'pause, which is what makes the question outlive a daemon restart. `unattended_answer` ' +
       'is the plan saying what this question means when nobody is there: under `--retry-after` ' +
       'the host answers it with that value once the window passes, journalled as unattended. ' +
+      'A list is one answer per unattended answer within an attempt, the last repeating. ' +
       'Absent — the default — waits for a person however long that takes.',
   },
   notify: {

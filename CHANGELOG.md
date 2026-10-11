@@ -32,6 +32,35 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
+  (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
+  for — or the one an operator picked with `retry with <member>` — is busy, or
+  is planned for a phase still to come, the run takes on a spare in that
+  member's image (same tier, model and harness) with a worktree provisioned for
+  it there and then, instead of borrowing a member another pending phase is
+  waiting for, or waiting. A member nobody is planned for is still borrowed, an
+  idle spare is reused first, and a member busy only with a finished phase's PR
+  chores is waited for. Journalled as `node_crew` `reason: spare_crew` and shown
+  in the post-mortem's `crew_substitutions`. Set `0` in the plan or under
+  `maestro.defaults` to keep the roster to the plan's. One observed run left a
+  phase on its critical path idle for 17 minutes while a retry held the member
+  it was planned for.
+- **`vinta-ai-maestro`: `defaults.pull_requests: plan` opens one PR for the
+  run.** The default, `phase`, is unchanged: a PR per phase, per integration
+  branch, and the plan PR. `plan` opens the plan PR alone, from the last wave
+  branch, and skips the phases' `after_pr` chores (there is no phase PR for
+  them). Also accepted under `maestro.defaults` in `.vinta-ai-workflows.yaml`.
+- **`vinta-ai-maestro doctor` warns when a phase gate will run its full command
+  every time** (`gate-scope:<gate>`), and every run prints it at start: a
+  `test` or `lint` gate a phase uses has no `scoped_cmd` under
+  `gate_scope: scoped`. It says whether `commands.test_unit_scoped` /
+  `lint_scoped` was passed over for having no `{changed_files}` / `{touches}`
+  placeholder — a skill-era line such as `pytest <app>/tests/` is not inherited
+  — or nothing is configured, and names the key to set (e.g.
+  `pytest --testmon {changed_files}`), or `maestro.defaults.gate_scope: full`
+  to accept it. One observed run spent two of its five hours running a
+  6,500-test suite on every phase gate and fix round.
+
 - **`vinta-ai-maestro`: `run` now shows what a slow start is doing.** Until
   now `run` printed "starting in the background…" and nothing else until the
   run was up, which can take minutes (`prepare_cmd`, preflight, database
@@ -563,6 +592,29 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   review prompt contains the line `VERDICT: pass`, so a review that stated no
   verdict could read as approved. opencode 1.19's `permission.asked` event is
   now mapped too.
+- **`vinta-ai-maestro`: an unattended run answers `exhausted` and `unapproved`
+  with `continue` once, then `stop`.** It answered `stop` straight away, which
+  failed the phase; the unattended retry then re-drove it from `implement` on
+  a cold session, gates and review from scratch, to reach the same question —
+  twelve failed attempts in one observed run. A plan question's
+  `unattended_answer` may now be a list, one answer per unattended answer
+  within an attempt, the last repeating.
+- **`vinta-ai-maestro`: a phase's dependents start once it has merged, pushed
+  and opened its PR**, when only `after_pr` chores that cannot fail it are left
+  (a review canvas, a PR comment). They used to wait for those too — up to four
+  minutes a phase on the critical path.
+- **`vinta-ai-maestro`: an agent's `gate <id>` is refused while an earlier gate
+  of the phase is red on the same tree**, naming that gate, and runs once the
+  tree moves. A `for g in lint typecheck test` loop no longer runs the suite
+  against a tree its typecheck already failed.
+- **`vinta-ai-maestro`: a crew member woken on a new phase is told the
+  objective changed** before anything else — the previous phase is finished
+  and nothing in flight for it is owed — ahead of the brief and the note about
+  what moved in its worktree.
+- **`vinta-ai-maestro`: the coordinator's gate-cost wake scales with the run**:
+  more than 15 minutes of uncached gate time per phase that ran it, never less
+  than 30 minutes, instead of every 30 minutes; it says how many phases the
+  time is spread over and whether the gate lacks a scoped form.
 
 - **`vinta-ai-maestro`: lane database names stay within Postgres's 63-character
   identifier limit, with room for test-runner affixes.** A forked lane database
@@ -838,6 +890,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in gates and the `project` block, and `plan-feature` says so.
 
 ### Fixed
+
+- **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
+  as work.** A session that ended with no text and no tool call — observed when
+  a resumed claude-code session closed a replay of killed background tasks
+  before reading the prompt — counted as a failed review with no reviewer
+  behind it, or, on a crew member's first turn of a new phase, swallowed the
+  new phase's brief so every later turn carried on with the old phase. Such a
+  turn is now retried once, cold, with the whole brief (`node_session`
+  `reason: empty_turn`), and a cold one that is empty too fails the turn.
 
 - **Maestro: an amended gate re-runs instead of returning its old result.**
   The gate cache matched only the gate's command, so changing a gate's

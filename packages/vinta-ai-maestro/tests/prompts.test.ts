@@ -2104,7 +2104,21 @@ describe('a cross-phase continuation', () => {
   it('puts the re-orientation before the brief, not after it', () => {
     const prompt = carried()
 
-    expect(prompt.indexOf('the worktree moved')).toBeLessThan(prompt.indexOf(DOCS_BRIEF))
+    expect(prompt.indexOf('your assignment is now docs')).toBeLessThan(prompt.indexOf(DOCS_BRIEF))
+  })
+
+  /**
+   * Observed: a member woken on a new phase with only the worktree note in front
+   * of the brief kept reporting on the phase it had finished, under the new
+   * phase's name, until the coordinator redirected it. The switch is said first.
+   */
+  it('says the previous phase is over and names the new objective before anything else', () => {
+    const prompt = carried()
+
+    expect(prompt).toContain('api-layer is finished. Do not continue it')
+    expect(prompt).toContain('drop anything still in flight for it')
+    expect(prompt).toMatch(/Your objective from here\s+on is docs:/)
+    expect(prompt.indexOf('api-layer is finished')).toBeLessThan(prompt.indexOf('everything you learned'))
   })
 
   it('names the files that changed, so staleness is checkable rather than vague', () => {

@@ -667,6 +667,9 @@ function liveHarness(): {
             parked += 1
             await gate
             parked -= 1
+            // A turn the model took part in: one that ends having said nothing
+            // is read as a turn that never happened, and retried or failed.
+            yield { type: 'assistant_text', text: 'done' }
             yield { type: 'session_ended', result: 'ok' }
           },
         },

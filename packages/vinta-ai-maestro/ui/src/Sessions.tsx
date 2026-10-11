@@ -249,10 +249,10 @@ function LiveFor({ since }: { readonly since: number }) {
   return <>{elapsed(since, useNow(1000))}</>
 }
 
-/** Reused is good news, cold is usually correct, and one case cost a spawn. */
+/** Reused is good news, cold is usually correct, and two cases cost a spawn. */
 function sessionTone(turn: Turn): Tone {
   if (turn.disposition === 'reused') return 'ok'
-  return turn.reason === 'stale_session' ? 'wait' : 'idle'
+  return turn.reason === 'stale_session' || turn.reason === 'empty_turn' ? 'wait' : 'idle'
 }
 
 /**
@@ -279,6 +279,8 @@ function sessionReason(reason: string): string {
       return 'Last fix round — deliberately an agent that has not seen the work.'
     case 'stale_session':
       return 'The harness had forgotten the session. The turn was retried cold.'
+    case 'empty_turn':
+      return 'The previous turn ended without the agent doing anything. It was retried cold.'
     case 'no_slot':
       return 'This step asked for a fresh session.'
     default:

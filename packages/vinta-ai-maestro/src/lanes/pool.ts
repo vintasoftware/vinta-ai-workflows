@@ -541,6 +541,28 @@ export class LanePool {
     return pool
   }
 
+  /**
+   * One more lane, mid-run — the desk of a crew member the scheduler took on
+   * because the one a phase was planned for was busy (`defaults.max_spare_crew`).
+   *
+   * Provisioned exactly as the pool's own lanes were, from the templates built
+   * at the start, with the next free slot index — after the integration
+   * worktree's, so no `index`-namespaced service is shared. The disk probe runs
+   * for this one worktree first, for the reason it runs at all: a refusal then
+   * costs nothing. A worktree already at the path is adopted rather than added
+   * over, which is what a resumed run that had taken on the same member finds.
+   */
+  async addLane(name: string): Promise<Lane> {
+    const existing = this.#all.find((candidate) => candidate.name === name)
+    if (existing !== undefined) return existing
+    const adopt = await this.#adoptable(name)
+    if (!adopt) await this.#probeDisk(1)
+    const index = Math.max(this.#options.laneCount, ...this.#all.map((lane) => lane.index)) + 1
+    const lane = await this.#provisionWorktree(name, 'lane', index, adopt)
+    this.#all = [...this.#all, lane]
+    return lane
+  }
+
   get lanes(): readonly Lane[] {
     return this.#all.filter((lane) => lane.kind === 'lane')
   }
