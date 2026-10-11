@@ -74,6 +74,11 @@ export interface HostWiring {
   readonly rebase?: NonNullable<AmendRunner['rebase']>
   /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
   readonly recycleLane?: (name: string) => Promise<void>
+  /**
+   * A new lane, provisioned mid-run for a spare crew member. Absent for a host
+   * that owns its lanes, which keeps the roster to the plan's.
+   */
+  readonly addLane?: (name: string) => Promise<void>
   /** One lane's environment, for the agent about to run in it. */
   readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
   /**
@@ -412,6 +417,12 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     },
     recycleLane: async (name: string) => {
       await pool.recycle(name)
+    },
+    // Into the executor as well as the pool: the executor resolves a node's
+    // lane by name from the list it was built with.
+    addLane: async (name: string) => {
+      const lane = await pool.addLane(name)
+      executor.addLane({ name: lane.name, path: lane.path, env: { ...lane.env, ...options.agentEnv } })
     },
     bindCommitDecision: (decide) => {
       decideCommit = decide

@@ -210,6 +210,26 @@ describe('lane pool', () => {
     expect(worktreePaths(repo)).toHaveLength(5)
   })
 
+  /** A spare crew member's desk, taken on mid-run (`max_spare_crew`). */
+  it('adds a lane mid-run from the same templates, on a slot of its own', async () => {
+    const pool = await provision(sqliteProject(), 2)
+    const before = migrated().length
+
+    const spare = await pool.addLane('run-1-crew-3-t2-spare-1')
+
+    expect(pool.lanes.map((lane) => lane.name)).toContain('run-1-crew-3-t2-spare-1')
+    expect(pool.lane('run-1-crew-3-t2-spare-1')).toBe(spare)
+    expect(existsSync(join(spare.path, '.git'))).toBe(true)
+    // Cloned from the template the pool built, not migrated again.
+    expect(migrated()).toHaveLength(before)
+    // After the integration worktree's slot, so no namespaced service is shared.
+    const slots = [...pool.lanes, pool.integration].map((lane) => lane.index)
+    expect(new Set(slots).size).toBe(slots.length)
+    expect(spare.index).toBeGreaterThan(pool.integration.index)
+    // Asked twice for the same name, the pool hands back the lane it has.
+    expect(await pool.addLane('run-1-crew-3-t2-spare-1')).toBe(spare)
+  })
+
   it('creates each template exactly once and clones it into every lane', async () => {
     const pool = await provision(sqliteProject())
     const all = [...pool.lanes, pool.integration]

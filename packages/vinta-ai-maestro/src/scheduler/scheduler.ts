@@ -141,7 +141,15 @@ import {
 } from '../questions/agent-questions.ts'
 import { killLiveGates } from '../gates/runner.ts'
 import type { Lease, ResourcePools } from '../resources/pools.ts'
-import { CHORE_TIMINGS, type ChoreTiming, type Node, type Pipeline, type SideEffect, type Workflow } from '../types.ts'
+import {
+  CHORE_TIMINGS,
+  type ChoreTiming,
+  type CrewMember,
+  type Node,
+  type Pipeline,
+  type SideEffect,
+  type Workflow,
+} from '../types.ts'
 
 /** The pool a node is dispatched into. Required of every workflow (§5.1). */
 const LANE = 'lane'
@@ -159,6 +167,19 @@ interface Turn {
   readonly priority: AdmitOptions
   /** The task that resumes `resumeSessionId` with `prompt` as its whole message. */
   readonly task: (prompt: string, resumeSessionId: string) => AgentTask
+}
+
+/**
+ * What a plan question means when nobody answers it, the `given`-th time it is
+ * answered that way this attempt. A string is the answer every time; a list is
+ * one answer per time, its last entry repeating. Anything else — absent, empty,
+ * not a string — waits for a person.
+ */
+export function unattendedAnswerFor(declared: unknown, given: number): string | null {
+  if (typeof declared === 'string') return declared
+  if (!Array.isArray(declared) || declared.length === 0) return null
+  const answer: unknown = declared[Math.min(given, declared.length - 1)]
+  return typeof answer === 'string' ? answer : null
 }
 
 /** The answers `#offerRetry` understands. `retry with ` carries a member id. */
@@ -317,6 +338,12 @@ export interface SchedulerOptions {
    * reset.
    */
   readonly recycleLane?: (name: string) => Promise<void>
+  /**
+   * Provisions a worktree under `name` for a spare crew member (`#spare`).
+   * Absent for a host that injected its own lanes: then nobody is taken on, and
+   * a busy member is covered or waited for as before.
+   */
+  readonly addLane?: (name: string) => Promise<void>
   /**
    * What changed under a member's worktree since its session last looked.
    *
@@ -569,6 +596,12 @@ interface NodeState {
    * Null for a question that waits for a person however long that takes.
    */
   unattendedAnswer: string | null
+  /**
+   * Unattended answers given this attempt, by the effect that asked. A plan's
+   * `unattended_answer` may be a list — its nth entry is the nth answer, and the
+   * last one repeats — so a budget question can say "go on once, then stop".
+   */
+  unattendedGiven: Map<string, number>
   /** Fixer runs taken so far. The `fix_rounds` fact the interpreter reads. */
   fixRounds: number
   /**
@@ -656,6 +689,12 @@ interface NodeState {
    * the question instead, once.
    */
   released: boolean
+  /**
+   * Merged, pushed and past every step that can fail it — only `after_pr`
+   * chores that cannot fail the phase are left. Its dependents may start: what
+   * they build on is on the integration branch already. See `#chores`.
+   */
+  landed: boolean
   /** Whether the deferred question is being asked, so dispatch asks it once. */
   deferredAsked: boolean
   /**
@@ -817,6 +856,14 @@ export class Scheduler {
   readonly #memberSessions = new Map<string, Map<string, SessionEntry>>()
   /** Members whose last phase failed: their next turn starts cold (§15.2). */
   readonly #poisoned = new Set<string>()
+  /**
+   * Members taken on beyond the roster (`defaults.max_spare_crew`), by id, with
+   * the roster member each was taken on in the image of. Never planned for, so
+   * never "needed" by a pending phase; they cover their tier like anyone else.
+   */
+  readonly #spares = new Map<string, CrewMember & { readonly of: string }>()
+  /** Set when a spare's worktree could not be provisioned: nobody else is taken on. */
+  #sparesBroken = false
   #waves = new Map<string, number>()
   /** Nodes parked on the login question, by harness id (§6.1). */
   readonly #loginWaiters = new Map<string, Set<NodeState>>()
@@ -924,6 +971,7 @@ export class Scheduler {
       aborted: false,
       parkedEffectId: null,
       unattendedAnswer: null,
+      unattendedGiven: new Map(),
       fixRounds: 0,
       lastGate: null,
       lastVerdict: null,
@@ -940,6 +988,7 @@ export class Scheduler {
       setupFailure: null,
       hostAsks: 0,
       released: false,
+      landed: false,
       deferredAsked: false,
       held: false,
       delegable: false,
@@ -1409,9 +1458,10 @@ export class Scheduler {
     for (const id of this.#order) {
       const state = this.#states.get(id) as NodeState
       if (state.status !== 'pending') continue
-      const ready = state.node.depends_on.every(
-        (dep) => this.#states.get(dep.node)?.status === 'done',
-      )
+      const ready = state.node.depends_on.every((dep) => {
+        const upstream = this.#states.get(dep.node)
+        return upstream?.status === 'done' || upstream?.landed === true
+      })
       if (!ready) continue
       // A deferred phase (`node.deferred`) waits for a person, not for its
       // dependencies: the plan said when it may run and this is not the
@@ -1670,13 +1720,24 @@ export class Scheduler {
    */
   async #claimCrew(state: NodeState): Promise<void> {
     while (!state.aborted && this.#halt === null) {
+      // The operator's pick, when they made one, stands in for the plan's.
+      // `assignCrew` still refuses a member who is not an implementer on the
+      // roster and still substitutes when the pick is busy, so an answer
+      // cannot put a phase somewhere the plan would not.
+      const target = state.retryMember ?? state.node.crew
+
+      // The member is finishing a phase whose dependents were let go early —
+      // only its PR's chores are left (`landed`). That is a short wait for a
+      // warm session, and neither a cover nor a spare is worth what a cold one
+      // costs.
+      if (target !== undefined && this.#finishing(target)) {
+        await this.#changed()
+        continue
+      }
+
       const decision: CrewDecision = assignCrew({
-        // The operator's pick, when they made one, stands in for the plan's.
-        // `assignCrew` still refuses a member who is not an implementer on the
-        // roster and still substitutes when the pick is busy, so an answer
-        // cannot put a phase somewhere the plan would not.
-        assigned: state.retryMember ?? state.node.crew,
-        crew: this.#workflow.crew,
+        assigned: target,
+        crew: this.#roster(),
         busy: this.#busyCrew,
         // Recomputed every pass, not hoisted: this loop only goes round again
         // because somebody settled, and settling is exactly what writes a
@@ -1694,33 +1755,25 @@ export class Scheduler {
 
       if (decision.kind === 'unstaffed') return
 
+      // The plan's own member, or somebody no pending phase is planned for.
+      if (decision.kind === 'assigned' && (decision.member === state.node.crew || !this.#needed(decision.member, state))) {
+        this.#take(state, decision)
+        return
+      }
+
+      // Nobody qualified is free, or the one who is — the operator's pick
+      // included — is planned for a phase still to come. Borrowing them moves
+      // the wait onto that phase; waiting keeps it here. Observed: a retry put
+      // on the member the next phase on the critical path was planned for left
+      // that phase idle for seventeen minutes. So a spare is taken on in the
+      // target's image, with a worktree of its own, while the budget lasts.
+      const spare = await this.#spare(state, target)
+      if (spare !== null) {
+        this.#take(state, spare)
+        return
+      }
       if (decision.kind === 'assigned') {
-        this.#busyCrew.add(decision.member)
-        state.crew = {
-          member: decision.member,
-          tier: decision.tier,
-          model: decision.model,
-          harness: decision.harness,
-        }
-        this.#options.journal.append({
-          runId: this.#options.runId,
-          nodeId: state.node.id,
-          type: 'node_crew',
-          payload: {
-            member: decision.member,
-            tier: decision.tier,
-            substitute: decision.substitute,
-            ...(decision.insteadOf === null
-              ? {}
-              : {
-                  instead_of: decision.insteadOf,
-                  ...(this.#workflow.crew[decision.insteadOf] === undefined
-                    ? {}
-                    : { planned_tier: this.#workflow.crew[decision.insteadOf]?.tier as number }),
-                }),
-            ...(decision.reason === null ? {} : { reason: decision.reason }),
-          },
-        })
+        this.#take(state, decision)
         return
       }
 
@@ -1729,6 +1782,126 @@ export class Scheduler {
       // signal the dispatch loop does rather than polling.
       await this.#changed()
     }
+  }
+
+  /** Claims the member `decision` names for this node, and journals who it is. */
+  #take(state: NodeState, decision: Extract<CrewDecision, { kind: 'assigned' }>): void {
+    this.#busyCrew.add(decision.member)
+    state.crew = {
+      member: decision.member,
+      tier: decision.tier,
+      model: decision.model,
+      harness: decision.harness,
+    }
+    const planned = decision.insteadOf === null ? undefined : this.#roster()[decision.insteadOf]
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'node_crew',
+      payload: {
+        member: decision.member,
+        tier: decision.tier,
+        substitute: decision.substitute,
+        ...(decision.insteadOf === null
+          ? {}
+          : {
+              instead_of: decision.insteadOf,
+              ...(planned === undefined ? {} : { planned_tier: planned.tier }),
+            }),
+        ...(decision.reason === null ? {} : { reason: decision.reason }),
+      },
+    })
+  }
+
+  /** The roster the plan declared, and the spares this run took on since. */
+  #roster(): Readonly<Record<string, CrewMember>> {
+    if (this.#spares.size === 0) return this.#workflow.crew
+    return { ...this.#workflow.crew, ...Object.fromEntries(this.#spares) }
+  }
+
+  /** Whether a phase still to start is planned for `member` — this one aside. */
+  #needed(member: string, except: NodeState): boolean {
+    for (const state of this.#states.values()) {
+      if (state === except) continue
+      // Dispatched and still claiming is waiting for a member just as much as
+      // pending is: `running` is set before the claim, not after it.
+      const waiting = state.status === 'running' && state.crew === null
+      if (state.status !== 'pending' && state.status !== 'blocked' && !waiting) continue
+      if ((state.retryMember ?? state.node.crew) === member) return true
+    }
+    return false
+  }
+
+  /** `member` is busy, and only with a landed phase's PR chores. */
+  #finishing(member: string): boolean {
+    if (!this.#busyCrew.has(member)) return false
+    for (const state of this.#states.values()) {
+      if (state.crew?.member === member) return state.landed
+    }
+    return false
+  }
+
+  /**
+   * A member for this node in `target`'s image — an idle spare taken on
+   * earlier, else a new one with a worktree provisioned for it — or null when
+   * the budget is spent, the host cannot add a lane, or provisioning failed.
+   *
+   * Claimed before the worktree exists, so a second node deciding at the same
+   * time counts it against the budget and cannot take it. A provisioning that
+   * fails stops spares for the rest of the run: the same disk or the same
+   * database would refuse the next one, and the run still has its roster.
+   */
+  async #spare(
+    state: NodeState,
+    target: string | undefined,
+  ): Promise<Extract<CrewDecision, { kind: 'assigned' }> | null> {
+    if (target === undefined) return null
+    const source = this.#roster()[target]
+    if (source === undefined) return null
+    const origin = this.#spares.get(target)?.of ?? target
+    const decision = (id: string): Extract<CrewDecision, { kind: 'assigned' }> => ({
+      kind: 'assigned',
+      member: id,
+      tier: source.tier,
+      model: source.model,
+      harness: source.harness ?? null,
+      substitute: true,
+      insteadOf: state.node.crew ?? target,
+      reason: 'spare_crew',
+    })
+
+    for (const [id, spare] of this.#spares) {
+      if (this.#busyCrew.has(id) || spare.of !== origin) continue
+      return decision(id)
+    }
+
+    const addLane = this.#options.addLane
+    if (addLane === undefined || this.#sparesBroken) return null
+    if (this.#spares.size >= this.#workflow.defaults.max_spare_crew) return null
+
+    const ordinal = this.#spares.size + 1
+    const id = `${origin}-spare-${ordinal}`
+    const lane = `${this.#options.runId}-crew-${roster(this.#workflow.crew).length + ordinal}-${id}`
+    const { description: _description, ...image } = source
+    this.#spares.set(id, { ...image, of: origin })
+    this.#busyCrew.add(id)
+    try {
+      await addLane(lane)
+    } catch (error) {
+      this.#spares.delete(id)
+      this.#busyCrew.delete(id)
+      this.#sparesBroken = true
+      this.#log.warn('crew.spare_failed', { node: state.node.id, member: id, ...errorFields(error) })
+      this.#wake()
+      return null
+    }
+    this.#laneOf.set(id, lane)
+    // The member brings its own desk, so the lane pool gets the slot to put it
+    // in. A pool left at the roster's size would queue the spare behind the
+    // phases it was taken on to stop waiting for.
+    if (this.#workflow.resources[LANE] !== undefined) this.#options.pools.grow(LANE)
+    this.#log.info('crew.spare_taken', { node: state.node.id, member: id, of: origin, lane })
+    return decision(id)
   }
 
   /**
@@ -1776,7 +1949,7 @@ export class Scheduler {
     const slots = this.#implementerSlots(state.pipeline)
     if (slots.length === 0) return warm
 
-    for (const member of roster(this.#workflow.crew)) {
+    for (const member of roster(this.#roster())) {
       // A busy member is not a candidate, warm or not, and asking costs a
       // `planSession` per slot for an answer nobody reads.
       if (this.#busyCrew.has(member.id)) continue
@@ -1869,6 +2042,7 @@ export class Scheduler {
   #restartAttempt(state: NodeState): void {
     state.fixRounds = 0
     state.agentRan = false
+    state.unattendedGiven.clear()
     // For the same reason the budget goes: the next attempt re-drives the
     // pipeline from its initial state, so the gate that was red and the verdict
     // that was `fail` belong to a run that no longer exists. Carried over, they
@@ -2370,8 +2544,10 @@ export class Scheduler {
         // pause exists first, so a restart reads it instead of re-asking.
         if (verb === 'await_human') {
           this.#ask(state, invocation.effect.id, questionOf(invocation.effect.params))
-          const unattended = invocation.effect.params['unattended_answer']
-          state.unattendedAnswer = typeof unattended === 'string' ? unattended : null
+          state.unattendedAnswer = unattendedAnswerFor(
+            invocation.effect.params['unattended_answer'],
+            state.unattendedGiven.get(invocation.effect.id) ?? 0,
+          )
         }
         if (verb === 'grant_fix_rounds') {
           // §16.3. The counter is the scheduler's, so this is the one place it
@@ -2478,6 +2654,17 @@ export class Scheduler {
         : choresFor(this.#workflow, state.node, when)
     const prOpened = invocation.context.pr?.['opened'] === true
     let verdict: 'pass' | 'fail' = 'pass'
+
+    // The `after_pr` chores run after the merge, the push and the PR — a review
+    // canvas, a PR comment. They edit nothing anybody builds on, and when none
+    // of them may fail the phase nothing after this point can either. Holding
+    // the dependents for them put minutes of PR decoration on the critical
+    // path of every phase: observed at up to four minutes a phase, for a step
+    // that failed outright on most of them.
+    if (when === 'after_pr' && chores.every((entry) => entry.chore.on_failure !== 'fail')) {
+      state.landed = true
+      this.#wake()
+    }
 
     for (const entry of chores) {
       const startedAt = Date.now()
@@ -2694,7 +2881,7 @@ export class Scheduler {
       // Three chores on one slot are one stretch of transcript without it.
       ...(chore === undefined ? {} : { chore: chore.id }),
     }
-    const turn: Turn = {
+    let turn: Turn = {
       adapter,
       cwd,
       plan,
@@ -2712,9 +2899,57 @@ export class Scheduler {
         resumeSessionId,
       }),
     }
-    const watch = new QuestionWatch()
-    const sessionId = await this.#drain(state, outcome, turn, watch)
-    await this.#agentQuestions(state, turn, watch, sessionId)
+    let watch = new QuestionWatch()
+    let drained = await this.#drain(state, outcome, turn, watch)
+
+    // A turn the model never took part in: the session started and ended with
+    // no text and no tool call. Its prompt did not reach the agent, so nothing
+    // the pipeline reads next — a commit, a verdict — can be about it.
+    //
+    // Observed on resumes. claude-code replays the notifications of background
+    // work its previous process was killed under, and closes that replay with a
+    // `result` before it reads the new prompt; read as the end, it is a turn
+    // that cost nothing and did nothing. On a review turn that is a `fail` with
+    // no reviewer behind it, sent to the operator as `unapproved`. On a
+    // cross-phase continuation it is worse: the new phase's brief was in the
+    // prompt that was never read, the ledger now files the session under the
+    // new phase, and every later turn gets a delta — so the agent carries on
+    // with the phase it last worked on, under the next one's name.
+    //
+    // Retried once, cold and with the whole brief, the way §15.4 retries a
+    // session the vendor forgot: a fresh session has no replay to make and no
+    // memory to be wrong about. A cold turn that is empty too is a harness that
+    // is not working, and that is a failure of the turn, not of the work.
+    if (drained.empty) {
+      this.#log.warn('node.empty_turn', {
+        node: state.node.id,
+        harness: adapter.id,
+        resumed: plan.resumeSessionId !== null,
+      })
+      if (plan.resumeSessionId === null) {
+        throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything`)
+      }
+      plan = {
+        slot: plan.slot,
+        resumeSessionId: null,
+        continuation: false,
+        crossPhase: false,
+        reason: 'empty_turn',
+        turns: 1,
+      }
+      const cold = await this.#admitLoggedIn(state, adapter, () => build(plan), priority)
+      if (cold.status === 'retry') throw new CapacityRetry(cold.wait)
+      if (cold.status !== 'admitted') throw new SpawnFatal(cold.message)
+      this.#session(state, plan)
+      this.#remember(state, plan, adapter, cold.session.id)
+      turn = { ...turn, plan }
+      watch = new QuestionWatch()
+      drained = await this.#drain(state, cold, turn, watch)
+      if (drained.empty) {
+        throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything, resumed and cold`)
+      }
+    }
+    await this.#agentQuestions(state, turn, watch, drained.sessionId)
 
     // A fix round is a fixer turn, not a state called `fix`.
     if (params['role'] === 'fixer') state.fixRounds += 1
@@ -2755,10 +2990,16 @@ export class Scheduler {
     outcome: Extract<AdmissionOutcome, { status: 'admitted' }>,
     turn: Turn,
     watch: QuestionWatch,
-  ): Promise<string> {
+  ): Promise<{ readonly sessionId: string; readonly empty: boolean }> {
     const { runId, journal, admission } = this.#options
     const { adapter, plan, by } = turn
     let sessionId = outcome.session.id
+    // Whether the model took any part: a word, a thought or a tool call. A
+    // usage row alone is not that — a replay closes with one, at zero.
+    let worked = false
+    // An interrupt ends a turn before the model may have said anything, and
+    // that is the operator's doing (§9), not a turn that failed to happen.
+    let interrupted = false
 
     // The registry: exactly as long-lived as the turn it points at, so a §9
     // operation can never reach a session whose stream has already ended.
@@ -2768,6 +3009,9 @@ export class Scheduler {
       for await (const event of outcome.session.events) {
         journal.appendTranscript(runId, state.node.id, { ...event, by: attribute(event, by) })
         watch.observe(event)
+        if (event.type === 'assistant_text' || event.type === 'thinking' || event.type === 'tool_use') worked = true
+        if (event.type === 'usage' && event.output > 0) worked = true
+        if (event.type === 'session_ended' && event.result === 'interrupted') interrupted = true
         if (event.type === 'tool_use') this.#detectBareGate(state, adapter.id, event.name, event.input)
         if (event.type === 'session_started') {
           sessionId = event.sessionId
@@ -2807,7 +3051,7 @@ export class Scheduler {
       })
       if (parked.status === 'retry') throw new CapacityRetry(parked.wait)
     }
-    return sessionId
+    return { sessionId, empty: !worked && !interrupted && this.#halt === null }
   }
 
   /**
@@ -2884,7 +3128,7 @@ export class Scheduler {
 
       const granted = await this.#admitAnswer(state, turn, message, sessionId)
       watch = new QuestionWatch()
-      sessionId = await this.#drain(state, granted, turn, watch)
+      sessionId = (await this.#drain(state, granted, turn, watch)).sessionId
     }
   }
 
@@ -3400,6 +3644,7 @@ export class Scheduler {
    */
   #armUnattendedAnswer(state: NodeState): () => void {
     const answer = state.unattendedAnswer
+    const effect = state.parkedEffectId
     state.unattendedAnswer = null
     state.delegable = answer !== null
     const after = this.#options.retryAfterMs
@@ -3413,6 +3658,7 @@ export class Scheduler {
         return
       }
       this.#log.info('node.unattended_answer', { node: state.node.id, after_ms: after })
+      if (effect !== null) state.unattendedGiven.set(effect, (state.unattendedGiven.get(effect) ?? 0) + 1)
       this.answer(state.node.id, { human: { answer, unattended: true } })
     })
   }

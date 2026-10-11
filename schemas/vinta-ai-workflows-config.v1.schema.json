@@ -339,7 +339,7 @@
       "additionalProperties": false,
       "properties": {
         "defaults": {
-          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `wave_gates` (`off` | `final` | `every`), `substitution` (`same_tier` | `up_one_tier` | `any`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`.",
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `wave_gates` (`off` | `final` | `every`), `substitution` (`same_tier` | `up_one_tier` | `any`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`, `max_spare_crew`, `pull_requests` (`phase` | `plan`).",
           "type": "object",
           "properties": {
             "harness": {
@@ -412,6 +412,19 @@
             "max_session_turns": {
               "type": "integer",
               "minimum": 1
+            },
+            "pull_requests": {
+              "type": "string",
+              "enum": [
+                "phase",
+                "plan"
+              ],
+              "description": "Which pull requests a run opens. `phase` (the default): one per phase, one per integration branch, and the plan PR that lands them. `plan`: the plan PR alone, from the last wave branch; phases' `after_pr` chores are then skipped."
+            },
+            "max_spare_crew": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Crew members a run may take on beyond the plan's roster (default 2). When the member a phase was planned for is busy, the phase gets a new member at that member's tier and model, with its own worktree, instead of borrowing a member another pending phase is planned for or waiting. `0` keeps the roster to the plan's."
             }
           },
           "additionalProperties": false

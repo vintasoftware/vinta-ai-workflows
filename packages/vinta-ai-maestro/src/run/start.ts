@@ -474,6 +474,8 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     // §8: a lane slot outlives the phase that used it, and the next phase must
     // not start in the last one's worktree or against its rows.
     ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),
+    // A spare crew member's desk (`defaults.max_spare_crew`).
+    ...(host.addLane === undefined ? {} : { addLane: host.addLane }),
     // The lane's isolation, reaching the process that needs it. Without this a
     // turn runs in the right directory with the wrong compose project.
     ...(host.laneEnv === undefined ? {} : { laneEnv: host.laneEnv }),

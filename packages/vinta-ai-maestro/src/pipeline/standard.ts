@@ -102,11 +102,28 @@ const runGates = (id: string) => ({
   description: 'The gates this node declared, in declaration order.',
 })
 
-/** A budget question: `continue` or `stop`, and `stop` when nobody is there. */
+/**
+ * A budget question: `continue` or `stop`. When nobody is there, `continue`
+ * once, then `stop`.
+ *
+ * It used to be `stop` straight away, and that is the expensive answer: a
+ * stopped phase fails, the unattended retry answers `retry`, and the retry
+ * re-drives the pipeline from `implement` on a cold session — the gates and the
+ * review run again from scratch to reach the question a second time. Observed
+ * as twelve failed attempts in one run, each the unattended `stop` of a review
+ * that only needed another round. `continue` keeps the session and spends one
+ * more budget where it already is; a second `stop`-worthy round in the same
+ * attempt is evidence the round is not the problem.
+ */
 const askToContinue = (id: string, question: string) => ({
   id,
   definitionId: 'await_human',
-  params: { question, kind: 'choice', choices: ['continue', 'stop'], unattended_answer: 'stop' },
+  params: {
+    question,
+    kind: 'choice',
+    choices: ['continue', 'stop'],
+    unattended_answer: ['continue', 'stop'],
+  },
 })
 
 export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({

@@ -141,6 +141,12 @@ export type SessionFreshReason =
   /** The vendor no longer has the session; the spawn was retried cold (§15.4). */
   | 'stale_session'
   /**
+   * The turn before this one ended without the model doing anything — no text,
+   * no tool call — so its prompt never reached the agent, and this is the same
+   * turn again, cold and with the whole brief (§15.4).
+   */
+  | 'empty_turn'
+  /**
    * The member's previous phase failed. Its session is the context that failed
    * with it, and carrying that into the next phase propagates whatever wrong
    * turn it took — a cold start is cheaper than a poisoned one.
@@ -176,6 +182,14 @@ export type CrewSubstituteReason =
    * real, which is why this is its own token instead of another `peer_busy`.
    */
   | 'warm_session'
+  /**
+   * The named member was busy, and the phase went to a spare taken on in their
+   * image — same tier, same model, a worktree of its own (`max_spare_crew`) —
+   * rather than to a member another pending phase is planned for, or to a wait.
+   * Costs what the plan budgeted per token; what it adds is a worktree and a
+   * cold session.
+   */
+  | 'spare_crew'
 
 /**
  * Where the operation went. `sent` reached the live session; `queued` is

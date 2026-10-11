@@ -849,6 +849,34 @@ export const DefaultsSchema = z.strictObject({
         'avoid a cold start. One observed run moved 23 phases from Tier 3 to a Tier 4 member ' +
         'whose credits then ran out, and nothing showed it.',
     ),
+  pull_requests: z
+    .enum(['phase', 'plan'])
+    .default('phase')
+    .describe(
+      'Which pull requests a run opens. `phase` \u2014 the default \u2014 one per phase, one per ' +
+        'integration branch, and the plan PR that lands them all: the phase PRs are review units ' +
+        'stacked in merge order. `plan` opens the plan PR alone, from the last wave branch, which ' +
+        'already holds every phase and every conflict resolution; review happens there. One ' +
+        'observed ten-phase refactor opened fifteen PRs that nobody was going to merge. Under ' +
+        '`plan` a phase has no PR of its own, so its `after_pr` chores are skipped.',
+    ),
+  max_spare_crew: z
+    .number()
+    .int()
+    .min(0)
+    .default(2)
+    .describe(
+      'Crew members a run may take on beyond the roster. When the member a phase was planned ' +
+        'for is busy, the phase does not borrow a member another pending phase is planned for, ' +
+        'and does not wait: it gets a new member at the planned member’s tier and model, with ' +
+        'a worktree of its own provisioned there and then. A member nobody plans for is borrowed ' +
+        'as before. The spare stays on the roster for the rest of the run, is never planned for, ' +
+        'and covers later phases at its tier. `retry with <member>` takes a spare in that ' +
+        'member’s image the same way when the member is needed elsewhere. A worktree, its ' +
+        'databases and its compose stack each, so this is bounded; `0` keeps the roster to the ' +
+        'plan’s and restores waiting and covering. One observed run left a phase on the ' +
+        'critical path idle for 17 minutes while a retry held the member it was planned for.',
+    ),
   wave_gates: z
     .enum(WAVE_GATES)
     .default('final')

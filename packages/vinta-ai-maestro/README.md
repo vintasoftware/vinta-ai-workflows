@@ -128,6 +128,12 @@ There are also `judge-hook` and `guard-hook`, which are internal: they are the h
 - **Crew substitution** is capped by `defaults.substitution` (default
   `up_one_tier`): a warm session never moves a phase up a tier, and `status`,
   the run view and the post-mortem show every phase that ran above its plan.
+- **A busy crew member is replaced, not borrowed** (`defaults.max_spare_crew`,
+  default 2): a phase whose member is busy gets a spare in that member's image,
+  with a worktree of its own, rather than a member another pending phase is
+  planned for. `0` keeps the roster to the plan's.
+- **One PR per run** with `defaults.pull_requests: plan`: the plan PR alone,
+  instead of a PR per phase and per integration branch (`phase`, the default).
 
 ### The run coordinator
 

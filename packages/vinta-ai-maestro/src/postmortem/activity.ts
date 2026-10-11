@@ -54,8 +54,11 @@ export const CrewSubstitutionSchema = z
     tier: z.number().int(),
     model: z.string().optional().describe('The model that member ran on, from the roster.'),
     reason: z
-      .enum(['peer_busy', 'warm_session'])
-      .describe('`peer_busy`: the planned member was working. `warm_session`: promoted to reuse an open session.'),
+      .enum(['peer_busy', 'warm_session', 'spare_crew'])
+      .describe(
+        '`peer_busy`: the planned member was working. `warm_session`: promoted to reuse an open session. ' +
+          '`spare_crew`: the planned member was working, and a spare was taken on in their image.',
+      ),
     attempts: z.number().int().min(1).describe('Attempts this member took the phase for.'),
     above_plan: z.boolean().describe('Whether this ran at a higher tier than the plan named — dearer than budgeted.'),
     node_cost_usd: z
@@ -215,7 +218,8 @@ export function crewSubstitutions(
     const plannedTier =
       typeof payload['planned_tier'] === 'number' ? payload['planned_tier'] : crew[planned]?.tier
     // Rows from before there were two reasons read as the one there was.
-    const reason = payload['reason'] === 'warm_session' ? 'warm_session' : 'peer_busy'
+    const reason =
+      payload['reason'] === 'warm_session' || payload['reason'] === 'spare_crew' ? payload['reason'] : 'peer_busy'
     const key = `${node}\u0000${member}\u0000${reason}`
     const existing = found.get(key)
     if (existing !== undefined) {

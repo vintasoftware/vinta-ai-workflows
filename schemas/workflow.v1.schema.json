@@ -423,6 +423,22 @@
             "any"
           ]
         },
+        "pull_requests": {
+          "default": "phase",
+          "description": "Which pull requests a run opens. `phase` — the default — one per phase, one per integration branch, and the plan PR that lands them all: the phase PRs are review units stacked in merge order. `plan` opens the plan PR alone, from the last wave branch, which already holds every phase and every conflict resolution; review happens there. One observed ten-phase refactor opened fifteen PRs that nobody was going to merge. Under `plan` a phase has no PR of its own, so its `after_pr` chores are skipped.",
+          "type": "string",
+          "enum": [
+            "phase",
+            "plan"
+          ]
+        },
+        "max_spare_crew": {
+          "default": 2,
+          "description": "Crew members a run may take on beyond the roster. When the member a phase was planned for is busy, the phase does not borrow a member another pending phase is planned for, and does not wait: it gets a new member at the planned member’s tier and model, with a worktree of its own provisioned there and then. A member nobody plans for is borrowed as before. The spare stays on the roster for the rest of the run, is never planned for, and covers later phases at its tier. `retry with <member>` takes a spare in that member’s image the same way when the member is needed elsewhere. A worktree, its databases and its compose stack each, so this is bounded; `0` keeps the roster to the plan’s and restores waiting and covering. One observed run left a phase on the critical path idle for 17 minutes while a retry held the member it was planned for.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "wave_gates": {
           "default": "final",
           "description": "When the phases’ gates run in full on a merged wave, in the integration worktree. Each phase passes its gates on its own branch, and two parallel phases can each be green and disagree with each other — a sender and a receiver of one signal, say — which only a merged tree shows. `final` — the default — runs every gate of the plan once on the last wave before the plan PR opens, and the wave’s phases’ gates on any wave whose merge needed a conflict resolution. `every` runs the wave’s phases’ gates on every wave as well, which costs one full suite per wave and catches a disagreement at the wave that introduced it. `off` runs none of these. Under `gate_scope: scoped` the full form of a narrowed gate still runs on each wave whatever this says: that is where the suite the phases skipped is paid back.",

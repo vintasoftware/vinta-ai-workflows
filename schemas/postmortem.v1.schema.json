@@ -593,9 +593,10 @@
                 "type": "string",
                 "enum": [
                   "peer_busy",
-                  "warm_session"
+                  "warm_session",
+                  "spare_crew"
                 ],
-                "description": "`peer_busy`: the planned member was working. `warm_session`: promoted to reuse an open session."
+                "description": "`peer_busy`: the planned member was working. `warm_session`: promoted to reuse an open session. `spare_crew`: the planned member was working, and a spare was taken on in their image."
               },
               "attempts": {
                 "type": "integer",

@@ -211,6 +211,26 @@ describe('resource pools', () => {
     lease.release()
   })
 
+  it('grants a waiter the moment the pool grows', async () => {
+    const pool = pools({ lane: 1 }, { agingMs: 0 })
+    const first = await pool.acquire(['lane'])
+    let granted = false
+    const pending = pool.acquire(['lane']).then((lease) => {
+      granted = true
+      return lease
+    })
+    await settle()
+    expect(granted).toBe(false)
+
+    pool.grow('lane')
+    const second = await within(1_000, pending)
+
+    expect(pool.capacity('lane')).toBe(2)
+    expect(pool.held('lane')).toBe(2)
+    first.release()
+    second.release()
+  })
+
   it('does not deadlock when two holders declare the same pools in opposite orders', async () => {
     const pool = pools({ 'test-suite': 1, lane: 1 }, { agingMs: 0 })
     const done: string[] = []

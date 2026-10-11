@@ -225,6 +225,10 @@ async function refusal(response: Response, gateId: string): Promise<string> {
     // A body that will not parse tells us nothing the status does not.
   }
 
+  if (code.startsWith('earlier_gate_red:')) {
+    const red = code.slice('earlier_gate_red:'.length)
+    return `gate "${red}" is red on this tree and comes before "${gateId}". Fix it and run "${red}" again first — "${gateId}" would run against a tree that already failed.`
+  }
   switch (code) {
     case 'unknown_gate':
       return `this plan declares no gate called "${gateId}" — the ones it does are listed in your instructions.`
