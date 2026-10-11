@@ -3,36 +3,56 @@
  * established.
  *
  * The unit suite is the one that actually protects this adapter: it drives the
- * JSONL mapping, the stream framing, the refusal table and `preflight` over
- * synthetic CLI output and fake binaries written into a temp dir, and it runs
- * everywhere — no CLI, no login, no tokens spent.
+ * notification mapping, the usage arithmetic, the refusal table, `preflight`,
+ * and whole sessions against a fake `codex app-server` that speaks the
+ * protocol over stdio (`support/fake-codex-app-server.ts`). It runs everywhere
+ * — no CLI, no login, no tokens spent.
  *
  * The live suite runs `runAdapterContract` against the real CLI and skips
  * itself when `preflight` says the binary is missing or logged out. It must
  * never fail a suite on a machine without an authenticated `codex`, which
  * includes CI.
  *
- * The synthetic frames below are transcribed from a real `codex exec --json`
- * run (codex-cli 0.147.0), including the failure frames — guessing at a vendor
- * schema is how an adapter passes its own tests and none of the vendor's.
+ * The payloads below are transcribed from recorded app-server sessions
+ * (codex-cli 0.147.0), including the failures — guessing at a vendor schema is
+ * how an adapter passes its own tests and none of the vendor's.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
+import type { AgentEvent, AgentSession, AgentTask, HarnessAdapter } from '../src/harness/adapter.ts'
 import {
-  type AgentEvent,
-  type AgentSession,
-  type AgentTask,
-  HarnessCapabilityError,
-  type HarnessAdapter,
-} from '../src/harness/adapter.ts'
-import { CodexAdapter, classifySpawnFailure, mapCliEvent } from '../src/harness/codex.ts'
+  CodexAdapter,
+  type CodexAdapterOptions,
+  classifySpawnFailure,
+  mapNotification,
+  turnRefusal,
+  usageBetween,
+  wakeMessage,
+} from '../src/harness/codex.ts'
 import { runAdapterContract } from '../src/harness/contract.ts'
-import { JsonLines, parseRetryAfter } from '../src/harness/shared.ts'
-import { turnRefusal } from '../src/harness/codex.ts'
+import { AGENT_PERMISSIONS, codexThreadPolicy } from '../src/harness/permissions.ts'
+import { operatorGuidance, parseRetryAfter } from '../src/harness/shared.ts'
 import { type FakeCliSpec, fakeCli } from './support/fake-cli.ts'
+import {
+  FAKE_THREAD,
+  type FakeAppServer,
+  type FakeAppServerSpec,
+  agentMessage,
+  childTurn,
+  command,
+  fakeCodexAppServer,
+  itemCompleted,
+  itemStarted,
+  reasoning,
+  spawnAgent,
+  threadStatus,
+  tokenUsage,
+  turnCompleted,
+  turnStarted,
+} from './support/fake-codex-app-server.ts'
 
 const temps: string[] = []
 
@@ -48,13 +68,7 @@ afterAll(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true })
 })
 
-/**
- * A fake `codex`, one per temp dir so no two fixtures can shadow each other.
- *
- * `preflight` runs the binary twice — `--version`, then `login status` — as
- * separate processes, so a spec's `version` answers the first invocation and
- * everything else it declares answers the second.
- */
+/** A fake for `preflight`, which only ever runs `--version` and `login status`. */
 const fakeBin = (spec: FakeCliSpec): string => fakeCli(makeTemp(), 'codex-fake', spec)
 
 /** What this CLI answers `--version` with, which `preflight` reports verbatim. */
@@ -63,208 +77,149 @@ const VERSION = 'codex-cli 0.147.0'
 /** Well-formed and never issued: the shape of a thread id the vendor has forgotten. */
 const UNISSUED_SESSION = '00000000-0000-4000-8000-000000000000'
 
+const notification = (method: string, params: Record<string, unknown>): unknown => ({ method, params })
+
 // ---------------------------------------------------------------------------
 
-describe('JsonLines framing', () => {
-  it('reassembles an object split across chunk boundaries', () => {
-    const lines = new JsonLines()
-    expect(lines.push('{"type":"thread.st')).toEqual([])
-    expect(lines.push('arted","thread_')).toEqual([])
-    expect(lines.push('id":"01a0-89cd"}\n')).toEqual([
-      { type: 'thread.started', thread_id: '01a0-89cd' },
-    ])
-  })
-
-  it('emits several frames from one chunk and holds an unterminated tail', () => {
-    const lines = new JsonLines()
-    expect(lines.push('{"a":1}\n{"b":2}\n{"c":')).toEqual([{ a: 1 }, { b: 2 }])
-    expect(lines.push('3}\n')).toEqual([{ c: 3 }])
-  })
-
-  it('drops blank lines and non-JSON noise without throwing', () => {
-    const lines = new JsonLines()
-    expect(lines.push('\n\nReading additional input from stdin...\n{"ok":true}\n')).toEqual([
-      { ok: true },
-    ])
-  })
-})
-
-describe('CLI frame mapping', () => {
-  it('maps the thread frame to a session start', () => {
-    expect(mapCliEvent({ type: 'thread.started', thread_id: 't-1' })).toEqual([
-      { type: 'session_started', sessionId: 't-1' },
-    ])
-  })
-
-  it('ignores the turn frame that only says a turn began', () => {
-    expect(mapCliEvent({ type: 'turn.started' })).toEqual([])
-  })
+describe('notification mapping', () => {
+  const started = (item: Record<string, unknown>): AgentEvent[] =>
+    mapNotification(notification('item/started', { item, threadId: 't', turnId: 'u' }))
+  const completed = (item: Record<string, unknown>): AgentEvent[] =>
+    mapNotification(notification('item/completed', { item, threadId: 't', turnId: 'u' }))
 
   it('maps a completed agent message and a completed reasoning item', () => {
-    expect(
-      mapCliEvent({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'ok' } }),
-    ).toEqual([{ type: 'assistant_text', text: 'ok' }])
-    expect(
-      mapCliEvent({ type: 'item.completed', item: { id: 'item_1', type: 'reasoning', text: 'weighing' } }),
-    ).toEqual([{ type: 'thinking', text: 'weighing' }])
-  })
-
-  it('opens a command execution on item.started and closes it on item.completed', () => {
-    const started = {
-      id: 'item_1',
-      type: 'command_execution',
-      command: '/bin/zsh -lc ls',
-      aggregated_output: '',
-      exit_code: null,
-      status: 'in_progress',
-    }
-    expect(mapCliEvent({ type: 'item.started', item: started })).toEqual([
-      { type: 'tool_use', id: 'item_1', name: 'command_execution', input: started },
+    expect(completed(agentMessage('m1', 'ok'))).toEqual([{ type: 'assistant_text', text: 'ok' }])
+    expect(completed(reasoning('r1', ['weighing', 'deciding']))).toEqual([
+      { type: 'thinking', text: 'weighing\n\ndeciding' },
     ])
-    expect(
-      mapCliEvent({
-        type: 'item.completed',
-        item: { ...started, aggregated_output: 'a.txt\n', exit_code: 0, status: 'completed' },
-      }),
-    ).toEqual([{ type: 'tool_result', id: 'item_1', ok: true, summary: 'a.txt\n' }])
   })
 
-  it('maps a non-zero exit and a failed status to a tool result that is not ok', () => {
-    const fail = (item: Record<string, unknown>): boolean => {
-      const event = mapCliEvent({ type: 'item.completed', item })[0]
+  it('reads text only when an item is whole, never from its start or its deltas', () => {
+    expect(started(agentMessage('m1', ''))).toEqual([])
+    expect(
+      mapNotification(notification('item/agentMessage/delta', { itemId: 'm1', delta: 'o' })),
+    ).toEqual([])
+    // Encrypted reasoning arrives empty and says nothing.
+    expect(completed(reasoning('r1'))).toEqual([])
+  })
+
+  it('opens a command on item/started and closes it on item/completed, under the name the guard reads', () => {
+    const open = command('exec-1', '42', 'ls')
+    expect(started(open)).toEqual([{ type: 'tool_use', id: 'exec-1', name: 'command_execution', input: open }])
+    expect(completed(command('exec-1', '42', 'ls', { exitCode: 0, output: 'a.txt\n' }))).toEqual([
+      { type: 'tool_result', id: 'exec-1', ok: true, summary: 'a.txt\n' },
+    ])
+  })
+
+  it('maps a non-zero exit, a failed status and a declined call to a result that is not ok', () => {
+    const ok = (item: Record<string, unknown>): boolean => {
+      const event = completed(item)[0]
       return event?.type === 'tool_result' ? event.ok : true
     }
-    expect(fail({ id: 'c', type: 'command_execution', exit_code: 2, status: 'completed' })).toBe(false)
-    expect(fail({ id: 'c', type: 'command_execution', exit_code: 0, status: 'failed' })).toBe(false)
+    expect(ok({ id: 'c', type: 'commandExecution', exitCode: 2, status: 'completed' })).toBe(false)
+    expect(ok({ id: 'c', type: 'commandExecution', exitCode: null, status: 'declined' })).toBe(false)
+    expect(ok({ id: 'f', type: 'fileChange', changes: [], status: 'failed' })).toBe(false)
   })
 
-  it('names an MCP call after the tool it called', () => {
-    const item = { id: 'm1', type: 'mcp_tool_call', server: 'figma', tool: 'read_page', status: 'in_progress' }
-    expect(mapCliEvent({ type: 'item.started', item })).toEqual([
-      { type: 'tool_use', id: 'm1', name: 'figma.read_page', input: item },
+  it('names an MCP call after the tool it called, and a sub-agent call after its tool', () => {
+    const mcp = { id: 'm1', type: 'mcpToolCall', server: 'figma', tool: 'read_page', status: 'inProgress' }
+    expect(started(mcp)).toEqual([{ type: 'tool_use', id: 'm1', name: 'figma.read_page', input: mcp }])
+    const spawn = spawnAgent('s1', 'child', 'inProgress')
+    expect(started(spawn)[0]).toMatchObject({ type: 'tool_use', name: 'spawn_agent' })
+  })
+
+  it('maps a compaction item to a compaction with no counts', () => {
+    expect(completed({ type: 'contextCompaction', id: 'k1' })).toEqual([
+      { type: 'context_compacted', trigger: 'auto' },
     ])
   })
 
-  it('drops item.updated, which is progress on a call already announced', () => {
-    expect(
-      mapCliEvent({
-        type: 'item.updated',
-        item: { id: 'item_1', type: 'command_execution', aggregated_output: 'partial' },
-      }),
-    ).toEqual([])
-  })
-
-  it('maps the terminal turn frame to usage plus a session end', () => {
-    expect(
-      mapCliEvent({
-        type: 'turn.completed',
-        usage: {
-          input_tokens: 17960,
-          cached_input_tokens: 11264,
-          cache_write_input_tokens: 0,
-          output_tokens: 5,
-          reasoning_output_tokens: 0,
-        },
-      }),
-    ).toEqual([
-      // Codex prices nothing, so `costUsd` is absent rather than guessed.
-      //
-      // `input` is 17960 − 11264: this vendor's `input_tokens` is the *whole*
-      // prompt with the cached part inside it, where Anthropic's is the fresh
-      // remainder with the cache counted beside it (§15.6). Carried through
-      // raw, a cross-harness token sum would mean two different things at
-      // once, and a cache-read share computed from it would be wrong by
-      // exactly the cached prefix. The subtraction is what makes `input` mean
-      // the same thing in all three adapters.
-      { type: 'usage', input: 6696, output: 5, cacheRead: 11264, cacheWrite: 0 },
-      { type: 'session_ended', result: 'ok' },
-    ])
-  })
-
-  it('omits a cache counter the CLI did not send rather than reporting a zero', () => {
-    // Unknown is not zero (§15.6): a turn that reported no cache figures must
-    // not aggregate as one that achieved a 0% hit rate.
-    const [usage] = mapCliEvent({
-      type: 'turn.completed',
-      usage: { input_tokens: 900, output_tokens: 30 },
-    })
-    expect(usage).toEqual({ type: 'usage', input: 900, output: 30 })
-    expect(usage).not.toHaveProperty('cacheRead')
-    expect(usage).not.toHaveProperty('cacheWrite')
-  })
-
-  it('never reports a negative token count when the vendor’s own figures disagree', () => {
-    // The subtraction is floored. A vendor is not owed arithmetic consistency,
-    // and a negative count would poison every total it is summed into.
-    expect(
-      mapCliEvent({
-        type: 'turn.completed',
-        usage: { input_tokens: 10, cached_input_tokens: 40, output_tokens: 1 },
-      })[0],
-    ).toEqual({ type: 'usage', input: 0, output: 1, cacheRead: 40 })
-  })
-
-  it('maps a failed turn to an error carrying only a classified reason token', () => {
-    const events = mapCliEvent({
-      type: 'turn.failed',
-      error: { message: '{"type":"error","status":429,"error":{"message":"rate limit exceeded"}}' },
-    })
-    expect(events).toEqual([
-      { type: 'error', message: 'codex: rate-limited' },
-      { type: 'session_ended', result: 'error' },
+  it('maps an error the server gave up on to a reason token, and ignores one it is retrying', () => {
+    const error = {
+      message: 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header',
+      codexErrorInfo: 'other',
+      additionalDetails: null,
+    }
+    expect(mapNotification(notification('error', { error, willRetry: true, threadId: 't', turnId: 'u' }))).toEqual([])
+    expect(mapNotification(notification('error', { error, willRetry: false, threadId: 't', turnId: 'u' }))).toEqual([
+      { type: 'error', message: 'codex: not-authenticated' },
     ])
   })
 
   it('never lets vendor prose reach an error event', () => {
     const prose = "The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account."
-    const fromStream = mapCliEvent({ type: 'error', message: prose })
-    const fromItem = mapCliEvent({ type: 'item.completed', item: { id: 'e', type: 'error', message: prose } })
-    for (const events of [fromStream, fromItem]) {
-      expect(events).toEqual([{ type: 'error', message: 'codex: unclassified' }])
-    }
+    const events = mapNotification(
+      notification('error', { error: { message: prose, codexErrorInfo: 'badRequest' }, willRetry: false }),
+    )
+    expect(events).toEqual([{ type: 'error', message: 'codex: unclassified' }])
   })
 
-  it('ignores frame types, item types and malformed frames it has never seen', () => {
-    expect(mapCliEvent({ type: 'a_variant_shipped_next_year', payload: 1 })).toEqual([])
-    expect(mapCliEvent({ type: 'item.completed', item: { id: 'x', type: 'todo_list', items: [] } })).toEqual([])
-    expect(mapCliEvent({ type: 'item.completed', item: { type: 'agent_message', text: 'no id' } })).toEqual([])
-    expect(mapCliEvent({ type: 'thread.started' })).toEqual([])
-    expect(mapCliEvent({ type: 'item.started', item: 'not an object' })).toEqual([])
-    expect(mapCliEvent(null)).toEqual([])
-    expect(mapCliEvent('a bare string')).toEqual([])
-    expect(mapCliEvent([1, 2, 3])).toEqual([])
+  it('ignores methods, item types and malformed notifications it has never seen', () => {
+    expect(mapNotification(notification('a/variant/shipped/next/year', { payload: 1 }))).toEqual([])
+    expect(completed({ id: 'x', type: 'plan', text: 'step 1' })).toEqual([])
+    expect(completed({ type: 'agentMessage', text: 'no id' })).toEqual([])
+    expect(completed({ id: 'u', type: 'userMessage', content: [] })).toEqual([])
+    expect(mapNotification(notification('item/started', { item: 'not an object' }))).toEqual([])
+    expect(mapNotification({ method: 'item/started' })).toEqual([])
+    expect(mapNotification(null)).toEqual([])
+    expect(mapNotification('a bare string')).toEqual([])
+    expect(mapNotification([1, 2, 3])).toEqual([])
+  })
+})
+
+describe('usage between two running totals', () => {
+  it('subtracts the cached prefix, so input is the fresh remainder in every adapter', () => {
+    // §15.6. The OpenAI shape counts the cached prefix inside `inputTokens`;
+    // carried through raw, a cross-harness sum would mean two things at once.
+    expect(
+      usageBetween(undefined, { input: 17960, cached: 11264, cacheWrite: 0, output: 5 }),
+    ).toEqual({ type: 'usage', input: 6696, output: 5, cacheRead: 11264, cacheWrite: 0 })
   })
 
-  it('maps a whole recorded run end to end through the framer', () => {
-    const transcript = [
-      '{"type":"thread.started","thread_id":"01a089cd-a59f-7801-a868-97dffc90d029"}',
-      '{"type":"turn.started"}',
-      '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I will inspect the directory."}}',
-      '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}',
-      '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"a.txt\\n","exit_code":0,"status":"completed"}}',
-      '{"type":"a_variant_shipped_next_year"}',
-      '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The file name is a.txt."}}',
-      '{"type":"turn.completed","usage":{"input_tokens":35676,"cached_input_tokens":28800,"output_tokens":108}}',
-      '',
-    ].join('\n')
+  it('reports only what was added since the last reading', () => {
+    const first = { input: 19083, cached: 11008, cacheWrite: 0, output: 118 }
+    const second = { input: 38307, cached: 29184, cacheWrite: 0, output: 123 }
+    expect(usageBetween(first, second)).toEqual({
+      type: 'usage',
+      input: 1048,
+      output: 5,
+      cacheRead: 18176,
+      cacheWrite: 0,
+    })
+  })
 
-    const lines = new JsonLines()
-    const events: AgentEvent[] = []
-    // Byte-at-a-time is the worst framing a pipe can hand you; it must not
-    // change the result at all.
-    for (const char of transcript) {
-      for (const frame of lines.push(char)) events.push(...mapCliEvent(frame))
-    }
+  it('reads a total that went down as a reset, never as negative usage', () => {
+    const before = { input: 5000, cached: 4000, cacheWrite: 0, output: 300 }
+    expect(usageBetween(before, { input: 100, cached: 0, cacheWrite: 0, output: 10 })).toEqual({
+      type: 'usage',
+      input: 100,
+      output: 10,
+      cacheRead: 0,
+      cacheWrite: 0,
+    })
+    // And a vendor whose own figures disagree is floored, not negative.
+    expect(usageBetween(undefined, { input: 10, cached: 40, cacheWrite: 0, output: 1 })).toMatchObject({
+      input: 0,
+    })
+  })
+})
 
-    expect(events.map((e) => e.type)).toEqual([
-      'session_started',
-      'assistant_text',
-      'tool_use',
-      'tool_result',
-      'assistant_text',
-      'usage',
-      'session_ended',
-    ])
+describe('the wake message', () => {
+  it('names what finished by identifier, and nothing it printed', () => {
+    const text = wakeMessage(
+      [{ command: 'pnpm test --run', processId: '7', exitCode: 1 }],
+      ['01a128fb-child'],
+    )
+    expect(text).toContain('`pnpm test --run` (session 7) exited with code 1')
+    expect(text).toContain('write_stdin with session_id 7')
+    expect(text).toContain('Sub-agent 01a128fb-child finished')
+  })
+
+  it('keeps a long command to one clipped line', () => {
+    const text = wakeMessage([{ command: `run\n${'x'.repeat(500)}`, processId: '1', exitCode: null }], [])
+    const line = text.split('\n').find((entry) => entry.includes('session 1')) ?? ''
+    expect(line.includes('…')).toBe(true)
+    expect(line).toContain('exited;')
   })
 })
 
@@ -279,11 +234,17 @@ describe('spawn refusal classification', () => {
     expect(kindOf('/bin/sh: codex: command not found', 127)).toBe('fatal')
   })
 
+  it('calls a CLI without the app server fatal, with its own reason', () => {
+    const refusal = classifySpawnFailure("error: unrecognized subcommand 'app-server'", 2, 'phase-1')
+    expect(refusal.kind).toBe('fatal')
+    expect(refusal.message).toContain('app-server-unsupported')
+  })
+
   // §6.1: a person logging in fixes this, and nothing else does — so it is
   // neither `fatal` (which fails the subtree) nor a wait (which retries).
   it('calls a logged-out CLI unauthenticated, for the operator', () => {
     expect(kindOf('Not logged in. Run `codex login`.')).toBe('unauthenticated')
-    expect(kindOf('401 Unauthorized')).toBe('unauthenticated')
+    expect(kindOf('unexpected status 401 Unauthorized: Missing bearer')).toBe('unauthenticated')
     expect(kindOf('OAuth token has expired')).toBe('unauthenticated')
   })
 
@@ -293,9 +254,10 @@ describe('spawn refusal classification', () => {
     )
   })
 
-  it('calls an exhausted usage window quota, not fatal', () => {
+  it('calls an exhausted usage window quota, by its prose or its structured code', () => {
     expect(kindOf("You've hit your usage limit. Try again in 2 hours.")).toBe('quota')
     expect(kindOf('insufficient_quota')).toBe('quota')
+    expect(kindOf('stopped usageLimitExceeded')).toBe('quota')
   })
 
   it('calls a rate limit a rate limit', () => {
@@ -312,6 +274,7 @@ describe('spawn refusal classification', () => {
     expect(kindOf('stream disconnected before completion')).toBe('transient')
     expect(kindOf('503 Service Unavailable')).toBe('transient')
     expect(kindOf('fetch failed: ECONNRESET')).toBe('transient')
+    expect(kindOf('serverOverloaded')).toBe('transient')
   })
 
   it('defaults an unrecognized failure to fatal rather than an unbounded wait', () => {
@@ -320,24 +283,19 @@ describe('spawn refusal classification', () => {
   })
 
   it('calls a refused resume stale — but only where a session id was carried', () => {
-    // §15.4's rule in both directions. Codex names the thing three ways
-    // depending on which layer answers, and none of them is stale when there
-    // was no token to expire.
+    // §15.4's rule in both directions. The first line is the server's own
+    // wording, recorded against an id it never issued.
     for (const prose of [
+      `no rollout found for thread id ${UNISSUED_SESSION}`,
       'Error: thread not found: 5f2c1b90',
       'no session found for the given id',
-      'could not load rollout for 5f2c1b90',
     ]) {
-      expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: true }).kind).toBe(
-        'stale_session',
-      )
+      expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: true }).kind).toBe('stale_session')
       expect(kindOf(prose)).toBe('fatal')
     }
   })
 
   it('reads a stale session ahead of a pattern that would otherwise match it', () => {
-    // Why the row is hoisted rather than merely listed: read as `transient`,
-    // a forgotten session would be waited on forever — it does not come back.
     const prose = 'stream disconnected: thread not found'
     expect(classifySpawnFailure(prose, 1, 'phase-1', { resuming: true }).kind).toBe('stale_session')
     expect(kindOf(prose)).toBe('transient')
@@ -351,7 +309,6 @@ describe('spawn refusal classification', () => {
       { resuming: true },
     )
     expect(refusal.kind).toBe('stale_session')
-    // Not a wait: the answer is one retry on a fresh session, now (§15.4).
     expect(refusal.retryAfter).toBe(undefined)
     expect(refusal.message.includes('resume-session-unknown')).toBe(true)
     expect(refusal.message.includes('5f2c1b90')).toBe(false)
@@ -386,24 +343,18 @@ describe('spawn refusal classification', () => {
 
 /**
  * §6.1's other half: the window that closes while a turn is running, where
- * there is no spawn left to refuse. Codex states a failure as prose — often a
- * whole upstream JSON body — and only the classifier's fixed token may reach an
- * event, so the prose is read here, matched, and dropped.
+ * there is no spawn left to refuse.
  */
 describe('a window that closes mid-turn', () => {
-  // `Z`, like every other clock in this file. Without it the string is parsed
-  // in the *runner's* zone, and an absolute expectation beside it then asserts
-  // the author's offset rather than the parser's arithmetic — green on a
-  // machine at -03:00 and red on a UTC runner.
+  // `Z`, like every other clock in this file: an absolute expectation beside
+  // a zone-less string asserts the author's offset, not the parser.
   const now = new Date('2026-01-01T10:00:00.000Z')
+  const prose = "You've hit your usage limit. Try again in 2 hours."
 
-  it('reads a failed turn, a stream error and an error item alike', () => {
-    const prose = "You've hit your usage limit. Try again in 2 hours."
-
+  it('reads an error the server gave up on, and a failed turn, alike', () => {
     for (const frame of [
-      { type: 'turn.failed', error: { message: prose } },
-      { type: 'error', message: prose },
-      { type: 'item.completed', item: { type: 'error', message: prose } },
+      notification('error', { error: { message: prose, codexErrorInfo: 'usageLimitExceeded' }, willRetry: false }),
+      notification('turn/completed', { threadId: 't', turn: { id: 'u', status: 'failed', error: { message: prose } } }),
     ]) {
       const refused = turnRefusal(frame, now)
       expect(refused?.kind).toBe('quota')
@@ -411,20 +362,33 @@ describe('a window that closes mid-turn', () => {
     }
   })
 
-  it('reports nothing for a turn that completed, or that failed on its own work', () => {
-    expect(turnRefusal({ type: 'turn.completed', usage: {} }, now)).toBe(undefined)
-    expect(turnRefusal({ type: 'turn.failed', error: { message: 'the tests fail' } }, now)).toBe(
+  it('reads the structured code when the prose says nothing', () => {
+    const frame = notification('error', {
+      error: { message: 'stopped', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } },
+      willRetry: false,
+    })
+    expect(turnRefusal(frame, now)?.kind).toBe('rate_limit')
+  })
+
+  it('reports nothing for a retry in progress, a completed turn, or a turn that failed on its own work', () => {
+    expect(turnRefusal(notification('error', { error: { message: prose }, willRetry: true }), now)).toBe(
       undefined,
     )
-    expect(turnRefusal({ type: 'item.completed', item: { type: 'agent_message' } }, now)).toBe(
-      undefined,
-    )
+    expect(
+      turnRefusal(notification('turn/completed', { turn: { id: 'u', status: 'completed', error: null } }), now),
+    ).toBe(undefined)
+    expect(
+      turnRefusal(
+        notification('turn/completed', { turn: { id: 'u', status: 'failed', error: { message: 'the tests fail' } } }),
+        now,
+      ),
+    ).toBe(undefined)
   })
 
   it('reports nothing for a fatal signal: a broken harness is not a wait', () => {
-    expect(turnRefusal({ type: 'error', message: 'not logged in; run codex login' }, now)).toBe(
-      undefined,
-    )
+    expect(
+      turnRefusal(notification('error', { error: { message: 'not logged in; run codex login' }, willRetry: false }), now),
+    ).toBe(undefined)
   })
 })
 
@@ -453,13 +417,6 @@ describe('reported reset times', () => {
     )
   })
 
-  it('reads a wall-clock reset and rolls it forward when it has passed', () => {
-    const local = new Date('2026-01-01T12:00:00')
-    expect(parseRetryAfter('Your limit will reset at 3pm', local)?.getHours()).toBe(15)
-    const late = new Date('2026-01-01T16:00:00')
-    expect(parseRetryAfter('Your limit will reset at 3pm', late)?.getDate()).toBe(2)
-  })
-
   it('reports nothing when the vendor said nothing', () => {
     expect(parseRetryAfter('overloaded', now)).toBe(undefined)
   })
@@ -468,11 +425,13 @@ describe('reported reset times', () => {
 // ---------------------------------------------------------------------------
 
 describe('declared capabilities', () => {
-  it('declares injection false, which is what §7 says codex exec can do', () => {
-    expect(new CodexAdapter().capabilities.inject).toBe(false)
-    expect(new CodexAdapter().capabilities.interrupt).toBe(true)
-    expect(new CodexAdapter().capabilities.resume).toBe(true)
-    expect(new CodexAdapter().capabilities.pty).toBe(true)
+  it('declares injection and background work, which the app server makes possible', () => {
+    const { capabilities } = new CodexAdapter()
+    expect(capabilities.inject).toBe(true)
+    expect(capabilities.backgroundWork).toBe(true)
+    expect(capabilities.interrupt).toBe(true)
+    expect(capabilities.resume).toBe(true)
+    expect(capabilities.pty).toBe(true)
   })
 })
 
@@ -503,8 +462,6 @@ describe('preflight against a fake binary', () => {
   })
 
   it('reports not installed when the binary exists but cannot answer --version', async () => {
-    // No `version` in the spec at all: this fake refuses `--version` the way a
-    // half-installed CLI does, which is a different state from having no file.
     const result = await new CodexAdapter({ bin: fakeBin({ exit: 1 }) }).preflight()
     expect(result.installed).toBe(false)
   })
@@ -533,90 +490,242 @@ describe('preflight against a fake binary', () => {
     const bin = fakeBin({ version: VERSION, stderr: ['error: unrecognized subcommand'], exit: 2 })
     expect((await new CodexAdapter({ bin }).preflight()).authenticated).toBe(true)
   })
-})
-
-describe('spawn against a fake binary', () => {
-  const task = (): AgentTask => ({
-    nodeId: 'phase-1',
-    cwd: makeTemp(),
-    prompt: 'implement the widget model',
-    model: 'gpt-5.2-codex',
-  })
 
   /**
-   * A fake that takes the prompt off stdin the way the real CLI does, then
-   * plays the given run.
-   *
-   * `readsLine` stands in for the old `cat > /dev/null`: `spawn` writes the
-   * brief and immediately ends the pipe (`inject` is false precisely because
-   * codex reads to EOF), so the brief arrives as one line either way — and a
-   * fake that read one line would still be correct if the adapter ever kept
-   * the pipe open, which a fake waiting on EOF would not.
+   * A release older than the app-server protocol this adapter speaks is not a
+   * usable install, and the fix is the install command — but the login comes
+   * first, so a machine with both problems hears about the one a person must
+   * solve before it hears about the one a command solves.
    */
-  const scripted = (spec: Omit<FakeCliSpec, 'version' | 'readsLine'>): string =>
-    fakeBin({ version: VERSION, readsLine: true, ...spec })
+  it('reports a CLI older than the app-server floor as needing an upgrade', async () => {
+    const old = fakeBin({ version: 'codex-cli 0.20.0', stdout: ['Logged in using ChatGPT'] })
+    const result = await new CodexAdapter({ bin: old }).preflight()
+    expect(result.installed).toBe(false)
+    expect(result.version).toBe('codex-cli 0.20.0')
+    expect(result.hint).toContain('0.147.0')
 
-  it('drives a whole scripted run into the normalized stream', async () => {
-    const bin = scripted({
-      stdout: [
-        '{"type":"thread.started","thread_id":"thread-fake"}',
-        '{"type":"turn.started"}',
-        '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"working"}}',
-        '{"type":"unknown_future_frame"}',
-        '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":4}}',
+    const oldAndOut = fakeBin({ version: 'codex-cli 0.20.0', stdout: ['Not logged in'], exit: 1 })
+    expect((await new CodexAdapter({ bin: oldAndOut }).preflight()).authenticated).toBe(false)
+
+    const unparseable = fakeBin({ version: 'codex dev build', stdout: ['Logged in using ChatGPT'] })
+    expect((await new CodexAdapter({ bin: unparseable }).preflight()).installed).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Sessions against a fake app server
+// ---------------------------------------------------------------------------
+
+const task = (overrides: Partial<AgentTask> = {}): AgentTask => ({
+  nodeId: 'phase-1',
+  cwd: makeTemp(),
+  prompt: 'implement the widget model',
+  model: 'gpt-5.6-luna',
+  ...overrides,
+})
+
+const server = (spec: FakeAppServerSpec = {}): FakeAppServer => fakeCodexAppServer(makeTemp(), spec)
+
+const start = async (
+  fake: FakeAppServer,
+  options: Omit<CodexAdapterOptions, 'bin'> = {},
+  overrides: Partial<AgentTask> = {},
+): Promise<AgentSession> => {
+  const outcome = await new CodexAdapter({ bin: fake.bin, ...options }).spawn(task(overrides))
+  if (!outcome.ok) throw new Error(`spawn refused: ${outcome.kind} ${outcome.message}`)
+  return outcome.session
+}
+
+const drain = async (session: AgentSession): Promise<AgentEvent[]> => {
+  const seen: AgentEvent[] = []
+  for await (const event of session.events) seen.push(event)
+  return seen
+}
+
+const types = (events: readonly AgentEvent[]): string[] => events.map((event) => event.type)
+
+/** The text inputs of the Nth `turn/start` the client sent. */
+const turnInput = (fake: FakeAppServer, index: number): string[] => {
+  const params = fake.sent('turn/start')[index]?.['params'] as { input?: { text?: string }[] } | undefined
+  return (params?.input ?? []).map((input) => input.text ?? '')
+}
+
+/** Polls a condition the fake's log will satisfy, failing loudly rather than hanging. */
+const until = async (condition: () => boolean, timeoutMs = 5_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('condition not reached')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A turn that ends cleanly after one reply. */
+const plainTurn = [
+  turnStarted(),
+  itemStarted(reasoning('r1')),
+  itemCompleted(reasoning('r1')),
+  tokenUsage({ input: 19083, cached: 11008, output: 118 }),
+  itemStarted(agentMessage('m1', '')),
+  itemCompleted(agentMessage('m1', 'ok')),
+  tokenUsage({ input: 38307, cached: 29184, output: 123 }),
+  turnCompleted(),
+]
+
+describe('spawn against a fake app server', () => {
+  it('does the handshake, starts the thread and maps a plain turn end to end', async () => {
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          itemStarted(reasoning('r1')),
+          itemStarted(command('exec-1', '10155', 'ls')),
+          itemCompleted(command('exec-1', '10155', 'ls', { exitCode: 0, output: 'a.txt\n' })),
+          tokenUsage({ input: 19083, cached: 11008, output: 118 }),
+          { notify: 'a/variant/shipped/next/year', params: { threadId: '$THREAD' } },
+          itemStarted(agentMessage('m1', '')),
+          itemCompleted(agentMessage('m1', 'ok')),
+          tokenUsage({ input: 38307, cached: 29184, output: 123 }),
+          turnCompleted(),
+        ],
       ],
     })
-    const outcome = await new CodexAdapter({ bin }).spawn(task())
-    expect(outcome.ok).toBe(true)
-    if (!outcome.ok) return
+    const session = await start(fake)
+    expect(session.id).toBe(FAKE_THREAD)
+    const events = await drain(session)
+    await session.kill()
 
-    expect(outcome.session.id).toBe('thread-fake')
-    const seen: AgentEvent[] = []
-    for await (const event of outcome.session.events) seen.push(event)
-    expect(seen).toEqual([
-      { type: 'session_started', sessionId: 'thread-fake' },
-      { type: 'assistant_text', text: 'working' },
-      { type: 'usage', input: 3, output: 4 },
+    expect(events).toEqual([
+      { type: 'session_started', sessionId: FAKE_THREAD },
+      { type: 'tool_use', id: 'exec-1', name: 'command_execution', input: command('exec-1', '10155', 'ls') },
+      { type: 'tool_result', id: 'exec-1', ok: true, summary: 'a.txt\n' },
+      { type: 'assistant_text', text: 'ok' },
+      // One usage for the turn, from the running total — not one per response.
+      { type: 'usage', input: 38307 - 29184, output: 123, cacheRead: 29184, cacheWrite: 0 },
       { type: 'session_ended', result: 'ok' },
+    ])
+
+    const log = fake.log()
+    // The prompt never reaches the process table.
+    expect(log[0]?.['argv']).toEqual(['app-server'])
+    const initialize = fake.sent('initialize')[0]?.['params'] as Record<string, unknown>
+    expect(initialize['capabilities']).toEqual({ experimentalApi: true })
+    expect(fake.sent('initialized').length).toBe(1)
+    const thread = fake.sent('thread/start')[0]?.['params'] as Record<string, unknown>
+    expect(thread).toMatchObject({ model: 'gpt-5.6-luna', ephemeral: false, ...codexThreadPolicy('auto') })
+    expect(turnInput(fake, 0)).toEqual(['implement the widget model'])
+    // Nothing was pending, and the session still cleaned before it went.
+    expect(fake.sent('thread/backgroundTerminals/list').length).toBe(1)
+    expect(fake.sent('thread/backgroundTerminals/clean').length).toBe(1)
+  })
+
+  it('defers to the CLI’s own model when the task names none', async () => {
+    const fake = server({ turns: [plainTurn] })
+    await drain(await start(fake, {}, { model: '' }))
+    const thread = fake.sent('thread/start')[0]?.['params'] as Record<string, unknown>
+    expect('model' in thread).toBe(false)
+  })
+
+  it('delivers operator text as a labelled second input, and records it as the operator’s', async () => {
+    const fake = server({ turns: [plainTurn] })
+    const events = await drain(await start(fake, {}, { operatorText: 'keep the migration reversible' }))
+    expect(turnInput(fake, 0)).toEqual([
+      'implement the widget model',
+      operatorGuidance('keep the migration reversible'),
+    ])
+    expect(events[1]).toEqual({ type: 'user_message', text: 'keep the migration reversible' })
+  })
+
+  it('states the operator’s policy on the thread, per mode', async () => {
+    for (const permission of AGENT_PERMISSIONS) {
+      const fake = server({ turns: [plainTurn] })
+      await drain(await start(fake, { permission }))
+      const thread = fake.sent('thread/start')[0]?.['params'] as Record<string, unknown>
+      expect(thread).toMatchObject(codexThreadPolicy(permission))
+    }
+  })
+
+  it('resumes a thread with the policy restated, and does not bill the history it replays', async () => {
+    const fake = server({
+      afterResume: [tokenUsage({ input: 50_000, cached: 40_000, output: 900 })],
+      turns: [[turnStarted(), tokenUsage({ input: 60_000, cached: 49_000, output: 950 }), turnCompleted()]],
+    })
+    const session = await start(fake, { permission: 'full' }, { resumeSessionId: 'thread-old' })
+    expect(session.id).toBe('thread-old')
+    const events = await drain(session)
+
+    const resume = fake.sent('thread/resume')[0]?.['params'] as Record<string, unknown>
+    expect(resume).toMatchObject({ threadId: 'thread-old', ...codexThreadPolicy('full') })
+    expect(fake.sent('thread/start').length).toBe(0)
+    expect(events.filter((event) => event.type === 'usage')).toEqual([
+      { type: 'usage', input: 1_000, output: 50, cacheRead: 9_000, cacheWrite: 0 },
     ])
   })
 
-  it('rejects send with a capability error instead of silently dropping the message', async () => {
-    const bin = scripted({
-      stdout: ['{"type":"thread.started","thread_id":"thread-quiet"}'],
-      // Still running when the send lands, which is the case that matters.
-      lingerMs: 5_000,
-    })
-    const outcome = await new CodexAdapter({ bin }).spawn(task())
-    expect(outcome.ok).toBe(true)
-    if (!outcome.ok) return
+  it('classifies a resume of a thread the server never had as stale — only when resuming', async () => {
+    const message = `no rollout found for thread id ${UNISSUED_SESSION}`
+    const stale = server({ replies: { 'thread/resume': { error: { code: -32600, message } } } })
+    const resumed = await new CodexAdapter({ bin: stale.bin }).spawn(task({ resumeSessionId: UNISSUED_SESSION }))
+    expect(resumed.ok === false && resumed.kind).toBe('stale_session')
+    expect(resumed.ok === false && resumed.message.includes(UNISSUED_SESSION)).toBe(false)
 
-    let rejected: unknown
-    await outcome.session.send('also update the changelog').catch((error: unknown) => {
-      rejected = error
-    })
-    expect(rejected instanceof HarnessCapabilityError).toBe(true)
-    expect((rejected as HarnessCapabilityError).capability).toBe('inject')
+    // The same wording from a fresh start is not a forgotten token.
+    const cold = server({ replies: { 'thread/start': { error: { code: -32600, message } } } })
+    const fresh = await new CodexAdapter({ bin: cold.bin }).spawn(task())
+    expect(fresh.ok === false && fresh.kind).toBe('fatal')
+  })
 
-    await outcome.session.kill()
+  it('answers every approval request — declining it and saying so in the stream', async () => {
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          itemStarted({ ...command('exec-1', null, 'touch created.txt'), source: 'agent' }),
+          {
+            request: 'item/commandExecution/requestApproval',
+            params: { threadId: '$THREAD', turnId: '$TURN', itemId: 'exec-1', command: "/bin/zsh -lc 'touch created.txt'" },
+          },
+          { request: 'account/chatgptAuthTokens/refresh', params: { reason: 'unauthorized' } },
+          { waitFor: 'thread/backgroundTerminals/list' },
+        ],
+      ],
+    })
+    // The turn never ends on its own here, so the replies are what is under
+    // test; the session is killed once both have been read.
+    const session = await start(fake, { permission: 'ask' })
+    const iterator = session.events[Symbol.asyncIterator]()
     const seen: AgentEvent[] = []
-    for await (const event of outcome.session.events) seen.push(event)
-    // And nothing that looks like the message got into the transcript.
-    expect(seen.some((e) => e.type === 'user_message')).toBe(false)
-    expect(seen[seen.length - 1]).toEqual({ type: 'session_ended', result: 'interrupted' })
-    // Spawns a real codex process: ~1s alone, but it sat exactly on vitest's
-    // 5s default and flaked about one run in four under parallel load.
-  }, 60_000)
+    while (!seen.some((event) => event.type === 'permission_request')) {
+      const step = await iterator.next()
+      if (step.done === true) break
+      seen.push(step.value)
+    }
+    await until(() => fake.log().some((entry) => entry['id'] === 1001 && entry['method'] === undefined))
+    await session.kill()
 
-  it('classifies a CLI that refuses before announcing a thread', async () => {
-    const bin = scripted({
-      // The vendor's own wording, byte for byte: the two-hour wait below is
-      // parsed back out of this line, so paraphrasing it would test nothing.
-      stderr: ["You've hit your usage limit. Try again in 2 hours."],
-      exit: 1,
+    expect(seen.find((event) => event.type === 'permission_request')).toEqual({
+      type: 'permission_request',
+      tool: 'command_execution',
+      detail: { itemId: 'exec-1', command: "/bin/zsh -lc 'touch created.txt'" },
     })
+    const replies = fake.log().filter((entry) => entry['method'] === undefined && 'id' in entry)
+    expect(replies.find((entry) => entry['id'] === 1000)?.['result']).toEqual({ decision: 'decline' })
+    // A request this client cannot answer is refused, never left open.
+    expect(replies.find((entry) => entry['id'] === 1001)?.['error']).toMatchObject({ code: -32601 })
+  })
+
+  it('classifies a server that refuses before announcing a thread', async () => {
+    const fake = server({ boot: { stderr: "You've hit your usage limit. Try again in 2 hours.", exit: 1 } })
     const now = Date.now()
-    const outcome = await new CodexAdapter({ bin }).spawn(task())
+    const outcome = await new CodexAdapter({ bin: fake.bin }).spawn(task())
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
     expect(outcome.kind).toBe('quota')
@@ -624,57 +733,385 @@ describe('spawn against a fake binary', () => {
     expect(waitMs >= 7_200_000 && waitMs < 7_260_000).toBe(true)
   })
 
-  it('classifies a refused resume as stale only when the task carried the id', async () => {
-    // The wiring §15.4 turns on, through a real process: the identical CLI
-    // failure is a stale token only for the spawn that offered one. Without
-    // it there was nothing to expire, so it keeps its ordinary reading.
-    const bin = scripted({ stderr: ['Error: thread not found: 5f2c1b90'], exit: 1 })
-    const adapter = new CodexAdapter({ bin })
+  it('refuses a logged-out server at spawn, before it spends a minute retrying 401s', async () => {
+    const fake = server({ replies: { 'account/read': { result: { account: null, requiresOpenaiAuth: true } } } })
+    const outcome = await new CodexAdapter({ bin: fake.bin }).spawn(task())
+    expect(outcome.ok === false && outcome.kind).toBe('unauthenticated')
+    expect(fake.sent('thread/start').length).toBe(0)
+  })
 
-    const resumed = await adapter.spawn({ ...task(), resumeSessionId: '5f2c1b90' })
-    expect(resumed.ok === false && resumed.kind).toBe('stale_session')
+  it('classifies a refusal sent as an error reply to the handshake or the first turn', async () => {
+    const initialize = server({ replies: { initialize: { error: { code: -32603, message: 'Not logged in' } } } })
+    const refusedInit = await new CodexAdapter({ bin: initialize.bin }).spawn(task())
+    expect(refusedInit.ok === false && refusedInit.kind).toBe('unauthenticated')
+    expect(refusedInit.ok === false && refusedInit.message).toContain('json-rpc -32603')
 
-    const cold = await adapter.spawn(task())
-    expect(cold.ok === false && cold.kind).toBe('fatal')
+    const turn = server({ replies: { 'turn/start': { error: { code: -32603, message: 'Too many requests' } } } })
+    const refusedTurn = await new CodexAdapter({ bin: turn.bin }).spawn(task())
+    expect(refusedTurn.ok === false && refusedTurn.kind).toBe('rate_limit')
   })
 
   it('classifies a binary that is not there at all', async () => {
     const outcome = await new CodexAdapter({ bin: join(makeTemp(), 'nope') }).spawn(task())
-    expect(outcome.ok).toBe(false)
-    if (outcome.ok) return
-    expect(outcome.kind).toBe('fatal')
+    expect(outcome.ok === false && outcome.kind).toBe('fatal')
   })
 
-  it('ends the stream once when the CLI dies mid-turn', async () => {
-    const bin = scripted({
-      stdout: ['{"type":"thread.started","thread_id":"thread-dies"}'],
-      exit: 3,
+  it('records a window that closes mid-turn, and ends the turn as failed', async () => {
+    const error = { message: "You've hit your usage limit. Try again in 2 hours.", codexErrorInfo: 'usageLimitExceeded' }
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          { notify: 'error', params: { error, willRetry: false, threadId: '$THREAD', turnId: '$TURN' } },
+          turnCompleted('failed', error),
+        ],
+      ],
     })
-    const outcome = await new CodexAdapter({ bin }).spawn(task())
-    expect(outcome.ok).toBe(true)
-    if (!outcome.ok) return
-    const seen: AgentEvent[] = []
-    for await (const event of outcome.session.events) seen.push(event)
-    expect(seen.filter((e) => e.type === 'session_ended').length).toBe(1)
-    expect(seen[seen.length - 1]).toEqual({ type: 'session_ended', result: 'error' })
+    const session = await start(fake)
+    const events = await drain(session)
+    expect(session.refusal?.kind).toBe('quota')
+    expect(events.filter((event) => event.type === 'error')).toEqual([
+      { type: 'error', message: 'codex refused mid-turn: usage-window-exhausted' },
+      { type: 'error', message: 'codex: usage-window-exhausted' },
+    ])
+    expect(events[events.length - 1]).toEqual({ type: 'session_ended', result: 'error' })
+  })
+
+  it('ends the stream once when the server dies mid-turn', async () => {
+    const fake = server({ turns: [[turnStarted(), { exit: 3 }]] })
+    const events = await drain(await start(fake))
+    expect(events.filter((event) => event.type === 'session_ended').length).toBe(1)
+    expect(events[events.length - 1]).toEqual({ type: 'session_ended', result: 'error' })
   })
 
   it('returns an injected refusal of every kind without starting a process', async () => {
     const adapter = new CodexAdapter({ bin: join(makeTemp(), 'never-run') })
-    for (const kind of [
-      'rate_limit',
-      'concurrency',
-      'quota',
-      'transient',
-      'stale_session',
-      'fatal',
-    ] as const) {
+    for (const kind of ['rate_limit', 'concurrency', 'quota', 'transient', 'stale_session', 'fatal'] as const) {
       adapter.refuseNext(kind)
       const outcome = await adapter.spawn(task())
-      expect(outcome.ok).toBe(false)
-      if (outcome.ok) return
-      expect(outcome.kind).toBe(kind)
+      expect(outcome.ok === false && outcome.kind).toBe(kind)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// backgroundWork
+// ---------------------------------------------------------------------------
+
+const BACKGROUND = 'sleep 20 && echo done > marker.txt'
+
+describe('a session with background work still running', () => {
+  /**
+   * The case the migration exists for: the agent backgrounds a command and
+   * ends its turn. The session must outlive the turn, see the command finish
+   * under the *old* turn's id, wake the agent with a turn of its own, and end
+   * once — after the agent has read the result.
+   */
+  it('is held past the turn, woken when the command finishes, and ends once', async () => {
+    const fake = server({
+      terminals: [[{ itemId: 'exec-bg', processId: '93423', command: BACKGROUND, cwd: '/lane' }], []],
+      turns: [
+        [
+          turnStarted(),
+          itemStarted(command('exec-bg', '93423', BACKGROUND)),
+          tokenUsage({ input: 1_000, output: 10 }),
+          // A new model response: the command was handed back as a session id.
+          itemStarted(reasoning('r2')),
+          itemCompleted(agentMessage('m1', 'STARTED')),
+          tokenUsage({ input: 2_000, output: 20 }),
+          turnCompleted(),
+          { waitFor: 'thread/backgroundTerminals/list' },
+          { delayMs: 300 },
+          itemCompleted(command('exec-bg', '93423', BACKGROUND, { exitCode: 0 }), { turnId: 'turn-1' }),
+        ],
+        [
+          turnStarted(),
+          itemCompleted(agentMessage('m2', 'marker says done')),
+          tokenUsage({ input: 3_500, output: 35 }),
+          turnCompleted(),
+        ],
+      ],
+    })
+    const events = await drain(await start(fake))
+
+    const wake = events.find((event) => event.type === 'user_message')
+    expect(wake?.type === 'user_message' && wake.text).toBe(
+      wakeMessage([{ command: BACKGROUND, processId: '93423', exitCode: 0 }], []),
+    )
+    expect(types(events)).toEqual([
+      'session_started',
+      'tool_use',
+      'assistant_text',
+      'usage',
+      // The command reports between turns, and the agent is woken after it.
+      'tool_result',
+      'user_message',
+      'assistant_text',
+      'usage',
+      'session_ended',
+    ])
+    expect(events[events.length - 1]).toEqual({ type: 'session_ended', result: 'ok' })
+    expect(fake.sent('turn/start').length).toBe(2)
+    expect(turnInput(fake, 1)).toEqual([wake?.type === 'user_message' ? wake.text : ''])
+    // Per turn, each carrying only its own share.
+    expect(events.filter((event) => event.type === 'usage').map((event) => event.type === 'usage' && event.output)).toEqual([20, 15])
+  })
+
+  it('wakes the agent when a sub-agent it left running finishes', async () => {
+    const child = 'thread-child'
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          itemStarted(spawnAgent('spawn-1', child, 'inProgress')),
+          threadStatus(child, 'idle'),
+          itemCompleted(spawnAgent('spawn-1', child, 'completed')),
+          threadStatus(child, 'active'),
+          childTurn(child, 'started'),
+          itemStarted(agentMessage('m1', '')),
+          itemCompleted(agentMessage('m1', 'LAUNCHED')),
+          turnCompleted(),
+          { waitFor: 'thread/backgroundTerminals/list' },
+          { delayMs: 300 },
+          // The sub-agent's own items are its business, not the transcript's.
+          itemCompleted(agentMessage('c1', 'CHILD-DONE'), { threadId: child, turnId: `${child}-turn` }),
+          threadStatus(child, 'idle'),
+          childTurn(child, 'completed'),
+        ],
+        [turnStarted(), itemCompleted(agentMessage('m2', 'the child is done')), turnCompleted()],
+      ],
+    })
+    const events = await drain(await start(fake))
+
+    expect(fake.sent('turn/start').length).toBe(2)
+    expect(turnInput(fake, 1)[0]).toBe(wakeMessage([], [child]))
+    expect(events.filter((event) => event.type === 'assistant_text')).toEqual([
+      { type: 'assistant_text', text: 'LAUNCHED' },
+      { type: 'assistant_text', text: 'the child is done' },
+    ])
+    expect(events.filter((event) => event.type === 'session_ended')).toEqual([
+      { type: 'session_ended', result: 'ok' },
+    ])
+  })
+
+  it('does not wake for a sub-agent the agent already waited on', async () => {
+    const child = 'thread-child'
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          itemStarted(spawnAgent('spawn-1', child, 'inProgress')),
+          itemCompleted(spawnAgent('spawn-1', child, 'completed')),
+          threadStatus(child, 'active'),
+          threadStatus(child, 'idle'),
+          itemCompleted({
+            ...spawnAgent('wait-1', child, 'completed'),
+            tool: 'wait',
+            agentsStates: { [child]: { status: 'completed', message: null } },
+          }),
+          turnCompleted(),
+        ],
+      ],
+    })
+    await drain(await start(fake))
+    expect(fake.sent('turn/start').length).toBe(1)
+  })
+
+  /**
+   * A command that was backgrounded and exited *during* the turn, without the
+   * agent ever polling it: nothing is left running, but its result was never
+   * read. Ending the session would drop it.
+   */
+  it('reports a backgrounded command that exited during the turn without being polled', async () => {
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          itemStarted(command('exec-9', '9', 'pnpm test')),
+          itemStarted(reasoning('r2')),
+          itemCompleted(command('exec-9', '9', 'pnpm test', { exitCode: 3 })),
+          itemCompleted(agentMessage('m1', 'waiting')),
+          turnCompleted(),
+        ],
+        [turnStarted(), itemCompleted(agentMessage('m2', 'tests failed, fixing')), turnCompleted()],
+      ],
+    })
+    await drain(await start(fake))
+    expect(fake.sent('turn/start').length).toBe(2)
+    expect(turnInput(fake, 1)[0]).toContain('(session 9) exited with code 3')
+  })
+
+  it('does not report a command the agent polled, or one that finished inside its own call', async () => {
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          // Finished inside its call: no new response began while it ran.
+          itemStarted(command('exec-1', '1', 'ls')),
+          itemCompleted(command('exec-1', '1', 'ls', { exitCode: 0 })),
+          // Backgrounded, then polled, then exited.
+          itemStarted(command('exec-2', '2', 'pnpm build')),
+          itemStarted(reasoning('r2')),
+          {
+            notify: 'item/commandExecution/terminalInteraction',
+            params: { threadId: '$THREAD', turnId: '$TURN', itemId: 'exec-2', processId: '2', stdin: '' },
+          },
+          itemCompleted(command('exec-2', '2', 'pnpm build', { exitCode: 0 })),
+          itemCompleted(agentMessage('m1', 'built')),
+          turnCompleted(),
+        ],
+      ],
+    })
+    const events = await drain(await start(fake))
+    expect(fake.sent('turn/start').length).toBe(1)
+    expect(events.some((event) => event.type === 'user_message')).toBe(false)
+  })
+
+  it('ends at once on a failed turn, whatever it left running', async () => {
+    const fake = server({
+      terminals: [[{ itemId: 'exec-bg', processId: '5', command: BACKGROUND, cwd: '/lane' }]],
+      turns: [
+        [
+          turnStarted(),
+          itemStarted(command('exec-bg', '5', BACKGROUND)),
+          itemStarted(reasoning('r2')),
+          turnCompleted('failed', { message: 'the model refused', codexErrorInfo: 'other' }),
+        ],
+      ],
+    })
+    const session = await start(fake)
+    const events = await drain(session)
+    expect(events[events.length - 1]).toEqual({ type: 'session_ended', result: 'error' })
+    expect(fake.sent('turn/start').length).toBe(1)
+    // And what it left running was cleaned rather than orphaned. The stream
+    // closes first; `kill` on an ended session resolves when cleanup has.
+    await session.kill()
+    expect(fake.sent('thread/backgroundTerminals/clean').length).toBe(1)
+  })
+
+  it('ends a held session that hears nothing, cleaning up what it left, the way its turn ended', async () => {
+    const fake = server({
+      terminals: [[{ itemId: 'exec-bg', processId: '5', command: 'pnpm dev', cwd: '/lane' }]],
+      turns: [
+        [
+          turnStarted(),
+          itemStarted(command('exec-bg', '5', 'pnpm dev')),
+          itemStarted(reasoning('r2')),
+          // Output from the process is not the server working on anything.
+          {
+            notify: 'item/commandExecution/outputDelta',
+            params: { threadId: '$THREAD', turnId: '$TURN', itemId: 'exec-bg', delta: 'listening' },
+          },
+          turnCompleted(),
+        ],
+      ],
+    })
+    const startedAt = Date.now()
+    const session = await start(fake, { backgroundIdleMs: 400 })
+    const events = await drain(session)
+    expect(Date.now() - startedAt >= 400).toBe(true)
+    await session.kill()
+    expect(events[events.length - 1]).toEqual({ type: 'session_ended', result: 'ok' })
+    expect(fake.sent('turn/start').length).toBe(1)
+    expect(fake.sent('thread/backgroundTerminals/clean').length).toBe(1)
+  })
+
+  it('interrupts the running turn, cleans the background terminals, and leaves no process', async () => {
+    const fake = server({
+      turns: [[turnStarted(), itemStarted(command('exec-bg', '5', BACKGROUND)), { waitFor: 'never-sent' }]],
+    })
+    const session = await start(fake)
+    const iterator = session.events[Symbol.asyncIterator]()
+    await iterator.next()
+    await session.interrupt()
+    const rest: AgentEvent[] = []
+    for (;;) {
+      const step = await iterator.next()
+      if (step.done === true) break
+      rest.push(step.value)
+    }
+    expect(rest[rest.length - 1]).toEqual({ type: 'session_ended', result: 'interrupted' })
+    // Cleanup runs after the stream closes; `kill` resolves when it is done.
+    await session.kill()
+    const methods = fake.log().map((entry) => entry['method'])
+    expect(methods.indexOf('turn/interrupt') >= 0).toBe(true)
+    expect(methods.indexOf('thread/backgroundTerminals/clean') > methods.indexOf('turn/interrupt')).toBe(true)
+    await until(() => !alive(Number(fake.log()[0]?.['pid'])))
+  }, 20_000)
+
+  it('kills idempotently, and the server is gone when kill resolves', async () => {
+    const fake = server({ turns: [[turnStarted(), { waitFor: 'never-sent' }]] })
+    const outcome = await new CodexAdapter({ bin: fake.bin }).spawn(task())
+    if (!outcome.ok) throw new Error('spawn refused')
+    await outcome.session.kill()
+    await outcome.session.kill()
+    const events = await drain(outcome.session)
+    expect(events.filter((event) => event.type === 'session_ended')).toEqual([
+      { type: 'session_ended', result: 'interrupted' },
+    ])
+    expect(fake.sent('thread/backgroundTerminals/clean').length).toBe(1)
+    await until(() => !alive(Number(fake.log()[0]?.['pid'])))
+  })
+
+  it('counts usage once, however often the server restates it', async () => {
+    const fake = server({
+      turns: [
+        [
+          turnStarted(),
+          tokenUsage({ input: 1_000, cached: 600, output: 10 }),
+          // A rate-limit update restates the same total.
+          tokenUsage({ input: 1_000, cached: 600, output: 10 }),
+          tokenUsage({ input: 2_000, cached: 1_500, output: 30 }),
+          turnCompleted(),
+        ],
+      ],
+    })
+    const usage = (await drain(await start(fake))).filter((event) => event.type === 'usage')
+    expect(usage).toEqual([{ type: 'usage', input: 500, output: 30, cacheRead: 1_500, cacheWrite: 0 }])
+  })
+})
+
+describe('steering a codex session', () => {
+  it('steers the running turn, naming the turn it means', async () => {
+    const fake = server({
+      turns: [[turnStarted(), { waitFor: 'turn/steer' }, itemCompleted(agentMessage('m1', 'done')), turnCompleted()]],
+    })
+    const session = await start(fake)
+    const iterator = session.events[Symbol.asyncIterator]()
+    await iterator.next()
+    await session.send('also update the changelog')
+    const rest: AgentEvent[] = []
+    for (;;) {
+      const step = await iterator.next()
+      if (step.done === true) break
+      rest.push(step.value)
+    }
+    expect(rest[0]).toEqual({ type: 'user_message', text: 'also update the changelog' })
+    const steer = fake.sent('turn/steer')[0]?.['params'] as Record<string, unknown>
+    expect(steer).toMatchObject({ threadId: FAKE_THREAD, expectedTurnId: 'turn-1' })
+    expect(fake.sent('turn/start').length).toBe(1)
+  })
+
+  it('continues a held session with a turn of the operator’s own', async () => {
+    const fake = server({
+      terminals: [[{ itemId: 'exec-bg', processId: '5', command: 'pnpm dev', cwd: '/lane' }]],
+      turns: [
+        [turnStarted(), itemStarted(command('exec-bg', '5', 'pnpm dev')), itemStarted(reasoning('r2')), turnCompleted()],
+        [turnStarted(), itemCompleted(agentMessage('m2', 'stopping the server')), turnCompleted()],
+      ],
+    })
+    const session = await start(fake, { backgroundIdleMs: 5_000 })
+    // Held once the listing has been read and nothing reported.
+    await until(() => fake.sent('thread/backgroundTerminals/list').length > 0)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await session.send('stop the dev server')
+    await until(() => fake.sent('turn/start').length >= 2)
+    expect(turnInput(fake, 1)).toEqual(['stop the dev server'])
+    await session.kill()
+    const events = await drain(session)
+    expect(events.filter((event) => event.type === 'user_message')).toEqual([
+      { type: 'user_message', text: 'stop the dev server' },
+    ])
   })
 })
 
@@ -682,7 +1119,7 @@ describe('spawn against a fake binary', () => {
 // Live contract, preflight-gated.
 // ---------------------------------------------------------------------------
 
-/** Codex refuses to run outside a git repository it was not told to trust. */
+/** A lane is a git checkout; the contract runs in one. */
 const makeRepo = (): string => {
   const dir = makeTemp()
   execFileSync('git', ['init', '-q'], { cwd: dir })
@@ -695,7 +1132,7 @@ const live = await liveAdapter.preflight()
 if (!live.installed || !live.authenticated) {
   const reason = live.installed
     ? `the CLI at "${liveAdapter.bin}" is not logged in — run \`${live.hint ?? ''}\` yourself`
-    : `no codex binary at "${liveAdapter.bin}" — set VINTA_AI_MAESTRO_CODEX_BIN`
+    : `no usable codex binary at "${liveAdapter.bin}" — ${live.hint ?? 'set VINTA_AI_MAESTRO_CODEX_BIN'}`
   describe.skip(`harness adapter contract: codex (live) — skipped: ${reason}`, () => {
     it('is skipped', () => {})
   })
@@ -715,8 +1152,6 @@ if (!live.installed || !live.authenticated) {
         if (outcome.ok) started.push(outcome.session)
         return outcome
       },
-      // The contract detaches every handle it opens, so unlike sessions these
-      // need no recording — `detach` is what proves there is no orphan.
       attachPty: (sessionId, attach) => real.attachPty(sessionId, attach),
     }
     const task: AgentTask = {
@@ -731,16 +1166,14 @@ if (!live.installed || !live.authenticated) {
       adapter,
       task,
       // A well-formed id no account has ever been issued, which is the only
-      // way to observe the real CLI's wording for a thread it does not have
+      // way to observe the real server's wording for a thread it does not have
       // (§15.4). Where the vendor changes that wording this is the test that
       // says so — the pattern table cannot notice on its own.
       staleResumeTask: { ...task, resumeSessionId: UNISSUED_SESSION },
       forceRefusal: real.refuseNext.bind(real),
-      // A real codex turn is a network round trip plus CLI startup: roughly a
-      // second to spawn and several more to drain. The contract's default
-      // deadline leaves too little margin for a slow network, and it is this
-      // adapter that needs the room, not the other two.
-      hangMs: 30_000,
+      // A real turn is a network round trip plus server startup, which loads
+      // the user's MCP servers and skills before the first token.
+      hangMs: 60_000,
       dispose: async () => {
         for (const session of started) await session.kill()
       },

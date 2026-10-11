@@ -15,8 +15,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AGENT_PERMISSIONS,
   claudeCodeArgs,
-  codexArgs,
-  codexResumeArgs,
+  codexThreadPolicy,
   DEFAULT_PERMISSION,
   isAgentPermission,
 } from '../src/harness/permissions.ts'
@@ -83,44 +82,54 @@ describe('claude-code', () => {
 
 describe('codex', () => {
   /**
-   * The pair the CLI refuses: "the argument '--sandbox <SANDBOX_MODE>' cannot
-   * be used with '--approve-for-me'". `--approve-for-me` *is* automatic review
-   * under the workspace-write sandbox, so naming the sandbox too reads as belt
-   * and braces and is a spawn that never reaches the model.
+   * All three, every time. A parameter left out falls back to the user's own
+   * `config.toml`, and a machine whose config routes approvals to codex's
+   * reviewer would quietly turn `ask` into `auto`.
    */
-  it('never passes --sandbox alongside --approve-for-me', () => {
+  it('states the sandbox, the approval policy and the reviewer in every mode', () => {
     for (const permission of AGENT_PERMISSIONS) {
-      const args = codexArgs(permission)
-      expect(args.includes('--sandbox') && args.includes('--approve-for-me')).toBe(false)
+      expect(Object.keys(codexThreadPolicy(permission)).sort()).toEqual([
+        'approvalPolicy',
+        'approvalsReviewer',
+        'sandbox',
+      ])
     }
   })
 
-  it('confines the shell to the lane when a human is approving', () => {
-    expect(codexArgs('ask')).toEqual(['--sandbox', 'workspace-write'])
-  })
-
+  /**
+   * `--approve-for-me` spelled out: the CLI implements that flag as exactly
+   * these three overrides, so `auto` keeps the meaning it had under `exec`.
+   */
   it('uses codex’s own automatic review on auto', () => {
-    expect(codexArgs('auto')).toEqual(['--approve-for-me'])
+    expect(codexThreadPolicy('auto')).toEqual({
+      sandbox: 'workspace-write',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review',
+    })
+  })
+
+  /** The requests come to this client, which records and declines them (`codex.ts`). */
+  it('confines the shell to the lane and routes requests to the client on ask', () => {
+    expect(codexThreadPolicy('ask')).toEqual({
+      sandbox: 'workspace-write',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+    })
+  })
+
+  it('drops the sandbox and never asks on full', () => {
+    expect(codexThreadPolicy('full')).toEqual({
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+    })
   })
 
   /**
-   * `exec resume` takes a different argument set: it rejects both `--sandbox`
-   * and `--approve-for-me` as unexpected, and accepts only the bypass flag.
-   * Passing the fresh-spawn policy there turns a `stale_session` refusal —
-   * which the scheduler retries cold — into a `fatal` one, which fails the node.
+   * codex has no per-call hook to judge with, so `judged` must land on the
+   * narrowest policy rather than on the `full` it is a variant of.
    */
-  it('passes resume only what resume accepts', () => {
-    for (const permission of ['ask', 'auto'] as const) {
-      expect(codexResumeArgs(permission)).toEqual([])
-    }
-    expect(codexResumeArgs('full')).toEqual(['--dangerously-bypass-approvals-and-sandbox'])
-  })
-
-  /**
-   * The one case where silence would surprise: a run told to skip every check
-   * must not start asking again the moment a session is continued.
-   */
-  it('carries full across a resume', () => {
-    expect(codexResumeArgs('full')).toEqual(codexArgs('full'))
+  it('falls back to the narrowest policy on judged', () => {
+    expect(codexThreadPolicy('judged')).toEqual(codexThreadPolicy('ask'))
   })
 })

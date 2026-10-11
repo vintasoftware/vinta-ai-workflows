@@ -2266,10 +2266,10 @@ describe('harness capabilities', () => {
     }
     expect(served.get('claude-code')).toEqual(new ClaudeCodeAdapter().capabilities)
     expect(served.get('codex')).toEqual(new CodexAdapter().capabilities)
-    // The one field that differs between the two, spelled out: this is what
-    // the node view greys a control on.
+    // Spelled out because it is what the node view greys a control on: codex
+    // steers over its app server now, so neither control is greyed.
     expect(served.get('claude-code')?.inject).toBe(true)
-    expect(served.get('codex')?.inject).toBe(false)
+    expect(served.get('codex')?.inject).toBe(true)
   })
 
   it('declares nothing for a harness it does not ship, rather than guessing', async () => {

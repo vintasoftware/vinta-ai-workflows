@@ -114,46 +114,51 @@ export function claudeCodeArgs(permission: AgentPermission): readonly string[] {
 }
 
 /**
- * codex's sandbox, or its automatic-approval mode — never both.
+ * What a codex thread is started — and resumed — under: a sandbox, an
+ * approval policy, and who reviews the approvals.
  *
- * `--approve-for-me` and `--sandbox` are mutually exclusive: the CLI refuses
- * the pair outright ("the argument '--sandbox <SANDBOX_MODE>' cannot be used
- * with '--approve-for-me'"), because `--approve-for-me` *is* automatic review
- * running under the workspace-write sandbox. Passing both looks like belt and
- * braces and is a spawn that dies before the model is reached.
+ * The app server takes all three as `thread/start` and `thread/resume`
+ * parameters, so they are stated in full on every spawn. Stating them all is
+ * deliberate: anything left out falls back to the user's `config.toml`, and a
+ * machine whose config routes approvals to `auto_review` would quietly turn
+ * `ask` into `auto`.
+ *
+ * `auto` is the CLI's `--approve-for-me`, spelled out: that flag *is*
+ * `approvals_reviewer = "auto_review"` with `approval_policy = "on-request"`
+ * under the workspace-write sandbox (it sets exactly those three overrides).
+ * Commands inside the lane run; an escalation goes to codex's own reviewer
+ * rather than to a person, so an unattended lane neither stalls nor widens
+ * without a check.
+ *
+ * `ask` is the same sandbox with the requests routed to the client, which
+ * answers each one by recording a `permission_request` and declining it
+ * (`codex.ts`). Under `exec` the CLI forced `never` and the model was not
+ * allowed to ask; now it may, and the transcript shows what it asked for —
+ * which is what a human watching an `ask` run is there to see. Nothing that
+ * was refused before is allowed now.
+ *
+ * `full` is `--dangerously-bypass-approvals-and-sandbox`: no sandbox, never
+ * ask. `judged` has no per-call hook to judge with on codex, and `doctor`
+ * refuses the pairing; reaching here anyway gets `ask`, the narrowest policy,
+ * rather than the widest — the wrong way round would be silent.
  *
  * `workspace-write` is the sandbox that matches a lane — the agent's own
  * checkout and nothing above it.
  */
-export function codexArgs(permission: AgentPermission): readonly string[] {
-  switch (permission) {
-    case 'ask':
-      return ['--sandbox', 'workspace-write']
-    case 'auto':
-      // Implies the workspace-write sandbox; naming it too is refused.
-      return ['--approve-for-me']
-    case 'full':
-      return ['--dangerously-bypass-approvals-and-sandbox']
-    case 'judged':
-      // codex has no per-call hook to judge with, and `doctor` refuses the
-      // pairing. Reaching here anyway gets the narrowest policy codex has
-      // rather than the widest — the wrong way round would be silent.
-      return ['--sandbox', 'workspace-write']
-  }
+export interface CodexThreadPolicy {
+  readonly sandbox: 'workspace-write' | 'danger-full-access'
+  readonly approvalPolicy: 'on-request' | 'never'
+  readonly approvalsReviewer: 'user' | 'auto_review'
 }
 
-/**
- * The same policy for `codex exec resume`, which takes a different set.
- *
- * `resume` accepts neither `--sandbox` nor `--approve-for-me` — it rejects them
- * as unexpected arguments — and accepts only the bypass flag. So `ask` and
- * `auto` pass nothing and the resumed thread keeps the policy it was created
- * under, which is the behaviour the subcommand's argument list implies.
- *
- * `full` is still passed, because it is the one whose absence would be a
- * surprise: a run told to skip every check would otherwise silently start
- * asking again the moment a session was continued.
- */
-export function codexResumeArgs(permission: AgentPermission): readonly string[] {
-  return permission === 'full' ? ['--dangerously-bypass-approvals-and-sandbox'] : []
+export function codexThreadPolicy(permission: AgentPermission): CodexThreadPolicy {
+  switch (permission) {
+    case 'auto':
+      return { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' }
+    case 'full':
+      return { sandbox: 'danger-full-access', approvalPolicy: 'never', approvalsReviewer: 'user' }
+    case 'ask':
+    case 'judged':
+      return { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'user' }
+  }
 }

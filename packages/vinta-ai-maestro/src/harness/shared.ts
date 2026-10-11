@@ -84,8 +84,9 @@ export class JsonLines {
  *
  * This is task input on its way to the agent. It never reaches a log line, an
  * error message or a process argument; each adapter delivers it over the same
- * channel it sends the brief on, which for `codex` is stdin specifically so a
- * brief never lands in the process table.
+ * channel it sends the brief on — a stdin message for `claude-code`, a
+ * `turn/start` input for `codex`, the session API for `opencode` — so a brief
+ * never lands in the process table.
  */
 export const operatorGuidance = (text: string): string =>
   [
