@@ -83,6 +83,7 @@ const ASSUMED: Capabilities = {
   pty: false,
   permissionControl: false,
   autoCompact: false,
+  backgroundWork: false,
 }
 
 /** §7's block for this node's harness, off the wire. Null when undeclared. */

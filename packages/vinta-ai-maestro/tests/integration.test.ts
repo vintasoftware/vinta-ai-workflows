@@ -1536,6 +1536,7 @@ function hangingAdapter(): { adapter: HarnessAdapter; killed: () => number; spaw
       pty: false,
       permissionControl: false,
       autoCompact: false,
+      backgroundWork: false,
     },
     preflight: async () => ({ installed: true, authenticated: true, version: '0' }),
     spawn: async () => {

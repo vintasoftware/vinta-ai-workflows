@@ -108,6 +108,8 @@ const CAPABILITIES: HarnessCapabilities = {
   pty: false,
   permissionControl: false,
   autoCompact: true,
+  // Unverified against opencode's server, so not promised.
+  backgroundWork: false,
 }
 
 /** Tool output can be a whole file. The transcript keeps it; an event carries a look. */

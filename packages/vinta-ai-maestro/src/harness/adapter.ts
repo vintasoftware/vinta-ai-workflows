@@ -109,6 +109,19 @@ export interface HarnessCapabilities {
    * false is worth more than a true nobody can hold the adapter to.
    */
   readonly autoCompact: boolean
+  /**
+   * The session outlives a turn that ends with background work still running —
+   * a sub-agent resumed by a message, a backgrounded command — and the agent is
+   * woken in the same session when that work reports, the way an interactive
+   * session behaves. The session ends on the first turn that leaves nothing
+   * running.
+   *
+   * Like `autoCompact`, no operation rejects when this is false. It is a fact
+   * the prompts read: an agent on a harness without it is told to run
+   * everything in the foreground, because whatever it backgrounds is killed
+   * with its turn and nothing wakes it.
+   */
+  readonly backgroundWork: boolean
 }
 
 export interface PreflightResult {

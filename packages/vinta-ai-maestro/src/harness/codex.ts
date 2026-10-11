@@ -112,6 +112,8 @@ const CAPABILITIES: HarnessCapabilities = {
   pty: true,
   permissionControl: true,
   autoCompact: true,
+  // `codex exec` ends with its turn: there is no session left to wake.
+  backgroundWork: false,
 }
 
 /** Command output can be a whole file. The transcript keeps it; an event carries a look. */
