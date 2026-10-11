@@ -27,7 +27,7 @@ import type {
   HarnessCapabilities,
   SpawnRefusalKind,
 } from '../src/harness/adapter.ts'
-import { MockAdapter, type MockScript } from '../src/harness/mock.ts'
+import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
 import { ConflictFixerRefused } from '../src/integration/fixer.ts'
 import { CoordinatorForbidden } from '../src/coordinator/actor.ts'
 import { GitCommandError } from '../src/integration/git.ts'
@@ -252,6 +252,8 @@ function rig(
     readonly scripts?: readonly MockScript[]
     /** `LanePool.recycle`'s seam: called as a used lane is handed on (§8). */
     readonly recycleLane?: (name: string) => Promise<void>
+    /** `LanePool.addLane`'s seam: a spare crew member's worktree. */
+    readonly addLane?: (name: string) => Promise<void>
     /** Session ids this harness has forgotten (§15.4). */
     readonly staleSessions?: readonly string[]
     /**
@@ -335,6 +337,7 @@ function rig(
     laneRoot: join(dir, 'lanes'),
     takeovers,
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
+    ...(options.addLane === undefined ? {} : { addLane: options.addLane }),
     ...(options.laneEnv === undefined ? {} : { laneEnv: options.laneEnv }),
     ...(options.resumeFrom === undefined ? {} : { resumeFrom: journal.nodes(runId) }),
     // **`stop` unless a test says otherwise, and production's default is
@@ -703,6 +706,7 @@ function makeWorkflow(
     readonly crew?: Record<string, unknown>
     readonly modelFallbacks?: Record<string, string>
     readonly substitution?: 'same_tier' | 'up_one_tier' | 'any'
+    readonly maxSpareCrew?: number
   } = {},
 ): Workflow {
   return WorkflowSchema.parse({
@@ -717,6 +721,7 @@ function makeWorkflow(
       ...(options.defaultChores === undefined ? {} : { chores: options.defaultChores }),
       ...(options.modelFallbacks === undefined ? {} : { model_fallbacks: options.modelFallbacks }),
       ...(options.substitution === undefined ? {} : { substitution: options.substitution }),
+      ...(options.maxSpareCrew === undefined ? {} : { max_spare_crew: options.maxSpareCrew }),
     },
     resources: options.resources ?? { lane: { capacity: options.lanes ?? 4, kind: 'worktree' } },
     gates: options.gates ?? {},
@@ -2036,7 +2041,13 @@ describe('§16 the review', () => {
     expectDrained(r)
   })
 
-  it('answers the unapproved question with stop when nobody is there', async () => {
+  /**
+   * `continue` once, then `stop`. A straight `stop` failed the phase, and the
+   * unattended retry that followed re-drove it from `implement` on a cold
+   * session — observed as twelve failed attempts in one run, each a review that
+   * only needed another round.
+   */
+  it('answers the unapproved question with continue, then stop, when nobody is there', async () => {
     const r = rig(reviewedWorkflow(), {
       retryAfterMs: 60_000,
       outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
@@ -2045,11 +2056,17 @@ describe('§16 the review', () => {
     const running = r.scheduler.run()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the unapproved review')
     await r.advance(60_000)
+    await until(() => countOf(r, 'e-review:review') === 2, 'the second review round')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second unapproved review')
+    await r.advance(60_000)
     const report = await running
 
     expect(report.statuses).toEqual({ a: 'failed' })
-    expect(countOf(r, 'e-review:review')).toBe(1)
-    expect(answersOf(r)).toEqual([{ effect_id: 'e-unapproved', answer: 'stop', unattended: true }])
+    expect(countOf(r, 'e-review:review')).toBe(2)
+    expect(answersOf(r)).toEqual([
+      { effect_id: 'e-unapproved', answer: 'continue', unattended: true },
+      { effect_id: 'e-unapproved', answer: 'stop', unattended: true },
+    ])
   })
 
   /**
@@ -2133,7 +2150,7 @@ describe('§16 the review', () => {
     expectDrained(r)
   })
 
-  it('answers the exhausted question with stop when nobody is there', async () => {
+  it('answers the exhausted question with continue, then stop, when nobody is there', async () => {
     const r = rig(standardWorkflow([node('a', [], { gates: ['unit'], max_fix_rounds: 1 })]), {
       retryAfterMs: 60_000,
       outcomes: { 'e-gate': exited(2) },
@@ -2142,11 +2159,17 @@ describe('§16 the review', () => {
     const running = r.scheduler.run()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the exhaustion')
     await r.advance(60_000)
+    await until(() => countOf(r, 'e-grant') === 1, 'the granted round')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second exhaustion')
+    await r.advance(60_000)
     const report = await running
 
     expect(report.statuses).toEqual({ a: 'failed' })
-    expect(countOf(r, 'e-grant')).toBe(0)
-    expect(answersOf(r)).toEqual([{ effect_id: 'e-exhausted', answer: 'stop', unattended: true }])
+    expect(countOf(r, 'e-grant')).toBe(1)
+    expect(answersOf(r)).toEqual([
+      { effect_id: 'e-exhausted', answer: 'continue', unattended: true },
+      { effect_id: 'e-exhausted', answer: 'stop', unattended: true },
+    ])
   })
 })
 
@@ -2805,6 +2828,63 @@ describe('after_pr chores', () => {
     expectDrained(r)
   })
 
+  /**
+   * Observed: a review canvas took up to four minutes a phase, on the critical
+   * path of every one, and failed on most of them. What a dependent builds on
+   * is merged and pushed before the canvas starts.
+   */
+  it('releases the dependents while they run, when none of them can fail the phase', async () => {
+    const PR = { facts: { pr: { opened: true, url: 'https://github.com/acme/app/pull/7', number: 7 } } }
+    let release = (): void => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const r: Rig = rig(
+      standardWorkflow(
+        [
+          node('a', [], { gates: ['unit'], chores: ['canvas'] }),
+          node('b', ['a'], { gates: ['unit'], chores: [] }),
+        ],
+        { canvas: { prompt: 'Post a review canvas.', skill: 'pr-review-canvas', when: 'after_pr' } },
+      ),
+      {
+        outcomes: { ...APPROVED, 'e-pr': PR },
+        tap: (call) => (call.nodeId === 'a' && call.effect === 'e-pr-chores' ? held : undefined),
+      },
+    )
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['b'] === 'done', 'b to finish while a decorates its PR')
+    expect(r.scheduler.statuses['a']).toBe('running')
+    release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expectDrained(r)
+  })
+
+  it('holds the dependents when an after_pr chore may fail the phase', async () => {
+    const PR = { facts: { pr: { opened: true, url: 'https://github.com/acme/app/pull/7', number: 7 } } }
+    const r = rig(
+      standardWorkflow(
+        [
+          node('a', [], { gates: ['unit'], chores: ['canvas'] }),
+          node('b', ['a'], { gates: ['unit'], chores: [] }),
+        ],
+        { canvas: { prompt: 'Post it.', when: 'after_pr', on_failure: 'fail' } },
+      ),
+      { outcomes: { ...APPROVED, 'e-pr': PR } },
+    )
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    const statuses = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_status')
+      .map((event) => `${event.nodeId}:${(event.payload as { status: string }).status}`)
+    expect(statuses.indexOf('a:done')).toBeLessThan(statuses.indexOf('b:running'))
+    expectDrained(r)
+  })
+
   it('is skipped, and the phase still done, when no PR opened', async () => {
     const r = prChoreRig({ opened: false })
     const report = await r.scheduler.run()
@@ -3074,6 +3154,53 @@ describe('a session the vendor has forgotten (§15.4)', () => {
   })
 })
 
+describe('a turn the agent never took part in', () => {
+  /** Started and ended, with no text, no tool call and a zero usage row. */
+  const EMPTY: MockScript = { events: [{ type: 'usage', input: 0, output: 0 }], result: 'ok' }
+
+  it('re-runs a resumed turn that came back empty, cold and with the whole brief', async () => {
+    // Observed: claude-code replays the notifications of work its last process
+    // was killed under and closes the replay with a `result` before it reads
+    // the prompt. Read as the end of the turn, a review stated no verdict and a
+    // new phase's brief was never seen.
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), {
+      scripts: [DEFAULT_SCRIPT, EMPTY, DEFAULT_SCRIPT],
+    })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(3)
+    expect(r.adapter.spawned[1]?.resumeSessionId).toBeDefined()
+    expect(r.adapter.spawned[2]?.resumeSessionId).toBeUndefined()
+    expect(sessionsOf(r, 'a').map((row) => (row as { reason?: string }).reason ?? 'reused')).toEqual([
+      'no_prior_session',
+      'reused',
+      'empty_turn',
+    ])
+    expectDrained(r)
+  })
+
+  it('fails the turn when a cold one is empty too, rather than reading it as work', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), {
+      scripts: [DEFAULT_SCRIPT, EMPTY, EMPTY],
+    })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(r.adapter.spawned).toHaveLength(3)
+    expectDrained(r)
+  })
+
+  it('does not retry a cold turn that was empty, because a retry would change nothing', async () => {
+    const r = rig(makeWorkflow([node('a')]), { scripts: [EMPTY, DEFAULT_SCRIPT] })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(r.adapter.spawned).toHaveLength(1)
+    expectDrained(r)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 9: staffing
 // ---------------------------------------------------------------------------
@@ -3140,6 +3267,136 @@ describe('crew', () => {
     expect(members.filter((event) => event['substitute'] === true)).toHaveLength(1)
     expect(members.find((event) => event['substitute'] === true)?.['instead_of']).toBe('tier2-1')
     expectDrained(r)
+  })
+
+  describe('a spare taken on (`max_spare_crew`)', () => {
+    /** The worktrees the host was asked to add, in order. */
+    const lanesAdded = (): { added: string[]; addLane: (name: string) => Promise<void> } => {
+      const added: string[] = []
+      return {
+        added,
+        addLane: async (name) => {
+          added.push(name)
+        },
+      }
+    }
+
+    it('takes on a member in the busy one’s image, with a desk of its own, instead of waiting', async () => {
+      const host = lanesAdded()
+      const r = rig(
+        makeWorkflow([node('a', [], { crew: 'tier2-1' }), node('b', [], { crew: 'tier2-1' })], {
+          lanes: 1,
+          crew: { 'tier2-1': CREW['tier2-1'] },
+        }),
+        { addLane: host.addLane },
+      )
+      const report = await r.scheduler.run()
+
+      expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+      expect(host.added).toEqual(['run-1-crew-2-tier2-1-spare-1'])
+      // Its desk came with a slot to put it in.
+      expect(r.pools.capacity('lane')).toBe(2)
+      expect(modelsOf(r)).toEqual(['medium', 'medium'])
+      expect(crewEvents(r)).toContainEqual({
+        member: 'tier2-1-spare-1',
+        tier: 2,
+        substitute: true,
+        instead_of: 'tier2-1',
+        planned_tier: 2,
+        reason: 'spare_crew',
+      })
+      expectDrained(r)
+    })
+
+    /**
+     * The rule the spare exists for. `tier2-2` is free and qualified, and a
+     * phase still to come is planned for them: borrowing them would move the
+     * wait onto that phase.
+     */
+    it('does not borrow a member a pending phase is planned for', async () => {
+      const host = lanesAdded()
+      const r = rig(
+        makeWorkflow(
+          [
+            node('a', [], { crew: 'tier2-1' }),
+            node('b', [], { crew: 'tier2-1' }),
+            node('c', ['a'], { crew: 'tier2-2' }),
+          ],
+          { lanes: 2, crew: { 'tier2-1': CREW['tier2-1'], 'tier2-2': CREW['tier2-2'] } },
+        ),
+        { addLane: host.addLane },
+      )
+      const report = await r.scheduler.run()
+
+      expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+      expect(host.added).toHaveLength(1)
+      const covering = crewEvents(r).filter((event) => event['substitute'] === true)
+      expect(covering.map((event) => [event['member'], event['reason']])).toEqual([['tier2-1-spare-1', 'spare_crew']])
+      expectDrained(r)
+    })
+
+    it('still borrows a free member nobody else is planned for, and adds no desk', async () => {
+      const host = lanesAdded()
+      const r = rig(
+        makeWorkflow([node('a', [], { crew: 'tier2-1' }), node('b', [], { crew: 'tier2-1' })], {
+          lanes: 2,
+          crew: { 'tier2-1': CREW['tier2-1'], 'tier2-2': CREW['tier2-2'] },
+        }),
+        { addLane: host.addLane },
+      )
+      const report = await r.scheduler.run()
+
+      expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+      expect(host.added).toEqual([])
+      expect(crewEvents(r).map((event) => event['member']).sort()).toEqual(['tier2-1', 'tier2-2'])
+      expectDrained(r)
+    })
+
+    it('waits as before when the budget is zero', async () => {
+      const host = lanesAdded()
+      const r = rig(
+        makeWorkflow([node('a', [], { crew: 'tier2-1' }), node('b', [], { crew: 'tier2-1' })], {
+          lanes: 2,
+          crew: { 'tier2-1': CREW['tier2-1'] },
+          maxSpareCrew: 0,
+        }),
+        { addLane: host.addLane },
+      )
+      const report = await r.scheduler.run()
+
+      expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+      expect(host.added).toEqual([])
+      expect(crewEvents(r).every((event) => event['member'] === 'tier2-1')).toBe(true)
+      expectDrained(r)
+    })
+
+    it('falls back to waiting, and takes nobody else on, when a desk cannot be provisioned', async () => {
+      const tried: string[] = []
+      const r = rig(
+        makeWorkflow(
+          [
+            node('a', [], { crew: 'tier2-1' }),
+            node('b', [], { crew: 'tier2-1' }),
+            // Ready the moment `a` frees the member, so it and `b` contend for
+            // them after the failed provisioning — and nobody tries again.
+            node('c', ['a'], { crew: 'tier2-1' }),
+          ],
+          { lanes: 3, crew: { 'tier2-1': CREW['tier2-1'] } },
+        ),
+        {
+          addLane: async (name) => {
+            tried.push(name)
+            throw new Error('no space left on device')
+          },
+        },
+      )
+      const report = await r.scheduler.run()
+
+      expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+      expect(tried).toHaveLength(1)
+      expect(crewEvents(r).every((event) => event['member'] === 'tier2-1')).toBe(true)
+      expectDrained(r)
+    })
   })
 
   /**
@@ -4057,6 +4314,44 @@ describe('a failed phase the operator can retry', () => {
 
     // `tier1` took the first attempt and `tier4` the second.
     expect(modelsOf(r)).toEqual(['cheap', 'dear'])
+    expectDrained(r)
+  })
+
+  /**
+   * The pick is a tier and a model, not a claim on a person. `tier4` is the
+   * member the next phase is planned for: putting the retry on them would move
+   * this phase's failure onto that one's schedule.
+   */
+  it('takes the retry on a spare in the pick’s image when the pick is planned for another phase', async () => {
+    const added: string[] = []
+    const r = rig(
+      makeWorkflow(
+        [node('a', [], { crew: 'tier1', pipeline: 'explode' }), node('b', ['a'], { crew: 'tier4' })],
+        { crew: { tier1: ROSTER.tier1, tier4: ROSTER.tier4 } },
+      ),
+      {
+        onFailure: 'ask',
+        addLane: async (name) => {
+          added.push(name)
+        },
+      },
+    )
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first offer')
+    r.scheduler.answer('a', { human: { answer: 'retry with tier4' } })
+    await until(() => r.adapter.spawned.length === 2, 'the second attempt')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second offer')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
+
+    expect(modelsOf(r)).toEqual(['cheap', 'dear'])
+    expect(added).toEqual(['run-1-crew-3-tier4-spare-1'])
+    const second = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_crew' && event.nodeId === 'a')
+      .map((event) => event.payload as Record<string, unknown>)[1]
+    expect(second).toMatchObject({ member: 'tier4-spare-1', tier: 4, reason: 'spare_crew' })
     expectDrained(r)
   })
 

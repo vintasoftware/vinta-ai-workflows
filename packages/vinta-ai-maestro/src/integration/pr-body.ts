@@ -320,15 +320,21 @@ export function composePlanPrBody(facts: PlanFacts): PrText {
     '',
     '## How to land the plan',
     '',
-    '**Merge this PR, with a merge commit, and no other.** It is the only PR that carries the ' +
-      'whole plan with its conflicts resolved once. The phase and integration PRs below are ' +
-      'review units: merging them as well resolves the same conflicts again, against different ' +
-      'bases, which is how a landing goes wrong.',
+    facts.steps.length > 0
+      ? '**Merge this PR, with a merge commit, and no other.** It is the only PR that carries the ' +
+        'whole plan with its conflicts resolved once. The phase and integration PRs below are ' +
+        'review units: merging them as well resolves the same conflicts again, against different ' +
+        'bases, which is how a landing goes wrong.'
+      : '**Merge this PR, with a merge commit.** It is the only PR the run opened, and it carries ' +
+        'the whole plan with its conflicts resolved once.',
     '',
-    `After it merges, \`vinta-ai-maestro land ${facts.runId} --close\` closes every review PR ` +
-      `whose work is now in \`${facts.baseBranch}\`, with a comment saying so. A fix made to a ` +
-      `phase after the run is carried into this branch with \`vinta-ai-maestro propagate ` +
-      `${facts.runId} <phase>\`.`,
+    facts.steps.length > 0
+      ? `After it merges, \`vinta-ai-maestro land ${facts.runId} --close\` closes every review PR ` +
+        `whose work is now in \`${facts.baseBranch}\`, with a comment saying so. A fix made to a ` +
+        `phase after the run is carried into this branch with \`vinta-ai-maestro propagate ` +
+        `${facts.runId} <phase>\`.`
+      : `A fix made to a phase after the run is carried into this branch with ` +
+        `\`vinta-ai-maestro propagate ${facts.runId} <phase>\`.`,
   ]
 
   if (facts.steps.length > 0) {

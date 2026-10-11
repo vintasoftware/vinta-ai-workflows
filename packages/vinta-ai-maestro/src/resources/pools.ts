@@ -100,7 +100,7 @@ export interface ResourcePoolsOptions {
 const DEFAULT_AGING_MS = 500
 
 interface Pool {
-  readonly capacity: number
+  capacity: number
   held: number
 }
 
@@ -195,6 +195,17 @@ export class ResourcePools {
 
   capacity(name: string): number {
     return this.#pool(name).capacity
+  }
+
+  /**
+   * One more slot in `name`, for good. The one way a capacity changes mid-run:
+   * a spare crew member brings its own worktree (`defaults.max_spare_crew`), and
+   * a lane pool that stayed at the roster's size would queue the member behind
+   * the very phases it was taken on to stop waiting for.
+   */
+  grow(name: string, by = 1): void {
+    this.#pool(name).capacity += by
+    this.#pump()
   }
 
   /** Holders enqueued and not yet granted. */

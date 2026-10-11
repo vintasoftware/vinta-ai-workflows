@@ -647,17 +647,19 @@ describe('the fix loop', () => {
         })
       },
       // Nobody is at the exhausted-budget question, so it takes its unattended
-      // answer — `stop` — once the window passes, exactly as an exhausted
-      // budget failed the phase before the question existed.
+      // answers once the window passes — `continue` for one more budget, then
+      // `stop` — and the phase fails as an exhausted budget always did.
       { script: PASSING, retryAfterMs: 10 },
     )
     const report = await within(60_000, rig.run(), 'the exhausted fix loop')
 
     expect(report.statuses['p1']).toBe('failed')
     expect(report.statuses['p2']).toBe('blocked')
-    // The exhausted-budget question notifies as any question does, and then
-    // `standard-phase`'s `failed` state does — identifiers and fixed reasons.
+    // The exhausted-budget question notifies as any question does, each time it
+    // is asked, and then `standard-phase`'s `failed` state does — identifiers
+    // and fixed reasons.
     expect(rig.notifications).toEqual([
+      { scope: 'node', id: 'p1', reason: 'waiting for the operator' },
       { scope: 'node', id: 'p1', reason: 'waiting for the operator' },
       { scope: 'node', id: 'p1', reason: 'phase failed' },
     ])
@@ -1066,6 +1068,112 @@ describe('journalled gate results', () => {
     const bracket = (gateEvents[1]?.ts ?? 0) - (gateEvents[0]?.ts ?? 0)
     expect(verdict.duration_ms).toBeLessThanOrEqual(bracket + 1)
   })
+
+  /**
+   * `lint → typecheck → test`, the middle one red. The fixer can only act on
+   * the red gate, and the round after it re-runs every gate anyway — so a suite
+   * that runs on after the failure buys a verdict the next round throws away.
+   * One observed phase paid 402 s of `test` for it, behind a typecheck that
+   * had already failed in 10.
+   *
+   * Each gate appends its own name to a file outside the lane, so "never ran"
+   * is asserted on the process rather than inferred from the journal. A gate
+   * that never ran is not journalled at all: no `gate_started` to leave the
+   * node view's clock running, and no `gate_result` with a status nobody
+   * measured — `GateStatus` is what a run *said*, and a gate that was not
+   * asked said nothing.
+   */
+  const lintTypecheckTest = (typecheck: Record<string, unknown>) => (root: string): Workflow =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'fail-fast',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      gates: {
+        lint: { cmd: renderGate({ append: { path: join(root, 'ran'), line: 'lint' } }), timeout_s: 30 },
+        typecheck,
+        test: { cmd: renderGate({ append: { path: join(root, 'ran'), line: 'test' } }), timeout_s: 30 },
+      },
+      nodes: [
+        { id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['lint', 'typecheck', 'test'] },
+      ],
+    })
+
+  const ran = (rig: Rig): string[] => readFileSync(join(rig.root, 'ran'), 'utf8').trim().split(/\r?\n/)
+
+  const gateEdges = (rig: Rig): string[] =>
+    rig.journal
+      .events(RUN_ID)
+      .filter((event) => event.type === 'gate_started' || event.type === 'gate_result')
+      .map((event) => `${event.type} ${(event.payload as { gate: string }).gate}`)
+
+  it('stops at the first red gate, and never starts the ones declared after it', async () => {
+    const rig = setup((root) =>
+      lintTypecheckTest({
+        cmd: renderGate({ append: { path: join(root, 'ran'), line: 'typecheck' }, exit: 1 }),
+        timeout_s: 30,
+      })(root),
+    )
+    assign(rig)
+
+    const outcome = await rig.invoke('p1', 'run_gate')
+
+    expect(ran(rig)).toEqual(['lint', 'typecheck'])
+    expect(gateEdges(rig)).toEqual([
+      'gate_started lint',
+      'gate_result lint',
+      'gate_started typecheck',
+      'gate_result typecheck',
+    ])
+    // The fact the guard and the fixer's prompt read names the red gate, not
+    // the last one declared: `test` was never run, so it cannot be the answer.
+    expect(outcome.facts?.gate?.['id']).toBe('typecheck')
+    expect(outcome.facts?.gate?.['exit_code']).toBe(1)
+    expect(outcome.facts?.gate?.['status']).toBe('failed')
+    const transcript = rig.journal.tailTranscript(RUN_ID, 'p1', 100) as { gate?: string }[]
+    expect(transcript.map((entry) => entry.gate)).toEqual([
+      'lint',
+      'typecheck',
+    ])
+  })
+
+  it('stops at a gate that timed out, exactly as at one that failed', async () => {
+    const rig = setup((root) =>
+      lintTypecheckTest({
+        // Waits on a file nothing creates, so the only way out is the timeout.
+        cmd: renderGate({ until: { path: join(root, 'never') } }),
+        timeout_s: 1,
+      })(root),
+    )
+    assign(rig)
+
+    const outcome = await rig.invoke('p1', 'run_gate')
+
+    expect(ran(rig)).toEqual(['lint'])
+    expect(gateResults(rig).map((row) => `${row.gate} ${row.status}`)).toEqual([
+      'lint passed',
+      'typecheck timed_out',
+    ])
+    expect(outcome.facts?.gate?.['id']).toBe('typecheck')
+    expect(outcome.facts?.gate?.['status']).toBe('timed_out')
+  }, 20_000)
+
+  it('runs every gate, in declaration order, when none of them is red', async () => {
+    const rig = setup((root) =>
+      lintTypecheckTest({
+        cmd: renderGate({ append: { path: join(root, 'ran'), line: 'typecheck' } }),
+        timeout_s: 30,
+      })(root),
+    )
+    assign(rig)
+
+    const outcome = await rig.invoke('p1', 'run_gate')
+
+    expect(ran(rig)).toEqual(['lint', 'typecheck', 'test'])
+    expect(outcome.facts?.gate?.['id']).toBe('test')
+    expect(outcome.facts?.gate?.['exit_code']).toBe(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1398,6 +1506,32 @@ describe('the git verbs', () => {
     expect(builtWaves(rig)).toEqual([1])
   })
 
+  it('stops a wave’s gates at the first red one, as a phase’s do', async () => {
+    // The same reasoning as `run_gate`'s, on the merged tree: the first red
+    // gate already fails the merge, and a full suite after it is minutes spent
+    // on a verdict nobody reads.
+    const counter = counterFile()
+    const rig = setup(() =>
+      WorkflowSchema.parse({
+        ...twoNodes(),
+        defaults: { ...twoNodes().defaults, gate_scope: 'full' },
+        gates: {
+          typecheck: { cmd: renderGate({ exit: 1 }) },
+          unit: { cmd: renderGate({ append: { path: counter, line: 'full' } }) },
+        },
+        nodes: twoNodes().nodes.map((node) => ({ ...node, gates: ['typecheck', 'unit'] })),
+      }),
+    )
+    await work(rig, 'p1', 0)
+    await rig.invoke('p1', 'git_merge')
+    await work(rig, 'p2', 1)
+    await expect(rig.invoke('p2', 'git_merge')).rejects.toThrow(/gate "typecheck" failed/)
+
+    expect(ranCount(counter)).toBe(0)
+    const rows = rig.journal.events(RUN_ID).filter((event) => event.type === 'wave_gate_result')
+    expect(rows.map((row) => (row.payload as { gate: string }).gate)).toEqual(['typecheck'])
+  })
+
   it('runs them on every wave under wave_gates: every, and on none under off', async () => {
     const every = counterFile()
     await mergeChain(setup(countedChain(every, 'every')))
@@ -1568,6 +1702,58 @@ describe('the git verbs', () => {
     // Spent: a second `open_pr` from the same phase does not open it again.
     await rig.invoke('p3', 'open_pr', { draft: true })
     expect(prs().filter((pr) => pr.nodeId === null)).toHaveLength(1)
+  })
+
+  /**
+   * `pull_requests: plan`: one PR for the run. Observed: a ten-phase refactor
+   * opened fifteen PRs, every one of them a review unit nobody would merge.
+   */
+  it('opens the plan PR alone under pull_requests: plan', async () => {
+    const diamond = (): Workflow =>
+      WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'diamond',
+        base_branch: 'main',
+        defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase', pull_requests: 'plan' },
+        resources: { lane: { capacity: 3, kind: 'worktree' } },
+        nodes: [
+          { id: 'p1', name: 'One', prompt_ref: 'plan.md#1' },
+          { id: 'p2', name: 'Two', prompt_ref: 'plan.md#2' },
+          {
+            id: 'p3',
+            name: 'Three',
+            prompt_ref: 'plan.md#3',
+            depends_on: [
+              { node: 'p1', artifact: 'one' },
+              { node: 'p2', artifact: 'two' },
+            ],
+          },
+        ],
+      })
+    const rig = setup(diamond)
+    const types = (): string[] =>
+      rig.journal
+        .events(RUN_ID)
+        .filter((event) => event.type === 'node_pr' || event.type === 'run_pr')
+        .map((event) => event.type)
+
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    for (const nodeId of ['p1', 'p2']) {
+      await rig.invoke(nodeId, 'git_merge')
+      // No phase PR, so nothing for an `after_pr` chore to work on.
+      await expect(rig.invoke(nodeId, 'open_pr', { draft: true })).resolves.toEqual({
+        facts: { pr: { opened: false } },
+      })
+    }
+    expect(types()).toEqual([])
+
+    await work(rig, 'p3', 2)
+    await rig.invoke('p3', 'git_merge')
+    await rig.invoke('p3', 'open_pr', { draft: true })
+
+    // No integration PR for p3's `integ-` base either: the plan PR alone.
+    expect(types()).toEqual(['run_pr'])
   })
 
   /**

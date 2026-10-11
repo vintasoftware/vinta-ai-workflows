@@ -214,7 +214,7 @@ export class RunEffectExecutor implements EffectExecutor {
   #workflow: Workflow
   #nodes: ReadonlyMap<string, Node>
   #waves: ReadonlyMap<string, number>
-  readonly #lanes: ReadonlyMap<string, ExecutorLane>
+  readonly #lanes: Map<string, ExecutorLane>
   readonly #notifier: Notifier
   /**
    * The nodes that reached their `git_merge` in this process. See
@@ -265,6 +265,11 @@ export class RunEffectExecutor implements EffectExecutor {
    * tracking write read the new definition, which is exactly the "safe point"
    * `src/amend/` already refuses to violate for the kinds that need one.
    */
+  /** A lane provisioned mid-run, for a spare crew member (`LanePool.addLane`). */
+  addLane(lane: ExecutorLane): void {
+    this.#lanes.set(lane.name, lane)
+  }
+
   adopt(workflow: Workflow): void {
     this.#workflow = workflow
     this.#nodes = new Map(workflow.nodes.map((node) => [node.id, node]))
@@ -424,6 +429,14 @@ export class RunEffectExecutor implements EffectExecutor {
       }
       // Declaration order, and the first red gate is the answer: running the
       // rest costs the most contended pool in the system to learn nothing.
+      // Red is failed *or* timed out — both leave a non-zero `exitCode`. The
+      // fixer can only act on this gate, and the round after it re-runs every
+      // gate from the top, so a `test` suite run behind a red `typecheck` is
+      // minutes spent on a verdict the next round discards. The gates after it
+      // are not journalled at all — no `gate_started`, no `gate_result` —
+      // because `GateStatus` is what a run said and these were never asked;
+      // and `last` is this gate, so the guard, `lastGate` and the fixer's
+      // prompt all name the red one rather than whichever was declared last.
       if (exitCode !== 0) break
     }
     return { facts: { gate: last } }
@@ -913,6 +926,8 @@ export class RunEffectExecutor implements EffectExecutor {
           duration_ms: result.durationMs,
         },
       })
+      // First red stops the wave, for `run_gate`'s reason: the merge fails on
+      // this gate whatever the rest say, and they are full suites.
       if (exitCode !== 0) throw new WaveGateError(wave, gateId, exitCode, logPath)
     }
   }
@@ -1023,8 +1038,16 @@ export class RunEffectExecutor implements EffectExecutor {
 
   /** One PR per node, on that node's own base. Never throws — see `pr.ts`. */
   async #openPr(nodeId: string, params: Readonly<Record<string, unknown>>): Promise<EffectOutcome> {
-    const { integrator, journal, runId } = this.#options
+    const { integrator } = this.#options
     const base = integrator.base(nodeId)
+
+    // `pull_requests: plan`: the plan PR is the only one, opened by whichever
+    // phase builds the last wave. No phase PR means no facts for an `after_pr`
+    // chore to work on, so those are skipped — which is the point.
+    if (this.#workflow.defaults.pull_requests === 'plan') {
+      await this.#openPlanPrIfDue(nodeId, params)
+      return { facts: { pr: { opened: false } } }
+    }
 
     // **A base nothing pushed is a PR nobody can open.** `git_push` pushes the
     // node's own branch and only that, so a phase based on an `integ-<id>`
@@ -1074,17 +1097,7 @@ export class RunEffectExecutor implements EffectExecutor {
     // should be able to see it was composed rather than written.
     this.#recordPr(nodeId, 'phase', result)
 
-    if (this.#planPrDue?.by === nodeId) {
-      const { wave } = this.#planPrDue
-      this.#planPrDue = null
-      const plan = await integrator.openPlanPr(wave, {
-        draft: params['draft'] === true,
-        text: this.#planPrText(wave),
-      })
-      if (plan !== null) {
-        journal.append({ runId, type: 'run_pr', payload: prPayload(plan) })
-      }
-    }
+    await this.#openPlanPrIfDue(nodeId, params)
 
     // Stated as facts as well, for what follows in the same state: an
     // `after_pr` chore is handed the phase PR it is about, and is skipped when
@@ -1098,6 +1111,21 @@ export class RunEffectExecutor implements EffectExecutor {
           ...(number === undefined ? {} : { number }),
         },
       },
+    }
+  }
+
+  /** The plan PR, when this node's merge built the last wave (`#planPrDue`). */
+  async #openPlanPrIfDue(nodeId: string, params: Readonly<Record<string, unknown>>): Promise<void> {
+    const { integrator, journal, runId } = this.#options
+    if (this.#planPrDue?.by !== nodeId) return
+    const { wave } = this.#planPrDue
+    this.#planPrDue = null
+    const plan = await integrator.openPlanPr(wave, {
+      draft: params['draft'] === true,
+      text: this.#planPrText(wave),
+    })
+    if (plan !== null) {
+      journal.append({ runId, type: 'run_pr', payload: prPayload(plan) })
     }
   }
 
@@ -1125,7 +1153,10 @@ export class RunEffectExecutor implements EffectExecutor {
       (a, b) => (this.#waves.get(a.id) ?? 0) - (this.#waves.get(b.id) ?? 0),
     )
     const steps: PlanPrStep[] = []
-    for (const node of ordered) {
+    // Under `pull_requests: plan` there are no review units to list: every
+    // phase would read as a PR that failed to open.
+    const units = this.#workflow.defaults.pull_requests === 'plan' ? [] : ordered
+    for (const node of units) {
       const base = integrator.base(node.id)
       if (base.kind === 'integration') {
         const url = urls.get(`integration:${node.id}`)
