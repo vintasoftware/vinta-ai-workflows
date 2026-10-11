@@ -89,7 +89,7 @@ export function startCoordinatorLoop(options: CoordinatorLoopOptions): Coordinat
 
   const collect = (): void => {
     const events = journal.events(runId)
-    for (const trigger of triggersFrom(events, cursor, { ...options.triggers, now: now() })) {
+    for (const trigger of triggersFrom(events, cursor, { ...options.triggers, now: now(), workflow: options.workflow() })) {
       if (!told.has(trigger.key)) pending.set(trigger.key, trigger)
     }
     cursor = events.reduce((max, event) => Math.max(max, event.id), cursor)

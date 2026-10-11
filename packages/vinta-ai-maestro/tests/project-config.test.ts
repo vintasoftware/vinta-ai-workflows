@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { ownDocument } from '../src/config/own.ts'
 import { loadProjectConfig, parseProjectConfig, type ProjectConfig } from '../src/config/project-config.ts'
-import { resolveDocument, resolveWorkflow } from '../src/config/resolve.ts'
+import { describeUnscopedGate, resolveDocument, resolveWorkflow, unscopedGates } from '../src/config/resolve.ts'
 import { isJudgeGate, type Gate, type Workflow, WorkflowSchema } from '../src/types.ts'
 
 const commandOf = (gate: Gate | undefined): string | undefined =>
@@ -155,6 +155,82 @@ describe('resolving a plan over its project', () => {
 
   it('leaves a document it cannot merge for the parser to report where it was written', () => {
     expect(resolveDocument('not a workflow', { commands: { test_unit: 'x' } })).toBe('not a workflow')
+  })
+})
+
+describe('gates that run in full on every phase', () => {
+  /** Both phases gated on `gates`, so every gate named is one a phase runs. */
+  const gatedPlan = (gates: readonly string[], overrides: Record<string, unknown> = {}): Record<string, unknown> =>
+    plan({
+      nodes: [
+        { id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates },
+        { id: 'p2', name: 'Two', prompt_ref: 'plan.md#phase-2', gates },
+      ],
+      ...overrides,
+    })
+
+  it('names a scoped line that was passed over for having no placeholder, without quoting it', () => {
+    // The observed run's line: a skill-era `<app>` for an agent to fill in. The
+    // daemon cannot, so the gate fell back to the full suite every phase.
+    const config = {
+      commands: {
+        test_unit: 'docker compose run --rm -T api uv run pytest -n auto',
+        test_unit_scoped: 'docker compose run --rm -T api uv run pytest <app>/tests/ -n auto',
+      },
+    }
+    const workflow = resolved(gatedPlan(['test']), config)
+
+    const found = unscopedGates(workflow, config)
+    expect(found).toEqual([
+      { gateId: 'test', type: 'test', typed: true, reason: { kind: 'placeholderless', key: 'test_unit_scoped' } },
+    ])
+    const { label, remedy } = describeUnscopedGate(found[0]!)
+    expect(label).toContain('commands.test_unit_scoped')
+    expect(label).toContain('{changed_files}')
+    // A command line is repository content: the key finds it, the line is not repeated.
+    expect(label).not.toContain('<app>')
+    expect(remedy).toContain('commands.test_unit_scoped')
+    expect(remedy).toContain('pytest --testmon {changed_files}')
+    expect(remedy).toContain('maestro.defaults.gate_scope: full')
+  })
+
+  it('says when nothing configures a scoped form at all', () => {
+    const config = { commands: { test_unit: 'pnpm test', lint: 'pnpm lint', build: 'pnpm build' } }
+    const workflow = resolved(gatedPlan(['typecheck', 'lint', 'test']), config)
+
+    const found = unscopedGates(workflow, config)
+    // `typecheck` has no scoped line to forget.
+    expect(found.map((finding) => [finding.gateId, finding.reason.kind])).toEqual([
+      ['test', 'none'],
+      ['lint', 'none'],
+    ])
+    expect(describeUnscopedGate(found[1]!).label).toContain('no scoped_cmd')
+  })
+
+  it('says nothing of a gate that narrows, a gate no phase runs, or a run that asked for full gates', () => {
+    const templated = {
+      commands: { test_unit: 'pnpm test', test_unit_scoped: 'pnpm vitest related {changed_files} --run' },
+    }
+    expect(unscopedGates(resolved(gatedPlan(['test']), templated), templated)).toEqual([])
+
+    const plain = { commands: { test_unit: 'pnpm test', lint: 'pnpm lint' } }
+    // `lint` is in the table by its type, and no phase names it.
+    expect(unscopedGates(resolved(gatedPlan(['test']), plain), plain).map((finding) => finding.gateId)).toEqual(['test'])
+
+    const full = { ...plain, maestro: { defaults: { gate_scope: 'full' as const } } }
+    expect(unscopedGates(resolved(gatedPlan(['test']), full), full)).toEqual([])
+  })
+
+  it('counts a gate the plan named `test` without a type, and points it at its own scoped_cmd', () => {
+    // An untyped plan entry replaces the project's gate whole, so no
+    // `commands.test_unit_scoped` would reach it however it were written.
+    const workflow = resolved(gatedPlan(['test'], { gates: { test: { cmd: 'uv run pytest' } } }), null)
+
+    const found = unscopedGates(workflow, null)
+    expect(found).toEqual([{ gateId: 'test', type: 'test', typed: false, reason: { kind: 'none' } }])
+    const { remedy } = describeUnscopedGate(found[0]!)
+    expect(remedy).toContain('gates.test.scoped_cmd')
+    expect(remedy).toContain('type: test')
   })
 })
 

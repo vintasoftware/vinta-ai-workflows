@@ -12,22 +12,46 @@
  *
  * **Something is costing too much**, read as thresholds over the whole run:
  * a phase that has been running for an hour, a gate whose uncached runs have
- * cost half an hour between them. Most of the time the answer is that the
- * work is hard; sometimes it is a test command rebuilding its database on
- * every run in every lane, which is what the coordinator is woken to tell
- * apart.
+ * cost more than the phases that ran it can account for. Most of the time the
+ * answer is that the work is hard; sometimes it is a test command rebuilding
+ * its database on every run in every lane, which is what the coordinator is
+ * woken to tell apart.
  *
  * Every trigger carries a `key`, and the loop wakes the coordinator once per
  * key: a phase that has been running for an hour is news once, not every
  * tick for the rest of the afternoon.
  */
+import { unscopedGates } from '../config/resolve.ts'
 import type { StoredEvent } from '../journal/events.ts'
+import type { Workflow } from '../types.ts'
 
 /** A phase that has been running this long is worth a look. */
 export const DEFAULT_PHASE_THRESHOLD_MS = 60 * 60 * 1000
 
-/** A gate whose uncached runs add up to this is worth a look. */
+/**
+ * The least a gate's uncached runs must add up to before they are worth a
+ * look, however few phases ran it. The floor under the ceiling: below it, two
+ * phases' worth of a slow suite is not news.
+ */
 export const DEFAULT_GATE_COST_CEILING_MS = 30 * 60 * 1000
+
+/**
+ * What one phase may spend on one gate, uncached, before the gate's total is
+ * out of proportion. The ceiling is this times the phases that have run the
+ * gate, never less than the floor above.
+ *
+ * A fixed ceiling read a long run as a costly one. One observed run woke its
+ * coordinator five times on the test gate, and it did nothing each time,
+ * because there was nothing to do: every phase spent its six minutes on the
+ * suite, and enough phases add up to half an hour over and over. A phase's
+ * gate runs inside its fix loop — the implementer asks for it, the reviewer,
+ * a fixer round or two — so a suite of about five minutes legitimately runs
+ * two or three times per phase. Fifteen minutes is that; a gate past it across
+ * the run is being rerun out of proportion — a flake retried, a fix loop that
+ * does not converge, a suite rebuilding its database every time — which is
+ * what the coordinator can do something about.
+ */
+export const DEFAULT_GATE_COST_PER_PHASE_MS = 15 * 60 * 1000
 
 /** A phase queued behind the integration worktree this long is stuck behind something. */
 export const DEFAULT_INTEGRATION_WAIT_MS = 20 * 60 * 1000
@@ -47,6 +71,16 @@ export type CoordinatorTrigger =
       readonly gateId: string
       readonly observedMs: number
       readonly thresholdMs: number
+      /** The phases whose uncached runs the total is over — what the ceiling scaled by. */
+      readonly phases: number
+      /**
+       * The gate runs its full command on every phase because it has no scoped
+       * form (`unscopedGates`): the likeliest reason it costs this much, and one
+       * the coordinator cannot amend away — its policy refuses adding a
+       * `scoped_cmd` (`coordinator/policy.ts`).
+       * False when the trigger was read without the workflow.
+       */
+      readonly fullEveryPhase: boolean
     }
   | { readonly kind: 'phase_failed'; readonly key: string; readonly nodeId: string; readonly reason: string }
   | { readonly kind: 'attempt_failed'; readonly key: string; readonly nodeId: string; readonly reason: string }
@@ -67,8 +101,16 @@ export type CoordinatorTrigger =
 
 export interface TriggerOptions {
   readonly phaseThresholdMs?: number
+  /** The floor under the gate-cost ceiling. */
   readonly gateCostCeilingMs?: number
+  readonly gateCostPerPhaseMs?: number
   readonly integrationWaitMs?: number
+  /**
+   * The run's definition now, when the caller has it: lets a `gate_cost`
+   * trigger say that the gate has no scoped form. Read without the project's
+   * file, so it can say *that*, not why.
+   */
+  readonly workflow?: Workflow
   /** Injected in tests. */
   readonly now?: number
 }
@@ -85,7 +127,11 @@ export function triggersFrom(
 ): readonly CoordinatorTrigger[] {
   const now = options.now ?? Date.now()
   const phaseThresholdMs = options.phaseThresholdMs ?? DEFAULT_PHASE_THRESHOLD_MS
-  const gateCostCeilingMs = options.gateCostCeilingMs ?? DEFAULT_GATE_COST_CEILING_MS
+  const gateCostFloorMs = options.gateCostCeilingMs ?? DEFAULT_GATE_COST_CEILING_MS
+  const gateCostPerPhaseMs = options.gateCostPerPhaseMs ?? DEFAULT_GATE_COST_PER_PHASE_MS
+  const unscoped = new Set(
+    options.workflow === undefined ? [] : unscopedGates(options.workflow, null).map((finding) => finding.gateId),
+  )
   const integrationWaitMs = options.integrationWaitMs ?? DEFAULT_INTEGRATION_WAIT_MS
 
   const found: CoordinatorTrigger[] = []
@@ -109,17 +155,26 @@ export function triggersFrom(
   }
 
   for (const [gateId, cost] of gateCost(events)) {
-    if (cost.totalMs < gateCostCeilingMs) continue
+    // Scaled by the phases that have run the gate *so far*, not by the plan's
+    // count: a plan's full allowance up front would hide the reruns of its
+    // first phases until the run was nearly over.
+    const ceilingMs = Math.max(gateCostFloorMs, gateCostPerPhaseMs * cost.phases)
+    if (cost.totalMs < ceilingMs) continue
     // Once per multiple of the ceiling: a gate that keeps costing is news again
-    // each time it costs another ceiling's worth, not on every tick.
-    const multiple = Math.floor(cost.totalMs / gateCostCeilingMs)
+    // each time it costs another ceiling's worth, not on every tick. The
+    // ceiling grows with the run, so a multiple already told can come round
+    // again; it is not told twice, which errs on the side of the quiet the
+    // scaling exists for.
+    const multiple = Math.floor(cost.totalMs / ceilingMs)
     found.push({
       kind: 'gate_cost',
       key: `gate:${gateId}#${multiple}`,
       nodeId: cost.lastNodeId,
       gateId,
       observedMs: cost.totalMs,
-      thresholdMs: gateCostCeilingMs,
+      thresholdMs: ceilingMs,
+      phases: cost.phases,
+      fullEveryPhase: unscoped.has(gateId),
     })
   }
 
@@ -152,7 +207,13 @@ function describeTrigger(trigger: CoordinatorTrigger): string {
     case 'gate_cost':
       return (
         `- gate ${trigger.gateId} has cost ${minutes(trigger.observedMs)} minutes across this run, ` +
-        `uncached (ceiling ${minutes(trigger.thresholdMs)}); last run by ${trigger.nodeId}`
+        `uncached, over ${trigger.phases} phase${trigger.phases === 1 ? '' : 's'} ` +
+        `(ceiling ${minutes(trigger.thresholdMs)}); last run by ${trigger.nodeId}` +
+        (trigger.fullEveryPhase
+          ? '. It has no scoped_cmd, so every phase and fix round runs its full command under ' +
+            'gate_scope: scoped; adding one (a line with {changed_files} or {touches}) is the ' +
+            'operator’s change, not an amendment you can make — tell them'
+          : '')
       )
     case 'integration_wait':
       return (
@@ -187,23 +248,36 @@ function runningSince(events: readonly StoredEvent[]): ReadonlyMap<string, numbe
 
 interface GateCost {
   readonly totalMs: number
+  /** How many distinct phases ran it uncached — what the ceiling scales by. */
+  readonly phases: number
   /** The last phase to run it — somewhere to start reading. */
   readonly lastNodeId: string
 }
 
-/** Uncached gate time per gate id, across the run. A cache hit cost nothing. */
+/**
+ * Uncached gate time per gate id, across the run. A cache hit cost nothing,
+ * and a phase that only ever hit the cache earns its gate no allowance.
+ * `gate_result` is phase gates only — a wave's gates are `wave_gate_result` —
+ * so the phases counted are the ones that ran it inside their own fix loops.
+ */
 function gateCost(events: readonly StoredEvent[]): ReadonlyMap<string, GateCost> {
-  const totals = new Map<string, GateCost>()
+  const totals = new Map<string, { totalMs: number; nodes: Set<string>; lastNodeId: string }>()
   for (const event of events) {
     if (event.type !== 'gate_result' || event.nodeId === null) continue
     const payload = event.payload as { gate?: string; duration_ms?: number; cached?: boolean }
     if (payload.gate === undefined || typeof payload.duration_ms !== 'number' || payload.cached === true) continue
-    totals.set(payload.gate, {
-      totalMs: (totals.get(payload.gate)?.totalMs ?? 0) + payload.duration_ms,
-      lastNodeId: event.nodeId,
-    })
+    const entry = totals.get(payload.gate) ?? { totalMs: 0, nodes: new Set<string>(), lastNodeId: event.nodeId }
+    entry.totalMs += payload.duration_ms
+    entry.nodes.add(event.nodeId)
+    entry.lastNodeId = event.nodeId
+    totals.set(payload.gate, entry)
   }
-  return totals
+  return new Map(
+    [...totals].map(([gate, entry]) => [
+      gate,
+      { totalMs: entry.totalMs, phases: entry.nodes.size, lastNodeId: entry.lastNodeId },
+    ]),
+  )
 }
 
 /** Nodes still queued behind the integration worktree: since when, and behind whom. */

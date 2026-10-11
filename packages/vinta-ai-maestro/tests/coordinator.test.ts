@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createErrorFeed, tapErrors } from '../src/coordinator/errors.ts'
 import { startCoordinatorLoop, type CoordinatorLoop } from '../src/coordinator/loop.ts'
 import { addedTokens, coordinatorRefusals, tokenize } from '../src/coordinator/policy.ts'
-import { triggersFrom, type CoordinatorTrigger } from '../src/coordinator/triggers.ts'
+import { describeTriggers, triggersFrom, type CoordinatorTrigger } from '../src/coordinator/triggers.ts'
 import type { AgentTask, HarnessAdapter, SpawnOutcome } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
@@ -226,6 +226,76 @@ describe('what wakes the coordinator', () => {
       phaseThresholdMs: 10 * HOUR,
     })
     expect(found).toEqual([expect.objectContaining({ kind: 'integration_wait', nodeId: 'p2', holder: 'p1' })])
+  })
+
+  describe('gate cost', () => {
+    const MIN = 60 * 1000
+    const gateRun = (journal: Journal, nodeId: string, gate: string, minutes: number, cached = false): void => {
+      journal.append({
+        runId: RUN,
+        nodeId,
+        type: 'gate_result',
+        payload: { gate, exit_code: 0, status: 'passed', duration_ms: minutes * MIN, cached },
+      })
+    }
+    const gateCosts = (journal: Journal, options: Parameters<typeof triggersFrom>[2] = {}) =>
+      triggersFrom(journal.events(RUN), Number.MAX_SAFE_INTEGER, options).filter(
+        (trigger): trigger is Extract<CoordinatorTrigger, { kind: 'gate_cost' }> => trigger.kind === 'gate_cost',
+      )
+
+    it('lets every phase spend its share, so a long run is not read as a costly one', () => {
+      // The observed run: a six-minute suite in each phase's gate, which a fixed
+      // 30-minute ceiling reported five times with nothing for anyone to do.
+      const journal = journalWith(workflowOf())
+      for (const nodeId of ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8']) {
+        gateRun(journal, nodeId, 'unit', 6)
+        gateRun(journal, nodeId, 'unit', 6)
+      }
+      expect(gateCosts(journal)).toEqual([])
+    })
+
+    it('wakes when the gate costs out of proportion to the phases that ran it', () => {
+      // Two phases, one of them rerunning the suite round after round.
+      const journal = journalWith(workflowOf())
+      gateRun(journal, 'p1', 'unit', 6)
+      for (let round = 0; round < 6; round += 1) gateRun(journal, 'p2', 'unit', 6)
+      gateRun(journal, 'p2', 'unit', 6, true) // a hit cost nothing
+
+      const [trigger, ...rest] = gateCosts(journal)
+      expect(rest).toEqual([])
+      expect(trigger).toMatchObject({
+        gateId: 'unit',
+        nodeId: 'p2',
+        observedMs: 42 * MIN,
+        phases: 2,
+        // Two phases' allowance is under the floor, so the floor is the ceiling.
+        thresholdMs: 30 * MIN,
+        fullEveryPhase: false,
+      })
+      expect(describeTriggers([trigger!])).toContain('over 2 phases (ceiling 30)')
+    })
+
+    it('scales the ceiling past the floor with the phases that ran the gate', () => {
+      const journal = journalWith(workflowOf())
+      for (const nodeId of ['p1', 'p2', 'p3', 'p4']) gateRun(journal, nodeId, 'unit', 14)
+      expect(gateCosts(journal)).toEqual([])
+      gateRun(journal, 'p4', 'unit', 5)
+      expect(gateCosts(journal)).toEqual([expect.objectContaining({ phases: 4, thresholdMs: 60 * MIN })])
+    })
+
+    it('says when the gate runs its full command every phase for want of a scoped form', () => {
+      const workflow = edited(workflowOf(), (draft) => {
+        draft.gates.unit.type = 'test'
+      })
+      const journal = journalWith(workflow)
+      for (let round = 0; round < 6; round += 1) gateRun(journal, 'p1', 'unit', 6)
+
+      const [trigger] = gateCosts(journal, { workflow })
+      expect(trigger).toMatchObject({ gateId: 'unit', fullEveryPhase: true })
+      expect(describeTriggers([trigger!])).toContain('It has no scoped_cmd')
+      // Read without the workflow, it cannot know, and says nothing.
+      expect(gateCosts(journal)[0]).toMatchObject({ fullEveryPhase: false })
+    })
   })
 })
 

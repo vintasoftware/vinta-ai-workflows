@@ -36,7 +36,7 @@
  * is then parsed exactly once, by the same `parseWorkflow` everything else
  * uses, so a value is checked against the same rules whichever layer set it.
  */
-import { GATE_TYPES, type GateType, type Workflow } from '../types.ts'
+import { GATE_TYPES, isJudgeGate, type GateType, type Workflow } from '../types.ts'
 import { parseWorkflow, type ParseResult, type ValidationIssue } from '../validate.ts'
 import { PROJECT_CONFIG_FILE, type ProjectConfig } from './project-config.ts'
 
@@ -188,6 +188,118 @@ function commandlessGates(authored: unknown, resolved: unknown): ValidationIssue
 
 export function hasScopePlaceholder(command: string): boolean {
   return command.includes('{changed_files}') || command.includes('{touches}')
+}
+
+// ---------------------------------------------------------------------------
+// Gates that will never narrow
+// ---------------------------------------------------------------------------
+
+/** The gate types a phase is expected to narrow: the ones with a `*_scoped` line. */
+type ScopableType = 'test' | 'lint'
+
+/**
+ * A gate that runs its full command on every phase although the run asked for
+ * scoped phase gates.
+ *
+ * `typed` says whether the gate inherits from the project at all: an untyped
+ * gate the plan named `test` replaces the project's whole, so no
+ * `commands.test_unit_scoped` would reach it however it were written.
+ */
+export interface UnscopedGate {
+  readonly gateId: string
+  readonly type: ScopableType
+  readonly typed: boolean
+  readonly reason:
+    | {
+        /** `commands.<key>` is set, and was passed over for having no placeholder. */
+        readonly kind: 'placeholderless'
+        readonly key: string
+      }
+    | { readonly kind: 'none' }
+}
+
+/**
+ * The `test` and `lint` gates a phase uses that will run their full `cmd` on
+ * every phase, every fix round, under `defaults.gate_scope: scoped`.
+ *
+ * Nothing at run time says this: `phaseGate` falls back to `cmd` when a gate
+ * has no `scoped_cmd`, which is correct, and silent. One observed run spent two
+ * hours running a 6,528-test suite — six to nine minutes each time — on every
+ * phase gate and every fix round, because its `commands.test_unit_scoped` was
+ * the skill-era `pytest <app>/tests/`: a line for an agent to fill in, which
+ * `gateTypeDefaults` rightly refuses to inherit and then told nobody about.
+ * This is the finding that run needed at minute zero; `doctor` reports it, and
+ * through the preflight so does the start of a run.
+ *
+ * A gate is a `test` or `lint` gate by its `type`, or — untyped — by its id,
+ * because a plan that declares `gates.test.cmd` and nothing else has still
+ * named its suite. `typecheck` and `e2e` are left out: neither has a scoped
+ * line to forget, and a type check narrowed to the changed files is not one.
+ *
+ * Only gates some phase runs, through its own `gates` or `defaults.gates`: a
+ * gate the table carries and nothing uses costs nothing. `config` is the
+ * project's file, `null` when there is none or it is not to hand — then every
+ * finding is `none`, which is still true of the gate.
+ */
+export function unscopedGates(workflow: Workflow, config: ProjectConfig | null): UnscopedGate[] {
+  if (workflow.defaults.gate_scope !== 'scoped') return []
+  const commands = isObject(config?.commands) ? config.commands : {}
+  const used = new Set([...(workflow.defaults.gates ?? []), ...workflow.nodes.flatMap((node) => node.gates)])
+  const found: UnscopedGate[] = []
+  for (const [gateId, gate] of Object.entries(workflow.gates)) {
+    if (!used.has(gateId) || isJudgeGate(gate) || gate.scoped_cmd !== undefined) continue
+    const type = gate.type ?? gateId
+    if (type !== 'test' && type !== 'lint') continue
+    const key = COMMAND_SOURCES[type].scoped
+    const line = key === undefined ? undefined : commands[key]
+    // A line *with* a placeholder that still did not arrive was overridden or
+    // never offered (an untyped gate inherits nothing): saying it was ignored
+    // for the placeholder would send the reader to fix the wrong thing.
+    found.push({
+      gateId,
+      type,
+      typed: gate.type !== undefined,
+      reason:
+        key !== undefined && typeof line === 'string' && !hasScopePlaceholder(line)
+          ? { kind: 'placeholderless', key }
+          : { kind: 'none' },
+    })
+  }
+  return found
+}
+
+/**
+ * The finding as one line and its remedy, shared by `doctor` and the run's
+ * startup warnings so the two never say it differently.
+ *
+ * The configured line itself is not quoted: a command line is repository
+ * content (§13.4), and a check line carries identifiers only (§11). The key is
+ * enough to find it.
+ */
+export function describeUnscopedGate(finding: UnscopedGate): { readonly label: string; readonly remedy: string } {
+  const why =
+    finding.reason.kind === 'placeholderless'
+      ? `commands.${finding.reason.key} in ${PROJECT_CONFIG_FILE} has no {changed_files} or {touches} ` +
+        'placeholder, so it is not inherited — a scoped line must say how it is scoped'
+      : 'it has no scoped_cmd, and nothing configures one'
+  const scopedKey = COMMAND_SOURCES[finding.type].scoped ?? ''
+  const example =
+    finding.type === 'test'
+      ? 'pytest --testmon {changed_files}, vitest related {changed_files} --run'
+      : 'ruff check {changed_files}, eslint {changed_files}'
+  const where = finding.typed
+    ? `commands.${scopedKey} (or maestro.gates.${finding.type}.scoped_cmd) in ${PROJECT_CONFIG_FILE}, ` +
+      `or gates.${finding.gateId}.scoped_cmd in the plan,`
+    : `gates.${finding.gateId}.scoped_cmd in the plan (or give it type: ${finding.type} so it inherits ` +
+      `commands.${scopedKey})`
+  return {
+    label:
+      `gate ${finding.gateId}: runs its full command on every phase and every fix round, ` +
+      `although gate_scope is scoped — ${why}`,
+    remedy:
+      `set ${where} to a line with {changed_files} or {touches} — e.g. ${example} — ` +
+      'or set maestro.defaults.gate_scope: full to accept a full run per phase',
+  }
 }
 
 // ---------------------------------------------------------------------------

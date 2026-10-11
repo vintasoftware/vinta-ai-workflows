@@ -47,6 +47,8 @@ import { PROBE_QUESTION } from '../system-one/adapter.ts'
 import { findLeftovers, type LeftoverDeps } from '../run/leftovers.ts'
 import { openJournal } from '../journal/journal.ts'
 import { storeFor } from '../cli/paths.ts'
+import { describeUnscopedGate, unscopedGates } from '../config/resolve.ts'
+import { loadProjectConfig, type ProjectConfig } from '../config/project-config.ts'
 
 const run = promisify(execFile)
 
@@ -1094,6 +1096,34 @@ export function checkComposeTty(workflow: Workflow): CheckResult[] {
 }
 
 /**
+ * `test` and `lint` gates that will run in full on every phase although the
+ * run asked for scoped phase gates (`config/resolve.ts`'s `unscopedGates`), one
+ * warning each with the line to set.
+ *
+ * A warning, not a failure: the run is correct, only slower — the full suite
+ * in every fix round of every phase. One observed run spent two hours that
+ * way, and nothing said so; the preflight turns every warning here into a line
+ * at the start of the run as well, which is where this one would have been read.
+ */
+export function checkGateScope(workflow: Workflow, config: ProjectConfig | null): CheckResult[] {
+  return unscopedGates(workflow, config).map((finding) => {
+    const { label, remedy } = describeUnscopedGate(finding)
+    return flag(`gate-scope:${finding.gateId}`, label, 'warn', remedy)
+  })
+}
+
+/**
+ * The project's file as the checkout has it, for the one check that explains
+ * itself by it. `null` when there is none or it does not parse — the workflow
+ * was already resolved over whatever loaded, and a broken file is its loader's
+ * to report, not this check's.
+ */
+async function checkoutConfig(repoPath: string): Promise<ProjectConfig | null> {
+  const loaded = await loadProjectConfig(repoPath)
+  return loaded.ok ? loaded.config : null
+}
+
+/**
  * What finished runs left running or on disk (`run/leftovers.ts`), one warning
  * each with the command that removes it. A warning, not a failure: none of it
  * stops a run, it only costs memory, disk and ports nobody is using.
@@ -1155,6 +1185,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
 
   const systemOne = await checkSystemOne(workflow, options.systemOne, options.permission)
   const leftovers = await checkLeftovers(repoPath, options.leftovers)
+  const config = await checkoutConfig(repoPath)
 
   const checks = [
     ...harnesses,
@@ -1168,6 +1199,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     disk,
     ...checkGates(workflow),
     ...checkComposeTty(workflow),
+    ...checkGateScope(workflow, config),
     ...envFiles,
     ...briefs,
     ...branches,
