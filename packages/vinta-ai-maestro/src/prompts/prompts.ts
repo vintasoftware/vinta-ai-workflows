@@ -168,6 +168,67 @@ export interface SpawnPromptRequest {
    * an agent asked to do nothing in particular to a diff.
    */
   readonly chore?: ChorePrompt
+  /**
+   * The harness keeps this session alive while background work it started
+   * runs, and wakes the agent when that work reports (`backgroundWork`).
+   *
+   * Every turn reads it (`waiting`): on such a harness an agent waits the way
+   * an interactive session does — by ending the turn — and the review loop,
+   * which waits on a reviewer and on gates, depends on it. Absent is false,
+   * which keeps every turn in the foreground: on a harness that ends with the
+   * turn, whatever was backgrounded is killed and nothing wakes the agent.
+   */
+  readonly backgroundWork?: boolean
+  /**
+   * The harness this turn runs on, for the names of its tools. Each one starts
+   * background work its own way, and an agent told to use another harness's
+   * tool either cannot find it or reaches for the wrong one.
+   */
+  readonly harness?: string
+}
+
+/**
+ * How one harness backgrounds work, in the words of its own tools.
+ *
+ * Only read where `backgroundWork` holds. The three shipped harnesses do it
+ * three ways: claude-code backgrounds a shell command and resumes a sub-agent
+ * with a message; codex leaves a command running when `exec_command` yields,
+ * and its sub-agents answer `send_input` on their own threads; opencode has no
+ * background shell at all, only a background `task`.
+ */
+interface BackgroundTerms {
+  /** How a command keeps running while the agent does something else, or null where nothing does. */
+  readonly command: string | null
+  /** How the reviewer is spawned so that its first pass comes back before the agent goes on. */
+  readonly spawn: string
+  /** How a later pass reaches that same reviewer, which then answers in the background. */
+  readonly message: string
+}
+
+const BACKGROUND_TERMS: Readonly<Record<string, BackgroundTerms>> = {
+  'claude-code': {
+    command: 'the Bash tool’s `run_in_background`',
+    spawn: 'the Agent tool, in the foreground, so its first pass comes back as the tool’s result',
+    message: '`SendMessage` to it',
+  },
+  codex: {
+    command:
+      '`exec_command` with a short `yield_time_ms` — when it returns a session id the command is still running; leave it running rather than polling it with `write_stdin`',
+    spawn: '`spawn_agent`, then `wait` on it, so its first pass comes back before you go on',
+    message: '`send_input` to it',
+  },
+  opencode: {
+    command: null,
+    spawn: 'the `task` tool, in the foreground, so its first pass comes back as the tool’s result',
+    message: 'the `task` tool with its `task_id` and `background: true`',
+  },
+}
+
+/** A harness this module has no words for: described, never guessed. */
+const GENERIC_TERMS: BackgroundTerms = {
+  command: 'your harness’s way of running a command in the background',
+  spawn: 'your harness’s sub-agent tool, waiting for its first pass before you go on',
+  message: 'a message to it through your harness’s sub-agent tool',
 }
 
 /** The chore a `run_chore` turn is running, as the scheduler resolved it. */
@@ -317,6 +378,8 @@ interface Continuation {
   readonly branch: string
   readonly baseBranch: string
   readonly facts: GuardContext
+  /** How this harness backgrounds work, or null where a turn ends with it (`backgroundWork`). */
+  readonly background: BackgroundTerms | null
 }
 
 /** What a cold turn is composed from: the above, plus everything read off disk. */
@@ -345,6 +408,10 @@ function resume(request: SpawnPromptRequest, workspace: string): Continuation {
     branch: row?.branch ?? 'HEAD',
     baseBranch: row?.base_branch ?? workflow.base_branch,
     facts: request.facts,
+    background:
+      request.backgroundWork === true
+        ? (BACKGROUND_TERMS[request.harness ?? ''] ?? GENERIC_TERMS)
+        : null,
   }
 }
 
@@ -628,7 +695,7 @@ function renderImplementer(materials: Materials): string {
     '5. A red outer gate sends you back to step 2, for as long as you have room to',
     '   work. It is not a reason to leave the work uncommitted — see below.',
     ...soloTurn('implements this phase'),
-    ...foreground(),
+    ...waiting(materials),
     ...commitProtocol(materials),
     ...prContext(materials),
     ...needsInput(),
@@ -745,6 +812,65 @@ function foreground(): string[] {
     'with it. A turn that finishes by waiting for a background result finishes',
     'having done nothing, and the phase is then judged on an empty branch.',
     'Long commands are fine — run them and wait for them to return.',
+  ]
+}
+
+/**
+ * How a turn waits: the harness decides, not the role.
+ *
+ * Every turn is the same agent in the same session, so the rule depends only on
+ * whether the harness keeps that session alive past a turn that leaves work
+ * running (`backgroundWork`). Where it does not, `foreground` holds, for the
+ * reason its comment gives. Where it does, ending the turn *is* the wait: the
+ * adapter holds the session open until nothing is left running and the agent is
+ * woken in it as each piece of work reports (`claude-code.ts`).
+ *
+ * The review needs this more than any turn, and gets two lines more. A
+ * resumed reviewer answers in the background whatever the prompt says, so a
+ * review told that nothing would wake it either ended "waiting on the reviewer"
+ * with no verdict, or spent its turn polling with `sleep` and monitors.
+ */
+function waiting(materials: Continuation, review = false): string[] {
+  const background = materials.background
+  // A harness with no background shell has nothing for an implementer or a
+  // fixer to background: its sub-agents are the only background work, and
+  // those turns may not spawn one (`soloTurn`).
+  if (background === null || (background.command === null && !review)) return foreground()
+  return [
+    '',
+    '## Waiting on work you started',
+    ...(review
+      ? [
+          background.command === null
+            ? 'The reviewer’s later passes run while you wait.'
+            : 'The reviewer’s later passes and the background gates run while you wait.',
+        ]
+      : [
+          'A long command — a test suite, a gate — may run in the background while you',
+          `carry on with something else: ${background.command}.`,
+        ]),
+    'To wait for anything you started, end your turn: this session stays open while',
+    'any of it is still running, and you are woken in it as each piece finishes. Do',
+    'not sleep, poll or start a monitor to wait.',
+    ...(background.command === null
+      ? [
+          'Run shell commands in the foreground: this harness has no background shell,',
+          'and nothing would wake you for a command you sent there with `&`.',
+        ]
+      : [
+          'Start nothing that does not finish on its own — a dev server, a watcher. The',
+          'session stays open for it, and your work is not handed on until it ends; stop',
+          'anything like that before your final report.',
+        ]),
+    'A message that ends your turn to wait is not your report. Keep it to one line',
+    'saying what you are waiting on.' +
+      (review ? ' Never put a VERDICT line in it.' : ''),
+    review
+      ? 'Write the report, and its VERDICT line, only once the reviewer has given its'
+      : 'Write the report only once nothing you started is still running.',
+    ...(review
+      ? [background.command === null ? 'final word.' : 'final word and the gates are back.']
+      : []),
   ]
 }
 
@@ -1209,7 +1335,7 @@ function renderFixer(materials: Materials): string {
     ...gateList(materials),
     ...gateStopCondition(),
     ...soloTurn('fixes what came back'),
-    ...foreground(),
+    ...waiting(materials),
     ...commitProtocol(materials),
     'Keep this round to one commit where you can — a hook rewrite aside — with a',
     'message naming the gate it fixes.',
@@ -1436,10 +1562,20 @@ function reviewRules(materials: Continuation, chore: ChoreMaterials, cold: boole
       : 'the reviewer verbatim, with the plan-level decisions when you were given them.',
     '',
     '## The reviewer',
-    'Exactly one reviewer sub-agent for this whole turn. Spawn it with your harness’s',
-    'sub-agent tool (claude-code’s Agent tool, or the same thing under another name)',
-    'on its most capable model tier, and send every later pass to that same agent so',
-    'it keeps its context. It reads and runs commands but edits nothing: check',
+    'Exactly one reviewer sub-agent for this whole turn.',
+    ...(materials.background !== null
+      ? [
+          `Spawn it on its most capable model tier with ${materials.background.spawn}.`,
+          `Send every later pass to that same agent — ${materials.background.message} — so`,
+          'it keeps its context; it answers in the background, and "Waiting" below says',
+          'how to wait for it. The reviewer reads and runs commands but edits nothing: check',
+        ]
+      : [
+          'Spawn it with your harness’s sub-agent tool (claude-code’s Agent tool, or the',
+          'same thing under another name) on its most capable model tier, and',
+          'send every later pass to that same agent so it keeps its context. It reads',
+          'and runs commands but edits nothing: check',
+        ]),
     '`git status --porcelain` and `git rev-parse HEAD` before and after each pass,',
     'and if it changed anything, say so in your report and do not build on it.',
     'This turn resumes after any question you stop to ask, and the reviewer may not',
@@ -1475,11 +1611,65 @@ function reviewRules(materials: Continuation, chore: ChoreMaterials, cold: boole
     'reviewer’s recommendation and yours. For the first two, your recommendation is',
     'normally to reject the finding.',
     '',
+    ...(materials.background !== null
+      ? backgroundVerify(materials, materials.background)
+      : [
+          '## Verify and commit',
+          'After each round of fixes, run the inner loop, then each of these yourself:',
+          ...gateList(materials),
+          'Commit each round as one commit whose message names the findings it addresses,',
+          'so the reviewer can read the round.',
+        ]),
+  ]
+}
+
+/**
+ * A round's verification, run beside the reviewer's next pass rather than
+ * before it.
+ *
+ * Run in sequence, a round was the gates — a full suite, minutes long — and
+ * then the reviewer, and the gates were the longer half. Neither depends on the
+ * other: the reviewer reads the commit, and the gates run it. So both start
+ * together and the round costs the longer of the two. The order still holds
+ * where it matters: the loop does not end on an approval of a commit the gates
+ * have not passed.
+ */
+function backgroundVerify(materials: Continuation, background: BackgroundTerms): string[] {
+  const gates = agentGates(materials)
+  const intro = [
     '## Verify and commit',
-    'After each round of fixes, run the inner loop, then each of these yourself:',
-    ...gateList(materials),
-    'Commit each round as one commit whose message names the findings it addresses,',
-    'so the reviewer can read the round.',
+    'After each round of fixes, run the inner loop — the tests for what you changed —',
+    'then commit the round as one commit whose message names the findings it',
+    'addresses, so the reviewer can read the round.',
+  ]
+  const closing = [
+    'A red gate is a finding of your own: read its output, fix it, commit, and tell',
+    'the reviewer before it gives its final word. The loop ends on the reviewer’s',
+    'approval of a commit the gates passed, not on either one alone.',
+  ]
+  // No background shell: the reviewer is the half that goes to the background,
+  // and the gates run in the foreground beside it.
+  if (background.command === null) {
+    return [
+      ...intro,
+      'Then send the round to the reviewer, which returns at once and leaves it',
+      'reviewing, and run each of these yourself while it does:',
+      ...gateList(materials),
+      ...closing,
+    ]
+  }
+  return [
+    ...intro,
+    'Then start both of these at once:',
+    `- the gates, as one background command (${background.command}),`,
+    ...(gates.length === 0
+      ? ['  running the repository’s own type/build check and its test suite;']
+      : [
+          '  in this order, stopping at the first that fails:',
+          `      ${gates.map((id) => `vinta-ai-maestro gate ${id}`).join(' && ')}`,
+        ]),
+    '- the round, sent to the reviewer.',
+    ...closing,
   ]
 }
 
@@ -1557,7 +1747,7 @@ function choreTail(materials: Continuation, chore: ChoreMaterials): string[] {
   const review = chore.when === 'review'
   return [
     ...(review ? reviewerOnly() : soloTurn('runs this chore')),
-    ...foreground(),
+    ...waiting(materials, review),
     ...(chore.when === 'after_pr' ? [] : commitProtocol(materials)),
     ...(review ? needsInput() : []),
     ...choreOutput(chore),
@@ -1668,7 +1858,7 @@ function renderFixerContinuation(materials: Continuation): string {
     ...gateList(materials),
     ...gateStopCondition(),
     ...soloTurn('fixes what came back'),
-    ...foreground(),
+    ...waiting(materials),
     ...commitProtocol(materials),
     'Keep this round to one commit where you can — a hook rewrite aside — with a',
     'message naming the gate it fixes.',
@@ -1704,7 +1894,7 @@ function renderImplementerContinuation(materials: Continuation): string {
     'them, ending on a green outer gate:',
     ...gateList(materials),
     ...soloTurn('implements this phase'),
-    ...foreground(),
+    ...waiting(materials),
     ...commitProtocol(materials),
     '',
     'Then file the single final report those instructions asked for.',

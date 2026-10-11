@@ -104,6 +104,7 @@ const DEFAULT_CAPABILITIES: HarnessCapabilities = {
    * of `false`. The honest value and the useful one are the same value.
    */
   autoCompact: false,
+  backgroundWork: false,
 }
 
 /** Long enough that a consumer can interrupt after the first event and still truncate the rest. */

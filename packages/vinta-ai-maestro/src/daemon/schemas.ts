@@ -321,6 +321,8 @@ export const HarnessCapabilitiesSchema = z.strictObject({
   permissionControl: z.boolean(),
   /** Compacts its own context instead of failing the turn when the window fills. */
   autoCompact: z.boolean(),
+  /** Keeps a session alive while background work it started runs, and wakes the agent when it reports. */
+  backgroundWork: z.boolean(),
 })
 
 type WireCapability = keyof z.infer<typeof HarnessCapabilitiesSchema>

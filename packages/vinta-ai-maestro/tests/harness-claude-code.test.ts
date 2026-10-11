@@ -1065,6 +1065,159 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
   })
 
+  /**
+   * A turn that ends with background work running ends the turn, not the
+   * session (`backgroundWork`). Ended on the first `result`, the process was
+   * killed under a reviewer still re-reviewing, and every review turn ended
+   * "waiting on the reviewer" with no verdict.
+   *
+   * The frames are the CLI's own, from a recorded 2.1.285 session: the list of
+   * running tasks, the task's notification, and the turn the CLI starts by
+   * itself to hand the agent its result.
+   */
+  describe('a session with background work still running', () => {
+    const drain = async (session: AgentSession): Promise<AgentEvent[]> => {
+      const seen: AgentEvent[] = []
+      for await (const event of session.events) seen.push(event)
+      return seen
+    }
+
+    const spawnFake = async (
+      stdout: readonly string[],
+      options: { readonly lingerMs?: number; readonly backgroundIdleMs?: number } = {},
+    ): Promise<AgentEvent[]> => {
+      const bin = fakeBin({
+        version: VERSION,
+        readsLine: true,
+        stdout,
+        ...(options.lingerMs === undefined ? {} : { lingerMs: options.lingerMs }),
+      })
+      const adapter = new ClaudeCodeAdapter({
+        bin,
+        ...(options.backgroundIdleMs === undefined ? {} : { backgroundIdleMs: options.backgroundIdleMs }),
+      })
+      const outcome = await adapter.spawn(task())
+      if (!outcome.ok) throw new Error('the fake refused')
+      return await drain(outcome.session)
+    }
+
+    const INIT = '{"type":"system","subtype":"init","session_id":"sess-held"}'
+    const text = (said: string): string =>
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: said }] } })
+    const running = (...ids: string[]): string =>
+      JSON.stringify({
+        type: 'system',
+        subtype: 'background_tasks_changed',
+        tasks: ids.map((task_id) => ({ task_id, task_type: 'local_agent' })),
+      })
+    const notified = (id: string): string =>
+      JSON.stringify({ type: 'system', subtype: 'task_notification', task_id: id, status: 'completed' })
+    const result = (fields: Record<string, unknown> = {}): string =>
+      JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 2, ...fields })
+
+    it('stays open until the work reports and the woken turn ends', async () => {
+      const seen = await spawnFake([
+        INIT,
+        running('reviewer'),
+        text('Waiting on the reviewer.'),
+        result({ usage: { input_tokens: 3, output_tokens: 4 }, total_cost_usd: 0.05 }),
+        notified('reviewer'),
+        running(),
+        INIT,
+        text('VERDICT: pass'),
+        result({ num_turns: 1, usage: { input_tokens: 1, output_tokens: 2 }, total_cost_usd: 0.08 }),
+      ])
+
+      expect(seen.filter((event) => event.type === 'session_started')).toHaveLength(1)
+      expect(seen.filter((event) => event.type === 'session_ended')).toEqual([
+        { type: 'session_ended', result: 'ok' },
+      ])
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+      expect(seen.at(-3)).toEqual({ type: 'assistant_text', text: 'VERDICT: pass' })
+    })
+
+    it('reports each turn’s own cost, not the process’s running total twice', async () => {
+      const seen = await spawnFake([
+        INIT,
+        running('reviewer'),
+        result({ usage: { input_tokens: 3, output_tokens: 4 }, total_cost_usd: 0.05 }),
+        running(),
+        result({ usage: { input_tokens: 1, output_tokens: 2 }, total_cost_usd: 0.08 }),
+      ])
+
+      const usage = seen.flatMap((event) => (event.type === 'usage' ? [event] : []))
+      expect(usage.map((event) => [event.input, event.output])).toEqual([
+        [3, 4],
+        [1, 2],
+      ])
+      expect(usage[0]?.costUsd).toBeCloseTo(0.05)
+      expect(usage[1]?.costUsd).toBeCloseTo(0.03)
+    })
+
+    it('counts a backgrounded task from its start frame when the CLI sends no list', async () => {
+      const seen = await spawnFake([
+        INIT,
+        '{"type":"system","subtype":"task_started","task_id":"suite","is_backgrounded":true}',
+        // A task the sub-agent runs is its own, and holds nothing open.
+        '{"type":"system","subtype":"task_started","task_id":"inner","is_backgrounded":true,"owned_by_subagent":true}',
+        result(),
+        notified('suite'),
+        text('the suite passed'),
+        result({ num_turns: 1 }),
+      ])
+
+      expect(seen.filter((event) => event.type === 'session_ended')).toHaveLength(1)
+      expect(seen.at(-2)).toEqual({ type: 'assistant_text', text: 'the suite passed' })
+    })
+
+    /**
+     * `--resume` replays the notifications of tasks the last process was
+     * killed under, and closes the replay with a `result` of zero turns before
+     * it reads the prompt. Ended there, the turn lasted a second and did
+     * nothing — and a review stated no verdict.
+     */
+    it('does not end on the replay a resumed session opens with', async () => {
+      const seen = await spawnFake([
+        '{"type":"system","subtype":"task_notification","task_id":"killed","status":"stopped"}',
+        INIT,
+        result({ num_turns: 0, result: '' }),
+        INIT,
+        text('VERDICT: fail'),
+        result({ num_turns: 1 }),
+      ])
+
+      expect(seen.filter((event) => event.type === 'session_ended')).toHaveLength(1)
+      expect(seen.at(-2)).toEqual({ type: 'assistant_text', text: 'VERDICT: fail' })
+    })
+
+    it('ends at once on a turn that failed, whatever is still running', async () => {
+      const seen = await spawnFake([
+        INIT,
+        running('reviewer'),
+        result({ subtype: 'error_during_execution', is_error: true }),
+      ])
+
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'error' })
+    })
+
+    it('ends the way its last turn did when the work goes quiet', async () => {
+      const seen = await spawnFake([INIT, running('server'), text('done'), result()], {
+        lingerMs: 10_000,
+        backgroundIdleMs: 200,
+      })
+
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+      expect(seen.some((event) => event.type === 'error')).toBe(false)
+    })
+
+    it('ends the way its last turn did when the CLI exits while held', async () => {
+      const seen = await spawnFake([INIT, running('reviewer'), text('done'), result()])
+
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+      expect(seen.some((event) => event.type === 'error')).toBe(false)
+    })
+  })
+
   /** A fake that records the argv it was handed, then plays one clean turn. */
   function argvRecordingCli(dir: string, name: string, out: string): string {
     return fakeCliFromSource(

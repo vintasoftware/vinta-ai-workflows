@@ -552,6 +552,46 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: agents wait for background work the way a normal
+  Claude Code session does.** A headless session no longer ends at the first
+  turn that leaves background work running. It stays open, the agent is woken
+  in the same session when that work reports, and the session ends on the
+  first turn that leaves nothing running. A held session ends after 30 minutes
+  with no output, and any work still running is cleaned up. Harnesses declare
+  this as a new `backgroundWork` capability:
+  - **claude-code:** the CLI wakes the agent itself. A resumed session also no
+    longer ends on the empty turn the CLI replays first.
+  - **codex:** the adapter wakes the agent itself (see below).
+  - **opencode:** on servers the adapter starts, background `task` sub-agents
+    are enabled through `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`. A
+    configured `baseUrl` reports `false`.
+
+  This fixes the slow review loop. The reviewer, resumed with a message, was
+  killed with the turn. Every round after the first ended "waiting on the
+  reviewer" with no verdict, went to the operator as `unapproved`, and
+  restarted with a cold reviewer. Every turn's prompt now says how to wait on
+  its harness (end the turn, never sleep or poll), naming that harness's own
+  tools. The review starts each round's gates alongside the reviewer's next
+  pass; on opencode, which has no background shell, the reviewer runs in the
+  background and the gates run beside it.
+
+- **`vinta-ai-maestro`: codex runs on `codex app-server` instead of
+  `codex exec`, and needs codex-cli 0.147.0 or later.** `exec` killed
+  background work when the turn ended. App-server keeps it, and the adapter
+  starts the next turn naming, by id, what finished. Codex now also supports
+  `inject`, so steering a running codex node is a message, no longer an
+  interrupt and resume. Each thread is started and resumed with an explicit
+  sandbox, approval policy and reviewer, so `~/.codex/config.toml` can no
+  longer widen `--permission`. Under `--permission ask`, a request for approval
+  is now recorded as a `permission_request` and declined; before, the model
+  could not ask at all. A logged-out codex is refused at spawn instead of
+  failing mid-turn.
+
+- **`vinta-ai-maestro`: an opencode review can no longer pass on its own
+  prompt.** The adapter echoed the user's prompt back as the agent's text. The
+  review prompt contains the line `VERDICT: pass`, so a review that stated no
+  verdict could read as approved. opencode 1.19's `permission.asked` event is
+  now mapped too.
 - **`vinta-ai-maestro`: an unattended run answers `exhausted` and `unapproved`
   with `continue` once, then `stop`.** It answered `stop` straight away, which
   failed the phase; the unattended retry then re-drove it from `implement` on

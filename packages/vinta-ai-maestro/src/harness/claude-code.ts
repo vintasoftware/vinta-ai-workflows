@@ -87,7 +87,16 @@ const CAPABILITIES: HarnessCapabilities = {
   pty: true,
   permissionControl: true,
   autoCompact: true,
+  backgroundWork: true,
 }
+
+/**
+ * How long a session held open for background work may go without a frame
+ * before it is ended anyway. Long enough for a backgrounded test suite, which
+ * says nothing until it exits; a sub-agent at work reports progress well inside
+ * it.
+ */
+const BACKGROUND_IDLE_MS = 30 * 60_000
 
 /** Tool results can be whole files. The transcript keeps them; an event carries a look. */
 const SUMMARY_LIMIT = 2_000
@@ -474,19 +483,107 @@ export function turnRefusal(raw: unknown, now?: Date): TurnRefusal | undefined {
 // Process plumbing
 // ---------------------------------------------------------------------------
 
+/**
+ * One headless session, which may span several turns (`backgroundWork`).
+ *
+ * **A `result` frame ends the turn, not necessarily the session.** An agent
+ * that resumes a sub-agent with a message, or backgrounds a command, ends its
+ * turn while that work runs. With stdin still open the CLI keeps the process
+ * alive and, when the work reports, wakes the agent in a new turn — exactly
+ * what an interactive session does. Ending the session on the first `result`
+ * killed that work with the process: a review loop whose reviewer was
+ * re-reviewing in the background ended its turn "waiting on the reviewer", with
+ * no verdict, every time, and each continuation started a fresh reviewer that
+ * met the same end.
+ *
+ * So the session ends on the first `result` that leaves no background task
+ * running, and only once the prompt has actually been answered. The second
+ * condition is for `--resume`: the CLI first replays the notifications of tasks
+ * the previous process was killed under, and closes that replay with a `result`
+ * of zero turns before it reads the prompt. Taken as the end, that frame made a
+ * one-second turn that cost nothing and did nothing — and stated no verdict.
+ *
+ * A session held open is bounded by silence, not by length
+ * (`backgroundIdleMs`): background work the agent started and forgot, a server
+ * left running, must not hold a lane forever.
+ */
 class ClaudeCodeSession implements AgentSession {
   readonly #queue: EventQueue
   readonly #child: ChildProcess
+  readonly #idleMs: number
   #taken = false
   #ended = false
   #stopping = false
   /** An error was reported during this turn. See `ingest`. */
   #errored = false
   #refusal: TurnRefusal | undefined
+  /** Background tasks the CLI is still running for the main agent, by task id. */
+  readonly #background = new Set<string>()
+  /** A `result` that followed real model work arrived, not only a replay. */
+  #answered = false
+  /** What the last turn reported, while the session is held open past it. */
+  #held: 'ok' | 'error' | undefined
+  #idle: ReturnType<typeof setTimeout> | undefined
+  /** The CLI's `total_cost_usd` is a running total for the process. */
+  #costSoFar = 0
 
-  constructor(readonly id: string, child: ChildProcess, queue: EventQueue) {
+  constructor(readonly id: string, child: ChildProcess, queue: EventQueue, idleMs: number) {
     this.#child = child
     this.#queue = queue
+    this.#idleMs = idleMs
+  }
+
+  /**
+   * What a raw frame says about the session's lifetime, read before the frame
+   * is mapped: the mapping of a `result` is what asks whether to end.
+   *
+   * `background_tasks_changed` is the CLI's own list and replaces what was
+   * known. `task_started` and `task_notification` keep the set right on a
+   * release that does not send the list. A task a sub-agent started is its
+   * own business, and it is not counted.
+   */
+  observe(raw: unknown): void {
+    if (this.#ended) return
+    const value = asRecord(raw)
+    if (!value) return
+    if (this.#held !== undefined) {
+      // A new turn has started; it is bounded the way every turn is, by the
+      // scheduler, not by this session's silence timer.
+      if (value['type'] === 'assistant' || (value['type'] === 'system' && value['subtype'] === 'init')) {
+        this.#disarmIdle()
+      } else if (this.#idle !== undefined) {
+        this.#armIdle()
+      }
+    }
+    if (value['type'] === 'result') {
+      // Absent counts as answered: only an explicit zero is a replay.
+      if (asNumber(value['num_turns']) !== 0) this.#answered = true
+      return
+    }
+    if (value['type'] !== 'system') return
+    const taskId = asString(value['task_id'])
+    switch (value['subtype']) {
+      case 'background_tasks_changed': {
+        const tasks = value['tasks']
+        if (!Array.isArray(tasks)) return
+        this.#background.clear()
+        for (const task of tasks) {
+          const id = asString(asRecord(task)?.['task_id'])
+          if (id !== undefined) this.#background.add(id)
+        }
+        return
+      }
+      case 'task_started':
+        if (taskId !== undefined && value['is_backgrounded'] === true && value['owned_by_subagent'] !== true) {
+          this.#background.add(taskId)
+        }
+        return
+      case 'task_notification':
+        if (taskId !== undefined) this.#background.delete(taskId)
+        return
+      default:
+        return
+    }
   }
 
   get refusal(): TurnRefusal | undefined {
@@ -545,22 +642,61 @@ class ClaudeCodeSession implements AgentSession {
     if (event.type === 'error') this.#errored = true
     if (event.type === 'session_ended') {
       const reported = this.#errored && event.result === 'ok' ? 'error' : event.result
+      // A turn that went wrong ends the session whatever is still running: the
+      // work it left behind belongs to a turn nobody is going to read as done.
+      if (!this.#stopping && reported === 'ok' && (this.#background.size > 0 || !this.#answered)) {
+        this.#held = reported
+        this.#armIdle()
+        return
+      }
       this.#finish(this.#stopping ? 'interrupted' : reported)
+      return
+    }
+    if (event.type === 'usage' && event.costUsd !== undefined) {
+      // Every `result` reports the process's cost so far; consumers add usage
+      // events up, so each one carries only what its own turn added.
+      const total = event.costUsd
+      this.#queue.push({ ...event, costUsd: Math.max(0, total - this.#costSoFar) })
+      this.#costSoFar = total
       return
     }
     this.#queue.push(event)
   }
 
-  /** The child died without a `result` frame. */
+  /**
+   * The child died without a `result` frame — or after one, while the session
+   * was held open. That turn did finish, and it ends the way it reported: what
+   * the exit cost is the background work, as it did before sessions were held.
+   */
   settleOnExit(): void {
     if (this.#ended) return
+    if (this.#held !== undefined && !this.#stopping) return this.#finish(this.#held)
     if (!this.#stopping) {
       this.#queue.push({ type: 'error', message: 'claude-code exited before its turn completed' })
     }
     this.#finish(this.#stopping ? 'interrupted' : 'error')
   }
 
+  /**
+   * Silence while held open: the background work never reported. The session
+   * ends the way its last turn did, which is what it would have done before it
+   * waited — a review that was waiting on its reviewer still has no verdict.
+   */
+  #armIdle(): void {
+    this.#disarmIdle()
+    this.#idle = setTimeout(() => {
+      if (!this.#ended) this.#finish(this.#held ?? 'ok')
+    }, this.#idleMs)
+    this.#idle.unref()
+  }
+
+  #disarmIdle(): void {
+    if (this.#idle !== undefined) clearTimeout(this.#idle)
+    this.#idle = undefined
+  }
+
   #finish(result: 'ok' | 'error' | 'interrupted'): void {
+    this.#disarmIdle()
     this.#ended = true
     this.#queue.push({ type: 'session_ended', result })
     this.#queue.close()
@@ -867,6 +1003,11 @@ export interface ClaudeCodeAdapterOptions {
   readonly guardHook?: GuardHook
   /** How long a spawn may go without an init frame before it is a `transient` refusal. */
   readonly startTimeoutMs?: number
+  /**
+   * How long a session held open for background work may go without a frame
+   * before it ends anyway (`ClaudeCodeSession`). Thirty minutes by default.
+   */
+  readonly backgroundIdleMs?: number
   readonly preflightTimeoutMs?: number
 }
 
@@ -1052,13 +1193,23 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
         for (const frame of lines.push(chunk)) {
           // Before the frame is mapped, because mapping it ends the session:
           // `ingest` sees the `session_ended` this same frame produces and
-          // closes the queue, after which `noteRefusal` is a no-op.
+          // closes the queue, after which `noteRefusal` is a no-op. `observe`
+          // goes first for the same reason — whether that `session_ended`
+          // ends anything depends on what this frame said.
           const refused = turnRefusal(frame)
           if (refused !== undefined) session?.noteRefusal(refused)
+          session?.observe(frame)
           for (const event of mapCliEvent(frame)) {
             if (event.type === 'session_started') {
+              // Every turn opens with an init frame, and a held session has
+              // several; only the first one is the session starting.
               if (session !== undefined) continue
-              session = new ClaudeCodeSession(event.sessionId, child, queue)
+              session = new ClaudeCodeSession(
+                event.sessionId,
+                child,
+                queue,
+                this.options.backgroundIdleMs ?? BACKGROUND_IDLE_MS,
+              )
               queue.push(event)
               // The operator's words in the record of the run they steered
               // (§5.3, §15) — the same place `send` puts them. Pushed here

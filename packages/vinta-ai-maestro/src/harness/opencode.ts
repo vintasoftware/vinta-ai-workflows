@@ -100,8 +100,14 @@ import { politeKillFirst } from '../platform/platform.ts'
  * project's own `opencode.json`, which is the same config boundary that decided
  * `permissionControl`, and which `OPENCODE_CONFIG_CAVEAT` records rather than
  * papers over.
+ *
+ * `backgroundWork` is per instance, and the same boundary decides it. A server
+ * this adapter starts gets `BACKGROUND_ENV`, so the `task` tool there can run a
+ * sub-agent in the background and wake the parent when it is done. A configured
+ * `baseUrl` is somebody else's process with somebody else's environment, and a
+ * true there would be a promise resting on a variable this code never set.
  */
-const CAPABILITIES: HarnessCapabilities = {
+const CAPABILITIES: Omit<HarnessCapabilities, 'backgroundWork'> = {
   inject: true,
   interrupt: true,
   resume: true,
@@ -109,6 +115,38 @@ const CAPABILITIES: HarnessCapabilities = {
   permissionControl: false,
   autoCompact: true,
 }
+
+/**
+ * opencode's background sub-agents are behind an experimental switch, and the
+ * server reads it from its own environment. Set to `true` explicitly rather
+ * than relying on the umbrella `OPENCODE_EXPERIMENTAL`: the specific variable
+ * wins over the umbrella in either direction, so an inherited `=false` would
+ * otherwise turn the feature off for every lane the server hosts, and the
+ * prompts would still be telling the agents it is there.
+ */
+const BACKGROUND_ENV = { OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: 'true' } as const
+
+/**
+ * How long a session held open for background work may go without a frame
+ * before it is ended anyway. Long enough for a sub-agent reviewing a large
+ * change; one at work publishes its parts well inside it.
+ */
+const BACKGROUND_IDLE_MS = 30 * 60_000
+
+/**
+ * The text of the synthetic user message opencode injects into the parent when
+ * a background task finishes: `<task id="<child session>" state="…">`. A task
+ * that was cancelled injects nothing, which is why a child's `session.deleted`
+ * is the other way out of the pending set.
+ */
+const BACKGROUND_RESULT = /^<task id="([^"]+)" state="(?:completed|error)">/
+
+/**
+ * Parts held for a message whose role has not been announced yet. opencode
+ * publishes a message before its parts, so this is a guard rather than a path;
+ * the cap keeps a misbehaving server from growing it without end.
+ */
+const UNROUTED_LIMIT = 200
 
 /** Tool output can be a whole file. The transcript keeps it; an event carries a look. */
 const SUMMARY_LIMIT = 2_000
@@ -199,6 +237,18 @@ export function parseModel(model: string): { providerID: string; modelID: string
  * at each status. Emitting an event per update would repeat the whole message
  * once per token, so this tracks what it has already emitted and yields only
  * what is new.
+ *
+ * **A part is routed by the role of its message.** opencode publishes the
+ * user's own prompt as `message.part.updated` too, so a text part is not the
+ * agent speaking until its message is known to be the assistant's. Mapped
+ * blindly, the prompt was echoed as `assistant_text` — and a review prompt
+ * carries the literal line `VERDICT: pass`, which the verdict reader would take
+ * as an approval the agent never gave. A part whose message has not been
+ * announced yet waits for it.
+ *
+ * **`session_ended` here is the end of a turn.** Whether it ends the session is
+ * `OpencodeSession`'s call, made from what this mapper tracks alongside: the
+ * background tasks still running, and whether the prompt was answered.
  */
 export class OpencodeEventMapper {
   /** part id -> the full text already emitted for it. */
@@ -215,21 +265,63 @@ export class OpencodeEventMapper {
    * behind a provider that reports nothing must aggregate as unknown and not
    * as a message that read nothing from cache (§15.6).
    */
-  readonly #usage = new Map<
-    string,
-    {
-      input: number
-      output: number
-      cost: number
-      cacheRead: number | undefined
-      cacheWrite: number | undefined
-    }
-  >()
+  readonly #usage = new Map<string, UsageTotals>()
+  /** message id -> the totals already reported in an earlier turn's `usage`. */
+  readonly #reported = new Map<string, UsageTotals>()
+  /** Messages whose totals moved since the last `usage` was emitted. */
+  readonly #dirty = new Set<string>()
   readonly #failed = new Set<string>()
+  /** message id -> role, from `message.updated`. */
+  readonly #roles = new Map<string, 'user' | 'assistant'>()
+  /** message id -> parts that arrived before their message was announced. */
+  readonly #unrouted = new Map<string, Record<string, unknown>[]>()
+  #unroutedCount = 0
+  /** Child session ids of background tasks that have not reported. */
+  readonly #pending = new Set<string>()
+  /** Task calls that already registered a child, so a republished part cannot register it twice. */
+  readonly #registered = new Set<string>()
+  #sawBackground = false
+  #assistantMessages = 0
+  #activity = 0
   #refusal: TurnRefusal | undefined
   #errored = false
 
   constructor(private readonly sessionId: string) {}
+
+  /** Background tasks this session started that have not reported back. */
+  get pendingBackground(): number {
+    return this.#pending.size
+  }
+
+  /** A background task was started at some point in this session. */
+  get sawBackground(): boolean {
+    return this.#sawBackground
+  }
+
+  /** Assistant messages seen on this session. Zero means the prompt has not been answered. */
+  get assistantMessages(): number {
+    return this.#assistantMessages
+  }
+
+  /** Bumped each time this session reports itself busy: a turn is running. */
+  get activity(): number {
+    return this.#activity
+  }
+
+  /**
+   * The frame is about this session or about a background task it is waiting
+   * on. The latter is the work making progress, which is what a held session's
+   * silence bound is measuring.
+   */
+  concerns(raw: unknown): boolean {
+    const properties = asRecord(asRecord(raw)?.['properties'])
+    if (!properties) return false
+    const id =
+      asString(properties['sessionID']) ??
+      asString(asRecord(properties['part'])?.['sessionID']) ??
+      asString(asRecord(properties['info'])?.['sessionID'])
+    return id !== undefined && (id === this.sessionId || this.#pending.has(id))
+  }
 
   /** Zero or more normalized events. Zero is the right answer for anything unknown. */
   map(raw: unknown): AgentEvent[] {
@@ -241,10 +333,13 @@ export class OpencodeEventMapper {
       case 'message.part.updated': {
         const part = asRecord(properties['part'])
         if (!part || part['sessionID'] !== this.sessionId) return []
-        return this.#mapPart(part)
+        return this.#routePart(part)
       }
       case 'message.updated':
         return this.#mapMessage(properties)
+      // `permission.updated` is what older servers publish and `permission.asked`
+      // what 1.19 does; the payloads differ only in where the class is. Both
+      // stay, because which server answers is not this adapter's choice.
       case 'permission.updated': {
         if (properties['sessionID'] !== this.sessionId) return []
         // `type` is the permission class (bash, edit, …). `title` is rendered
@@ -252,6 +347,24 @@ export class OpencodeEventMapper {
         // the UI treats as a tool name.
         const tool = asString(properties['type'])
         return tool === undefined ? [] : [{ type: 'permission_request', tool, detail: properties['metadata'] }]
+      }
+      case 'permission.asked': {
+        if (properties['sessionID'] !== this.sessionId) return []
+        const tool = asString(properties['permission'])
+        return tool === undefined ? [] : [{ type: 'permission_request', tool, detail: properties['metadata'] }]
+      }
+      case 'session.status': {
+        if (properties['sessionID'] !== this.sessionId) return []
+        const status = asString(asRecord(properties['status'])?.['type'])
+        if (status === 'busy' || status === 'retry') this.#activity += 1
+        return []
+      }
+      case 'session.deleted': {
+        // A cancelled task injects nothing; its child going away is the only
+        // word that it is not coming back.
+        const id = asString(properties['sessionID']) ?? asString(asRecord(properties['info'])?.['id'])
+        if (id !== undefined) this.#pending.delete(id)
+        return []
       }
       case 'session.compacted': {
         // Filtered by session id like everything else on this bus, and for the
@@ -282,6 +395,9 @@ export class OpencodeEventMapper {
         return [{ type: 'error', message: `opencode session error: ${this.#errorName(properties['error'])}` }]
       }
       case 'session.idle': {
+        // A child's idle never gets here: it carries the child's id. That
+        // matters, because a background child goes idle *before* the server
+        // injects its result into this session.
         if (properties['sessionID'] !== this.sessionId) return []
         return [...this.#usageEvents(), { type: 'session_ended', result: this.#errored ? 'error' : 'ok' }]
       }
@@ -292,12 +408,15 @@ export class OpencodeEventMapper {
   }
 
   /**
-   * The terminal usage event, cumulative across the turn's assistant messages.
-   * §7: one per session, from the final frame — per-message figures are the
-   * deltas that sum to it, so emitting both makes every consumer double-count.
+   * What this turn added to the session's usage. §7: one per turn, from its
+   * terminal frame — per-message figures are the deltas that sum to it, so
+   * emitting both makes every consumer double-count. A session held open for
+   * background work has several turns, so each event carries only what moved
+   * since the last one: a message counted in an earlier turn and republished
+   * since is counted for its difference, never again whole.
    */
   #usageEvents(): AgentEvent[] {
-    if (this.#usage.size === 0) return []
+    if (this.#dirty.size === 0) return []
     let input = 0
     let output = 0
     let cost = 0
@@ -308,13 +427,22 @@ export class OpencodeEventMapper {
     // a 0% cache hit rate.
     let cacheRead: number | undefined
     let cacheWrite: number | undefined
-    for (const totals of this.#usage.values()) {
-      input += totals.input
-      output += totals.output
-      cost += totals.cost
-      if (totals.cacheRead !== undefined) cacheRead = (cacheRead ?? 0) + totals.cacheRead
-      if (totals.cacheWrite !== undefined) cacheWrite = (cacheWrite ?? 0) + totals.cacheWrite
+    for (const id of this.#dirty) {
+      const totals = this.#usage.get(id)
+      if (totals === undefined) continue
+      const before = this.#reported.get(id)
+      input += totals.input - (before?.input ?? 0)
+      output += totals.output - (before?.output ?? 0)
+      cost += totals.cost - (before?.cost ?? 0)
+      if (totals.cacheRead !== undefined) {
+        cacheRead = (cacheRead ?? 0) + totals.cacheRead - (before?.cacheRead ?? 0)
+      }
+      if (totals.cacheWrite !== undefined) {
+        cacheWrite = (cacheWrite ?? 0) + totals.cacheWrite - (before?.cacheWrite ?? 0)
+      }
+      this.#reported.set(id, totals)
     }
+    this.#dirty.clear()
     return [
       {
         type: 'usage',
@@ -373,9 +501,23 @@ export class OpencodeEventMapper {
 
   #mapMessage(properties: Record<string, unknown>): AgentEvent[] {
     const info = asRecord(properties['info'])
-    if (!info || info['sessionID'] !== this.sessionId || info['role'] !== 'assistant') return []
+    if (!info || info['sessionID'] !== this.sessionId) return []
     const messageId = asString(info['id'])
-    if (messageId === undefined) return []
+    const role = info['role']
+    if (messageId === undefined || (role !== 'assistant' && role !== 'user')) return []
+
+    const events: AgentEvent[] = []
+    if (!this.#roles.has(messageId)) {
+      this.#roles.set(messageId, role)
+      if (role === 'assistant') this.#assistantMessages += 1
+      const waiting = this.#unrouted.get(messageId)
+      if (waiting !== undefined) {
+        this.#unrouted.delete(messageId)
+        this.#unroutedCount -= waiting.length
+        for (const part of waiting) events.push(...this.#mapPart(part, role))
+      }
+    }
+    if (role !== 'assistant') return events
 
     const tokens = asRecord(info['tokens'])
     if (tokens) {
@@ -391,13 +533,34 @@ export class OpencodeEventMapper {
         cacheRead,
         cacheWrite,
       })
+      this.#dirty.add(messageId)
     }
 
     const error = asRecord(info['error'])
-    if (!error || this.#failed.has(messageId)) return []
+    if (!error || this.#failed.has(messageId)) return events
     this.#failed.add(messageId)
     this.#errored = true
-    return [{ type: 'error', message: `opencode message error: ${this.#errorName(error)}` }]
+    events.push({ type: 'error', message: `opencode message error: ${this.#errorName(error)}` })
+    return events
+  }
+
+  /**
+   * A part whose message has not been announced is held, not guessed at: a
+   * user's prompt read as the agent's words is worse than a line arriving a
+   * frame late. A part with no message id cannot be routed at all and is
+   * dropped — every part opencode publishes carries one.
+   */
+  #routePart(part: Record<string, unknown>): AgentEvent[] {
+    const messageId = asString(part['messageID'])
+    if (messageId === undefined) return []
+    const role = this.#roles.get(messageId)
+    if (role !== undefined) return this.#mapPart(part, role)
+    if (this.#unroutedCount >= UNROUTED_LIMIT) return []
+    const waiting = this.#unrouted.get(messageId) ?? []
+    waiting.push(part)
+    this.#unrouted.set(messageId, waiting)
+    this.#unroutedCount += 1
+    return []
   }
 
   /** Whatever this part gained since it was last seen. */
@@ -411,8 +574,36 @@ export class OpencodeEventMapper {
     return next.length > 0 ? next : undefined
   }
 
-  #mapPart(part: Record<string, unknown>): AgentEvent[] {
+  /**
+   * A `task` call that runs, or was moved, into the background. The metadata
+   * names the child session, and the call registers it once: opencode
+   * republishes a tool part at every status and again when it prunes old
+   * output, and a finished child must not come back as pending from a repeat.
+   * A new call naming the same child — resuming a sub-agent that had finished
+   * — is new work and registers again.
+   */
+  #trackBackground(callId: string, name: string, state: Record<string, unknown>): void {
+    if (name !== 'task' || this.#registered.has(callId)) return
+    const metadata = asRecord(state['metadata'])
+    if (metadata?.['background'] !== true) return
+    const child = asString(metadata['sessionId'])
+    if (child === undefined) return
+    this.#registered.add(callId)
+    this.#pending.add(child)
+    this.#sawBackground = true
+  }
+
+  #mapPart(part: Record<string, unknown>, role: 'user' | 'assistant'): AgentEvent[] {
     const id = asString(part['id'])
+    if (role === 'user') {
+      // Never the agent's words. The one thing a user message says that this
+      // adapter needs is the server reporting a background task done.
+      if (part['type'] === 'text' && part['synthetic'] === true) {
+        const reported = BACKGROUND_RESULT.exec(asString(part['text']) ?? '')
+        if (reported?.[1] !== undefined) this.#pending.delete(reported[1])
+      }
+      return []
+    }
     switch (part['type']) {
       case 'text': {
         // A synthetic part is the harness talking to itself, not the agent.
@@ -432,6 +623,11 @@ export class OpencodeEventMapper {
         const name = asString(part['tool'])
         const state = asRecord(part['state'])
         if (callId === undefined || name === undefined || state === undefined) return []
+        // A pruned part is an old result republished with its output dropped:
+        // nothing new happened, and on a resumed session it is a call from an
+        // earlier spawn this mapper never announced.
+        if (asRecord(state['time'])?.['compacted'] !== undefined) return []
+        this.#trackBackground(callId, name, state)
         const status = asString(state['status'])
         const events: AgentEvent[] = []
         // `pending` carries a partial input; announcing the call then would put
@@ -457,6 +653,14 @@ export class OpencodeEventMapper {
         return []
     }
   }
+}
+
+interface UsageTotals {
+  readonly input: number
+  readonly output: number
+  readonly cost: number
+  readonly cacheRead: number | undefined
+  readonly cacheWrite: number | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -781,19 +985,71 @@ class OpencodeServer {
 // Session
 // ---------------------------------------------------------------------------
 
+interface SessionOptions {
+  readonly interruptTimeoutMs: number
+  readonly backgroundIdleMs: number
+  /** What the prompt named, so a re-prompt runs on the same model. */
+  readonly model: { readonly providerID: string; readonly modelID: string } | undefined
+}
+
+/**
+ * One opencode session, which may span several turns (`backgroundWork`).
+ *
+ * **`session.idle` ends a turn, not necessarily the session.** An agent that
+ * starts a sub-agent with `task` in the background gets the call back at once
+ * and usually ends its turn; the server keeps the sub-agent running and, when
+ * it finishes, injects its result into this session as a synthetic user
+ * message and starts the next turn by itself. Ending on the first idle left
+ * that turn unread — and on a server the adapter does not tear down with the
+ * session, it still ran, against a lane worktree the next node was using.
+ *
+ * So the session ends on the first idle that leaves no background task pending,
+ * and only once the prompt has been answered. A task stops being pending when
+ * its result is injected, or when its child session is deleted; never when the
+ * child goes idle, which happens *before* the injection.
+ *
+ * **The server can lose the wake-up.** The injection is a prompt, and a prompt
+ * that lands while this session's loop is finishing joins that run instead of
+ * starting one: the session goes idle with the result unanswered. So an idle
+ * that ends a session which had background work — or one whose prompt was never
+ * answered — first reads the session's last message. If it is a user message,
+ * the session is prompted again with no parts, which opencode keeps out of the
+ * model's context, so the run that follows answers the message that was
+ * missed. Once per answer: a re-prompt that draws no reply ends the session.
+ *
+ * A session held open is bounded by silence, not by length
+ * (`backgroundIdleMs`): a sub-agent that never reports must not hold a lane
+ * forever. On expiry the session is aborted on the server, which cancels its
+ * background tasks, and ends the way its last turn did. A failed turn ends the
+ * session at once, and its leftover tasks are cancelled the same way.
+ *
+ * None of this depends on `capabilities.backgroundWork`. A configured server
+ * may have background tasks enabled without this adapter saying so, and a task
+ * nobody is waiting for is exactly the thing that must not run unobserved.
+ */
 class OpencodeSession implements AgentSession {
   readonly #queue = new EventQueue()
   readonly #mapper: OpencodeEventMapper
   #release: (() => void) | null = null
+  /** The interrupt's deadline. */
   #timer: ReturnType<typeof setTimeout> | undefined
+  /** The silence bound while the session is held open. */
+  #idle: ReturnType<typeof setTimeout> | undefined
   #taken = false
   #ended = false
   #stopping = false
+  #aborted = false
+  /** What the last turn reported, while the session is held open past it. */
+  #held: 'ok' | 'error' | undefined
+  /** Assistant messages seen when the session was last re-prompted. */
+  #rewokeAt: number | undefined
+  /** Which idle's decision is current; an older one in flight is dropped. */
+  #decision = 0
 
   constructor(
     readonly id: string,
     private readonly server: OpencodeServer,
-    private readonly interruptTimeoutMs: number,
+    private readonly options: SessionOptions,
   ) {
     this.#mapper = new OpencodeEventMapper(id)
     // First, and before anything can be ingested: the contract frames every
@@ -850,26 +1106,123 @@ class OpencodeSession implements AgentSession {
 
   #ingest(raw: unknown): void {
     if (this.#ended) return
-    for (const event of this.#mapper.map(raw)) {
+    const activity = this.#mapper.activity
+    const events = this.#mapper.map(raw)
+    if (this.#held !== undefined) {
+      if (this.#mapper.activity !== activity) {
+        // A new turn has started; it is bounded the way every turn is, by the
+        // scheduler, not by this session's silence timer.
+        this.#held = undefined
+        this.#disarmIdle()
+      } else if (this.#mapper.concerns(raw)) {
+        this.#armIdle()
+      }
+    }
+    for (const event of events) {
       if (event.type === 'session_ended') {
-        this.#finish(this.#stopping ? 'interrupted' : event.result)
+        this.#turnEnded(event.result)
         return
       }
       this.#queue.push(event)
     }
   }
 
+  #turnEnded(result: 'ok' | 'error' | 'interrupted'): void {
+    if (this.#stopping) return this.#finish('interrupted')
+    // A turn that went wrong ends the session whatever is still running: the
+    // work it left behind belongs to a turn nobody is going to read as done.
+    if (result !== 'ok') return this.#finish(result)
+    this.#held = result
+    this.#armIdle()
+    if (this.#mapper.pendingBackground > 0) return
+    if (this.#mapper.sawBackground || this.#mapper.assistantMessages === 0) {
+      void this.#settle()
+      return
+    }
+    this.#finish(result)
+  }
+
+  /** The lost-wake-up guard: end, unless the session went idle on an unanswered message. */
+  async #settle(): Promise<void> {
+    const decision = ++this.#decision
+    const activity = this.#mapper.activity
+    const unanswered = await this.#lastIsUnanswered()
+    // A new turn or a newer idle since the request went out has the say.
+    if (this.#ended || decision !== this.#decision || this.#mapper.activity !== activity) return
+    const result = this.#held ?? 'ok'
+    const answeredSince = this.#rewokeAt === undefined || this.#mapper.assistantMessages > this.#rewokeAt
+    if (unanswered && answeredSince) {
+      this.#rewokeAt = this.#mapper.assistantMessages
+      const model = this.options.model
+      const sent = await postJson(this.#url('/prompt_async'), { parts: [], ...(model === undefined ? {} : { model }) })
+      // Held, and bounded by silence, until the turn it starts ends.
+      if (sent.ok || decision !== this.#decision) return
+    }
+    this.#finish(result)
+  }
+
+  /**
+   * `GET /session/:id/message?limit=1` answers with the newest message. Any
+   * failure reads as answered: this is a guard against a server bug, and a
+   * guard that cannot see must not hold the session on a guess.
+   */
+  async #lastIsUnanswered(): Promise<boolean> {
+    const listed = await request(this.#url('/message?limit=1'), { method: 'GET' })
+    if (!listed.ok || !Array.isArray(listed.body)) return false
+    const last = asRecord(listed.body.at(-1))
+    return asRecord(last?.['info'])?.['role'] === 'user'
+  }
+
   #lost(): void {
     if (this.#ended) return
+    // The last turn did finish; what the stream took with it is the work the
+    // session was waiting on, which `#finish` cancels.
+    if (this.#held !== undefined && !this.#stopping) return this.#finish(this.#held)
     if (!this.#stopping) {
       this.#queue.push({ type: 'error', message: 'opencode event stream ended before the turn completed' })
     }
     this.#finish(this.#stopping ? 'interrupted' : 'error')
   }
 
+  /**
+   * Silence while held open: the background work never reported. The session
+   * ends the way its last turn did, which is what it would have done before it
+   * waited — a review that was waiting on its reviewer still has no verdict.
+   */
+  #armIdle(): void {
+    this.#disarmIdle()
+    this.#idle = setTimeout(() => {
+      if (!this.#ended) {
+        this.#abort()
+        this.#finish(this.#held ?? 'ok')
+      }
+    }, this.options.backgroundIdleMs)
+    this.#idle.unref()
+  }
+
+  #disarmIdle(): void {
+    if (this.#idle !== undefined) clearTimeout(this.#idle)
+    this.#idle = undefined
+  }
+
+  /**
+   * Aborting a session also cancels its background tasks, recursively, on the
+   * server. Sent once, and never awaited — see `interrupt`.
+   */
+  #abort(): void {
+    if (this.#aborted) return
+    this.#aborted = true
+    void postJson(this.#url('/abort'), {})
+  }
+
   #finish(result: 'ok' | 'error' | 'interrupted'): void {
+    if (this.#ended) return
     this.#ended = true
     if (this.#timer) clearTimeout(this.#timer)
+    this.#disarmIdle()
+    // Unlike a CLI's child process, the server outlives this session: a task
+    // still pending would finish, wake the session and run a turn nobody reads.
+    if (this.#mapper.pendingBackground > 0) this.#abort()
     this.#queue.push({ type: 'session_ended', result })
     this.#queue.close()
     this.detach()
@@ -906,17 +1259,17 @@ class OpencodeSession implements AgentSession {
     // The cost is that resolving says the abort was *sent*, not delivered. A
     // test reading the server's side the instant the turn ends is therefore
     // asserting a race it can lose; `tests/harness-opencode.test.ts` waits.
-    void postJson(this.#url('/abort'), {})
+    this.#abort()
     // The scheduler is waiting on a terminal event; a server that never reports
     // idle must not hold a node open forever.
-    this.#timer = setTimeout(() => this.#finish('interrupted'), this.interruptTimeoutMs)
+    this.#timer = setTimeout(() => this.#finish('interrupted'), this.options.interruptTimeoutMs)
     this.#timer.unref()
   }
 
   async kill(): Promise<void> {
     if (this.#ended) return
     this.#stopping = true
-    void postJson(this.#url('/abort'), {})
+    this.#abort()
     this.#finish('interrupted')
   }
 }
@@ -942,6 +1295,11 @@ export interface OpencodeAdapterOptions {
   readonly startTimeoutMs?: number
   readonly preflightTimeoutMs?: number
   readonly interruptTimeoutMs?: number
+  /**
+   * How long a session held open for background work may go without a frame
+   * before it ends anyway (`OpencodeSession`). Thirty minutes by default.
+   */
+  readonly backgroundIdleMs?: number
 }
 
 type BootFailure = { readonly failed: true; readonly refuse: (nodeId: string) => SpawnRefusal }
@@ -961,7 +1319,7 @@ const EXTERNAL_KEY = ' external'
 
 export class OpencodeAdapter implements HarnessAdapter {
   readonly id = 'opencode'
-  readonly capabilities = CAPABILITIES
+  readonly capabilities: HarnessCapabilities
   readonly bin: string
 
   readonly #servers = new Map<string, OpencodeServer>()
@@ -970,6 +1328,7 @@ export class OpencodeAdapter implements HarnessAdapter {
 
   constructor(private readonly options: OpencodeAdapterOptions = {}) {
     this.bin = options.bin ?? process.env['VINTA_AI_MAESTRO_OPENCODE_BIN'] ?? 'opencode'
+    this.capabilities = { ...CAPABILITIES, backgroundWork: options.baseUrl === undefined }
   }
 
   /**
@@ -1085,7 +1444,12 @@ export class OpencodeAdapter implements HarnessAdapter {
       if (sessionId === undefined) return refuse('fatal', 'session-id-missing', task.nodeId)
     }
 
-    const session = new OpencodeSession(sessionId, server, this.options.interruptTimeoutMs ?? 2_000)
+    const model = parseModel(task.model)
+    const session = new OpencodeSession(sessionId, server, {
+      interruptTimeoutMs: this.options.interruptTimeoutMs ?? 2_000,
+      backgroundIdleMs: this.options.backgroundIdleMs ?? BACKGROUND_IDLE_MS,
+      model,
+    })
     // Subscribed first: an event that arrives between the prompt landing and
     // the subscription being made is an event the transcript never gets.
     session.attach()
@@ -1096,7 +1460,6 @@ export class OpencodeAdapter implements HarnessAdapter {
     // when the operator typed, so this spawn is its only delivery.
     if (task.operatorText !== undefined) session.noteOperator(task.operatorText)
 
-    const model = parseModel(task.model)
     const prompt = await postJson(`${server.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       parts: [
         { type: 'text', text: task.prompt },
@@ -1190,7 +1553,9 @@ export class OpencodeAdapter implements HarnessAdapter {
       child = spawnChild(spec.file, spec.args, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: childEnv(STRIPPED_ENV, env),
+        // Applied last, over the lane's own overlay too: the prompts are told
+        // what `capabilities` says, and this is what makes it true.
+        env: { ...childEnv(STRIPPED_ENV, env), ...BACKGROUND_ENV },
         ...spec.options,
       })
     } catch (error) {

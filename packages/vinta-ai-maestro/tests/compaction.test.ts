@@ -36,6 +36,11 @@ import {
 } from '../src/harness/compaction.ts'
 import { AGENT_PERMISSIONS } from '../src/harness/permissions.ts'
 import { fakeCliFromSource } from './support/fake-cli.ts'
+import {
+  fakeCodexAppServer,
+  turnCompleted as codexTurnCompleted,
+  turnStarted as codexTurnStarted,
+} from './support/fake-codex-app-server.ts'
 
 const VERSION = '1.2.3 (Claude Code)'
 
@@ -302,30 +307,30 @@ describe('codex', () => {
    * future edit that reaches for any of the plausible spellings trips here.
    */
   it('spawns unchanged, because there is nothing to turn on', async () => {
-    const dir = makeTemp()
-    const bin = fakeCliFromSource(
-      dir,
-      'codex-compaction',
-      `import { writeFileSync } from 'node:fs'
-if (process.argv.includes('--version')) { console.log('codex-cli 0.0.0'); process.exit(0) }
-writeFileSync(${JSON.stringify(join(dir, 'codex.json'))}, JSON.stringify(process.argv.slice(2)))
-console.log(JSON.stringify({ type: 'thread.started', thread_id: 'th-1' }))
-console.log(JSON.stringify({ type: 'turn.completed' }))
-`,
-    )
+    const fake = fakeCodexAppServer(makeTemp(), {
+      turns: [[codexTurnStarted(), codexTurnCompleted()]],
+    })
 
-    const outcome = await new CodexAdapter({ bin }).spawn(task(makeTemp()))
+    const outcome = await new CodexAdapter({ bin: fake.bin }).spawn(task(makeTemp()))
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
     for await (const _event of outcome.session.events) void _event
+    await outcome.session.kill()
 
-    const argv = (JSON.parse(readFileSync(join(dir, 'codex.json'), 'utf8')) as string[]).join(' ')
+    // Neither the command line nor the thread it starts says anything about
+    // compaction: the thread's `config` is where a key would have to go. The
+    // working directory is left out — this suite's temp dirs are named for it.
+    const thread = fake.sent('thread/start').map((entry) => ({
+      ...(entry['params'] as Record<string, unknown>),
+      cwd: undefined,
+    }))
+    const said = JSON.stringify([fake.log()[0]?.['argv'], thread])
     for (const token of [
       'compact',
       'auto_compact_token_limit',
       'model_auto_compact_token_limit',
     ]) {
-      expect(argv, token).not.toContain(token)
+      expect(said, token).not.toContain(token)
     }
   })
 })
