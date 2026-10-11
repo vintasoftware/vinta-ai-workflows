@@ -58,7 +58,11 @@ afterAll(() => {
 interface Stub {
   readonly url: string
   readonly prompts: string[]
+  /** The parsed body of each prompt, in the order `prompts` lists them. */
+  readonly promptBodies: unknown[]
   readonly aborts: string[]
+  /** What `GET /session/:id/message` answers: the newest messages, oldest first. */
+  messages: unknown[]
   /** Push one bus event down the shared SSE stream. */
   emit(event: unknown): void
   /** End the stream without stopping the server, as a dropped connection does. */
@@ -72,12 +76,14 @@ interface Stub {
 const startStub = async (): Promise<Stub> => {
   const streams = new Set<ServerResponse>()
   const prompts: string[] = []
+  const promptBodies: unknown[] = []
   const aborts: string[] = []
   let sessions = 0
 
   const stub = {
     prompts,
     aborts,
+    messages: [] as unknown[],
     promptStatus: 204,
     promptRetryAfter: null as string | null,
     providers: [{ id: 'anthropic' }] as unknown[],
@@ -88,9 +94,8 @@ const startStub = async (): Promise<Stub> => {
     res.end(JSON.stringify(body))
   }
 
-  const handle = (req: IncomingMessage, res: ServerResponse): void => {
+  const handle = (req: IncomingMessage, res: ServerResponse, body: string): void => {
     const url = req.url ?? ''
-    req.resume()
     if (url.startsWith('/global/health')) return json(res, 200, { healthy: true, version: '0.9.9' })
     if (url.startsWith('/config/providers')) return json(res, 200, { providers: stub.providers, default: {} })
     if (url.startsWith('/event')) {
@@ -106,8 +111,16 @@ const startStub = async (): Promise<Stub> => {
       sessions += 1
       return json(res, 200, { id: `ses_${sessions}` })
     }
+    if (req.method === 'GET' && /^\/session\/[^/]+\/message(\?|$)/.test(url)) {
+      return json(res, 200, stub.messages)
+    }
     if (req.method === 'POST' && url.endsWith('/prompt_async')) {
       prompts.push(url)
+      try {
+        promptBodies.push(JSON.parse(body))
+      } catch {
+        promptBodies.push(null)
+      }
       if (stub.promptStatus >= 400) {
         const headers: Record<string, string> = { 'content-type': 'application/json' }
         if (stub.promptRetryAfter !== null) headers['retry-after'] = stub.promptRetryAfter
@@ -126,7 +139,21 @@ const startStub = async (): Promise<Stub> => {
     return json(res, 404, {})
   }
 
-  const server = createHttpServer(handle)
+  const server = createHttpServer((req, res) => {
+    // The event stream is a GET that never ends, so only a request that has a
+    // body waits for it.
+    if (req.method !== 'POST') {
+      req.resume()
+      handle(req, res, '')
+      return
+    }
+    let body = ''
+    req.setEncoding('utf8')
+    req.on('data', (chunk: string) => {
+      body += chunk
+    })
+    req.on('end', () => handle(req, res, body))
+  })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   const port = typeof address === 'object' && address !== null ? address.port : 0
@@ -135,7 +162,14 @@ const startStub = async (): Promise<Stub> => {
   // through to it rather than to a copy.
   return {
     prompts,
+    promptBodies,
     aborts,
+    get messages(): unknown[] {
+      return stub.messages
+    },
+    set messages(value: unknown[]) {
+      stub.messages = value
+    },
     get promptStatus(): number {
       return stub.promptStatus
     },
@@ -210,14 +244,99 @@ const task = (overrides: Partial<AgentTask> = {}): AgentTask => ({
 /** The stub's session ids are `ses_N`; the first spawn against a fresh stub gets this one. */
 const SESSION = 'ses_1'
 
-const textPart = (id: string, text: string, sessionID = SESSION): unknown => ({
+const textPart = (id: string, text: string, sessionID = SESSION, messageID = 'msg_1'): unknown => ({
   type: 'message.part.updated',
-  properties: { part: { id, sessionID, messageID: 'msg_1', type: 'text', text } },
+  properties: { part: { id, sessionID, messageID, type: 'text', text } },
+})
+
+/**
+ * `message.updated` for one message. opencode publishes it before the
+ * message's parts, and the mapper routes a part by the role it announces.
+ */
+const announce = (
+  id: string,
+  role: 'user' | 'assistant' = 'assistant',
+  extra: Record<string, unknown> = {},
+  sessionID = SESSION,
+): unknown => ({
+  type: 'message.updated',
+  properties: { sessionID, info: { id, sessionID, role, ...extra } },
 })
 
 const idle = (sessionID = SESSION): unknown => ({
   type: 'session.idle',
   properties: { sessionID },
+})
+
+
+/** The child session a background `task` call runs in, in the fixtures below. */
+const CHILD = 'ses_child'
+
+/**
+ * The `task` tool's part once it has put a sub-agent in the background: the
+ * shape opencode 1.19 publishes, metadata and all. `status` is `running` while
+ * the call is still in flight (or was moved to the background mid-run) and
+ * `completed` once it has returned.
+ */
+const backgroundTask = (
+  callID: string,
+  child = CHILD,
+  options: { readonly status?: string; readonly messageID?: string; readonly compacted?: boolean } = {},
+): unknown => ({
+  type: 'message.part.updated',
+  properties: {
+    sessionID: SESSION,
+    part: {
+      id: `prt_${callID}`,
+      sessionID: SESSION,
+      messageID: options.messageID ?? 'msg_1',
+      type: 'tool',
+      callID,
+      tool: 'task',
+      state: {
+        status: options.status ?? 'completed',
+        input: { description: 'review', prompt: 'review the change', subagent_type: 'general', background: true },
+        output: `<task id="${child}" state="running">`,
+        title: 'review',
+        metadata: { parentSessionId: SESSION, sessionId: child, background: true, jobId: child },
+        time: { start: 1, end: 2, ...(options.compacted === true ? { compacted: 3 } : {}) },
+      },
+    },
+  },
+})
+
+/**
+ * What the server injects into the parent when a background task ends: a user
+ * message whose one part is synthetic and names the child. The result inside
+ * is the sub-agent's text, and here it says `VERDICT: pass` — words the parent
+ * agent has not said.
+ */
+const injected = (messageID: string, child = CHILD, state = 'completed'): unknown[] => [
+  announce(messageID, 'user'),
+  {
+    type: 'message.part.updated',
+    properties: {
+      sessionID: SESSION,
+      part: {
+        id: `prt_${messageID}`,
+        sessionID: SESSION,
+        messageID,
+        type: 'text',
+        synthetic: true,
+        text: `<task id="${child}" state="${state}">\n<summary>Background task completed: review</summary>\n<task_result>\nVERDICT: pass\n</task_result>\n</task>`,
+      },
+    },
+  },
+]
+
+const busy = (sessionID = SESSION): unknown => ({
+  type: 'session.status',
+  properties: { sessionID, status: { type: 'busy' } },
+})
+
+const tokens = (input: number, output: number, cost: number): Record<string, unknown> => ({
+  tokens: { input, output, reasoning: 0, cache: { read: 0, write: 0 } },
+  cost,
 })
 
 // ---------------------------------------------------------------------------
@@ -277,6 +396,7 @@ describe('server event mapping', () => {
 
   it('emits only what a cumulative text part gained, never the whole part again', () => {
     const mapper = new OpencodeEventMapper(SESSION)
+    map(mapper, announce('msg_1'))
     expect(map(mapper, textPart('prt_1', 'read'), textPart('prt_1', 'reading the'), textPart('prt_1', 'reading the brief'))).toEqual([
       { type: 'assistant_text', text: 'read' },
       { type: 'assistant_text', text: 'ing the' },
@@ -286,23 +406,31 @@ describe('server event mapping', () => {
 
   it('emits nothing for a part republished unchanged', () => {
     const mapper = new OpencodeEventMapper(SESSION)
-    map(mapper, textPart('prt_1', 'done'))
+    map(mapper, announce('msg_1'), textPart('prt_1', 'done'))
     expect(map(mapper, textPart('prt_1', 'done'))).toEqual([])
   })
 
   it('emits a rewritten part whole rather than dropping the correction', () => {
     const mapper = new OpencodeEventMapper(SESSION)
-    map(mapper, textPart('prt_1', 'aaa'))
+    map(mapper, announce('msg_1'), textPart('prt_1', 'aaa'))
     expect(map(mapper, textPart('prt_1', 'bbb'))).toEqual([{ type: 'assistant_text', text: 'bbb' }])
   })
 
   it('maps a reasoning part to thinking', () => {
     const mapper = new OpencodeEventMapper(SESSION)
+    map(mapper, announce('msg_1'))
     expect(
       map(mapper, {
         type: 'message.part.updated',
         properties: {
-          part: { id: 'prt_2', sessionID: SESSION, type: 'reasoning', text: 'considering', time: { start: 1 } },
+          part: {
+            id: 'prt_2',
+            sessionID: SESSION,
+            messageID: 'msg_1',
+            type: 'reasoning',
+            text: 'considering',
+            time: { start: 1 },
+          },
         },
       }),
     ).toEqual([{ type: 'thinking', text: 'considering' }])
@@ -310,20 +438,24 @@ describe('server event mapping', () => {
 
   it('skips a synthetic text part, which is the harness talking to itself', () => {
     const mapper = new OpencodeEventMapper(SESSION)
+    map(mapper, announce('msg_1'))
     expect(
       map(mapper, {
         type: 'message.part.updated',
-        properties: { part: { id: 'prt_3', sessionID: SESSION, type: 'text', text: 'x', synthetic: true } },
+        properties: {
+          part: { id: 'prt_3', sessionID: SESSION, messageID: 'msg_1', type: 'text', text: 'x', synthetic: true },
+        },
       }),
     ).toEqual([])
   })
 
   it('announces a tool call once and settles it once across its status updates', () => {
     const mapper = new OpencodeEventMapper(SESSION)
+    map(mapper, announce('msg_1'))
     const part = (state: unknown): unknown => ({
       type: 'message.part.updated',
       properties: {
-        part: { id: 'prt_4', sessionID: SESSION, type: 'tool', callID: 'call_1', tool: 'read', state },
+        part: { id: 'prt_4', sessionID: SESSION, messageID: 'msg_1', type: 'tool', callID: 'call_1', tool: 'read', state },
       },
     })
 
@@ -344,6 +476,7 @@ describe('server event mapping', () => {
 
   it('announces and fails a tool that errored without ever running', () => {
     const mapper = new OpencodeEventMapper(SESSION)
+    map(mapper, announce('msg_1'))
     expect(
       map(mapper, {
         type: 'message.part.updated',
@@ -351,6 +484,7 @@ describe('server event mapping', () => {
           part: {
             id: 'prt_5',
             sessionID: SESSION,
+            messageID: 'msg_1',
             type: 'tool',
             callID: 'call_2',
             tool: 'bash',
@@ -580,6 +714,137 @@ describe('server event mapping', () => {
         [1, 2, 3],
       ),
     ).toEqual([])
+  })
+
+  /**
+   * opencode publishes the user's own prompt as parts too. Read as the agent's
+   * words, a review prompt's literal `VERDICT: pass` line was an approval the
+   * agent never gave: the verdict reader is an unanchored match over the turn's
+   * assistant text.
+   */
+  it('never echoes the prompt as the agent speaking, whichever frame comes first', () => {
+    const prompt = 'Review the change.\nEnd with exactly one line:\nVERDICT: pass'
+    const announcedFirst = new OpencodeEventMapper(SESSION)
+    expect(map(announcedFirst, announce('msg_u', 'user'), textPart('prt_u', prompt, SESSION, 'msg_u'))).toEqual([])
+
+    const partFirst = new OpencodeEventMapper(SESSION)
+    expect(map(partFirst, textPart('prt_u', prompt, SESSION, 'msg_u'), announce('msg_u', 'user'))).toEqual([])
+
+    // The guard is the role, not a blanket delay: a part that beat its
+    // assistant message out is emitted when the message is announced.
+    const early = new OpencodeEventMapper(SESSION)
+    expect(map(early, textPart('prt_a', 'VERDICT: fail', SESSION, 'msg_a'))).toEqual([])
+    expect(map(early, announce('msg_a'))).toEqual([{ type: 'assistant_text', text: 'VERDICT: fail' }])
+  })
+
+  it('maps a permission request in the shape opencode 1.19 publishes it', () => {
+    const mapper = new OpencodeEventMapper(SESSION)
+    expect(
+      map(mapper, {
+        type: 'permission.asked',
+        properties: {
+          id: 'per_1',
+          sessionID: SESSION,
+          permission: 'bash',
+          patterns: ['rm -rf the repository, which is agent output'],
+          metadata: { command: 'ls' },
+          always: ['*'],
+          tool: { messageID: 'msg_1', callID: 'call_1' },
+        },
+      }),
+    ).toEqual([{ type: 'permission_request', tool: 'bash', detail: { command: 'ls' } }])
+    expect(
+      map(mapper, { type: 'permission.asked', properties: { sessionID: 'ses_other', permission: 'bash' } }),
+    ).toEqual([])
+  })
+
+  describe('background tasks', () => {
+    it('counts a task the agent put in the background until the server reports it', () => {
+      const mapper = new OpencodeEventMapper(SESSION)
+      map(mapper, announce('msg_1'), backgroundTask('call_1', CHILD, { status: 'running' }))
+      expect(mapper.pendingBackground).toBe(1)
+      expect(mapper.sawBackground).toBe(true)
+
+      // The child's own idle comes first, and says nothing about the parent.
+      map(mapper, idle(CHILD), backgroundTask('call_1'))
+      expect(mapper.pendingBackground).toBe(1)
+
+      // The injected result is a user message: it settles the task and is not
+      // the agent speaking, whatever the sub-agent wrote.
+      expect(map(mapper, ...injected('msg_2'))).toEqual([])
+      expect(mapper.pendingBackground).toBe(0)
+    })
+
+    it('counts a foreground task once it is moved to the background', () => {
+      const mapper = new OpencodeEventMapper(SESSION)
+      const foreground = {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'prt_call_1',
+            sessionID: SESSION,
+            messageID: 'msg_1',
+            type: 'tool',
+            callID: 'call_1',
+            tool: 'task',
+            state: { status: 'running', input: {}, metadata: { sessionId: CHILD }, time: { start: 1 } },
+          },
+        },
+      }
+      map(mapper, announce('msg_1'), foreground)
+      expect(mapper.pendingBackground).toBe(0)
+      map(mapper, backgroundTask('call_1', CHILD, { status: 'running' }))
+      expect(mapper.pendingBackground).toBe(1)
+    })
+
+    it('does not bring a reported task back when its part is republished or pruned', () => {
+      const mapper = new OpencodeEventMapper(SESSION)
+      map(mapper, announce('msg_1'), backgroundTask('call_1'), ...injected('msg_2'))
+      map(mapper, backgroundTask('call_1'), backgroundTask('call_1', CHILD, { compacted: true }))
+      expect(mapper.pendingBackground).toBe(0)
+
+      // A new call resuming the finished sub-agent is new work.
+      map(mapper, announce('msg_3'), backgroundTask('call_2', CHILD, { messageID: 'msg_3' }))
+      expect(mapper.pendingBackground).toBe(1)
+    })
+
+    it('lets a task go when its child session is deleted, since a cancelled one reports nothing', () => {
+      const mapper = new OpencodeEventMapper(SESSION)
+      map(mapper, announce('msg_1'), backgroundTask('call_1'))
+      map(mapper, { type: 'session.deleted', properties: { sessionID: CHILD, info: { id: CHILD } } })
+      expect(mapper.pendingBackground).toBe(0)
+    })
+
+    it('ignores a background task that belongs to another session', () => {
+      const mapper = new OpencodeEventMapper(SESSION)
+      const theirs = backgroundTask('call_9') as { properties: { part: Record<string, unknown> } }
+      theirs.properties.part['sessionID'] = 'ses_other'
+      map(mapper, announce('msg_1'), theirs)
+      expect(mapper.pendingBackground).toBe(0)
+    })
+
+    it('reports each turn only what it added', () => {
+      const mapper = new OpencodeEventMapper(SESSION)
+      expect(map(mapper, announce('msg_1', 'assistant', tokens(100, 20, 0.01)), idle())[0]).toEqual({
+        type: 'usage',
+        input: 100,
+        output: 20,
+        costUsd: 0.01,
+        cacheRead: 0,
+        cacheWrite: 0,
+      })
+      // The first message republished unchanged, and a second one: the second
+      // turn reports the second message alone.
+      const second = map(
+        mapper,
+        announce('msg_1', 'assistant', tokens(100, 20, 0.01)),
+        announce('msg_3', 'assistant', tokens(50, 5, 0.02)),
+        idle(),
+      )
+      expect(second[0]).toEqual({ type: 'usage', input: 50, output: 5, costUsd: 0.02, cacheRead: 0, cacheWrite: 0 })
+      // A turn that moved nothing reports nothing.
+      expect(map(mapper, idle())).toEqual([{ type: 'session_ended', result: 'ok' }])
+    })
   })
 })
 
@@ -816,6 +1081,7 @@ describe('spawn against a stub server', () => {
           part: {
             id: 'prt_2',
             sessionID: SESSION,
+            messageID: 'msg_1',
             type: 'tool',
             callID: 'call_1',
             tool: 'read',
@@ -1090,6 +1356,292 @@ describe('spawn against a stub server', () => {
   })
 })
 
+
+/**
+ * A turn is not a session where background tasks run (`backgroundWork`). An
+ * agent that starts a sub-agent in the background ends its turn while the
+ * sub-agent works; opencode injects the result when it is done and starts the
+ * next turn by itself. Ended on the first `session.idle`, that turn went
+ * unread — and kept running against the lane.
+ */
+describe('a session with background work still running', () => {
+  const spawned = async (
+    options: { readonly backgroundIdleMs?: number } = {},
+  ): Promise<{ stub: Stub; adapter: OpencodeAdapter; session: AgentSession }> => {
+    const stub = await startStub()
+    const adapter = new OpencodeAdapter({ baseUrl: stub.url, ...options })
+    const outcome = await adapter.spawn(task())
+    if (!outcome.ok) throw new Error('spawn refused')
+    return { stub, adapter, session: outcome.session }
+  }
+
+  const ANSWERED = [{ info: { id: 'msg_9', sessionID: SESSION, role: 'assistant' }, parts: [] }]
+  const UNANSWERED = [{ info: { id: 'msg_2', sessionID: SESSION, role: 'user' }, parts: [] }]
+
+  const texts = (seen: readonly AgentEvent[]): string[] =>
+    seen.flatMap((event) => (event.type === 'assistant_text' ? [event.text] : []))
+
+  it('stays open while the task runs and ends after the turn it wakes', async () => {
+    const { stub, adapter, session } = await spawned()
+    try {
+      stub.messages = ANSWERED
+      stub.emit(announce('msg_1', 'assistant', tokens(3, 4, 0.01)))
+      stub.emit(textPart('prt_1', 'Waiting on the reviewer.'))
+      stub.emit(backgroundTask('call_1'))
+      stub.emit(busy())
+      stub.emit(idle())
+      // The child finishing: its idle comes before the injection.
+      stub.emit({ type: 'session.status', properties: { sessionID: CHILD, status: { type: 'idle' } } })
+      stub.emit(idle(CHILD))
+      for (const frame of injected('msg_2')) stub.emit(frame)
+      stub.emit(busy())
+      stub.emit(announce('msg_3', 'assistant', tokens(1, 2, 0.02)))
+      stub.emit(textPart('prt_3', 'VERDICT: pass', SESSION, 'msg_3'))
+      stub.emit(idle())
+
+      const seen = await drain(session)
+      expect(seen.filter((event) => event.type === 'session_ended')).toEqual([
+        { type: 'session_ended', result: 'ok' },
+      ])
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+      // The sub-agent's `VERDICT: pass` is in the injected message, which is
+      // not the agent's text; the woken turn's is.
+      expect(texts(seen)).toEqual(['Waiting on the reviewer.', 'VERDICT: pass'])
+      expect(stub.aborts).toEqual([])
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('does not end when only the child goes idle', async () => {
+    const { stub, adapter, session } = await spawned()
+    try {
+      const seen: AgentEvent[] = []
+      const reading = (async () => {
+        for await (const event of session.events) seen.push(event)
+      })()
+      stub.emit(announce('msg_1'))
+      stub.emit(backgroundTask('call_1'))
+      stub.emit(idle())
+      stub.emit({ type: 'session.status', properties: { sessionID: CHILD, status: { type: 'idle' } } })
+      stub.emit(idle(CHILD))
+      await new Promise<void>((resolve) => setTimeout(resolve, 150))
+      expect(seen.some((event) => event.type === 'session_ended')).toBe(false)
+
+      // Still open, so this is what ends it — and it leaves nothing running.
+      await session.kill()
+      await reading
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'interrupted' })
+      await until(() => stub.aborts.length > 0, 'the abort to reach the server')
+      expect(stub.aborts).toEqual([`/session/${SESSION}/abort`])
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  /**
+   * opencode's lost wake-up: the result is injected while the parent's loop is
+   * finishing, joins that run instead of starting one, and the session goes
+   * idle with a user message nobody answered.
+   */
+  it('prompts again, with no parts, when the session went idle on an unanswered result', async () => {
+    const { stub, adapter, session } = await spawned()
+    try {
+      stub.messages = UNANSWERED
+      stub.emit(announce('msg_1'))
+      stub.emit(backgroundTask('call_1'))
+      for (const frame of injected('msg_2')) stub.emit(frame)
+      stub.emit(idle())
+
+      await until(() => stub.prompts.length === 2, 'the re-prompt')
+      // No parts: opencode leaves an empty user message out of the model's
+      // context, so the turn answers the injected result. Same model as the
+      // prompt, so the turn is not quietly run on another one.
+      expect(stub.promptBodies[1]).toEqual({
+        parts: [],
+        model: { providerID: 'anthropic', modelID: 'claude-haiku' },
+      })
+
+      stub.messages = ANSWERED
+      stub.emit(busy())
+      stub.emit(announce('msg_3'))
+      stub.emit(textPart('prt_3', 'VERDICT: pass', SESSION, 'msg_3'))
+      stub.emit(idle())
+
+      const seen = await drain(session)
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+      expect(texts(seen)).toEqual(['VERDICT: pass'])
+      expect(stub.prompts.length).toBe(2)
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('prompts again once, and ends when that draws no answer', async () => {
+    const { stub, adapter, session } = await spawned()
+    try {
+      stub.messages = UNANSWERED
+      stub.emit(announce('msg_1'))
+      stub.emit(backgroundTask('call_1'))
+      for (const frame of injected('msg_2')) stub.emit(frame)
+      stub.emit(idle())
+      await until(() => stub.prompts.length === 2, 'the re-prompt')
+
+      stub.emit(busy())
+      stub.emit(idle())
+
+      const seen = await drain(session)
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+      expect(stub.prompts.length).toBe(2)
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('ends a session the task never reports back to, and cancels the task', async () => {
+    const { stub, adapter, session } = await spawned({ backgroundIdleMs: 100 })
+    try {
+      stub.emit(announce('msg_1'))
+      stub.emit(textPart('prt_1', 'done'))
+      stub.emit(backgroundTask('call_1'))
+      stub.emit(idle())
+
+      const seen = await drain(session)
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+      expect(seen.some((event) => event.type === 'error')).toBe(false)
+      await until(() => stub.aborts.length > 0, 'the abort to reach the server')
+      expect(stub.aborts).toEqual([`/session/${SESSION}/abort`])
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('keeps a session the task is still talking through open past the silence bound', async () => {
+    const { stub, adapter, session } = await spawned({ backgroundIdleMs: 150 })
+    try {
+      stub.messages = ANSWERED
+      stub.emit(announce('msg_1'))
+      stub.emit(backgroundTask('call_1'))
+      stub.emit(idle())
+      // The child at work, inside the bound each time, for longer than it.
+      for (let i = 0; i < 4; i += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 75))
+        stub.emit(textPart(`prt_child_${i}`, 'reviewing', CHILD, 'msg_child'))
+      }
+      for (const frame of injected('msg_2')) stub.emit(frame)
+      stub.emit(busy())
+      stub.emit(announce('msg_3'))
+      stub.emit(textPart('prt_3', 'VERDICT: pass', SESSION, 'msg_3'))
+      stub.emit(idle())
+
+      const seen = await drain(session)
+      expect(texts(seen)).toEqual(['VERDICT: pass'])
+      expect(stub.aborts).toEqual([])
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('ends at once on a turn that failed, and cancels what it left running', async () => {
+    const { stub, adapter, session } = await spawned()
+    try {
+      stub.emit(announce('msg_1'))
+      stub.emit(backgroundTask('call_1'))
+      stub.emit({ type: 'session.error', properties: { sessionID: SESSION, error: { name: 'APIError' } } })
+      stub.emit(idle())
+
+      const seen = await drain(session)
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'error' })
+      await until(() => stub.aborts.length > 0, 'the abort to reach the server')
+      expect(stub.aborts).toEqual([`/session/${SESSION}/abort`])
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('reports each turn its own usage, so the sum is the session', async () => {
+    const { stub, adapter, session } = await spawned()
+    try {
+      stub.messages = ANSWERED
+      stub.emit(announce('msg_1', 'assistant', tokens(100, 20, 0.01)))
+      stub.emit(backgroundTask('call_1'))
+      stub.emit(idle())
+      for (const frame of injected('msg_2')) stub.emit(frame)
+      stub.emit(busy())
+      // The first turn's message republished, unchanged, during the second.
+      stub.emit(announce('msg_1', 'assistant', tokens(100, 20, 0.01)))
+      stub.emit(announce('msg_3', 'assistant', tokens(50, 5, 0.02)))
+      stub.emit(idle())
+
+      const usage = (await drain(session)).flatMap((event) => (event.type === 'usage' ? [event] : []))
+      expect(usage.map((event) => [event.input, event.output])).toEqual([
+        [100, 20],
+        [50, 5],
+      ])
+      expect(usage[0]?.costUsd).toBeCloseTo(0.01)
+      expect(usage[1]?.costUsd).toBeCloseTo(0.02)
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('does not end on an idle before the prompt was answered', async () => {
+    // The prompt landed while an earlier run of a resumed session was exiting,
+    // which is the same lost wake-up with the operator's prompt in it.
+    const { stub, adapter, session } = await spawned()
+    try {
+      stub.messages = [{ info: { id: 'msg_p', sessionID: SESSION, role: 'user' }, parts: [] }]
+      stub.emit(idle())
+      await until(() => stub.prompts.length === 2, 'the re-prompt')
+
+      stub.messages = ANSWERED
+      stub.emit(busy())
+      stub.emit(announce('msg_1'))
+      stub.emit(textPart('prt_1', 'on it'))
+      stub.emit(idle())
+
+      const seen = await drain(session)
+      expect(texts(seen)).toEqual(['on it'])
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+
+  it('never shows the prompt opencode echoes back as the agent’s text', async () => {
+    const { stub, adapter, session } = await spawned()
+    try {
+      stub.emit(announce('msg_u', 'user'))
+      stub.emit(textPart('prt_u', 'Review it.\nVERDICT: pass', SESSION, 'msg_u'))
+      stub.emit(announce('msg_1'))
+      stub.emit(idle())
+
+      expect(texts(await drain(session))).toEqual([])
+    } finally {
+      await adapter.close()
+      await stub.close()
+    }
+  })
+})
+
+describe('background work as a capability', () => {
+  it('is promised only by a server this adapter starts, whose environment it sets', () => {
+    expect(new OpencodeAdapter({ bin: 'opencode' }).capabilities.backgroundWork).toBe(true)
+    // Somebody else's server: the switch is in an environment this adapter
+    // never set, so nothing is promised — even though a session still holds.
+    expect(new OpencodeAdapter({ baseUrl: 'http://127.0.0.1:1' }).capabilities.backgroundWork).toBe(false)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Server lifecycle: the acceptance criterion, asserted rather than assumed.
 // ---------------------------------------------------------------------------
@@ -1266,6 +1818,47 @@ describe('server lifecycle', () => {
       // Backpressure, not a broken workflow: the node goes back to pending.
       expect(outcome.kind).toBe('transient')
       expect(adapter.listServers().length).toBe(0)
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('starts its server with background sub-agents switched on, over a lane that says otherwise', async () => {
+    // Reports the switch it was started with as its version, which is a
+    // channel the adapter already reads back.
+    const bin = fakeCliFromSource(
+      makeTemp(),
+      'opencode-env',
+      `import http from 'node:http'
+const args = process.argv.slice(2)
+if (args[0] === '--version') process.exit(0)
+const port = Number(args[args.indexOf('--port') + 1])
+const flag = String(process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS)
+const srv = http.createServer((req, res) => {
+  req.resume()
+  const url = req.url || ''
+  const json = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+  if (url.startsWith('/global/health')) return json(200, { healthy: true, version: 'flag=' + flag })
+  if (url.startsWith('/config/providers')) return json(200, { providers: [{ id: 'x' }], default: {} })
+  if (url.startsWith('/event')) { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': ok\\n\\n'); return }
+  if (req.method === 'POST' && url === '/session') return json(200, { id: 'ses_1' })
+  if (req.method === 'POST' && url.endsWith('/prompt_async')) { res.writeHead(204); res.end(); return }
+  return json(404, {})
+})
+srv.listen(port, '127.0.0.1')
+`,
+    )
+    const adapter = new OpencodeAdapter({ bin, startTimeoutMs: BOOT_MS })
+    try {
+      const outcome = await adapter.spawn(
+        task({ env: { OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: 'false', OPENCODE_EXPERIMENTAL: 'false' } }),
+      )
+      expect(outcome.ok).toBe(true)
+      const server = adapter.listServers()[0]
+      if (server === undefined) throw new Error('no server was started')
+      const health = (await (await fetch(`${server.baseUrl}/global/health`)).json()) as { version: string }
+      expect(health.version).toBe('flag=true')
+      if (outcome.ok) await outcome.session.kill()
     } finally {
       await adapter.close()
     }
