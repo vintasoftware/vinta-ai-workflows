@@ -49,6 +49,8 @@ function rig(
     readonly script?: GateScript
     readonly requires?: readonly string[]
     readonly timeoutS?: number
+    /** A `lint` gate declared before `unit` on the node, exiting with this code. */
+    readonly lintExit?: number
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-agent-gate-'))
@@ -84,8 +86,16 @@ function rig(
         requires: options.requires ?? ['test-suite'],
         ...(options.timeoutS === undefined ? {} : { timeout_s: options.timeoutS }),
       },
+      ...(options.lintExit === undefined ? {} : { lint: { cmd: renderGate({ exit: options.lintExit }) } }),
     },
-    nodes: [{ id: NODE, name: 'API', prompt_ref: 'plan.md#api-layer', gates: ['unit'] }],
+    nodes: [
+      {
+        id: NODE,
+        name: 'API',
+        prompt_ref: 'plan.md#api-layer',
+        gates: options.lintExit === undefined ? ['unit'] : ['lint', 'unit'],
+      },
+    ],
   })
 
   const journal = openJournal(store)
@@ -126,6 +136,40 @@ function rig(
 }
 
 const transcript = (journal: Journal): unknown[] => journal.tailTranscript(RUN_ID, NODE, 50)
+
+describe('a gate behind a red one', () => {
+  /**
+   * Observed: an agent checking gate by gate kept going after typecheck went
+   * red, and a 400-second suite ran against a tree the next round threw away.
+   */
+  it('is refused, and costs no run, while an earlier gate is red on this tree', async () => {
+    const r = rig({ lintExit: 1 })
+
+    expect((await r.broker.run('lint', NODE)).status).toBe('failed')
+    await expect(r.broker.run('unit', NODE)).rejects.toMatchObject({ code: 'earlier_gate_red:lint' })
+    expect(r.runs()).toBe(0)
+  })
+
+  it('runs once the tree moves, because the red result was about the old one', async () => {
+    const r = rig({ lintExit: 1 })
+    await r.broker.run('lint', NODE)
+
+    writeFileSync(join(r.lane, 'src.txt'), 'v2\n')
+    const result = await r.broker.run('unit', NODE)
+
+    expect(result.status).toBe('passed')
+    expect(r.runs()).toBe(1)
+  })
+
+  it('runs when the earlier gate passed, or has not been run on this tree', async () => {
+    const green = rig({ lintExit: 0 })
+    await green.broker.run('lint', NODE)
+    expect((await green.broker.run('unit', NODE)).status).toBe('passed')
+
+    const unasked = rig({ lintExit: 1 })
+    expect((await unasked.broker.run('unit', NODE)).status).toBe('passed')
+  })
+})
 
 describe('a gate run on an agent’s behalf', () => {
   it('runs the declared command in the node’s lane, holding the gate’s pool', async () => {

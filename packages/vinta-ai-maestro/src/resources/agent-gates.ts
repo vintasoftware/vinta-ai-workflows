@@ -39,7 +39,7 @@
  * `runGate` behind it, store after — so it is used as it stands rather than
  * copied into a third spelling that could drift from the other two.
  */
-import { runGateCached, type GateCache } from '../gates/cache.ts'
+import { gateConfigKey, laneTreeHash, runGateCached, type GateCache } from '../gates/cache.ts'
 import { TIMEOUT_EXIT } from '../gates/runner.ts'
 import { phaseGate } from '../gates/scope.ts'
 import type { Journal } from '../journal/journal.ts'
@@ -259,6 +259,18 @@ export class AgentGateBroker {
             touches: this.#workflow.nodes.find((node) => node.id === holderNode)?.touches ?? [],
           })
 
+    // A later gate behind a red one is refused, not run. Agents check their
+    // work gate by gate — `for g in lint typecheck test` — and the red
+    // typecheck did not stop the loop: observed as a 400-second suite run
+    // against a tree that had already failed, whose result the next round
+    // threw away. The gate node stops at the first red gate (`#runGate`);
+    // this is the same rule for the gates a turn asks for. Read off the cache,
+    // so it costs no run: a red result for this exact tree and command is
+    // already there, or the earlier gate has not been run on it at all.
+    const node = this.#workflow.nodes.find((candidate) => candidate.id === holderNode)
+    const red = await this.#earlierRed(gateId, node?.gates ?? [], lane, row?.base_branch ?? null, node?.touches ?? [])
+    if (red !== null) throw new AgentGateRefusal(`earlier_gate_red:${red}`)
+
     const result = await runGateCached({
       gateId,
       gate: effective,
@@ -309,6 +321,35 @@ export class AgentGateBroker {
       cached: result.cached,
       logRef: result.logPath,
     }
+  }
+
+  /**
+   * The first gate declared before `gateId` on this node whose cached result
+   * for the lane's current tree is red, or null. Only command gates: a judge
+   * gate is never run from inside a turn, so it has no result here to read.
+   */
+  async #earlierRed(
+    gateId: string,
+    declared: readonly string[],
+    lane: GateLane,
+    base: string | null,
+    touches: readonly string[],
+  ): Promise<string | null> {
+    const index = declared.indexOf(gateId)
+    if (index <= 0) return null
+    let tree: string | null = null
+    for (const earlier of declared.slice(0, index)) {
+      const gate = this.#workflow.gates[earlier]
+      if (gate === undefined || isJudgeGate(gate)) continue
+      const effective =
+        base === null
+          ? gate
+          : await phaseGate(gate, this.#workflow.defaults.gate_scope, { lanePath: lane.path, base, touches })
+      tree ??= laneTreeHash(lane.path)
+      const hit = this.#options.cache.lookup(earlier, tree, gateConfigKey(effective))
+      if (hit !== undefined && hit.status !== 'passed') return earlier
+    }
+    return null
   }
 
   /**
