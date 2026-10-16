@@ -264,6 +264,8 @@ const mapPermissionDenied = (value: Record<string, unknown>): AgentEvent[] => {
 /** A refusal explains itself in a sentence; anything longer is not one. */
 const DETAIL_LIMIT = 500
 
+const TURN_BLOCKED = 'claude-code: the turn ended blocked'
+
 /**
  * The CLI's own verdict on the turn it just finished.
  *
@@ -279,11 +281,11 @@ const DETAIL_LIMIT = 500
  * `needs_action` and `status_detail` are the agent's own words and are dropped
  * (§11); the fixed sentence below is this adapter's, and says the one thing the
  * category actually establishes.
+ *
+ * The session keeps it only for a turn that was also refused a tool (`ingest`).
  */
 const mapTurnSummary = (value: Record<string, unknown>): AgentEvent[] =>
-  value['status_category'] === 'blocked'
-    ? [{ type: 'error', message: 'claude-code: the turn ended blocked' }]
-    : []
+  value['status_category'] === 'blocked' ? [{ type: 'error', message: TURN_BLOCKED }] : []
 
 /**
  * The moment the session's memory got thinner:
@@ -523,6 +525,8 @@ class ClaudeCodeSession implements AgentSession {
   #stopping = false
   /** An error was reported during this turn. See `ingest`. */
   #errored = false
+  /** The harness refused a tool during this turn. See `ingest`. */
+  #denied = false
   #refusal: TurnRefusal | undefined
   /** Background tasks the CLI is still running for the main agent, by task id. */
   readonly #background = new Set<string>()
@@ -594,6 +598,10 @@ class ClaudeCodeSession implements AgentSession {
     switch (value['subtype']) {
       case 'init':
         this.#unread.clear()
+        // A turn's errors and refusals are that turn's. A held session's
+        // earlier turn ended ok or it would not have been held.
+        this.#errored = false
+        this.#denied = false
         return
       case 'background_tasks_changed': {
         const tasks = value['tasks']
@@ -675,9 +683,22 @@ class ClaudeCodeSession implements AgentSession {
    * blocked summary in particular: every error here is one this adapter chose
    * to raise, and there is no error it raises that should leave a turn looking
    * clean.
+   *
+   * **The blocked summary counts only beside a refused tool.** It is the CLI's
+   * model reading the turn's last message, and it reads "needs a person" into
+   * any message that names a next step: a review ending "Nothing was pushed."
+   * and `VERDICT: pass`, an implementer listing an open point, a canvas chore
+   * saying what publishing would post. In one observed run 43 of a phase's
+   * turns ended blocked that way, an approving review among them, and each was
+   * recorded as a failure. The case the rule exists for — a turn the harness
+   * refused, which then wrote nothing — always carries the refusal itself.
+   * Whether the rest did their job is what verdicts, gates and the agent's own
+   * questions decide.
    */
   ingest(event: AgentEvent): void {
     if (this.#ended) return
+    if (event.type === 'permission_denied') this.#denied = true
+    if (event.type === 'error' && event.message === TURN_BLOCKED && !this.#denied) return
     if (event.type === 'error') this.#errored = true
     if (event.type === 'session_ended') {
       const reported = this.#errored && event.result === 'ok' ? 'error' : event.result

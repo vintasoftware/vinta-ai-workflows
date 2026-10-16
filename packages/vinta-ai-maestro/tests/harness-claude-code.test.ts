@@ -1044,6 +1044,33 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     ])
   })
 
+  /**
+   * The summary is the CLI's model reading the last message, and it calls any
+   * message that names a next step "blocked". Without a refused tool behind
+   * it, an approving review was recorded as a failure.
+   */
+  it('ends ok on a blocked summary when nothing was refused', async () => {
+    const bin = fakeBin({
+      version: VERSION,
+      readsLine: true,
+      stdout: [
+        '{"type":"system","subtype":"init","session_id":"sess-verdict"}',
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'VERDICT: pass' }] } }),
+        '{"type":"system","subtype":"post_turn_summary","status_category":"blocked"}',
+        '{"type":"result","subtype":"success","is_error":false}',
+      ],
+    })
+
+    const outcome = await new ClaudeCodeAdapter({ bin }).spawn(task())
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const seen: AgentEvent[] = []
+    for await (const event of outcome.session.events) seen.push(event)
+
+    expect(seen.filter((event) => event.type === 'error')).toEqual([])
+    expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+  })
+
   /** The ordinary path is untouched: no error, no reinterpretation. */
   it('still ends ok when nothing went wrong', async () => {
     const bin = fakeBin({
@@ -1134,6 +1161,28 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
       ])
       expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
       expect(seen.at(-3)).toEqual({ type: 'assistant_text', text: 'VERDICT: pass' })
+    })
+
+    it('keeps waiting through a blocked summary of the turn that waits, and ends ok', async () => {
+      const blocked = '{"type":"system","subtype":"post_turn_summary","status_category":"blocked"}'
+      const seen = await spawnFake([
+        INIT,
+        running('reviewer'),
+        text('Waiting on the reviewer.'),
+        blocked,
+        result(),
+        notified('reviewer'),
+        running(),
+        INIT,
+        text('VERDICT: pass'),
+        blocked,
+        result({ num_turns: 1 }),
+      ])
+
+      expect(seen.filter((event) => event.type === 'error')).toEqual([])
+      expect(seen.filter((event) => event.type === 'session_ended')).toEqual([
+        { type: 'session_ended', result: 'ok' },
+      ])
     })
 
     it('reports each turn’s own cost, not the process’s running total twice', async () => {

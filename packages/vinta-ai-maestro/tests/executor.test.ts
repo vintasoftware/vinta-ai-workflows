@@ -45,6 +45,7 @@ import type {
   PreflightResult,
   SpawnOutcome,
 } from '../src/harness/adapter.ts'
+import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
 import { VERDICT_MARKER } from '../src/prompts/index.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
@@ -55,6 +56,7 @@ import { createScheduler, type RunReport } from '../src/scheduler/index.ts'
 import { SideEffectSchema, WorkflowSchema, type EffectId, type Workflow } from '../src/types.ts'
 import type { SystemOne } from '../src/system-one/config.ts'
 import { MockSystemOneAdapter } from '../src/system-one/mock.ts'
+import { fakeCli } from './support/fake-cli.ts'
 import { renderGate } from './support/gate-script.ts'
 
 // ---------------------------------------------------------------------------
@@ -717,6 +719,43 @@ describe('the review verdict', () => {
     turn(rig, `${VERDICT_MARKER} pass`, 'error')
     expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
       review: { verdict: 'fail' },
+    })
+  })
+
+  /**
+   * The claude-code CLI's turn summary called an approving review "blocked" —
+   * its model reads any message naming a next step that way — and the review
+   * chore was recorded as failed with "the turn ended blocked". The adapter's
+   * real output for that turn, journalled as the scheduler journals it.
+   */
+  it('reads a pass from a claude-code review whose turn the CLI summarized as blocked', async () => {
+    const rig = setup(onePhase)
+    const root = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-blocked-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const bin = fakeCli(root, 'claude-fake', {
+      version: '1.2.3 (Claude Code)',
+      readsLine: true,
+      stdout: [
+        '{"type":"system","subtype":"init","session_id":"sess-review"}',
+        JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'text', text: `Nothing was pushed.\n${VERDICT_MARKER} pass` }] },
+        }),
+        '{"type":"system","subtype":"post_turn_summary","status_category":"blocked"}',
+        '{"type":"result","subtype":"success","is_error":false}',
+      ],
+    })
+    const outcome = await new ClaudeCodeAdapter({ bin }).spawn({
+      nodeId: 'p1',
+      cwd: root,
+      prompt: 'review the phase',
+      model: 'opus',
+    })
+    if (!outcome.ok) throw new Error('the fake refused')
+    for await (const event of outcome.session.events) rig.journal.appendTranscript(RUN_ID, 'p1', event)
+
+    expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
+      review: { verdict: 'pass' },
     })
   })
 
