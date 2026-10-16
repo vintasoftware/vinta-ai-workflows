@@ -38,6 +38,8 @@ export const NODE_USAGE = `usage: vinta-ai-maestro node <op> <runId> <phase> [te
                                           phase waiting on a question, hold it:
                                           no --retry-after timer answers it.
   abort    <runId> <phase>                Kill it, fail it, block dependents.
+                                          A run left with nothing to run stays
+                                          up for retry; stop it to end it.
   retry    <runId> <phase>                Run a failed phase again.
   answer   <runId> <phase> <choice>       Answer the question it is parked on.
            [--answers <json>]             An agent's questions take one JSON

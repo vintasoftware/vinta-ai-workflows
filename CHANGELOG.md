@@ -904,6 +904,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A merge the run did not start is still refused by name. A failed `git_merge`
   of a named branch now aborts its merge.
 
+- **`vinta-ai-maestro`: aborting the only runnable phase no longer ends the
+  run.** A run whose remaining phases all depended on an aborted one ended
+  `failed` at once, and the `node retry` that followed was refused as `run has
+  ended`. Aborted phases now hold the run open for their retry (no timer retries
+  them); `pause` or `stop` ends it. Under `--on-failure stop` an abort still ends
+  the run. A retry sent while the aborted attempt is still winding down is
+  applied once it has.
+
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
   a resumed claude-code session closed a replay of killed background tasks

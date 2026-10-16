@@ -588,6 +588,15 @@ interface NodeState {
   pauseRequested: boolean
   /** Set by `abortNode`. Every step checks it, so a killed node stops stepping. */
   aborted: boolean
+  /**
+   * The node's body — `#runNode`, or `#holdDeferred` — has not returned yet.
+   * An aborted node is failed at once and its body unwinds a step later, so
+   * this is what says whether a retry can start the node again now or has to
+   * wait for the old body to leave (`retryQueued`).
+   */
+  bodyActive: boolean
+  /** A retry arrived while an aborted body was still unwinding; it is applied as the body exits. */
+  retryQueued: boolean
   /** The effect the node is parked on, for the answer event that closes it. */
   parkedEffectId: string | null
   /**
@@ -871,6 +880,10 @@ export class Scheduler {
   #heights = new Map<string, number>()
   #waiters: (() => void)[] = []
   #iterations = 0
+  /** Set once `run()` has left its loop: there is nothing left to dispatch into. */
+  #ended = false
+  /** Whether `scheduler.awaiting_retry` was logged for the current wait. */
+  #awaitingLogged = false
   /** Set once by `halt`. Read at every point a node could start new work. */
   #halt: HaltMode | null = null
   /** Resolves when `halt` is called, for the one wait no state change ends. */
@@ -969,6 +982,8 @@ export class Scheduler {
       resumeSessionId: null,
       pauseRequested: false,
       aborted: false,
+      bodyActive: false,
+      retryQueued: false,
       parkedEffectId: null,
       unattendedAnswer: null,
       unattendedGiven: new Map(),
@@ -1137,6 +1152,7 @@ export class Scheduler {
       // transcript and its post-mortem has nothing to describe. The reason has
       // to be recorded at the moment it is known or it is not recorded at all.
       this.#log.error('scheduler.unrunnable', { stop: unrunnable.kind })
+      this.#ended = true
       return this.#report(unrunnable)
     }
 
@@ -1152,7 +1168,7 @@ export class Scheduler {
     while (true) {
       this.#iterations += 1
       this.#dispatchReady()
-      if (this.#settled()) break
+      if (this.#settled() && !this.#awaitingRetry()) break
       // After `#settled`, so a run whose last node finished in the same turn
       // the operator halted it ends as what it actually was.
       if (this.#halt !== null && this.#active === 0) break
@@ -1174,7 +1190,10 @@ export class Scheduler {
       await this.#changed()
     }
 
-    const halted = this.#settled() ? null : this.#halt
+    this.#ended = true
+    // A run held open for an aborted node's retry and then halted ends as the
+    // halt, not as `failed`: nothing settled it, the operator ended it.
+    const halted = this.#settled() && !this.#holdsAborted() ? null : this.#halt
     const status =
       halted ?? (stop === null && this.#failures().length === 0 ? 'done' : 'failed')
     this.#options.journal.append({
@@ -1233,6 +1252,48 @@ export class Scheduler {
     this.#wake()
   }
 
+  /**
+   * Nodes an operator (or the coordinator) aborted that are still failed.
+   *
+   * An abort is somebody's decision about one attempt, not a verdict that the
+   * run is over — the usual next step is `retry`, often with a fix in between.
+   * A run whose last runnable node was aborted, with every other pending
+   * phase depending on it, used to settle in that same turn and end `failed`,
+   * and the `retry` sent a moment later was refused as `run has ended`.
+   */
+  #abortedFailures(): NodeState[] {
+    return [...this.#states.values()].filter((state) => state.aborted && state.status === 'failed')
+  }
+
+  /**
+   * Whether aborted nodes hold the run open. Not under `onFailure: stop`,
+   * which is the operator saying a failure ends the run and nobody will be
+   * there to retry it — an abort ends it like any other failure.
+   */
+  #holdsAborted(): boolean {
+    return (this.#options.onFailure ?? 'retry') !== 'stop' && this.#abortedFailures().length > 0
+  }
+
+  /**
+   * Whether a run with nothing left to run stays up anyway, for an aborted
+   * node's retry. Held the way `--on-failure retry` holds a failure on its
+   * question: no timer ends it — the abort was a person's, so nothing retries
+   * it for them — and a `retry`, or a `pause` or `stop` of the run, does.
+   */
+  #awaitingRetry(): boolean {
+    if (this.#halt !== null) return false
+    if (!this.#holdsAborted()) {
+      this.#awaitingLogged = false
+      return false
+    }
+    if (!this.#awaitingLogged) {
+      this.#awaitingLogged = true
+      const nodes = this.#abortedFailures().map((state) => state.node.id)
+      this.#log.info('scheduler.awaiting_retry', { nodes: nodes.join(',') })
+    }
+    return true
+  }
+
   /** Where a node goes when a halt reaches it: everything back, and `pending`. */
   #unwindHalted(state: NodeState): void {
     state.held = false
@@ -1253,8 +1314,14 @@ export class Scheduler {
    * It needs the run to still be in flight: `run()` returns once every node has
    * settled, and after that there is no loop left to dispatch into. With
    * `onFailure: retry` — the default — a failing node parks on a question
-   * rather than ending the run, so the loop is usually still there. A run that
-   * has genuinely finished is re-run, not retried.
+   * rather than ending the run, so the loop is usually still there; and a run
+   * whose only failures left are aborted nodes is held open for exactly this
+   * (`#awaitingRetry`). A run that has genuinely finished is re-run, not
+   * retried.
+   *
+   * An aborted node is failed the moment it is aborted and its body unwinds a
+   * step later. Retried in between, it is queued and started as that body
+   * leaves, so the old attempt can never step on the new one.
    *
    * Cold, like every other retry here: the context that failed is the thing
    * being retried away from.
@@ -1265,8 +1332,21 @@ export class Scheduler {
     if (state.status !== 'failed') {
       throw new Error(`node "${nodeId}" is ${state.status}, not failed`)
     }
-    if (this.#settled()) throw new Error(`run has ended; start it again instead`)
+    if (this.#ended) throw new Error(`run has ended; start it again instead`)
+    if (state.bodyActive) {
+      state.retryQueued = true
+      return
+    }
+    this.#reopen(state)
+  }
 
+  /** `retry`'s work, once nothing of the failed attempt is still running. */
+  #reopen(state: NodeState): void {
+    const nodeId = state.node.id
+    state.retryQueued = false
+    state.aborted = false
+    // A deferred phase aborted while it waited for its start asks again.
+    if (!state.released) state.deferredAsked = false
     state.failure = null
     state.autoRetries = 0
     this.#restartAttempt(state)
@@ -1471,6 +1551,7 @@ export class Scheduler {
         if (!state.deferredAsked) {
           state.deferredAsked = true
           this.#active += 1
+          state.bodyActive = true
           void this.#holdDeferred(state)
             .catch((error: unknown) => {
               this.#log.error('scheduler.node_threw', { node: state.node.id, ...errorFields(error) })
@@ -1478,6 +1559,7 @@ export class Scheduler {
             })
             .finally(() => {
               this.#active -= 1
+              this.#bodyExited(state)
               this.#wake()
             })
         }
@@ -1508,6 +1590,7 @@ export class Scheduler {
       // because `#fail` is one of the things that might have thrown.
       // -----------------------------------------------------------------
       this.#active += 1
+      state.bodyActive = true
       void this.#runNode(state).catch((error: unknown) => {
         this.#log.error('scheduler.node_threw', {
           node: state.node.id,
@@ -1526,11 +1609,22 @@ export class Scheduler {
         }
       }).finally(() => {
         this.#active -= 1
+        this.#bodyExited(state)
         // Only a halt waits on this count; waking otherwise would add a loop
         // turn every node exit, which the scheduler's own tests count.
         if (this.#halt !== null) this.#wake()
       })
     }
+  }
+
+  /** A node body returned. A retry that arrived while it was unwinding an abort starts now. */
+  #bodyExited(state: NodeState): void {
+    state.bodyActive = false
+    if (!state.retryQueued) return
+    state.retryQueued = false
+    // Only a node still failed and a run still live: a halt or an answer may
+    // have moved it on since the retry was queued.
+    if (state.status === 'failed' && !this.#ended) this.#reopen(state)
   }
 
   #settled(): boolean {

@@ -56,7 +56,10 @@ export interface RunControl {
    * parked on a question, hold it there (`held`).
    */
   pause(nodeId: string, actor?: Actor): Operated
-  /** §9 — kill the session, mark failed, block dependents. */
+  /**
+   * §9 — kill the session, mark failed, block dependents. A run left with
+   * nothing to run stays up for the node's `retry` (§9).
+   */
   abortNode(nodeId: string, actor?: Actor): Operated
   /**
    * Run a failed node again, and unblock what its failure blocked.

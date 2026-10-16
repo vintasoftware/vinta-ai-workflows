@@ -507,8 +507,10 @@ Five operations on a running node, exposed in the UI and over the API:
 | Add context | `session.send(text)` where `capabilities.inject`; otherwise queued and delivered on the next resume |
 | Redirect | interrupt, then send the new instruction (or resume with an amended prompt) |
 | Pause | finish the current turn, then `await_human` (§9.1) |
-| Abort node | kill the session; mark failed; dependents blocked |
+| Abort node | kill the session; mark failed; dependents blocked. A run with nothing else left to run stays up for the node's retry |
 | Take over | interrupt → PTY attach → detach → resume headless |
+
+**An abort is a decision about one attempt, not about the run.** The usual next step is `retry`, often after a fix in between, and `retry` needs a run still in flight. A run whose last runnable phase was aborted — every other pending phase depending on it — used to settle in the same turn and end `failed`, and the retry sent a moment later was refused as `run has ended`. So aborted nodes hold the run open, the way `--on-failure retry` holds a failure on its question: the node stays `failed`, its dependents `blocked`, and nothing answers for the operator — the abort was a person's, so no `--retry-after` timer retries it. `node retry` releases it; `pause` or `stop` on the run ends it as that halt. Under `--on-failure stop` an abort ends the run like any other failure, since nobody is there to retry it. A retry sent while the aborted attempt is still unwinding is applied as that attempt leaves, so the two never overlap.
 
 ### 9.1 Human gates and notifications
 
