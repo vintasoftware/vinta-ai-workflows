@@ -914,6 +914,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed phases and the ones they blocked are attempted again, and `status`
   prints the command for it. The help now names paused, interrupted and
   failed as resumable, and only `done` and `cancelled` as refused.
+- **`vinta-ai-maestro`: the shipped permission-judge question no longer
+  refuses routine commands.** Under `--permission judged` it allowed 44 of 69
+  commands from a real run, refusing `ls .env*`, `cat .env.example`,
+  `docker ps` and the project's own `make` targets. The question now says a
+  secret is a *value* — listing env files and reading templates is allowed,
+  reading a real `.env` is not — allows read-only inspection and the project's
+  own commands in its worktree, and still refuses pushes, `sudo`, writes
+  outside the worktree and another project's containers or volumes. A
+  project that set its own `judges.permission.question` is unaffected; the
+  default `allow_above` stays 0.9.
 
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
