@@ -529,3 +529,75 @@ describe('execPort', () => {
     expect(labels).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Forgetting a gate verdict (§13.4)
+// ---------------------------------------------------------------------------
+
+describe('gate cache invalidation', () => {
+  const TREE = 'a'.repeat(40)
+
+  /** Records what it was asked to forget, and says one entry went each time. */
+  const recordingCache = () => {
+    const calls: { gateId: string; tree: string | undefined }[] = []
+    return {
+      calls,
+      invalidate: (gateId: string, tree?: string) => {
+        calls.push({ gateId, tree })
+        return 1
+      },
+    }
+  }
+  const path = (gate: string): string => `/api/runs/${RUN_ID}/gates/${gate}/invalidate`
+
+  it('is the coordinator’s as well as the operator’s, and journals who asked', async () => {
+    const r = await rig()
+    const cache = recordingCache()
+    r.register({ gateCache: cache })
+
+    const byCoordinator = await call(r.daemon, path('unit'), {
+      method: 'POST',
+      token: r.daemon.coordinatorToken,
+      body: { tree: TREE },
+    })
+    const byOperator = await call(r.daemon, path('unit'), { method: 'POST', body: {} })
+
+    expect(byCoordinator).toEqual({ status: 200, body: { gate: 'unit', removed: 1 } })
+    expect(byOperator.status).toBe(200)
+    expect(cache.calls).toEqual([
+      { gateId: 'unit', tree: TREE },
+      { gateId: 'unit', tree: undefined },
+    ])
+    const rows = r.journal.events(RUN_ID).filter((event) => event.type === 'gate_cache_invalidated')
+    expect(rows.map((event) => event.payload)).toEqual([
+      { gate: 'unit', tree: TREE, removed: 1, by: 'coordinator' },
+      { gate: 'unit', removed: 1 },
+    ])
+  })
+
+  it('is not an agent’s: its way past a stale verdict is `gate --no-cache`', async () => {
+    const r = await rig()
+    const cache = recordingCache()
+    r.register({ gateCache: cache })
+
+    const asAgent = await call(r.daemon, path('unit'), { method: 'POST', token: r.daemon.agentToken, body: {} })
+
+    expect(asAgent.status).toBe(403)
+    expect(cache.calls).toEqual([])
+  })
+
+  it('refuses an undeclared gate, a tree that is not an object id, and a host with no cache', async () => {
+    const r = await rig()
+    const unsupported = await call(r.daemon, path('unit'), { method: 'POST', body: {} })
+    expect(unsupported.status).toBe(501)
+
+    const cache = recordingCache()
+    r.register({ gateCache: cache })
+    const unknown = await call(r.daemon, path('nope'), { method: 'POST', body: {} })
+    const badTree = await call(r.daemon, path('unit'), { method: 'POST', body: { tree: 'HEAD; rm -rf /' } })
+
+    expect(ErrorResponseSchema.parse(unknown.body).error).toBe('unknown_gate')
+    expect(badTree.status).toBe(400)
+    expect(cache.calls).toEqual([])
+  })
+})

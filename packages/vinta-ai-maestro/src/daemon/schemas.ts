@@ -95,6 +95,18 @@ export const ExecRequestSchema = z.strictObject({
   command: z.string().min(1),
 })
 
+/**
+ * Forgetting one gate's cached results (§13.4). No `tree` is every tree. A tree
+ * is a git object id, so it is held to that shape rather than passed to SQLite
+ * as whatever arrived.
+ */
+export const GateCacheInvalidateSchema = z.strictObject({
+  tree: z
+    .string()
+    .regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/)
+    .optional(),
+})
+
 /** A command inside an agent turn asks for semaphore resources as one lease. */
 export const AgentLeaseRequestSchema = z.strictObject({
   resources: z.array(z.string().min(1)).min(1).max(32),

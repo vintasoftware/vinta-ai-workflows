@@ -239,6 +239,26 @@ export class GateCache {
       )
   }
 
+  /**
+   * Forgets `gateId`'s results: for one tree when `treeHash` is given, for
+   * every tree otherwise. Returns how many entries went.
+   *
+   * Every definition the gate has had goes with them. The caller is saying the
+   * verdict is wrong for a reason the key cannot see — an ignored file, the
+   * lane's database, something installed — and that reason is no more
+   * confined to one definition than it is to one tree. The cost of forgetting
+   * too much is a re-run, which is the price this cache always charges for a
+   * miss; the cost of forgetting too little is the stale verdict the caller is
+   * trying to get rid of.
+   */
+  invalidate(gateId: string, treeHash?: string): number {
+    const info =
+      treeHash === undefined
+        ? this.db.prepare('DELETE FROM gate_results WHERE gate_id = ?').run(gateId)
+        : this.db.prepare('DELETE FROM gate_results WHERE gate_id = ? AND tree_hash = ?').run(gateId, treeHash)
+    return info.changes
+  }
+
   close(): void {
     this.db.close()
   }

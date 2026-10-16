@@ -70,6 +70,7 @@ import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
   AgentGateRequestSchema,
+  GateCacheInvalidateSchema,
   GuardRequestSchema,
   PermissionRequestSchema,
   AgentLeaseRequestSchema,
@@ -696,6 +697,46 @@ export function createApi(options: ApiOptions): Hono {
       // have deadlocked against the lane the node is holding.
       return fail(c, 409, error instanceof AgentGateRefusal ? error.code : 'gate_unavailable')
     }
+  })
+
+  /**
+   * Forgets one gate's cached results (§13.4) — for one lane tree, or for every
+   * tree when the body names none. The next run of that gate, by the gate node
+   * or an agent, runs it.
+   *
+   * For a verdict the key cannot see is wrong: a red one whose cause was an
+   * ignored file, the lane's database, something installed. The operator's and
+   * the coordinator's, and not the agent's (`AGENT_ROUTES`): an agent has
+   * `gate <id> --no-cache`, which replaces the entry for its own lane's tree
+   * and nothing wider. Open to the coordinator because forgetting a verdict
+   * can only cause a gate to run again; it cannot make one pass.
+   */
+  app.post('/api/runs/:runId/gates/:gateId/invalidate', async (c) => {
+    const runId = c.req.param('runId')
+    const gateId = c.req.param('gateId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    if (run.gateCache === undefined) return fail(c, 501, 'gate_cache_unavailable')
+    if (workflow(runId).gates[gateId] === undefined) return fail(c, 400, 'unknown_gate')
+    const body = await readBody(c, GateCacheInvalidateSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+
+    const { tree } = body.value
+    const actor = actorOf(c)
+    const removed = run.gateCache.invalidate(gateId, tree)
+    journal.append({
+      runId,
+      type: 'gate_cache_invalidated',
+      payload: {
+        gate: gateId,
+        ...(tree === undefined ? {} : { tree }),
+        removed,
+        ...(actor === 'coordinator' ? { by: actor } : {}),
+      },
+    })
+    log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, removed })
+    return c.json({ gate: gateId, removed })
   })
 
   /**

@@ -141,6 +141,11 @@ export interface AgentGatePort {
   ): Promise<AgentGateWaiting | AgentGateResult>
 }
 
+/** See `DaemonRun.gateCache`. Returns how many entries went. */
+export interface GateCachePort {
+  invalidate(gateId: string, treeHash?: string): number
+}
+
 /**
  * Why a run could not be started, as a code the route maps to a status.
  *
@@ -234,6 +239,13 @@ export interface DaemonRun {
   readonly halt?: (mode: 'paused' | 'cancelled') => Promise<void>
   /** `vinta-ai-maestro exec`: a command run by hand in a lane or the integration worktree. */
   readonly exec?: ExecPort
+  /**
+   * §13.4's cache, as far as an operator or the coordinator may reach it:
+   * forgetting a verdict. Absent on a host with no cache, and the endpoint
+   * then refuses. An agent never reaches it — its way past a stale entry is
+   * `gate <id> --no-cache`, which replaces the entry for its own lane only.
+   */
+  readonly gateCache?: GateCachePort
 }
 
 /** What the daemon asks on a judged session's behalf. The input never leaves the call. */

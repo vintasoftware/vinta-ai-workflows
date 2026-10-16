@@ -712,6 +712,7 @@ export class Journal {
       case 'wave_built':
       case 'wave_deferred':
       case 'workspace_exec':
+      case 'gate_cache_invalidated':
       case 'stacks_stopped':
       case 'coordinator_woke':
       case 'bare_gate_blocked':

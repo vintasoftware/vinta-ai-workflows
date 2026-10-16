@@ -25,6 +25,12 @@
  * block's environment (`env_files`, compose, databases, setup commands),
  * model fallbacks. Those can make a run slower or dearer when set wrongly;
  * none of them can make a failing check pass.
+ *
+ * Forgetting a cached gate verdict (`gate-cache invalidate`, §13.4) is the
+ * coordinator's too, and is not an amendment, so nothing here checks it: it
+ * only ever makes a gate run again. It is how a red the cache replays for a
+ * cause outside the lane's tracked files — the cause it was woken by
+ * `gate_stalled` to look for — stops being replayed once the cause is gone.
  */
 import { diffWorkflows } from '../amend/diff.ts'
 import type { AmendmentKind } from '../journal/events.ts'
