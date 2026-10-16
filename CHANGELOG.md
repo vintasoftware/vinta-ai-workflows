@@ -891,6 +891,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro purge` no longer ends a run you did not name.** A bulk
+  `purge --lanes` removed the lanes of paused, failed and interrupted runs —
+  the integration worktree included — so `run --resume` had nothing to adopt,
+  and a bulk `purge` deleted those runs' frozen snapshots. A run that could
+  still be resumed is now kept whole, directory and lanes, and named with the
+  reason; purge it by name, or pass the new `--force`. A run whose job is
+  still running is kept even then.
+- **`vinta-ai-maestro purge --lanes` tears a lane down, not just its
+  worktree.** It used to leave every forked database, compose stack and lane
+  summary behind, including summaries whose worktree was already gone. Each
+  reaped lane's summary is now its teardown manifest: `docker compose -p
+  <project> down`, `docker volume rm` for its forked volumes, the `reset_cmd`
+  of its own service namespaces, and `dropdb` (or the project's `dropdb_cmd`)
+  for its forked databases — every command listed before anything runs, and
+  under `--dry-run` nothing runs. Only what is provably that lane's is
+  touched: never a compose-delivered database, an index-numbered service slot,
+  or a summary `prepare-worktree` wrote for a worktree you made. A step that
+  fails is reported, and its lane's summary is kept so a rerun retries it.
+
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
   a resumed claude-code session closed a replay of killed background tasks

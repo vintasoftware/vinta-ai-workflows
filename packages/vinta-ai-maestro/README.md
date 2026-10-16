@@ -103,7 +103,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch after the run into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Stops at a conflict, leaving that branch as it was. |
 | `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. |
-| `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. A run whose job is still running is kept. |
+| `purge [run-id] [--repo <dir>] [--yes] [--dry-run] [--lanes] [--branches] [--force]` | Deletes run state under `.vinta-ai-maestro/runs/`; `--lanes` also removes lane worktrees and tears down their databases, service slices and compose stacks from each lane's summary. A run whose job is still running is kept; one that could still be resumed (paused, failed, interrupted) is kept unless named or `--force`. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 | `status <run-id>` | The run's state and every phase's, including a phase queued behind the integration worktree (and who holds it) — which otherwise reads `running` with nothing running. |
 | `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
@@ -897,7 +897,11 @@ $ vinta-ai-maestro purge <run-id>           # names every path, then asks
 $ vinta-ai-maestro purge <run-id> --yes     # for scripts
 ```
 
-It removes the run *directory* — snapshot, transcripts, raw streams, gate logs. It does not touch `flow.db`, which holds the identifiers the post-mortem is built from and no repository contents. A run id is a single name, never a path: anything containing a separator or `..` is refused before anything is unlinked.
+It removes the run *directory* — snapshot, transcripts, raw streams, gate logs — and the run's rows in `flow.db`. A run id is a single name, never a path: anything containing a separator or `..` is refused before anything is unlinked.
+
+Without a run id it purges every run **except** one whose job is still running and one that could still be resumed — paused, failed or interrupted — because purging a run ends it. Those are named and kept; name the run, or pass `--force`, to purge it anyway. A running job is kept regardless.
+
+`--lanes` also removes the lane worktrees under `.vinta-ai-maestro/lanes/` and undoes what each lane's summary records outside git: its compose stack and forked volumes, its own service namespaces, and its forked databases (`dropdb`, or the project's `dropdb_cmd`). Summaries whose worktree is already gone are cleaned up the same way. Every command is listed before anything runs — `--dry-run` stops there — and anything a summary names that is not provably that lane's alone (a compose-delivered database, an index-numbered service slot) is listed and left. A step that fails is reported and keeps its lane's summary, so running the purge again retries it.
 
 ## When something goes wrong: the daemon's own log
 

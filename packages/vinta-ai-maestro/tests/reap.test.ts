@@ -48,7 +48,17 @@ function repoWithLanes(runIds: readonly string[]): {
   for (const runId of runIds) {
     const name = `${runId}-crew-1-tier1`
     git(repo, 'worktree', 'add', '-q', '-b', `plan/p/phase-${runId}`, join(laneRoot, name))
-    writeFileSync(join(summaryDir, `${name}.yaml`), `name: ${name}\n`, 'utf8')
+    const summary = [
+      `name: ${name}`,
+      `path: ${JSON.stringify(join(laneRoot, name))}`,
+      `branch: plan/p/phase-${runId}`,
+      'base_ref: main',
+      'created_at: "2026-01-01T00:00:00Z"',
+      'state:',
+      '  compose:',
+      `    project_name: repo_${name}`,
+    ]
+    writeFileSync(join(summaryDir, `${name}.yaml`), `${summary.join('\n')}\n`, 'utf8')
   }
   return { repo, laneRoot, summaryDir }
 }
