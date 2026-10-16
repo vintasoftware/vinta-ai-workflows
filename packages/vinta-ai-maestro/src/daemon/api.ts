@@ -49,6 +49,7 @@ import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
 import { isJudgeGate, WorkflowSchema, type Workflow } from '../types.ts'
 import type { Actor } from '../journal/events.ts'
 import { CoordinatorForbidden } from '../coordinator/actor.ts'
+import { execHolder } from '../coordinator/exec.ts'
 import { coordinatorRefusals } from '../coordinator/policy.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
@@ -848,8 +849,15 @@ export function createApi(options: ApiOptions): Hono {
     if (run.exec === undefined) return fail(c, 501, 'exec_unsupported')
     const body = await readBody(c, ExecRequestSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
-    const { target, command } = body.value
-    if (!run.exec.knows(target)) return fail(c, 404, 'unknown_target')
+    const { command } = body.value
+    // A lane's short name or its phase's id resolves too, and a refusal lists
+    // what the run has: only the full lane name used to work, silently.
+    const target = run.exec.resolve(body.value.target)
+    if (target === null) {
+      return fail(c, 404, 'unknown_target', [
+        { path: 'target', code: 'unknown_target', message: `known targets: ${run.exec.targets().join(', ')}` },
+      ])
+    }
 
     const actor = actorOf(c)
     const port = run.exec
@@ -1629,6 +1637,11 @@ export function createApi(options: ApiOptions): Hono {
    * left behind — and queueing it would hold capacity for nobody.
    */
   function refuseHolder(c: Context, runId: string, holderNode: string): Response | null {
+    // A command an operator runs with `exec` on a lane no phase is in holds as
+    // itself, and only while it runs (`execHolder`).
+    if (holderNode.startsWith(execHolder(''))) {
+      return runs.get(runId)?.exec?.holds(holderNode) === true ? null : fail(c, 409, 'holder_not_running')
+    }
     const row = journal.nodes(runId).find((node) => node.node_id === holderNode)
     if (row === undefined) return fail(c, 400, 'invalid_holder')
     if (row.status !== 'running') return fail(c, 409, 'holder_not_running')

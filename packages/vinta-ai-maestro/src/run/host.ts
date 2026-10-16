@@ -91,6 +91,8 @@ export interface HostWiring {
   readonly workspace?: (
     target: string,
   ) => { readonly path: string; readonly env: Readonly<Record<string, string>> } | null
+  /** Every lane's full name, for `exec` to resolve short names against and list. */
+  readonly laneNames?: () => readonly string[]
   /** Stops every lane's compose stack, volumes kept (`LanePool.stopStacks`). */
   readonly stopStacks?: () => Promise<readonly StackStop[]>
   /** Runs `work` holding the integration worktree's queue, as `label`. */
@@ -476,6 +478,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       const lane = pool.lanes.find((candidate) => candidate.name === target)
       return lane === undefined ? null : { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
     },
+    laneNames: () => pool.lanes.map((lane) => lane.name),
     holdIntegration: (label, work) => executor.integration(work, null, label),
     stopStacks: () => pool.stopStacks(),
     // The same cache the executor was given, so a gate an agent ran is a hit

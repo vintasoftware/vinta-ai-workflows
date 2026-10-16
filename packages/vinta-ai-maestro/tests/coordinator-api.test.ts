@@ -17,7 +17,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { CoordinatorForbidden, type Actor } from '../src/coordinator/actor.ts'
-import { execPort, type ExecPort } from '../src/coordinator/exec.ts'
+import { execPort, resolveExecTarget, type ExecPort } from '../src/coordinator/exec.ts'
+import { AgentLeaseBroker, MAESTRO_NODE_ENV, MAESTRO_TURN_ENV } from '../src/resources/agent-leases.ts'
 import {
   AmendResponseSchema,
   ErrorResponseSchema,
@@ -462,6 +463,75 @@ describe('exec', () => {
     expect(r.journal.events(RUN_ID).filter((event) => event.type === 'workspace_exec')).toEqual([])
   })
 
+  /**
+   * `exec <run> crew-3-tier2-2` and `exec <run> p1` were both refused
+   * `unknown_target`; only `<run-id>-crew-3-tier2-2` worked, and nothing said
+   * so. The refusal now lists what the run has.
+   */
+  it('lists the run’s targets when it refuses one', async () => {
+    const r = await rig()
+    const port = execPort({
+      workspace: () => null,
+      targets: () => ['integration', `${RUN_ID}-crew-1 (crew-1, phase a)`],
+    })
+    r.register({ exec: port })
+
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/exec`, {
+      method: 'POST',
+      body: { target: 'crew-9', command: 'true' },
+    })
+
+    expect(result.status).toBe(404)
+    const body = ErrorResponseSchema.parse(result.body)
+    expect(body.error).toBe('unknown_target')
+    expect(JSON.stringify(body.issues)).toContain(`${RUN_ID}-crew-1 (crew-1, phase a)`)
+  })
+
+  /**
+   * Inside `exec`, `vinta-ai-maestro with test-suite -- make test` said "no
+   * live run is available" while the run was live: the command had the run's
+   * address and token but no holder. An exec on an idle lane holds leases as
+   * itself, for as long as it runs and no longer.
+   */
+  it('lets the command take a lease as itself while it runs, and not after', async () => {
+    const r = await rig()
+    const path = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-lane-'))
+    cleanups.push(() => rmSync(path, { recursive: true, force: true }))
+    const pools = new ResourcePools(makeWorkflow().resources, { agingMs: 0 })
+    const ended: string[] = []
+    const port = execPort({
+      workspace: (target) => (target === 'lane-1' ? { path, env: {} } : null),
+      onEnded: (holder) => ended.push(holder),
+    })
+    r.register({ exec: port, agentLeases: new AgentLeaseBroker(pools, r.journal, RUN_ID), pools })
+    const lease = () =>
+      call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+        method: 'POST',
+        token: r.daemon.agentToken,
+        body: { resources: ['test-suite'], holderNode: 'exec:lane-1' },
+      })
+
+    expect((await lease()).status).toBeGreaterThanOrEqual(400)
+    const running = exec(
+      r.daemon,
+      {
+        target: 'lane-1',
+        command: `node -e "process.stdout.write(process.env.${MAESTRO_NODE_ENV} + ' ' + (process.env.${MAESTRO_TURN_ENV} ? 'turn' : 'none')); setTimeout(() => {}, 1500)"`,
+      },
+      r.daemon.token,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const granted = await lease()
+    const result = await running
+
+    expect(granted.status).toBe(201)
+    expect(result.frames.flatMap((frame) => (typeof frame.output === 'string' ? [frame.output] : [])).join('')).toBe(
+      'exec:lane-1 turn',
+    )
+    expect(ended).toEqual(['exec:lane-1'])
+    expect((await lease()).status).toBeGreaterThanOrEqual(400)
+  })
+
   /** A host with no worktrees to offer says so, rather than running the command somewhere it guessed. */
   it('refuses on a host with no exec port', async () => {
     const r = await rig()
@@ -471,6 +541,20 @@ describe('exec', () => {
     })
     expect(result.status).toBe(501)
     expect(ErrorResponseSchema.parse(result.body).error).toBe('exec_unsupported')
+  })
+})
+
+describe('resolveExecTarget', () => {
+  const lanes = [`${RUN_ID}-crew-1-a`, `${RUN_ID}-crew-3-tier2-2`]
+  const phaseLanes = new Map([['p1', `${RUN_ID}-crew-3-tier2-2`]])
+
+  it('takes the full name, the name without the run prefix, or a phase running in the lane', () => {
+    const resolve = (target: string) => resolveExecTarget(target, { runId: RUN_ID, lanes, phaseLanes })
+    expect(resolve(`${RUN_ID}-crew-3-tier2-2`)).toBe(`${RUN_ID}-crew-3-tier2-2`)
+    expect(resolve('crew-3-tier2-2')).toBe(`${RUN_ID}-crew-3-tier2-2`)
+    expect(resolve('p1')).toBe(`${RUN_ID}-crew-3-tier2-2`)
+    expect(resolve('integration')).toBe('integration')
+    expect(resolve('crew-9')).toBeNull()
   })
 })
 

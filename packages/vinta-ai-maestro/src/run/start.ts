@@ -38,7 +38,7 @@ import { runDoctor, type DoctorReport } from '../doctor/index.ts'
 import type { DoctorOverrides } from '../cli/doctor.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
-import type { Journal } from '../journal/journal.ts'
+import type { Journal, NodeRow } from '../journal/journal.ts'
 import { LanePrepareError, prepareInfrastructure } from '../lanes/pool.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import {
@@ -63,7 +63,7 @@ import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
 import type { StackStop } from '../lanes/pool.ts'
 import { startCoordinatorLoop, type CoordinatorLoop } from '../coordinator/loop.ts'
 import type { ErrorFeed } from '../coordinator/errors.ts'
-import { execPort } from '../coordinator/exec.ts'
+import { execPort, type ExecPortOptions, resolveExecTarget } from '../coordinator/exec.ts'
 import type { TriggerOptions } from '../coordinator/triggers.ts'
 import { startConfigReloader, type ConfigReloader } from '../config/reload.ts'
 import { commitOf, ensurePlanBranch, planBranchName } from './plan-branch.ts'
@@ -562,6 +562,12 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
           exec: execPort({
             workspace: host.workspace,
             ...(host.holdIntegration === undefined ? {} : { holdIntegration: host.holdIntegration }),
+            ...execNames(host.laneNames ?? (() => []), () => journal.nodes(runId), runId),
+            // A command's leases and queued waits end with it, as a turn's do.
+            onEnded: (holder, turn) => {
+              agentLeases.endTurn(holder, turn)
+              agentGates?.endTurn(holder, turn)
+            },
           }),
         }),
     // Read through `current`, so a gate retuned mid-run is guarded on the
@@ -674,6 +680,34 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
  * dropping every projection and replaying reproduces it. Reading the whole
  * event list to count two kinds of row is affordable exactly once per process.
  */
+/**
+ * How `exec` names a run's worktrees: the resolution an operator's typed name
+ * goes through, the list a refusal shows, and which phase a lane is running —
+ * read fresh each time, because phases move between lanes as the run goes.
+ */
+function execNames(
+  laneNames: () => readonly string[],
+  rows: () => readonly NodeRow[],
+  runId: string,
+): Pick<ExecPortOptions, 'resolve' | 'targets' | 'holder'> {
+  const phaseLanes = (): Map<string, string> =>
+    new Map(rows().flatMap((row) => (row.status === 'running' && row.lane !== null ? [[row.node_id, row.lane]] : [])))
+  const phaseIn = (lane: string): string | null =>
+    [...phaseLanes()].find(([, name]) => name === lane)?.[0] ?? null
+  return {
+    resolve: (target) => resolveExecTarget(target, { runId, lanes: laneNames(), phaseLanes: phaseLanes() }),
+    targets: () => [
+      'integration',
+      ...laneNames().map((name) => {
+        const short = name.startsWith(`${runId}-`) ? name.slice(runId.length + 1) : name
+        const phase = phaseIn(name)
+        return `${name} (${short}${phase === null ? '' : `, phase ${phase}`})`
+      }),
+    ],
+    holder: (target) => (target === 'integration' ? null : phaseIn(target)),
+  }
+}
+
 function attemptOf(journal: Journal, runId: string): number {
   let resumes = 0
   for (const event of journal.events(runId)) {
