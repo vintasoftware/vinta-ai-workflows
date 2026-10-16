@@ -2172,7 +2172,11 @@ describe('§16 the review', () => {
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first unapproved review')
     const asked = r.journal.events('run-1').filter((event) => event.type === 'human_question')
     expect(asked.map((event) => event.payload)).toEqual([
-      expect.objectContaining({ effect_id: 'e-unapproved', kind: 'choice', choices: ['continue', 'stop'] }),
+      expect.objectContaining({
+        effect_id: 'e-unapproved',
+        kind: 'choice',
+        choices: ['continue', 'accept', 'stop'],
+      }),
     ])
 
     r.scheduler.answer('a', { human: { answer: 'continue' } })
@@ -2196,6 +2200,37 @@ describe('§16 the review', () => {
       { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
       { slot: 'main', disposition: 'reused', session_id: 'claude-code-session-1' },
     ])
+    expectDrained(r)
+  })
+
+  /**
+   * Operators answered `stop` meaning "take it as it is", and it failed the
+   * attempt, which under `--on-failure retry` starts the phase over. `accept`
+   * is that answer: the review loop ends, the work stays, and the phase goes
+   * on through polish, the gates and integration.
+   */
+  it('accepts an unapproved phase as it is: polish, verify and integrate, no failure', async () => {
+    const r = rig(reviewedWorkflow(['review', 'deslop']), {
+      outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the unapproved review')
+    const asked = r.journal.events('run-1').filter((event) => event.type === 'human_question')
+    const question = asked[0]?.payload as unknown as { choices: string[]; question: string }
+    expect(question.choices).toEqual(['continue', 'accept', 'stop'])
+    // Each choice says what it does — `stop` was read as "accept" for want of it.
+    expect(question.question).toContain('accept')
+    expect(question.question).toContain('starts the phase over')
+
+    r.scheduler.answer('a', { human: { answer: 'accept' } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(countOf(r, 'e-review:review')).toBe(1)
+    expect(countOf(r, 'e-chores')).toBe(1)
+    expect(countOf(r, 'e-verify')).toBe(1)
+    expect(answersOf(r)).toEqual([{ effect_id: 'e-unapproved', answer: 'accept' }])
     expectDrained(r)
   })
 
@@ -2243,7 +2278,7 @@ describe('§16 the review', () => {
 
     const running = r.scheduler.run()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the unapproved review')
-    expect(r.journal.pendingQuestion('run-1', 'a')?.question.choices).toEqual(['continue', 'stop'])
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question.choices).toEqual(['continue', 'accept', 'stop'])
 
     r.scheduler.answer('a', { human: { answer: 'continue' } })
     const report = await running

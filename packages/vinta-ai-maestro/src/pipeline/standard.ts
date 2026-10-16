@@ -11,6 +11,7 @@
  * exhausted  ──┬─ continue (budget granted again) ──▶ fix
  *              └─ stop ──▶ failed
  * unapproved ──┬─ continue ──▶ review
+ *              ├─ accept ──▶ polish
  *              └─ stop ──▶ failed
  * ```
  *
@@ -35,8 +36,10 @@
  * runs until the reviewer approves; with one, it stops after that many
  * unsuccessful iterations and says so. Whether more rounds are
  * worth it is the operator's call: `continue` runs the review again, and the
- * new turn picks the argument up where the session left it. Unattended it
- * answers `stop`, so the phase goes to `--on-failure`.
+ * new turn picks the argument up where the session left it; `accept` takes the
+ * phase as it is, through polish and the gates; `stop` fails the attempt, so
+ * the phase goes to `--on-failure`. Unattended it answers `continue` once,
+ * then `stop` (`askToContinue`).
  *
  * **`verify` runs the gates again, on the tree that merges.** The review loop
  * and the polish chores both edit it. The loop runs the gates through the
@@ -134,13 +137,13 @@ const runGates = (id: string) => ({
  * more budget where it already is; a second `stop`-worthy round in the same
  * attempt is evidence the round is not the problem.
  */
-const askToContinue = (id: string, question: string) => ({
+const askToContinue = (id: string, question: string, choices: readonly string[] = ['continue', 'stop']) => ({
   id,
   definitionId: 'await_human',
   params: {
     question,
     kind: 'choice',
-    choices: ['continue', 'stop'],
+    choices,
     unattended_answer: ['continue', 'stop'],
   },
 })
@@ -214,7 +217,12 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
           'e-unapproved',
           'The review loop ran its iterations and the reviewer has not approved this phase. ' +
             'The transcript has the blockers that remain and the implementer’s report on ' +
-            'them. Continue the review for another round of the same budget, or stop the phase?',
+            'them. continue: review again, on the same session, for another budget. ' +
+            'accept: end the review and keep the work as it is — the polish chores, the ' +
+            'gates and integration still run — recorded as accepted without approval. ' +
+            'stop: fail this attempt; under --on-failure retry that starts the phase over ' +
+            'from implement on a fresh session.',
+          ['continue', 'accept', 'stop'],
         ),
       ],
     },
@@ -317,11 +325,20 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       to: 'review',
       guard: "human.answer == 'continue'",
     },
+    // The operator taking the phase without the reviewer's approval. The
+    // polish chores and `verify` still run: accepting a review's open findings
+    // is not accepting a red gate.
+    {
+      id: 't-review-accept',
+      from: 'unapproved',
+      to: 'polish',
+      guard: "human.answer == 'accept'",
+    },
     {
       id: 't-review-stop',
       from: 'unapproved',
       to: 'failed',
-      guard: "!(human.answer == 'continue')",
+      guard: "!(human.answer == 'continue') && !(human.answer == 'accept')",
     },
     // Unconditional, and the polish chores state nothing a guard could branch
     // on: they are not allowed to stand between a phase and its merge, which is
