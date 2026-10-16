@@ -81,6 +81,8 @@ async function rig(options: { readonly upstream?: Daemon } = {}): Promise<Rig> {
   const journal = openJournal(dir)
   const workflow = makeWorkflow()
   journal.createRun(RUN_ID, workflow)
+  // The lease and gate routes serve a running node only.
+  journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'running' } })
 
   const calls: string[] = []
   const pools = new ResourcePools(workflow.resources, { agingMs: 0 })

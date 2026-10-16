@@ -55,7 +55,13 @@ import {
 import { ClaudeCodeAdapter } from '../src/harness/claude-code.ts'
 import { CodexAdapter } from '../src/harness/codex.ts'
 import { OpencodeAdapter } from '../src/harness/opencode.ts'
-import { EventPageSchema, NodeChangesSchema, StartRunResponseSchema } from '../src/daemon/schemas.ts'
+import {
+  EventPageSchema,
+  HaltResponseSchema,
+  NodeChangesSchema,
+  StartRunResponseSchema,
+} from '../src/daemon/schemas.ts'
+import { AgentGateRefusal } from '../src/resources/agent-gates.ts'
 import { PtyServerFrameSchema } from '../src/daemon/pty-frames.ts'
 import type {
   PermissionJudgePort,
@@ -746,9 +752,21 @@ describe('snapshots', () => {
   })
 })
 
+/**
+ * Marks nodes `running`, as the scheduler does on dispatch. The lease and gate
+ * routes serve only a running node: anything else asking is a leftover of a
+ * session that has ended.
+ */
+function running(r: Rig, ...nodes: string[]): void {
+  for (const nodeId of nodes) {
+    r.journal.append({ runId: RUN_ID, nodeId, type: 'node_status', payload: { status: 'running' } })
+  }
+}
+
 describe('agent-held leases', () => {
   it('holds the request until the shared pool grants it, then releases idempotently', async () => {
     const r = await rig()
+    running(r, 'a', 'b')
     const firstResult = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
       method: 'POST',
       body: { resources: ['test-suite'], holderNode: 'a' },
@@ -793,6 +811,7 @@ describe('agent-held leases', () => {
    */
   it('answers "still queued" and parks the wait rather than dropping it', async () => {
     const r = await rig({ leaseWaitMs: 20 })
+    running(r, 'a', 'b')
     const held = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
       method: 'POST',
       body: { resources: ['test-suite'], holderNode: 'a' },
@@ -833,6 +852,7 @@ describe('agent-held leases', () => {
    */
   it('does not let a later in-process waiter overtake an agent between hops', async () => {
     const r = await rig({ leaseWaitMs: 20 })
+    running(r, 'a', 'b')
 
     const holder = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
       method: 'POST',
@@ -876,6 +896,7 @@ describe('agent-held leases', () => {
 
   it('renews a live lease and refuses lane self-deadlocks and unknown holders', async () => {
     const r = await rig()
+    running(r, 'a', 'b')
     const acquired = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
       method: 'POST',
       body: { resources: ['test-suite'], holderNode: 'a' },
@@ -917,6 +938,7 @@ describe('agent-held leases', () => {
    */
   it('tells a connected client when an agent takes a lease and when it drops it', async () => {
     const r = await rig()
+    running(r, 'a', 'b')
     const connection = await connect(r.daemon, `?run=${RUN_ID}&token=${r.daemon.token}`)
     if (!('socket' in connection)) throw new Error('handshake refused')
     await until(() => (connection.frames.length > 0 ? true : undefined), 'the backlog frame')
@@ -982,6 +1004,174 @@ describe('agent-held leases', () => {
  * as a result rather than as an error. What happens behind it — the cache, the
  * pools, the lane — is `agent-gates.test.ts`'s.
  */
+describe('who a lease or gate is waiting on, and when nobody is', () => {
+  it('names each holder of the resource in a queued answer', async () => {
+    const r = await rig({ leaseWaitMs: 20 })
+    running(r, 'a', 'b')
+    r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_assigned', payload: { lane: 'run-1-lane-1' } })
+    const held = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a', turn: 'turn-a', pid: 4242 },
+    })
+    expect(held.status).toBe(201)
+
+    const queued = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b', pid: 5151 },
+    })
+
+    expect(queued.status).toBe(202)
+    expect(AgentLeaseWaitingSchema.parse(queued.body).holders).toEqual([
+      { resource: 'test-suite', node: 'a', lane: 'run-1-lane-1', via: 'with', pid: 4242 },
+    ])
+  })
+
+  it('names a phase’s own gate step, which holds the pool through the scheduler', async () => {
+    const r = await rig({ leaseWaitMs: 20 })
+    running(r, 'a', 'b')
+    // What the scheduler does around a `run_gate`: the pool, and the row.
+    const lease = await r.pools.acquire(['test-suite'])
+    r.journal.acquireLease('test-suite', 'a')
+
+    const queued = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b' },
+    })
+
+    expect(AgentLeaseWaitingSchema.parse(queued.body).holders).toEqual([
+      { resource: 'test-suite', node: 'a', lane: null, via: 'gate_step' },
+    ])
+    lease.release()
+  })
+
+  /**
+   * Agents background `with … &` and end the turn; the process is reparented
+   * and keeps asking. A node that is not running has no turn for it to serve.
+   */
+  it('refuses a node that is not running', async () => {
+    const r = await rig()
+    running(r, 'a')
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b' },
+    })
+    expect(result).toMatchObject({ status: 409, body: { error: 'holder_not_running' } })
+    expect(r.pools.waiting).toBe(0)
+  })
+
+  it('refuses a session that has ended, and takes back the lease it held', async () => {
+    const r = await rig()
+    running(r, 'a')
+    const held = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a', turn: 'turn-1' },
+    })
+    const lease = AgentLeaseGrantSchema.parse(held.body)
+
+    r.agentLeases.endTurn('a', 'turn-1')
+
+    expect(r.pools.held('test-suite')).toBe(0)
+    const renewed = await call(r.daemon, `/api/runs/${RUN_ID}/leases/${lease.leaseId}`, { method: 'PUT' })
+    expect(renewed).toMatchObject({ status: 409, body: { error: 'lease_expired' } })
+    const again = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a', turn: 'turn-1' },
+    })
+    expect(again).toMatchObject({ status: 409, body: { error: 'turn_ended' } })
+  })
+
+  it('answers a queued client with the pause, so its turn can end', async () => {
+    const r = await rig({ leaseWaitMs: 20 })
+    running(r, 'a', 'b')
+    await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'a' },
+    })
+    const queued = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b' },
+    })
+    const ticket = AgentLeaseWaitingSchema.parse(queued.body)
+
+    r.agentLeases.halt('run_pausing')
+
+    expect(r.pools.waiting).toBe(0)
+    const answered = await call(r.daemon, `/api/runs/${RUN_ID}/leases`, {
+      method: 'POST',
+      body: { resources: ['test-suite'], holderNode: 'b', waitToken: ticket.waitToken },
+    })
+    expect(answered).toMatchObject({ status: 409, body: { error: 'run_pausing' } })
+  })
+
+  it('says which of its own leases a refused gate is waiting on', async () => {
+    const r = await rig()
+    running(r, 'a')
+    r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_assigned', payload: { lane: 'run-1-lane-1' } })
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      agentLeases: r.agentLeases,
+      agentGates: {
+        hop: async () => {
+          throw new AgentGateRefusal('holds_required:test-suite', [
+            { leaseId: 'lease-1', holderNode: 'a', resources: ['test-suite'], turn: 'turn-1', pid: 4242 },
+          ])
+        },
+      },
+    })
+
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'a', turn: 'turn-1' },
+    })
+
+    expect(result.status).toBe(409)
+    expect(result.body).toEqual({
+      error: 'holds_required:test-suite',
+      issues: null,
+      holders: [{ resource: 'test-suite', node: 'a', lane: 'run-1-lane-1', via: 'with', pid: 4242 }],
+    })
+  })
+
+  it('names who holds a queued gate’s pools, and says running once it runs', async () => {
+    const r = await rig()
+    running(r, 'a', 'b')
+    let state: 'queued' | 'running' = 'queued'
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      agentLeases: r.agentLeases,
+      agentGates: {
+        hop: async (gateId) => ({ waiting: true, gateId, state }),
+        running: () => [{ holderNode: 'b', gateId: 'unit', requires: ['test-suite'] }],
+      },
+    })
+
+    const queued = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'a' },
+    })
+    expect(queued.status).toBe(202)
+    expect(queued.body).toEqual({
+      waiting: true,
+      gateId: 'unit',
+      state: 'queued',
+      holders: [{ resource: 'test-suite', node: 'b', lane: null, via: 'gate', gate: 'unit' }],
+    })
+
+    state = 'running'
+    const started = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
+      method: 'POST',
+      body: { gate: 'unit', holderNode: 'a' },
+    })
+    expect(started.body).toEqual({ waiting: true, gateId: 'unit', state: 'running' })
+  })
+})
+
 describe('gates run for an agent', () => {
   /**
    * Records what it was asked for; the broker's own behaviour is tested
@@ -994,7 +1184,7 @@ describe('gates run for an agent', () => {
       calls,
       hop: async (gateId: string, holderNode: string) => {
         calls.push({ gateId, holderNode })
-        if (options.waiting === true) return { waiting: true as const, gateId }
+        if (options.waiting === true) return { waiting: true as const, gateId, state: 'running' as const }
         return {
           gateId,
           status: 'failed',
@@ -1008,6 +1198,7 @@ describe('gates run for an agent', () => {
 
   it('runs the named gate for the asking node and returns its verdict', async () => {
     const r = await rig()
+    running(r, 'a', 'b')
     const gates = recordingGates()
     r.daemon.register({
       runId: RUN_ID,
@@ -1039,6 +1230,7 @@ describe('gates run for an agent', () => {
     // the CLI reported a daemon it could not reach — about a gate that was
     // running perfectly well.
     const r = await rig()
+    running(r, 'a', 'b')
     const gates = recordingGates({ waiting: true })
     r.daemon.register({
       runId: RUN_ID,
@@ -1055,7 +1247,7 @@ describe('gates run for an agent', () => {
     })
 
     expect(result.status).toBe(202)
-    expect(result.body).toEqual({ waiting: true, gateId: 'unit' })
+    expect(result.body).toEqual({ waiting: true, gateId: 'unit', state: 'running' })
     // No exit code anywhere in it: a waiting answer that carried one would be
     // a verdict on a gate that has not finished.
     expect(result.body).not.toHaveProperty('exitCode')
@@ -1063,6 +1255,7 @@ describe('gates run for an agent', () => {
 
   it('refuses an undeclared gate, a node that is not the run’s, and a body carrying a command', async () => {
     const r = await rig()
+    running(r, 'a', 'b')
     const gates = recordingGates()
     r.daemon.register({
       runId: RUN_ID,
@@ -1103,6 +1296,7 @@ describe('gates run for an agent', () => {
   it('says so rather than pretending when the host offers no gates', async () => {
     // The default rig registers no `agentGates` — a read-only or injected host.
     const r = await rig()
+    running(r, 'a', 'b')
 
     const result = await call(r.daemon, `/api/runs/${RUN_ID}/gates`, {
       method: 'POST',
@@ -2984,6 +3178,25 @@ describe('halting a run (pause / stop)', () => {
     expect((await call(r.daemon, `/api/runs/${RUN_ID}/pause`, { method: 'POST', body: {} })).status).toBe(202)
     expect((await call(r.daemon, `/api/runs/${RUN_ID}/stop`, { method: 'POST', body: {} })).status).toBe(202)
     expect(modes).toEqual(['paused', 'cancelled'])
+  })
+
+  it('answers with what the drain is still waiting on, when the host says', async () => {
+    const r = await rig()
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      halt: async () => [{ node: 'a', doing: 'agent_turn' as const, harness: 'claude-code' }],
+    })
+
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/pause`, { method: 'POST', body: {} })
+
+    expect(result.status).toBe(202)
+    expect(HaltResponseSchema.parse(result.body)).toEqual({
+      ok: true,
+      waitingOn: [{ node: 'a', doing: 'agent_turn', harness: 'claude-code' }],
+    })
   })
 
   it('refuses for a host that cannot halt', async () => {

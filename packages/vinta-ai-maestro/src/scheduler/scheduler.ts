@@ -74,11 +74,13 @@
  */
 import { ids as guardIds } from '../guard/guard.ts'
 import { checkCommand, shellLineOf } from '../guard/match.ts'
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl, AdmissionOutcome, AdmitOptions } from '../admission/admission.ts'
 import { systemClock, type Clock } from '../admission/clock.ts'
 import { type PtyRegistry, takeovers } from '../daemon/pty.ts'
+import type { NodeActivity } from '../daemon/schemas.ts'
 import { computeHeights, computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import { gitLines } from '../integration/git.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
@@ -121,7 +123,7 @@ import {
 } from '../pipeline/interpreter.ts'
 import { LaneRecycleError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
-import { MAESTRO_NODE_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
+import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import { assignCrew, type CrewDecision, roster } from './crew.ts'
 import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import {
@@ -167,6 +169,12 @@ interface Turn {
   readonly priority: AdmitOptions
   /** The task that resumes `resumeSessionId` with `prompt` as its whole message. */
   readonly task: (prompt: string, resumeSessionId: string) => AgentTask
+  /**
+   * The turn id the last task built carried, or null where the environment
+   * carries none. Admission spawns the task it was just handed, so the session
+   * a drain reads is always the last one built.
+   */
+  readonly turnId: () => string | null
 }
 
 /**
@@ -364,6 +372,14 @@ export interface SchedulerOptions {
    * production wiring is a composition rather than a flag.
    */
   readonly takeovers?: PtyRegistry
+  /**
+   * Told when an agent session's stream has drained, with the turn id its
+   * environment carried (`MAESTRO_TURN_ENV`). The daemon's lease and gate
+   * brokers release what that session's commands still hold and refuse them
+   * from then on: a command the agent backgrounded with `&` outlives the
+   * session and would otherwise keep its place in a queue for nobody.
+   */
+  readonly onTurnEnded?: (nodeId: string, turnId: string) => void
   /**
    * The daemon's own log. Absent in tests, and then nothing is written.
    *
@@ -1211,7 +1227,15 @@ export class Scheduler {
   async halt(mode: HaltMode): Promise<void> {
     if (this.#halt === 'cancelled' || this.#halt === 'interrupted' || this.#halt === mode) return
     this.#halt = mode
-    this.#log.info('scheduler.halt', { mode })
+    // What the drain will wait for, named. A pause that does not finish is
+    // waiting on one of these, and `{ mode }` alone left the operator to guess
+    // which — the case that prompted this was an agent turn queued in `with`.
+    const active = this.activity()
+    this.#log.info('scheduler.halt', {
+      mode,
+      active: active.length,
+      nodes: active.map((entry) => `${entry.node}:${entry.doing}`).join(','),
+    })
     this.#halting.resolve()
     for (const state of this.#states.values()) {
       const resume = state.resume
@@ -1231,6 +1255,28 @@ export class Scheduler {
       await Promise.all(kills)
     }
     this.#wake()
+  }
+
+  /**
+   * The nodes whose bodies are still executing, and the step each is in: a
+   * live agent turn, a gate holding its pools, a question, or anything else
+   * between two of those. The drain a halt starts ends when this is empty.
+   */
+  activity(): NodeActivity[] {
+    const active: NodeActivity[] = []
+    for (const state of this.#states.values()) {
+      if (state.status !== 'running' && state.status !== 'awaiting_human') continue
+      if (state.live !== null) {
+        active.push({ node: state.node.id, doing: 'agent_turn', harness: state.live.adapter.id })
+      } else if (state.gateLease !== null) {
+        active.push({ node: state.node.id, doing: 'gate' })
+      } else if (state.resume !== null) {
+        active.push({ node: state.node.id, doing: 'question' })
+      } else {
+        active.push({ node: state.node.id, doing: 'step' })
+      }
+    }
+    return active
   }
 
   /** Where a node goes when a halt reaches it: everything back, and `pending`. */
@@ -2759,10 +2805,17 @@ export class Scheduler {
     // The lease client attributes journal rows to the phase that asked. Only
     // add it where the host exposed a daemon URL; an injected/test host with no
     // lease route keeps the exact environment it supplied before this feature.
-    const env =
-      laneEnv[MAESTRO_URL_ENV] === undefined
-        ? laneEnv
-        : { ...laneEnv, [MAESTRO_NODE_ENV]: state.node.id }
+    //
+    // And the session: a fresh turn id per task built, so a command left
+    // running when its session ends can be told apart from the next session's.
+    let turnId: string | null = null
+    const envField = (): { readonly env?: Readonly<Record<string, string>> } => {
+      if (laneEnv[MAESTRO_URL_ENV] === undefined) {
+        return Object.keys(laneEnv).length === 0 ? {} : { env: laneEnv }
+      }
+      turnId = randomUUID()
+      return { env: { ...laneEnv, [MAESTRO_NODE_ENV]: state.node.id, [MAESTRO_TURN_ENV]: turnId } }
+    }
 
     // §15's decision, taken before the task is built because the prompt
     // depends on it: a continued session is handed a delta, and a cold one the
@@ -2803,7 +2856,7 @@ export class Scheduler {
         ...(plan.crossPhase && reorientation !== null ? { reorientation } : {}),
       }),
       model: this.#modelFor(state, params),
-      ...(Object.keys(env).length === 0 ? {} : { env }),
+      ...envField(),
       ...(owed.length === 0 ? {} : { operatorText: owed.join('\n') }),
       // The handoff token: either the slot's session (§15) or, for a pipeline
       // that named no slot, the id an operator's takeover left behind (§9).
@@ -2899,9 +2952,10 @@ export class Scheduler {
         cwd,
         prompt,
         model: this.#modelFor(state, params),
-        ...(Object.keys(env).length === 0 ? {} : { env }),
+        ...envField(),
         resumeSessionId,
       }),
+      turnId: () => turnId,
     }
     let watch = new QuestionWatch()
     let drained = await this.#drain(state, outcome, turn, watch)
@@ -2997,6 +3051,7 @@ export class Scheduler {
   ): Promise<{ readonly sessionId: string; readonly empty: boolean }> {
     const { runId, journal, admission } = this.#options
     const { adapter, plan, by } = turn
+    const turnId = turn.turnId()
     let sessionId = outcome.session.id
     // Whether the model took any part: a word, a thought or a tool call. A
     // usage row alone is not that — a replay closes with one, at zero.
@@ -3032,6 +3087,10 @@ export class Scheduler {
       state.live = null
       // Frees the harness in-flight slot: the ceiling counts running agents.
       outcome.release()
+      // What the session's commands still hold or wait for, released. The
+      // adapter has cancelled the background work it tracked; this is for the
+      // work it could not see.
+      if (turnId !== null) this.#options.onTurnEnded?.(state.node.id, turnId)
     }
     if (state.aborted) throw new Aborted()
 

@@ -45,7 +45,7 @@ import { errorKind, sanitize } from '../log/index.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
 import type { IntegrationWaveRecord } from '../postmortem/postmortem.ts'
 import type { ResourcePools } from '../resources/pools.ts'
-import { AgentGateBroker } from '../resources/agent-gates.ts'
+import { AgentGateBroker, type AgentGateBrokerOptions } from '../resources/agent-gates.ts'
 import { roster } from '../scheduler/crew.ts'
 import { isJudgeGate, type Workflow } from '../types.ts'
 import type { SystemOne } from '../system-one/config.ts'
@@ -105,7 +105,10 @@ export interface HostWiring {
    * it. Absent for an injected executor, which provisions no lanes to run a
    * gate against.
    */
-  readonly gatesFor?: (pools: ResourcePools) => AgentGatePort
+  readonly gatesFor?: (
+    pools: ResourcePools,
+    leases?: AgentGateBrokerOptions['leases'],
+  ) => AgentGatePort & Pick<AgentGateBroker, 'endTurn' | 'halt'>
   /**
    * Hand an amended workflow (§9) to everything on this side of the seam.
    *
@@ -455,13 +458,16 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // for the `gate` node afterwards. Two caches over one project would be two
     // databases in one file's place and the hits would land in whichever one
     // nobody asked.
-    gatesFor: (pools) => {
+    gatesFor: (pools, leases) => {
       const broker = new AgentGateBroker({
         workflow,
         runId,
         journal,
         pools,
         cache,
+        // The lease broker's holder index, so a gate asked for from inside a
+        // `with` on its own pool is refused instead of waiting on itself.
+        ...(leases === undefined ? {} : { leases }),
         // Through the pool for `laneEnv`'s reason, and with the same agent
         // environment overlaid: a gate run from inside a turn must see the
         // lane's forked database and compose project, exactly as the gate node's

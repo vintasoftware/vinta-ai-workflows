@@ -6,21 +6,26 @@ import {
   MAESTRO_NODE_ENV,
   MAESTRO_RUN_ENV,
   MAESTRO_TOKEN_ENV,
+  MAESTRO_TURN_ENV,
   MAESTRO_URL_ENV,
 } from '../resources/agent-leases.ts'
+import { endingRefusal, heldBy, readRefusal } from './holders.ts'
 import { FAILED, USAGE, type Io } from './io.ts'
 
 export const WITH_USAGE = `usage: vinta-ai-maestro with <resource> -- <cmd>
 
   Waits — for as long as it takes — until the running daemon grants
   <resource>, then runs <cmd> and releases the lease on exit. A resource held
-  by another lane is not an error: this reports that it is waiting and keeps
-  waiting. Long commands renew their lease automatically. This verb is intended
+  by another lane is not an error: this says who holds it and keeps waiting.
+  Long commands renew their lease automatically. This verb is intended
   for agent turns started by \`vinta-ai-maestro run\`; the daemon connection and
   current phase are supplied through that turn's environment.
 
   If it does fail, the command is not run. Report the failure rather than
-  running <cmd> unleased.
+  running <cmd> unleased. If it says the run is pausing, end your turn.
+
+  Never wrap \`vinta-ai-maestro gate\` in it: a gate takes its own leases, and
+  inside \`with\` it waits for the resource this command is holding.
 
   Quote <cmd> as one argument when it contains shell operators or significant
   whitespace.`
@@ -78,6 +83,7 @@ export async function withCommand(
       headers,
       resource,
       holderNode,
+      turn: process.env[MAESTRO_TURN_ENV],
       io,
       ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
     })
@@ -162,6 +168,8 @@ interface LeaseWait {
   readonly headers: Readonly<Record<string, string>>
   readonly resource: string
   readonly holderNode: string
+  /** The session this was started from, when the environment carries one. */
+  readonly turn: string | undefined
   readonly io: Io
   readonly sleep?: (ms: number) => Promise<void>
   readonly now?: () => number
@@ -188,12 +196,13 @@ interface LeaseWait {
  * token costs a field and turns the loop back into one wait.
  */
 async function waitForLease(wait: LeaseWait): Promise<{ leaseId: string; ttlMs: number } | null> {
-  const { request, endpoint, headers, resource, holderNode, io } = wait
+  const { request, endpoint, headers, resource, holderNode, turn, io } = wait
   const sleep = wait.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)))
   const now = wait.now ?? (() => Date.now())
 
   let transportFailures = 0
   let announcedAt: number | null = null
+  let announced = ''
   let waitToken: string | undefined
 
   for (;;) {
@@ -201,6 +210,9 @@ async function waitForLease(wait: LeaseWait): Promise<{ leaseId: string; ttlMs: 
       resources: [resource],
       holderNode,
       ...(waitToken === undefined ? {} : { waitToken }),
+      ...(turn === undefined ? {} : { turn }),
+      // So whoever queues behind this lease is told which process holds it.
+      pid: process.pid,
     })
     let response: Response
     try {
@@ -225,10 +237,15 @@ async function waitForLease(wait: LeaseWait): Promise<{ leaseId: string; ttlMs: 
       const queued = AgentLeaseWaitingSchema.safeParse(await response.json().catch(() => null))
       waitToken = queued.success ? queued.data.waitToken : undefined
 
-      // Said once, then occasionally: a transcript should show a turn waiting
-      // rather than a turn that stopped saying anything.
-      if (announcedAt === null) {
-        io.err(`vinta-ai-maestro: waiting for "${resource}" — it is held by another lane.`)
+      // Said once, again whenever the holder changes, and otherwise only
+      // occasionally: a transcript should show a turn waiting rather than a
+      // turn that stopped saying anything, and should say on whom. "Held by
+      // another lane" was the line printed while the asking phase held the
+      // lease itself, the one wait that could never end.
+      const holders = heldBy(resource, queued.success ? queued.data.holders : undefined, holderNode)
+      if (announcedAt === null || holders !== announced) {
+        io.err(`vinta-ai-maestro: waiting for ${holders}`)
+        announced = holders
         announcedAt = now()
       } else if (now() - announcedAt >= NOTICE_MS) {
         io.err(`vinta-ai-maestro: still waiting for "${resource}".`)
@@ -257,14 +274,9 @@ async function waitForLease(wait: LeaseWait): Promise<{ leaseId: string; ttlMs: 
 
 /** What a refusal means, in terms of the thing the operator can change. */
 async function refusal(response: Response, resource: string): Promise<string> {
-  let code = ''
-  try {
-    const body: unknown = await response.json()
-    const named = (body as { error?: unknown } | null)?.error
-    if (typeof named === 'string') code = named
-  } catch {
-    // A body that will not parse tells us nothing the status does not.
-  }
+  const { code } = await readRefusal(response)
+  const ending = endingRefusal(code)
+  if (ending !== null) return ending
 
   switch (code) {
     case 'invalid_resource':

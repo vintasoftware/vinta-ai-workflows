@@ -45,7 +45,8 @@ import { phaseGate } from '../gates/scope.ts'
 import type { Journal } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import { isJudgeGate, type Workflow } from '../types.ts'
-import type { ResourcePools } from './pools.ts'
+import type { AgentLeaseHeld } from './agent-leases.ts'
+import { AcquireAborted, type ResourcePools } from './pools.ts'
 
 /** The lane a node was assigned, as the host already describes one. */
 export interface GateLane {
@@ -73,7 +74,14 @@ export interface AgentGateResult {
  * that must not leak it.
  */
 export class AgentGateRefusal extends Error {
-  constructor(readonly code: string) {
+  /**
+   * `held` is set on `holds_required`: the caller's own leases on the gate's
+   * pools, so the refusal can say which command is holding them.
+   */
+  constructor(
+    readonly code: string,
+    readonly held: readonly AgentLeaseHeld[] = [],
+  ) {
     super(code)
   }
 }
@@ -84,6 +92,15 @@ export interface AgentGateBrokerOptions {
   readonly journal: Pick<Journal, 'nodes' | 'append' | 'appendTranscript' | 'gateLogPath'>
   readonly pools: ResourcePools
   readonly cache: GateCache
+  /**
+   * The leases agents hold through `with`, by holder. A gate asked for by a
+   * node that already holds one of its pools would queue behind that node's
+   * own lease, and when the gate was asked for from *inside* the `with`
+   * (`with test-suite -- vinta-ai-maestro gate test`) the lease is never let
+   * go: every lane's gates queued behind it for fifty-five minutes in one run.
+   * Absent for a host with no lease broker, and then nothing is checked.
+   */
+  readonly leases?: { held(): readonly AgentLeaseHeld[] }
   /** The lane behind a slot name, read through the pool: a recycled slot is a new object. */
   readonly lane: (name: string) => GateLane
   /**
@@ -112,16 +129,41 @@ export interface AgentGateBrokerOptions {
 export interface AgentGateWaiting {
   readonly waiting: true
   readonly gateId: string
+  /**
+   * `queued` until the gate's pools are granted, `running` after. An agent
+   * told "running" about a gate that is only queued reads the wait as the
+   * suite being slow, and nobody looks at what is holding the pool.
+   */
+  readonly state: GateFlightState
 }
 
-/** One gate, running, with whoever is watching it sharing the one promise. */
+export type GateFlightState = 'queued' | 'running'
+
+/** One gate, queued or running, with whoever is watching it sharing the one promise. */
 interface GateFlight {
   readonly settled: Promise<AgentGateResult>
+  readonly holderNode: string
+  readonly gateId: string
+  readonly requires: readonly string[]
+  state: GateFlightState
+  /** The session that last asked for it. A queued flight goes when that session ends. */
+  turn: string | undefined
+  /** Takes the gate out of the pool queue. Too late, and harmless, once it runs. */
+  readonly abort: AbortController
+}
+
+/** A gate an agent asked for that holds its pools now, for naming to a waiter. */
+export interface AgentGateRunning {
+  readonly holderNode: string
+  readonly gateId: string
+  readonly requires: readonly string[]
 }
 
 export interface AgentGateHopOptions {
   /** How long this hop may hold the request open before answering "not yet". */
   readonly withinMs: number
+  /** The session asking (`MAESTRO_TURN_ENV`), when the client knows it. */
+  readonly turn?: string
 }
 
 export class AgentGateBroker {
@@ -132,6 +174,10 @@ export class AgentGateBroker {
   readonly #clearTimer: (timer: NodeJS.Timeout) => void
   /** Keyed by `(holderNode, gateId)` — see `AgentGateWaiting` for why that is the key. */
   readonly #inFlight = new Map<string, GateFlight>()
+  /** `AgentLeaseBroker`'s, for the same orphaned clients. */
+  readonly #endedTurns = new Set<string>()
+  /** Set by `halt`: the code every gate not already running is refused with. */
+  #halted: string | null = null
 
   constructor(options: AgentGateBrokerOptions) {
     this.#options = options
@@ -188,15 +234,44 @@ export class AgentGateBroker {
   ): Promise<AgentGateWaiting | AgentGateResult> {
     const key = `${holderNode} ${gateId}`
     let flight = this.#inFlight.get(key)
+    const { turn } = options
 
-    if (flight === undefined) {
+    if (turn !== undefined && this.#endedTurns.has(turn)) throw new AgentGateRefusal('turn_ended')
+    // A draining run lets a gate that is already running finish, and a client
+    // watching it may keep watching: that is a step in flight. Nothing starts.
+    if (this.#halted !== null && flight?.state !== 'running') {
+      throw new AgentGateRefusal(this.#halted)
+    }
+
+    if (flight !== undefined) {
+      if (turn !== undefined) flight.turn = turn
+    } else {
       // A refusal — `unknown_gate`, `no_lane`, `gate_needs_lane` — rejects
       // before anything is acquired, so it lands inside `withinMs` and reaches
       // the hop that asked, which is the one whose route can turn it into a
       // status. The retirement below means a later hop re-asks and is refused
       // the same way rather than inheriting a dead flight.
-      const started = this.run(gateId, holderNode)
-      flight = { settled: started }
+      const abort = new AbortController()
+      let created: GateFlight | undefined
+      // `onRunning` cannot fire before `created` is set: `run` awaits before
+      // it reaches the pools.
+      const started = this.run(gateId, holderNode, {
+        signal: abort.signal,
+        onRunning: () => {
+          if (created !== undefined) created.state = 'running'
+        },
+      })
+      const declared = this.#workflow.gates[gateId]
+      created = {
+        settled: started,
+        holderNode,
+        gateId,
+        requires: declared === undefined || isJudgeGate(declared) ? [] : declared.requires,
+        state: 'queued',
+        turn,
+        abort,
+      }
+      flight = created
       this.#inFlight.set(key, flight)
 
       // Retired the moment it settles, however it settles. A later invocation
@@ -212,7 +287,42 @@ export class AgentGateBroker {
     }
 
     const result = await this.#within(flight.settled, options.withinMs)
-    return result ?? { waiting: true, gateId }
+    return result ?? { waiting: true, gateId, state: flight.state }
+  }
+
+  /** The agent-run gates holding their pools right now. */
+  running(): readonly AgentGateRunning[] {
+    return [...this.#inFlight.values()]
+      .filter((flight) => flight.state === 'running')
+      .map(({ holderNode, gateId, requires }) => ({ holderNode, gateId, requires }))
+  }
+
+  /**
+   * A session has ended: its gates still queued for their pools leave the
+   * queue, and it is refused from now on. One already running is left to
+   * finish. Its result is cached, so the gate node's run of the same tree is
+   * a hit, and killing it would throw away the part that was paid for.
+   */
+  endTurn(holderNode: string, turn: string): void {
+    this.#endedTurns.add(turn)
+    for (const flight of this.#inFlight.values()) {
+      if (flight.holderNode === holderNode && flight.turn === turn && flight.state === 'queued') {
+        flight.abort.abort('turn_ended')
+      }
+    }
+  }
+
+  /**
+   * The run is draining (§9.3). Queued gates leave the queue with `code`, and
+   * no gate starts from now on. A running one finishes: it is a step in
+   * flight, and its client may keep watching it.
+   */
+  halt(code: string): void {
+    if (this.#halted !== null) return
+    this.#halted = code
+    for (const flight of this.#inFlight.values()) {
+      if (flight.state === 'queued') flight.abort.abort(code)
+    }
   }
 
   /**
@@ -225,7 +335,11 @@ export class AgentGateBroker {
    * is a gate that ran; filing it anywhere else would make the transcript's
    * GATE band a record of only some of them.
    */
-  async run(gateId: string, holderNode: string): Promise<AgentGateResult> {
+  async run(
+    gateId: string,
+    holderNode: string,
+    flight: { readonly signal?: AbortSignal; readonly onRunning?: () => void } = {},
+  ): Promise<AgentGateResult> {
     const { runId, journal } = this.#options
 
     const gate = this.#workflow.gates[gateId]
@@ -240,6 +354,18 @@ export class AgentGateBroker {
     // self-deadlock the lease endpoint refuses `lane` to avoid, arrived at
     // through a gate's `requires` instead of through an agent's request.
     if (gate.requires.includes(LANE)) throw new AgentGateRefusal('gate_needs_lane')
+
+    // The same self-deadlock through the other door: a pool this node already
+    // holds through `with`. Typically the gate was asked for from inside that
+    // `with`, which cannot let go until the gate returns, while the gate cannot
+    // start until it does. Refused rather than made re-entrant: a gate holding
+    // its pools is what tells the other lanes they are not sharing them.
+    const own = (this.#options.leases?.held() ?? []).filter(
+      (held) =>
+        held.holderNode === holderNode && held.resources.some((name) => gate.requires.includes(name)),
+    )
+    const taken = own[0]?.resources.find((name) => gate.requires.includes(name))
+    if (taken !== undefined) throw new AgentGateRefusal(`holds_required:${taken}`, own)
 
     const row = journal.nodes(runId).find((candidate) => candidate.node_id === holderNode)
     const laneName = row?.lane
@@ -277,12 +403,28 @@ export class AgentGateBroker {
       cwd: lane.path,
       env: lane.env,
       logPath: journal.gateLogPath(runId, holderNode, gateId),
-      pools: this.#options.pools,
+      pools: {
+        // Through the flight's signal, so a session that ends or a run that
+        // drains takes the gate out of the queue rather than leaving it to run
+        // later against a tree nobody is waiting on.
+        acquire: (needs) =>
+          (flight.signal === undefined
+            ? this.#options.pools.acquire(needs)
+            : this.#options.pools.acquire(needs, { signal: flight.signal })
+          ).catch((error: unknown) => {
+              const reason: unknown = flight.signal?.reason
+              if (error instanceof AcquireAborted && typeof reason === 'string') {
+                throw new AgentGateRefusal(reason)
+              }
+              throw error
+            }),
+      },
       cache: this.#options.cache,
       // Fires at the spawn, after the pools are granted — so the distance to
       // the result below is the gate's runtime and not the queue in front of
       // it, which for an agent-run gate can be the larger of the two.
       onStart: () => {
+        flight.onRunning?.()
         journal.append({
           runId,
           nodeId: holderNode,

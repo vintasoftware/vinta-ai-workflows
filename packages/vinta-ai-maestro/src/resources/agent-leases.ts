@@ -42,6 +42,15 @@ export const MAESTRO_URL_ENV = 'VINTA_AI_MAESTRO_URL'
 export const MAESTRO_TOKEN_ENV = 'VINTA_AI_MAESTRO_TOKEN'
 export const MAESTRO_RUN_ENV = 'VINTA_AI_MAESTRO_RUN_ID'
 export const MAESTRO_NODE_ENV = 'VINTA_AI_MAESTRO_NODE_ID'
+/**
+ * The agent session a command was started from, one id per session the
+ * scheduler drains. A node outlives its sessions, so the node alone cannot say
+ * whether the process asking is still part of the work: a command backgrounded
+ * with `&` is reparented when its session ends and keeps asking for as long as
+ * nobody stops it. The id is what lets the daemon tell that command apart from
+ * the node's next session, and refuse it.
+ */
+export const MAESTRO_TURN_ENV = 'VINTA_AI_MAESTRO_TURN_ID'
 
 export interface AgentLeaseGrant {
   readonly leaseId: string
@@ -61,6 +70,40 @@ export interface AgentLeaseWaiting {
 
 export type AgentLeaseHop = AgentLeaseGrant | AgentLeaseWaiting
 
+/**
+ * Who is asking, past the node: the session it was started from and the
+ * process doing the asking. Both optional, because a client built before
+ * either existed still gets a lease — it just cannot be told apart from the
+ * node's other commands, or named to a waiter.
+ */
+export interface AgentLeaseCaller {
+  readonly turn?: string
+  readonly pid?: number
+}
+
+/** One lease this broker has granted, as a waiter or a gate is told about it. */
+export interface AgentLeaseHeld {
+  readonly leaseId: string
+  readonly holderNode: string
+  readonly resources: readonly string[]
+  readonly turn?: string
+  readonly pid?: number
+}
+
+/**
+ * A wait the broker ended rather than granted, as a code the route relays.
+ *
+ * `turn_ended`: the session the command came from has ended, so nothing is
+ * waiting for its answer. `run_pausing` / `run_stopping`: the run is draining,
+ * and a pause waits for every node to reach a step boundary, which an agent
+ * turn blocked behind a semaphore never does.
+ */
+export class AgentLeaseRefusal extends Error {
+  constructor(readonly code: string) {
+    super(code)
+  }
+}
+
 export interface AgentLeaseBrokerOptions {
   readonly ttlMs?: number
   /** How long a parked wait survives unattended. See `DEFAULT_PARKED_WAIT_TTL_MS`. */
@@ -76,6 +119,7 @@ interface HeldLease {
   readonly holderNode: string
   readonly resources: readonly string[]
   readonly lease: Lease
+  readonly caller: AgentLeaseCaller
   expiresAt: number
   timer: NodeJS.Timeout
 }
@@ -86,8 +130,12 @@ interface ParkedWait {
   readonly holderNode: string
   readonly resources: readonly string[]
   readonly wait: PoolWait
+  readonly turn: string | undefined
   /** Absent while a hop is actually watching; set when the client is away. */
   reaper: NodeJS.Timeout | undefined
+  /** Settles with a refusal code when the wait is ended without a grant. */
+  readonly cancelled: Promise<string>
+  readonly cancel: (code: string) => void
 }
 
 export class AgentLeaseBroker {
@@ -102,6 +150,14 @@ export class AgentLeaseBroker {
   readonly #clearTimer: (timer: NodeJS.Timeout) => void
   readonly #held = new Map<string, HeldLease>()
   readonly #parked = new Map<string, ParkedWait>()
+  /**
+   * Sessions that have ended. Kept for the run, because the requests this
+   * exists to refuse arrive *after* the end — an orphaned command's next hop —
+   * and an id is a few dozen bytes against a run's few hundred sessions.
+   */
+  readonly #endedTurns = new Set<string>()
+  /** Set by `halt`: the code every wait is now answered with. */
+  #halted: string | null = null
   #closed = false
 
   /**
@@ -144,13 +200,15 @@ export class AgentLeaseBroker {
   async hop(
     resources: readonly string[],
     holderNode: string,
-    options: { readonly waitToken?: string; readonly withinMs: number },
+    options: AgentLeaseCaller & { readonly waitToken?: string; readonly withinMs: number },
   ): Promise<AgentLeaseHop> {
     if (this.#closed) throw new Error('agent lease broker is closed')
+    this.#admit(options.turn)
 
     const canonical = [...new Set(resources)].sort()
     const parked =
-      this.#resume(options.waitToken, canonical, holderNode) ?? this.#fresh(canonical, holderNode)
+      this.#resume(options.waitToken, canonical, holderNode) ??
+      this.#fresh(canonical, holderNode, options.turn)
     this.#parked.set(parked.id, parked)
     // Attended again: the client is demonstrably alive for the length of this
     // hop, so the reaper has nothing to decide until it goes away once more.
@@ -159,8 +217,9 @@ export class AgentLeaseBroker {
       parked.reaper = undefined
     }
 
-    const lease = await this.#within(parked.wait.granted, options.withinMs)
+    const lease = await this.#within(parked, options.withinMs)
     if (lease === null) return this.#park(parked)
+    if (typeof lease === 'string') throw new AgentLeaseRefusal(lease)
 
     // One wait is one place in the queue and therefore one lease. Two hops can
     // be watching the same token — a client that retried without waiting for
@@ -169,7 +228,7 @@ export class AgentLeaseBroker {
     // from it; the other must not, and must not release it either, because the
     // object it is holding is the winner's capacity. It starts a new wait.
     if (this.#parked.get(parked.id) !== parked) {
-      return this.#park(this.#fresh(canonical, holderNode))
+      return this.#park(this.#fresh(canonical, holderNode, options.turn))
     }
 
     this.#parked.delete(parked.id)
@@ -177,7 +236,18 @@ export class AgentLeaseBroker {
       lease.release()
       throw new Error('agent lease broker is closed')
     }
-    return this.#grant(lease, canonical, holderNode)
+    return this.#grant(lease, canonical, holderNode, options)
+  }
+
+  /**
+   * Refuses a caller whose answer nobody is waiting for: a session that has
+   * ended, or anyone once the run is draining. Checked on every hop, so a
+   * client that slept through the moment its wait was cancelled is told the
+   * same thing when it comes back.
+   */
+  #admit(turn: string | undefined): void {
+    if (this.#halted !== null) throw new AgentLeaseRefusal(this.#halted)
+    if (turn !== undefined && this.#endedTurns.has(turn)) throw new AgentLeaseRefusal('turn_ended')
   }
 
   /**
@@ -189,9 +259,10 @@ export class AgentLeaseBroker {
   async acquire(
     resources: readonly string[],
     holderNode: string,
-    options: { readonly signal?: AbortSignal } = {},
+    options: AgentLeaseCaller & { readonly signal?: AbortSignal } = {},
   ): Promise<AgentLeaseGrant> {
     if (this.#closed) throw new Error('agent lease broker is closed')
+    this.#admit(options.turn)
 
     const canonical = [...new Set(resources)].sort()
     const lease = await this.#pools.acquire(
@@ -202,18 +273,34 @@ export class AgentLeaseBroker {
       lease.release()
       throw new Error('agent lease broker is closed')
     }
-    return this.#grant(lease, canonical, holderNode)
+    return this.#grant(lease, canonical, holderNode, options)
   }
 
   /** A new place in the queue. Taken now — the position is the thing being bought. */
-  #fresh(canonical: readonly string[], holderNode: string): ParkedWait {
+  #fresh(canonical: readonly string[], holderNode: string, turn: string | undefined): ParkedWait {
+    let cancel!: (code: string) => void
+    const cancelled = new Promise<string>((resolve) => {
+      cancel = resolve
+    })
     return {
       id: this.#id(),
       holderNode,
       resources: canonical,
       wait: this.#pools.wait(canonical),
+      turn,
       reaper: undefined,
+      cancelled,
+      cancel,
     }
+  }
+
+  /** Takes a wait out of the queue for good, telling any hop watching it why. */
+  #cancel(entry: ParkedWait, code: string): void {
+    if (this.#parked.get(entry.id) !== entry) return
+    this.#parked.delete(entry.id)
+    if (entry.reaper !== undefined) this.#clearTimer(entry.reaper)
+    entry.wait.abandon()
+    entry.cancel(code)
   }
 
   /** Leaves the wait in the queue, unattended, on a clock. */
@@ -250,26 +337,36 @@ export class AgentLeaseBroker {
     return parked
   }
 
-  /** The lease if it lands inside `ms`, else `null` — the wait itself is untouched. */
-  #within(granted: Promise<Lease>, ms: number): Promise<Lease | null> {
-    return new Promise<Lease | null>((resolve) => {
+  /**
+   * The lease if it lands inside `ms`, `null` if it does not, or the code the
+   * wait was cancelled with. A timeout leaves the wait itself untouched.
+   */
+  #within(entry: ParkedWait, ms: number): Promise<Lease | string | null> {
+    return new Promise<Lease | string | null>((resolve) => {
       let settled = false
       const timer = this.#setTimer(() => {
         if (settled) return
         settled = true
         resolve(null)
       }, ms)
-      void granted.then((lease) => {
+      const settle = (outcome: Lease | string): void => {
         if (settled) return
         settled = true
         this.#clearTimer(timer)
-        resolve(lease)
-      })
+        resolve(outcome)
+      }
+      void entry.wait.granted.then(settle)
+      void entry.cancelled.then(settle)
     })
   }
 
   /** Bookkeeping shared by both routes to a grant: expiry timer and journal. */
-  #grant(lease: Lease, canonical: readonly string[], holderNode: string): AgentLeaseGrant {
+  #grant(
+    lease: Lease,
+    canonical: readonly string[],
+    holderNode: string,
+    caller: AgentLeaseCaller,
+  ): AgentLeaseGrant {
     const id = this.#id()
     const expiresAt = this.#now() + this.#ttlMs
     const held: HeldLease = {
@@ -277,6 +374,10 @@ export class AgentLeaseBroker {
       holderNode,
       resources: canonical,
       lease,
+      caller: {
+        ...(caller.turn === undefined ? {} : { turn: caller.turn }),
+        ...(caller.pid === undefined ? {} : { pid: caller.pid }),
+      },
       expiresAt,
       timer: this.#timer(id, expiresAt),
     }
@@ -327,17 +428,67 @@ export class AgentLeaseBroker {
     this.#announce(held.holderNode, 'released', id, held.resources)
   }
 
+  /**
+   * Every lease granted and not yet released, in grant order: the holder index
+   * a waiter is told about and a gate is checked against. A node asking for a
+   * gate whose pool it already holds through `with` is asking to wait on
+   * itself.
+   */
+  held(): readonly AgentLeaseHeld[] {
+    return [...this.#held.values()].map((held) => ({
+      leaseId: held.id,
+      holderNode: held.holderNode,
+      resources: held.resources,
+      ...held.caller,
+    }))
+  }
+
+  /**
+   * A session has ended, so its commands have nobody to answer to: what they
+   * hold is released, what they are queued for is cancelled, and whatever they
+   * ask from now on is refused `turn_ended`.
+   *
+   * Adapters cancel the background work they track when a session ends (§7),
+   * but a command an agent backgrounded with a shell `&` is not tracked. It is
+   * reparented and keeps its lease, or its place in the queue, for as long as
+   * it lives. One run had nine of these, up to fifty-five minutes old, queued
+   * in front of the lanes that were still working. A held lease is released
+   * too: the process holding it belongs to nobody now, and its client stops
+   * the command when the next renewal is refused.
+   */
+  endTurn(holderNode: string, turn: string): void {
+    this.#endedTurns.add(turn)
+    for (const held of [...this.#held.values()]) {
+      if (held.holderNode === holderNode && held.caller.turn === turn) this.release(held.id)
+    }
+    for (const parked of [...this.#parked.values()]) {
+      if (parked.holderNode === holderNode && parked.turn === turn) this.#cancel(parked, 'turn_ended')
+    }
+  }
+
+  /**
+   * The run is draining (§9.3). Every queued wait is cancelled with `code`, and
+   * every later ask is refused with it. Held leases are left alone: the command
+   * under one is a step in flight, and a pause lets those finish.
+   *
+   * Without this a pause never finished while an agent was queued. The drain
+   * waits for each node to reach a step boundary, and an agent turn blocked in
+   * `with` behind a semaphore never reaches one. The client turns the code into
+   * an instruction to end the turn, and the end of the turn is the boundary.
+   */
+  halt(code: string): void {
+    if (this.#halted !== null) return
+    this.#halted = code
+    for (const parked of [...this.#parked.values()]) this.#cancel(parked, code)
+  }
+
   close(): void {
     if (this.#closed) return
     this.#closed = true
     for (const id of [...this.#held.keys()]) this.release(id)
     // Parked waits are queue entries, and one of them may already have been
     // granted while nobody was watching it. Both are the run's capacity.
-    for (const parked of [...this.#parked.values()]) {
-      this.#parked.delete(parked.id)
-      if (parked.reaper !== undefined) this.#clearTimer(parked.reaper)
-      parked.wait.abandon()
-    }
+    for (const parked of [...this.#parked.values()]) this.#cancel(parked, 'run_not_live')
   }
 
   /** One edge, as identifiers: pool ids, the holder's node id, the lease id. */

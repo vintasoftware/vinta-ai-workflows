@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GateCache } from '../src/gates/cache.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import { AgentGateBroker, AgentGateRefusal } from '../src/resources/agent-gates.ts'
+import type { AgentLeaseHeld } from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 import { renderGate, type GateScript } from './support/gate-script.ts'
@@ -51,6 +52,8 @@ function rig(
     readonly timeoutS?: number
     /** A `lint` gate declared before `unit` on the node, exiting with this code. */
     readonly lintExit?: number
+    /** What the lease broker reports as held through `with`. */
+    readonly leases?: readonly AgentLeaseHeld[]
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-agent-gate-'))
@@ -116,6 +119,7 @@ function rig(
       journal,
       pools,
       cache,
+      ...(options.leases === undefined ? {} : { leases: { held: () => options.leases ?? [] } }),
       lane: (name) => {
         if (name !== LANE) throw new Error(`unexpected lane "${name}"`)
         return { path: lane, env: { LANE_MARKER: 'set' } }
@@ -329,14 +333,14 @@ describe('a gate waited for in hops', () => {
     // Nothing can finish inside zero milliseconds, so this reaches the queued
     // answer without the test having to guess at a duration.
     const first = await r.broker.hop('unit', NODE, { withinMs: 0 })
-    expect(first).toEqual({ waiting: true, gateId: 'unit' })
+    expect(first).toMatchObject({ waiting: true, gateId: 'unit' })
 
     // Still running: giving up on a hop must not cancel the work behind it.
     // Cancelled here, a client's ceiling would become the gate's, and the
     // suite would restart from nothing every time the harness reached for its
     // timer.
     const second = await r.broker.hop('unit', NODE, { withinMs: 0 })
-    expect(second).toEqual({ waiting: true, gateId: 'unit' })
+    expect(second).toMatchObject({ waiting: true, gateId: 'unit' })
 
     gate.release()
     const done = await r.broker.hop('unit', NODE, { withinMs: 30_000 })
@@ -409,5 +413,123 @@ describe('a gate waited for in hops', () => {
     const again = await r.broker.hop('unit', NODE, { withinMs: 30_000 })
     expect(again).toMatchObject({ status: 'passed', cached: true })
     expect(r.runs()).toBe(1)
+  }, 30_000)
+})
+
+/**
+ * `with test-suite -- vinta-ai-maestro gate test`, where `test` requires
+ * `test-suite` at capacity 1. The outer `with` held the only slot and the gate
+ * queued for it; every lane's gates queued behind the pair for fifty-five
+ * minutes. The broker refuses it before anything is acquired.
+ */
+describe('a gate asked for while its own phase holds the pool', () => {
+  it('is refused, naming the lease, and runs nothing', async () => {
+    const own: AgentLeaseHeld = {
+      leaseId: 'lease-1',
+      holderNode: NODE,
+      resources: ['test-suite'],
+      turn: 'turn-1',
+      pid: 4242,
+    }
+    const r = rig({ leases: [own] })
+
+    const refused = await r.broker.run('unit', NODE).catch((error: unknown) => error)
+
+    expect(refused).toBeInstanceOf(AgentGateRefusal)
+    expect(refused).toMatchObject({ code: 'holds_required:test-suite', held: [own] })
+    expect(r.runs()).toBe(0)
+    expect(r.pools.waiting).toBe(0)
+  })
+
+  it('still runs when the pool is held by another phase, which is a wait and not a deadlock', async () => {
+    const r = rig({
+      leases: [{ leaseId: 'lease-1', holderNode: 'other-phase', resources: ['test-suite'] }],
+    })
+    await expect(r.broker.run('unit', NODE)).resolves.toMatchObject({ status: 'passed' })
+  }, 30_000)
+})
+
+describe('what a waiting gate is doing', () => {
+  const held = (): { path: string; release: () => void } => {
+    const path = join(mkdtempSync(join(tmpdir(), 'vinta-agent-gate-hold-')), 'go')
+    cleanups.push(() => rmSync(dirname(path), { recursive: true, force: true }))
+    return { path, release: () => writeFileSync(path, 'go\n') }
+  }
+
+  /** Hops until the gate reports `state`, so no test guesses at a duration. */
+  const until = async (r: Rig, state: string, options: { readonly turn?: string } = {}) => {
+    for (let i = 0; i < 200; i += 1) {
+      const outcome = await r.broker.hop('unit', NODE, { withinMs: 50, ...options })
+      if ('waiting' in outcome && outcome.state === state) return outcome
+    }
+    throw new Error(`the gate never reported ${state}`)
+  }
+
+  it('says queued while another holds its pool, and running once it has it', async () => {
+    const gate = held()
+    const r = rig({ script: { until: { path: gate.path } } })
+    const other = await r.pools.acquire(['test-suite'])
+
+    expect(await until(r, 'queued')).toEqual({ waiting: true, gateId: 'unit', state: 'queued' })
+    expect(r.broker.running()).toEqual([])
+
+    other.release()
+    await until(r, 'running')
+    // Named to a waiter as a holder of its pool while it runs.
+    expect(r.broker.running()).toEqual([{ holderNode: NODE, gateId: 'unit', requires: ['test-suite'] }])
+
+    gate.release()
+    await expect(r.broker.hop('unit', NODE, { withinMs: 30_000 })).resolves.toMatchObject({ status: 'passed' })
+    expect(r.broker.running()).toEqual([])
+  }, 30_000)
+
+  it('leaves the queue when the session that asked ends, and refuses that session after', async () => {
+    const r = rig()
+    const other = await r.pools.acquire(['test-suite'])
+    await until(r, 'queued', { turn: 'turn-1' })
+    expect(r.pools.waiting).toBe(1)
+
+    r.broker.endTurn(NODE, 'turn-1')
+
+    // The flight was taken out of the queue: an ask without a session finds no
+    // flight to attach to and starts its own, and the ended session is refused.
+    await expect(r.broker.hop('unit', NODE, { withinMs: 50, turn: 'turn-1' })).rejects.toMatchObject({
+      code: 'turn_ended',
+    })
+    await new Promise((done) => setTimeout(done, 20))
+    expect(r.pools.waiting).toBe(0)
+    other.release()
+    expect(r.runs()).toBe(0)
+  }, 30_000)
+
+  it('fails a queued gate on a pause, starts nothing after it, and lets a running one finish', async () => {
+    const gate = held()
+    const r = rig({ script: { until: { path: gate.path } } })
+    await until(r, 'running')
+
+    // A second node's queued gate is the one the pause takes back.
+    const other = rig()
+    const blocker = await other.pools.acquire(['test-suite'])
+    await until(other, 'queued')
+
+    r.broker.halt('run_pausing')
+    other.broker.halt('run_pausing')
+
+    await expect(other.broker.hop('unit', NODE, { withinMs: 50 })).rejects.toMatchObject({
+      code: 'run_pausing',
+    })
+    await new Promise((done) => setTimeout(done, 20))
+    expect(other.pools.waiting).toBe(0)
+    blocker.release()
+    expect(other.runs()).toBe(0)
+
+    // The running one is a step in flight: watching it is still allowed, and
+    // it finishes with its own result.
+    await expect(r.broker.hop('unit', NODE, { withinMs: 50 })).resolves.toMatchObject({
+      waiting: true,
+      state: 'running',
+    })
+    gate.release()
+    await expect(r.broker.hop('unit', NODE, { withinMs: 30_000 })).resolves.toMatchObject({ status: 'passed' })
   }, 30_000)
 })

@@ -58,13 +58,15 @@
  * alternative reads as permission to improvise one. Every line out of here ends
  * on what not to do about it.
  */
-import { AgentGateResultSchema } from '../daemon/schemas.ts'
+import { AgentGateResultSchema, AgentGateWaitingSchema } from '../daemon/schemas.ts'
 import {
   MAESTRO_NODE_ENV,
   MAESTRO_RUN_ENV,
   MAESTRO_TOKEN_ENV,
+  MAESTRO_TURN_ENV,
   MAESTRO_URL_ENV,
 } from '../resources/agent-leases.ts'
+import { endingRefusal, heldBy, readRefusal } from './holders.ts'
 import { FAILED, USAGE, type Io } from './io.ts'
 
 export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id>
@@ -82,7 +84,8 @@ export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id>
   Waiting is normal: the gate queues for its resources and then runs. Let it.
   If your shell cuts this command short, run it again — the gate keeps running
   on the daemon and the second call attaches to it rather than starting it
-  over. Do not build a wait of your own around it.
+  over. Do not build a wait of your own around it, and do not run it inside
+  \`vinta-ai-maestro with\`: it takes its own leases.
 
   If it refuses, that is the answer to the gate, not permission to run the
   command yourself. Report it.`
@@ -129,10 +132,12 @@ export async function gateCommand(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)))
   const endpoint = `${url}/api/runs/${encodeURIComponent(runId)}/gates`
   const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
-  const body = JSON.stringify({ gate: gateId, holderNode })
+  const turn = process.env[MAESTRO_TURN_ENV]
+  const body = JSON.stringify({ gate: gateId, holderNode, ...(turn === undefined ? {} : { turn }) })
 
   let transportFailures = 0
   let announcedAt: number | null = null
+  let announced = ''
 
   for (;;) {
     let response: Response
@@ -157,15 +162,24 @@ export async function gateCommand(
     // not an answer — and treating it as one would read an empty result as a
     // gate that passed.
     if (response.status === 202) {
-      // Said once, then occasionally: a transcript should show a turn waiting
-      // rather than a turn that stopped saying anything. The second line is
-      // also where an agent reads that being cut off here costs it nothing.
+      // Said once, again when what it is waiting on changes, and otherwise
+      // only occasionally: a transcript should show a turn waiting rather than
+      // a turn that stopped saying anything. "Running" used to be printed for
+      // a gate that was only queued, which sent a reader looking at a slow
+      // suite instead of at whatever held its pool. The second line is also
+      // where an agent reads that being cut off here costs it nothing.
+      const line = waitingLine(gateId, holderNode, await response.json().catch(() => null))
       if (announcedAt === null) {
-        io.err(`vinta-ai-maestro: gate ${gateId} is running. Waiting for it.`)
+        io.err(`vinta-ai-maestro: ${line}`)
         io.err(
           'vinta-ai-maestro: if this command is cut short, run it again — the gate keeps ' +
-            'running and the next call attaches to it.',
+            'its place and the next call attaches to it.',
         )
+        announced = line
+        announcedAt = Date.now()
+      } else if (line !== announced) {
+        io.err(`vinta-ai-maestro: ${line}`)
+        announced = line
         announcedAt = Date.now()
       } else if (Date.now() - announcedAt >= NOTICE_MS) {
         io.err(`vinta-ai-maestro: still waiting for gate ${gateId}.`)
@@ -214,17 +228,44 @@ const DO_NOT_WORK_AROUND =
   'Do not run the gate command yourself instead. Report this — a gate you ran ' +
   'by hand is not the gate, and it takes the machine without queueing for it.'
 
+/** What a `202` says the gate is doing: queued behind someone, or running. */
+function waitingLine(gateId: string, self: string, body: unknown): string {
+  const parsed = AgentGateWaitingSchema.safeParse(body)
+  // A daemon that predates the state only answers `202` once the gate is
+  // its own, so "running" is the old sentence and the honest default.
+  if (!parsed.success || parsed.data.state !== 'queued') {
+    return `gate ${gateId} is running. Waiting for it.`
+  }
+  const holders = parsed.data.holders
+  if (holders === undefined) return `gate ${gateId} is queued for its resources. Waiting for them.`
+  const resources = [...new Set(holders.map((holder) => holder.resource))]
+  const held =
+    resources.length === 0
+      ? 'its resources are free, but others queued for them first.'
+      : resources
+          .map((resource) =>
+            heldBy(
+              resource,
+              holders.filter((holder) => holder.resource === resource),
+              self,
+            ),
+          )
+          .join(' ')
+  return `gate ${gateId} is queued, not running yet: ${held}`
+}
+
 /** What a refusal means, in terms of the thing the reader can change. */
 async function refusal(response: Response, gateId: string): Promise<string> {
-  let code = ''
-  try {
-    const body: unknown = await response.json()
-    const named = (body as { error?: unknown } | null)?.error
-    if (typeof named === 'string') code = named
-  } catch {
-    // A body that will not parse tells us nothing the status does not.
-  }
+  const { code, holders } = await readRefusal(response)
+  const ending = endingRefusal(code)
+  if (ending !== null) return ending
 
+  if (code.startsWith('holds_required:')) {
+    const resource = code.slice('holds_required:'.length)
+    const pids = holders.flatMap((holder) => (holder.pid === undefined ? [] : [holder.pid]))
+    const by = pids.length === 0 ? '' : ` (pid ${pids.join(', ')})`
+    return `your phase already holds "${resource}" through \`vinta-ai-maestro with\`${by}, and gate "${gateId}" needs it. A gate takes its own leases: run \`vinta-ai-maestro gate ${gateId}\` on its own, not inside \`with\`, and let any \`with\` you started on "${resource}" finish first.`
+  }
   if (code.startsWith('earlier_gate_red:')) {
     const red = code.slice('earlier_gate_red:'.length)
     return `gate "${red}" is red on this tree and comes before "${gateId}". Fix it and run "${red}" again first — "${gateId}" would run against a tree that already failed.`

@@ -25,14 +25,20 @@ import type { GateGuardPort } from '../guard/guard.ts'
 import type { AmendRunner } from '../amend/amend.ts'
 import type { Actor, NodeStatus, OperatorDelivery } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import type { HumanQuestion } from './schemas.ts'
+import type { HumanQuestion, NodeActivity } from './schemas.ts'
 import type { ExecPort } from '../coordinator/exec.ts'
 import type {
   AgentGateHopOptions,
   AgentGateResult,
+  AgentGateRunning,
   AgentGateWaiting,
 } from '../resources/agent-gates.ts'
-import type { AgentLeaseGrant, AgentLeaseHop } from '../resources/agent-leases.ts'
+import type {
+  AgentLeaseCaller,
+  AgentLeaseGrant,
+  AgentLeaseHeld,
+  AgentLeaseHop,
+} from '../resources/agent-leases.ts'
 
 /**
  * What an operation did, where the host can say: the scheduler's operations
@@ -113,10 +119,12 @@ export interface AgentLeasePort {
   hop(
     resources: readonly string[],
     holderNode: string,
-    options: { readonly waitToken?: string; readonly withinMs: number },
+    options: AgentLeaseCaller & { readonly waitToken?: string; readonly withinMs: number },
   ): Promise<AgentLeaseHop>
   renew(leaseId: string): AgentLeaseGrant | null
   release(leaseId: string): void
+  /** Every lease granted and not yet released: who a waiter is queued behind. */
+  held(): readonly AgentLeaseHeld[]
 }
 
 /**
@@ -139,6 +147,11 @@ export interface AgentGatePort {
     holderNode: string,
     options: AgentGateHopOptions,
   ): Promise<AgentGateWaiting | AgentGateResult>
+  /**
+   * The gates agents asked for that hold their pools now. Optional: a host
+   * without it names fewer holders to a waiter, and nothing else changes.
+   */
+  running?(): readonly AgentGateRunning[]
 }
 
 /**
@@ -230,8 +243,12 @@ export interface DaemonRun {
    * `stop` kills its live turns and cancels it. Resolves once the request is
    * taken, not once the run has ended: the host process exits when it has.
    * Absent on a host that cannot end a run early, and then both refuse.
+   *
+   * May answer with the nodes the drain is still waiting on, which the CLI
+   * prints: a pause that seems to hang is one waiting on a step, and the
+   * operator should be told which.
    */
-  readonly halt?: (mode: 'paused' | 'cancelled') => Promise<void>
+  readonly halt?: (mode: 'paused' | 'cancelled') => Promise<readonly NodeActivity[] | void>
   /** `vinta-ai-maestro exec`: a command run by hand in a lane or the integration worktree. */
   readonly exec?: ExecPort
 }

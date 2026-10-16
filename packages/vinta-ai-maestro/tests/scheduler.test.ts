@@ -38,6 +38,7 @@ import { openJournal, type Journal } from '../src/journal/journal.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
+import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import { createScheduler, type RunReport, type Scheduler } from '../src/scheduler/index.ts'
 import { WorkflowSchema, type EffectId, type Workflow } from '../src/types.ts'
@@ -274,6 +275,8 @@ function rig(
   readonly retryAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
     readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
+    /** Told when a session's stream drains, with its turn id. */
+    readonly onTurnEnded?: (nodeId: string, turnId: string) => void
     /**
      * The state a killed process left in the journal, by node id: the run is
      * then built as a resume of it.
@@ -339,6 +342,7 @@ function rig(
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
     ...(options.addLane === undefined ? {} : { addLane: options.addLane }),
     ...(options.laneEnv === undefined ? {} : { laneEnv: options.laneEnv }),
+    ...(options.onTurnEnded === undefined ? {} : { onTurnEnded: options.onTurnEnded }),
     ...(options.resumeFrom === undefined ? {} : { resumeFrom: journal.nodes(runId) }),
     // **`stop` unless a test says otherwise, and production's default is
     // `retry`.** Every test below that asserts about a failure — containment,
@@ -1094,6 +1098,46 @@ describe('the lane’s environment', () => {
     await r.scheduler.run()
 
     expect(r.adapter.spawned[0]?.env).toBeUndefined()
+  })
+})
+
+/**
+ * A command an agent backgrounds with `&` outlives the session that started
+ * it, and used to keep its lease or its place in a queue for as long as it
+ * lived. Each session's environment names it, and the daemon is told when it
+ * ends, so what its commands hold can be taken back then.
+ */
+describe('the turn id', () => {
+  it('is fresh per session, reaches the agent beside the node id, and is reported when the session ends', async () => {
+    const ended: [string, string][] = []
+    const r = rig(makeWorkflow([node('a'), node('b')], { lanes: 2 }), {
+      laneEnv: () => ({ [MAESTRO_URL_ENV]: 'http://127.0.0.1:1' }),
+      onTurnEnded: (nodeId, turnId) => {
+        ended.push([nodeId, turnId])
+      },
+    })
+
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned).toHaveLength(2)
+    const turns = r.adapter.spawned.map((task) => {
+      const turn = task.env?.[MAESTRO_TURN_ENV]
+      expect(turn).toEqual(expect.any(String))
+      expect(task.env?.[MAESTRO_NODE_ENV]).toBe(task.nodeId)
+      return [task.nodeId, turn as string] as [string, string]
+    })
+    expect(new Set(turns.map(([, turn]) => turn)).size).toBe(2)
+    expect([...ended].sort()).toEqual([...turns].sort())
+  })
+
+  it('is absent, and nothing is reported, where the host exposes no daemon', async () => {
+    const ended: string[] = []
+    const r = rig(makeWorkflow([node('a')]), { onTurnEnded: (_node, turn) => ended.push(turn) })
+
+    await r.scheduler.run()
+
+    expect(r.adapter.spawned[0]?.env).toBeUndefined()
+    expect(ended).toEqual([])
   })
 })
 
@@ -4441,6 +4485,8 @@ describe('halt', () => {
     const running = r.scheduler.run()
     await until(() => r.stall.live(), "node a's session to open")
 
+    // What the drain is waiting on, which the halt reports and logs.
+    expect(r.scheduler.activity()).toEqual([{ node: 'a', doing: 'agent_turn', harness: HARNESS }])
     await r.scheduler.halt('paused')
     // Nothing was killed: the turn is still open until the agent finishes it.
     expect(r.stall.live()).toBe(true)

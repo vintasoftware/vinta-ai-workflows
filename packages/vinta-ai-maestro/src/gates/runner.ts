@@ -88,7 +88,7 @@ export interface RunGateOptions {
   readonly env: Readonly<Record<string, string>>
   /** Supplied by the caller — the journal's `gateLogPath`. */
   readonly logPath: string
-  readonly pools: ResourcePools
+  readonly pools: Pick<ResourcePools, 'acquire'>
   /**
    * Called once the gate is actually starting, with the same clock reading
    * `durationMs` is measured from.

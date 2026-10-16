@@ -104,6 +104,14 @@ export const AgentLeaseRequestSchema = z.strictObject({
    * first ask — and absent is not an error, it just starts a new wait.
    */
   waitToken: z.string().min(1).optional(),
+  /**
+   * The session the command was started from (`VINTA_AI_MAESTRO_TURN_ID`).
+   * A request from a session that has ended is refused `turn_ended`: nothing
+   * is waiting for its answer. Absent from a client that predates it.
+   */
+  turn: z.string().min(1).optional(),
+  /** The asking process, so a waiter queued behind this lease can be told whose it is. */
+  pid: z.number().int().positive().optional(),
 })
 
 /**
@@ -116,6 +124,8 @@ export const AgentLeaseRequestSchema = z.strictObject({
 export const AgentGateRequestSchema = z.strictObject({
   gate: z.string().min(1),
   holderNode: z.string().min(1),
+  /** As on `AgentLeaseRequestSchema`. */
+  turn: z.string().min(1).optional(),
 })
 
 /**
@@ -206,6 +216,24 @@ export const AgentLeaseGrantSchema = z.strictObject({
 export type AgentLeaseGrantResponse = z.infer<typeof AgentLeaseGrantSchema>
 
 /**
+ * Who holds a pool a waiter is queued for. Identifiers only (§11): the node,
+ * its lane, and how it holds the pool — `with` (an agent's lease, with the
+ * process holding it where the client said), `gate` (a gate an agent asked the
+ * daemon to run) or `gate_step` (the phase's own gate step). An empty list
+ * means nobody holds it and the waiter is behind others queued first.
+ */
+export const ResourceHolderSchema = z.strictObject({
+  resource: z.string().min(1),
+  node: z.string().min(1),
+  lane: z.string().min(1).nullable(),
+  via: z.enum(['with', 'gate', 'gate_step']),
+  gate: z.string().min(1).optional(),
+  pid: z.number().int().positive().optional(),
+})
+
+export type ResourceHolder = z.infer<typeof ResourceHolderSchema>
+
+/**
  * The 202 body: still queued, ask again. Distinct from every failure shape on
  * purpose — a client must be able to tell "wait" from "no", because the two
  * deserve opposite reactions and conflating them is what sent agents around
@@ -220,6 +248,12 @@ export const AgentLeaseWaitingSchema = z.strictObject({
    * bound while an in-process one was not.
    */
   waitToken: z.string().min(1),
+  /**
+   * Who holds what this wait is queued for. Without it the client said
+   * "held by another lane" about a lease its own phase held, which was the
+   * one case where waiting could never end.
+   */
+  holders: z.array(ResourceHolderSchema).optional(),
 })
 
 export type AgentLeaseWaitingResponse = z.infer<typeof AgentLeaseWaitingSchema>
@@ -255,9 +289,35 @@ export type AgentGateResultResponse = z.infer<typeof AgentGateResultSchema>
 export const AgentGateWaitingSchema = z.strictObject({
   waiting: z.literal(true),
   gateId: z.string().min(1),
+  /** Queued for its pools, or running. Absent from a daemon that predates it. */
+  state: z.enum(['queued', 'running']).optional(),
+  /** Who holds the pools a queued gate is waiting for. See `ResourceHolderSchema`. */
+  holders: z.array(ResourceHolderSchema).optional(),
 })
 
 export type AgentGateWaitingResponse = z.infer<typeof AgentGateWaitingSchema>
+
+/**
+ * A node a halt is still waiting on, and what it is in the middle of. A pause
+ * ends when every running node reaches a step boundary, so this is the list
+ * of steps it is waiting for.
+ */
+export const NodeActivitySchema = z.strictObject({
+  node: z.string().min(1),
+  doing: z.enum(['agent_turn', 'gate', 'question', 'step']),
+  /** The harness of a live agent turn. */
+  harness: z.string().min(1).optional(),
+})
+
+export type NodeActivity = z.infer<typeof NodeActivitySchema>
+
+/** `POST /pause` and `/stop`, once the job has the request. */
+export const HaltResponseSchema = z.strictObject({
+  ok: z.literal(true),
+  waitingOn: z.array(NodeActivitySchema).optional(),
+})
+
+export type HaltResponse = z.infer<typeof HaltResponseSchema>
 
 export const RunSummarySchema = z.strictObject({
   runId: z.string(),
