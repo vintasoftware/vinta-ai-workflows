@@ -16,6 +16,14 @@ export { HttpSystemOneAdapter, type HttpSystemOneOptions } from './http.ts'
 export { CommandSystemOneAdapter, type CommandSystemOneOptions } from './command.ts'
 export { MockSystemOneAdapter, type MockAnswer } from './mock.ts'
 export {
+  calibrate,
+  casesFromFile,
+  casesFromRun,
+  type CalibrationCase,
+  type CalibrationReport,
+  type CalibrationResult,
+} from './calibrate.ts'
+export {
   SystemOneConfigError,
   SystemOneConfigSchema,
   createSystemOne,

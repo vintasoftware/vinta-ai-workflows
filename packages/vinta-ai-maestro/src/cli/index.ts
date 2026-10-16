@@ -19,6 +19,7 @@ import { guardHookMain } from '../guard/hook.ts'
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
 import { GATE_USAGE, gateCommand } from './gate.ts'
+import { JUDGE_USAGE, judgeCommand } from './judge.ts'
 import { PAUSE_USAGE, STOP_USAGE, pauseCommand, stopCommand } from './halt.ts'
 import { LOGS_USAGE, logsCommand } from './logs.ts'
 import { PURGE_USAGE, purgeCommand } from './purge.ts'
@@ -82,6 +83,8 @@ usage: vinta-ai-maestro <command> [options]
   with <resource> -- <cmd>   Run a command while holding a live run's resource.
   gate <gate-id>             Run one of a live run's declared gates against this
                              turn's lane, leased and cached by the daemon.
+  judge calibrate            Replay a run's commands, or a file of them,
+                             against a permission-judge question and threshold.
   judge-hook                 Internal: the safety hook --permission judged
                              installs. Reads one tool call on stdin.
   guard-hook                 Internal: the gate guard every run installs for
@@ -118,6 +121,7 @@ const USAGES: Readonly<Record<string, string>> = {
   purge: PURGE_USAGE,
   with: WITH_USAGE,
   gate: GATE_USAGE,
+  judge: JUDGE_USAGE,
 }
 
 export async function main(argv: readonly string[], io: Io = processIo()): Promise<number> {
@@ -184,6 +188,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await withCommand(rest, io)
     case 'gate':
       return await gateCommand(rest, io)
+    case 'judge':
+      return await judgeCommand(rest, io)
     case 'judge-hook':
       return await judgeHookCommandMain({
         stdin: readStdin,

@@ -32,6 +32,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro judge calibrate`: measure a permission-judge question
+  before a run relies on it.** It replays a past run's `Bash` calls
+  (`--run <run-id>`), or a file of commands each optionally labelled `safe` or
+  `unsafe` (`--commands <file>`), against a candidate question
+  (`--question` / `--question-file`) and threshold (`--threshold`) through the
+  classifier in `--system-one`. Nothing is executed. It reports how many would
+  be allowed and refused, the score distribution, every labelled command
+  judged the wrong way, and the highest-scoring must-deny command, and exits 1
+  on a misjudged one so a case file can guard a project's question in CI.
+  Commands are printed as recorded, never their output.
+
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or

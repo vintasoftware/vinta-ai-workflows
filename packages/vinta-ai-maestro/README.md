@@ -108,6 +108,8 @@ Every command runs against a project checkout — your project, not this one. `-
 | `status <run-id>` | The run's state and every phase's, including a phase queued behind the integration worktree (and who holds it) — which otherwise reads `running` with nothing running. |
 | `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
 
+`judge calibrate --system-one <config.json> (--run <run-id> | --commands <file>)` replays commands against the permission judge's question and threshold without running them — see [System One classifiers](#system-one-classifiers).
+
 There are also `judge-hook` and `guard-hook`, which are internal: they are the hooks `--permission judged` and [the gate guard](#the-gate-guard) install, and claude-code runs them, not you.
 
 `--port` defaults to `0`, an OS-assigned port printed with the URL. `--host` defaults to `127.0.0.1` — see [The URL is the credential](#the-url-is-the-credential). `vinta-ai-maestro <command> --help` prints the command's own options.
@@ -1043,6 +1045,16 @@ A lane is still a worktree of your repository, so committed settings travel into
 ```
 
 `http` POSTs `{ kind, question, labels, input }` and reads `{ scores }` or `{ yes }` back, with the key from the environment variable you name (removed from the daemon's environment once read, so agents never see it). Before a run starts, the preflight asks the classifier one synthetic question, so a missing or rejected key, or an unreachable URL, stops the run at minute zero instead of at the first gate. Set `"probe": false` to skip it. `doctor` also warns about an `http` adapter with no `api_key_env`, since that sends no `Authorization` header. `command` runs a local program with the same JSON on stdin and stdout — the choice when repository content must not leave the machine, because a hosted classifier receives diffs, gate logs and shell commands.
+
+**Tuning the permission judge.** It fails closed, so a question that is too cautious shows up as agents that cannot run `ls`, not as an error. The shipped question separates reading secret *values* (refused) from listing `.env*` files or reading `.env.example` (allowed), allows read-only inspection (`docker ps`, `git status`/`log`) and the project's own `make`/`npm`/`pnpm` commands in the worktree, and still refuses pushes, `sudo`, writes outside the worktree and another project's containers or volumes. If your project needs more — naming its own tooling, saying which files hold secrets — set `judges.permission.question`, and measure it before a run relies on it:
+
+```console
+$ vinta-ai-maestro judge calibrate --system-one s1.json --run <run-id>
+$ vinta-ai-maestro judge calibrate --system-one s1.json --commands cases.tsv \
+    --question-file question.txt --threshold 0.7
+```
+
+`--run` replays every `Bash` call a past run's agents made; `--commands` takes a file with one command per line, optionally prefixed `safe<TAB>` or `unsafe<TAB>` for what it must get. Nothing is executed — only the classifier is asked. The report gives allowed and refused counts, the score distribution, every labelled command judged the wrong way and the highest-scoring must-deny command, and exits 1 on a misjudged one, so a case file can guard a question in CI. It prints commands as recorded and never their output. Raise or lower `allow_above` only on what it shows: the default stays 0.9.
 
 A plan can then declare **judge gates** next to its command gates:
 
