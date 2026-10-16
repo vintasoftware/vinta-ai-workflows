@@ -133,7 +133,10 @@ export interface RunDeps {
    * preflight that reads its answers from the command line is not one.
    */
   readonly doctor?: DoctorOverrides
-  /** Overrides the pool's measured per-lane disk estimate (§8's N× probe). */
+  /**
+   * Overrides the per-lane disk estimate (§8's probe) — the pool's, and the
+   * preflight's too unless `doctor` sets its own.
+   */
   readonly perLaneBytes?: number
   /** Called once the daemon is up and the run has been registered. */
   readonly onStarted?: (daemon: Daemon, run: DaemonRun) => void
@@ -382,7 +385,16 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       // The same condition `startRun` gets `resume` from, so the preflight and
       // the pool cannot disagree about whether these lanes are being adopted.
       ...(resumeId === undefined ? {} : { resumeRunId: resumeId }),
-      ...(deps.doctor === undefined ? {} : { doctor: deps.doctor }),
+      // One per-lane estimate for both probes unless a test gives the doctor
+      // its own: two that disagree let a preflight pass a pool that refuses.
+      ...(deps.doctor === undefined && deps.perLaneBytes === undefined
+        ? {}
+        : {
+            doctor: {
+              ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
+              ...deps.doctor,
+            },
+          }),
       permission,
       ...(systemOne === undefined ? {} : { systemOne }),
     })

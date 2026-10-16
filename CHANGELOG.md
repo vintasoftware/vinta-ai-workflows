@@ -891,6 +891,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: the disk preflight sizes the pool the run will
+  really create.** `run --resume` with every worktree still on disk was
+  refused (`3 lanes + 1 integration worktree needs 37.9 GiB, only 18.0 GiB
+  free`) by a doctor that charged for them all again; it now charges only the
+  worktrees still to be made, and passes a resume that makes none. A staffed run
+  is counted as the pool provisions it — a worktree per crew member, not per
+  unit of `resources.lane.capacity` — plus `defaults.max_spare_crew`
+  headroom, and the doctor, the pool and the refusal line now name the same
+  count. The per-lane estimate is the tracked tree at the base branch, the
+  copied `node_modules` and the `env_files`, instead of a walk of the whole
+  main checkout that counted `.git`, the `.vinta-ai-maestro/` store (lanes
+  included) and ignored caches — one run's estimate had grown from 4.0 to
+  9.5 GiB a lane against real lanes of about 1.1 GiB.
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
   a resumed claude-code session closed a replay of killed background tasks

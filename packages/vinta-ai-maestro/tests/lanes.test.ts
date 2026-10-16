@@ -1009,6 +1009,29 @@ describe('lane pool', () => {
     expect(existsSync(migrateLog)).toBe(false)
   })
 
+  it('charges the probe for spare-crew headroom, naming the whole count', async () => {
+    // One lane and the integration worktree fit; the two desks the run may add
+    // mid-run do not, and a pool that fills the disk at its first spare is the
+    // half-provisioned failure the probe exists to prevent.
+    const { bavail, bsize } = await statfs(root)
+
+    const failure = await LanePool.provision({
+      repoPath: repo,
+      poolRoot,
+      runId: 'run-1',
+      laneCount: 1,
+      spareHeadroom: 2,
+      baseRef: 'main',
+      project: sqliteProject(),
+      perLaneBytes: Math.floor((bavail * bsize) / 3),
+    }).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(DiskProbeError)
+    expect((failure as DiskProbeError).count).toMatchObject({ lanes: 1, spares: 2, creating: 4 })
+    expect((failure as Error).message).toContain('1 lane + 1 integration worktree + 2 spare-crew worktrees')
+    expect(existsSync(poolRoot)).toBe(false)
+  })
+
   /**
    * A run's process is killed. Its worktrees are still on disk, and whatever
    * the agents had not committed is still in them — which is, for an untracked

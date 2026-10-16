@@ -56,7 +56,8 @@ import {
   planTemplate,
 } from './database.ts'
 import { runDatabaseCommand } from './db-command.ts'
-import { DiskProbeError, measureBytes, probePoolDisk } from './disk.ts'
+import { countWorktrees, describeWorktrees, integrationName, type WorktreeCount } from './count.ts'
+import { DiskProbeError, estimateLaneBytes, probePoolDisk } from './disk.ts'
 import { planService, type ServicePlan, type ServiceSpec } from './services.ts'
 import { readSummary, resetPlan, writeSummary, type WorktreeSummary } from './summary.ts'
 
@@ -349,8 +350,15 @@ export interface PoolOptions {
    * path that is not there is provisioned exactly as a first run would.
    */
   readonly adopt?: boolean
-  /** Overrides the measured per-lane disk estimate the N× probe uses. */
+  /** Overrides the per-lane disk estimate (`estimateLaneBytes`) the probe uses. */
   readonly perLaneBytes?: number
+  /**
+   * Desks the run may add mid-run through `addLane` (`defaults.max_spare_crew`
+   * on a staffed run, `spareHeadroom` in `count.ts`). Charged to the probe
+   * up front, because a pool that fits only until its first spare is taken on
+   * is a pool that fills the disk mid-run. Defaults to none.
+   */
+  readonly spareHeadroom?: number
   /**
    * Told what provisioning is doing, one line per step. Provisioning is where a
    * run spends its first minutes — a database template is built and every lane
@@ -481,7 +489,7 @@ export class LanePool {
       Array.from({ length: options.laneCount }, (_, i) => `${options.runId}-lane-${i + 1}`)
     const names: [string, Lane['kind']][] = [
       ...laneNames.map((name): [string, Lane['kind']] => [name, 'lane']),
-      [`${options.runId}-integ`, 'integration'],
+      [integrationName(options.runId), 'integration'],
     ]
 
     // Which worktrees are already there, settled before anything is created or
@@ -499,11 +507,19 @@ export class LanePool {
     // space, on a filesystem already holding every worktree it is about to
     // reuse — a refusal that gets stranger the closer the pool is to correct,
     // because the more lanes survived the more disk the probe demands.
-    const creating = adopting.filter((adopt) => !adopt).length
+    //
+    // `count.ts` is the one place that counts; the doctor's disk line and the
+    // refusal read the same answer.
+    const count = countWorktrees({
+      lanes: laneNames.length,
+      spares: options.spareHeadroom ?? 0,
+      adopted: adopting.filter(Boolean).length,
+    })
     options.progress?.(
-      `checking disk space for ${creating} new worktree${creating === 1 ? '' : 's'}…`,
+      `checking disk space for ${count.creating} new worktree${count.creating === 1 ? '' : 's'} ` +
+        `(${describeWorktrees(count)})…`,
     )
-    await pool.#probeDisk(creating)
+    await pool.#probeDisk(count.creating, count)
     // `run` has already done this, before its preflight — earlier than a pool
     // can, and the right place for it. Repeated here so a host that drives the
     // pool directly still gets a reachable server before `createdb` needs one;
@@ -822,19 +838,24 @@ export class LanePool {
   /**
    * Refuses the pool that will not fit, before a byte of it exists.
    *
-   * Counted in worktrees this call is about to create — the lanes plus the
-   * integration worktree, which is a lane in every way that costs disk, less
-   * any a resume is adopting. Zero of them is not a probe that trivially
-   * passes but one that is not run: `measureBytes` walks the whole main
-   * checkout, and a resume that creates nothing has nothing to weigh it
-   * against.
+   * Counted in worktrees that will cost new disk — `WorktreeCount.creating`:
+   * the lanes plus the integration worktree, which is a lane in every way that
+   * costs disk, plus spare-crew headroom, less any a resume is adopting. Zero
+   * of them is not a probe that trivially passes but one that is not run: a
+   * resume that creates nothing has nothing to weigh the estimate against.
    */
-  async #probeDisk(worktreeCount: number): Promise<void> {
+  async #probeDisk(worktreeCount: number, count?: WorktreeCount): Promise<void> {
     if (worktreeCount === 0) return
-    const { repoPath, poolRoot, perLaneBytes } = this.#options
-    const perLane = perLaneBytes ?? (await measureBytes(repoPath))
+    const { repoPath, poolRoot, perLaneBytes, baseRef } = this.#options
+    const perLane =
+      perLaneBytes ??
+      (await estimateLaneBytes({
+        repoPath,
+        baseRef,
+        ...(this.#project.envFiles === undefined ? {} : { envFiles: this.#project.envFiles }),
+      }))
     const probe = await probePoolDisk(poolRoot, perLane, worktreeCount)
-    if (!probe.fits) throw new DiskProbeError(probe)
+    if (!probe.fits) throw new DiskProbeError(probe, count)
   }
 
   async #buildTemplates(): Promise<void> {
@@ -1242,8 +1263,8 @@ export class LanePool {
    * Cloned rather than byte-copied where the filesystem can (`FICLONE` on
    * APFS, btrfs, XFS and ReFS), so N lanes cost close to one tree on disk until
    * a lane changes something. Elsewhere it falls back to an ordinary copy,
-   * which the disk probe already budgets for: it measures the main checkout
-   * with its `node_modules`. Symlinks inside the tree are copied verbatim.
+   * which the disk probe already budgets for: `estimateLaneBytes` charges
+   * every lane the tree's full size. Symlinks inside the tree are copied verbatim.
    * pnpm's layout is relative links, and resolving them would point every lane
    * back at main's `.pnpm`.
    *

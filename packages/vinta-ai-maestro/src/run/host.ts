@@ -38,6 +38,7 @@ import { createCrewConflictFixer } from '../integration/staffing.ts'
 import type { StoredEvent } from '../journal/events.ts'
 import type { TranscriptEntry } from '../journal/transcript.ts'
 import type { Journal } from '../journal/journal.ts'
+import { describeWorktrees, laneNames, shrinkRemedy, spareHeadroom, worktreeCount } from '../lanes/count.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
 import { DatabaseCommandError } from '../lanes/db-command.ts'
 import { LaneAdoptError, LaneEnvFileError, LanePool, LaneSetupError, type StackStop } from '../lanes/pool.ts'
@@ -221,9 +222,8 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   // thing that lets a member's session outlive a phase, because a session is
   // about a directory. The names are derived from the roster here and in the scheduler, from the
   // same function, so neither can drift from the other.
-  const crewLanes = roster(workflow.crew).map(
-    (member, i) => `${runId}-crew-${i + 1}-${member.id}`,
-  )
+  const staffed = roster(workflow.crew).length > 0
+  const lanes = laneNames(workflow, runId)
 
   const pool = await LanePool.provision({
     repoPath,
@@ -231,8 +231,10 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     runId,
     // The scheduler names its lane slots the same way, so a node's assigned
     // lane is one of these worktrees rather than a directory nobody made.
-    laneCount: crewLanes.length > 0 ? crewLanes.length : (workflow.resources['lane']?.capacity ?? 1),
-    ...(crewLanes.length === 0 ? {} : { laneNames: crewLanes }),
+    laneCount: lanes.length,
+    ...(staffed ? { laneNames: lanes } : {}),
+    // The desks `addLane` below may add mid-run, weighed now with the rest.
+    spareHeadroom: spareHeadroom(workflow),
     baseRef: options.planBranch ?? workflow.base_branch,
     // With no `project` block a lane is a worktree and nothing else, and
     // `migrateCmd` is never reached — templates are built per declared role.
@@ -572,13 +574,14 @@ function detailOf(error: unknown): string | null {
  * anything being learned from it.
  */
 export function refusal(error: unknown, workflow: Workflow, laneRoot: string): string {
-  const lanes = workflow.resources['lane']?.capacity ?? 1
   if (error instanceof DiskProbeError) {
     const { requiredBytes, availableBytes } = error.probe
+    // The pool's own count when it gave one, which knows what a resume adopted.
+    const count = error.count ?? worktreeCount(workflow)
     return (
-      `vinta-ai-maestro: refusing to provision ${lanes} lanes + 1 integration worktree — ` +
-      `${requiredBytes} bytes needed, ${availableBytes} available under ${laneRoot}. ` +
-      'Free space, or lower resources.lane.capacity.'
+      `vinta-ai-maestro: refusing to provision ${describeWorktrees(count)} — ` +
+      `${requiredBytes} bytes needed for ${count.creating} new, ${availableBytes} available under ${laneRoot}. ` +
+      `Free space, or ${shrinkRemedy(workflow)}.`
     )
   }
   // The pool's own errors already say which lane and what went wrong; a generic

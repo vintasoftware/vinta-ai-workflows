@@ -34,7 +34,14 @@ import type { HarnessAdapter } from '../harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
-import { measureBytes, probePoolDisk } from '../lanes/disk.ts'
+import {
+  describeWorktrees,
+  integrationName,
+  laneNames,
+  shrinkRemedy,
+  worktreeCount,
+} from '../lanes/count.ts'
+import { estimateLaneBytes, probePoolDisk } from '../lanes/disk.ts'
 import { createdbOf, dropdbOf, serverFlags } from '../lanes/database.ts'
 import { DatabaseCommandError, runDatabaseCommand } from '../lanes/db-command.ts'
 import type { ProjectSpec } from '../lanes/pool.ts'
@@ -87,7 +94,7 @@ export interface DoctorOptions {
   readonly poolRoot: string
   /** Defaults to `<repoPath>/.vinta-ai-workflows/worktrees`. */
   readonly summaryDir?: string
-  /** Overrides the measured per-lane disk estimate. */
+  /** Overrides the per-lane disk estimate (`estimateLaneBytes`). */
   readonly perLaneBytes?: number
   /** How long the database-command probe may take. Defaults to 15 seconds. */
   readonly databaseProbeTimeoutMs?: number
@@ -469,19 +476,67 @@ const size = (bytes: number): string =>
     ? `${Math.round(bytes / 1024 ** 2)} MiB`
     : `${(bytes / 1024 ** 3).toFixed(1)} GiB`
 
-/** §8: the probe runs against `lanes + 1` — the integration worktree costs the same. */
-async function checkDisk(options: DoctorOptions, laneCount: number): Promise<CheckResult> {
-  const perLane = options.perLaneBytes ?? (await measureBytes(options.repoPath))
-  const probe = await probePoolDisk(options.poolRoot, perLane, laneCount + 1)
-  const need = `${laneCount} lanes + 1 integration worktree needs ${size(probe.requiredBytes)}`
+/**
+ * §8: the worktrees the run will create, counted by `count.ts` exactly as the
+ * pool counts them — lanes (one per crew member on a staffed run), the
+ * integration worktree, spare-crew headroom — less what a resume adopts.
+ *
+ * The adoption half is why this is not `capacity + 1` any more. A resume
+ * whose every worktree was still on disk was refused for want of 38 GiB while
+ * the pool, which counts only what it creates, would have asked for nothing.
+ */
+async function checkDisk(
+  options: DoctorOptions,
+  gitBin: string,
+  adopted: () => Promise<number>,
+): Promise<CheckResult> {
+  const { workflow } = options
+  const count = worktreeCount(workflow, await adopted())
+  const what = describeWorktrees(count)
+  if (count.creating === 0) {
+    return pass('disk', `disk: ${what} — nothing new to provision`)
+  }
+  const perLane =
+    options.perLaneBytes ??
+    (await estimateLaneBytes({
+      repoPath: options.repoPath,
+      baseRef: workflow.base_branch,
+      git: gitBin,
+      ...(options.project?.envFiles === undefined ? {} : { envFiles: options.project.envFiles }),
+    }))
+  const probe = await probePoolDisk(options.poolRoot, perLane, count.creating)
+  const need = `${what} — ${count.creating} new need ${size(probe.requiredBytes)}`
   if (probe.fits) return pass('disk', `disk: ${need}, ${size(probe.availableBytes)} free`)
   return flag(
     'disk',
     `disk: ${need}, only ${size(probe.availableBytes)} free`,
     'fail',
     `free ${size(probe.requiredBytes - probe.availableBytes)} on the volume holding ${options.poolRoot}, ` +
-      'or lower resources.lane.capacity in the workflow',
+      `or ${shrinkRemedy(workflow)}`,
   )
+}
+
+/**
+ * How many of the run's up-front worktrees a resume will take over: those of
+ * its names standing under the lane root as linked worktrees.
+ *
+ * The filesystem is asked, for the reason `adoptedLaneBranches` gives, and a
+ * worktree on a detached HEAD counts — it holds no branch, but it holds bytes
+ * the pool will not spend again. Whether the pool really adopts each one is its
+ * own stricter question; one it refuses stops the resume with a reason of its
+ * own, so an overcount here never lets a run start that should not.
+ */
+async function adoptedWorktreeCount(options: DoctorOptions, runId: string): Promise<number> {
+  const names = [...laneNames(options.workflow, runId), integrationName(runId)]
+  const linked = await Promise.all(
+    names.map((name) =>
+      stat(join(options.poolRoot, name, '.git')).then(
+        (entry) => entry.isFile(),
+        () => false,
+      ),
+    ),
+  )
+  return linked.filter(Boolean).length
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,7 +1205,6 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const gitBin = options.bins?.git ?? 'git'
   const dockerBin = options.bins?.docker ?? 'docker'
   const summaryDir = options.summaryDir ?? `${repoPath}/.vinta-ai-workflows/worktrees`
-  const laneCount = workflow.resources['lane']?.capacity ?? 1
 
   // Resolving the resume's own lanes is part of this one check rather than a
   // step before the others: the checks are independent and run concurrently,
@@ -1176,7 +1230,9 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       checkCompose(dockerBin, needsCompose(options.project)),
       checkServers(options.project),
       checkDatabaseCommands(options.project, options.databaseProbeTimeoutMs ?? 15_000, repoPath),
-      checkDisk(options, laneCount),
+      checkDisk(options, gitBin, async () =>
+        options.resumeRunId === undefined ? 0 : adoptedWorktreeCount(options, options.resumeRunId),
+      ),
       checkLaneSummaries(summaryDir),
       checkBriefs(gitBin, repoPath, workflow),
       heldBranches(),
