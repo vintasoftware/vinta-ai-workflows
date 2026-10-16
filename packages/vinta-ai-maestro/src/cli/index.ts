@@ -32,10 +32,12 @@ import { LAND_USAGE, PROPAGATE_USAGE, landCommand, propagateCommand } from './la
 import {
   AMEND_USAGE,
   EXEC_USAGE,
+  GATE_CACHE_USAGE,
   NODE_USAGE,
   WORKFLOW_USAGE,
   amendCommand,
   execCommand,
+  gateCacheCommand,
   nodeCommand,
   workflowCommand,
 } from './steer.ts'
@@ -71,6 +73,9 @@ usage: vinta-ai-maestro <command> [options]
   exec <run-id> <lane|integration> -- <cmd>
                              Run a command in a lane or the integration
                              worktree, with that worktree's environment.
+  gate-cache invalidate <run-id> <gate-id> [--tree <hash>]
+                             Forget a gate's cached results, so its next run
+                             runs the command rather than replaying them.
   land <run-id> [--close]    Which PR lands a finished run, and which of its
                              review PRs are done; --close closes those.
   propagate <run-id> <phase> Carry a fix made on a phase after the run into
@@ -81,7 +86,8 @@ usage: vinta-ai-maestro <command> [options]
   purge [run-id]             Delete run state under .vinta-ai-maestro/ — transcripts
                              and gate logs hold repository contents verbatim.
   with <resource> -- <cmd>   Run a command while holding a live run's resource.
-  gate <gate-id>             Run one of a live run's declared gates against this
+  gate <gate-id> [--no-cache]
+                             Run one of a live run's declared gates against this
                              turn's lane, leased and cached by the daemon.
   judge calibrate            Replay a run's commands, or a file of them,
                              against a permission-judge question and threshold.
@@ -116,6 +122,7 @@ const USAGES: Readonly<Record<string, string>> = {
   workflow: WORKFLOW_USAGE,
   amend: AMEND_USAGE,
   exec: EXEC_USAGE,
+  'gate-cache': GATE_CACHE_USAGE,
   land: LAND_USAGE,
   propagate: PROPAGATE_USAGE,
   purge: PURGE_USAGE,
@@ -178,6 +185,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await amendCommand(rest, io)
     case 'exec':
       return await execCommand(rest, io)
+    case 'gate-cache':
+      return await gateCacheCommand(rest, io)
     case 'land':
       return await landCommand(rest, io)
     case 'propagate':

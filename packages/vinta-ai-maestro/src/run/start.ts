@@ -531,6 +531,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     // The `gate` verb's route in. Absent for a host with no lanes, and then the
     // verb refuses rather than running a gate against a directory it guessed.
     ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
+    ...(host.gateCache === undefined ? {} : { gateCache: host.gateCache }),
     ...(amend === undefined ? {} : { amend }),
     ...(permissionJudge === undefined ? {} : { permissionJudge }),
     // `vinta-ai-maestro exec`: a command by hand in a lane or the integration

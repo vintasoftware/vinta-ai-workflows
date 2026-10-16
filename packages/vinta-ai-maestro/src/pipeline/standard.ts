@@ -7,7 +7,7 @@
  *                      │                      └─ otherwise ──▶ unapproved             │             (merge, push, PR,
  *                      │                                                              │              after_pr chores)
  *                      ├─ exit≠0, rounds left ──▶ fix ──▶ gate                         ├─ exit≠0, rounds left ──▶ fix
- *                      └─ exit≠0, none left ──▶ exhausted                              └─ exit≠0, none left ──▶ exhausted
+ *                      └─ exit≠0, none left or stalled ──▶ exhausted                   └─ exit≠0, none left or stalled ──▶ exhausted
  * exhausted  ──┬─ continue (budget granted again) ──▶ fix
  *              └─ stop ──▶ failed
  * unapproved ──┬─ continue ──▶ review
@@ -55,6 +55,12 @@
  * to a fixer, since the last thing that happened was a red gate nobody has
  * answered yet.
  *
+ * **A stalled fix loop asks too.** `gate.stalled` is the scheduler's fact for
+ * a gate red again, run fresh, on the very tree a fixer turn left unchanged
+ * (§13.4). With no budget that loop would otherwise never end — twenty fixers
+ * in a row were observed finding nothing to fix — so it takes the same door
+ * as an exhausted budget, whatever the budget says.
+ *
  * `tests/fixtures/golden-workflow.json` carries a pipeline of the same kind with
  * almost no effects: it is a schema fixture, and a fixture that ran agents
  * would make every parser test wait on one. This one is the runnable article —
@@ -94,6 +100,19 @@ export const STANDARD_PHASE_ID = 'standard-phase'
  * comparison is asked of a `null`.
  */
 const UNLIMITED = 'node.max_fix_rounds == null'
+
+/**
+ * The fixer would be spent on a gate it already failed to move (§13.4). Written
+ * against `true` so that a host which never states the fact reads as "not
+ * stalled": a missing fact makes the comparison false.
+ */
+const STALLED = 'gate.stalled == true'
+
+/** A red gate a fixer may still be spent on. */
+const FIXABLE = `gate.exit_code != 0 && !(${STALLED}) && (${UNLIMITED} || fix_rounds < node.max_fix_rounds)`
+
+/** A red gate that goes to a person instead. Exactly `FIXABLE`'s complement among red gates. */
+const NOT_FIXABLE = `gate.exit_code != 0 && (${STALLED} || (!${UNLIMITED} && fix_rounds >= node.max_fix_rounds))`
 
 /** `gate` and `verify` run the same check, on different trees. */
 const runGates = (id: string) => ({
@@ -165,9 +184,11 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       onEnter: [
         askToContinue(
           'e-exhausted',
-          'This phase spent its fix rounds and its gates are still red. The transcript has ' +
-            'the gate output and the fixer’s last report. Continue for another round of the ' +
-            'same budget, or stop the phase?',
+          'This phase’s gates are still red, and either it spent its fix rounds or its last ' +
+            'fixer left the tree unchanged and the gate, run fresh, failed the same way — ' +
+            'which points at a cause outside the tracked files. The transcript has the gate ' +
+            'output and the fixer’s last report. Continue for another round of the same ' +
+            'budget, or stop the phase?',
         ),
       ],
     },
@@ -268,13 +289,13 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       id: 't-gate-fail',
       from: 'gate',
       to: 'fix',
-      guard: `gate.exit_code != 0 && (${UNLIMITED} || fix_rounds < node.max_fix_rounds)`,
+      guard: FIXABLE,
     },
     {
       id: 't-gate-exhausted',
       from: 'gate',
       to: 'exhausted',
-      guard: `gate.exit_code != 0 && !${UNLIMITED} && fix_rounds >= node.max_fix_rounds`,
+      guard: NOT_FIXABLE,
     },
     { id: 't-fixed', from: 'fix', to: 'gate' },
     {
@@ -311,13 +332,13 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
       id: 't-verify-fail',
       from: 'verify',
       to: 'fix',
-      guard: `gate.exit_code != 0 && (${UNLIMITED} || fix_rounds < node.max_fix_rounds)`,
+      guard: FIXABLE,
     },
     {
       id: 't-verify-exhausted',
       from: 'verify',
       to: 'exhausted',
-      guard: `gate.exit_code != 0 && !${UNLIMITED} && fix_rounds >= node.max_fix_rounds`,
+      guard: NOT_FIXABLE,
     },
     { id: 't-integrated', from: 'integrate', to: 'done' },
   ],

@@ -4,7 +4,8 @@
  * Two kinds of thing, read two ways.
  *
  * **Something went wrong**, read from the journal as it happens: a phase that
- * failed, an attempt that errored, a phase queued behind the integration
+ * failed, an attempt that errored, a fix loop that stalled on a gate (§13.4),
+ * a phase queued behind the integration
  * worktree for longer than any merge should take, and — handed in by the
  * job's logger rather than read from the journal — an error maestro logged
  * about itself. These are why the coordinator exists: the run used to sit on
@@ -83,6 +84,20 @@ export type CoordinatorTrigger =
       readonly fullEveryPhase: boolean
     }
   | { readonly kind: 'phase_failed'; readonly key: string; readonly nodeId: string; readonly reason: string }
+  /**
+   * A fixer round left the tree as it found it and the gate, run fresh, was
+   * red on it again (`gate_stalled`, `escalated`). The phase is now asking
+   * whether to continue. Something outside the lane's tracked files is the
+   * likely cause — an ignored file, a cache, the lane's database — which an
+   * agent working on the code cannot see and `exec` can.
+   */
+  | {
+      readonly kind: 'gate_stalled'
+      readonly key: string
+      readonly nodeId: string
+      readonly gateId: string
+      readonly tree: string
+    }
   | { readonly kind: 'attempt_failed'; readonly key: string; readonly nodeId: string; readonly reason: string }
   | {
       readonly kind: 'integration_wait'
@@ -144,6 +159,11 @@ export function triggersFrom(
       found.push({ kind: 'phase_failed', key: `failed:${event.id}`, nodeId, reason: payload.reason ?? 'no reason recorded' })
     } else if (event.type === 'node_error') {
       found.push({ kind: 'attempt_failed', key: `error:${event.id}`, nodeId, reason: payload.reason ?? 'no reason recorded' })
+    } else if (event.type === 'gate_stalled') {
+      const stalled = event.payload as { gate?: string; tree?: string; outcome?: string }
+      if (stalled.outcome === 'escalated' && stalled.gate !== undefined && stalled.tree !== undefined) {
+        found.push({ kind: 'gate_stalled', key: `stalled:${event.id}`, nodeId, gateId: stalled.gate, tree: stalled.tree })
+      }
     }
   }
 
@@ -199,6 +219,13 @@ function describeTrigger(trigger: CoordinatorTrigger): string {
       return `- phase ${trigger.nodeId} failed: ${trigger.reason}`
     case 'attempt_failed':
       return `- an attempt at phase ${trigger.nodeId} failed: ${trigger.reason}`
+    case 'gate_stalled':
+      return (
+        `- phase ${trigger.nodeId}'s fixer changed nothing and gate ${trigger.gateId} is still red on ` +
+        `the same tree (${trigger.tree.slice(0, 12)}), run fresh. The phase is asking whether to ` +
+        'continue. Look in its lane for a cause outside the tracked files (an ignored file, a tool ' +
+        'cache, the database); once it is fixed, `gate-cache invalidate` the gate and answer `continue`'
+      )
     case 'phase_elapsed':
       return (
         `- phase ${trigger.nodeId} has been running for ${minutes(trigger.observedMs)} minutes ` +

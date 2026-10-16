@@ -42,7 +42,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   judged the wrong way, and the highest-scoring must-deny command, and exits 1
   on a misjudged one so a case file can guard a project's question in CI.
   Commands are printed as recorded, never their output.
-
+- **`vinta-ai-maestro`: ways past a stale gate verdict.** `gate <id>
+  --no-cache` runs a gate past its cached result and keeps the new one in its
+  place; a cached red now says so. `gate-cache invalidate <run-id> <gate-id>
+  [--tree <hash>]` forgets a gate's results for the operator and the run
+  coordinator (`POST /api/runs/:id/gates/:gate/invalidate`, journalled as
+  `gate_cache_invalidated`; an agent's token cannot reach it). Both are for a
+  verdict whose cause git does not track — an ignored file, a tool's cache, an
+  installed dependency — which the tree-keyed cache would otherwise replay.
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or
@@ -935,6 +942,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outside the worktree and another project's containers or volumes. A
   project that set its own `judges.permission.question` is unaffected; the
   default `allow_above` stays 0.9.
+- **`vinta-ai-maestro`: a fix loop that changes nothing now stops and asks.**
+  A typecheck red because of ignored files left in a lane kept coming back
+  from the gate cache after they were gone, and twenty fixers in a row found
+  nothing to fix. When a gate is red again on the very tree a fixer turn left
+  unchanged, the scheduler reruns that gate once without the cache; if it is
+  still red the same way, `standard-phase` goes to `exhausted` instead of
+  spawning another fixer — with or without `max_fix_rounds` — and the run
+  coordinator is woken. New guard fact `gate.stalled`, new `run_gate` param
+  `no_cache`, new journal event `gate_stalled`. A fixer that moved the tree at
+  all is never a stall. A custom pipeline keeps its own guards and can opt in
+  on `gate.stalled`.
 
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when

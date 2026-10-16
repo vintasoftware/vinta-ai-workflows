@@ -11,11 +11,20 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { GateCache } from '../src/gates/cache.ts'
+import { gateCommand } from '../src/cli/gate.ts'
+import { USAGE } from '../src/cli/io.ts'
+import { runControl, startDaemon } from '../src/daemon/index.ts'
+import { GateCache, gateConfigKey, laneTreeHash } from '../src/gates/cache.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import { AgentGateBroker, AgentGateRefusal } from '../src/resources/agent-gates.ts'
+import {
+  MAESTRO_NODE_ENV,
+  MAESTRO_RUN_ENV,
+  MAESTRO_TOKEN_ENV,
+  MAESTRO_URL_ENV,
+} from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
-import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { WorkflowSchema, type CommandGate, type Workflow } from '../src/types.ts'
 import { renderGate, type GateScript } from './support/gate-script.ts'
 
 const RUN_ID = 'run-1'
@@ -30,6 +39,8 @@ afterEach(() => {
 
 interface Rig {
   readonly broker: AgentGateBroker
+  readonly cache: GateCache
+  readonly workflow: Workflow
   readonly journal: Journal
   readonly pools: ResourcePools
   readonly lane: string
@@ -121,6 +132,8 @@ function rig(
         return { path: lane, env: { LANE_MARKER: 'set' } }
       },
     }),
+    cache,
+    workflow,
     journal,
     pools,
     lane,
@@ -410,4 +423,77 @@ describe('a gate waited for in hops', () => {
     expect(again).toMatchObject({ status: 'passed', cached: true })
     expect(r.runs()).toBe(1)
   }, 30_000)
+})
+
+/**
+ * `gate <id> --no-cache`, from the command line through the daemon's route and
+ * the broker to the cache — the agent's way past a verdict the tree hash
+ * cannot see is stale.
+ */
+describe('a gate run with --no-cache', () => {
+  /** A live daemon serving the rig's run, and the env a turn in its lane carries. */
+  async function served(r: Rig): Promise<{ readonly env: Record<string, string> }> {
+    const daemon = await startDaemon({ journal: r.journal, pollMs: 5, warn: () => {} })
+    cleanups.push(() => void daemon.close())
+    daemon.register({
+      runId: RUN_ID,
+      control: runControl({ statuses: {}, answer: () => {} }),
+      pools: r.pools,
+      admission: { ceiling: () => 4, inFlight: () => 1, wakeAt: () => undefined },
+      agentGates: r.broker,
+    })
+    return {
+      env: {
+        [MAESTRO_URL_ENV]: daemon.url,
+        [MAESTRO_TOKEN_ENV]: daemon.agentToken,
+        [MAESTRO_RUN_ENV]: RUN_ID,
+        [MAESTRO_NODE_ENV]: NODE,
+      },
+    }
+  }
+
+  const recorder = () => {
+    const err: string[] = []
+    return { err, io: { out: () => {}, err: (line: string) => err.push(line), confirm: async () => false } }
+  }
+
+  it('runs past a stale red the cache would replay, and the fresh green replaces it', async () => {
+    const r = rig()
+    const { env } = await served(r)
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value)
+    cleanups.push(() => vi.unstubAllEnvs())
+    // The field case, seeded: red on this exact tree, for a reason the tree
+    // never held — ignored files that have since gone.
+    r.cache.store(laneTreeHash(r.lane), gateConfigKey(r.workflow.gates['unit'] as CommandGate), {
+      gateId: 'unit',
+      status: 'failed',
+      exitCode: 1,
+      durationMs: 5,
+      logPath: 'stale.log',
+    })
+
+    const replayed = recorder()
+    expect(await gateCommand(['unit'], replayed.io)).toBe(1)
+    expect(r.runs()).toBe(0)
+    // Where the agent reads the answer, it is told the way out.
+    expect(replayed.err.join('\n')).toContain('gate unit --no-cache')
+
+    const forced = recorder()
+    expect(await gateCommand(['unit', '--no-cache'], forced.io)).toBe(0)
+    expect(r.runs()).toBe(1)
+
+    // The gate node's lookup — and any agent's — now gets the fresh verdict.
+    const after = recorder()
+    expect(await gateCommand(['unit'], after.io)).toBe(0)
+    expect(after.err.join('\n')).toContain('from cache')
+    expect(r.runs()).toBe(1)
+  })
+
+  it('takes the flag on either side of the id, and nothing else', async () => {
+    const usage = recorder()
+    expect(await gateCommand(['--no-cache'], usage.io)).toBe(USAGE)
+    expect(await gateCommand(['unit', '--no-cache', 'lint'], usage.io)).toBe(USAGE)
+    expect(await gateCommand(['unit', '--fresh'], usage.io)).toBe(USAGE)
+    expect(usage.err.join('\n')).toContain('[--no-cache]')
+  })
 })

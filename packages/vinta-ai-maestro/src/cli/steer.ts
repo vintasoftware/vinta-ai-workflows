@@ -1,5 +1,6 @@
 /**
- * Acting on a live run from a shell: `node`, `amend`, `workflow` and `exec`.
+ * Acting on a live run from a shell: `node`, `amend`, `workflow`, `exec` and
+ * `gate-cache`.
  *
  * The UI could steer a phase, amend a run and answer a question; a terminal
  * could only pause or stop the whole run. These are the same operations, over
@@ -63,6 +64,19 @@ export const WORKFLOW_USAGE = `usage: vinta-ai-maestro workflow <runId> [--repo 
   Prints a run's workflow as it stands now — the snapshot it started with,
   with every amendment since applied — as JSON.
 
+  --repo <dir>   The project. Defaults to the current directory.`
+
+export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <runId> <gate-id> [--tree <hash>] [--repo <dir>]
+
+  Forgets a gate's cached results, so the next run of it — by the phase's gate
+  step or by an agent — runs the command instead of replaying the verdict.
+
+  The cache is keyed on a lane's tracked contents. A result whose cause lies
+  outside them — an ignored file, a tool's cache directory, an installed
+  dependency, the lane's database — is replayed until the tracked contents
+  move. This is the way out when that verdict is wrong.
+
+  --tree <hash>  Only the result for this lane tree. Default: every tree.
   --repo <dir>   The project. Defaults to the current directory.`
 
 export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integration> [--repo <dir>] -- <command...>
@@ -266,6 +280,36 @@ export async function workflowCommand(argv: readonly string[], io: Io): Promise<
   } finally {
     journal.close()
   }
+}
+
+export async function gateCacheCommand(argv: readonly string[], io: Io, deps: SteerDeps = {}): Promise<number> {
+  let parsed
+  try {
+    parsed = parseArgs({
+      args: [...argv],
+      options: { repo: { type: 'string' }, tree: { type: 'string' } },
+      allowPositionals: true,
+    })
+  } catch {
+    io.err(GATE_CACHE_USAGE)
+    return USAGE
+  }
+  const [verb, runId, gateId] = parsed.positionals
+  if (verb !== 'invalidate' || runId === undefined || gateId === undefined || parsed.positionals.length > 3) {
+    io.err(GATE_CACHE_USAGE)
+    return USAGE
+  }
+  const { tree } = parsed.values
+  const repoPath = resolve(parsed.values.repo ?? process.cwd())
+  const target = reach(repoPath, runId, deps.env ?? process.env)
+  if (target === null) return notLive(io, runId)
+  const path = `/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateId)}/invalidate`
+  const answered = await post(target, path, JSON.stringify(tree === undefined ? {} : { tree }), deps.fetch ?? fetch)
+  if (answered === null) return notLive(io, runId)
+  if (answered.status >= 400) return refused(io, answered.status, answered.body)
+  const removed = (answered.body as { removed?: number } | null)?.removed ?? 0
+  io.out(`gate ${gateId}: ${removed} cached result${removed === 1 ? '' : 's'} forgotten`)
+  return OK
 }
 
 export async function execCommand(argv: readonly string[], io: Io, deps: SteerDeps = {}): Promise<number> {

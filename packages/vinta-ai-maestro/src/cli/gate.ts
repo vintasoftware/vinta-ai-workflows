@@ -14,7 +14,8 @@
  * - **The result is cached.** Keyed on `(gate id, lane tree hash)`, the same
  *   key and the same database the `gate` node reads. The reviewer running
  *   `unit` after the implementer ran it on the same tree is a lookup, and so is
- *   the authoritative run afterwards.
+ *   the authoritative run afterwards. `--no-cache` runs it anyway and keeps
+ *   the new result, for a cause the tree hash cannot see (an ignored file).
  * - **The lease is not skippable.** The daemon acquires the gate's pools around
  *   the run. There is no spelling of this command that takes the machine
  *   without queueing for it.
@@ -67,7 +68,7 @@ import {
 } from '../resources/agent-leases.ts'
 import { FAILED, USAGE, type Io } from './io.ts'
 
-export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id>
+export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id> [--no-cache]
 
   Runs one of this plan's declared gates against your lane and exits with the
   gate's own exit code. The daemon runs it: it holds the gate's resources for
@@ -85,7 +86,13 @@ export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id>
   over. Do not build a wait of your own around it.
 
   If it refuses, that is the answer to the gate, not permission to run the
-  command yourself. Report it.`
+  command yourself. Report it.
+
+  --no-cache   Run the gate even though your lane's tracked contents have not
+               changed, and keep that result instead of the cached one. For
+               when what you fixed is something the cache cannot see: an
+               ignored file, a tool's own cache directory, an installed
+               dependency, the lane's database.`
 
 export interface GateDeps {
   readonly fetch?: typeof fetch
@@ -110,8 +117,12 @@ export async function gateCommand(
   io: Io,
   deps: GateDeps = {},
 ): Promise<number> {
-  const [gateId, ...rest] = argv
-  if (gateId === undefined || gateId.trim() === '' || rest.length > 0) {
+  // One flag, in either position, so a hand-rolled split beats `parseArgs`:
+  // anything else that starts with `-` is still a usage error, as is a second
+  // gate id.
+  const noCache = argv.includes('--no-cache')
+  const [gateId, ...rest] = argv.filter((arg) => arg !== '--no-cache')
+  if (gateId === undefined || gateId.trim() === '' || gateId.startsWith('-') || rest.length > 0) {
     io.err(GATE_USAGE)
     return USAGE
   }
@@ -129,7 +140,10 @@ export async function gateCommand(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)))
   const endpoint = `${url}/api/runs/${encodeURIComponent(runId)}/gates`
   const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
-  const body = JSON.stringify({ gate: gateId, holderNode })
+  // Sent on every hop, though only the hop that starts the run reads it: a
+  // re-invocation after a kill attaches to the run already going, which is
+  // the fresh one this asked for.
+  const body = JSON.stringify({ gate: gateId, holderNode, ...(noCache ? { noCache: true } : {}) })
 
   let transportFailures = 0
   let announcedAt: number | null = null
@@ -197,6 +211,16 @@ export async function gateCommand(
       `vinta-ai-maestro: gate ${gateId} ${status}` +
         ` (exit ${exitCode})${cached ? ', from cache — your lane is unchanged since it last ran' : ''}.`,
     )
+    // The one case a cached answer can be wrong, said where it is read. A red
+    // replayed after the agent removed its cause — a stale type-checker cache,
+    // an ignored build directory — sent twenty fixers in a row to find nothing
+    // to fix, because nothing in the lane's tracked contents had moved.
+    if (cached && exitCode !== 0) {
+      io.err(
+        `vinta-ai-maestro: if what you changed is not tracked by git (an ignored file, a cache ` +
+          `directory, an installed dependency), run "vinta-ai-maestro gate ${gateId} --no-cache".`,
+      )
+    }
     io.err(`vinta-ai-maestro: its output is at ${logRef}`)
     return exitCode
   }
@@ -227,7 +251,7 @@ async function refusal(response: Response, gateId: string): Promise<string> {
 
   if (code.startsWith('earlier_gate_red:')) {
     const red = code.slice('earlier_gate_red:'.length)
-    return `gate "${red}" is red on this tree and comes before "${gateId}". Fix it and run "${red}" again first — "${gateId}" would run against a tree that already failed.`
+    return `gate "${red}" is red on this tree and comes before "${gateId}". Fix it and run "${red}" again first — "${gateId}" would run against a tree that already failed. If its cause was outside git's view, run "${red}" with --no-cache.`
   }
   switch (code) {
     case 'unknown_gate':

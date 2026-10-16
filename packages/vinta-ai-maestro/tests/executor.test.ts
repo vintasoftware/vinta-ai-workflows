@@ -36,7 +36,7 @@ import {
   type Notifier,
   type RunEffectExecutor,
 } from '../src/executor/index.ts'
-import { GateCache } from '../src/gates/cache.ts'
+import { GateCache, laneTreeHash } from '../src/gates/cache.ts'
 import type {
   AgentSession,
   AgentTask,
@@ -803,6 +803,42 @@ describe('gate caching', () => {
 
     // The gate command ran exactly once: the hit skipped the runner entirely.
     expect(readFileSync(join(rig.root, counter), 'utf8').trim().split('\n')).toHaveLength(1)
+  })
+
+  it('skips the cache for the gate `no_cache` names, keeps the hits before it, and states the tree', async () => {
+    // The scheduler's stall rerun (§13.4): the red gate runs fresh, the green
+    // one declared before it is still a hit, and a red verdict carries the
+    // lane tree it is about so a fixer that changed nothing can be told apart.
+    const rig = setup(
+      (root) =>
+        WorkflowSchema.parse({
+          schema_version: 1,
+          id: 'fresh',
+          base_branch: 'main',
+          defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+          resources: { lane: { capacity: 1, kind: 'worktree' } },
+          gates: {
+            lint: { cmd: `echo lint >> ${join(root, 'lint-runs')}`, timeout_s: 30 },
+            unit: { cmd: `echo unit >> ${join(root, 'unit-runs')} && exit 3`, timeout_s: 30 },
+          },
+          nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['lint', 'unit'] }],
+        }),
+      { cache: true },
+    )
+    const lane = rig.lanes[0] as ExecutorLane
+    rig.journal.append({ runId: RUN_ID, nodeId: 'p1', type: 'node_assigned', payload: { lane: lane.name } })
+    const runs = (file: string): number => readFileSync(join(rig.root, file), 'utf8').trim().split('\n').length
+
+    const first = await rig.invoke('p1', 'run_gate')
+    expect(first.facts?.gate).toMatchObject({ id: 'unit', exit_code: 3, cached: false, tree: laneTreeHash(lane.path) })
+
+    const cached = await rig.invoke('p1', 'run_gate')
+    expect(cached.facts?.gate).toMatchObject({ id: 'unit', cached: true, tree: laneTreeHash(lane.path) })
+
+    const fresh = await rig.invoke('p1', 'run_gate', { no_cache: 'unit' })
+    expect(fresh.facts?.gate).toMatchObject({ id: 'unit', exit_code: 3, cached: false })
+    expect(runs('lint-runs')).toBe(1)
+    expect(runs('unit-runs')).toBe(2)
   })
 
   /**

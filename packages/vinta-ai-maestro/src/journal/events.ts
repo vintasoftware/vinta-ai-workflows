@@ -277,6 +277,17 @@ interface RunPayloads {
     readonly by?: Actor
   }
   /**
+   * Gate results forgotten by hand (`vinta-ai-maestro gate-cache invalidate`,
+   * §13.4): one gate's, for one tree or for every tree. `removed` is how many
+   * entries went. Ids and a git object id only.
+   */
+  gate_cache_invalidated: {
+    readonly gate: string
+    readonly tree?: string
+    readonly removed: number
+    readonly by?: Actor
+  }
+  /**
    * A finished run's compose stacks, stopped (`docker compose down`, volumes
    * kept). Projects only; `failed` are the ones that would not stop.
    */
@@ -763,6 +774,17 @@ interface NodePayloads {
       readonly load_1m?: number
       readonly cpus: number
     }
+  }
+  /**
+   * A gate red again on the tree it was red on before a fixer round, so the
+   * round changed nothing the gate reads (§13.4). `rerun_cleared` is a stale
+   * cached verdict the fresh rerun overturned; `escalated` is the same answer
+   * twice, and the node went to the operator instead of another fixer.
+   */
+  gate_stalled: {
+    readonly gate: string
+    readonly tree: string
+    readonly outcome: 'rerun_cleared' | 'escalated'
   }
   /**
    * What became of one chore turn (`run_chore`).

@@ -39,8 +39,11 @@
  *   output and `.env` are invisible. This is the right default — those are
  *   derived or secret, and hashing `node_modules/` would cost more than the
  *   gate — but it means a gate whose result depends on an ignored file (an
- *   uninstalled dependency, a changed `.env`) can hit staleley. `--no-cache` is
- *   the escape hatch.
+ *   uninstalled dependency, a changed `.env`, a stale type-checker cache) can
+ *   hit stalely. `vinta-ai-maestro gate <id> --no-cache` is the agent's
+ *   escape hatch, `GateCache.invalidate` the operator's and the coordinator's,
+ *   and the scheduler takes the same way out on its own when a fixer round
+ *   leaves the tree exactly as it found it (§13.4).
  * - **Submodule contents.** A submodule is recorded as its HEAD gitlink;
  *   uncommitted work inside one does not move the hash.
  * - **Everything outside the worktree**: environment, database state, the
@@ -239,6 +242,26 @@ export class GateCache {
       )
   }
 
+  /**
+   * Forgets `gateId`'s results: for one tree when `treeHash` is given, for
+   * every tree otherwise. Returns how many entries went.
+   *
+   * Every definition the gate has had goes with them. The caller is saying the
+   * verdict is wrong for a reason the key cannot see — an ignored file, the
+   * lane's database, something installed — and that reason is no more
+   * confined to one definition than it is to one tree. The cost of forgetting
+   * too much is a re-run, which is the price this cache always charges for a
+   * miss; the cost of forgetting too little is the stale verdict the caller is
+   * trying to get rid of.
+   */
+  invalidate(gateId: string, treeHash?: string): number {
+    const info =
+      treeHash === undefined
+        ? this.db.prepare('DELETE FROM gate_results WHERE gate_id = ?').run(gateId)
+        : this.db.prepare('DELETE FROM gate_results WHERE gate_id = ? AND tree_hash = ?').run(gateId, treeHash)
+    return info.changes
+  }
+
   close(): void {
     this.db.close()
   }
@@ -246,7 +269,12 @@ export class GateCache {
 
 export interface RunGateCachedOptions extends RunGateOptions {
   readonly cache: GateCache
-  /** `--no-cache`: run the gate anyway, and refresh the entry with the result. */
+  /**
+   * `--no-cache`: run the gate anyway, and let its result replace the entry.
+   * The entry is dropped before the run rather than overwritten after it, so
+   * a run that times out — which is never stored — leaves no verdict behind
+   * instead of the stale one it was asked to replace.
+   */
   readonly noCache?: boolean
 }
 
@@ -258,7 +286,9 @@ export async function runGateCached(options: RunGateCachedOptions): Promise<Cach
   const treeHash = laneTreeHash(options.cwd)
   const config = gateConfigKey(options.gate)
 
-  if (options.noCache !== true) {
+  if (options.noCache === true) {
+    options.cache.invalidate(options.gateId, treeHash)
+  } else {
     const hit = options.cache.lookup(options.gateId, treeHash, config)
     // Returning here is what keeps the gate's pools untouched: `runGate` is the
     // only thing that acquires them, and it is never called.
