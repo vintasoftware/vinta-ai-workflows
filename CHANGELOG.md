@@ -34,6 +34,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
+  `integrate` — a merge, a suite on the merged tree, a push, none with an
+  agent — showed `running` over a silent transcript, and one queued behind it
+  looked the same. Now:
+  - The phase view has an **Integration** timeline: each merge, conflict fix
+    round, `verify`, wave gate, push and PR of this attempt, a live clock on
+    the one in progress, and the log of every step that has one.
+  - The run view has an **Integration worktree** panel: who holds it, the step
+    it is on and for how long, and who is queued behind it. The roster and
+    the phase header show each running phase's pipeline step.
+  - `status` prints the step beside each running phase and an `integration`
+    line (`a · wave 1 gate unit · 6m 13s · 1 queued (b)`); `status --json`
+    carries `nodes[].step` and `integration`.
+  - A conflict fixer's turn is also written to the transcript of the phase
+    being based or building the wave, not only to the incoming phase's.
+
+  Two additive journal events back it: `node_step` (the pipeline state an
+  attempt entered) and `integration_step` (a step started or finished in the
+  worktree, identifiers and a log path only). Older runs have neither and
+  show no timeline.
 - **`vinta-ai-maestro`: `accept` on an unapproved review.** The review-budget
   question offered `continue` or `stop`, and operators answered `stop` meaning
   "take it as it is" — which fails the attempt and, under `--on-failure
@@ -638,6 +658,30 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: the full suite runs before a PR, and on every merged
+  tree.** Under `gate_scope: scoped`, a phase's gates ran their scoped form
+  everywhere, so a PR could carry a suite only a scoped run had seen, and most
+  phases were `done` before any full suite touched their code.
+  - A phase's gates run scoped until its review approves; `verify`, after the
+    review, runs every gate's full `cmd` on the phase branch. A red full run
+    goes back to a fixer and through the review again — more review rounds,
+    no failing suite in a PR. The fixer is told the gate failed in full, and
+    `vinta-ai-maestro gate <id> --full` runs the whole command for an agent.
+  - `defaults.wave_gates` now defaults to `every`: each wave's gates run in
+    full on the merged tree, so the next wave builds on a passing one. Set
+    `final` for the previous behaviour.
+  - A multi-dependency phase's `integ-<id>` base runs its dependencies' gates
+    in full before the phase starts, cached on the merged tree; red fails the
+    phase's setup with `BaseGateError`. A clean base merge used to run nothing.
+  - Wave and base gate failures now reach the journal with their gate and log,
+    not just their error name.
+  - Each full run can be skipped in a plan's `defaults` or the project's
+    `maestro.defaults` (`.vinta-ai-workflows.yaml`): `verify_gates: scoped`
+    keeps `verify` on the scoped form, `base_gates: off` leaves merged bases
+    unchecked, and `wave_gates: final` / `off` as before. Both new fields are
+    in `vinta-ai-workflows-config.v1.schema.json`, and the bootstrap asks when
+    the full suite should run. The run coordinator may tighten them, never
+    loosen them.
 - **`vinta-ai-maestro`: a recycled lane no longer keeps the last phase's
   ignored files.** A lane handed to the next phase kept everything gitignored,
   and one kept `apps/api/.mypy_cache` and a deleted package's `__pycache__`,

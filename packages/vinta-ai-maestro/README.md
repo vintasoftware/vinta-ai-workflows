@@ -372,13 +372,29 @@ argument the other's receiver requires — and only the merged tree shows it.
 
 | Value | Runs the gates in full on the integration worktree |
 |---|---|
-| `final` (default) | every gate of the plan on the last wave, before the plan PR opens; a wave's own gates on any wave whose merge needed a conflict resolution |
-| `every` | a wave's own gates on every wave, plus the final check — one extra suite per wave, and a break is named at the wave that introduced it |
+| `every` (default) | a wave's own gates on every wave, so the next wave builds on a passing tree and a break is named at the wave that introduced it, plus every gate of the plan on the last wave before the plan PR opens — one suite per wave |
+| `final` | every gate of the plan on the last wave; a wave's own gates only on a wave whose merge needed a conflict resolution |
 | `off` | none of the above |
 
 Under `gate_scope: scoped`, the full form of a narrowed gate still runs on
 every wave whatever this says. A red merged tree fails the phase whose merge
 built the wave.
+
+A multi-dependency phase's base (`integ-<id>`) is a merged tree as well: its
+dependencies' gates run on it in full before the phase starts, cached on the
+merged tree so a retry on the same base pays nothing. A red base stops the phase
+in its setup, naming the gate and its log.
+
+Each full run can be skipped, in the plan's `defaults` or the project's
+`maestro.defaults`:
+
+| Setting | Default | Skips |
+|---|---|---|
+| `verify_gates: scoped` | `full` | the full suite a phase runs after its review approves; the merged-tree gates are then its first full run |
+| `base_gates: off` | `full` | the gates on a multi-dependency phase's merged base |
+| `wave_gates: final` / `off` | `every` | the full suite on each wave (see above) |
+
+The run coordinator can make any of these stricter and none of them looser.
 
 ### Pausing a phase that is waiting on you
 
@@ -454,12 +470,16 @@ deletions excluded) or `{touches}` (the node's Touch List) in it:
 "unit": { "cmd": "pnpm vitest run", "scoped_cmd": "pnpm vitest related {changed_files} --run" }
 ```
 
-Under `defaults.gate_scope: scoped`, the default, phase gates run `scoped_cmd`.
-Those are the gates the implementer, every fixer round and the review loop ask for.
-The full `cmd` then runs **once per wave, on the merged tree**, after the wave's
-branches are merged. A red full run there is a regression *between* phases. It
-fails the merge and names the wave and the gate. `gate_scope: full` runs `cmd`
-everywhere and skips the wave run. A gate with no `scoped_cmd`, or a
+Under `defaults.gate_scope: scoped`, the default, a phase's gates run `scoped_cmd`
+**until its review approves**: the gate step, the implementer, every fixer round
+and the review loop. Once the review approves, `verify` runs every gate's full
+`cmd` on the phase branch, so the PR never carries a suite only a scoped run
+looked at. A red full run goes back to a fixer — told it failed in full and to
+check with `vinta-ai-maestro gate <id> --full` — and through the review again.
+That can cost review rounds; a failing suite in a PR costs more. The full `cmd`
+also runs on every merged tree in the integration worktree: each wave, and each
+multi-dependency base. A red full run there is a regression *between* phases. It
+fails the merge and names the gate. `gate_scope: full` runs `cmd` everywhere. A gate with no `scoped_cmd`, or a
 placeholder with nothing to substitute, runs `cmd`.
 
 The command must accept any path it is given. A source file with no tests of its
