@@ -891,6 +891,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: an integration merge a pause, stop or kill caught
+  half-way no longer wedges the run.** Every later attempt used to fail on
+  `integration worktree is mid-merge` until someone ran `git merge --abort` by
+  hand. The integrator now recognises a merge it started — one of the plan's
+  phase branches (or a kept resolution, or the plan branch) into one of its
+  `integ-`/`wave-` branches — keeps what it had under
+  `refs/vinta-ai-maestro/abandoned/<branch>`, aborts it and redoes it, so the
+  result is gated again; each one journals `integration_reclaimed`. The same
+  sweep runs on `run --resume` and when a stop outlives its deadline. A conflict
+  left for a person that nobody finished is redone on the retry the same way.
+  A merge the run did not start is still refused by name. A failed `git_merge`
+  of a named branch now aborts its merge.
+
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
   a resumed claude-code session closed a replay of killed background tasks

@@ -312,6 +312,19 @@ interface RunPayloads {
    */
   run_resumed: { readonly attempt: number }
   /**
+   * An unfinished merge of this run's found standing in the integration
+   * worktree — a pause, a stop or a kill caught it half-way, or a conflict was
+   * left for a person and the phase was retried — taken down so it can be
+   * redone (`Integrator.reclaim`, §8). Branch and ref names only: `kept` is
+   * where whatever the merge had in its tree was saved, null when it could
+   * not be.
+   */
+  integration_reclaimed: {
+    readonly into: string
+    readonly incoming: string
+    readonly kept: string | null
+  }
+  /**
    * A plan-branch commit the run could not take, or could not take yet
    * (`src/config/reload.ts`). An applied one is a `workflow_amended` row with
    * `author: 'config'` and needs nothing more.

@@ -1412,21 +1412,31 @@ describe('a resolution git refuses to commit', () => {
 })
 
 describe('an integration worktree that is mid-merge', () => {
-  it('is refused by name before any checkout, rather than failing on `git checkout exited 1`', async () => {
-    const repo = await conflictingPair()
-    // Somebody — a killed run, a person — left a conflicted merge standing.
-    run(repo.integ, 'checkout', '-B', 'plan/wf/integ-c', 'plan/wf/phase-a')
+  /** A merge of `incoming` into `into`, left standing — conflicted, as a kill or a person would leave it. */
+  const leaveMerge = (cwd: string, into: string, from: string, incoming: string): void => {
+    run(cwd, 'checkout', '-B', into, from)
     try {
-      run(repo.integ, 'merge', '--no-ff', '--no-edit', 'plan/wf/phase-b')
+      run(cwd, 'merge', '--no-ff', '--no-edit', incoming)
     } catch {
       // Conflicted, as intended.
     }
+  }
+
+  it('refuses a merge this run did not start by name, before any checkout', async () => {
+    const repo = await conflictingPair()
+    // A person's own merge of a branch the plan does not know.
+    const elsewhere = await repo.lane('lane-3')
+    run(elsewhere, 'checkout', '-B', 'feature/manual', 'main')
+    await repo.commit(elsewhere, { 'app.ts': 'const value = "manual"\n' }, 'manual: value')
+    leaveMerge(repo.integ, 'plan/wf/integ-c', 'plan/wf/phase-a', 'feature/manual')
     expect(midMerge(repo.integ)).toBe(true)
     const fixer = spyFixer()
+    const reclaimed: unknown[] = []
     const integrator = new Integrator({
       plan: plan([node('a'), node('b'), node('c', ['a', 'b']), node('d', ['a', 'b'])]),
       integrationPath: repo.integ,
       fixer,
+      onReclaimed: (merge) => reclaimed.push(merge),
     })
 
     // Another phase's base, built in the same worktree.
@@ -1438,15 +1448,134 @@ describe('an integration worktree that is mid-merge', () => {
     expect(failure).toBeInstanceOf(IntegrationWorktreeBusyError)
     const error = failure as IntegrationWorktreeBusyError
     expect(error.operation).toBe('merge')
-    expect(error.incoming).toBe('plan/wf/phase-b')
+    expect(error.incoming).toBe('feature/manual')
     expect(error.into).toBe('plan/wf/integ-c')
     expect(error.message).toContain('mid-merge')
-    expect(error.message).toContain('plan/wf/phase-b into plan/wf/integ-c')
+    expect(error.message).toContain('feature/manual into plan/wf/integ-c')
     // Nothing was touched: the merge is still there for whoever owns it.
     expect(midMerge(repo.integ)).toBe(true)
     expect(fixer.calls).toEqual([])
-    // A wave merge is refused the same way.
+    expect(reclaimed).toEqual([])
+    // A wave merge is refused the same way, and so is an explicit sweep.
     await expect(integrator.mergeWave(1)).rejects.toBeInstanceOf(IntegrationWorktreeBusyError)
+    await expect(integrator.reclaim()).rejects.toBeInstanceOf(IntegrationWorktreeBusyError)
+  })
+
+  it('refuses a plan branch merged into a branch that is not the plan\'s', async () => {
+    const repo = await conflictingPair()
+    leaveMerge(repo.integ, 'scratch', 'plan/wf/phase-a', 'plan/wf/phase-b')
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+    })
+
+    await expect(integrator.prepareBase('c')).rejects.toBeInstanceOf(IntegrationWorktreeBusyError)
+    expect(midMerge(repo.integ)).toBe(true)
+  })
+
+  /**
+   * The observed wedge: a stop landed while `phase-p4a` was being merged into
+   * `wave-1`. The merge had staged without a conflict and was never committed,
+   * and every later attempt failed on `IntegrationWorktreeBusyError` until a
+   * person ran `git merge --abort`.
+   */
+  it('redoes an interrupted wave merge of its own, so the wave is built afresh', async () => {
+    const repo = await makeRepo()
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a\n' }, 'phase a')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'b.ts': 'b\n' }, 'phase b')
+    // Phase a merged; phase b staged and never committed.
+    run(repo.integ, 'checkout', '-B', 'plan/wf/wave-1', 'main')
+    run(repo.integ, 'merge', '--no-ff', '--no-edit', 'plan/wf/phase-a')
+    run(repo.integ, 'merge', '--no-ff', '--no-commit', 'plan/wf/phase-b')
+    expect(midMerge(repo.integ)).toBe(true)
+    const reclaimed: unknown[] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+      onReclaimed: (merge) => reclaimed.push(merge),
+    })
+
+    const result = await integrator.mergeWave(1, undefined, 'b')
+
+    expect(result.merged).toEqual(['a', 'b'])
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(isAncestor(repo.integ, 'plan/wf/phase-a', 'plan/wf/wave-1')).toBe(true)
+    expect(isAncestor(repo.integ, 'plan/wf/phase-b', 'plan/wf/wave-1')).toBe(true)
+    expect(reclaimed).toEqual([
+      { into: 'plan/wf/wave-1', incoming: 'plan/wf/phase-b', kept: 'refs/vinta-ai-maestro/abandoned/wave-1' },
+    ])
+    expect(parents(repo.integ, 'refs/vinta-ai-maestro/abandoned/wave-1')).toHaveLength(2)
+  })
+
+  /**
+   * A conflict left for a person (`UnresolvedConflictError`) that nobody
+   * finished. The retry used to fail in setup on every attempt; it now keeps
+   * the fixer's attempt and hands the merge to a fixer again.
+   */
+  it('keeps an unfinished conflict of its own and redoes the merge on the retry', async () => {
+    const repo = await conflictingPair()
+    const RESOLVED = 'const value = "a" + "b"\n'
+    let resolve = false
+    const fixer = spyFixer(async (request) => {
+      if (resolve) await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+    })
+    const verify: string[] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      maxFixRounds: 1,
+      verify: async (cwd) => {
+        verify.push(await readFile(join(cwd, 'app.ts'), 'utf8'))
+        return true
+      },
+    })
+
+    await expect(integrator.prepareBase('c')).rejects.toBeInstanceOf(UnresolvedConflictError)
+    // Left standing, by design: it is what a person finishing it by hand needs.
+    expect(midMerge(repo.integ)).toBe(true)
+
+    resolve = true
+    const base = await integrator.prepareBase('c')
+
+    expect(base).toBe('plan/wf/integ-c')
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(fixer.calls).toHaveLength(2)
+    // The merge's result went through the gate again.
+    expect(verify).toEqual([RESOLVED])
+    expect(run(repo.integ, 'show', 'plan/wf/integ-c:app.ts')).toBe(RESOLVED.trim())
+    // The fixer's unfinished attempt is not lost, and not reused: it still has its markers.
+    expect(run(repo.integ, 'show', 'refs/vinta-ai-maestro/abandoned/integ-c:app.ts')).toContain('<<<<<<<')
+  })
+
+  it('recognises a phase branch a retry has moved on since the merge began', async () => {
+    const repo = await makeRepo()
+    const one = await repo.lane('lane-1')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a\n' }, 'phase a')
+    run(repo.integ, 'checkout', '-B', 'plan/wf/wave-1', 'main')
+    run(repo.integ, 'merge', '--no-ff', '--no-commit', 'plan/wf/phase-a')
+    // The retried phase committed more on top.
+    await repo.commit(one, { 'a.ts': 'a, again\n' }, 'phase a: attempt 2')
+    const integrator = new Integrator({ plan: plan([node('a')]), integrationPath: repo.integ, fixer: spyFixer() })
+
+    const reclaimed = await integrator.reclaim()
+
+    expect(reclaimed).toMatchObject({ into: 'plan/wf/wave-1', incoming: 'plan/wf/phase-a' })
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+
+  it('answers null with nothing in progress', async () => {
+    const repo = await makeRepo()
+    const integrator = new Integrator({ plan: plan([node('a')]), integrationPath: repo.integ, fixer: spyFixer() })
+    expect(await integrator.reclaim()).toBe(null)
   })
 
   it('does not leave one behind when the fixer could not run at all', async () => {

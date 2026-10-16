@@ -415,6 +415,13 @@ what they wanted), *commit --no-verify* (the resolution already passed the
 phases' gates), or *abort merge*. Under `--retry-after`, nobody there means
 *abort*. The retry reuses the kept resolution.
 
+A merge maestro started that a pause, a stop or a kill caught half-way is not
+left for you either. On the next attempt, on `run --resume`, and when a stop
+outlives its deadline, maestro keeps what that merge had under
+`refs/vinta-ai-maestro/abandoned/<branch>`, aborts it and does it again. A merge
+it did not start (yours, or a rebase) is never touched: the phase that needs
+the worktree stops and names it.
+
 ### Gate types
 
 A gate with a `type` (`test`, `lint`, `typecheck` or `e2e`) takes any field it

@@ -27,7 +27,7 @@ import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
 import type { ConflictFixer } from '../integration/fixer.ts'
-import { gitLines, gitOk } from '../integration/git.ts'
+import { gitLines } from '../integration/git.ts'
 import {
   type CommitDecision,
   type CommitFailure,
@@ -138,9 +138,10 @@ export interface HostWiring {
    */
   readonly bindCommitDecision?: (decide: (failure: CommitFailure) => Promise<CommitDecision>) => void
   /**
-   * Ends what the scheduler cannot: a conflict-fixer round in progress, and a
-   * merge left standing in the integration worktree. For a run interrupted by
-   * a signal. Absent for an injected executor.
+   * Ends what the scheduler cannot: a conflict-fixer round in progress, and an
+   * unfinished merge of this run's left standing in the integration worktree
+   * (`Integrator.reclaim`). For a run interrupted by a signal, and for a stop
+   * whose drain outlived its deadline. Absent for an injected executor.
    */
   readonly interrupt?: () => Promise<void>
   /**
@@ -337,6 +338,13 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // until then, for the reason `bindCommitDecision` gives.
     onCommitFailure: (failure) =>
       decideCommit === null ? Promise.resolve('abort' as const) : decideCommit(failure),
+    onReclaimed: (merge) => {
+      journal.append({
+        runId,
+        type: 'integration_reclaimed',
+        payload: { into: merge.into, incoming: merge.incoming, kept: merge.kept },
+      })
+    },
     onConflict: (conflict) => {
       journal.append({
         runId,
@@ -352,6 +360,13 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       })
     },
   })
+
+  // A resume picks up an integration worktree a pause, a stop or a kill may
+  // have caught mid-merge. The merge is redone by whichever phase needs the
+  // worktree next anyway; sweeping it now means none of them starts on it, and
+  // the journal says so before anything else happens. A merge this run did not
+  // start is left where it is, for that phase to refuse by name.
+  if (options.adopt === true) await integrator.reclaim().catch(() => null)
 
   const cache = new GateCache(repoPath)
   // Every gate broker `gatesFor` hands out, so `adopt` can reach all of them.
@@ -431,11 +446,12 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // holds; this ends the one it does not — a fix round — and leaves the
     // shared worktree with no merge in progress, which is the state every
     // resume and every later phase needs it in.
+    //
+    // Only a merge this run started: one somebody else has standing there is
+    // theirs, and the next phase to need the worktree names it.
     interrupt: async () => {
       await fixer.interrupt?.()
-      if (await gitOk(integrationPath, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])) {
-        await gitOk(integrationPath, ['merge', '--abort'])
-      }
+      await integrator.reclaim().catch(() => null)
     },
     // Read through the pool rather than captured, because a recycle that had to
     // re-provision hands back a different `Lane` object for the same slot.

@@ -590,6 +590,16 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
           new Promise<false>((resolve_) => setTimeout(() => resolve_(false), INTERRUPT_DEADLINE_MS).unref()),
         ])
         if (!interrupted) log.warn('run.interrupt_forced', { run: runId })
+      } else {
+        // A stop whose drain outlived its deadline. The kills were sent when it
+        // was asked for; what nothing has done yet is end a fix round and take
+        // down a merge the stop caught half-way in the integration worktree,
+        // which this process exiting would otherwise leave for the next run to
+        // trip over. Bounded for the same reason.
+        await Promise.race([
+          started.interrupt().catch(() => {}),
+          new Promise<void>((resolve_) => setTimeout(resolve_, INTERRUPT_DEADLINE_MS).unref()),
+        ])
       }
       // **Written before anything is closed, and this is the whole point of
       // handling the signal at all.** Without it the run stays `running` in
