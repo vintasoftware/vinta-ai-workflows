@@ -38,6 +38,9 @@ export const NODE_USAGE = `usage: vinta-ai-maestro node <op> <runId> <phase> [te
   pause    <runId> <phase>                Stop after the current turn. On a
                                           phase waiting on a question, hold it:
                                           no --retry-after timer answers it.
+  resume   <runId> <phase>                Undo pause: withdraw one not yet
+                                          taken, release the paused phase, or
+                                          give a held one its timer back.
   abort    <runId> <phase>                Kill it, fail it, block dependents.
                                           A run left with nothing to run stays
                                           up for retry; stop it to end it.
@@ -102,6 +105,7 @@ const NODE_OPS = {
   context: { path: 'context', field: 'text' },
   redirect: { path: 'redirect', field: 'instruction' },
   pause: { path: 'pause', field: null },
+  resume: { path: 'resume', field: null },
   abort: { path: 'abort', field: null },
   retry: { path: 'retry', field: null },
   fresh: { path: 'fresh', field: null },

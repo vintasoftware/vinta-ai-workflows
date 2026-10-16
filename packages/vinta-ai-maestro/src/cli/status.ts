@@ -20,7 +20,7 @@ import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { jobLogPathFor, liveJob, type JobRecord } from '../job/job.ts'
-import { openJournal, type Journal, type RunRow } from '../journal/journal.ts'
+import { openJournal, type Journal, type PendingQuestion, type RunRow } from '../journal/journal.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
 import { describeLeftovers, findLeftovers, type LeftoverDeps } from '../run/leftovers.ts'
@@ -164,7 +164,10 @@ function showRun(
   const job = liveJob(repoPath, runId)
   const state = runState(row, job)
   const nodes = journal.nodes(runId)
-  const asking = new Set(journal.pendingQuestions(runId).map((question) => question.nodeId))
+  // The question itself, not only that there is one: an operator answering
+  // from the terminal had to read it out of `flow.db`.
+  const questions = new Map(journal.pendingQuestions(runId).map((pending) => [pending.nodeId, pending]))
+  const asking = new Set(questions.keys())
   const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, string | null>()
   const held = state === 'running' ? journal.heldNodes(runId) : new Set<string>()
   const substituted = journal.substitutions(runId)
@@ -196,6 +199,7 @@ function showRun(
           wave: node.wave,
           harness: node.harness,
           asking: asking.has(node.node_id),
+          question: questionOf(questions.get(node.node_id)),
           waitingOn: waiting.has(node.node_id) ? 'integration_worktree' : null,
           heldBy: waiting.get(node.node_id) ?? null,
           pausedByOperator: held.has(node.node_id),
@@ -228,12 +232,31 @@ function showRun(
     ),
   )
   io.out('')
+  for (const [nodeId, pending] of questions) {
+    const choices = pending.question.choices ?? []
+    io.out(`${nodeId} asks: ${pending.question.question}${choices.length === 0 ? '' : ` [${choices.join(' | ')}]`}`)
+  }
   if (asking.size > 0) {
-    io.out(`${asking.size} phase(s) waiting on an answer — open \`vinta-ai-maestro ui\` to answer.`)
+    io.out(
+      `${asking.size} phase(s) waiting on an answer — \`vinta-ai-maestro node answer <run> <phase> <choice>\`, ` +
+        'or open `vinta-ai-maestro ui`.',
+    )
   }
   io.out(`log       ${jobLogPathFor(repoPath, runId)}`)
   if (isResumable(state)) io.out(`resume    vinta-ai-maestro run --resume ${runId}`)
   return OK
+}
+
+/** A pending question as `status --json` gives it: what is asked, how, and the effect it parked on. */
+function questionOf(pending: PendingQuestion | undefined): Record<string, unknown> | null {
+  if (pending === undefined) return null
+  return {
+    effectId: pending.effectId,
+    question: pending.question.question,
+    kind: pending.question.kind,
+    choices: pending.question.choices ?? null,
+    askedAt: pending.askedAt,
+  }
 }
 
 /** Left-aligned columns, two spaces apart. Plain text: it is read in a terminal. */

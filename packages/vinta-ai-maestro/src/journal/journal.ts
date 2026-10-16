@@ -575,6 +575,7 @@ export class Journal {
       }
       const payload = JSON.parse(row.payload_json) as { op?: string; delivery?: string }
       if (payload.op === 'pause' && payload.delivery === 'held') held.add(row.node_id)
+      if (payload.op === 'resume' && payload.delivery === 'delivered') held.delete(row.node_id)
     }
     return held
   }

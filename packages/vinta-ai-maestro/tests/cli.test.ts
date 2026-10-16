@@ -2800,6 +2800,44 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
     })
   })
 
+  /**
+   * `status --json` said `asking: true` and nothing else: the question, its
+   * choices and the effect it parked on had to be read out of `flow.db`.
+   */
+  it('shows the question a phase is asking, with its choices and effect', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'asked')
+    const journal = openJournal(dir)
+    journal.append({
+      runId: 'asked',
+      nodeId: 'a',
+      type: 'human_question',
+      payload: {
+        effect_id: 'e-unapproved',
+        question: 'The reviewer has not approved this phase.',
+        kind: 'choice',
+        choices: ['continue', 'accept', 'stop'],
+      },
+    })
+    journal.close()
+
+    const io = recorder()
+    expect(await statusCommand(['asked', '--repo', dir], io.io)).toBe(OK)
+    expect(io.out.join('\n')).toContain('a asks: The reviewer has not approved this phase. [continue | accept | stop]')
+    const json = recorder()
+    expect(await statusCommand(['asked', '--repo', dir, '--json'], json.io)).toBe(OK)
+    expect(JSON.parse(json.out.join('')).nodes[0]).toMatchObject({
+      nodeId: 'a',
+      asking: true,
+      question: {
+        effectId: 'e-unapproved',
+        question: 'The reviewer has not approved this phase.',
+        kind: 'choice',
+        choices: ['continue', 'accept', 'stop'],
+      },
+    })
+  })
+
   it('lists what a finished run left running or on disk, with the command for each', async () => {
     const dir = gitRepo()
     orphan(dir, 'over')

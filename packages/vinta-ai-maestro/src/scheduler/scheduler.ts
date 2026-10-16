@@ -672,6 +672,8 @@ interface NodeState {
    * Null for a question that waits for a person however long that takes.
    */
   unattendedAnswer: string | null
+  /** Sets the unattended timer going again, once it fired on a held node and stood down. */
+  rearm: (() => void) | null
   /**
    * Unattended answers given this attempt, by the effect that asked. A plan's
    * `unattended_answer` may be a list — its nth entry is the nth answer, and the
@@ -1069,6 +1071,7 @@ export class Scheduler {
       freshRequested: false,
       parkedEffectId: null,
       unattendedAnswer: null,
+      rearm: null,
       unattendedGiven: new Map(),
       fixRounds: 0,
       lastGate: null,
@@ -1657,6 +1660,41 @@ export class Scheduler {
    * it; the turn after that is the cold one. A settled node has no next turn,
    * and a `retry` is cold anyway, so both are `ignored`.
    */
+  /**
+   * §9 — undo `pause`. It had no undo of its own: a phase paused between turns
+   * was released only by answering the synthesized "The operator paused this
+   * node. Resume it?", which nothing documented, and a held one only by
+   * answering its question by hand — giving up the unattended answer the run
+   * was relying on.
+   *
+   * A pause still waiting for its turn to end is withdrawn; a phase parked on
+   * the pause is let go; a held phase gets its question's timer back, a full
+   * interval from now if it had already stood down. Anything else is `ignored`.
+   * The coordinator cannot resume what the operator paused (§9.2).
+   */
+  resume(nodeId: string, actor: Actor = 'operator'): OperatorDelivery {
+    const state = this.#stateOf(nodeId)
+    if (actor === 'coordinator') throw new CoordinatorForbidden('the operator paused this node')
+    if (state.pauseRequested) {
+      state.pauseRequested = false
+      return this.#operation(state, 'resume', undefined, 'delivered', actor)
+    }
+    if (state.resume !== null && state.parkedEffectId?.startsWith('operator-pause:') === true) {
+      const delivered = this.#operation(state, 'resume', undefined, 'delivered', actor)
+      this.answer(nodeId, { human: { answer: 'resume' } }, actor)
+      return delivered
+    }
+    if (state.held) {
+      state.held = false
+      const rearm = state.rearm
+      state.rearm = null
+      rearm?.()
+      this.#log.info('node.resumed', { node: state.node.id })
+      return this.#operation(state, 'resume', undefined, 'delivered', actor)
+    }
+    return this.#operation(state, 'resume', undefined, 'ignored', actor)
+  }
+
   freshSession(nodeId: string, actor: Actor = 'operator'): OperatorDelivery {
     const state = this.#stateOf(nodeId)
     if (this.#settledNode(state)) return this.#operation(state, 'fresh', undefined, 'ignored', actor)
@@ -4032,16 +4070,26 @@ export class Scheduler {
     if (answer === null || after === undefined || after <= 0) return () => {}
 
     const clock = this.#options.clock ?? systemClock
-    return clock.at(clock.now() + after, () => {
+    let cancel = (): void => {}
+    const fire = (): void => {
       if (state.resume === null || state.aborted) return
       if (state.held) {
         this.#log.info('node.unattended_withheld', { node: state.node.id, reason: 'held' })
+        // `resume` gives the timer back, a full interval from then.
+        state.rearm = () => {
+          cancel = clock.at(clock.now() + after, fire)
+        }
         return
       }
       this.#log.info('node.unattended_answer', { node: state.node.id, after_ms: after })
       if (effect !== null) state.unattendedGiven.set(effect, (state.unattendedGiven.get(effect) ?? 0) + 1)
       this.answer(state.node.id, { human: { answer, unattended: true } })
-    })
+    }
+    cancel = clock.at(clock.now() + after, fire)
+    return () => {
+      state.rearm = null
+      cancel()
+    }
   }
 
   /**
@@ -4079,13 +4127,18 @@ export class Scheduler {
     state.quickFailures = quick ? state.quickFailures + 1 : 0
     const factor = Math.min(2 ** Math.max(0, state.quickFailures - 1), UNATTENDED_BACKOFF_CAP)
     const wait = after * factor
-    return clock.at(clock.now() + wait, () => {
+    let cancel = (): void => {}
+    const fire = (): void => {
       // Between the timer firing and this running, the operator may have
       // answered: `resume` is nulled by `answer`, and asking again here is
       // cheaper than reasoning about whether that can happen.
       if (state.resume === null || state.aborted) return
       if (state.held) {
         this.#log.info('node.unattended_withheld', { node: state.node.id, reason: 'held' })
+        // `resume` gives the timer back, a full wait from then.
+        state.rearm = () => {
+          cancel = clock.at(clock.now() + wait, fire)
+        }
         return
       }
       state.unattended += 1
@@ -4096,7 +4149,12 @@ export class Scheduler {
         quick_failures: state.quickFailures,
       })
       this.answer(state.node.id, { human: { answer: RETRY, unattended: true } })
-    })
+    }
+    cancel = clock.at(clock.now() + wait, fire)
+    return () => {
+      state.rearm = null
+      cancel()
+    }
   }
 
   #setStatus(state: NodeState, status: NodeStatus, reason?: string): void {

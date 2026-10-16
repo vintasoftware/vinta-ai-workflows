@@ -1118,6 +1118,14 @@ export function createApi(options: ApiOptions): Hono {
     operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => run.control.pause(nodeId, actor)),
   )
 
+  /** §9 — undo `pause` (`Scheduler.resume`). */
+  app.post('/api/runs/:runId/nodes/:nodeId/resume', (c) =>
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => {
+      if (run.control.resume === undefined) throw new UnsupportedOperation('resume')
+      return run.control.resume(nodeId, actor)
+    }),
+  )
+
   app.post('/api/runs/:runId/nodes/:nodeId/abort', (c) =>
     operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => run.control.abortNode(nodeId, actor)),
   )

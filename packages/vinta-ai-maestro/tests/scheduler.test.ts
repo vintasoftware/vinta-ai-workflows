@@ -2569,6 +2569,27 @@ describe('§9 operations', () => {
     expectDrained(r)
   })
 
+  it('resumes a paused node with `resume`, rather than an answer to a question nobody documented', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true })
+
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    await r.scheduler.pause('a')
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+
+    expect(r.scheduler.resume('a')).toBe('delivered')
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'pause', delivery: 'sent' },
+      { op: 'resume', delivery: 'delivered' },
+    ])
+    expect(r.scheduler.resume('a')).toBe('ignored')
+    expectDrained(r)
+  })
+
   it('aborts a node: kills the session, fails it, and blocks exactly its dependents', async () => {
     const workflow = makeWorkflow([node('a'), node('b', ['a']), node('c', ['b']), node('d')])
     const r = rig(workflow, { stall: true })
@@ -4173,6 +4194,35 @@ describe('a failed phase the operator can retry', () => {
       await running
       expect(r.journal.heldNodes('run-1')).toEqual(new Set())
       expect(await r.scheduler.pause('a')).toBe('ignored')
+      expectDrained(r)
+    })
+
+    /**
+     * `node pause` had no undo: a held phase was released only by answering
+     * its question by hand, and a paused one only by answering a synthesized
+     * "Resume it?" nobody had documented. `resume` gives the timer back.
+     */
+    it('resumes a held node: the withheld timer answers it after all', async () => {
+      const r = rig(makeWorkflow([node('a')], { pipeline: 'explode' }), {
+        onFailure: 'retry',
+        retries: 0,
+        retryAfterMs: 60_000,
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'offer')
+      expect(await r.scheduler.pause('a')).toBe('held')
+      await r.advance(60_000)
+      expect(r.adapter.spawned.length).toBe(1)
+
+      expect(r.scheduler.resume('a')).toBe('delivered')
+      expect(r.journal.heldNodes('run-1')).toEqual(new Set())
+      await r.advance(60_000)
+      await until(() => r.adapter.spawned.length === 2, 'the unattended retry')
+
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the second failure')
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      await running
       expectDrained(r)
     })
 

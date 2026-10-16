@@ -57,7 +57,7 @@ export interface HumanQuestion {
 export type HumanAnswer = string | number | boolean | null
 
 /** The §9 operations that steer a node. `take over` is a PTY attach, not an event. */
-export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort' | 'fresh'
+export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'resume' | 'abort' | 'fresh'
 
 /**
  * Which edge of a gate-pool acquisition a `gate_pool` event marks.

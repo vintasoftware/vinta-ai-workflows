@@ -62,6 +62,8 @@ export interface RunControl {
    * parked on a question, hold it there (`held`).
    */
   pause(nodeId: string, actor?: Actor): Operated
+  /** §9 — undo `pause`: withdraw it, release the parked phase, or give a held one its timer back. */
+  resume?(nodeId: string, actor?: Actor): Operated
   /**
    * §9 — kill the session, mark failed, block dependents. A run left with
    * nothing to run stays up for the node's `retry` (§9).
@@ -303,7 +305,7 @@ export function runControl(
   }
   // Destructured off the prototype, so every forward re-binds `this` to the
   // scheduler: these are class methods reaching private state.
-  const { addContext, redirect, pause, abortNode, question, retry, freshSession } = scheduler
+  const { addContext, redirect, pause, resume, abortNode, question, retry, freshSession } = scheduler
   const own =
     operations.question ??
     (question === undefined ? undefined : (nodeId: string) => question.call(scheduler, nodeId))
@@ -339,6 +341,11 @@ export function runControl(
       : retry === undefined
         ? {}
         : { retry: (nodeId: string) => retry.call(scheduler, nodeId) }),
+    ...(operations.resume !== undefined
+      ? { resume: operations.resume }
+      : resume === undefined
+        ? {}
+        : { resume: (nodeId: string, actor?: Actor) => resume.call(scheduler, nodeId, actor) }),
     ...(operations.freshSession !== undefined
       ? { freshSession: operations.freshSession }
       : freshSession === undefined
