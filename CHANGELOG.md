@@ -33,6 +33,34 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `accept` on an unapproved review.** The review-budget
+  question offered `continue` or `stop`, and operators answered `stop` meaning
+  "take it as it is" — which fails the attempt and, under `--on-failure
+  retry`, starts the phase over. It now offers `continue`, `accept` and `stop`
+  and says what each does. `accept` ends the review loop and keeps the work:
+  the polish chores, the gates and integration still run, and the answer is
+  journalled. The unattended answer is unchanged (`continue` once, then
+  `stop`); the coordinator cannot answer `accept`.
+- **`vinta-ai-maestro validate` warns about parallel phases adding migrations
+  to one app**, and `plan-feature` treats them as real overlap. Two phases
+  that neither depends on the other, each adding a migration under the same
+  directory (Django `<app>/migrations/`, Alembic `…/versions/`, Rails
+  `db/migrate/`, Prisma `prisma/migrations/`), start from the same latest
+  migration; merged, the graph has two leaves and every gate on the merged
+  tree fails. Their Touch Lists name different files, so nothing flagged it.
+  `validate --json` gains a `warnings` list, printed as `warning:` lines in
+  text mode, and the review page shows them in their own panel; neither
+  changes the exit code or `valid`. `plan-feature` now says to add the edge,
+  or to name the phase whose integration writes the merge migration.
+- **`vinta-ai-maestro node resume <run> <phase>`**, the undo of `node pause`:
+  it withdraws a pause not yet taken, releases a phase parked on the pause, or
+  gives a held phase its `--retry-after` timer back. It used to take
+  answering an undocumented "The operator paused this node. Resume it?"
+  question, or answering a held phase's question by hand.
+- **`vinta-ai-maestro status` shows the question each phase is asking**, with
+  its choices, and `status --json` carries it per node as `question`
+  (`effectId`, `question`, `kind`, `choices`, `askedAt`). `asking: true` alone
+  sent operators into `flow.db` to read it.
 - **`vinta-ai-maestro`: ways past a stale gate verdict.** `gate <id>
   --no-cache` runs a gate past its cached result and keeps the new one in its
   place; a cached red now says so. `gate-cache invalidate <run-id> <gate-id>
@@ -957,6 +985,51 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a claude-code turn the CLI calls "blocked" no longer
+  fails unless a tool was refused in it.** The CLI's own turn summary marks a
+  turn `blocked` whenever its last message names a next step for a person —
+  a review ending "Nothing was pushed." over `VERDICT: pass`, an implementer
+  listing an open point — and each such turn was recorded as failed
+  ("claude-code: the turn ended blocked"), an approving review included. One
+  observed phase had 43 of them. The summary now fails a turn only alongside a
+  `permission_denied` in the same turn, the case it was added for; whether
+  the rest did their job is for verdicts, gates and the agent's questions. A
+  turn's errors no longer outlive it in a session held open for background
+  work.
+- **`vinta-ai-maestro`: a merge git stopped with nothing unmerged no longer
+  starts a fixer.** `rerere.autoupdate` replaying a recorded resolution, or a
+  `pre-merge-commit` / `commit-msg` hook refusing the merged code, leaves
+  `git merge` non-zero with no unmerged path, and the integrator handed the
+  conflict fixer an empty file list — nineteen rounds in one observed phase,
+  each told to resolve nothing. With no conflict markers left, the merge now
+  goes to `verify` and is committed, recorded as resolved in 0 rounds; a hook
+  that refuses that commit gets the refused-commit question (commit, commit
+  past the hooks, or abort), worded for a clean merge. Only a red gate sends it
+  to the fixer. A merge git refused before merging anything (an untracked file
+  in the way) fails with git's own error.
+- **`vinta-ai-maestro`: a merge finished by hand survives the next attempt.**
+  A conflict the fixer could not settle fails the phase with "finish the merge
+  by hand … and commit it", and the next attempt's `mergeWave` cut
+  `wave-<N>` again from `wave-<N-1>` and re-merged every member, throwing the
+  resolution away and hitting the same conflict on every attempt. A wave or
+  `integ-<id>` branch that still contains its starting point, and whose merges
+  all brought in work still in the members' current tips, is now kept, and only
+  the members it lacks are merged. A member redone after it was merged still
+  forces a rebuild. The error now says the branch is kept.
+- **`vinta-ai-maestro`: a merged tree that fails its gates is no longer
+  reported as an unresolved conflict with no paths.** Two sibling phases that
+  each added a Django migration on the same parent merged cleanly and failed
+  `verify` together, and the phase failed "unresolved conflict: p4a both
+  changed , …". Each fix round is now told which gate the merged tree failed
+  and where its log is, and the rounds end in `IntegrationVerifyError`, naming
+  the gate and its log path (`nodes/_integration/gates/<gate>.log`).
+- **`vinta-ai-maestro`: `exec` accepts a lane's short name or its phase, and
+  `with` / `gate` work inside it.** `exec <run> crew-3-tier2-2` and
+  `exec <run> p1` were refused `unknown_target`; only the full
+  `<run-id>-crew-3-tier2-2` worked. Both now resolve, and a refusal lists the
+  run's targets. Inside `exec`, `with test-suite -- make test` said "no live
+  run is available" while the run was live: the command now holds leases as the
+  phase running in the lane, or as itself on an idle one, until it exits.
 - **`vinta-ai-maestro`: a fix loop that changes nothing now stops and asks.**
   A typecheck red because of ignored files left in a lane kept coming back
   from the gate cache after they were gone, and twenty fixers in a row found
