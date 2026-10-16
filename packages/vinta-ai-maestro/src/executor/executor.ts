@@ -141,8 +141,6 @@ export interface RunExecutorOptions {
   readonly lanes?: readonly ExecutorLane[]
   /** §13.4's gate result cache. Omitted means every gate runs. */
   readonly cache?: GateCache
-  /** `--no-cache`: run the gate anyway, and refresh the entry with the result. */
-  readonly noCache?: boolean
   /** Verdict for a review turn that stated none. Conservative by default. */
   readonly defaultVerdict?: 'pass' | 'fail'
   /** Injected in tests, and on a platform with no notification channel. */
@@ -197,6 +195,27 @@ const WAVE_GATE_NODE = '_integration'
 
 /** How many transcript entries back to look for the verdict. */
 const TRANSCRIPT_WINDOW = 50
+
+/** One gate's answer, and the lane tree it is an answer about when that was hashed. */
+interface GateRun {
+  readonly result: GateResult
+  readonly cached: boolean
+  readonly tree?: string
+}
+
+/**
+ * The lane's tree hash, or nothing when it cannot be had — a lane that is not
+ * a git worktree, as a test's may be. The stall check it feeds is a
+ * convenience on top of the fix loop, and must never be the reason a gate
+ * result is lost.
+ */
+function treeHashOf(path: string): string | undefined {
+  try {
+    return laneTreeHash(path)
+  } catch {
+    return undefined
+  }
+}
 
 export class RunEffectExecutor implements EffectExecutor {
   readonly #options: RunExecutorOptions
@@ -382,6 +401,12 @@ export class RunEffectExecutor implements EffectExecutor {
     const gateIds = typeof named === 'string' ? [named] : (this.#node(nodeId)?.gates ?? [])
     // A node that declared no gates passes the gate state vacuously (§5.2).
     if (gateIds.length === 0) return { facts: { gate: { exit_code: 0, status: 'passed' } } }
+    // `true` skips the cache for every gate this runs; a gate id, for that one
+    // gate only. The second is the scheduler's stall rerun (§13.4): the gates
+    // before the red one were green on this tree and stay hits, and the ones
+    // after it still run if the rerun comes back green.
+    const noCache = params['no_cache']
+    const fresh = (gateId: string): boolean => noCache === true || noCache === gateId
 
     const lane = this.#lane(nodeId)
     let last: Record<string, ContextValue> = { exit_code: 0, status: 'passed' }
@@ -390,9 +415,9 @@ export class RunEffectExecutor implements EffectExecutor {
       if (gate === undefined) continue
       const logPath = this.#options.journal.gateLogPath(this.#options.runId, nodeId, gateId)
 
-      let { result, cached } = isJudgeGate(gate)
-        ? await this.#judgeGate(nodeId, gateId, gate, lane, logPath)
-        : await this.#commandGate(nodeId, gateId, gate, lane, logPath)
+      let { result, cached, tree } = isJudgeGate(gate)
+        ? await this.#judgeGate(nodeId, gateId, gate, lane, logPath, fresh(gateId))
+        : await this.#commandGate(nodeId, gateId, gate, lane, logPath, fresh(gateId))
       let exitCode = this.#recordGate(nodeId, gateId, result, cached)
 
       // §17.5: a red command gate the classifier calls flaky or environmental
@@ -413,12 +438,17 @@ export class RunEffectExecutor implements EffectExecutor {
           this.#judged(nodeId, 'gate_triage', gateId, sorted.judgement)
           triage = sorted.label ?? triage
           if (!sorted.rerun) break
-          ;({ result, cached } = await this.#commandGate(nodeId, gateId, gate, lane, logPath, true))
+          ;({ result, cached, tree } = await this.#commandGate(nodeId, gateId, gate, lane, logPath, true))
           exitCode = this.#recordGate(nodeId, gateId, result, cached)
           if (result.status !== 'failed') break
         }
       }
 
+      // The tree a red verdict is about, so the scheduler can tell a fixer
+      // that changed nothing from one that changed the wrong thing (§13.4). A
+      // git object id, not content. Hashed here only when the cache did not
+      // already, and only for a red gate: a green one ends no fix loop.
+      if (exitCode !== 0) tree ??= treeHashOf(lane.path)
       last = {
         id: gateId,
         exit_code: exitCode,
@@ -426,6 +456,7 @@ export class RunEffectExecutor implements EffectExecutor {
         cached,
         log_ref: result.logPath,
         ...(triage === undefined ? {} : { triage }),
+        ...(tree === undefined ? {} : { tree }),
       }
       // Declaration order, and the first red gate is the answer: running the
       // rest costs the most contended pool in the system to learn nothing.
@@ -449,8 +480,8 @@ export class RunEffectExecutor implements EffectExecutor {
     gate: CommandGate,
     lane: ExecutorLane,
     logPath: string,
-    rerun = false,
-  ): Promise<{ readonly result: GateResult; readonly cached: boolean }> {
+    fresh = false,
+  ): Promise<GateRun> {
     // The line that runs: the gate's scoped form when the run gates phases
     // narrowed and the gate has one, its full `cmd` otherwise. Resolved per run
     // of the gate, because the files the lane changed move with every fix.
@@ -481,7 +512,7 @@ export class RunEffectExecutor implements EffectExecutor {
           })
         },
       },
-      rerun,
+      fresh,
     )
   }
 
@@ -491,28 +522,33 @@ export class RunEffectExecutor implements EffectExecutor {
    * point: the scheduler already holds the pools, but a real run's cost is the
    * gate command, not the lease.
    *
-   * `rerun` skips the lookup — a triage rerun (§17.5) exists to ask the same
-   * tree again, and the cache would answer with the failure it is doubting —
-   * and still stores, so the rerun's verdict is the one the next lookup gets.
+   * `fresh` skips the lookup — a triage rerun (§17.5) and a stall rerun
+   * (§13.4) both exist to ask the same tree again, and the cache would answer
+   * with the failure they are doubting. It drops the entry first, as
+   * `runGateCached` does for `--no-cache`, and stores after, so the fresh
+   * verdict is the one the next lookup gets — and a fresh run that times out
+   * leaves no stale verdict behind.
    */
   async #gate(
     gateId: string,
     lane: ExecutorLane,
     options: Omit<RunGateOptions, 'pools'>,
-    rerun = false,
-  ): Promise<{ readonly result: GateResult; readonly cached: boolean }> {
+    fresh = false,
+  ): Promise<GateRun> {
     const cache = this.#options.cache
     if (cache === undefined) return { result: await executeGate(options), cached: false }
 
     const treeHash = laneTreeHash(lane.path)
     const config = gateConfigKey(options.gate)
-    if (this.#options.noCache !== true && !rerun) {
+    if (fresh) {
+      cache.invalidate(gateId, treeHash)
+    } else {
       const hit = cache.lookup(gateId, treeHash, config)
-      if (hit !== undefined) return { result: hit, cached: true }
+      if (hit !== undefined) return { result: hit, cached: true, tree: treeHash }
     }
     const result = await executeGate(options)
     cache.store(treeHash, config, result)
-    return { result, cached: false }
+    return { result, cached: false, tree: treeHash }
   }
 
   /**
@@ -529,7 +565,8 @@ export class RunEffectExecutor implements EffectExecutor {
     gate: JudgeGate,
     lane: ExecutorLane,
     logPath: string,
-  ): Promise<{ readonly result: GateResult; readonly cached: boolean }> {
+    fresh = false,
+  ): Promise<GateRun> {
     const { judge } = gate
     const question =
       judge.question ??
@@ -539,9 +576,13 @@ export class RunEffectExecutor implements EffectExecutor {
     const key = judgeCacheKey(judge, question, adapter?.id ?? 'none')
     const treeHash = cache === undefined ? undefined : laneTreeHash(lane.path)
 
-    if (cache !== undefined && treeHash !== undefined && this.#options.noCache !== true) {
-      const hit = cache.lookup(gateId, treeHash, key)
-      if (hit !== undefined) return { result: hit, cached: true }
+    if (cache !== undefined && treeHash !== undefined) {
+      if (fresh) {
+        cache.invalidate(gateId, treeHash)
+      } else {
+        const hit = cache.lookup(gateId, treeHash, key)
+        if (hit !== undefined) return { result: hit, cached: true, tree: treeHash }
+      }
     }
 
     this.#options.journal.append({
@@ -563,7 +604,7 @@ export class RunEffectExecutor implements EffectExecutor {
     if (cache !== undefined && treeHash !== undefined && ran.judgement.outcome === 'answered') {
       cache.store(treeHash, key, ran.result)
     }
-    return { result: ran.result, cached: false }
+    return { result: ran.result, cached: false, ...(treeHash === undefined ? {} : { tree: treeHash }) }
   }
 
   /**

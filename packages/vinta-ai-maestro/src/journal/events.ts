@@ -776,6 +776,17 @@ interface NodePayloads {
     }
   }
   /**
+   * A gate red again on the tree it was red on before a fixer round, so the
+   * round changed nothing the gate reads (§13.4). `rerun_cleared` is a stale
+   * cached verdict the fresh rerun overturned; `escalated` is the same answer
+   * twice, and the node went to the operator instead of another fixer.
+   */
+  gate_stalled: {
+    readonly gate: string
+    readonly tree: string
+    readonly outcome: 'rerun_cleared' | 'escalated'
+  }
+  /**
    * What became of one chore turn (`run_chore`).
    *
    * The turn itself is in the transcript, attributed to the `chore` role, which
