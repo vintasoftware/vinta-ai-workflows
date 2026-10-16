@@ -66,6 +66,7 @@ import { nodeLabel, nodeTone } from './status.ts'
 import { capabilitiesOf, Composer, NodeControls, SteeringGuide } from './Steering.tsx'
 import { TerminalView } from './Terminal.tsx'
 import { useNow } from './time.ts'
+import { IntegrationTimeline } from './Integration.tsx'
 import { Transcript } from './Transcript.tsx'
 import { useRun } from './useRun.ts'
 
@@ -181,6 +182,13 @@ export function NodeView({
           </PageHeaderHeading>
           <PageHeaderActions className="run-meta">
             <Chip tone={nodeTone(status)}>{nodeLabel(status)}</Chip>
+            {/* Where in its pipeline: `running` covers a phase from its first
+                turn to its PR, and says nothing about which. */}
+            {status === 'running' && detail.node.step !== null && (
+              <span className="font-mono text-xs text-muted-foreground" data-step={detail.node.step}>
+                {detail.node.step}
+              </span>
+            )}
             <Live connected={connected} />
             <NodeControls
               capabilities={capabilities}
@@ -226,6 +234,7 @@ export function NodeView({
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="flex flex-col gap-4">
+          <IntegrationTimeline steps={detail.integration} />
           <Transcript
             entries={detail.transcript.entries}
             composer={

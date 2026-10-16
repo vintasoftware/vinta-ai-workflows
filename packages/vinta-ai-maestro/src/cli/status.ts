@@ -20,7 +20,14 @@ import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { jobLogPathFor, liveJob, type JobRecord } from '../job/job.ts'
-import { openJournal, type Journal, type PendingQuestion, type RunRow } from '../journal/journal.ts'
+import { describeStep } from '../journal/integration-steps.ts'
+import {
+  type IntegrationWorktreeState,
+  openJournal,
+  type Journal,
+  type PendingQuestion,
+  type RunRow,
+} from '../journal/journal.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
 import { describeLeftovers, findLeftovers, type LeftoverDeps } from '../run/leftovers.ts'
@@ -171,6 +178,10 @@ function showRun(
   const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, string | null>()
   const held = state === 'running' ? journal.heldNodes(runId) : new Set<string>()
   const substituted = journal.substitutions(runId)
+  // Where each phase is in its pipeline, and who has the integration
+  // worktree: a phase in `integrate` runs no agent, and read as frozen.
+  const steps = journal.nodeSteps(runId)
+  const worktree = state === 'running' ? journal.integrationWorktree(runId) : null
   const crewNote = (nodeId: string): string => {
     const row = substituted.get(nodeId)
     if (row === undefined) return ''
@@ -193,6 +204,7 @@ function showRun(
         pid: job?.pid ?? null,
         startedAt: row.started_at,
         endedAt: row.ended_at,
+        integration: worktree,
         nodes: nodes.map((node) => ({
           nodeId: node.node_id,
           status: node.status,
@@ -203,6 +215,7 @@ function showRun(
           waitingOn: waiting.has(node.node_id) ? 'integration_worktree' : null,
           heldBy: waiting.get(node.node_id) ?? null,
           pausedByOperator: held.has(node.node_id),
+          step: steps.get(node.node_id) ?? null,
           substitution: substituted.get(node.node_id) ?? null,
         })),
       }),
@@ -224,6 +237,7 @@ function showRun(
       nodes.map((node) => [
         node.node_id,
         (asking.has(node.node_id) ? `${node.status} — asking` : node.status) +
+          (node.status === 'running' && steps.has(node.node_id) ? ` · ${steps.get(node.node_id)}` : '') +
           waitNote(node.node_id) +
           crewNote(node.node_id),
         String(node.wave),
@@ -232,6 +246,7 @@ function showRun(
     ),
   )
   io.out('')
+  if (worktree !== null && (worktree.holder !== null || worktree.queue.length > 0)) io.out(integrationLine(worktree))
   for (const [nodeId, pending] of questions) {
     const choices = pending.question.choices ?? []
     io.out(`${nodeId} asks: ${pending.question.question}${choices.length === 0 ? '' : ` [${choices.join(' | ')}]`}`)
@@ -245,6 +260,21 @@ function showRun(
   io.out(`log       ${jobLogPathFor(repoPath, runId)}`)
   if (isResumable(state)) io.out(`resume    vinta-ai-maestro run --resume ${runId}`)
   return OK
+}
+
+/**
+ * `integration  p4 · wave 2 gate test · 6:13 · 2 queued (p5, p7)`: the one
+ * worktree every merge goes through, and whether it is busy or stuck.
+ */
+function integrationLine(worktree: IntegrationWorktreeState, now = Date.now()): string {
+  const parts = [worktree.holder ?? 'free']
+  if (worktree.holder !== null) {
+    parts.push(worktree.step === null ? 'between steps' : describeStep(worktree.step))
+    const since = worktree.step?.startedAt ?? worktree.since
+    if (since !== null) parts.push(duration(now - since))
+  }
+  if (worktree.queue.length > 0) parts.push(`${worktree.queue.length} queued (${worktree.queue.join(', ')})`)
+  return `integration  ${parts.join(' · ')}`
 }
 
 /** A pending question as `status --json` gives it: what is asked, how, and the effect it parked on. */

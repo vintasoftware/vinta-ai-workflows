@@ -359,6 +359,38 @@ export const NodeSummarySchema = z.strictObject({
   baseBranch: z.string().nullable(),
   harness: z.string(),
   sessionId: z.string().nullable(),
+  /** The pipeline state this attempt last entered (`node_step`), or null before its first. */
+  step: z.string().nullable(),
+})
+
+/** One step a node took in the integration worktree (`integration_step`, paired). Identifiers only. */
+export const IntegrationStepSchema = z.strictObject({
+  step: z.enum(['hold', 'merge', 'fix_round', 'verify', 'wave_gate', 'push', 'open_pr']),
+  branch: z.string().nullable(),
+  incoming: z.string().nullable(),
+  wave: z.number().int().nullable(),
+  gate: z.string().nullable(),
+  round: z.number().int().nullable(),
+  /** The gate's log, served by the gate-log route. */
+  log: z.string().nullable(),
+  startedAt: z.number().int(),
+  /** Null while it is still going: the client's clock counts from `startedAt`. */
+  finishedAt: z.number().int().nullable(),
+  outcome: z.enum(['ok', 'resolved', 'failed', 'interrupted']).nullable(),
+})
+
+/** A timeline row on the node view: the step, and the end of its gate log when it has one. */
+export const IntegrationTimelineEntrySchema = IntegrationStepSchema.extend({
+  /** The log's last 64 KiB, as a gate panel row carries it. Null when the step has no log. */
+  logTail: z.string().nullable(),
+})
+
+/** The integration worktree: who holds it, what they are doing, who waits. */
+export const IntegrationWorktreeSchema = z.strictObject({
+  holder: z.string().nullable(),
+  since: z.number().int().nullable(),
+  step: IntegrationStepSchema.nullable(),
+  queue: z.array(z.string()),
 })
 
 /** One capacity pool as of now (§10's pool meters). `holders` are node ids. */
@@ -464,6 +496,11 @@ export const RunSnapshotSchema = z.strictObject({
   resources: z.array(ResourceStateSchema),
   gateQueue: GateQueueSchema,
   harnesses: z.array(HarnessStateSchema),
+  /**
+   * Every merge, wave suite and conflict fix runs in one worktree, one at a
+   * time, and a phase waiting on it looks exactly like a phase working.
+   */
+  integration: IntegrationWorktreeSchema,
 })
 
 /**
@@ -630,6 +667,8 @@ export const PullRequestRefSchema = z.strictObject({
 export const NodeDetailSchema = z.strictObject({
   runId: z.string(),
   node: NodeSummarySchema,
+  /** What this attempt has done in the integration worktree, oldest first. */
+  integration: z.array(IntegrationTimelineEntrySchema),
   diff: DiffRefSchema,
   /** Null until the node reaches `open_pr`. */
   pullRequest: PullRequestRefSchema.nullable(),

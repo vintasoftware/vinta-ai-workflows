@@ -946,7 +946,13 @@ export function createApi(options: ApiOptions): Hono {
 
     const detail: NodeDetail = {
       runId,
-      node: nodeSummary(node, declared?.name ?? node.node_id),
+      node: nodeSummary(node, declared?.name ?? node.node_id, journal.nodeSteps(runId).get(node.node_id) ?? null),
+      integration: journal.integrationTimeline(runId, node.node_id).map((row) => ({
+        ...row,
+        // Read only inside the run's own directory, whatever the event says.
+        logTail:
+          row.log !== null && journal.ownsRunFile(runId, row.log) ? tailFile(row.log, GATE_LOG_TAIL_BYTES) : null,
+      })),
       diff: { branch: node.branch, baseBranch: node.base_branch, lane: node.lane },
       pullRequest: pullRequest(journal, runId, node.node_id),
       transcript: {
@@ -1766,6 +1772,7 @@ export function createApi(options: ApiOptions): Hono {
     const cursor = journal.lastEventId(row.id)
     const nodes = journal.nodes(row.id)
     const names = new Map(wf.nodes.map((node) => [node.id, node.name]))
+    const steps = journal.nodeSteps(row.id)
     const mine = new Set(nodes.map((node) => node.node_id))
     const leases = journal.leases().filter((lease) => mine.has(lease.holder_node))
 
@@ -1777,7 +1784,10 @@ export function createApi(options: ApiOptions): Hono {
     return {
       run: runSummary(row),
       cursor,
-      nodes: nodes.map((node) => nodeSummary(node, names.get(node.node_id) ?? node.node_id)),
+      nodes: nodes.map((node) =>
+        nodeSummary(node, names.get(node.node_id) ?? node.node_id, steps.get(node.node_id) ?? null),
+      ),
+      integration: (({ queue, ...rest }) => ({ ...rest, queue: [...queue] }))(journal.integrationWorktree(row.id)),
       // The graph's edges come from the frozen workflow, which is the only
       // place they exist: a dependency is plan structure, not run state, so no
       // event carries one and no node row could.
@@ -1831,7 +1841,7 @@ function runSummary(row: RunRow): RunSummary {
   }
 }
 
-function nodeSummary(row: NodeRow, name: string): RunSnapshot['nodes'][number] {
+function nodeSummary(row: NodeRow, name: string, step: string | null): RunSnapshot['nodes'][number] {
   return {
     nodeId: row.node_id,
     name,
@@ -1842,6 +1852,7 @@ function nodeSummary(row: NodeRow, name: string): RunSnapshot['nodes'][number] {
     baseBranch: row.base_branch,
     harness: row.harness,
     sessionId: row.session_id,
+    step,
   }
 }
 

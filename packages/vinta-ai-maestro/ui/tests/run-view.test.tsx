@@ -477,3 +477,56 @@ test('double-clicking a node on the graph opens its node view', async () => {
   expect(window.location.hash).toBe(`#/runs/${RUN_ID}/nodes/impl`)
   await waitFor(() => expect(container.querySelector('section.node')).not.toBe(null))
 })
+
+/**
+ * One worktree, one merge at a time, and a phase waiting on it looked exactly
+ * like a phase working. The panel names who has it, what they are doing and
+ * who waits; the roster says where each running phase is in its pipeline.
+ */
+test('the integration worktree panel names its holder, its step and its queue', async () => {
+  const startedAt = Date.now() - 125_000
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: {
+      [RUN_ID]: snapshot({
+        nodes: [{ ...node('p4', 'running'), step: 'integrate' }, node('p5', 'running'), node('p7', 'running')],
+        integration: {
+          holder: 'p4',
+          since: startedAt - 10_000,
+          step: {
+            step: 'wave_gate',
+            branch: null,
+            incoming: null,
+            wave: 2,
+            gate: 'test',
+            round: null,
+            log: null,
+            startedAt,
+            finishedAt: null,
+            outcome: null,
+          },
+          queue: ['p5', 'p7'],
+        },
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-integration-worktree] [data-holder="p4"]')).not.toBe(null))
+  const panel = textOf(container, '[data-integration-worktree]')
+  expect(panel).toContain('wave 2 gate test')
+  expect(panel).toContain('2m 0')
+  expect(textOf(container, '[data-integration-worktree] [data-queue]')).toContain('p5, p7')
+  expect(container.querySelector('tr[data-node="p4"] [data-step="integrate"]')).not.toBe(null)
+})
+
+test('an idle integration worktree says so', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+  await waitFor(() => expect(textOf(container, '[data-integration-worktree]')).toContain('Idle'))
+})

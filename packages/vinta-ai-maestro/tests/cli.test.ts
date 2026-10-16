@@ -2801,6 +2801,38 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
   })
 
   /**
+   * A phase in `integrate` runs no agent, and `running` said nothing about
+   * which step of its pipeline it was in or who had the integration worktree.
+   */
+  it('shows each running phase’s step, and who holds the integration worktree', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'merging')
+    writeJob(dir, { runId: 'merging', pid: process.pid, url: 'http://127.0.0.1:9', token: 't', state: 'running', startedAt: 0 })
+    const journal = openJournal(dir)
+    const append = (nodeId: string, type: 'node_step' | 'integration_step' | 'node_wait' | 'node_status', payload: object) =>
+      journal.append({ runId: 'merging', nodeId, type, payload } as Parameters<typeof journal.append>[0])
+    append('a', 'node_status', { status: 'running' })
+    append('b', 'node_status', { status: 'running' })
+    append('a', 'node_step', { state: 'integrate', attempt: 1 })
+    append('a', 'integration_step', { step: 'hold', state: 'started' })
+    append('a', 'integration_step', { step: 'wave_gate', state: 'started', wave: 1, gate: 'unit' })
+    append('b', 'node_wait', { on: 'integration_worktree', state: 'queued', holder: 'a' })
+    journal.close()
+
+    const io = recorder()
+    expect(await statusCommand(['merging', '--repo', dir], io.io)).toBe(OK)
+    const text = io.out.join('\n')
+    expect(text).toContain('running · integrate')
+    expect(text).toMatch(/integration {2}a · wave 1 gate unit · \S+ · 1 queued \(b\)/)
+
+    const json = recorder()
+    expect(await statusCommand(['merging', '--repo', dir, '--json'], json.io)).toBe(OK)
+    const parsed = JSON.parse(json.out.join('')) as { nodes: { nodeId: string; step: string | null }[] }
+    expect(parsed.nodes.find((row) => row.nodeId === 'a')?.step).toBe('integrate')
+    expect(parsed).toMatchObject({ integration: { holder: 'a', queue: ['b'], step: { step: 'wave_gate', gate: 'unit' } } })
+  })
+
+  /**
    * `status --json` said `asking: true` and nothing else: the question, its
    * choices and the effect it parked on had to be read out of `flow.db`.
    */

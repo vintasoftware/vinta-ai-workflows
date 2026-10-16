@@ -43,6 +43,7 @@ export function node(nodeId: string, status: NodeStatus, wave = 0): NodeSummary 
     baseBranch: 'main',
     harness: 'claude-code',
     sessionId: null,
+    step: null,
   }
 }
 
@@ -97,6 +98,7 @@ export function snapshot(parts: Partial<RunSnapshot> = {}): RunSnapshot {
     resources: [],
     gateQueue: { waiting: 0, holders: [] },
     harnesses: [],
+    integration: { holder: null, since: null, step: null, queue: [] },
     ...parts,
   }
 }
@@ -196,6 +198,7 @@ export function nodeDetail(parts: Partial<NodeDetail> = {}): NodeDetail {
   return {
     runId: RUN_ID,
     node: node('impl', 'running'),
+    integration: [],
     diff: { branch: 'feature/impl', baseBranch: 'main', lane: 'lane-1' },
     pullRequest: null,
     transcript: { stream: 'transcript', entries: [] },

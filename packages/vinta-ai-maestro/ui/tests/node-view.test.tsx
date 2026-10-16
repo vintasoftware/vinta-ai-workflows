@@ -28,6 +28,7 @@ import {
 import { renderApp, textOf } from './render-app.tsx'
 import { startStubDaemon, type StubDaemon } from './stub-daemon.ts'
 import { WINDOWS_TIMING_RETRY } from '../../tests/support/platform.ts'
+import type { NodeDetail } from '../../src/daemon/schemas.ts'
 
 let daemon: StubDaemon | null = null
 let view: RenderResult | null = null
@@ -532,6 +533,67 @@ test('an agent’s question is answered by clicking its options, or in an exclus
   fireEvent.click(lost.container.querySelector('[data-op="answer"]') as HTMLElement)
   await waitFor(() => expect(stub.posts).toHaveLength(3))
   expect(stub.posts[2]?.body).toEqual({ answers: [{ selected: [], text: 'use the existing table' }] })
+})
+
+/**
+ * `integrate` runs no agent of its own, and a phase in it read as frozen over
+ * a silent transcript. The timeline says what it has done and is doing, with
+ * a clock on the step in progress and the log of each step that has one.
+ */
+test('the integration timeline shows each step, the one in progress, and its logs', async () => {
+  const now = Date.now()
+  const step = (parts: Partial<NodeDetail['integration'][number]>): NodeDetail['integration'][number] => ({
+    step: 'merge',
+    branch: null,
+    incoming: null,
+    wave: null,
+    gate: null,
+    round: null,
+    log: null,
+    startedAt: now - 200_000,
+    finishedAt: now - 190_000,
+    outcome: 'ok',
+    logTail: null,
+    ...parts,
+  })
+  const running = { ...node('p4', 'running'), step: 'integrate' }
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [running] }) },
+    details: {
+      [`${RUN_ID}/p4`]: nodeDetail({
+        node: running,
+        integration: [
+          step({ step: 'hold', finishedAt: null, outcome: null }),
+          step({ step: 'merge', incoming: 'p4', branch: 'plan/x/wave-2', outcome: 'resolved' }),
+          step({ step: 'fix_round', round: 1 }),
+          step({ step: 'verify', gate: 'test', outcome: 'failed', logTail: 'Conflicting migrations detected\n' }),
+          step({ step: 'wave_gate', wave: 2, gate: 'test', startedAt: now - 65_000, finishedAt: null, outcome: null }),
+        ],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'p4')
+
+  await waitFor(() => expect(container.querySelector('[data-integration]')).not.toBe(null))
+  const rows = [...container.querySelectorAll('[data-integration-step]')]
+  // `hold` wraps the rest, and is not a row of its own.
+  expect(rows.map((row) => row.getAttribute('data-integration-step'))).toEqual([
+    'merge',
+    'fix_round',
+    'verify',
+    'wave_gate',
+  ])
+  expect(rows.map((row) => row.getAttribute('data-outcome'))).toEqual(['resolved', 'ok', 'failed', 'running'])
+  expect(rows[0]?.textContent).toContain('merge p4 into plan/x/wave-2')
+  expect(rows[3]?.textContent).toContain('wave 2 gate test')
+  expect(rows[3]?.textContent).toContain('1m 0')
+  expect(container.querySelector('[data-step="integrate"]')).not.toBe(null)
+
+  fireEvent.click(rows[2]?.querySelector('[data-action="open-step-log"]') as Element)
+  await waitFor(() => expect(document.querySelector('[data-step-dialog="verify"]')).not.toBe(null))
+  expect(document.querySelector('[data-step-dialog="verify"]')?.textContent).toContain('Conflicting migrations detected')
 })
 
 test('the gate panel names each verdict, and reads a log in a dialog', async () => {

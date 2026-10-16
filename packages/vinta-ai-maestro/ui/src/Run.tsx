@@ -47,6 +47,7 @@ import { Live } from './Live.tsx'
 import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import { nodeLabel, nodeTone, runTone } from './status.ts'
 import { elapsed, useNow } from './time.ts'
+import { IntegrationWorktree } from './Integration.tsx'
 import { MonitorPanel } from './Monitor.tsx'
 import { RunControls } from './RunControls.tsx'
 import { useRun } from './useRun.ts'
@@ -162,6 +163,7 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
           selected={selected}
           onSelect={setSelected}
         />
+        <IntegrationWorktree worktree={snapshot.integration} />
         <Rollup client={client} runId={runId} />
         <MonitorPanel client={client} runId={runId} />
         <Pools resources={snapshot.resources} />
@@ -253,6 +255,11 @@ function Nodes({
                 </TableCell>
                 <TableCell>
                   <Chip tone={nodeTone(node.status)}>{nodeLabel(node.status)}</Chip>
+                  {node.status === 'running' && node.step !== null && (
+                    <span className="ml-2 font-mono text-xs text-muted-foreground" data-step={node.step}>
+                      {node.step}
+                    </span>
+                  )}
                 </TableCell>
                 <TableCell className="pr-4 text-right">
                   {/* The node view (§10). A fragment, so the token in the

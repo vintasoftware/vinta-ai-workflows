@@ -166,7 +166,7 @@ function GateLogDialog({
           </DialogHeader>
 
           {/* Keyed by gate, so stepping to another one starts at its end. */}
-          <LogBody key={gate.gateId} gate={gate} />
+          <LogBody key={gate.gateId} id={gate.gateId} log={gate.log} running={gate.status === 'running'} />
 
           <DialogFooter className="flex-row items-center justify-between border-t px-5 py-3 sm:justify-between">
             <div className="flex items-center gap-1">
@@ -219,15 +219,24 @@ function GateLogDialog({
  * has scrolled away: the same contract `follow.ts` gives the transcript, at
  * the size a single `pre` needs.
  */
-function LogBody({ gate }: { readonly gate: Gate }) {
+export function LogBody({
+  id,
+  log,
+  running,
+}: {
+  /** What `data-gate-log` names: a gate id, or an integration step's. */
+  readonly id: string
+  readonly log: string
+  readonly running: boolean
+}) {
   const scroller = useRef<HTMLDivElement | null>(null)
   const stuck = useRef(true)
-  const lines = gate.log === '' ? [] : gate.log.replace(/\n$/, '').split('\n')
+  const lines = log === '' ? [] : log.replace(/\n$/, '').split('\n')
 
   useLayoutEffect(() => {
     const element = scroller.current
     if (element !== null && stuck.current) element.scrollTop = element.scrollHeight
-  }, [gate.log])
+  }, [log])
 
   return (
     <div
@@ -242,7 +251,7 @@ function LogBody({ gate }: { readonly gate: Gate }) {
         <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
           <ScrollTextIcon aria-hidden="true" className="size-6 text-muted-foreground/60" />
           <EmptyNote>
-            {gate.status === 'running'
+            {running
               ? 'This gate has written nothing yet. Its output appears here as it runs.'
               : 'This gate has written nothing yet.'}
           </EmptyNote>
@@ -250,7 +259,7 @@ function LogBody({ gate }: { readonly gate: Gate }) {
       ) : (
         <pre
           className="gate-log m-0 py-3 pr-4 font-mono text-xs leading-5"
-          data-gate-log={gate.gateId}
+          data-gate-log={id}
         >
           {lines.map((line, number) => (
             // Lines are positions in an append-only log; the index is their identity.
@@ -369,7 +378,7 @@ function GateTiming({ gate }: { readonly gate: Gate }) {
   )
 }
 
-function RunningFor({ since, prefix = '' }: { readonly since: number; readonly prefix?: string }) {
+export function RunningFor({ since, prefix = '' }: { readonly since: number; readonly prefix?: string }) {
   return (
     <>
       {prefix}
