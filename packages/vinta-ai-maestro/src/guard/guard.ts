@@ -40,6 +40,17 @@ export function createGateGuard(options: GateGuardOptions): GateGuardPort {
 }
 
 /** The hit as the journal carries it: the rule and an id, never the command (§11). */
-export function ids(hit: GuardHit): { readonly rule: 'gate' | 'pool'; readonly gate?: string; readonly pool?: string } {
-  return hit.rule === 'gate' ? { rule: 'gate', gate: hit.gate } : { rule: 'pool', pool: hit.pool }
+export function ids(hit: GuardHit): {
+  readonly rule: GuardHit['rule']
+  readonly gate?: string
+  readonly pool?: string
+} {
+  switch (hit.rule) {
+    case 'gate':
+      return { rule: 'gate', gate: hit.gate }
+    case 'pool':
+      return { rule: 'pool', pool: hit.pool }
+    case 'nested_gate':
+      return { rule: 'nested_gate', gate: hit.gate, pool: hit.pool }
+  }
 }

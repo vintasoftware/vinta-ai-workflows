@@ -1955,6 +1955,9 @@ one by id, from your own worktree:
 It runs the plan’s own command for that gate, in your lane, and exits with the
 gate’s exit code — \`0\` is green. It prints the path to the gate’s output; read
 that file when a gate is red, rather than inferring what broke from the code.
+It takes the leases the gate needs itself, so never wrap it in
+\`vinta-ai-maestro with\`: inside one it waits for a resource your own command
+holds, and never runs.
 
 **Run gates this way rather than running their commands yourself.** Three
 things are true of a gate the orchestrator ran and none of them survive a
