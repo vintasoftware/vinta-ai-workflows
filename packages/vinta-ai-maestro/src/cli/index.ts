@@ -58,7 +58,7 @@ usage: vinta-ai-maestro <command> [options]
                              clock, critical path and pool contention.
   run <workflow.json>        Start the workflow as a background job and
                              return. The run outlives this terminal.
-  run --resume <run-id>      Pick an interrupted or paused run back up.
+  run --resume <run-id>      Pick a paused, interrupted or failed run back up.
   status [run-id]            What every run — or one run — is doing.
   logs <run-id> [-f]         A run's job log; -f follows it to the end.
   pause <run-id>             Let running steps finish, then stop. Resumable.

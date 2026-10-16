@@ -91,7 +91,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `doctor <workflow.json> [--repo <dir>] [--resume <run-id>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
 | `run <workflow.json> [--repo <dir>]` | Starts the workflow as a **background job** and returns once it is under way. The run does not need the terminal: close it and the run carries on. `--foreground` hosts it in this process instead and exits when it ends, for CI. |
-| `run --resume <run-id>` | Picks an interrupted or paused run back up, as a background job. |
+| `run --resume <run-id>` | Picks a paused, interrupted or failed run back up, as a background job. Done phases stay done; every other phase — a failed run's failed and blocked phases included — is attempted again. Only `done` and `cancelled` runs are refused. |
 | `status [run-id] [--json]` | Every run in the project and what it is doing — or one run, phase by phase. A run whose job died without ending it shows as `interrupted`. |
 | `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
 | `pause <run-id> [--wait]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
@@ -166,7 +166,7 @@ recorded as its own. Its limits are enforced by the run, not by its prompt:
 
 `ui` is the browser's way in. It reads every run's history from the journal, and for a run whose job is alive it forwards that run's requests and socket to the job, so the live graph, steering, answering a question and taking over a terminal all work as if the two were one process. Close `ui` and the runs carry on; open it tomorrow and it shows them where they got to.
 
-A run ends one of four ways, and the journal says which: it settles (`done` or `failed`), it is paused (`paused`, resumable), it is stopped (`cancelled`, final), or its job is killed by a signal (`failed`, resumable — exactly what closing the terminal used to do). `status` shows a run whose job vanished without writing any of those — a reboot, a `kill -9` — as `interrupted`, and `run --resume` picks it up.
+A run ends one of four ways, and the journal says which: it settles (`done`, final, or `failed`, resumable — the failed phases and those they blocked are attempted again), it is paused (`paused`, resumable), it is stopped (`cancelled`, final), or its job is killed by a signal (`failed`, resumable — exactly what closing the terminal used to do). `status` shows a run whose job vanished without writing any of those — a reboot, a `kill -9` — as `interrupted`, and `run --resume` picks it up.
 
 The daemon-facing commands use three exit codes, so a script can tell the cases
 apart: `0` success, `1` the command ran and the answer was no, `2` the command

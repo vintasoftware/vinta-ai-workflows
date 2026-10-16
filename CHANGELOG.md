@@ -909,6 +909,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   touched: never a compose-delivered database, an index-numbered service slot,
   or a summary `prepare-worktree` wrote for a worktree you made. A step that
   fails is reported, and its lane's summary is kept so a rerun retries it.
+- **`vinta-ai-maestro run --help` says which runs resume.** It claimed a run
+  that "finished" could not be resumed, while a `failed` run resumes — its
+  failed phases and the ones they blocked are attempted again, and `status`
+  prints the command for it. The help now names paused, interrupted and
+  failed as resumable, and only `done` and `cancelled` as refused.
 
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when

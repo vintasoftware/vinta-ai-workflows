@@ -82,15 +82,18 @@ export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
 
   <workflow.json>  Usually ai-plans/<feature>.workflow.json — the committed
                  document plan-feature wrote and the editor edits.
-  --resume <id>  Pick up a run that was interrupted or paused, instead of
-                 starting one. Phases already done stay done, their lane
+  --resume <id>  Pick up a run that was paused, interrupted or failed, instead
+                 of starting one. Phases already done stay done, their lane
                  worktrees are reused rather than recreated — whatever an agent
-                 had written and not committed is still there — and a phase that
-                 was mid-step when the run stopped runs again from the top of
-                 its pipeline. The plan comes from the run's frozen snapshot,
-                 not from the file it was written from: editing that file
-                 afterwards does not reach back into a run already under way.
-                 A run that finished, or was stopped, cannot be resumed.
+                 had written and not committed is still there — and every
+                 other phase goes back to pending: one that was mid-step runs
+                 again from the top of its pipeline, and on a failed run the
+                 failed phases and the ones they blocked are attempted again.
+                 The plan comes from the run's frozen snapshot, not from the
+                 file it was written from: editing that file afterwards does
+                 not reach back into a run already under way. Only a run that
+                 is done, or was stopped (cancelled), cannot be resumed; run
+                 the plan again instead.
   --foreground   Host the run in this process and wait for it to end, exiting
                  0 only when every phase completed. For CI, where the exit
                  code is the point. Closing the terminal then interrupts the
