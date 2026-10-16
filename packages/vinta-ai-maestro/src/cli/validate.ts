@@ -114,11 +114,22 @@ export async function validateCommand(argv: readonly string[], io: Io): Promise<
           path: formatPath(issue.path),
           message: issue.message,
         })),
+        warnings: inspected.warnings.map((warning) => ({
+          source: warning.source,
+          path: formatPath(warning.path),
+          message: warning.message,
+        })),
       }),
     )
     return ok ? OK : FAILED
   }
 
+  // Said either way, and never the exit status: a warning is for the person
+  // reading the plan, not a reason to refuse it.
+  for (const warning of inspected.warnings) {
+    const [line] = formatIssues([warning]).split('\n')
+    io.err(`  warning: ${line} [${warning.source}]`)
+  }
   if (ok) {
     io.out(`${path}: valid — ${phases} phase${phases === 1 ? '' : 's'} in ${waves} wave${waves === 1 ? '' : 's'}`)
     return OK

@@ -254,6 +254,7 @@ Before publishing the plan, cross-check the **Touch List**: for every pair of ph
 
 - **Trivial overlap** (a shared `__init__.py`, a settings registry, a route table) — fine. Note it under the graph table so the reviewer isn't surprised.
 - **Real overlap** (the same use case, the same serializer, the same view) — **add the dependency edge** and let one phase build on the other. A serialized pair that merges cleanly beats a parallel pair that needs a human to untangle.
+- **Migrations in one app count as real overlap, even in different files.** Two phases that run in parallel and each add a migration to the same app both start from the same latest migration. Each is green alone; merged, the migration graph has two leaves (Django) or two heads (Alembic), and every gate on the merged tree fails. Their Touch Lists name two different new files, so path overlap never shows it. Prefer the edge — usually by folding both schema changes into the foundation phase — or, when the two must stay parallel, say in the later phase's body that the integration step writes the merge migration. `vinta-ai-maestro validate` warns about such a pair; put the migrations directory in each phase's Touch List so it can.
 
 ### Design *for* parallelism when it's cheap
 
@@ -1070,6 +1071,8 @@ Fix each issue by its `source`:
 - **`reference`**: a `plan_ref`, `prompt_ref` or `plan_context_refs` anchor names no heading in the plan. The plan is the source of truth. Usually a phase heading was renamed or renumbered and the workflow was not updated. Fix whichever side is wrong, then check that the two still agree.
 - **`workflow`**: the document's shape or graph, such as an unknown node, a cycle, an undeclared pool, a crew member that cannot take its phase, a gate entry with neither `cmd` nor `type`, a phase with no gates, or an id that does not match the filename. Re-derive the field from the plan. A gate `"has no cmd"` is an override that forgot its `"type"`. A phase that `"has no gates"` is a node carrying `"gates": []` — remove the key so it takes `defaults.gates`, name its gates, or, for a plan whose phases genuinely have nothing to run, set `defaults.allow_ungated_phases: true`. If the plan itself is wrong (a cycle in its `**Depends on**:` lines), fix the plan first.
 - **`config`**: `.vinta-ai-workflows.yaml` does not parse. That file is the project's, not the plan's. Do not edit it to make the plan pass. Tell the human what is wrong and where.
+
+**`warnings` do not change the exit code, and each still gets an answer.** Today the one warning is two phases that run in parallel and both add migrations to the same app (see "Same-wave phases must not fight over the same files"). Add the dependency edge, or keep the pair parallel and say in the later phase's body that the merge migration is written at integration. Either way, name the choice when you hand the plan over. An older maestro prints no `warnings` key.
 
 ## Review the plan with the human
 

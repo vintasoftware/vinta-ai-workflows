@@ -66,6 +66,7 @@ function view(overrides: Partial<PlanViewResponse> = {}): PlanViewResponse {
     workflow: WORKFLOW,
     valid: true,
     issues: [],
+    warnings: [],
     waves: { p1: 1, p2: 2, p3: 2, p4: 3, p5: 4 },
     plan: { ref: PLAN_REF, title: 'Bookmark Folders — Implementation Plan', markdown: MARKDOWN },
     phases,
@@ -277,6 +278,27 @@ test('a plan with issues lists them and colours the phase they belong to', async
   await waitFor(() => expect(cardLabelOf(container, 'p2')).toContain('Has issues'))
   click(container, '[data-action="checks"]')
   await waitFor(() => expect(container.querySelector('[data-issue="nodes[1].prompt_ref"]')).not.toBe(null))
+})
+
+test('a valid plan with warnings says so, and lists them apart from issues', async () => {
+  const plans = double(
+    view({
+      warnings: [
+        {
+          path: 'nodes[2].touches',
+          source: 'workflow',
+          message: 'phases "p2" and "p3" both add migrations under apps/bookmarks/migrations/',
+        },
+      ],
+    }),
+  )
+  const { container } = await openReview(plans)
+  await waitFor(() =>
+    expect(container.querySelector('[data-action="checks"]')?.textContent).toContain('valid · 1 warning'),
+  )
+  click(container, '[data-action="checks"]')
+  await waitFor(() => expect(container.querySelector('[data-warnings] [data-issue="nodes[2].touches"]')).not.toBe(null))
+  expect(container.querySelector('[data-issues]')).toBe(null)
 })
 
 test('the gates tab is a phase-by-gate matrix of the resolved commands', async () => {

@@ -892,6 +892,8 @@ export const PlanViewResponseSchema = z.strictObject({
   workflow: WorkflowSchema.nullable(),
   valid: z.boolean(),
   issues: z.array(PlanIssueSchema),
+  /** Worth reading before the run, and no part of `valid`: two parallel phases adding migrations to one app. */
+  warnings: z.array(PlanIssueSchema),
   waves: z.record(z.string(), z.number().int()),
   plan: z
     .strictObject({ ref: z.string(), title: z.string().nullable(), markdown: z.string() })

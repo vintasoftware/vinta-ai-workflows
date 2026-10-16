@@ -26,7 +26,7 @@ import { choresFor } from '../chores.ts'
 import { loadProjectConfig, PROJECT_CONFIG_FILE, type ProjectConfig } from '../config/project-config.ts'
 import { resolveDocument, resolveWorkflow } from '../config/resolve.ts'
 import { harnessCapabilities } from '../daemon/harnesses.ts'
-import { computeWaves, findCycle } from '../graph.ts'
+import { computeWaves, findCycle, transitiveDependents } from '../graph.ts'
 import { composeSpawnPrompt, PromptError, resolveBrief, type PromptJournal } from '../prompts/prompts.ts'
 import { WorkflowSchema, type Workflow } from '../types.ts'
 import type { ValidationIssue } from '../validate.ts'
@@ -69,6 +69,7 @@ export interface PlanView {
   readonly workflow: Workflow | null
   readonly valid: boolean
   readonly issues: readonly PlanIssue[]
+  readonly warnings: readonly PlanIssue[]
   readonly waves: Readonly<Record<string, number>>
   readonly plan: PlanDocument | null
   readonly phases: Readonly<Record<string, PhaseMaterials>>
@@ -90,6 +91,8 @@ const EMPTY_JOURNAL: PromptJournal = {
 export interface Inspection {
   readonly workflow: Workflow | null
   readonly issues: readonly PlanIssue[]
+  /** Worth a look before the run, and not a reason to refuse it: `validate` still passes. */
+  readonly warnings: readonly PlanIssue[]
   readonly waves: Readonly<Record<string, number>>
 }
 
@@ -144,7 +147,69 @@ export async function inspectWorkflow(
   const references = workflow === null ? [] : checkReferences(workflow, repoDir)
   issues.push(...references.map((issue) => ({ ...issue, source: 'reference' as const })))
 
-  return { ok: true, workflow, issues, waves: workflow === null ? {} : wavesOf(workflow) }
+  const warnings =
+    workflow === null ? [] : parallelMigrations(workflow).map((issue) => ({ ...issue, source: 'workflow' as const }))
+  return { ok: true, workflow, issues, warnings, waves: workflow === null ? {} : wavesOf(workflow) }
+}
+
+/**
+ * Two phases that can run at the same time — neither depends on the other,
+ * directly or through another — whose Touch Lists both reach into one
+ * migrations directory.
+ *
+ * Each such phase starts from the same latest migration and adds one on top
+ * of it. Alone, each is green; merged, Django or Alembic finds two leaves (two
+ * heads) and every gate on the merged tree fails. One observed run spent its
+ * integration rounds on exactly that. The paths differ — one new file each —
+ * so the Touch List's same-path check never sees it.
+ *
+ * A warning, not an issue: a merge migration written at integration is a
+ * legitimate plan, and Rails, whose migrations are ordered by timestamp, may
+ * not care. What the plan should do is say so, or add the edge.
+ */
+export function parallelMigrations(workflow: Workflow): ValidationIssue[] {
+  const migrating = workflow.nodes.flatMap((node, index) => {
+    const dirs = [...new Set(node.touches.flatMap((path) => migrationsDir(path) ?? []))]
+    return dirs.length === 0 ? [] : [{ node, index, dirs }]
+  })
+  const issues: ValidationIssue[] = []
+  for (const [i, first] of migrating.entries()) {
+    const ordered = new Set(transitiveDependents(workflow.nodes, first.node.id))
+    for (const second of migrating.slice(i + 1)) {
+      if (ordered.has(second.node.id)) continue
+      if (transitiveDependents(workflow.nodes, second.node.id).includes(first.node.id)) continue
+      for (const dir of first.dirs.filter((candidate) => second.dirs.includes(candidate))) {
+        issues.push({
+          path: ['nodes', second.index, 'touches'],
+          message:
+            `phases "${first.node.id}" and "${second.node.id}" both add migrations under ${dir} and neither ` +
+            'depends on the other, so each starts from the same latest migration. Merged, the migration ' +
+            'graph has two leaves and the merged tree fails its gates. Add a dependency edge so one builds ' +
+            'on the other, or say in the plan which phase writes the merge migration.',
+        })
+      }
+    }
+  }
+  return issues
+}
+
+/**
+ * The migrations directory a Touch List entry is in, ending in `/`, or null.
+ * Django's `<app>/migrations/`, Alembic's `migrations/versions/` and
+ * `alembic/versions/`, Rails' `db/migrate/`, Prisma's `prisma/migrations/`.
+ */
+function migrationsDir(path: string): string | null {
+  const segments = path.split('/').filter((segment) => segment !== '')
+  for (const [i, segment] of segments.entries()) {
+    const isDir = i < segments.length - 1 || path.endsWith('/')
+    if (!isDir) break
+    const versions = segments[i + 1] === 'versions' && (i + 1 < segments.length - 1 || path.endsWith('/'))
+    if (segment === 'migrations' || segment === 'alembic') {
+      return `${segments.slice(0, versions ? i + 2 : i + 1).join('/')}/`
+    }
+    if (segment === 'migrate' && segments[i - 1] === 'db') return `${segments.slice(0, i + 1).join('/')}/`
+  }
+  return null
 }
 
 /**
@@ -187,7 +252,7 @@ export async function buildPlanView(
 ): Promise<PlanViewResult> {
   const inspected = await inspectWorkflow(repoDir, join(plansDir, `${id}${WORKFLOW_FILE_SUFFIX}`), id)
   if (!inspected.ok) return inspected
-  const { workflow, issues, waves } = inspected
+  const { workflow, issues, warnings, waves } = inspected
   return {
     ok: true,
     view: {
@@ -195,6 +260,7 @@ export async function buildPlanView(
       workflow,
       valid: issues.length === 0,
       issues,
+      warnings,
       waves,
       plan: workflow === null ? null : planDocument(repoDir, workflow),
       phases: workflow === null ? {} : materials(repoDir, workflow),

@@ -42,6 +42,7 @@ import {
   deleteDraft,
   emptyReview,
   markDelivered,
+  parallelMigrations,
   postMessage,
   ReviewRefusal,
   setCommentStatus,
@@ -348,6 +349,76 @@ describe('vinta-ai-maestro validate', () => {
       doc.defaults = { ...(doc.defaults as Record<string, unknown>), allow_ungated_phases: true }
     })
     expect(await validateCommand([join(dir, WORKFLOW_FILE), '--repo', dir], recordingIo())).toBe(0)
+  })
+
+  /**
+   * Two sibling phases each added a Django migration on the same parent. Both
+   * were green alone; merged, Django saw two leaf nodes and every gate on the
+   * merged tree failed. Their Touch Lists named different files in one
+   * migrations directory, so no path overlap showed it. A warning, not a
+   * refusal: a merge migration is a legitimate plan.
+   */
+  it('warns when two phases that run in parallel both add migrations to one app', async () => {
+    const dir = repo()
+    editWorkflow(dir, (doc) => {
+      const nodes = doc.nodes as { id: string; touches: string[] }[]
+      nodes[1]?.touches.push('apps/bookmarks/migrations/0003_folder_position.py')
+      nodes[2]?.touches.push('apps/bookmarks/migrations/')
+    })
+
+    const io = recordingIo()
+    expect(await validateCommand([join(dir, WORKFLOW_FILE), '--repo', dir, '--json'], io)).toBe(0)
+    const report = JSON.parse(io.outs[0] ?? '{}') as {
+      ok: boolean
+      warnings: { path: string; message: string }[]
+    }
+    expect(report.ok).toBe(true)
+    expect(report.warnings).toHaveLength(1)
+    expect(report.warnings[0]?.path).toBe('nodes[2].touches')
+    expect(report.warnings[0]?.message).toContain('"p2" and "p3"')
+    expect(report.warnings[0]?.message).toContain('apps/bookmarks/migrations/')
+
+    const text = recordingIo()
+    expect(await validateCommand([join(dir, WORKFLOW_FILE), '--repo', dir], text)).toBe(0)
+    expect(text.errs.join('\n')).toContain('warning')
+  })
+
+  it('says nothing about migrations a dependency edge already orders', () => {
+    const workflow = WorkflowSchema.parse(
+      JSON.parse(readFileSync(join(FIXTURES, 'plan-feature-example.workflow.json'), 'utf8')),
+    )
+    // p1 already adds migrations, and p2 depends on it: p2 starts from p1's.
+    const ordered = {
+      ...workflow,
+      nodes: workflow.nodes.map((node) =>
+        node.id === 'p2' ? { ...node, touches: [...node.touches, 'apps/bookmarks/migrations/0003_x.py'] } : node,
+      ),
+    }
+    expect(parallelMigrations(ordered)).toEqual([])
+
+    // Siblings in different apps fork nothing; Rails and Alembic directories are read too.
+    const apart = {
+      ...workflow,
+      nodes: workflow.nodes.map((node) =>
+        node.id === 'p2'
+          ? { ...node, touches: [...node.touches, 'apps/folders/migrations/0001_initial.py'] }
+          : node.id === 'p3'
+            ? { ...node, touches: [...node.touches, 'db/migrate/20260304_add_position.rb'] }
+            : node,
+      ),
+    }
+    expect(parallelMigrations(apart)).toEqual([])
+    const alembic = {
+      ...workflow,
+      nodes: workflow.nodes.map((node) =>
+        node.id === 'p2' || node.id === 'p3'
+          ? { ...node, touches: [...node.touches, `migrations/versions/${node.id}_rev.py`] }
+          : node,
+      ),
+    }
+    expect(parallelMigrations(alembic).map((issue) => issue.message)).toEqual([
+      expect.stringContaining('migrations/versions/'),
+    ])
   })
 
   it('passes the worked example and says how big it is', async () => {

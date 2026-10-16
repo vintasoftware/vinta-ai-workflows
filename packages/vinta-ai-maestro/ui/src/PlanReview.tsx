@@ -422,12 +422,16 @@ export function PlanReviewView({
         <PageHeaderActions>
           <button
             type="button"
-            onClick={() => setTab(view.valid ? 'graph' : 'issues')}
+            onClick={() => setTab(view.valid && view.warnings.length === 0 ? 'graph' : 'issues')}
             data-action="checks"
             className="cursor-pointer"
           >
-            <Chip tone={view.valid ? 'ok' : 'error'}>
-              {view.valid ? 'valid' : `${issues.length} issue${issues.length === 1 ? '' : 's'}`}
+            <Chip tone={!view.valid ? 'error' : view.warnings.length > 0 ? 'attention' : 'ok'}>
+              {!view.valid
+                ? `${issues.length} issue${issues.length === 1 ? '' : 's'}`
+                : view.warnings.length > 0
+                  ? `valid · ${view.warnings.length} warning${view.warnings.length === 1 ? '' : 's'}`
+                  : 'valid'}
             </Chip>
           </button>
           <Chip tone={approved ? 'ok' : open > 0 ? 'attention' : 'idle'}>
@@ -495,8 +499,15 @@ export function PlanReviewView({
               { value: 'plan', label: 'Plan' },
               { value: 'gates', label: 'Gates' },
               { value: 'schedule', label: 'Schedule' },
-              ...(issues.length > 0
-                ? [{ value: 'issues' as const, label: 'Issues', count: issues.length, tone: 'error' as const }]
+              ...(issues.length > 0 || (view?.warnings.length ?? 0) > 0
+                ? [
+                    {
+                      value: 'issues' as const,
+                      label: 'Issues',
+                      count: issues.length + (view?.warnings.length ?? 0),
+                      tone: issues.length > 0 ? ('error' as const) : ('attention' as const),
+                    },
+                  ]
                 : []),
             ]}
           />
@@ -759,43 +770,76 @@ function IssueList({
   readonly onSelectPhase: (nodeId: string) => void
 }) {
   return (
-    <Panel
-      title={
-        <span className="flex items-center gap-2">
-          <AlertTriangleIcon className="size-4 text-tone-error" aria-hidden="true" />
-          {view.issues.length} issue{view.issues.length === 1 ? '' : 's'}
-        </span>
-      }
-      description={
-        <>
-          What <code className="font-mono">vinta-ai-maestro validate</code> reports. A run would stop
-          on each of these.
-        </>
-      }
-    >
-      <ul className="divide-y text-[13px]" data-issues>
-        {view.issues.map((issue, index) => {
-          const nodeId = issueNode(issue, workflow)
-          return (
-            <li key={`${issue.path}-${index}`} className="flex flex-col gap-0.5 py-2" data-issue={issue.path}>
-              <span className="flex flex-wrap items-center gap-2">
-                <code className="font-mono text-xs">{issue.path === '' ? '(document)' : issue.path}</code>
-                <Chip tone="idle">{SOURCE_LABEL[issue.source]}</Chip>
-                {nodeId !== null && (
-                  <button
-                    type="button"
-                    className="text-xs text-primary hover:underline"
-                    onClick={() => onSelectPhase(nodeId)}
-                  >
-                    {nodeId}
-                  </button>
-                )}
-              </span>
-              <span>{issue.message}</span>
-            </li>
-          )
-        })}
-      </ul>
-    </Panel>
+    <>
+      {view.issues.length > 0 && (
+        <Panel
+          title={
+            <span className="flex items-center gap-2">
+              <AlertTriangleIcon className="size-4 text-tone-error" aria-hidden="true" />
+              {view.issues.length} issue{view.issues.length === 1 ? '' : 's'}
+            </span>
+          }
+          description={
+            <>
+              What <code className="font-mono">vinta-ai-maestro validate</code> reports. A run would stop
+              on each of these.
+            </>
+          }
+        >
+          <IssueRows issues={view.issues} workflow={workflow} onSelectPhase={onSelectPhase} data="issues" />
+        </Panel>
+      )}
+      {view.warnings.length > 0 && (
+        <Panel
+          title={
+            <span className="flex items-center gap-2">
+              <AlertTriangleIcon className="size-4 text-tone-attention" aria-hidden="true" />
+              {view.warnings.length} warning{view.warnings.length === 1 ? '' : 's'}
+            </span>
+          }
+          description="Worth settling before the run. Validation still passes with these."
+        >
+          <IssueRows issues={view.warnings} workflow={workflow} onSelectPhase={onSelectPhase} data="warnings" />
+        </Panel>
+      )}
+    </>
+  )
+}
+
+function IssueRows({
+  issues,
+  workflow,
+  onSelectPhase,
+  data,
+}: {
+  readonly issues: PlanViewResponse['issues']
+  readonly workflow: Workflow | null
+  readonly onSelectPhase: (nodeId: string) => void
+  readonly data: 'issues' | 'warnings'
+}) {
+  return (
+    <ul className="divide-y text-[13px]" {...{ [`data-${data}`]: true }}>
+      {issues.map((issue, index) => {
+        const nodeId = issueNode(issue, workflow)
+        return (
+          <li key={`${issue.path}-${index}`} className="flex flex-col gap-0.5 py-2" data-issue={issue.path}>
+            <span className="flex flex-wrap items-center gap-2">
+              <code className="font-mono text-xs">{issue.path === '' ? '(document)' : issue.path}</code>
+              <Chip tone="idle">{SOURCE_LABEL[issue.source]}</Chip>
+              {nodeId !== null && (
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={() => onSelectPhase(nodeId)}
+                >
+                  {nodeId}
+                </button>
+              )}
+            </span>
+            <span>{issue.message}</span>
+          </li>
+        )
+      })}
+    </ul>
   )
 }

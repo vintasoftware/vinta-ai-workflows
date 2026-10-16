@@ -141,6 +141,11 @@ export function registerPlanRoutes(app: Hono, options: PlanRoutesOptions): void 
         source: issue.source,
         message: issue.message,
       })),
+      warnings: view.warnings.map((warning) => ({
+        path: formatPath(warning.path),
+        source: warning.source,
+        message: warning.message,
+      })),
       waves: { ...view.waves },
       plan: view.plan,
       phases,

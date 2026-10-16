@@ -52,6 +52,7 @@ export {
 export {
   buildPlanView,
   inspectWorkflow,
+  parallelMigrations,
   planStamp,
   WORKFLOW_FILE_SUFFIX,
   type Inspection,
