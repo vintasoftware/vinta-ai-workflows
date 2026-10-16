@@ -237,6 +237,11 @@ export class QuestionWatch {
     }
   }
 
+  /** What the agent wrote after its last tool call: the turn's closing report, joined. */
+  prose(): string {
+    return this.#prose.join('')
+  }
+
   result(): AgentAsk | null {
     if (this.#interrupted) return null
     const last = this.#prose.at(-1)

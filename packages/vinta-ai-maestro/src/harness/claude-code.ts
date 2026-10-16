@@ -98,6 +98,13 @@ const CAPABILITIES: HarnessCapabilities = {
  */
 const BACKGROUND_IDLE_MS = 30 * 60_000
 
+/**
+ * How long a session held open only for a wake turn the CLI has not started
+ * yet may stay silent. The CLI starts that turn within a second of its
+ * `result`; this only bounds the case where it never comes.
+ */
+const WAKE_GRACE_MS = 60_000
+
 /** Tool results can be whole files. The transcript keeps them; an event carries a look. */
 const SUMMARY_LIMIT = 2_000
 
@@ -519,6 +526,14 @@ class ClaudeCodeSession implements AgentSession {
   #refusal: TurnRefusal | undefined
   /** Background tasks the CLI is still running for the main agent, by task id. */
   readonly #background = new Set<string>()
+  /** Every task id this session has counted as background work. */
+  readonly #backgrounded = new Set<string>()
+  /**
+   * Background work that reported after the agent's last model call began, so
+   * the agent has not read it. The CLI hands it over in a turn of its own after
+   * the `result`, and that turn is the one carrying a reviewer's answer.
+   */
+  readonly #unread = new Set<string>()
   /** A `result` that followed real model work arrived, not only a replay. */
   #answered = false
   /** What the last turn reported, while the session is held open past it. */
@@ -541,6 +556,16 @@ class ClaudeCodeSession implements AgentSession {
    * known. `task_started` and `task_notification` keep the set right on a
    * release that does not send the list. A task a sub-agent started is its
    * own business, and it is not counted.
+   *
+   * Work can also finish *before* the turn does: a reviewer that answers while
+   * the agent is still writing its last message. The list is then empty at the
+   * `result`, but the agent has not read the answer — no frame says it has,
+   * and the CLI wakes it in a new turn straight after. Observed on 2.1.285:
+   * a notification followed by a main-thread `user` frame (a tool result) is
+   * read in the same turn, because the next model call carries it, and no new
+   * turn follows; one with nothing after it but the final message gets a turn
+   * of its own. So a notification counts as unread until a main-thread `user`
+   * frame or a new turn's `init`.
    */
   observe(raw: unknown): void {
     if (this.#ended) return
@@ -560,30 +585,44 @@ class ClaudeCodeSession implements AgentSession {
       if (asNumber(value['num_turns']) !== 0) this.#answered = true
       return
     }
+    if (value['type'] === 'user') {
+      if (value['parent_tool_use_id'] === undefined || value['parent_tool_use_id'] === null) this.#unread.clear()
+      return
+    }
     if (value['type'] !== 'system') return
     const taskId = asString(value['task_id'])
     switch (value['subtype']) {
+      case 'init':
+        this.#unread.clear()
+        return
       case 'background_tasks_changed': {
         const tasks = value['tasks']
         if (!Array.isArray(tasks)) return
         this.#background.clear()
         for (const task of tasks) {
           const id = asString(asRecord(task)?.['task_id'])
-          if (id !== undefined) this.#background.add(id)
+          if (id !== undefined) this.#track(id)
         }
         return
       }
       case 'task_started':
         if (taskId !== undefined && value['is_backgrounded'] === true && value['owned_by_subagent'] !== true) {
-          this.#background.add(taskId)
+          this.#track(taskId)
         }
         return
       case 'task_notification':
-        if (taskId !== undefined) this.#background.delete(taskId)
+        if (taskId === undefined) return
+        this.#background.delete(taskId)
+        if (this.#backgrounded.has(taskId)) this.#unread.add(taskId)
         return
       default:
         return
     }
+  }
+
+  #track(taskId: string): void {
+    this.#background.add(taskId)
+    this.#backgrounded.add(taskId)
   }
 
   get refusal(): TurnRefusal | undefined {
@@ -644,7 +683,11 @@ class ClaudeCodeSession implements AgentSession {
       const reported = this.#errored && event.result === 'ok' ? 'error' : event.result
       // A turn that went wrong ends the session whatever is still running: the
       // work it left behind belongs to a turn nobody is going to read as done.
-      if (!this.#stopping && reported === 'ok' && (this.#background.size > 0 || !this.#answered)) {
+      if (
+        !this.#stopping &&
+        reported === 'ok' &&
+        (this.#background.size > 0 || this.#unread.size > 0 || !this.#answered)
+      ) {
         this.#held = reported
         this.#armIdle()
         return
@@ -684,9 +727,12 @@ class ClaudeCodeSession implements AgentSession {
    */
   #armIdle(): void {
     this.#disarmIdle()
+    // Held only for a wake turn the CLI owes: that turn starts at once, so a
+    // long silence here means it is not coming.
+    const idleMs = this.#background.size > 0 ? this.#idleMs : Math.min(this.#idleMs, WAKE_GRACE_MS)
     this.#idle = setTimeout(() => {
       if (!this.#ended) this.#finish(this.#held ?? 'ok')
-    }, this.#idleMs)
+    }, idleMs)
     this.#idle.unref()
   }
 

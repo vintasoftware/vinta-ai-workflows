@@ -29,6 +29,7 @@ import type {
 } from '../src/harness/adapter.ts'
 import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
 import { ConflictFixerRefused } from '../src/integration/fixer.ts'
+import type { Decision } from '../src/decisions/index.ts'
 import { CoordinatorForbidden } from '../src/coordinator/actor.ts'
 import { GitCommandError } from '../src/integration/git.ts'
 import type { CommitDecision, CommitFailure } from '../src/integration/integrator.ts'
@@ -289,6 +290,8 @@ function rig(
     readonly resumeFrom?: Readonly<Record<string, NodeStatus>>
     /** What that process had assigned, for the fields a row carries past a status. */
     readonly assigned?: Readonly<Record<string, { readonly session_id?: string }>>
+    /** Decisions the dead process had kept, per node (`src/decisions`). */
+    readonly decisions?: Readonly<Record<string, readonly Decision[]>>
   } = {},
 ): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-scheduler-'))
@@ -301,6 +304,9 @@ function rig(
   }
   for (const [nodeId, status] of Object.entries(options.resumeFrom ?? {})) {
     journal.append({ runId, nodeId, type: 'node_status', payload: { status } })
+  }
+  for (const [nodeId, kept] of Object.entries(options.decisions ?? {})) {
+    for (const entry of kept) journal.appendDecision(runId, nodeId, entry)
   }
 
   // Strict FIFO: the aging window is a wall-clock affordance, and a test that
@@ -4757,6 +4763,160 @@ describe('an agent that stops to ask', () => {
     expect(report.statuses).toEqual({ a: 'done' })
     expect(questionsOf(r)).toEqual([])
     expect(r.adapter.spawned).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A phase's decisions (`src/decisions`): kept where they are made, handed to
+// every later prompt whichever session it reaches
+// ---------------------------------------------------------------------------
+
+describe('a phase’s decisions', () => {
+  const ASKING: MockScript = {
+    events: [
+      {
+        type: 'assistant_text',
+        text: [
+          'status: NEEDS_INPUT',
+          'questions:',
+          '  - header: Storage',
+          '    question: Keep invoices in the existing table?',
+          '    options:',
+          '      - label: Existing table (Recommended)',
+          '        description: No migration.',
+          '      - label: New table',
+          '        description: Adds a migration.',
+        ].join('\n'),
+      },
+    ],
+    result: 'ok',
+  }
+  const DONE: MockScript = { events: [{ type: 'assistant_text', text: 'Status: SUCCESS' }], result: 'ok' }
+  /** A review turn's report, streamed in two pieces the way a harness may send it. */
+  const REVIEWED: MockScript = {
+    events: [
+      { type: 'tool_use', name: 'Agent', input: { prompt: 'review' }, id: 'tool-r' },
+      { type: 'tool_result', id: 'tool-r', ok: true, summary: 'one finding' },
+      { type: 'assistant_text', text: 'Passes: 2.\nREJECTED: Add a null check to parse() — every caller vali' },
+      { type: 'assistant_text', text: 'dates first (src/api.ts:12)\nVERDICT: pass' },
+    ],
+    result: 'ok',
+  }
+
+  const keptOf = (r: Rig): Decision[] => r.journal.decisions('run-1', 'a')
+
+  it('keeps an answered question and hands it to the review, whose rejections it keeps too', async () => {
+    const r = rig(reviewedWorkflow(), { outcomes: APPROVED, scripts: [ASKING, DONE, REVIEWED] })
+    plant(r, '## a\n\nAdd invoices.\n')
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
+    r.scheduler.answer('a', { human: { answer: JSON.stringify([{ selected: [1] }]) } })
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(keptOf(r)).toEqual([
+      {
+        kind: 'answer',
+        by: 'operator',
+        text: 'Storage — Keep invoices in the existing table?\nAnswer: New table (Adds a migration.)',
+      },
+      {
+        kind: 'rejected',
+        by: 'review',
+        text: 'Add a null check to parse() — every caller validates first (src/api.ts:12)',
+      },
+    ])
+    // The review turn is the third spawn: the question's, the answer's, then it.
+    const review = r.adapter.spawned[2]?.prompt ?? ''
+    expect(review).toContain('## Decisions already made in this phase')
+    expect(review).toContain(
+      '- The operator answered: Storage — Keep invoices in the existing table?\n  Answer: New table (Adds a migration.)',
+    )
+    expect(review).toContain('## Findings that re-open a decision')
+    expect(review).toContain('REJECTED: <the finding, in one sentence>')
+    expectDrained(r)
+  })
+
+  it('marks an answer the run gave itself as unattended', async () => {
+    const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE], retryAfterMs: 60_000 })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
+    await r.advance(60_000)
+    await running
+
+    expect(keptOf(r)).toEqual([
+      expect.objectContaining({ kind: 'answer', by: 'unattended', text: expect.stringContaining('Existing table') }),
+    ])
+  })
+
+  it('keeps the operator’s context, sent or queued, once', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.addContext('a', 'use the composite index')
+    await r.scheduler.addContext('a', 'use the  composite index')
+    await r.scheduler.addContext('a', 'the database is on 55432', 'coordinator')
+    r.stall.release()
+    await running
+
+    expect(keptOf(r)).toEqual([
+      { kind: 'context', by: 'operator', text: 'use the composite index' },
+      { kind: 'context', by: 'coordinator', text: 'the database is on 55432' },
+    ])
+  })
+
+  it('rebuilds them from the journal on resume and renders them in the first prompt', async () => {
+    const r = rig(reviewedWorkflow(), {
+      outcomes: APPROVED,
+      resumeFrom: { a: 'running' },
+      decisions: {
+        a: [
+          { kind: 'context', by: 'operator', text: 'keep the v1 endpoint' },
+          { kind: 'rejected', by: 'review', text: 'Validate twice — validated upstream' },
+        ],
+      },
+    })
+    plant(r, '## a\n\nAdd invoices.\n')
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    const [implementer, review] = r.adapter.spawned.map((task) => task.prompt)
+    expect(implementer).toContain('- The operator said: keep the v1 endpoint')
+    expect(implementer).toContain('- A review finding rejected with counter-evidence: Validate twice — validated upstream')
+    expect(review).toContain('- The operator said: keep the v1 endpoint')
+  })
+
+  it('keeps them across a retry, which starts everything else over', async () => {
+    const composed = {
+      ...EXPLODE,
+      states: EXPLODE.states.map((state) =>
+        state.id === 'work'
+          ? { ...state, onEnter: [{ ...spawn('e-work', 'implementer'), params: { role: 'implementer', prompt_template: 'implementer' } }] }
+          : state,
+      ),
+    }
+    const r = rig(makeWorkflow([node('a')], { pipelines: { composed }, pipeline: 'composed' }), {
+      scripts: [ASKING, DONE],
+      onFailure: 'retry',
+      retries: 1,
+    })
+    // Four lane slots in this workflow, and the free list hands out the last.
+    for (const slot of ['run-1-lane-3', 'run-1-lane-4']) {
+      mkdirSync(join(r.laneRoot, slot), { recursive: true })
+      writeFileSync(join(r.laneRoot, slot, 'plan.md'), '## a\n\nAdd invoices.\n')
+    }
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
+    r.scheduler.answer('a', { human: { answer: JSON.stringify([{ selected: [0] }]) } })
+    await until(() => r.adapter.spawned.length === 3, 'the second attempt')
+
+    expect(r.adapter.spawned[0]?.prompt).not.toContain('Decisions already made')
+    expect(r.adapter.spawned[2]?.prompt).toContain('- The operator answered: Storage — Keep invoices in the existing table?')
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after the retry')
+    r.scheduler.answer('a', { human: { answer: 'stop' } })
+    await running
   })
 })
 

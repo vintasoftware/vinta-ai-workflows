@@ -40,6 +40,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gate_cache_invalidated`; an agent's token cannot reach it). Both are for a
   verdict whose cause git does not track — an ignored file, a tool's cache, an
   installed dependency — which the tree-keyed cache would otherwise replay.
+
+- **`vinta-ai-maestro`: a phase's decisions outlive the session they were
+  made in.** Each node now keeps a list of what was settled for it: agents'
+  questions with their answers (marked as the operator's, the coordinator's,
+  or unattended), the operator's `node context` and `redirect` text, and the
+  findings the review rejected with their counter-evidence. Every later
+  prompt carries the list — implementer, fixer, chores, and the review, which
+  hands it to its reviewer — so a fresh reviewer, a replaced session or a
+  retry no longer re-asks or re-raises what was already decided. Before
+  this, an unattended run answered one question four times and a phase ran
+  some thirty rounds without converging, and operator context sent with
+  `node context` had to be re-sent after a session change. The review now
+  rejects a finding that re-opens a decision, citing it, and asks the
+  operator about it at most once, and only with new evidence. It ends its
+  report with a `REJECTED:` line per rejected finding, which the run keeps.
+  The list is bounded (the newest 12 answers and notes and the newest 8
+  rejected findings), kept across retries, written to
+  `runs/<id>/nodes/<node>/decisions.jsonl` and read back when a run resumes.
+
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or
@@ -910,6 +929,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `no_cache`, new journal event `gate_stalled`. A fixer that moved the tree at
   all is never a stall. A custom pipeline keeps its own guards and can opt in
   on `gate.stalled`.
+
+- **`vinta-ai-maestro`: a claude-code review no longer loses a reviewer answer
+  that comes back early.** When a reviewer resumed with `SendMessage` answered
+  while the agent was still writing its last message, the session ended at the
+  turn's `result` and killed the turn the CLI starts to hand over the answer.
+  The review then stated no verdict and went to the operator as `unapproved`.
+  The session now waits for that turn, for at most a minute of silence.
+
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
   a resumed claude-code session closed a replay of killed background tasks
