@@ -128,6 +128,8 @@ export const AgentLeaseRequestSchema = z.strictObject({
 export const AgentGateRequestSchema = z.strictObject({
   gate: z.string().min(1),
   holderNode: z.string().min(1),
+  /** `gate <id> --no-cache`. Absent is false, so an older client still parses. */
+  noCache: z.boolean().optional(),
 })
 
 /**

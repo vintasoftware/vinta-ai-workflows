@@ -684,6 +684,7 @@ export function createApi(options: ApiOptions): Hono {
     try {
       const outcome = await found.run.agentGates.hop(body.value.gate, body.value.holderNode, {
         withinMs: options.gateWaitMs ?? GATE_WAIT_MS,
+        ...(body.value.noCache === true ? { noCache: true } : {}),
       })
       // Still running, which is the ordinary case and not an error.
       if ('waiting' in outcome) {

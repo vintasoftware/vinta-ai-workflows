@@ -85,7 +85,8 @@ usage: vinta-ai-maestro <command> [options]
   purge [run-id]             Delete run state under .vinta-ai-maestro/ — transcripts
                              and gate logs hold repository contents verbatim.
   with <resource> -- <cmd>   Run a command while holding a live run's resource.
-  gate <gate-id>             Run one of a live run's declared gates against this
+  gate <gate-id> [--no-cache]
+                             Run one of a live run's declared gates against this
                              turn's lane, leased and cached by the daemon.
   judge-hook                 Internal: the safety hook --permission judged
                              installs. Reads one tool call on stdin.

@@ -107,7 +107,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. A run whose job is still running is kept. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 | `status <run-id>` | The run's state and every phase's, including a phase queued behind the integration worktree (and who holds it) — which otherwise reads `running` with nothing running. |
-| `gate <gate-id>` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. |
+| `gate <gate-id> [--no-cache]` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. `--no-cache` runs it past a cached result and keeps the new one, for a cause git does not track (an ignored file, a tool cache). |
 
 There are also `judge-hook` and `guard-hook`, which are internal: they are the hooks `--permission judged` and [the gate guard](#the-gate-guard) install, and claude-code runs them, not you.
 
