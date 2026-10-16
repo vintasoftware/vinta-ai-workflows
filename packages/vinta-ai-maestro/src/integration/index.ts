@@ -6,6 +6,7 @@ export {
   type IntegrationNode,
   type IntegrationPlan,
   type IntegratorOptions,
+  IntegrationVerifyError,
   UnresolvedConflictError,
   type WaveResult,
 } from './integrator.ts'

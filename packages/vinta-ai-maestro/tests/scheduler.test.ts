@@ -5248,6 +5248,7 @@ describe('a merge commit git refused', () => {
     incoming: 'plan/test-flow/phase-z',
     error: new GitCommandError('commit', 1, "ModuleNotFoundError: No module named 'settings.local'"),
     attempt: 1,
+    conflicted: true,
   })
 
   it('asks on the node whose merge it is, and returns what the operator chose', async () => {

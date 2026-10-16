@@ -3919,10 +3919,13 @@ export class Scheduler {
       failure.forNode,
       {
         question:
-          `git refused to commit the resolved merge of ${failure.incoming} into ${failure.branch} ` +
-          `(git commit exited ${failure.error.exitCode ?? 'abnormally'}` +
+          `git refused to commit the ${failure.conflicted ? 'resolved ' : ''}merge of ${failure.incoming} ` +
+          `into ${failure.branch} (git commit exited ${failure.error.exitCode ?? 'abnormally'}` +
           `${failure.attempt > 1 ? `, ${failure.attempt} times` : ''}). ` +
-          'The resolution passed the gates. Commit it now, commit it past the hooks, or abort the merge?',
+          (failure.conflicted
+            ? 'The resolution passed the gates. '
+            : 'The merge had no conflicts; a hook checking the merged code refused it. ') +
+          'Commit it now, commit it past the hooks, or abort the merge?',
         kind: 'choice',
         choices: [...COMMIT_CHOICES],
       },

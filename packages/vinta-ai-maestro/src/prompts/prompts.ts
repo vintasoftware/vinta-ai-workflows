@@ -113,6 +113,20 @@ export interface ConflictContext {
    * staffed this conflict (`integration/staffing.ts`). Node ids, so §11 holds.
    */
   readonly implemented?: readonly string[]
+  /** The gate the merged tree failed after the last round, when that is why this round runs. */
+  readonly redGate?: RedGate
+}
+
+/**
+ * A gate that went red on a merged tree: its id and where its output is, the
+ * way a phase's fixer is told (`failure`). The output itself stays in the log
+ * (§11); the agent reads it there. Fields are optional because a `verify` that
+ * answers a bare `false` names nothing.
+ */
+export interface RedGate {
+  readonly gateId?: string
+  readonly logPath?: string
+  readonly exitCode?: number | null
 }
 
 export interface SpawnPromptRequest {
@@ -336,9 +350,13 @@ export function composeSpawnPrompt(request: SpawnPromptRequest): string {
  */
 export function composeConflictPrompt(context: ConflictContext): string {
   const mine = context.implemented ?? []
+  const red = context.redGate
   return [
     `Resolve the merge conflict from merging ${context.incoming} into ${context.into}.`,
-    `Conflicted paths: ${context.paths.join(' ')}`,
+    context.paths.length > 0
+      ? `Conflicted paths: ${context.paths.join(' ')}`
+      : 'Git merged it with no textual conflict left; what conflicts is the merged code.',
+    ...(red === undefined ? [] : redGateLines(red)),
     `Nodes involved: ${context.nodes.join(' ')}`,
     ...(mine.length === 0
       ? []
@@ -355,6 +373,23 @@ export function composeConflictPrompt(context: ConflictContext): string {
     'you stop. This round has a time limit, and other phases are queued behind',
     'this worktree while you hold it.',
   ].join('\n')
+}
+
+/**
+ * Why a fix round is running again. Two phases can each be right alone and
+ * wrong together — each adding a migration on the same parent is the common
+ * case — and only the gate's output says which way.
+ */
+function redGateLines(red: RedGate): string[] {
+  const exit = typeof red.exitCode === 'number' ? ` with exit code ${red.exitCode}` : ''
+  return [
+    `Gate ${red.gateId ?? '(unnamed)'} failed on the merged tree${exit}.`,
+    red.logPath === undefined
+      ? 'Its output was not kept; the gate runs again once you stop.'
+      : `Its output is at ${red.logPath} — read it first; it says what broke.`,
+    'Fix what the two phases break together, such as two migrations on one parent',
+    'that need a merge migration, without dropping either phase’s work.',
+  ]
 }
 
 function knownTemplate(template: unknown, nodeId: string): AgentRole {

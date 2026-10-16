@@ -21,7 +21,7 @@ import {
   type Attribution,
   type TranscriptEntry,
 } from '../journal/transcript.ts'
-import { composeConflictPrompt } from '../prompts/index.ts'
+import { composeConflictPrompt, type RedGate } from '../prompts/index.ts'
 
 export interface ConflictRequest {
   /** The integration worktree. The fixer runs here and nowhere else. */
@@ -39,6 +39,8 @@ export interface ConflictRequest {
   readonly promptRefs: readonly string[]
   /** 1-based. Exhausting the rounds hands the conflict to a person, not to a harder retry. */
   readonly round: number
+  /** The gate the merged tree failed after the previous round, or before any round. */
+  readonly redGate?: RedGate
 }
 
 /**

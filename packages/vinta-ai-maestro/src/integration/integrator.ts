@@ -36,6 +36,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { computeWaves } from '../graph.ts'
+import type { RedGate } from '../prompts/index.ts'
 import type { ConflictFixer, ConflictRequest } from './fixer.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
@@ -95,8 +96,9 @@ export interface WaveResult {
  * common answer and the one the worktree is left ready for.
  *
  * The merge is deliberately left in place, conflicted: it is the only copy of
- * what the fixer tried, and since `prepareBase` began reusing a prepared base,
- * a resolution finished by hand there — committed — survives into the retry.
+ * what the fixer tried, and since `prepareBase` and `mergeWave` keep a branch
+ * they can build on (`#reusable`), a resolution finished by hand there —
+ * committed — survives into the retry.
  * One still in progress when the retry comes is not left to wedge it: it is
  * this run's own merge, so the retry keeps it under `ABANDONED_REFS` and
  * starts the merge again (`Integrator.reclaim`).
@@ -106,18 +108,57 @@ export class UnresolvedConflictError extends Error {
   readonly paths: readonly string[]
   readonly rounds: number
 
-  constructor(nodes: readonly string[], paths: readonly string[], rounds: number) {
+  constructor(nodes: readonly string[], paths: readonly string[], rounds: number, message?: string) {
     super(
+      message ??
       `unresolved conflict: ${nodes.join(', ')} both changed ${paths.join(', ')}, ` +
         `and it still conflicts after ${rounds} fix rounds. Finish the merge by ` +
-        `hand in the integration worktree and commit it, or serialize the phases ` +
-        `with a dependency edge. A merge still unfinished when the phase is ` +
-        `retried is kept under ${ABANDONED_REFS}/ and started again.`,
+        `hand in the integration worktree and conclude it with \`git commit\` — ` +
+        `the next attempt keeps that branch and merges only the phases it still ` +
+        `lacks — or serialize the phases with a dependency edge. A merge still ` +
+        `unfinished when the phase is retried is kept under ${ABANDONED_REFS}/ ` +
+        `and started again.`,
     )
     this.name = 'UnresolvedConflictError'
     this.nodes = nodes
     this.paths = paths
     this.rounds = rounds
+  }
+}
+
+/**
+ * The merge's last fix round ended on a red gate, not on a conflict: the
+ * merged tree does not pass the phases' gates. Two sibling phases that each
+ * added a migration on the same parent are the common case — each fine alone,
+ * broken together, and invisible to git.
+ *
+ * A subclass, so everything that handles an unresolved conflict — the failure
+ * reason, the post-mortem's split signal, the merge left in place for a person
+ * — handles this the same way. What differs is what it says: the gate and its
+ * log, which is where the cause is. "still conflicts after 2 fix rounds" over
+ * an empty path list sent an operator looking for a conflict that was a test.
+ */
+export class IntegrationVerifyError extends UnresolvedConflictError {
+  constructor(
+    nodes: readonly string[],
+    paths: readonly string[],
+    rounds: number,
+    readonly gate: RedGate,
+    into: string,
+    incoming: string,
+  ) {
+    super(
+      nodes,
+      paths,
+      rounds,
+      `merge of ${incoming} into ${into} fails gate ${gate.gateId ?? '(unnamed)'}` +
+        `${typeof gate.exitCode === 'number' ? ` (exit ${gate.exitCode})` : ''} after ${rounds} fix rounds` +
+        `${gate.logPath === undefined ? '' : `; its output is at ${gate.logPath}`}. ` +
+        `${nodes.join(' and ')} each pass alone and break together. Fix the merged code ` +
+        `in the integration worktree and conclude the merge with \`git commit\` — the ` +
+        `next attempt keeps that branch — or serialize the phases with a dependency edge.`,
+    )
+    this.name = 'IntegrationVerifyError'
   }
 }
 
@@ -180,6 +221,12 @@ export interface CommitFailure {
   readonly error: GitCommandError
   /** How many times the commit has been refused in this merge, 1-based. */
   readonly attempt: number
+  /**
+   * Whether the merge conflicted and a fixer resolved it. False for a merge
+   * git made cleanly whose commit was refused anyway — the hook checked the
+   * merged code itself, and no resolution or gate stands between the two.
+   */
+  readonly conflicted: boolean
 }
 
 /**
@@ -270,7 +317,7 @@ export interface IntegratorOptions {
    * sends the conflict back to the fixer — a resolution that does not build is
    * not a resolution.
    */
-  readonly verify?: (cwd: string) => Promise<boolean>
+  readonly verify?: (cwd: string) => Promise<true | false | RedGate>
   /**
    * Every conflict a fixer settled, as it is settled.
    *
@@ -460,16 +507,18 @@ export class Integrator {
     // "Correct" is deliberately about *reachability of the current tips* rather
     // than about the branch merely existing. A dependency that was retried and
     // re-implemented has a new tip this base has never seen, and reusing a base
-    // built on the old one would hand the phase work that is no longer there.
-    if (await this.#basePrepared(cwd, base.branch, base.nodes)) {
-      await git(cwd, ['checkout', base.branch])
-      return base.branch
-    }
+    // built on the old one would hand the phase work that is no longer there:
+    // `#reusable` rebuilds then, and merges on top what a kept base lacks.
+    const missing = await this.#reusable(cwd, base.branch, this.nodeBranch(first as string), rest)
+    await git(
+      cwd,
+      missing === null
+        ? ['checkout', '-B', base.branch, this.nodeBranch(first as string)]
+        : ['checkout', base.branch],
+    )
 
-    await git(cwd, ['checkout', '-B', base.branch, this.nodeBranch(first as string)])
-
-    const merged = [first as string]
-    for (const dep of rest) {
+    const merged = [first as string, ...rest.filter((dep) => missing !== null && !missing.includes(dep))]
+    for (const dep of missing ?? rest) {
       const conflict = await this.#merge(base.branch, dep, merged, nodeId)
       // Reported wherever the host wants it. Without this a conflict resolved
       // while *preparing a base* was recorded nowhere at all — `mergeWave`'s
@@ -480,29 +529,6 @@ export class Integrator {
       merged.push(dep)
     }
     return base.branch
-  }
-
-  /**
-   * Whether `branch` already integrates every dependency's *current* tip.
-   *
-   * A missing branch answers false, as does one built before a dependency
-   * moved. Both are read-only questions — nothing here creates or resets a ref,
-   * so a base judged stale costs only the rebuild it was going to do anyway.
-   */
-  async #basePrepared(
-    cwd: string,
-    branch: string,
-    nodes: readonly string[],
-  ): Promise<boolean> {
-    if (!(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]))) {
-      return false
-    }
-    for (const node of nodes) {
-      if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', this.nodeBranch(node), branch]))) {
-        return false
-      }
-    }
-    return true
   }
 
   /**
@@ -643,17 +669,24 @@ export class Integrator {
     if (wave > 1 && !(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${under}`]))) {
       throw new WaveNotBuiltError(wave - 1, under)
     }
-    await git(cwd, ['checkout', '-B', branch, under])
+    const order = members ?? this.nodesAt(wave)
+    const catchUp = wave > 1 && this.#options.runBase !== undefined
+    // A wave this attempt can build on — one a person finished by hand after
+    // the fixer gave up, typically — is kept, and only what it lacks is merged
+    // (`#reusable`). Rebuilding from `under` threw that resolution away and
+    // brought the same conflict back on every attempt.
+    const missing = await this.#reusable(cwd, branch, under, order, catchUp ? [this.#runBase()] : [])
+    await git(cwd, missing === null ? ['checkout', '-B', branch, under] : ['checkout', branch])
     // Wave 1 starts at the plan branch's tip, so it already has every commit
     // made there. A later wave starts at the wave before it, which was cut
     // before anything committed to the plan branch since — a config change
     // pushed mid-run — so that is merged first, or the plan PR would ship
     // without the change the run has been running under.
-    if (wave > 1 && this.#options.runBase !== undefined) await this.#catchUp(cwd, branch)
+    if (catchUp) await this.#catchUp(cwd, branch)
 
-    const merged: string[] = []
+    const merged = order.filter((id) => missing !== null && !missing.includes(id))
     const conflicts: ConflictRecord[] = []
-    for (const nodeId of members ?? this.nodesAt(wave)) {
+    for (const nodeId of missing ?? order) {
       const conflict = await this.#merge(branch, nodeId, merged, forNode ?? nodeId)
       if (conflict) {
         conflicts.push(conflict)
@@ -664,7 +697,54 @@ export class Integrator {
       }
       merged.push(nodeId)
     }
-    return { wave, branch, merged, conflicts }
+    return { wave, branch, merged: order.filter((id) => merged.includes(id)), conflicts }
+  }
+
+  /**
+   * What `branch` still lacks, when it can be built on as it stands; null when
+   * it has to be cut again from `under`.
+   *
+   * It can when it exists, still contains `under`, and every merge made on it
+   * since brought in work that is still current: each merge's incoming side is
+   * in some member's tip (or in one of `extra`, the plan branch a wave catches
+   * up with). That is what tells a resolution finished by hand — its incoming
+   * side *is* the member's tip — from a member that was redone after it was
+   * merged, whose old commits are in the branch and no longer in the member.
+   * The second answers null, and the rebuild is what drops the old work.
+   *
+   * The members it already contains need nothing; the rest are merged on top,
+   * in order. A member it contains at an older tip that the current one
+   * descends from is "missing" and merged again, which brings in only what is
+   * new.
+   */
+  async #reusable(
+    cwd: string,
+    branch: string,
+    under: string,
+    members: readonly string[],
+    extra: readonly string[] = [],
+  ): Promise<string[] | null> {
+    if (!(await gitOk(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]))) return null
+    if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', under, branch]))) return null
+    const tips = [...members.map((id) => this.nodeBranch(id)), ...extra]
+    for (const line of await gitLines(cwd, ['rev-list', '--merges', '--parents', `${under}..${branch}`])) {
+      const [, , ...incoming] = line.split(' ')
+      for (const commit of incoming) {
+        let current = false
+        for (const tip of tips) {
+          if (await gitOk(cwd, ['merge-base', '--is-ancestor', commit, tip])) {
+            current = true
+            break
+          }
+        }
+        if (!current) return null
+      }
+    }
+    const missing: string[] = []
+    for (const id of members) {
+      if (!(await gitOk(cwd, ['merge-base', '--is-ancestor', this.nodeBranch(id), branch]))) missing.push(id)
+    }
+    return missing
   }
 
   /** Merges the plan branch into `branch` when it has commits `branch` lacks. */
@@ -808,10 +888,42 @@ export class Integrator {
     const incoming = this.nodeBranch(nodeId)
     // --no-ff always: a fast-forward erases that this was a separate phase,
     // and a squash erases the phase's unit commits.
-    if (await gitOk(cwd, ['merge', '--no-ff', '--no-edit', incoming])) return null
+    let refused: GitCommandError
+    try {
+      await git(cwd, ['merge', '--no-ff', '--no-edit', incoming])
+      return null
+    } catch (error) {
+      if (!(error instanceof GitCommandError)) throw error
+      refused = error
+    }
 
-    const paths = await this.#conflictedPaths()
+    const unmerged = await this.#conflictedPaths()
+    // **A merge that stopped with nothing unmerged is not a conflict to hand
+    // a fixer.** Git merged the trees and stopped short of the commit:
+    // `rerere.autoupdate` replayed a recorded resolution and staged it, or a
+    // `pre-merge-commit` / `commit-msg` hook refused the merged code. Handed to
+    // the fixer, either became a "conflict" with no files — nineteen rounds in
+    // one observed phase, each told to resolve nothing. Without `MERGE_HEAD`
+    // git refused before merging anything (an untracked file in the way), and
+    // its own words are the error.
+    if (unmerged.length === 0 && !(await this.#merging(cwd))) throw refused
+    // What git had to resolve, for the record and for the marker check: the
+    // unmerged paths, or — when it resolved them itself — what conflicts
+    // between the two sides.
+    const paths = unmerged.length > 0 ? unmerged : await this.#conflictingPaths(cwd)
     const nodes = await this.#owners(paths, alreadyMerged, nodeId)
+
+    let red: RedGate | null = null
+    if (unmerged.length === 0 && !(await this.#unresolved(paths))) {
+      // Already resolved, so 0 rounds: the gates decide, as they would after a
+      // fixer. Only a red one reaches the fixer — two migrations on one parent
+      // merge cleanly and break together.
+      red = await this.#verify(cwd)
+      if (red === null) {
+        await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'], paths.length > 0)
+        return paths.length === 0 ? null : { nodes, paths, rounds: 0 }
+      }
+    }
     // A resolution of exactly this merge that a refused commit left behind
     // (`preserveResolution`): the fixer's work, already past `verify`, waiting
     // for a commit the hook would allow. Taken over the conflicted merge
@@ -839,7 +951,7 @@ export class Integrator {
 
     for (let round = 1; round <= this.#maxFixRounds; round += 1) {
       try {
-        await this.#options.fixer.fix({ ...request, round })
+        await this.#options.fixer.fix({ ...request, round, ...(red === null ? {} : { redGate: red }) })
       } catch (error) {
         // A fixer that could not run — refused for capacity, a harness that
         // died — has resolved nothing, and the merge it was handed must not
@@ -851,6 +963,7 @@ export class Integrator {
         await this.#abandonMerge(cwd)
         throw error
       }
+      red = null
       if (await this.#unresolved(paths)) continue
 
       // **A fixer that committed its own resolution is the ordinary case, not a
@@ -878,7 +991,9 @@ export class Integrator {
       // Before anything is committed, whichever shape the resolution arrived
       // in: a fixer must not be able to dodge the gate by committing its own
       // work, which is the one thing committing early would otherwise buy it.
-      if (this.#options.verify && !(await this.#options.verify(cwd))) continue
+      // A red gate goes to the next round, named, so the fixer reads why.
+      red = await this.#verify(cwd)
+      if (red !== null) continue
 
       if (await this.#merging(cwd)) {
         // The merge is still git's to conclude, so `--no-edit` takes the
@@ -906,7 +1021,35 @@ export class Integrator {
 
     // The conflicted merge is left in place deliberately: it is the only copy
     // of what the fixer tried, and it is what a human continuing by hand needs.
+    // A last round that ended on a red gate says so: "still conflicts" over an
+    // empty path list sent one operator looking for a conflict that was a
+    // failing test.
+    if (red !== null) throw new IntegrationVerifyError(nodes, paths, this.#maxFixRounds, red, into, incoming)
     throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds)
+  }
+
+  /** The outer gate on the merged tree: null when green or not configured, else what went red. */
+  async #verify(cwd: string): Promise<RedGate | null> {
+    if (this.#options.verify === undefined) return null
+    const verdict = await this.#options.verify(cwd)
+    if (verdict === true) return null
+    return verdict === false ? {} : verdict
+  }
+
+  /**
+   * The paths both sides of the merge in progress changed since they parted —
+   * what a conflict git resolved itself (`rerere`) was over, since the index
+   * no longer says: it is staged as if there never was one. Empty when git
+   * cannot say, which only costs the record its paths.
+   */
+  async #conflictingPaths(cwd: string): Promise<string[]> {
+    try {
+      const base = (await git(cwd, ['merge-base', 'HEAD', 'MERGE_HEAD'])).trim()
+      const ours = new Set(await gitLines(cwd, ['diff', '--name-only', base, 'HEAD']))
+      return (await gitLines(cwd, ['diff', '--name-only', base, 'MERGE_HEAD'])).filter((path) => ours.has(path))
+    } catch {
+      return []
+    }
   }
 
   /**
@@ -931,6 +1074,7 @@ export class Integrator {
     into: string,
     incoming: string,
     args: readonly string[],
+    conflicted = true,
   ): Promise<void> {
     let extra: readonly string[] = []
     for (let attempt = 1; ; attempt += 1) {
@@ -952,6 +1096,7 @@ export class Integrator {
                   incoming,
                   error: refused,
                   attempt,
+                  conflicted,
                 })
         } catch (asking) {
           // The question could not be asked or was withdrawn — a halt, an

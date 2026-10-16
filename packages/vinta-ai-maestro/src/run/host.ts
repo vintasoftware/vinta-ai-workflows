@@ -53,6 +53,7 @@ import type { SystemOne } from '../system-one/config.ts'
 import { judgeHookCommand } from '../system-one/hook.ts'
 import { storeFor } from '../cli/paths.ts'
 import { projectSpec } from '../cli/project.ts'
+import type { RedGate } from '../prompts/index.ts'
 
 /**
  * Where a merge gate's log is filed.
@@ -314,7 +315,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
      * failing the phase: the fixer gets told, and the round budget is what
      * bounds it.
      */
-    verify: async (cwd: string): Promise<boolean> => {
+    verify: async (cwd: string): Promise<true | RedGate> => {
       // Command gates only. A judge gate's question is about one phase's diff,
       // and a conflict resolution is not any phase's — asking it of the merge
       // would judge a diff the question was never written for.
@@ -323,6 +324,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         return gate === undefined || isJudgeGate(gate) ? [] : [[id, gate] as const]
       })
       for (const [id, gate] of gates) {
+        const logPath = journal.gateLogPath(runId, INTEGRATION_NODE, id)
         const result = await executeGate({
           gateId: id,
           gate,
@@ -330,9 +332,11 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
           env: { ...integration.env, ...options.agentEnv },
           // Filed under the integration worktree's own pseudo-node, so a merge
           // gate's log never overwrites a phase's log for the same gate id.
-          logPath: journal.gateLogPath(runId, INTEGRATION_NODE, id),
+          logPath,
         })
-        if (result.exitCode !== 0) return false
+        // Named, with its log, so the next fix round reads why and the error
+        // the rounds end on says where the cause is.
+        if (result.exitCode !== 0) return { gateId: id, logPath, exitCode: result.exitCode }
       }
       return true
     },

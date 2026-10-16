@@ -25,8 +25,10 @@ import {
 } from '../src/integration/fixer.ts'
 import type { TranscriptEntry } from '../src/journal/transcript.ts'
 import {
+  type CommitDecision,
   type CommitFailure,
   IntegrationCommitError,
+  IntegrationVerifyError,
   IntegrationWorktreeBusyError,
   Integrator,
   type IntegrationNode,
@@ -421,11 +423,11 @@ describe('a base that was already prepared', () => {
 
   /**
    * Reuse is about the dependencies' *current* tips, not about the branch
-   * existing. A dependency that was retried and re-implemented has a tip this
-   * base has never seen, and handing the phase a base built on the old one
-   * would give it work that is no longer there.
+   * existing. A dependency that was retried and landed more work has a tip
+   * this base has never seen; it is merged on top, which brings in only the
+   * new commits and keeps the resolution already made.
    */
-  it('rebuilds when a dependency has moved since', async () => {
+  it('merges on top a dependency that has moved since', async () => {
     const repo = await conflictingPair()
     const fixer = spyFixer(async (request) => {
       await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
@@ -447,8 +449,134 @@ describe('a base that was already prepared', () => {
 
     await integrator.prepareBase('c')
 
-    expect(fixer.calls).toHaveLength(2)
+    expect(fixer.calls).toHaveLength(1)
     expect(isAncestor(repo.integ, 'plan/wf/phase-b', 'plan/wf/integ-c')).toBe(true)
+    expect(run(repo.integ, 'show', 'plan/wf/integ-c:app.ts').trim()).toBe('const value = "a" + "b"')
+  })
+
+  /** A dependency redone from scratch: its old commits are in the base and no longer in it. */
+  it('rebuilds when a dependency was redone', async () => {
+    const repo = await conflictingPair()
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+    await integrator.prepareBase('c')
+
+    const two = join(repo.root, 'lane-2')
+    run(two, 'reset', '--hard', 'main')
+    await repo.commit(two, { 'b.ts': 'export const b = 2\n' }, 'phase b, redone')
+
+    await integrator.prepareBase('c')
+
+    expect(fixer.calls).toHaveLength(1)
+    expect(run(repo.integ, 'show', 'plan/wf/integ-c:app.ts').trim()).toBe('const value = "a"')
+    expect(isAncestor(repo.integ, 'plan/wf/phase-b', 'plan/wf/integ-c')).toBe(true)
+  })
+})
+
+const RED_GATE = { gateId: 'test', logPath: '/runs/r/nodes/_integration/gates/test.log', exitCode: 1 }
+
+/**
+ * Textually resolved, and the merged tree fails a gate: two sibling phases that
+ * each added a migration on the same parent. It used to run out its rounds as
+ * "unresolved conflict: p4a both changed , …" — no paths, no gate, and the
+ * fixer never told what was red.
+ */
+describe('a merge the gates reject', () => {
+  it('hands the red gate to the next round, and names it when the rounds run out', async () => {
+    const repo = await conflictingPair()
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      maxFixRounds: 2,
+      verify: async () => RED_GATE,
+    })
+
+    const failure = await integrator.prepareBase('c').then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(IntegrationVerifyError)
+    const error = failure as IntegrationVerifyError
+    expect(error.gate).toEqual(RED_GATE)
+    expect(error.message).toContain('gate test')
+    expect(error.message).toContain(RED_GATE.logPath)
+    expect(fixer.calls[0]?.redGate).toBeUndefined()
+    expect(fixer.calls[1]?.redGate).toEqual(RED_GATE)
+  })
+})
+
+/**
+ * `rerere.autoupdate` replays a recorded resolution and stages it, and `git
+ * merge` still exits 1: no unmerged path, no marker, `MERGE_HEAD` in place. A
+ * fixer was spawned for it anyway, to resolve nothing.
+ */
+describe('a merge git resolved before any fixer', () => {
+  const REPLAYED = 'const value = "a" + "b"\n'
+
+  async function replaying(): Promise<Repo> {
+    const repo = await conflictingPair()
+    run(repo.main, 'config', 'rerere.enabled', 'true')
+    run(repo.main, 'config', 'rerere.autoupdate', 'true')
+    const lane = await repo.lane('lane-record')
+    run(lane, 'checkout', '-B', 'record', 'plan/wf/phase-a')
+    try {
+      run(lane, 'merge', '--no-edit', 'plan/wf/phase-b')
+    } catch {
+      // The conflict being recorded.
+    }
+    await writeFile(join(lane, 'app.ts'), REPLAYED)
+    run(lane, 'add', 'app.ts')
+    run(lane, 'commit', '--no-edit')
+    return repo
+  }
+
+  it('verifies and commits it as resolved in 0 rounds, with no fixer', async () => {
+    const repo = await replaying()
+    const fixer = spyFixer()
+    const reported: { paths: readonly string[]; rounds: number }[] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      verify: async () => true,
+      onConflict: (conflict) => reported.push({ paths: conflict.paths, rounds: conflict.rounds }),
+    })
+
+    const base = await integrator.prepareBase('c')
+
+    expect(fixer.calls).toHaveLength(0)
+    expect(run(repo.integ, 'show', `${base}:app.ts`).trim()).toBe(REPLAYED.trim())
+    expect(reported).toEqual([{ paths: ['app.ts'], rounds: 0 }])
+    expect(midMerge(repo.integ)).toBe(false)
+  })
+
+  it('hands it to the fixer with the red gate when the merged tree fails verify', async () => {
+    const repo = await replaying()
+    const fixer = spyFixer()
+    let verified = 0
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      verify: async () => (verified++ === 0 ? RED_GATE : true),
+    })
+
+    await integrator.prepareBase('c')
+
+    expect(fixer.calls).toHaveLength(1)
+    expect(fixer.calls[0]?.redGate).toEqual(RED_GATE)
+    expect(midMerge(repo.integ)).toBe(false)
   })
 })
 
@@ -559,6 +687,83 @@ describe('wave merges', () => {
     const wave2 = await integrator.mergeWave(2)
     expect(wave2.merged).toEqual(['c'])
     expect(isAncestor(repo.integ, wave1.branch, wave2.branch)).toBe(true)
+  })
+})
+
+/**
+ * A wave conflict the fixer could not settle is finished by hand, as the error
+ * says to. The next attempt used to `checkout -B wave-<N> wave-<N-1>` and merge
+ * every member again, which threw the resolution away and brought the same
+ * conflict back on every attempt.
+ */
+describe('a wave finished by hand', () => {
+  const BY_HAND = 'const value = "by hand"\n'
+
+  /** `a` and `b` conflict on `app.ts`; `d` touches its own file. All are wave 1. */
+  async function wave(): Promise<{ repo: Repo; fixer: SpyFixer; integrator: Integrator }> {
+    const repo = await conflictingPair()
+    const three = await repo.lane('lane-3')
+    run(three, 'checkout', '-B', 'plan/wf/phase-d', 'main')
+    await repo.commit(three, { 'd.ts': 'export const d = 1\n' }, 'phase d')
+    const fixer = spyFixer()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('d')]),
+      integrationPath: repo.integ,
+      fixer,
+      maxFixRounds: 1,
+    })
+    await expect(integrator.mergeWave(1)).rejects.toBeInstanceOf(UnresolvedConflictError)
+    expect(fixer.calls).toHaveLength(1)
+    return { repo, fixer, integrator }
+  }
+
+  const finishByHand = async (repo: Repo): Promise<void> => {
+    await writeFile(join(repo.integ, 'app.ts'), BY_HAND)
+    run(repo.integ, 'add', 'app.ts')
+    run(repo.integ, 'commit', '--no-edit')
+  }
+
+  it('keeps the resolution and merges only the members still missing', async () => {
+    const { repo, fixer, integrator } = await wave()
+    await finishByHand(repo)
+
+    const retried = await integrator.mergeWave(1)
+
+    expect(fixer.calls).toHaveLength(1)
+    expect(retried.merged).toEqual(['a', 'b', 'd'])
+    expect(run(repo.integ, 'show', 'plan/wf/wave-1:app.ts').trim()).toBe(BY_HAND.trim())
+    for (const id of ['a', 'b', 'd']) {
+      expect(isAncestor(repo.integ, `plan/wf/phase-${id}`, 'plan/wf/wave-1')).toBe(true)
+    }
+  })
+
+  it('keeps a wave the operator also finished merging, without merging anything', async () => {
+    const { repo, fixer, integrator } = await wave()
+    await finishByHand(repo)
+    run(repo.integ, 'merge', '--no-ff', '--no-edit', 'plan/wf/phase-d')
+    const built = run(repo.integ, 'rev-parse', 'plan/wf/wave-1')
+
+    const retried = await integrator.mergeWave(1)
+
+    expect(fixer.calls).toHaveLength(1)
+    expect(run(repo.integ, 'rev-parse', 'plan/wf/wave-1')).toBe(built)
+    expect(retried).toMatchObject({ merged: ['a', 'b', 'd'], conflicts: [] })
+  })
+
+  it('rebuilds when a member was redone after it was merged', async () => {
+    const { repo, fixer, integrator } = await wave()
+    await finishByHand(repo)
+    // `a` is redone from scratch: its old commit is in the wave and no longer
+    // in its branch, so keeping the wave would ship the old work.
+    const lane = join(repo.root, 'lane-1')
+    run(lane, 'reset', '--hard', 'main')
+    await repo.commit(lane, { 'a.ts': 'export const a = 2\n' }, 'phase a, redone')
+
+    const retried = await integrator.mergeWave(1)
+
+    expect(retried.merged).toEqual(['a', 'b', 'd'])
+    expect(run(repo.integ, 'show', 'plan/wf/wave-1:app.ts').trim()).toBe('const value = "b"')
+    expect(fixer.calls).toHaveLength(1)
   })
 })
 
@@ -1408,6 +1613,102 @@ describe('a resolution git refuses to commit', () => {
     expect(run(repo.integ, 'show', 'refs/vinta-ai-maestro/resolutions/b:app.ts').trim()).toBe(
       RESOLVED.trim(),
     )
+  })
+})
+
+/**
+ * A merge that fails with nothing conflicted. Git merged the trees and a hook
+ * checking the merged code refused the commit — `git merge` runs
+ * `pre-merge-commit`, and concluding it runs `pre-commit`. Read as a conflict,
+ * it handed the fixer an empty file list nineteen times in one observed phase.
+ */
+describe('a clean merge git refuses to commit', () => {
+  /** `c` depends on `a` and `b`, which touch different files. */
+  async function disjointPair(): Promise<Repo> {
+    const repo = await makeRepo()
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'export const a = 1\n' }, 'phase a')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'b.ts': 'export const b = 1\n' }, 'phase b')
+    return repo
+  }
+
+  async function refuseMergeCommits(repo: Repo): Promise<void> {
+    const hooks = join(repo.main, '.git', 'hooks')
+    await mkdir(hooks, { recursive: true })
+    for (const hook of ['pre-merge-commit', 'pre-commit']) {
+      await writeFile(join(hooks, hook), `#!/bin/sh\necho "${HOOK_COMPLAINT}" >&2\nexit 1\n`, { mode: 0o755 })
+    }
+  }
+
+  const integratorFor = (repo: Repo, fixer: SpyFixer, onCommitFailure?: (f: CommitFailure) => Promise<CommitDecision>) =>
+    new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+      ...(onCommitFailure === undefined ? {} : { onCommitFailure }),
+    })
+
+  it('asks about the commit instead of handing the fixer a conflict with no files', async () => {
+    const repo = await disjointPair()
+    await refuseMergeCommits(repo)
+    const asked: CommitFailure[] = []
+    const fixer = spyFixer()
+
+    const base = await integratorFor(repo, fixer, async (failure) => {
+      asked.push(failure)
+      return 'no-verify'
+    }).prepareBase('c')
+
+    expect(fixer.calls).toHaveLength(0)
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.conflicted).toBe(false)
+    expect(asked[0]?.nodeId).toBe('b')
+    expect(asked[0]?.error.detail).toContain(HOOK_COMPLAINT)
+    expect(isAncestor(repo.integ, 'plan/wf/phase-a', base)).toBe(true)
+    expect(isAncestor(repo.integ, 'plan/wf/phase-b', base)).toBe(true)
+    expect(midMerge(repo.integ)).toBe(false)
+  })
+
+  it('abandons the merge with no one to ask, and leaves the worktree clean', async () => {
+    const repo = await disjointPair()
+    await refuseMergeCommits(repo)
+    const fixer = spyFixer()
+
+    const failure = await integratorFor(repo, fixer)
+      .prepareBase('c')
+      .then(
+        () => null,
+        (error: unknown) => error,
+      )
+
+    expect(failure).toBeInstanceOf(IntegrationCommitError)
+    expect((failure as IntegrationCommitError).message).toContain(HOOK_COMPLAINT)
+    expect(fixer.calls).toHaveLength(0)
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+
+  it("reports git's own refusal when nothing was merged at all", async () => {
+    const repo = await disjointPair()
+    const fixer = spyFixer()
+    // An untracked file where the incoming phase adds one: git refuses the
+    // merge before touching anything, and there is no MERGE_HEAD.
+    await writeFile(join(repo.integ, 'b.ts'), 'in the way\n')
+
+    const failure = await integratorFor(repo, fixer)
+      .prepareBase('c')
+      .then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(GitCommandError)
+    expect((failure as GitCommandError).subcommand).toBe('merge')
+    expect(fixer.calls).toHaveLength(0)
+    expect(midMerge(repo.integ)).toBe(false)
   })
 })
 

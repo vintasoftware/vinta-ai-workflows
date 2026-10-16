@@ -11,6 +11,7 @@ export {
   type ConflictContext,
   type DependencyContext,
   type PromptJournal,
+  type RedGate,
   type Reorientation,
   type SpawnPromptRequest,
 } from './prompts.ts'

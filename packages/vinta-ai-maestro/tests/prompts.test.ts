@@ -1820,6 +1820,23 @@ describe('the conflict-fixer prompt', () => {
     expect(prompt).toContain('time limit')
   })
 
+  it('tells the next round which gate the merged tree failed, and where its output is', () => {
+    const prompt = composeConflictPrompt({
+      into: 'plan/wf/wave-1',
+      incoming: 'plan/wf/phase-b',
+      nodes: ['a', 'b'],
+      paths: [],
+      promptRefs: ['plan.md#phase-a', 'plan.md#phase-b'],
+      redGate: { gateId: 'test', logPath: '/runs/r/nodes/_integration/gates/test.log', exitCode: 1 },
+    })
+
+    expect(prompt).toContain('Gate test failed on the merged tree')
+    expect(prompt).toContain('/runs/r/nodes/_integration/gates/test.log')
+    // Nothing conflicted textually: the work is the semantic conflict.
+    expect(prompt).not.toContain('Conflicted paths:')
+    expect(prompt).toContain('no textual conflict')
+  })
+
   it('carries identifiers and plan references, and the one rule that matters', () => {
     const prompt = composeConflictPrompt({
       into: 'plan/bookmarks/wave-2',
