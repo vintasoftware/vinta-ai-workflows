@@ -86,6 +86,8 @@ interface Call {
   readonly verb: EffectId
   /** The guard context the effect saw — where a queued steering message lands. */
   readonly context: GuardContext
+  /** The effect's params as the scheduler passed them, which may add its own. */
+  readonly params: Readonly<Record<string, unknown>>
 }
 
 /**
@@ -194,6 +196,7 @@ function recorder(
         effect: invocation.effect.id,
         verb: invocation.effect.definitionId,
         context: invocation.context,
+        params: invocation.effect.params,
       }
       calls.push(call)
       const tapped = tap?.(call)
@@ -1715,6 +1718,111 @@ describe('standard-phase under the scheduler', () => {
     expect(countOf(r, 'e-fix')).toBe(6)
     expect(countOf(r, 'e-exhausted')).toBe(0)
     expectDrained(r)
+  })
+
+  describe('a fix loop that stops moving the tree (§13.4)', () => {
+    const T1 = '1'.repeat(40)
+    const T2 = '2'.repeat(40)
+    const T3 = '3'.repeat(40)
+    /** A `unit` result as the real executor states it: id, exit, whether cached, the tree. */
+    const red = (tree: string, cached: boolean): EffectOutcome => ({
+      facts: { gate: { id: 'unit', exit_code: 1, status: 'failed', cached, tree } },
+    })
+    const green = (tree: string): EffectOutcome => ({
+      facts: { gate: { id: 'unit', exit_code: 0, status: 'passed', cached: false, tree } },
+    })
+    const stalls = (r: Rig): unknown[] =>
+      r.journal
+        .events('run-1')
+        .filter((event) => event.type === 'gate_stalled')
+        .map((event) => event.payload)
+    const gateParams = (r: Rig): unknown[] =>
+      r.calls.filter((call) => call.effect === 'e-gate').map((call) => call.params['no_cache'])
+    /** No budget: before this, nothing but an operator ended such a loop. */
+    const unbudgeted = (): Workflow =>
+      standardWorkflow([node('a', [], { gates: ['unit'], max_fix_rounds: undefined })])
+
+    it('reruns a cached red once, fresh, and asks rather than spending another fixer when it holds', async () => {
+      const r = rig(unbudgeted(), {
+        // Red; the fixer changes nothing, so the cache replays it; the fresh
+        // rerun is red on the same tree too.
+        outcomes: { ...APPROVED, 'e-gate': [red(T1, false), red(T1, true), red(T1, false)] },
+      })
+
+      const report = await runAnsweringStop(r, 'a')
+
+      expect(countOf(r, 'e-fix')).toBe(1)
+      // The third run is the scheduler's own, skipping the cache for the red
+      // gate only.
+      expect(gateParams(r)).toEqual([undefined, undefined, 'unit'])
+      expect(countOf(r, 'e-exhausted')).toBe(1)
+      expect(stalls(r)).toEqual([{ gate: 'unit', tree: T1, outcome: 'escalated' }])
+      expect(report.statuses).toEqual({ a: 'failed' })
+      expect(report.failures['a']).toContain('gate "unit" exited 1 again on a tree the last fixer left unchanged')
+      expectDrained(r)
+    })
+
+    it('carries on with the fresh answer when the rerun overturns a stale cached red', async () => {
+      // The field case: the cause was ignored files, they went, and the tree
+      // hash never saw either.
+      const r = rig(unbudgeted(), {
+        outcomes: { ...APPROVED, 'e-gate': [red(T1, false), red(T1, true), green(T1)] },
+      })
+
+      const report = await r.scheduler.run()
+
+      expect(report.statuses).toEqual({ a: 'done' })
+      expect(countOf(r, 'e-fix')).toBe(1)
+      expect(countOf(r, 'e-exhausted')).toBe(0)
+      expect(stalls(r)).toEqual([{ gate: 'unit', tree: T1, outcome: 'rerun_cleared' }])
+      expectDrained(r)
+    })
+
+    it('asks straight away when the repeat was already a fresh run', async () => {
+      const r = rig(unbudgeted(), { outcomes: { ...APPROVED, 'e-gate': [red(T1, false), red(T1, false)] } })
+
+      await runAnsweringStop(r, 'a')
+
+      // A third run of the same command on the same tree would learn nothing.
+      expect(countOf(r, 'e-gate')).toBe(2)
+      expect(countOf(r, 'e-fix')).toBe(1)
+      expect(stalls(r)).toEqual([{ gate: 'unit', tree: T1, outcome: 'escalated' }])
+    })
+
+    it('never fires on a fixer that moved the tree, however often the gate stays red', async () => {
+      const r = rig(unbudgeted(), {
+        outcomes: { ...APPROVED, 'e-gate': [red(T1, false), red(T2, false), red(T3, true), green(T3)] },
+      })
+
+      const report = await r.scheduler.run()
+
+      expect(report.statuses).toEqual({ a: 'done' })
+      expect(countOf(r, 'e-fix')).toBe(3)
+      expect(countOf(r, 'e-exhausted')).toBe(0)
+      expect(stalls(r)).toEqual([])
+      expect(gateParams(r).every((param) => param === undefined)).toBe(true)
+    })
+
+    it('spends the granted round when the operator continues, and asks again if it stalls again', async () => {
+      const r = rig(unbudgeted(), {
+        outcomes: { ...APPROVED, 'e-gate': [red(T1, false), red(T1, false), red(T1, true), red(T1, false)] },
+      })
+
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'a to ask')
+      r.scheduler.answer('a', { human: { answer: 'continue' } })
+      await until(() => countOf(r, 'e-exhausted') === 2 && r.scheduler.statuses['a'] === 'awaiting_human', 'a to ask again')
+      r.scheduler.answer('a', { human: { answer: 'stop' } })
+      const report = await running
+
+      // One fixer per question: a stall is never answered with a loop.
+      expect(countOf(r, 'e-fix')).toBe(2)
+      expect(stalls(r)).toEqual([
+        { gate: 'unit', tree: T1, outcome: 'escalated' },
+        { gate: 'unit', tree: T1, outcome: 'escalated' },
+      ])
+      expect(report.statuses).toEqual({ a: 'failed' })
+    })
   })
 
   it('names no budget in a failure reason when the node set none', async () => {

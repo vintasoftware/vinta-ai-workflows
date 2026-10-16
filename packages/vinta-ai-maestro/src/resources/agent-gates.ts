@@ -122,6 +122,13 @@ interface GateFlight {
 export interface AgentGateHopOptions {
   /** How long this hop may hold the request open before answering "not yet". */
   readonly withinMs: number
+  /**
+   * `gate <id> --no-cache`: skip the lookup and let the run replace the entry.
+   * Read only when this hop starts the flight; a hop that attaches to one
+   * already running gets that run's answer, which is a fresh run's anyway —
+   * a hit never stays in flight long enough to be attached to.
+   */
+  readonly noCache?: boolean
 }
 
 export class AgentGateBroker {
@@ -195,7 +202,7 @@ export class AgentGateBroker {
       // the hop that asked, which is the one whose route can turn it into a
       // status. The retirement below means a later hop re-asks and is refused
       // the same way rather than inheriting a dead flight.
-      const started = this.run(gateId, holderNode)
+      const started = this.run(gateId, holderNode, options.noCache === true)
       flight = { settled: started }
       this.#inFlight.set(key, flight)
 
@@ -225,7 +232,7 @@ export class AgentGateBroker {
    * is a gate that ran; filing it anywhere else would make the transcript's
    * GATE band a record of only some of them.
    */
-  async run(gateId: string, holderNode: string): Promise<AgentGateResult> {
+  async run(gateId: string, holderNode: string, noCache = false): Promise<AgentGateResult> {
     const { runId, journal } = this.#options
 
     const gate = this.#workflow.gates[gateId]
@@ -279,6 +286,7 @@ export class AgentGateBroker {
       logPath: journal.gateLogPath(runId, holderNode, gateId),
       pools: this.#options.pools,
       cache: this.#options.cache,
+      noCache,
       // Fires at the spawn, after the pools are granted — so the distance to
       // the result below is the gate's runtime and not the queue in front of
       // it, which for an agent-run gate can be the larger of the two.

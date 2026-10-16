@@ -16,7 +16,7 @@ import { join } from 'node:path'
 
 import type { AmendRunner } from '../amend/amend.ts'
 import { createRebaser } from '../amend/rebase.ts'
-import type { AgentGatePort } from '../daemon/index.ts'
+import type { AgentGatePort, GateCachePort } from '../daemon/index.ts'
 import { referencedHarnesses } from '../doctor/index.ts'
 import { createRunExecutor } from '../executor/index.ts'
 import { GateCache } from '../gates/cache.ts'
@@ -106,6 +106,8 @@ export interface HostWiring {
    * gate against.
    */
   readonly gatesFor?: (pools: ResourcePools) => AgentGatePort
+  /** The same cache, for forgetting a verdict by hand (§13.4). Absent with no cache. */
+  readonly gateCache?: GateCachePort
   /**
    * Hand an amended workflow (§9) to everything on this side of the seam.
    *
@@ -491,6 +493,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         'HEAD',
       ])
     },
+    gateCache: { invalidate: (gateId, treeHash) => cache.invalidate(gateId, treeHash) },
     close: () => cache.close(),
   }
 }

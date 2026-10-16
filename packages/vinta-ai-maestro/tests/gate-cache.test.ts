@@ -405,3 +405,57 @@ describe('gate result caching', () => {
     expect(await runs()).toBe(2)
   })
 })
+
+describe('escaping a stale verdict', () => {
+  // The field case: a typecheck went red because of ignored files left in the
+  // lane, the files went, and the tree hash — which never saw them — kept
+  // replaying the failure. Seeded with `store` because a gate whose verdict
+  // depends on an ignored file is exactly what the key cannot express.
+  const staleRed = (tree: string, config: string): void => {
+    cache.store(tree, config, { gateId: 'suite', status: 'failed', exitCode: 1, durationMs: 5, logPath: 'old.log' })
+  }
+
+  it('replaces a cached red with the result of a noCache run', async () => {
+    const passing = gate()
+    staleRed(laneTreeHash(repo), gateConfigKey(passing))
+    expect((await run({ gate: passing })).status).toBe('failed')
+    expect(await runs()).toBe(0)
+
+    const forced = await run({ gate: passing, noCache: true })
+    expect(forced).toMatchObject({ status: 'passed', cached: false })
+    expect(await runs()).toBe(1)
+
+    // And the replacement is what the next ordinary lookup — the gate node's,
+    // or another agent's — is served.
+    expect(await run({ gate: passing })).toMatchObject({ status: 'passed', cached: true })
+    expect(await runs()).toBe(1)
+  })
+
+  it('drops the entry for a noCache run that times out instead of keeping the stale one', async () => {
+    const slow = gate({ background: { seconds: 30, pidFile: join(store, 'slow.pid') } }, { timeout_s: 1 })
+    staleRed(laneTreeHash(repo), gateConfigKey(slow))
+
+    expect((await run({ gate: slow, noCache: true })).status).toBe('timed_out')
+    expect(cache.lookup('suite', laneTreeHash(repo), gateConfigKey(slow))).toBeUndefined()
+  }, 20_000)
+
+  it('invalidate forgets one gate’s results — on every tree, or on the one named', async () => {
+    const first = laneTreeHash(repo)
+    await run({ gateId: 'suite' })
+    await run({ gateId: 'lint' })
+    await writeFile(join(repo, 'src.txt'), 'v2\n')
+    const second = laneTreeHash(repo)
+    await run({ gateId: 'suite' })
+    const config = gateConfigKey(gate())
+
+    expect(cache.invalidate('suite', first)).toBe(1)
+    expect(cache.lookup('suite', first, config)).toBeUndefined()
+    expect(cache.lookup('suite', second, config)).toBeDefined()
+
+    expect(cache.invalidate('suite')).toBe(1)
+    expect(cache.lookup('suite', second, config)).toBeUndefined()
+    // Another gate on the same tree is not the one being doubted.
+    expect(cache.lookup('lint', first, config)).toBeDefined()
+    expect(cache.invalidate('suite')).toBe(0)
+  })
+})

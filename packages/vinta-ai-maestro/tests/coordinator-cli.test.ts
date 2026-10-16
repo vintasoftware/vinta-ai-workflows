@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { main } from '../src/cli/index.ts'
 import { FAILED, OK, USAGE, type Io } from '../src/cli/io.ts'
-import { amendCommand, execCommand, nodeCommand, workflowCommand } from '../src/cli/steer.ts'
+import { amendCommand, execCommand, gateCacheCommand, nodeCommand, workflowCommand } from '../src/cli/steer.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import { shellQuote } from '../src/platform/platform.ts'
 import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
@@ -371,5 +371,47 @@ describe('exec', () => {
     expect(code).toBe(FAILED)
     expect(r.out.join('\n')).not.toContain('usage: vinta-ai-maestro exec')
     expect(r.err.join('\n')).toContain('is not live')
+  })
+})
+
+describe('gate-cache', () => {
+  it('asks the run to forget one gate’s results, on every tree by default', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ gate: 'unit', removed: 3 }))
+
+    const code = await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--repo', emptyRepo()], r.io, {
+      env: ENV,
+      fetch: f.fetch,
+    })
+
+    expect(code).toBe(OK)
+    expect(f.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/gates/unit/invalidate`)
+    expect(f.sent[0]?.headers.authorization).toBe(`Bearer ${TOKEN}`)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({})
+    expect(r.out).toEqual(['gate unit: 3 cached results forgotten'])
+  })
+
+  it('narrows to one tree with --tree', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ gate: 'unit', removed: 1 }))
+    const tree = 'b'.repeat(40)
+
+    const code = await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--tree', tree, '--repo', emptyRepo()], r.io, {
+      env: ENV,
+      fetch: f.fetch,
+    })
+
+    expect(code).toBe(OK)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({ tree })
+    expect(r.out).toEqual(['gate unit: 1 cached result forgotten'])
+  })
+
+  it('is a usage error without the verb, and is reachable from main', async () => {
+    const r = recorder()
+    expect(await gateCacheCommand([RUN_ID, 'unit'], r.io, { env: ENV })).toBe(USAGE)
+
+    const help = recorder()
+    expect(await main(['gate-cache', '--help'], help.io)).toBe(OK)
+    expect(help.out.join('\n')).toContain('gate-cache invalidate')
   })
 })

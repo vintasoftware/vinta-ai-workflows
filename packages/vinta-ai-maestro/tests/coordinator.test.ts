@@ -209,6 +209,19 @@ describe('what wakes the coordinator', () => {
     ])
   })
 
+  it('wakes for a fix loop that stalled on a gate, and not for a stale verdict the rerun cleared', () => {
+    const journal = journalWith(workflowOf())
+    const tree = 'c'.repeat(40)
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'gate_stalled', payload: { gate: 'unit', tree, outcome: 'rerun_cleared' } })
+    journal.append({ runId: RUN, nodeId: 'p2', type: 'gate_stalled', payload: { gate: 'unit', tree, outcome: 'escalated' } })
+
+    const found = triggersFrom(journal.events(RUN), 0, { phaseThresholdMs: 10 * HOUR })
+    expect(found).toEqual([expect.objectContaining({ kind: 'gate_stalled', nodeId: 'p2', gateId: 'unit', tree })])
+    const line = describeTriggers(found)
+    expect(line).toContain('phase p2')
+    expect(line).toContain('gate-cache invalidate')
+  })
+
   it('wakes for a phase stuck behind the integration worktree, naming the holder', () => {
     // The watch item from a real run: a phase read `running` for 2h40m with no
     // agent process. `node_wait` now says what it waits on; this says it out loud.

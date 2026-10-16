@@ -112,7 +112,7 @@ import {
 } from '../integration/integrator.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
-import type { GuardContext } from '../pipeline/guard.ts'
+import type { ContextValue, GuardContext } from '../pipeline/guard.ts'
 import {
   createPipelineRun,
   PipelineStuckError,
@@ -481,7 +481,8 @@ function settledReason(settled: Settled, state: NodeState): string {
     // stays readable rather than growing a `gate "null"`.
     const named = gate.id === null ? 'gate' : `gate "${gate.id}"`
     clauses.push(
-      gate.status === 'timed_out' ? `${named} timed out` : `${named} exited ${gate.exitCode}`,
+      (gate.status === 'timed_out' ? `${named} timed out` : `${named} exited ${gate.exitCode}`) +
+        (gate.stalled === true ? ' again on a tree the last fixer left unchanged' : ''),
     )
   }
   if (state.lastVerdict === 'fail') clauses.push('review verdict "fail"')
@@ -493,6 +494,31 @@ function settledReason(settled: Settled, state: NodeState): string {
   )
 
   return clauses.join('; ')
+}
+
+/** A red `run_gate` result the stall check can key on. */
+interface RedGate {
+  readonly gate: string
+  readonly tree: string
+  readonly cached: boolean
+}
+
+/**
+ * The red gate in a `run_gate` outcome, or null for a green one — and for a
+ * red one reported without its id or tree, which the stall check cannot key
+ * and so leaves to the ordinary fix loop.
+ */
+function redGateOf(outcome: EffectOutcome): RedGate | null {
+  const gate = outcome.facts?.gate
+  if (!isFactRecord(gate)) return null
+  const { id, tree, exit_code: exitCode, cached } = gate
+  if (typeof exitCode !== 'number' || exitCode === 0) return null
+  if (typeof id !== 'string' || typeof tree !== 'string') return null
+  return { gate: id, tree, cached: cached === true }
+}
+
+function isFactRecord(value: unknown): value is Readonly<Record<string, ContextValue>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** A refusal that is backpressure: unwinds the attempt so the lane is freed first. */
@@ -626,7 +652,21 @@ interface NodeState {
     readonly id: string | null
     readonly exitCode: number
     readonly status: string | null
+    /** Red again on the tree a fixer round left unchanged (§13.4). */
+    readonly stalled?: boolean
   } | null
+  /**
+   * The red gate the fix loop is answering — its id and the lane tree it was
+   * red on — and whether a fixer turn has run since. What `#runGate` compares
+   * the next red against to tell a fixer that changed the wrong thing from one
+   * that changed nothing at all (§13.4).
+   *
+   * A tree hash rather than a commit, because the question is what the gate
+   * read and the gate reads uncommitted work too; and a git object id, which
+   * is not repository content (§11). Null after a green gate, at the start of
+   * an attempt, and whenever the host reports a red gate without its tree.
+   */
+  lastRed: { readonly gate: string; readonly tree: string; fixedSince: boolean } | null
   /**
    * The last verdict the review chores stated this attempt (`pass` | `fail`).
    *
@@ -974,6 +1014,7 @@ export class Scheduler {
       unattendedGiven: new Map(),
       fixRounds: 0,
       lastGate: null,
+      lastRed: null,
       lastVerdict: null,
       lane: null,
       retryMember: null,
@@ -2049,6 +2090,7 @@ export class Scheduler {
     // would describe attempt 1's gate in attempt 2's failure — the one kind of
     // wrong answer worse than no answer, because it reads as evidence.
     state.lastGate = null
+    state.lastRed = null
     state.lastVerdict = null
     if (state.crew === null) state.sessions.clear()
     else this.#ledgerFor(state.crew.member).clear()
@@ -2538,7 +2580,10 @@ export class Scheduler {
         if (verb === 'spawn_agent' || verb === 'run_chore') state.agentRan = true
         if (verb === 'spawn_agent') return this.#observe(state, await this.#spawnTurn(state, invocation))
         if (verb === 'run_chore') return this.#observe(state, await this.#chores(state, invocation))
-        if (verb === 'run_gate') await this.#acquireGate(state, invocation)
+        if (verb === 'run_gate') {
+          await this.#acquireGate(state, invocation)
+          return this.#observe(state, await this.#runGate(state, invocation))
+        }
         // The question is journalled before the host executor runs, because
         // the host executor is what raises the notification: the record of the
         // pause exists first, so a restart reads it instead of re-asking.
@@ -2568,6 +2613,66 @@ export class Scheduler {
   }
 
   /**
+   * `run_gate`, with the fix loop's stall check around it (§13.4).
+   *
+   * A gate red again on the very tree it was red on before a fixer turn means
+   * the turn changed nothing the gate reads. Another fixer is the wrong answer
+   * to that: observed as twenty in a row, each finding nothing to fix and
+   * ending without a commit, while the cache replayed a typecheck failure
+   * whose cause — stale ignored files in the lane — was already gone. The
+   * cache keys on the tree, so a cause outside it can be removed without the
+   * key noticing.
+   *
+   * So a stall gets one fresh run of the red gate before anything else. Green,
+   * or red differently, and the loop carries on with the fresh answer. Red the
+   * same way, and the fact goes out as `gate.stalled`, which `standard-phase`
+   * routes to `exhausted` — the existing door to a person, with the existing
+   * unattended answer — rather than to another fixer. A red that was already a
+   * fresh run skips straight to that: asking the same tree the same question a
+   * third time would learn nothing.
+   *
+   * Keyed on the gate *and* the tree. A fixer that moved the tree at all, by a
+   * commit or an uncommitted edit, is a fixer that tried, and is never a stall.
+   */
+  async #runGate(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
+    const executor = this.#options.executor
+    let outcome = await executor.execute(invocation)
+    let red = redGateOf(outcome)
+    const prior = state.lastRed
+    state.lastRed = red === null ? null : { gate: red.gate, tree: red.tree, fixedSince: false }
+    if (red === null || prior === null || !prior.fixedSince) return outcome
+    if (prior.gate !== red.gate || prior.tree !== red.tree) return outcome
+
+    if (red.cached) {
+      outcome = await executor.execute({
+        ...invocation,
+        effect: { ...invocation.effect, params: { ...invocation.effect.params, no_cache: red.gate } },
+      })
+      const again = redGateOf(outcome)
+      if (again === null || again.gate !== red.gate || again.tree !== red.tree) {
+        this.#stalled(state, red, 'rerun_cleared')
+        state.lastRed = again === null ? null : { gate: again.gate, tree: again.tree, fixedSince: false }
+        return outcome
+      }
+      red = again
+    }
+
+    this.#stalled(state, red, 'escalated')
+    const gate = outcome.facts?.gate
+    return { ...outcome, facts: { ...outcome.facts, gate: { ...(isFactRecord(gate) ? gate : {}), stalled: true } } }
+  }
+
+  #stalled(state: NodeState, red: RedGate, outcome: 'rerun_cleared' | 'escalated'): void {
+    this.#log.warn('node.gate_stalled', { node: state.node.id, gate: red.gate, outcome })
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'gate_stalled',
+      payload: { gate: red.gate, tree: red.tree, outcome },
+    })
+  }
+
+  /**
    * Keeps the two facts a failure has to be able to name, and passes the
    * outcome straight through.
    *
@@ -2592,6 +2697,7 @@ export class Scheduler {
         id: typeof id === 'string' ? id : null,
         exitCode,
         status: typeof status === 'string' ? status : null,
+        ...(gate?.['stalled'] === true ? { stalled: true } : {}),
       }
     }
     const verdict = outcome.facts?.review?.['verdict']
@@ -2956,7 +3062,10 @@ export class Scheduler {
     await this.#agentQuestions(state, turn, watch, drained.sessionId)
 
     // A fix round is a fixer turn, not a state called `fix`.
-    if (params['role'] === 'fixer') state.fixRounds += 1
+    if (params['role'] === 'fixer') {
+      state.fixRounds += 1
+      if (state.lastRed !== null) state.lastRed.fixedSince = true
+    }
 
     return await this.#options.executor.execute(invocation)
   }
