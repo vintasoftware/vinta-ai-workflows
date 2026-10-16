@@ -453,6 +453,97 @@ describe('lane pool', () => {
     expect(existsSync(join(lane.path, SETUP_RECEIPT))).toBe(true)
   })
 
+  describe('cleaning a recycled lane', () => {
+    /** Ignored in every worktree of the fixture: `info/exclude` lives in the common dir. */
+    const ignore = async (...patterns: string[]) => {
+      await writeFile(join(repo, '.git', 'info', 'exclude'), `${patterns.join('\n')}\n`)
+    }
+    const write = async (lane: Lane, path: string, body = 'x') => {
+      await mkdir(dirname(join(lane.path, path)), { recursive: true })
+      await writeFile(join(lane.path, path), body)
+    }
+
+    it('removes the ignored files a previous phase left', async () => {
+      // The observed case: a `.mypy_cache` from an earlier phase, and a package
+      // the phase deleted that survived as its `__pycache__` alone. mypy read
+      // both in the next phase and reported eighteen errors on clean code.
+      await ignore('.mypy_cache/', '__pycache__/')
+      const pool = await provision(sqliteProject(), 1)
+      const lane = pool.lanes[0] as Lane
+      await write(lane, '.mypy_cache/3.12/cache.json')
+      await write(lane, 'gone_pkg/__pycache__/mod.cpython-312.pyc')
+
+      await pool.recycle(lane.name)
+
+      expect(existsSync(join(lane.path, '.mypy_cache'))).toBe(false)
+      expect(existsSync(join(lane.path, 'gone_pkg'))).toBe(false)
+      // The lane's own database was among the ignored files, and the reset that
+      // follows the clean put it back.
+      expect(widgetCount(envVar(lane, 'TEST_DATABASE_URL'))).toBe(0)
+    })
+
+    it('keeps what provisioning put there: the deps, the env files and recycle_keep', async () => {
+      await ignore('.env', '.venv/', '.mypy_cache/')
+      await writeFile(join(repo, '.env'), 'FROM_MAIN=1\n')
+      const pool = await provision(
+        { ...sqliteProject(), envFiles: ['.env'], recycleKeep: ['.venv'], hooks: false },
+        1,
+      )
+      const lane = pool.lanes[0] as Lane
+      await write(lane, '.venv/bin/python', 'interpreter')
+      await write(lane, 'apps/api/.venv/marker', 'nested')
+      await write(lane, '.mypy_cache/cache.json')
+
+      await pool.recycle(lane.name)
+
+      expect(existsSync(join(lane.path, 'node_modules'))).toBe(true)
+      expect(readFileSync(join(lane.path, '.env'), 'utf8')).toContain('FROM_MAIN=1')
+      expect(existsSync(join(lane.path, '.git-hooks-disabled'))).toBe(true)
+      // A pattern without a slash matches at any depth, as gitignore's does.
+      expect(readFileSync(join(lane.path, '.venv', 'bin', 'python'), 'utf8')).toBe('interpreter')
+      expect(existsSync(join(lane.path, 'apps', 'api', '.venv', 'marker'))).toBe(true)
+      expect(existsSync(join(lane.path, '.mypy_cache'))).toBe(false)
+    })
+
+    it('runs reset_cmd on a recycle only, after the clean and before setup_cmd', async () => {
+      const append = (word: string) =>
+        `node -e "require('fs').appendFileSync('hooks.log', '${word}\\n')"`
+      const pool = await provision(
+        { ...sqliteProject(), resetCmd: append('reset'), setupCmd: append('setup') },
+        1,
+      )
+      const lane = pool.lanes[0] as Lane
+      const log = () => readFileSync(join(lane.path, 'hooks.log'), 'utf8')
+      // A fresh lane has nothing of a previous phase to reset.
+      expect(log()).toBe('setup\n')
+
+      await pool.recycle(lane.name)
+
+      // The clean took the provision's log, so this is the recycle's alone.
+      expect(log()).toBe('reset\nsetup\n')
+    })
+
+    it('says why when reset_cmd fails', async () => {
+      const pool = await provision(
+        {
+          ...sqliteProject(),
+          resetCmd: 'node -e "console.error(\'cache is locked\'); process.exit(4)"',
+        },
+        1,
+      )
+      const lane = pool.lanes[0] as Lane
+
+      const failure = await pool.recycle(lane.name).then(
+        () => null,
+        (error: unknown) => error as Error,
+      )
+
+      expect(failure?.name).toBe('LaneSetupError')
+      expect(failure?.message).toContain("the project's reset_cmd exited 4")
+      expect(failure?.message).toContain('cache is locked')
+    })
+  })
+
   it('says why when the setup command fails', async () => {
     // The first version of this carried a lane name and nothing else, on a §11
     // reading that turned out to be the wrong one: an operator whose setup

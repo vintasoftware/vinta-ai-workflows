@@ -802,6 +802,30 @@ export const ProjectSchema = z
           'no field here describes. It MUST be idempotent: it runs again every time the lane is ' +
           'recycled for another phase.',
       ),
+    reset_cmd: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Run inside a lane when it is recycled for another phase, and only then — never on a ' +
+          'freshly provisioned lane. Runs with the lane’s environment applied, after maestro ' +
+          'has reset the worktree, the env files, the databases and the services, and before ' +
+          '`setup_cmd`. For what a phase leaves behind that the clean does not reach: a cache ' +
+          'outside the worktree, a `recycle_keep` directory that needs pruning rather than ' +
+          'deleting.',
+      ),
+    recycle_keep: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Ignored paths a recycled lane keeps. A recycle removes every untracked and ignored ' +
+          'file the previous phase left — caches such as `.mypy_cache` and `__pycache__` ' +
+          'included, which once kept a deleted package importable and failed a type check on ' +
+          'clean code — except the copied dependency tree, the `env_files` and what is listed ' +
+          'here. Each entry is a gitignore pattern handed to `git clean -e`: `.venv` keeps one ' +
+          'at any depth, `/apps/api/.venv` only that one. For what is expensive to rebuild; ' +
+          'anything not listed is rebuilt by `setup_cmd`, which runs on every recycle.',
+      ),
   })
   .describe(
     'What a lane needs to be a working checkout of this project. Optional: with no project ' +

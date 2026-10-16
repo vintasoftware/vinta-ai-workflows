@@ -189,6 +189,9 @@ export class LaneAdoptError extends Error {
   }
 }
 
+/** The empty directory a `hooks: skip` lane points `core.hooksPath` at. */
+const HOOKS_DISABLED_DIR = '.git-hooks-disabled'
+
 /** How much of a failing setup command's stderr is carried. */
 const STDERR_LIMIT = 500
 
@@ -214,10 +217,12 @@ export class LaneSetupError extends Error {
     readonly lane: string,
     readonly exitCode: number | null,
     readonly detail: string,
+    /** Which of the project's lane hooks failed. `reset_cmd` runs on a recycle only. */
+    readonly command: 'setup_cmd' | 'reset_cmd' = 'setup_cmd',
   ) {
     const code = exitCode === null ? 'was killed' : `exited ${exitCode}`
     super(
-      `lane "${lane}": the project's setup_cmd ${code}` +
+      `lane "${lane}": the project's ${command} ${code}` +
         (detail === '' ? '' : `\n${detail}`),
     )
     this.name = 'LaneSetupError'
@@ -295,6 +300,10 @@ export interface ProjectSpec {
   readonly envFiles?: readonly string[]
   /** The project's own idempotent lane-setup command, run inside the lane. */
   readonly setupCmd?: string
+  /** The project's own command for a lane being recycled, and only then. */
+  readonly resetCmd?: string
+  /** gitignore patterns a recycle's clean leaves in place (`recycle_keep`). */
+  readonly recycleKeep?: readonly string[]
   /**
    * Run in the repository root before anything a run creates, to make the
    * shared servers reachable. See `prepareInfrastructure`.
@@ -649,10 +658,10 @@ export class LanePool {
     if (plan.reusable) {
       await this.#restoreWorktree(lane, summary)
       // Both halves of "a working checkout" are put back, not just the rows.
-      // The clean above is `-e node_modules` and nothing more, so a copied env
-      // file the previous phase edited — or one it deleted — is restored here
-      // from the main checkout rather than inherited. And the project's own
-      // hook runs again, which is why its contract says idempotent.
+      // The clean above keeps the env files, so a copied one the previous phase
+      // edited — or deleted — is restored here from the main checkout rather
+      // than inherited. And the project's own hook runs again, which is why its
+      // contract says idempotent.
       await this.#copyEnvFiles(name, lane.path)
       try {
         for (const command of plan.commands) {
@@ -666,6 +675,9 @@ export class LanePool {
       } catch {
         throw new LaneRecycleError(name, 'database')
       }
+      // Last of the resets and before setup, so the project's own sees a lane
+      // maestro has finished with, and `setup_cmd` sees one the project has.
+      await this.#reset(lane)
       await this.#setup(lane)
       return lane
     }
@@ -735,22 +747,50 @@ export class LanePool {
    *
    * Read from the summary rather than from `lane`, for the same reason the
    * reset decision is: the file is the contract, so a lane the skill
-   * provisioned and a lane the pool provisioned recycle identically. The lane's
-   * dependency tree is excluded from the clean because it is state a lane
-   * cannot run a gate without, and re-copying it on every hand-off would cost
-   * more than the rest of the recycle together. A phase that changes
-   * dependencies leaves its tree to the next one; a project whose plans do
-   * that puts its install in `setup_cmd`, which runs on every recycle.
+   * provisioned and a lane the pool provisioned recycle identically.
+   *
+   * **The clean takes ignored files too** (`-x`), and it did not always. An
+   * ignored file is exactly what a phase leaves that nobody looks at: a
+   * `.mypy_cache` from an earlier phase, and a package directory the phase
+   * deleted that survived as a `__pycache__` alone. mypy read both in the next
+   * phase and reported eighteen errors on clean code.
+   *
+   * What it keeps is what provisioning put there on purpose. The dependency
+   * tree, because a lane cannot run a gate without it and re-copying it on
+   * every hand-off would cost more than the rest of the recycle together — a
+   * phase that changes dependencies leaves its tree to the next one, and a
+   * project whose plans do that puts its install in `setup_cmd`, which runs on
+   * every recycle. The env files, which `#copyEnvFiles` puts back anyway. The
+   * empty hooks directory. And `recycle_keep`, the project's own list of what
+   * is too expensive to rebuild — a `.venv`, typically. A database file in the
+   * lane goes with the rest, and the database reset that follows restores it
+   * from the template.
    */
   async #restoreWorktree(lane: Lane, summary: WorktreeSummary): Promise<void> {
     try {
       const git = (args: readonly string[]) => run('git', [...args], { cwd: lane.path })
       await git(['checkout', '--force', summary.branch])
       await git(['reset', '--hard', summary.base_ref])
-      await git(['clean', '-fd', '-e', 'node_modules'])
+      await git(['clean', '-fdx', ...this.#cleanExclusions().flatMap((pattern) => ['-e', pattern])])
     } catch {
       throw new LaneRecycleError(lane.name, 'worktree')
     }
+  }
+
+  /**
+   * What a recycle's clean leaves, as `git clean -e` patterns. With `-x` these
+   * are the only ignore rules git applies, so each is anchored where it has to
+   * be: the env files at the paths they were copied to, `node_modules` at any
+   * depth as it always was, `recycle_keep` exactly as the project wrote it.
+   */
+  #cleanExclusions(): string[] {
+    const anchored = (path: string) => `/${path.replaceAll('\\', '/').replace(/^\/+/, '')}`
+    return [
+      'node_modules',
+      anchored(HOOKS_DISABLED_DIR),
+      ...(this.#project.envFiles ?? []).map(anchored),
+      ...(this.#project.recycleKeep ?? []),
+    ]
   }
 
   /** Whether the ref is there. A missing branch is an answer, not a failure. */
@@ -1040,7 +1080,7 @@ export class LanePool {
    */
   async #configureHooks(lanePath: string): Promise<void> {
     if (this.#project.hooks !== false) return
-    const empty = join(lanePath, '.git-hooks-disabled')
+    const empty = join(lanePath, HOOKS_DISABLED_DIR)
     await mkdir(empty, { recursive: true })
     // A worktree's `.git` is a file, and `--worktree` needs `extensions
     // .worktreeConfig`; `--local` on a worktree reaches the shared config,
@@ -1249,6 +1289,22 @@ export class LanePool {
       await sh(setupCmd, lane.path, lane.env)
     } catch (error) {
       throw new LaneSetupError(lane.name, exitCodeOf(error), stderrTail(error))
+    }
+  }
+
+  /**
+   * The project's `reset_cmd`: its say in what a lane handed to the next phase
+   * looks like, for whatever the clean cannot know about. A recycle only — a
+   * fresh lane has nothing of a previous phase in it — and with the same
+   * environment and the same failure detail `setup_cmd` gets.
+   */
+  async #reset(lane: Lane): Promise<void> {
+    const { resetCmd } = this.#project
+    if (resetCmd === undefined) return
+    try {
+      await sh(resetCmd, lane.path, lane.env)
+    } catch (error) {
+      throw new LaneSetupError(lane.name, exitCodeOf(error), stderrTail(error), 'reset_cmd')
     }
   }
 

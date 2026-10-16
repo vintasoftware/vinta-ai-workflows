@@ -32,6 +32,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `project.reset_cmd` and `project.recycle_keep`.**
+  `reset_cmd` is a project hook run inside a lane when it is recycled for the
+  next phase, and only then, after maestro's own resets and before
+  `setup_cmd`. `recycle_keep` lists gitignore patterns a recycled lane keeps
+  (`.venv`, say) now that the recycle cleans ignored files. Both optional, in
+  `workflow.v1`.
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or
@@ -552,6 +558,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: a recycled lane no longer keeps the last phase's
+  ignored files.** A lane handed to the next phase kept everything gitignored,
+  and one kept `apps/api/.mypy_cache` and a deleted package's `__pycache__`,
+  so mypy reported 18 errors on clean code. The recycle now cleans ignored
+  files too, keeping only the copied `node_modules`, the `env_files` and the
+  new `project.recycle_keep` patterns. **Migration:** anything expensive your
+  lanes build and should keep across phases, such as a `.venv`, goes in
+  `recycle_keep`; otherwise `setup_cmd`, which already runs on every
+  recycle, rebuilds it.
 - **`vinta-ai-maestro`: agents wait for background work the way a normal
   Claude Code session does.** A headless session no longer ends at the first
   turn that leaves background work running. It stays open, the agent is woken

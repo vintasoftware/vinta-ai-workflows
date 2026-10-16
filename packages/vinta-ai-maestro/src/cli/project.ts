@@ -35,6 +35,8 @@ export function projectSpec(project: Project | undefined): ProjectSpec {
     },
     envFiles: project.env_files,
     ...(project.setup_cmd === undefined ? {} : { setupCmd: project.setup_cmd }),
+    ...(project.reset_cmd === undefined ? {} : { resetCmd: project.reset_cmd }),
+    recycleKeep: project.recycle_keep,
     ...(project.prepare_cmd === undefined ? {} : { prepareCmd: project.prepare_cmd }),
     hooks: project.hooks === 'run',
     services: Object.entries(project.services).map(([id, service]) => ({
