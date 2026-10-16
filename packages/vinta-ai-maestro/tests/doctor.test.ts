@@ -630,6 +630,52 @@ describe('vinta-ai-maestro doctor', () => {
       expect(check.remedy).toContain('worktree remove --force')
       expect(report.ok).toBe(false)
     })
+
+    it('does not charge the disk for worktrees the resume adopts', async () => {
+      // The observed refusal: every worktree was on disk, the pool would have
+      // created none, and the doctor still charged for all of them.
+      const { dir, poolRoot } = await resumeFixture()
+      execFileSync('git', ['worktree', 'add', '-q', '--detach', join(poolRoot, 'p-run1-integ')], {
+        cwd: dir,
+        stdio: 'ignore',
+      })
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run1',
+        perLaneBytes: 2 ** 50,
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      const check = find(report.checks, 'disk')
+      expect(check.status).toBe('pass')
+      expect(check.label).toContain('(2 already on disk)')
+      expect(check.label).toContain('nothing new to provision')
+    })
+
+    it('charges a resume for the worktrees it still has to create', async () => {
+      // Only the lane survived; the integration worktree was never made.
+      const { dir, poolRoot } = await resumeFixture()
+      const base = greenOptions()
+
+      const report = await runDoctor({
+        ...base,
+        workflow: resumeWorkflow,
+        repoPath: dir,
+        poolRoot,
+        resumeRunId: 'p-run1',
+        perLaneBytes: 2 ** 50,
+        bins: { ...base.bins, git: 'git' },
+      })
+
+      const check = find(report.checks, 'disk')
+      expect(check.status).toBe('fail')
+      expect(check.label).toContain('(1 already on disk) — 1 new need 1048576.0 GiB')
+    })
   })
 
   describe('gates', () => {
@@ -828,6 +874,23 @@ describe('vinta-ai-maestro doctor', () => {
     expect(check.label).toContain('2 lanes + 1 integration worktree')
     expect(check.remedy).toContain('resources.lane.capacity')
     expect(report.exitCode).toBe(1)
+  })
+
+  it('sizes a staffed run by its roster and spare headroom, not its capacity', async () => {
+    // Capacity 2, five members, two spares: the pool makes a desk per member
+    // plus the integration worktree, and may add two more mid-run.
+    const base = greenOptions()
+    const staffed = WorkflowSchema.parse({
+      ...base.workflow,
+      crew: Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((id) => [id, { tier: 1, model: 'opus' }])),
+      nodes: base.workflow.nodes.map((node) => ({ ...node, crew: 'a' })),
+    })
+
+    const report = await runDoctor({ ...base, workflow: staffed, perLaneBytes: 2 ** 50 })
+
+    const check = find(report.checks, 'disk')
+    expect(check.label).toContain('5 lanes + 1 integration worktree + 2 spare-crew worktrees — 8 new')
+    expect(check.remedy).toContain('max_spare_crew')
   })
 
   it('does not fail a project that needs no compose, even with docker missing', async () => {

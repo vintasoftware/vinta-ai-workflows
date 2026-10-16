@@ -70,6 +70,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on a misjudged one so a case file can guard a project's question in CI.
   Commands are printed as recorded, never their output.
 
+- **`vinta-ai-maestro`: `project.reset_cmd` and `project.recycle_keep`.**
+  `reset_cmd` is a project hook run inside a lane when it is recycled for the
+  next phase, and only then, after maestro's own resets and before
+  `setup_cmd`. `recycle_keep` lists gitignore patterns a recycled lane keeps
+  (`.venv`, say) now that the recycle cleans ignored files. Both optional, in
+  `workflow.v1`.
 
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
@@ -591,6 +597,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: a recycled lane no longer keeps the last phase's
+  ignored files.** A lane handed to the next phase kept everything gitignored,
+  and one kept `apps/api/.mypy_cache` and a deleted package's `__pycache__`,
+  so mypy reported 18 errors on clean code. The recycle now cleans ignored
+  files too, keeping only the copied `node_modules`, the `env_files` and the
+  new `project.recycle_keep` patterns. **Migration:** anything expensive your
+  lanes build and should keep across phases, such as a `.venv`, goes in
+  `recycle_keep`; otherwise `setup_cmd`, which already runs on every
+  recycle, rebuilds it.
 - **`vinta-ai-maestro`: agents wait for background work the way a normal
   Claude Code session does.** A headless session no longer ends at the first
   turn that leaves background work running. It stays open, the agent is woken
@@ -983,6 +998,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   project that set its own `judges.permission.question` is unaffected; the
   default `allow_above` stays 0.9.
 
+- **`vinta-ai-maestro`: the disk preflight sizes the pool the run will
+  really create.** `run --resume` with every worktree still on disk was
+  refused (`3 lanes + 1 integration worktree needs 37.9 GiB, only 18.0 GiB
+  free`) by a doctor that charged for them all again; it now charges only the
+  worktrees still to be made, and passes a resume that makes none. A staffed run
+  is counted as the pool provisions it — a worktree per crew member, not per
+  unit of `resources.lane.capacity` — plus `defaults.max_spare_crew`
+  headroom, and the doctor, the pool and the refusal line now name the same
+  count. The per-lane estimate is the tracked tree at the base branch, the
+  copied `node_modules` and the `env_files`, instead of a walk of the whole
+  main checkout that counted `.git`, the `.vinta-ai-maestro/` store (lanes
+  included) and ignored caches — one run's estimate had grown from 4.0 to
+  9.5 GiB a lane against real lanes of about 1.1 GiB.
 
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
