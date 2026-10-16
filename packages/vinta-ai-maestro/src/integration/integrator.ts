@@ -96,7 +96,10 @@ export interface WaveResult {
  *
  * The merge is deliberately left in place, conflicted: it is the only copy of
  * what the fixer tried, and since `prepareBase` began reusing a prepared base,
- * a resolution finished by hand there survives into the retry.
+ * a resolution finished by hand there — committed — survives into the retry.
+ * One still in progress when the retry comes is not left to wedge it: it is
+ * this run's own merge, so the retry keeps it under `ABANDONED_REFS` and
+ * starts the merge again (`Integrator.reclaim`).
  */
 export class UnresolvedConflictError extends Error {
   readonly nodes: readonly string[]
@@ -107,8 +110,9 @@ export class UnresolvedConflictError extends Error {
     super(
       `unresolved conflict: ${nodes.join(', ')} both changed ${paths.join(', ')}, ` +
         `and it still conflicts after ${rounds} fix rounds. Finish the merge by ` +
-        `hand in the integration worktree — the retry will keep it — or serialize ` +
-        `the phases with a dependency edge.`,
+        `hand in the integration worktree and commit it, or serialize the phases ` +
+        `with a dependency edge. A merge still unfinished when the phase is ` +
+        `retried is kept under ${ABANDONED_REFS}/ and started again.`,
     )
     this.name = 'UnresolvedConflictError'
     this.nodes = nodes
@@ -130,9 +134,11 @@ export class UnresolvedConflictError extends Error {
  * the answer names the operation and both branches — which is what somebody
  * finishing or aborting it by hand needs, and all they need.
  *
- * Nothing here is resolved automatically. A merge left in place is either a
- * conflict `UnresolvedConflictError` handed to a person, or a person's own
- * work in progress; both are theirs to conclude.
+ * Only what this run did not start gets here. A merge of one of the plan's
+ * own branches into one of its own integration branches is the integrator's,
+ * whoever interrupted it, and `Integrator.reclaim` takes it down and lets it be
+ * redone. A rebase, a cherry-pick, or a merge of anything else is somebody's
+ * own work in progress, and theirs to conclude.
  */
 export class IntegrationWorktreeBusyError extends Error {
   constructor(
@@ -234,6 +240,24 @@ export class IntegrationCommitError extends Error {
 /** Where a refused resolution is kept. One ref per incoming phase; the newest wins. */
 export const RESOLUTION_REFS = 'refs/vinta-ai-maestro/resolutions'
 
+/**
+ * Where an unfinished merge of this run's is kept when it is taken down to be
+ * redone (`Integrator.reclaim`). One ref per branch merged into; the newest
+ * wins. Never reused automatically, unlike `RESOLUTION_REFS`: what it holds
+ * passed no gate and may still carry conflict markers.
+ */
+export const ABANDONED_REFS = 'refs/vinta-ai-maestro/abandoned'
+
+/** An unfinished merge this run started, taken down so it can be redone. Identifiers only. */
+export interface ReclaimedMerge {
+  /** The branch the merge was being made on. */
+  readonly into: string
+  /** What was being merged: a branch or ref name. */
+  readonly incoming: string
+  /** Where what the merge had in its tree is kept, or null when it could not be. */
+  readonly kept: string | null
+}
+
 export interface IntegratorOptions {
   readonly plan: IntegrationPlan
   /** The dedicated integration worktree: every merge and every fix happens here. */
@@ -280,6 +304,8 @@ export interface IntegratorOptions {
    * unattended run answers `abort` for them once the retry window passes.
    */
   readonly onCommitFailure?: (failure: CommitFailure) => Promise<CommitDecision>
+  /** Every unfinished merge of this run's that `reclaim` took down, as it is taken down. */
+  readonly onReclaimed?: (merge: ReclaimedMerge) => void
   /** Overridden in tests so `gh` is never invoked against a real remote. */
   readonly ghPath?: string
   /**
@@ -412,8 +438,9 @@ export class Integrator {
 
     // Before any checkout — including the one the prepared-base path below
     // makes. A worktree mid-merge refuses every checkout with the same terse
-    // line, and the only useful answer names the merge.
-    await this.#assertIdle(cwd)
+    // line: an unfinished merge of this run's is redone, and any other is
+    // refused by name.
+    await this.reclaim()
 
     // **A base that is already correct is kept, conflicts and all.**
     //
@@ -607,7 +634,7 @@ export class Integrator {
   async mergeWave(wave: number, members?: readonly string[], forNode?: string): Promise<WaveResult> {
     const cwd = this.#options.integrationPath
     const branch = this.waveBranch(wave)
-    await this.#assertIdle(cwd)
+    await this.reclaim()
     const under = this.waveBranch(wave - 1)
     // Named, rather than left to `checkout`'s exit 128: "is not a commit" sent
     // one operator looking for a corrupted ref, when the wave had simply never
@@ -1013,17 +1040,118 @@ export class Integrator {
   }
 
   /**
-   * Refuses to work in a worktree that is mid-merge, mid-rebase or
-   * mid-cherry-pick, naming what it found (`IntegrationWorktreeBusyError`).
+   * Leaves the integration worktree with no operation in progress, or says
+   * why it cannot: takes down an unfinished merge this run started, and
+   * refuses — by name, `IntegrationWorktreeBusyError` — anything else.
    *
-   * Read-only. Asked before every checkout this class makes in the integration
-   * worktree, because git's own refusal for that state is one line that names
-   * neither the operation nor the branches.
+   * Asked before every checkout this class makes in the integration worktree,
+   * and by the host on a resume and on the way out of a forced stop. A merge
+   * that a pause, a stop or a kill caught half-way is the integrator's own
+   * work and nobody else will conclude it: refusing it, as this used to,
+   * failed every later attempt in its setup with the same line until a person
+   * ran `git merge --abort` by hand — one observed phase backed off its
+   * unattended retries and parked on a human over a merge that had staged
+   * without a conflict. So it is redone instead, which is also what puts the
+   * merge's result in front of the gates again.
+   *
+   * "Started by this run" is read from git, not remembered: the branch
+   * checked out is one of the plan's `integ-` or `wave-` branches, and what is
+   * being merged is one of the plan's phase branches (at its tip, or behind it
+   * when a retry has moved it on since), a resolution this integrator kept, or
+   * the plan branch catching a wave up. Anything else is somebody's own.
+   *
+   * Nothing is lost: whatever the merge had in its tree, a fixer's unfinished
+   * attempt included, is kept as a commit under `ABANDONED_REFS` first.
    */
-  async #assertIdle(cwd: string): Promise<void> {
+  async reclaim(): Promise<ReclaimedMerge | null> {
+    const cwd = this.#options.integrationPath
     const gitDir = (await git(cwd, ['rev-parse', '--absolute-git-dir'])).trim()
     const operation = await this.#operationInProgress(cwd, gitDir)
-    if (operation === null) return
+    if (operation === null) return null
+    const own = operation === 'merge' ? await this.#ownMerge(cwd) : null
+    if (own === null) throw await this.#busy(cwd, operation)
+
+    const kept = await this.#keepAbandoned(cwd, own.into, own.incoming)
+    await gitOk(cwd, ['merge', '--abort'])
+    // `--abort` refuses a few index states a killed merge can leave; a hard
+    // reset to the branch's own tip clears `MERGE_HEAD` from any of them.
+    if (await this.#merging(cwd)) await gitOk(cwd, ['reset', '--hard', 'HEAD'])
+    if (await this.#merging(cwd)) throw await this.#busy(cwd, operation)
+    const merge: ReclaimedMerge = { into: own.into, incoming: own.incoming, kept }
+    this.#options.onReclaimed?.(merge)
+    return merge
+  }
+
+  /**
+   * The merge in progress, when this run started it: `into` the plan branch
+   * checked out, `incoming` the name of what it is merging. Null otherwise.
+   */
+  async #ownMerge(cwd: string): Promise<{ readonly into: string; readonly incoming: string } | null> {
+    const prefix = `plan/${this.#plan.id}/`
+    const into = (await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => '')).trim()
+    if (!into.startsWith(`${prefix}integ-`) && !into.startsWith(`${prefix}wave-`)) return null
+    const head = (await git(cwd, ['rev-parse', 'MERGE_HEAD']).catch(() => '')).trim()
+    if (head === '') return null
+
+    const resolutions = await gitLines(cwd, ['for-each-ref', '--format=%(objectname) %(refname)', RESOLUTION_REFS])
+    for (const line of resolutions) {
+      const [sha, ref] = line.split(' ')
+      if (sha === head && ref !== undefined) return { into, incoming: ref }
+    }
+
+    const runBase = this.#runBase()
+    const baseTip = (await git(cwd, ['rev-parse', '--verify', '--quiet', runBase]).catch(() => '')).trim()
+    if (into.startsWith(`${prefix}wave-`) && head === baseTip) return { into, incoming: runBase }
+    // What every phase branch contains is the base, and a merge of the base
+    // is not a phase's.
+    if (await gitOk(cwd, ['merge-base', '--is-ancestor', head, runBase])) return null
+
+    const phases = (
+      await gitLines(cwd, ['for-each-ref', '--contains', head, '--format=%(refname:short)', `refs/heads/${prefix}`])
+    ).filter((branch) => branch.startsWith(`${prefix}phase-`))
+    if (phases.length === 0) return null
+    for (const branch of phases) {
+      if ((await git(cwd, ['rev-parse', branch])).trim() === head) return { into, incoming: branch }
+    }
+    return { into, incoming: phases[0] as string }
+  }
+
+  /**
+   * Keeps what an unfinished merge has in its tree as a commit under
+   * `ABANDONED_REFS`, with the merge's own parents, and returns the ref — or
+   * null when nothing could be kept. Plumbing, so no hook runs. The index is
+   * staged whole first: a killed fixer round leaves unmerged paths, which
+   * `write-tree` refuses, and the merge is about to be undone anyway.
+   */
+  async #keepAbandoned(cwd: string, into: string, incoming: string): Promise<string | null> {
+    try {
+      await git(cwd, ['add', '--all'])
+      const tree = (await git(cwd, ['write-tree'])).trim()
+      const commit = (
+        await git(cwd, [
+          'commit-tree',
+          tree,
+          '-p',
+          'HEAD',
+          '-p',
+          'MERGE_HEAD',
+          '-m',
+          `Unfinished merge of ${incoming} into ${into} (kept by vinta-ai-maestro: it was redone)`,
+        ])
+      ).trim()
+      const ref = `${ABANDONED_REFS}/${into.slice(`plan/${this.#plan.id}/`.length)}`
+      await git(cwd, ['update-ref', ref, commit])
+      return ref
+    } catch {
+      return null
+    }
+  }
+
+  /** The refusal for an operation this run did not start, naming it and both branches. */
+  async #busy(
+    cwd: string,
+    operation: 'merge' | 'rebase' | 'cherry-pick',
+  ): Promise<IntegrationWorktreeBusyError> {
     const into = (await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => '')).trim()
     const headRef =
       operation === 'merge' ? 'MERGE_HEAD' : operation === 'rebase' ? 'REBASE_HEAD' : 'CHERRY_PICK_HEAD'
@@ -1034,7 +1162,7 @@ export class Integrator {
     ).trim()
     const sha = (await git(cwd, ['rev-parse', '--short', headRef]).catch(() => '')).trim()
     const incoming = named !== '' ? named.replace(/[~^].*$/, '') : sha !== '' ? sha : null
-    throw new IntegrationWorktreeBusyError(operation, incoming, into === '' ? null : into)
+    return new IntegrationWorktreeBusyError(operation, incoming, into === '' ? null : into)
   }
 
   async #operationInProgress(

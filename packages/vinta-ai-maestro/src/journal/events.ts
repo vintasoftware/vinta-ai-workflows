@@ -57,7 +57,7 @@ export interface HumanQuestion {
 export type HumanAnswer = string | number | boolean | null
 
 /** The §9 operations that steer a node. `take over` is a PTY attach, not an event. */
-export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort'
+export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort' | 'fresh'
 
 /**
  * Which edge of a gate-pool acquisition a `gate_pool` event marks.
@@ -152,6 +152,12 @@ export type SessionFreshReason =
    * turn it took — a cold start is cheaper than a poisoned one.
    */
   | 'prior_phase_failed'
+  /**
+   * An operator (or the coordinator) dropped the node's session (`node
+   * fresh`): its next turn starts cold whatever the ledger would have
+   * continued.
+   */
+  | 'operator_fresh'
 
 /**
  * Why a phase went to somebody other than the member the plan named. A closed
@@ -322,6 +328,19 @@ interface RunPayloads {
    * failed from one that ran twice because the machine rebooted underneath it.
    */
   run_resumed: { readonly attempt: number }
+  /**
+   * An unfinished merge of this run's found standing in the integration
+   * worktree — a pause, a stop or a kill caught it half-way, or a conflict was
+   * left for a person and the phase was retried — taken down so it can be
+   * redone (`Integrator.reclaim`, §8). Branch and ref names only: `kept` is
+   * where whatever the merge had in its tree was saved, null when it could
+   * not be.
+   */
+  integration_reclaimed: {
+    readonly into: string
+    readonly incoming: string
+    readonly kept: string | null
+  }
   /**
    * A plan-branch commit the run could not take, or could not take yet
    * (`src/config/reload.ts`). An applied one is a `workflow_amended` row with

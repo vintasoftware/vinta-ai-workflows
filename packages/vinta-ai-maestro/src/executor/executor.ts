@@ -752,7 +752,16 @@ export class RunEffectExecutor implements EffectExecutor {
     const named = params['branch']
     if (typeof named === 'string') {
       await this.#integration(async () => {
-        await git(this.#options.integrationPath, ['merge', '--no-ff', '--no-edit', named])
+        const cwd = this.#options.integrationPath
+        try {
+          await git(cwd, ['merge', '--no-ff', '--no-edit', named])
+        } catch (error) {
+          // No fixer reaches a named merge, so a conflict here is a failure,
+          // and the merge it left must not outlive it: every other phase's
+          // base and wave is built in this worktree.
+          await gitOk(cwd, ['merge', '--abort'])
+          throw error
+        }
       })
       return {}
     }

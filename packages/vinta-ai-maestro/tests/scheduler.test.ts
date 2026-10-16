@@ -2808,6 +2808,34 @@ describe('session slots', () => {
     ])
   })
 
+  it('starts the next turn cold when the operator drops the session', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's first turn to open")
+
+    expect(r.scheduler.freshSession('a')).toBe('queued')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // The turn in flight was not cut short; the next one did not continue it.
+    expect(r.adapter.spawned.map((task) => task.resumeSessionId)).toEqual([undefined, undefined])
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'fresh', reason: 'operator_fresh' },
+    ])
+    expect(operationsOf(r, 'a')).toEqual([{ op: 'fresh', delivery: 'queued' }])
+    expectDrained(r)
+  })
+
+  it('ignores a dropped session on a settled node: there is no next turn', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]))
+    await r.scheduler.run()
+
+    expect(r.scheduler.freshSession('a')).toBe('ignored')
+    expect(operationsOf(r, 'a')).toEqual([{ op: 'fresh', delivery: 'ignored' }])
+  })
+
   it('keeps a turn on another slot out of the implementer’s session', async () => {
     const r = rig(makeWorkflow([node('a', [], { pipeline: 'slots' })]))
     await r.scheduler.run()
@@ -4322,6 +4350,73 @@ describe('a failed phase the operator can retry', () => {
     // The honest refusal. A button that silently did nothing here is worse than
     // one that says the plan has to be started again.
     expect(() => r.scheduler.retry('a')).toThrow(/run has ended/)
+  })
+
+  /**
+   * The observed run: `node abort` on the only runnable phase, every other
+   * pending phase depending on it, ended the run `failed` in the same turn —
+   * and the `node retry` sent a moment later was refused as `run has ended`.
+   */
+  it('keeps a run whose last runnable phase was aborted alive, for the retry', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), { stall: true, onFailure: 'retry' })
+    let ended = false
+    const running = r.scheduler.run().finally(() => {
+      ended = true
+    })
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.abortNode('a')
+    r.stall.release()
+    // Long enough for the loop to have ended the run, had it been going to.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(ended).toBe(false)
+    expect(r.scheduler.statuses).toEqual({ a: 'failed', b: 'blocked' })
+    expect(r.journal.events('run-1').some((event) => event.type === 'run_ended')).toBe(false)
+
+    r.scheduler.retry('a')
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(2)
+    expectDrained(r)
+  })
+
+  it('queues a retry sent while the aborted attempt is still unwinding', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), { stall: true, onFailure: 'retry' })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.abortNode('a')
+    // The killed turn is still draining: its body has not left yet.
+    r.scheduler.retry('a')
+    expect(r.scheduler.statuses['a']).toBe('failed')
+
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // Exactly one more attempt: the old body never stepped on after the retry.
+    expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(2)
+    expectDrained(r)
+  })
+
+  it('ends a run held for a retry as whatever halted it', async () => {
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])]), { stall: true, onFailure: 'retry' })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    await r.scheduler.abortNode('a')
+    r.stall.release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    await r.scheduler.halt('cancelled')
+    const report = await running
+
+    expect(report.halted).toBe('cancelled')
+    const ended = r.journal.events('run-1').filter((event) => event.type === 'run_ended')
+    expect(ended.map((event) => event.payload)).toEqual([{ status: 'cancelled' }])
+    expect(() => r.scheduler.retry('a')).toThrow(/run has ended/)
+    expectDrained(r)
   })
 
   /** `stop` is for CI, where waiting is worse than failing. */

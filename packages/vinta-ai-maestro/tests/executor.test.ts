@@ -1338,6 +1338,24 @@ describe('the git verbs', () => {
     expect(isAncestor(rig.repo, branchOf(rig.workflow, 'p2'), wave1)).toBe(true)
   })
 
+  it('aborts a named merge that fails, rather than leaving the integration worktree mid-merge', async () => {
+    const rig = setup(twoPeers)
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    for (const [index, body] of [[0, 'one\n'], [1, 'two\n']] as const) {
+      const lane = (rig.lanes[index] as ExecutorLane).path
+      writeFileSync(join(lane, 'shared.txt'), body)
+      g(lane, 'add', '--all')
+      g(lane, 'commit', '-m', `shared ${body.trim()}`)
+    }
+    g(rig.integ, 'checkout', '-B', 'scratch', branchOf(rig.workflow, 'p1'))
+
+    await expect(rig.invoke('p2', 'git_merge', { branch: branchOf(rig.workflow, 'p2') })).rejects.toThrow()
+
+    expect(() => g(rig.integ, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD')).toThrow()
+    expect(g(rig.integ, 'status', '--porcelain')).toBe('')
+  })
+
   /** `twoPeers` with one gate that has a scoped form: what the wave gate is for. */
   const scopedPeers = (fullGate: string) => (): Workflow =>
     WorkflowSchema.parse({

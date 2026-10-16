@@ -77,6 +77,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`.venv`, say) now that the recycle cleans ignored files. Both optional, in
   `workflow.v1`.
 
+- **`vinta-ai-maestro`: `node fresh <run> <phase>` drops a phase's agent
+  session without failing the attempt.** The phase's next turn starts cold with
+  the whole brief, journalled `node_session` `reason: operator_fresh`; the turn
+  in flight is not stopped (pair it with `redirect` for that). It is the way out
+  of a session gone wrong — an agent replaying killed work or carrying on with
+  the previous phase — that used to cost an `abort`. Also `POST
+  /api/runs/:run/nodes/:node/fresh`, and the run coordinator can use it. The
+  post-mortem's `operations.node_operations[].op` gains `fresh` (additive, in
+  `postmortem.v1.schema.json`).
+
+
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or
@@ -1011,6 +1022,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   main checkout that counted `.git`, the `.vinta-ai-maestro/` store (lanes
   included) and ignored caches — one run's estimate had grown from 4.0 to
   9.5 GiB a lane against real lanes of about 1.1 GiB.
+
+- **`vinta-ai-maestro`: an integration merge a pause, stop or kill caught
+  half-way no longer wedges the run.** Every later attempt used to fail on
+  `integration worktree is mid-merge` until someone ran `git merge --abort` by
+  hand. The integrator now recognises a merge it started — one of the plan's
+  phase branches (or a kept resolution, or the plan branch) into one of its
+  `integ-`/`wave-` branches — keeps what it had under
+  `refs/vinta-ai-maestro/abandoned/<branch>`, aborts it and redoes it, so the
+  result is gated again; each one journals `integration_reclaimed`. The same
+  sweep runs on `run --resume` and when a stop outlives its deadline. A conflict
+  left for a person that nobody finished is redone on the retry the same way.
+  A merge the run did not start is still refused by name. A failed `git_merge`
+  of a named branch now aborts its merge.
+
+- **`vinta-ai-maestro`: aborting the only runnable phase no longer ends the
+  run.** A run whose remaining phases all depended on an aborted one ended
+  `failed` at once, and the `node retry` that followed was refused as `run has
+  ended`. Aborted phases now hold the run open for their retry (no timer retries
+  them); `pause` or `stop` ends it. Under `--on-failure stop` an abort still ends
+  the run. A retry sent while the aborted attempt is still winding down is
+  applied once it has.
+
 
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when

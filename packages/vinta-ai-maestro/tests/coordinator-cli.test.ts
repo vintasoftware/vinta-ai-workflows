@@ -110,6 +110,16 @@ describe('node', () => {
     expect(r.out).toEqual(['context p1: queued'])
   })
 
+  it('posts fresh with no body, and prints that it is queued for the next turn', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ ok: true, delivery: 'queued' }))
+    const code = await nodeCommand(['fresh', RUN_ID, 'p1', '--repo', emptyRepo()], r.io, { env: ENV, fetch: f.fetch })
+    expect(code).toBe(OK)
+    expect(f.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/nodes/p1/fresh`)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({})
+    expect(r.out).toEqual(['fresh p1: queued'])
+  })
+
   /** An operation that did nothing must not exit 0: a script would read it as done. */
   it('exits 1 when the run ignored the operation', async () => {
     const r = recorder()

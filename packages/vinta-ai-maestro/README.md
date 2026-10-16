@@ -96,7 +96,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
 | `pause <run-id> [--wait]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
 | `stop <run-id> [--wait]` | Kills every live agent turn and gate now. The run is `cancelled` and cannot be resumed. |
-| `node <context\|redirect\|pause\|abort\|retry\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, or `ignored`, which exits 1). |
+| `node <context\|redirect\|pause\|abort\|retry\|fresh\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, or `ignored`, which exits 1). `fresh` drops the phase's agent session so its next turn starts cold. A run whose last runnable phase was aborted stays up for its `retry`. |
 | `workflow <run-id>` | Prints the run's workflow as it stands now, every amendment applied. |
 | `amend <run-id> <workflow.json>` | Applies an edited workflow to a live run (§9's amend: refused while a phase it would move is running). |
 | `land <run-id> [--close]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base; `--close` closes those with a comment. |
@@ -417,6 +417,13 @@ and the phase whose merge it is asks: *commit* (hooks again, once you have fixed
 what they wanted), *commit --no-verify* (the resolution already passed the
 phases' gates), or *abort merge*. Under `--retry-after`, nobody there means
 *abort*. The retry reuses the kept resolution.
+
+A merge maestro started that a pause, a stop or a kill caught half-way is not
+left for you either. On the next attempt, on `run --resume`, and when a stop
+outlives its deadline, maestro keeps what that merge had under
+`refs/vinta-ai-maestro/abandoned/<branch>`, aborts it and does it again. A merge
+it did not start (yours, or a rebase) is never touched: the phase that needs
+the worktree stops and names it.
 
 ### Gate types
 

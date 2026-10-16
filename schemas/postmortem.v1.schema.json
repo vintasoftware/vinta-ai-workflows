@@ -680,7 +680,8 @@
                       "add_context",
                       "redirect",
                       "pause",
-                      "abort"
+                      "abort",
+                      "fresh"
                     ]
                   },
                   "by": {
@@ -704,7 +705,7 @@
                 ],
                 "additionalProperties": false
               },
-              "description": "Steering, pauses and aborts, per phase."
+              "description": "Steering, pauses, aborts and dropped sessions, per phase."
             },
             "questions": {
               "type": "object",

@@ -56,8 +56,17 @@ export interface RunControl {
    * parked on a question, hold it there (`held`).
    */
   pause(nodeId: string, actor?: Actor): Operated
-  /** §9 — kill the session, mark failed, block dependents. */
+  /**
+   * §9 — kill the session, mark failed, block dependents. A run left with
+   * nothing to run stays up for the node's `retry` (§9).
+   */
   abortNode(nodeId: string, actor?: Actor): Operated
+  /**
+   * Drop the node's agent session: its next turn starts cold, with the whole
+   * brief (§15). Optional, like `retry`, and refused rather than faked by a
+   * host that does not keep sessions.
+   */
+  freshSession?(nodeId: string, actor?: Actor): Operated
   /**
    * Run a failed node again, and unblock what its failure blocked.
    *
@@ -277,7 +286,7 @@ export function runControl(
   }
   // Destructured off the prototype, so every forward re-binds `this` to the
   // scheduler: these are class methods reaching private state.
-  const { addContext, redirect, pause, abortNode, question, retry } = scheduler
+  const { addContext, redirect, pause, abortNode, question, retry, freshSession } = scheduler
   const own =
     operations.question ??
     (question === undefined ? undefined : (nodeId: string) => question.call(scheduler, nodeId))
@@ -313,5 +322,10 @@ export function runControl(
       : retry === undefined
         ? {}
         : { retry: (nodeId: string) => retry.call(scheduler, nodeId) }),
+    ...(operations.freshSession !== undefined
+      ? { freshSession: operations.freshSession }
+      : freshSession === undefined
+        ? {}
+        : { freshSession: (nodeId: string, actor?: Actor) => freshSession.call(scheduler, nodeId, actor) }),
   }
 }

@@ -180,6 +180,7 @@ function recordingControl(): RunControl & { readonly calls: ControlCall[] } {
     // The second argument of these two is the actor, not a payload.
     pause: (nodeId) => record('pause')(nodeId),
     abortNode: (nodeId) => record('abortNode')(nodeId),
+    freshSession: (nodeId) => record('freshSession')(nodeId),
     question: (nodeId) =>
       nodeId === 'a'
         ? { question: 'Ship it?', kind: 'confirm' as const, context: { diffRef: 'phase/a' } }
@@ -1229,6 +1230,7 @@ describe('§9 operations', () => {
     { path: 'redirect', body: { instruction: 'use a migration' }, op: 'redirect', arg: 'use a migration' },
     { path: 'pause', body: {}, op: 'pause', arg: null },
     { path: 'abort', body: {}, op: 'abortNode', arg: null },
+    { path: 'fresh', body: {}, op: 'freshSession', arg: null },
   ] as const
 
   for (const operation of operations) {
@@ -1305,6 +1307,9 @@ describe('§9 operations', () => {
       body: {},
     })
     expect(paused.status).toBe(409)
+    // So does an optional one it does not have.
+    const fresh = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/fresh`, { method: 'POST', body: {} })
+    expect(fresh.status).toBe(409)
   })
 })
 
@@ -1904,9 +1909,17 @@ describe('human gates', () => {
     expect(aborted.status).toBe(200)
 
     scheduler.answer('a', { human: { answer: 'ship' } })
+    await until(() => (scheduler.statuses['a'] === 'done' ? true : undefined), 'node a to finish')
+
+    // Nothing is left to run but the aborted node, and the run is still up
+    // for its retry — which the API reaches like any other operation.
+    const retried = await call(daemon, `/api/runs/${RUN_ID}/nodes/b/retry`, { method: 'POST', body: {} })
+    expect(retried.status).toBe(200)
+    await until(() => (scheduler.statuses['b'] === 'awaiting_human' ? true : undefined), 'node b to park')
+    scheduler.answer('b', { human: { answer: 'ship' } })
     const report = await running
 
-    expect(report.statuses).toEqual({ a: 'done', b: 'failed' })
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
     const operations = journal
       .events(RUN_ID)
       .filter((event) => event.type === 'node_operation')

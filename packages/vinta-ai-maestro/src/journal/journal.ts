@@ -753,6 +753,7 @@ export class Journal {
       case 'gate_cache_invalidated':
       case 'gate_stalled':
       case 'stacks_stopped':
+      case 'integration_reclaimed':
       case 'coordinator_woke':
       case 'bare_gate_blocked':
       case 'bare_gate_detected':
