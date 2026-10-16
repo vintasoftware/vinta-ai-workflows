@@ -91,7 +91,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `doctor <workflow.json> [--repo <dir>] [--resume <run-id>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
 | `run <workflow.json> [--repo <dir>]` | Starts the workflow as a **background job** and returns once it is under way. The run does not need the terminal: close it and the run carries on. `--foreground` hosts it in this process instead and exits when it ends, for CI. |
-| `run --resume <run-id>` | Picks an interrupted or paused run back up, as a background job. |
+| `run --resume <run-id>` | Picks a paused, interrupted or failed run back up, as a background job. Done phases stay done; every other phase — a failed run's failed and blocked phases included — is attempted again. Only `done` and `cancelled` runs are refused. |
 | `status [run-id] [--json]` | Every run in the project and what it is doing — or one run, phase by phase. A run whose job died without ending it shows as `interrupted`. |
 | `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
 | `pause <run-id> [--wait]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
@@ -104,10 +104,12 @@ Every command runs against a project checkout — your project, not this one. `-
 | `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
 | `gate-cache invalidate <run-id> <gate-id> [--tree <hash>]` | Forgets a gate's cached results, on one lane tree or on all of them, so its next run runs the command instead of replaying a verdict whose cause was outside the lane's tracked files. The operator's and the run coordinator's. |
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. |
-| `purge [run-id] [--repo <dir>] [--yes] [--dry-run]` | Deletes run state under `.vinta-ai-maestro/runs/`. A run whose job is still running is kept. |
+| `purge [run-id] [--repo <dir>] [--yes] [--dry-run] [--lanes] [--branches] [--force]` | Deletes run state under `.vinta-ai-maestro/runs/`; `--lanes` also removes lane worktrees and tears down their databases, service slices and compose stacks from each lane's summary. A run whose job is still running is kept; one that could still be resumed (paused, failed, interrupted) is kept unless named or `--force`. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 | `status <run-id>` | The run's state and every phase's, including a phase queued behind the integration worktree (and who holds it) — which otherwise reads `running` with nothing running. |
 | `gate <gate-id> [--no-cache]` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. `--no-cache` runs it past a cached result and keeps the new one, for a cause git does not track (an ignored file, a tool cache). |
+
+`judge calibrate --system-one <config.json> (--run <run-id> | --commands <file>)` replays commands against the permission judge's question and threshold without running them — see [System One classifiers](#system-one-classifiers).
 
 There are also `judge-hook` and `guard-hook`, which are internal: they are the hooks `--permission judged` and [the gate guard](#the-gate-guard) install, and claude-code runs them, not you.
 
@@ -167,7 +169,7 @@ recorded as its own. Its limits are enforced by the run, not by its prompt:
 
 `ui` is the browser's way in. It reads every run's history from the journal, and for a run whose job is alive it forwards that run's requests and socket to the job, so the live graph, steering, answering a question and taking over a terminal all work as if the two were one process. Close `ui` and the runs carry on; open it tomorrow and it shows them where they got to.
 
-A run ends one of four ways, and the journal says which: it settles (`done` or `failed`), it is paused (`paused`, resumable), it is stopped (`cancelled`, final), or its job is killed by a signal (`failed`, resumable — exactly what closing the terminal used to do). `status` shows a run whose job vanished without writing any of those — a reboot, a `kill -9` — as `interrupted`, and `run --resume` picks it up.
+A run ends one of four ways, and the journal says which: it settles (`done`, final, or `failed`, resumable — the failed phases and those they blocked are attempted again), it is paused (`paused`, resumable), it is stopped (`cancelled`, final), or its job is killed by a signal (`failed`, resumable — exactly what closing the terminal used to do). `status` shows a run whose job vanished without writing any of those — a reboot, a `kill -9` — as `interrupted`, and `run --resume` picks it up.
 
 The daemon-facing commands use three exit codes, so a script can tell the cases
 apart: `0` success, `1` the command ran and the answer was no, `2` the command
@@ -898,7 +900,11 @@ $ vinta-ai-maestro purge <run-id>           # names every path, then asks
 $ vinta-ai-maestro purge <run-id> --yes     # for scripts
 ```
 
-It removes the run *directory* — snapshot, transcripts, raw streams, gate logs. It does not touch `flow.db`, which holds the identifiers the post-mortem is built from and no repository contents. A run id is a single name, never a path: anything containing a separator or `..` is refused before anything is unlinked.
+It removes the run *directory* — snapshot, transcripts, raw streams, gate logs — and the run's rows in `flow.db`. A run id is a single name, never a path: anything containing a separator or `..` is refused before anything is unlinked.
+
+Without a run id it purges every run **except** one whose job is still running and one that could still be resumed — paused, failed or interrupted — because purging a run ends it. Those are named and kept; name the run, or pass `--force`, to purge it anyway. A running job is kept regardless.
+
+`--lanes` also removes the lane worktrees under `.vinta-ai-maestro/lanes/` and undoes what each lane's summary records outside git: its compose stack and forked volumes, its own service namespaces, and its forked databases (`dropdb`, or the project's `dropdb_cmd`). Summaries whose worktree is already gone are cleaned up the same way. Every command is listed before anything runs — `--dry-run` stops there — and anything a summary names that is not provably that lane's alone (a compose-delivered database, an index-numbered service slot) is listed and left. A step that fails is reported and keeps its lane's summary, so running the purge again retries it.
 
 ## When something goes wrong: the daemon's own log
 
@@ -1040,6 +1046,16 @@ A lane is still a worktree of your repository, so committed settings travel into
 ```
 
 `http` POSTs `{ kind, question, labels, input }` and reads `{ scores }` or `{ yes }` back, with the key from the environment variable you name (removed from the daemon's environment once read, so agents never see it). Before a run starts, the preflight asks the classifier one synthetic question, so a missing or rejected key, or an unreachable URL, stops the run at minute zero instead of at the first gate. Set `"probe": false` to skip it. `doctor` also warns about an `http` adapter with no `api_key_env`, since that sends no `Authorization` header. `command` runs a local program with the same JSON on stdin and stdout — the choice when repository content must not leave the machine, because a hosted classifier receives diffs, gate logs and shell commands.
+
+**Tuning the permission judge.** It fails closed, so a question that is too cautious shows up as agents that cannot run `ls`, not as an error. The shipped question separates reading secret *values* (refused) from listing `.env*` files or reading `.env.example` (allowed), allows read-only inspection (`docker ps`, `git status`/`log`) and the project's own `make`/`npm`/`pnpm` commands in the worktree, and still refuses pushes, `sudo`, writes outside the worktree and another project's containers or volumes. If your project needs more — naming its own tooling, saying which files hold secrets — set `judges.permission.question`, and measure it before a run relies on it:
+
+```console
+$ vinta-ai-maestro judge calibrate --system-one s1.json --run <run-id>
+$ vinta-ai-maestro judge calibrate --system-one s1.json --commands cases.tsv \
+    --question-file question.txt --threshold 0.7
+```
+
+`--run` replays every `Bash` call a past run's agents made; `--commands` takes a file with one command per line, optionally prefixed `safe<TAB>` or `unsafe<TAB>` for what it must get. Nothing is executed — only the classifier is asked. The report gives allowed and refused counts, the score distribution, every labelled command judged the wrong way and the highest-scoring must-deny command, and exits 1 on a misjudged one, so a case file can guard a question in CI. It prints commands as recorded and never their output. Raise or lower `allow_above` only on what it shows: the default stays 0.9.
 
 A plan can then declare **judge gates** next to its command gates:
 

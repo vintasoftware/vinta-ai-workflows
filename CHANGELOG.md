@@ -59,6 +59,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rejected findings), kept across retries, written to
   `runs/<id>/nodes/<node>/decisions.jsonl` and read back when a run resumes.
 
+- **`vinta-ai-maestro judge calibrate`: measure a permission-judge question
+  before a run relies on it.** It replays a past run's `Bash` calls
+  (`--run <run-id>`), or a file of commands each optionally labelled `safe` or
+  `unsafe` (`--commands <file>`), against a candidate question
+  (`--question` / `--question-file`) and threshold (`--threshold`) through the
+  classifier in `--system-one`. Nothing is executed. It reports how many would
+  be allowed and refused, the score distribution, every labelled command
+  judged the wrong way, and the highest-scoring must-deny command, and exits 1
+  on a misjudged one so a case file can guard a project's question in CI.
+  Commands are printed as recorded, never their output.
+
+
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or
@@ -936,6 +948,41 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   turn's `result` and killed the turn the CLI starts to hand over the answer.
   The review then stated no verdict and went to the operator as `unapproved`.
   The session now waits for that turn, for at most a minute of silence.
+
+- **`vinta-ai-maestro purge` no longer ends a run you did not name.** A bulk
+  `purge --lanes` removed the lanes of paused, failed and interrupted runs —
+  the integration worktree included — so `run --resume` had nothing to adopt,
+  and a bulk `purge` deleted those runs' frozen snapshots. A run that could
+  still be resumed is now kept whole, directory and lanes, and named with the
+  reason; purge it by name, or pass the new `--force`. A run whose job is
+  still running is kept even then.
+- **`vinta-ai-maestro purge --lanes` tears a lane down, not just its
+  worktree.** It used to leave every forked database, compose stack and lane
+  summary behind, including summaries whose worktree was already gone. Each
+  reaped lane's summary is now its teardown manifest: `docker compose -p
+  <project> down`, `docker volume rm` for its forked volumes, the `reset_cmd`
+  of its own service namespaces, and `dropdb` (or the project's `dropdb_cmd`)
+  for its forked databases — every command listed before anything runs, and
+  under `--dry-run` nothing runs. Only what is provably that lane's is
+  touched: never a compose-delivered database, an index-numbered service slot,
+  or a summary `prepare-worktree` wrote for a worktree you made. A step that
+  fails is reported, and its lane's summary is kept so a rerun retries it.
+- **`vinta-ai-maestro run --help` says which runs resume.** It claimed a run
+  that "finished" could not be resumed, while a `failed` run resumes — its
+  failed phases and the ones they blocked are attempted again, and `status`
+  prints the command for it. The help now names paused, interrupted and
+  failed as resumable, and only `done` and `cancelled` as refused.
+- **`vinta-ai-maestro`: the shipped permission-judge question no longer
+  refuses routine commands.** Under `--permission judged` it allowed 44 of 69
+  commands from a real run, refusing `ls .env*`, `cat .env.example`,
+  `docker ps` and the project's own `make` targets. The question now says a
+  secret is a *value* — listing env files and reading templates is allowed,
+  reading a real `.env` is not — allows read-only inspection and the project's
+  own commands in its worktree, and still refuses pushes, `sudo`, writes
+  outside the worktree and another project's containers or volumes. A
+  project that set its own `judges.permission.question` is unaffected; the
+  default `allow_above` stays 0.9.
+
 
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when

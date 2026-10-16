@@ -99,7 +99,7 @@ export class ServiceCapacityError extends Error {
  * a transformation — but a caller-supplied lane name (`laneNames`, a staffed
  * run naming worktrees after crew members) has only the pool's word for it.
  */
-const token = (value: string): string => value.replaceAll(/[^A-Za-z0-9_-]/g, '_')
+export const namespaceToken = (value: string): string => value.replaceAll(/[^A-Za-z0-9_-]/g, '_')
 
 const fill = (
   template: string,
@@ -117,7 +117,7 @@ export function planService(spec: ServiceSpec, lane: LaneIdentity): ServicePlan 
   }
 
   const namespace =
-    spec.namespace === 'index' ? String(lane.laneIndex) : token(lane.laneName)
+    spec.namespace === 'index' ? String(lane.laneIndex) : namespaceToken(lane.laneName)
   // With a server, the namespace is a path segment on it; without one, the
   // namespace is the whole answer — which is what an S3 prefix is.
   const url = spec.url === undefined ? namespace : `${spec.url.replace(/\/+$/, '')}/${namespace}`

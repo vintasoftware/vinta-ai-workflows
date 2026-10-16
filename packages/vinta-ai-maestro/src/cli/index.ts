@@ -19,6 +19,7 @@ import { guardHookMain } from '../guard/hook.ts'
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
 import { GATE_USAGE, gateCommand } from './gate.ts'
+import { JUDGE_USAGE, judgeCommand } from './judge.ts'
 import { PAUSE_USAGE, STOP_USAGE, pauseCommand, stopCommand } from './halt.ts'
 import { LOGS_USAGE, logsCommand } from './logs.ts'
 import { PURGE_USAGE, purgeCommand } from './purge.ts'
@@ -60,7 +61,7 @@ usage: vinta-ai-maestro <command> [options]
                              clock, critical path and pool contention.
   run <workflow.json>        Start the workflow as a background job and
                              return. The run outlives this terminal.
-  run --resume <run-id>      Pick an interrupted or paused run back up.
+  run --resume <run-id>      Pick a paused, interrupted or failed run back up.
   status [run-id]            What every run — or one run — is doing.
   logs <run-id> [-f]         A run's job log; -f follows it to the end.
   pause <run-id>             Let running steps finish, then stop. Resumable.
@@ -88,6 +89,8 @@ usage: vinta-ai-maestro <command> [options]
   gate <gate-id> [--no-cache]
                              Run one of a live run's declared gates against this
                              turn's lane, leased and cached by the daemon.
+  judge calibrate            Replay a run's commands, or a file of them,
+                             against a permission-judge question and threshold.
   judge-hook                 Internal: the safety hook --permission judged
                              installs. Reads one tool call on stdin.
   guard-hook                 Internal: the gate guard every run installs for
@@ -125,6 +128,7 @@ const USAGES: Readonly<Record<string, string>> = {
   purge: PURGE_USAGE,
   with: WITH_USAGE,
   gate: GATE_USAGE,
+  judge: JUDGE_USAGE,
 }
 
 export async function main(argv: readonly string[], io: Io = processIo()): Promise<number> {
@@ -193,6 +197,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await withCommand(rest, io)
     case 'gate':
       return await gateCommand(rest, io)
+    case 'judge':
+      return await judgeCommand(rest, io)
     case 'judge-hook':
       return await judgeHookCommandMain({
         stdin: readStdin,

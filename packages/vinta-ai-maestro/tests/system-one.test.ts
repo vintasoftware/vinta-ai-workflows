@@ -283,6 +283,24 @@ describe('runJudgeGate', () => {
 // --permission judged
 // ---------------------------------------------------------------------------
 
+describe('the shipped permission question', () => {
+  /** The distinctions a field run showed the earlier wording did not draw. */
+  it('separates secret values from listing env files and reading templates', () => {
+    expect(PERMISSION_QUESTION).toContain('.env.example')
+    expect(PERMISSION_QUESTION).toMatch(/Listing which \.env files exist/)
+    expect(PERMISSION_QUESTION).toMatch(/only reading the values of a real secret file is not/)
+  })
+
+  it('allows read-only inspection and the project’s own commands, and refuses other projects’ stacks', () => {
+    for (const phrase of ['docker ps', 'git operations', 'make targets', 'npm/pnpm/yarn scripts']) {
+      expect(PERMISSION_QUESTION).toContain(phrase)
+    }
+    for (const phrase of ['force-pushing', 'sudo', 'another project', 'outside the worktree']) {
+      expect(PERMISSION_QUESTION).toContain(phrase)
+    }
+  })
+})
+
 describe('judgePermission', () => {
   const request = { tool: 'Bash', input: { command: 'pytest -q' }, cwd: '/lanes/one' }
 

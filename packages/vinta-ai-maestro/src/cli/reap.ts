@@ -25,11 +25,27 @@
  * A cleanup command that occasionally eats work is one nobody can afford to run
  * quickly, and running it quickly — between failed attempts, without reading the
  * list every time — is the entire point.
+ *
+ * **And never a run's lanes while the run still needs them.** A lane belongs to
+ * a run, and a run that is live, paused, failed or interrupted will adopt its
+ * worktrees when it resumes. `RunGuard` says which runs those are; their lanes
+ * are kept and named, like a dirty one.
+ *
+ * A lane is also everything provisioned for it outside git — forked databases,
+ * service slices, a compose stack and its forked volumes — and its summary is
+ * the manifest of those. Reaping a lane tears them down from it
+ * (`lanes/teardown.ts`), and a summary whose worktree is already gone is reaped
+ * the same way rather than left for someone to find.
  */
 import { execFile } from 'node:child_process'
-import { readdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readdir, readFile, rm, stat } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+
+import { runDatabaseCommand } from '../lanes/db-command.ts'
+import { readSummary, type WorktreeSummary } from '../lanes/summary.ts'
+import { planTeardown, type TeardownStep } from '../lanes/teardown.ts'
+import { NO_GUARD, type RunGuard } from './run-guard.ts'
 
 const run = promisify(execFile)
 
@@ -42,13 +58,39 @@ export interface Lane {
   readonly dirty: boolean
 }
 
+/** One lane's state outside git, and the files that record it. */
+export interface Teardown {
+  readonly lane: string
+  /** Run before the summary goes; any failure keeps the summary for a retry. */
+  readonly steps: readonly TeardownStep[]
+  /** What the summary names that is deliberately not touched, and why. */
+  readonly left: readonly string[]
+  /** `<lane>.yaml` and its sidecars. */
+  readonly files: readonly string[]
+  /** True when the worktree is already gone and only the summary is left. */
+  readonly orphan: boolean
+}
+
+/** A lane, or a summary without one, kept because of the run it belongs to. */
+export interface ProtectedLane {
+  readonly name: string
+  readonly runId: string
+  readonly reason: string
+}
+
 export interface Reapable {
   /** Lanes safe to remove: nothing uncommitted in them. */
   readonly lanes: readonly Lane[]
   /** Lanes kept because their worktree holds uncommitted work. */
   readonly dirtyLanes: readonly Lane[]
-  /** Summary files (`<name>.yaml` and any sidecars) belonging to `lanes`. */
+  /** Lanes and orphan summaries kept because their run is live or can still be resumed. */
+  readonly protectedLanes: readonly ProtectedLane[]
+  /** Summary files (`<name>.yaml` and any sidecars) belonging to `lanes` and orphans. */
   readonly summaries: readonly string[]
+  /** What goes with each of them outside git, from its summary. */
+  readonly teardowns: readonly Teardown[]
+  /** Summaries that could not be read: nothing can be torn down from them, so they stay. */
+  readonly unreadableSummaries: readonly string[]
   /** Phase branches safe to delete: every commit on them is reachable elsewhere. */
   readonly emptyBranches: readonly string[]
   /** Phase branches kept because they carry commits no other branch has. */
@@ -78,10 +120,8 @@ const git = async (repoPath: string, args: readonly string[]): Promise<string> =
  * that way round there is no second spelling to reconcile: the children of the
  * lane root are the candidates, and each is asked about itself.
  */
-async function lanesUnder(laneRoot: string, runId: string | undefined): Promise<readonly Lane[]> {
-  const names = (await entriesOf(laneRoot)).filter(
-    (name) => runId === undefined || name.startsWith(`${runId}-`),
-  )
+async function lanesUnder(laneRoot: string): Promise<readonly Lane[]> {
+  const names = await entriesOf(laneRoot)
 
   const found = await Promise.all(
     names.map(async (name): Promise<Lane | null> => {
@@ -144,8 +184,15 @@ async function isDirty(path: string): Promise<boolean> {
  * What belongs to a run, or to every run, under this store.
  *
  * A lane is a child of `laneRoot` that is really a worktree; the name matters
- * only for `runId`, which selects a subset of lanes already established as
- * lanes. Nothing is reaped for looking like it belongs to a run.
+ * only for `runId` and `guard`, which select among lanes already established
+ * as lanes. Nothing is reaped for looking like it belongs to a run.
+ *
+ * A summary whose worktree is gone is an orphan, reaped by the same rules: it
+ * is the only record of a forked database or a compose stack that nothing else
+ * will ever remove. It counts as a lane's only when it says so itself — its
+ * `path` is the lane root's directory of that name — because the same
+ * directory holds the summaries `prepare-worktree` writes for worktrees a
+ * person made, and those are not this command's.
  */
 export async function findReapable(options: {
   readonly repoPath: string
@@ -155,24 +202,71 @@ export async function findReapable(options: {
   readonly runId?: string
   /** Whether to consider branches at all. */
   readonly includeBranches: boolean
+  /** Which run owns a lane, and whether it must be kept. Absent keeps nothing. */
+  readonly guard?: RunGuard
 }): Promise<Reapable> {
   const { repoPath, laneRoot, summaryDir, runId } = options
+  const guard = options.guard ?? NO_GUARD
 
-  const mine = await lanesUnder(laneRoot, runId)
+  // A lane that a longer run id claims belongs to that run, not this one.
+  const selected = (name: string): boolean => {
+    if (runId === undefined) return true
+    const owner = guard.ownerOf(name)
+    return owner === null ? name.startsWith(`${runId}-`) : owner === runId
+  }
+  const protectedLanes: ProtectedLane[] = []
+  const kept = (name: string): boolean => {
+    const owner = guard.ownerOf(name)
+    const reason = owner === null ? null : guard.keep(owner)
+    if (owner === null || reason === null) return false
+    protectedLanes.push({ name, runId: owner, reason })
+    return true
+  }
+
+  const all = await lanesUnder(laneRoot)
+  const onDisk = new Set(all.map((lane) => basename(lane.path)))
+  const mine = all.filter((lane) => selected(basename(lane.path)) && !kept(basename(lane.path)))
 
   const lanes = mine.filter((lane) => !lane.dirty)
   const dirtyLanes = mine.filter((lane) => lane.dirty)
 
-  // Only the clean lanes' summaries. A kept lane keeps its summary: the file
-  // is how the pool knows what that worktree is, and orphaning it would leave
-  // a directory nothing can reset or tear down.
-  const names = new Set(lanes.map((lane) => basename(lane.path)))
-  const summaries = (await entriesOf(summaryDir))
-    .filter((entry) => names.has(entry.replace(/\.(yaml|docker-compose\.override\.yml)$/, '')))
-    .map((entry) => join(summaryDir, entry))
+  // Only the clean lanes' summaries, and the orphans'. A kept lane keeps its
+  // summary: the file is how the pool knows what that worktree is, and
+  // orphaning it would leave a directory nothing can reset or tear down.
+  const entries = await entriesOf(summaryDir)
+  const teardowns: Teardown[] = []
+  const unreadableSummaries: string[] = []
+  const plan = async (name: string, orphan: boolean): Promise<void> => {
+    const files = entries
+      .filter((entry) => stemOf(entry) === name)
+      .map((entry) => join(summaryDir, entry))
+    if (files.length === 0) return
+    let summary: WorktreeSummary | null = null
+    if (entries.includes(`${name}.yaml`)) {
+      try {
+        summary = await readSummary(summaryDir, name)
+      } catch {
+        unreadableSummaries.push(join(summaryDir, `${name}.yaml`))
+        return
+      }
+    }
+    const owner = guard.ownerOf(name)
+    const undo =
+      summary === null
+        ? { steps: [], left: [] }
+        : planTeardown(summary, owner === null ? null : guard.project(owner))
+    teardowns.push({ lane: name, steps: undo.steps, left: undo.left, files, orphan })
+  }
+
+  for (const lane of lanes) await plan(basename(lane.path), false)
+  for (const name of await orphansIn(summaryDir, laneRoot, entries, onDisk)) {
+    if (selected(name) && !kept(name)) await plan(name, true)
+  }
+  const summaries = teardowns.flatMap((teardown) => teardown.files)
+  const found = { lanes, dirtyLanes, protectedLanes, summaries, teardowns, unreadableSummaries }
 
   if (!options.includeBranches) {
-    return { lanes, dirtyLanes, summaries, emptyBranches: [], carryingBranches: [] }
+    return { ...found, emptyBranches: [], carryingBranches: [] }
   }
 
   // Only branches held by lanes that are actually going. A branch whose
@@ -182,37 +276,109 @@ export async function findReapable(options: {
   const carrying = await Promise.all(candidates.map((branch) => carriesCommits(repoPath, branch)))
 
   return {
-    lanes,
-    dirtyLanes,
-    summaries,
+    ...found,
     emptyBranches: candidates.filter((_, i) => carrying[i] === false),
     carryingBranches: candidates.filter((_, i) => carrying[i] !== false),
   }
 }
 
+const SUMMARY_FILE = /\.(yaml|docker-compose\.override\.yml)$/
+
+const stemOf = (entry: string): string | null =>
+  SUMMARY_FILE.test(entry) ? entry.replace(SUMMARY_FILE, '') : null
+
+/** How every compose override the pool writes begins. */
+const GENERATED = '# GENERATED by vinta-ai-maestro'
+
 /**
- * Removes the worktrees, then the branches the caller approved.
+ * Lane names with a summary and no worktree under the lane root.
  *
- * Worktrees first, and that order is required rather than tidy: git refuses to
- * delete a branch that a worktree still has checked out, so branch deletion
- * after removal is the only sequence that works.
+ * A summary is a lane's when it records that lane's own path; a compose
+ * override with no summary beside it is a lane's when the pool wrote it, which
+ * its first line says. Anything else in the directory is someone else's.
+ */
+async function orphansIn(
+  summaryDir: string,
+  laneRoot: string,
+  entries: readonly string[],
+  onDisk: ReadonlySet<string>,
+): Promise<readonly string[]> {
+  const stems = new Set(entries.map(stemOf).filter((stem): stem is string => stem !== null))
+  const found: string[] = []
+  for (const name of [...stems].filter((stem) => !onDisk.has(stem)).sort()) {
+    if (entries.includes(`${name}.yaml`)) {
+      try {
+        const summary = await readSummary(summaryDir, name)
+        if (summary.name === name && resolve(summary.path) === resolve(laneRoot, name)) {
+          found.push(name)
+        }
+      } catch {
+        // Unreadable and so not provably a lane's: not this command's to touch.
+      }
+      continue
+    }
+    try {
+      const text = await readFile(join(summaryDir, `${name}.docker-compose.override.yml`), 'utf8')
+      if (text.startsWith(GENERATED)) found.push(name)
+    } catch {
+      // Gone between the listing and the read: nothing left to reap.
+    }
+  }
+  return found
+}
+
+/** Runs one teardown command line. Injected in tests. */
+export type TeardownExec = (command: string, cwd: string) => Promise<void>
+
+/**
+ * The real one: stdin closed and a timeout, as for every database command, so
+ * a `dropdb` asking for a password fails instead of hanging the purge.
+ */
+const runTeardownCommand: TeardownExec = (command, cwd) => runDatabaseCommand(command, { cwd })
+
+/**
+ * Tears down what each lane made outside git, removes the worktrees, then the
+ * branches the caller approved, then the summaries.
+ *
+ * Teardown first, while the summary that describes it is still there. A
+ * summary goes only once everything it lists has gone and its worktree with
+ * it: it is the manifest a retry works from, and deleting it after a failed
+ * `dropdb` would leave a database nothing records.
+ *
+ * Worktrees before branches, and that order is required rather than tidy: git
+ * refuses to delete a branch that a worktree still has checked out, so branch
+ * deletion after removal is the only sequence that works.
  *
  * Each step is attempted independently. One worktree that will not go — a file
  * still held open, which Windows does routinely — must not strand the other
- * eleven.
+ * eleven, and a database server that is down must not keep any worktree.
  */
 export async function reap(
   repoPath: string,
   target: Reapable,
-  options: { readonly branches: boolean },
+  options: { readonly branches: boolean; readonly exec?: TeardownExec },
 ): Promise<readonly string[]> {
   const failures: string[] = []
+  const exec = options.exec ?? runTeardownCommand
+  const unfinished = new Set<string>()
+
+  for (const teardown of target.teardowns) {
+    for (const step of teardown.steps) {
+      try {
+        await exec(step.command, repoPath)
+      } catch {
+        failures.push(`${step.label} (lane ${teardown.lane})`)
+        unfinished.add(teardown.lane)
+      }
+    }
+  }
 
   for (const lane of target.lanes) {
     try {
       await git(repoPath, ['worktree', 'remove', '--force', lane.path])
     } catch {
       failures.push(`worktree ${lane.path}`)
+      unfinished.add(basename(lane.path))
     }
   }
   // A removal that half-succeeded leaves the worktree registered, and git then
@@ -231,6 +397,20 @@ export async function reap(
         await git(repoPath, ['branch', '-d', branch])
       } catch {
         failures.push(`branch ${branch}`)
+      }
+    }
+  }
+
+  for (const teardown of target.teardowns) {
+    for (const file of teardown.files) {
+      if (unfinished.has(teardown.lane)) {
+        failures.push(`summary ${file} (kept until lane ${teardown.lane} is gone)`)
+        continue
+      }
+      try {
+        await rm(file, { force: true })
+      } catch {
+        failures.push(`summary ${file}`)
       }
     }
   }
