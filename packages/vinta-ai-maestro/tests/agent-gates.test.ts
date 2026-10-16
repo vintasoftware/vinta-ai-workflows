@@ -65,6 +65,8 @@ function rig(
     readonly lintExit?: number
     /** What the lease broker reports as held through `with`. */
     readonly leases?: readonly AgentLeaseHeld[]
+    /** Give `unit` a scoped form that runs nothing the counter sees, on a lane cut from `main`. */
+    readonly scoped?: boolean
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-agent-gate-'))
@@ -99,6 +101,7 @@ function rig(
         cmd: renderGate({ append: { path: counter, line: 'ran' }, ...options.script }),
         requires: options.requires ?? ['test-suite'],
         ...(options.timeoutS === undefined ? {} : { timeout_s: options.timeoutS }),
+        ...(options.scoped === true ? { scoped_cmd: 'echo {changed_files}' } : {}),
       },
       ...(options.lintExit === undefined ? {} : { lint: { cmd: renderGate({ exit: options.lintExit }) } }),
     },
@@ -117,7 +120,12 @@ function rig(
   journal.createRun(RUN_ID, workflow)
   // What the scheduler writes when it admits the node. Without it the broker
   // has no lane to run in, which is its own test below.
-  journal.append({ runId: RUN_ID, nodeId: NODE, type: 'node_assigned', payload: { lane: LANE } })
+  journal.append({
+    runId: RUN_ID,
+    nodeId: NODE,
+    type: 'node_assigned',
+    payload: { lane: LANE, ...(options.scoped === true ? { base_branch: 'main' } : {}) },
+  })
 
   const pools = new ResourcePools(workflow.resources, { agingMs: 0 })
   const cache = new GateCache(store)
@@ -434,6 +442,34 @@ describe('a gate waited for in hops', () => {
  * the broker to the cache — the agent's way past a verdict the tree hash
  * cannot see is stale.
  */
+/**
+ * `verify` runs each gate in full after the review approves, and a fixer
+ * answering a red full gate has to see it the same way: its scoped form can
+ * pass on code the phase did not change.
+ */
+describe('a gate run with --full', () => {
+  it('runs the whole command where the scoped form would run, as a flight of its own', async () => {
+    const r = rig({ scoped: true })
+    // A change, so the scoped form has files to narrow to.
+    writeFileSync(join(r.lane, 'src.txt'), 'v2\n')
+
+    await expect(r.broker.hop('unit', NODE, { withinMs: 30_000 })).resolves.toMatchObject({ status: 'passed' })
+    expect(r.runs()).toBe(0)
+
+    await expect(r.broker.hop('unit', NODE, { withinMs: 30_000, full: true })).resolves.toMatchObject({
+      status: 'passed',
+    })
+    expect(r.runs()).toBe(1)
+  }, 30_000)
+
+  it('takes the flag, and refuses it with no gate id', async () => {
+    const err: string[] = []
+    const usage = { err, io: { out: () => {}, err: (line: string) => err.push(line), confirm: async () => false } }
+    expect(await gateCommand(['--full'], usage.io)).toBe(USAGE)
+    expect(usage.err.join('\n')).toContain('[--full]')
+  })
+})
+
 describe('a gate run with --no-cache', () => {
   /** A live daemon serving the rig's run, and the env a turn in its lane carries. */
   async function served(r: Rig): Promise<{ readonly env: Record<string, string> }> {

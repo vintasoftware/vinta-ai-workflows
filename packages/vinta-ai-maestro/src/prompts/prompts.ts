@@ -1987,11 +1987,20 @@ function failure(materials: Continuation): string[] {
   }
   const id = gate?.['id']
   const logRef = gate?.['log_ref']
+  const name = typeof id === 'string' ? id : 'unknown'
   return [
-    `Gate ${typeof id === 'string' ? id : 'unknown'} failed with exit code ${exitCode}.`,
+    `Gate ${name} failed with exit code ${exitCode}.`,
     typeof logRef === 'string'
       ? `Its output is at ${logRef} — read it first; it says what broke.`
       : 'Re-run the gate command below to see what broke.',
+    // A scoped run of the same gate can pass while this fails — the break is
+    // in code the phase did not change — so the fixer is told how to see it.
+    ...(gate?.['scope'] === 'full'
+      ? [
+          'It ran in full — the whole suite, after the review approved — not narrowed to',
+          `the files this phase changed. Check your fix the same way: \`vinta-ai-maestro gate ${name} --full\`.`,
+        ]
+      : []),
   ]
 }
 

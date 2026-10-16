@@ -1194,6 +1194,20 @@ describe('the fixer prompt', () => {
     expect(prompt).not.toContain('VERDICT: pass')
   })
 
+  /**
+   * `verify` runs each gate in full once the review approves. A scoped run of
+   * the same gate can pass where that failed — the break is outside the files
+   * the phase changed — so the fixer is told, and how to see it.
+   */
+  it('says a gate failed in full, and how to run it that way', () => {
+    const full = compose('api-layer', 'fixer', { facts: { gate: { ...RED_GATE.gate, scope: 'full' } } })
+    expect(full).toContain('It ran in full')
+    expect(full).toContain('vinta-ai-maestro gate unit --full')
+
+    const scoped = compose('api-layer', 'fixer', { facts: RED_GATE })
+    expect(scoped).not.toContain('--full')
+  })
+
   it('says so when the orchestrator did not record which gate failed, in both forms', () => {
     for (const continuation of [false, true]) {
       const prompt = compose('api-layer', 'fixer', { continuation })

@@ -138,6 +138,8 @@ export const AgentGateRequestSchema = z.strictObject({
   holderNode: z.string().min(1),
   /** `gate <id> --no-cache`. Absent is false, so an older client still parses. */
   noCache: z.boolean().optional(),
+  /** `gate <id> --full`: the whole `cmd`, not the scoped form. Absent is false. */
+  full: z.boolean().optional(),
   /** As on `AgentLeaseRequestSchema`. */
   turn: z.string().min(1).optional(),
 })
@@ -365,7 +367,7 @@ export const NodeSummarySchema = z.strictObject({
 
 /** One step a node took in the integration worktree (`integration_step`, paired). Identifiers only. */
 export const IntegrationStepSchema = z.strictObject({
-  step: z.enum(['hold', 'merge', 'fix_round', 'verify', 'wave_gate', 'push', 'open_pr']),
+  step: z.enum(['hold', 'merge', 'fix_round', 'verify', 'base_gate', 'wave_gate', 'push', 'open_pr']),
   branch: z.string().nullable(),
   incoming: z.string().nullable(),
   wave: z.number().int().nullable(),

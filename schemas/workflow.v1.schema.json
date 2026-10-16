@@ -420,7 +420,7 @@
         },
         "gate_scope": {
           "default": "scoped",
-          "description": "`scoped` — the default — runs a gate’s `scoped_cmd` on phase gates and its full `cmd` on the gate that re-runs after a wave merge. `full` runs `cmd` everywhere.",
+          "description": "`scoped` — the default — runs a gate’s `scoped_cmd` on a phase’s gates up to and during its review, and its full `cmd` once the review approves (`verify`) and on every merged tree in the integration worktree. `full` runs `cmd` everywhere.",
           "type": "string",
           "enum": [
             "scoped",
@@ -453,9 +453,27 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "verify_gates": {
+          "default": "full",
+          "description": "What `standard-phase`’s `verify` runs once the review approves. `full` — the default — runs every gate’s whole `cmd` on the phase branch, so a PR never carries a suite only a scoped run saw; a red full run goes back to a fixer and the review. `scoped` keeps the scoped form there too, for a suite too slow to run once per phase — the merged-tree gates are then the first full run. No effect under `gate_scope: full`.",
+          "type": "string",
+          "enum": [
+            "full",
+            "scoped"
+          ]
+        },
+        "base_gates": {
+          "default": "full",
+          "description": "Whether a multi-dependency phase’s base (`integ-<id>`, its dependencies merged) is gated before the phase starts on it. `full` — the default — runs every command gate its dependencies declare, whole `cmd`, on the merged base, cached on its tree; red fails the phase’s setup. `off` starts the phase on the merged base unchecked.",
+          "type": "string",
+          "enum": [
+            "full",
+            "off"
+          ]
+        },
         "wave_gates": {
-          "default": "final",
-          "description": "When the phases’ gates run in full on a merged wave, in the integration worktree. Each phase passes its gates on its own branch, and two parallel phases can each be green and disagree with each other — a sender and a receiver of one signal, say — which only a merged tree shows. `final` — the default — runs every gate of the plan once on the last wave before the plan PR opens, and the wave’s phases’ gates on any wave whose merge needed a conflict resolution. `every` runs the wave’s phases’ gates on every wave as well, which costs one full suite per wave and catches a disagreement at the wave that introduced it. `off` runs none of these. Under `gate_scope: scoped` the full form of a narrowed gate still runs on each wave whatever this says: that is where the suite the phases skipped is paid back.",
+          "default": "every",
+          "description": "When the phases’ gates run in full on a merged wave, in the integration worktree. Each phase passes its gates on its own branch, and two parallel phases can each be green and disagree with each other — a sender and a receiver of one signal, say — which only a merged tree shows. `every` — the default — runs the wave’s phases’ gates on every wave, so the next wave builds on a passing tree and a disagreement is caught at the wave that introduced it, and every gate of the plan once on the last wave before the plan PR opens. It costs one full suite per wave. `final` runs the last wave’s and any wave whose merge needed a conflict resolution only. `off` runs none of these. Under `gate_scope: scoped` the full form of a narrowed gate still runs on each wave whatever this says: that is where the suite the phases skipped is paid back.",
           "type": "string",
           "enum": [
             "off",

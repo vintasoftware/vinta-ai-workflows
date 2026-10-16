@@ -895,6 +895,14 @@ function failureReason(error: unknown): string {
   ) {
     return error.message
   }
+  // A merged tree a full gate failed on: a wave, or a phase's base. A wave, a
+  // node id, a branch, a gate id, an exit code and a log path — and the one
+  // failure where "which gate, and where is its log" is the whole answer.
+  // By name, because the executor is the host's and the scheduler does not
+  // import it.
+  if (error instanceof Error && (error.name === 'WaveGateError' || error.name === 'BaseGateError')) {
+    return error.message
+  }
   const named = error as { name?: unknown; code?: unknown }
   const name = typeof named.name === 'string' ? named.name : 'Error'
   return typeof named.code === 'string' ? `${name}: ${named.code}` : name

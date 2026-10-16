@@ -200,6 +200,14 @@ export type Substitution = (typeof SUBSTITUTIONS)[number]
 export const WAVE_GATES = ['off', 'final', 'every'] as const
 export type WaveGates = (typeof WAVE_GATES)[number]
 
+/** What a phase's `verify` runs once its review approves (`defaults.verify_gates`). */
+export const VERIFY_GATES = ['full', 'scoped'] as const
+export type VerifyGates = (typeof VERIFY_GATES)[number]
+
+/** Whether a multi-dependency phase's merged base is gated (`defaults.base_gates`). */
+export const BASE_GATES = ['full', 'off'] as const
+export type BaseGates = (typeof BASE_GATES)[number]
+
 /** What `scoped_cmd` may name. Substituted shell-quoted, space-separated. */
 export const SCOPE_PLACEHOLDERS = ['{changed_files}', '{touches}'] as const
 
@@ -858,8 +866,9 @@ export const DefaultsSchema = z.strictObject({
     .enum(GATE_SCOPES)
     .default('scoped')
     .describe(
-      '`scoped` — the default — runs a gate’s `scoped_cmd` on phase gates and its full `cmd` on ' +
-        'the gate that re-runs after a wave merge. `full` runs `cmd` everywhere.',
+      '`scoped` — the default — runs a gate’s `scoped_cmd` on a phase’s gates up to and during ' +
+        'its review, and its full `cmd` once the review approves (`verify`) and on every merged ' +
+        'tree in the integration worktree. `full` runs `cmd` everywhere.',
     ),
   substitution: z
     .enum(SUBSTITUTIONS)
@@ -901,18 +910,37 @@ export const DefaultsSchema = z.strictObject({
         'plan’s and restores waiting and covering. One observed run left a phase on the ' +
         'critical path idle for 17 minutes while a retry held the member it was planned for.',
     ),
+  verify_gates: z
+    .enum(VERIFY_GATES)
+    .default('full')
+    .describe(
+      'What `standard-phase`\u2019s `verify` runs once the review approves. `full` \u2014 the default \u2014 ' +
+        'runs every gate\u2019s whole `cmd` on the phase branch, so a PR never carries a suite only a ' +
+        'scoped run saw; a red full run goes back to a fixer and the review. `scoped` keeps the ' +
+        'scoped form there too, for a suite too slow to run once per phase \u2014 the merged-tree ' +
+        'gates are then the first full run. No effect under `gate_scope: full`.',
+    ),
+  base_gates: z
+    .enum(BASE_GATES)
+    .default('full')
+    .describe(
+      'Whether a multi-dependency phase\u2019s base (`integ-<id>`, its dependencies merged) is gated ' +
+        'before the phase starts on it. `full` \u2014 the default \u2014 runs every command gate its ' +
+        'dependencies declare, whole `cmd`, on the merged base, cached on its tree; red fails the ' +
+        'phase\u2019s setup. `off` starts the phase on the merged base unchecked.',
+    ),
   wave_gates: z
     .enum(WAVE_GATES)
-    .default('final')
+    .default('every')
     .describe(
       'When the phases\u2019 gates run in full on a merged wave, in the integration worktree. Each ' +
         'phase passes its gates on its own branch, and two parallel phases can each be green and ' +
         'disagree with each other \u2014 a sender and a receiver of one signal, say \u2014 which only a ' +
-        'merged tree shows. `final` \u2014 the default \u2014 runs every gate of the plan once on the last ' +
-        'wave before the plan PR opens, and the wave\u2019s phases\u2019 gates on any wave whose merge ' +
-        'needed a conflict resolution. `every` runs the wave\u2019s phases\u2019 gates on every wave as ' +
-        'well, which costs one full suite per wave and catches a disagreement at the wave that ' +
-        'introduced it. `off` runs none of these. Under `gate_scope: scoped` the full form of a ' +
+        'merged tree shows. `every` \u2014 the default \u2014 runs the wave\u2019s phases\u2019 gates on every ' +
+        'wave, so the next wave builds on a passing tree and a disagreement is caught at the wave ' +
+        'that introduced it, and every gate of the plan once on the last wave before the plan PR ' +
+        'opens. It costs one full suite per wave. `final` runs the last wave\u2019s and any wave whose ' +
+        'merge needed a conflict resolution only. `off` runs none of these. Under `gate_scope: scoped` the full form of a ' +
         'narrowed gate still runs on each wave whatever this says: that is where the suite the ' +
         'phases skipped is paid back.',
     ),

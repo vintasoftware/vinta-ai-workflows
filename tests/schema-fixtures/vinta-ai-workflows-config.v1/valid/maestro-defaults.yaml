@@ -31,6 +31,8 @@ maestro:
   defaults:
     gates: [typecheck, lint, test]
     gate_scope: scoped
+    verify_gates: scoped
+    base_gates: 'off'
     wave_gates: every
     substitution: same_tier
     max_spare_crew: 1

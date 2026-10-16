@@ -70,7 +70,7 @@ import {
 import { endingRefusal, heldBy, readRefusal } from './holders.ts'
 import { FAILED, USAGE, type Io } from './io.ts'
 
-export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id> [--no-cache]
+export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id> [--full] [--no-cache]
 
   Runs one of this plan's declared gates against your lane and exits with the
   gate's own exit code. The daemon runs it: it holds the gate's resources for
@@ -91,6 +91,10 @@ export const GATE_USAGE = `usage: vinta-ai-maestro gate <gate-id> [--no-cache]
   If it refuses, that is the answer to the gate, not permission to run the
   command yourself. Report it.
 
+  --full       Run the gate's whole command rather than the form narrowed to
+               the files your phase changed. The phase's last gate run, after
+               the review approves, is a full one; when it fails, check your
+               fix this way.
   --no-cache   Run the gate even though your lane's tracked contents have not
                changed, and keep that result instead of the cached one. For
                when what you fixed is something the cache cannot see: an
@@ -124,7 +128,8 @@ export async function gateCommand(
   // anything else that starts with `-` is still a usage error, as is a second
   // gate id.
   const noCache = argv.includes('--no-cache')
-  const [gateId, ...rest] = argv.filter((arg) => arg !== '--no-cache')
+  const full = argv.includes('--full')
+  const [gateId, ...rest] = argv.filter((arg) => arg !== '--no-cache' && arg !== '--full')
   if (gateId === undefined || gateId.trim() === '' || gateId.startsWith('-') || rest.length > 0) {
     io.err(GATE_USAGE)
     return USAGE
@@ -151,6 +156,7 @@ export async function gateCommand(
     gate: gateId,
     holderNode,
     ...(noCache ? { noCache: true } : {}),
+    ...(full ? { full: true } : {}),
     ...(turn === undefined ? {} : { turn }),
   })
 

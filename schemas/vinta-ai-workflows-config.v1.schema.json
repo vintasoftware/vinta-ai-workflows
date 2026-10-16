@@ -339,7 +339,7 @@
       "additionalProperties": false,
       "properties": {
         "defaults": {
-          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `wave_gates` (`off` | `final` | `every`), `substitution` (`same_tier` | `up_one_tier` | `any`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`, `max_spare_crew`, `pull_requests` (`phase` | `plan`).",
+          "description": "Run defaults a plan's `defaults` overrides field by field: `harness`, `model`, `pipeline`, `chores`, `gates` (the gate ids every phase runs unless it names its own), `gate_scope` (`scoped` | `full`), `verify_gates` (`full` | `scoped`), `base_gates` (`full` | `off`), `wave_gates` (`off` | `final` | `every`), `substitution` (`same_tier` | `up_one_tier` | `any`), `allow_ungated_phases`, `model_fallbacks`, `max_session_turns`, `max_spare_crew`, `pull_requests` (`phase` | `plan`).",
           "type": "object",
           "properties": {
             "harness": {
@@ -379,6 +379,22 @@
                 "full"
               ]
             },
+            "verify_gates": {
+              "type": "string",
+              "enum": [
+                "full",
+                "scoped"
+              ],
+              "description": "What a phase's `verify` runs once its review approves. `full` (the default): every gate's whole command on the phase branch, so a PR never carries a suite only a scoped run saw. `scoped`: the scoped form there too, for a suite too slow to run once per phase; the merged-tree gates are then the first full run. No effect under `gate_scope: full`."
+            },
+            "base_gates": {
+              "type": "string",
+              "enum": [
+                "full",
+                "off"
+              ],
+              "description": "Whether a multi-dependency phase's merged base is gated before the phase starts on it. `full` (the default): every command gate its dependencies declare, whole command, on the merged base; red fails the phase's setup. `off`: the phase starts on the merged base unchecked."
+            },
             "substitution": {
               "type": "string",
               "enum": [
@@ -395,7 +411,7 @@
                 "final",
                 "every"
               ],
-              "description": "When the phases' gates run in full on a merged wave, in the integration worktree. `final` (the default): every gate of the plan on the last wave before the plan PR, and a wave's gates on any wave whose merge needed a conflict resolution. `every`: on every wave as well. `off`: none of these (the full form of a `scoped_cmd` gate still runs per wave under `gate_scope: scoped`)."
+              "description": "When the phases' gates run in full on a merged wave, in the integration worktree. `every` (the default): a wave's gates on every wave, so the next wave builds on a passing tree, and every gate of the plan on the last wave before the plan PR. `final`: the last wave's, and a wave's gates only on a wave whose merge needed a conflict resolution. `off`: none of these (the full form of a `scoped_cmd` gate still runs per wave under `gate_scope: scoped`)."
             },
             "allow_ungated_phases": {
               "type": "boolean",

@@ -170,6 +170,28 @@ export interface RunExecutorOptions {
  * narrowed failed on the result. Ids and an exit code (§11); the gate's log is
  * where its output is.
  */
+/**
+ * A multi-dependency phase's base merged and failed a gate its dependencies
+ * declare, run in full on it. Each dependency passed alone; together they do
+ * not, so nothing is built on them until that is fixed.
+ */
+export class BaseGateError extends Error {
+  constructor(
+    readonly nodeId: string,
+    readonly branch: string,
+    readonly gateId: string,
+    readonly exitCode: number,
+    readonly logPath: string,
+  ) {
+    super(
+      `the base of ${nodeId} (${branch}) merged, but gate "${gateId}" failed on it (exit ${exitCode}) — ` +
+        'its dependencies each passed their own gates, so this is a regression between them, and ' +
+        `${nodeId} does not start on it. Log: ${logPath}`,
+    )
+    this.name = 'BaseGateError'
+  }
+}
+
 export class WaveGateError extends Error {
   constructor(
     readonly wave: number,
@@ -407,6 +429,11 @@ export class RunEffectExecutor implements EffectExecutor {
     // after it still run if the rerun comes back green.
     const noCache = params['no_cache']
     const fresh = (gateId: string): boolean => noCache === true || noCache === gateId
+    // `scope: 'full'` runs each gate's whole `cmd` whatever `gate_scope` says:
+    // `verify`, after the review approved, is where the suite runs unnarrowed,
+    // so a PR never ships what only a scoped run looked at — unless the plan
+    // or the project chose to skip it (`verify_gates: scoped`).
+    const full = params['scope'] === 'full' && this.#workflow.defaults.verify_gates === 'full'
 
     const lane = this.#lane(nodeId)
     let last: Record<string, ContextValue> = { exit_code: 0, status: 'passed' }
@@ -417,7 +444,7 @@ export class RunEffectExecutor implements EffectExecutor {
 
       let { result, cached, tree } = isJudgeGate(gate)
         ? await this.#judgeGate(nodeId, gateId, gate, lane, logPath, fresh(gateId))
-        : await this.#commandGate(nodeId, gateId, gate, lane, logPath, fresh(gateId))
+        : await this.#commandGate(nodeId, gateId, gate, lane, logPath, fresh(gateId), full)
       let exitCode = this.#recordGate(nodeId, gateId, result, cached)
 
       // §17.5: a red command gate the classifier calls flaky or environmental
@@ -438,7 +465,7 @@ export class RunEffectExecutor implements EffectExecutor {
           this.#judged(nodeId, 'gate_triage', gateId, sorted.judgement)
           triage = sorted.label ?? triage
           if (!sorted.rerun) break
-          ;({ result, cached, tree } = await this.#commandGate(nodeId, gateId, gate, lane, logPath, true))
+          ;({ result, cached, tree } = await this.#commandGate(nodeId, gateId, gate, lane, logPath, true, full))
           exitCode = this.#recordGate(nodeId, gateId, result, cached)
           if (result.status !== 'failed') break
         }
@@ -455,6 +482,7 @@ export class RunEffectExecutor implements EffectExecutor {
         status: result.status,
         cached,
         log_ref: result.logPath,
+        ...(full ? { scope: 'full' } : {}),
         ...(triage === undefined ? {} : { triage }),
         ...(tree === undefined ? {} : { tree }),
       }
@@ -481,12 +509,13 @@ export class RunEffectExecutor implements EffectExecutor {
     lane: ExecutorLane,
     logPath: string,
     fresh = false,
+    full = false,
   ): Promise<GateRun> {
     // The line that runs: the gate's scoped form when the run gates phases
     // narrowed and the gate has one, its full `cmd` otherwise. Resolved per run
     // of the gate, because the files the lane changed move with every fix.
     const node = this.#node(nodeId)
-    const effective = await phaseGate(gate, this.#workflow.defaults.gate_scope, {
+    const effective = await phaseGate(gate, full ? 'full' : this.#workflow.defaults.gate_scope, {
       lanePath: lane.path,
       base: this.#row(nodeId)?.base_branch ?? this.#options.integrator.base(nodeId).branch,
       touches: node?.touches ?? [],
@@ -708,7 +737,10 @@ export class RunEffectExecutor implements EffectExecutor {
     if (typeof from === 'string') {
       await git(lane.path, resume ? ['checkout', branch] : ['checkout', '-B', branch, from])
     } else {
-      await this.#integration(() => integrator.startNode(nodeId, lane.path, resume), nodeId)
+      await this.#integration(async () => {
+        await integrator.startNode(nodeId, lane.path, resume)
+        await this.#baseGates(nodeId)
+      }, nodeId)
     }
 
     this.#options.journal.append({
@@ -987,6 +1019,48 @@ export class RunEffectExecutor implements EffectExecutor {
       // First red stops the wave, for `run_gate`'s reason: the merge fails on
       // this gate whatever the rest say, and they are full suites.
       if (exitCode !== 0) throw new WaveGateError(wave, gateId, exitCode, logPath)
+    }
+  }
+
+  /**
+   * The full gates on a multi-dependency phase's base, before the phase starts
+   * on it: every command gate its dependencies declare, whole `cmd`, in the
+   * integration worktree where `prepareBase` left the base checked out.
+   *
+   * A clean merge used to run nothing, so two dependencies that each passed
+   * alone and broke together handed the phase a red tree, and its own scoped
+   * gates — narrowed to what it changed — never looked. Cached on the merged
+   * tree, so a retry on the same base is a hit, not a second suite. Red stops
+   * the phase in its setup and names the gate and its log.
+   */
+  async #baseGates(nodeId: string): Promise<void> {
+    const base = this.#options.integrator.base(nodeId)
+    if (base.kind !== 'integration' || this.#workflow.defaults.base_gates === 'off') return
+    const ids = [...new Set(base.nodes.flatMap((id) => this.#node(id)?.gates ?? []))]
+    const integration: ExecutorLane = {
+      name: 'integration',
+      path: this.#options.integrationPath,
+      env: this.#options.integrationEnv ?? {},
+    }
+    for (const gateId of ids) {
+      const gate = this.#workflow.gates[gateId]
+      if (gate === undefined || isJudgeGate(gate)) continue
+      const logPath = this.#options.journal.gateLogPath(this.#options.runId, WAVE_GATE_NODE, `base-${nodeId}-${gateId}`)
+      const step = { step: 'base_gate', branch: base.branch, gate: gateId, log: logPath } as const
+      this.#step(nodeId, { ...step, state: 'started' })
+      const { result } = await this.#gate(gateId, integration, {
+        gateId,
+        gate,
+        cwd: integration.path,
+        env: integration.env,
+        logPath,
+      }).catch((error: unknown) => {
+        this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
+        throw error
+      })
+      const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
+      this.#step(nodeId, { ...step, state: 'finished', outcome: exitCode === 0 ? 'ok' : 'failed' })
+      if (exitCode !== 0) throw new BaseGateError(nodeId, base.branch, gateId, exitCode, logPath)
     }
   }
 

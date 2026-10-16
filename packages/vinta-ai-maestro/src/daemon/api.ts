@@ -697,6 +697,7 @@ export function createApi(options: ApiOptions): Hono {
       const outcome = await found.run.agentGates.hop(body.value.gate, body.value.holderNode, {
         withinMs: options.gateWaitMs ?? GATE_WAIT_MS,
         ...(body.value.noCache === true ? { noCache: true } : {}),
+        ...(body.value.full === true ? { full: true } : {}),
         ...(body.value.turn === undefined ? {} : { turn: body.value.turn }),
       })
       // Still queued or running, which is the ordinary case and not an error.

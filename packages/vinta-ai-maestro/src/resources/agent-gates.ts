@@ -169,6 +169,12 @@ export interface AgentGateHopOptions {
    * a hit never stays in flight long enough to be attached to.
    */
   readonly noCache?: boolean
+  /**
+   * `gate <id> --full`: the gate's whole `cmd`, whatever `gate_scope` says —
+   * how a fixer sees the failure `verify` found in full. A flight of its own,
+   * never attached to a scoped run of the same gate.
+   */
+  readonly full?: boolean
   /** The session asking (`MAESTRO_TURN_ENV`), when the client knows it. */
   readonly turn?: string
 }
@@ -239,7 +245,7 @@ export class AgentGateBroker {
     holderNode: string,
     options: AgentGateHopOptions,
   ): Promise<AgentGateWaiting | AgentGateResult> {
-    const key = `${holderNode} ${gateId}`
+    const key = `${holderNode} ${gateId}${options.full === true ? ` full` : ''}`
     let flight = this.#inFlight.get(key)
     const { turn } = options
 
@@ -264,6 +270,7 @@ export class AgentGateBroker {
       // it reaches the pools.
       const started = this.run(gateId, holderNode, {
         noCache: options.noCache === true,
+        full: options.full === true,
         signal: abort.signal,
         onRunning: () => {
           if (created !== undefined) created.state = 'running'
@@ -348,6 +355,7 @@ export class AgentGateBroker {
     holderNode: string,
     flight: {
       readonly noCache?: boolean
+      readonly full?: boolean
       readonly signal?: AbortSignal
       readonly onRunning?: () => void
     } = {},
@@ -391,7 +399,7 @@ export class AgentGateBroker {
     const effective =
       row?.base_branch === null || row?.base_branch === undefined
         ? gate
-        : await phaseGate(gate, this.#workflow.defaults.gate_scope, {
+        : await phaseGate(gate, flight.full === true ? 'full' : this.#workflow.defaults.gate_scope, {
             lanePath: lane.path,
             base: row.base_branch,
             touches: this.#workflow.nodes.find((node) => node.id === holderNode)?.touches ?? [],

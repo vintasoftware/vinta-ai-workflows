@@ -430,6 +430,7 @@ export type IntegrationStepKind =
   | 'merge'
   | 'fix_round'
   | 'verify'
+  | 'base_gate'
   | 'wave_gate'
   | 'push'
   | 'open_pr'

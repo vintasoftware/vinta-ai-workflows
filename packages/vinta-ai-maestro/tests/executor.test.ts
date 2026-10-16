@@ -1420,6 +1420,46 @@ describe('the git verbs', () => {
   })
 
   /**
+   * Scoped until the review approves, full after: `verify` asks for each
+   * gate's whole `cmd`, so a PR never ships a suite only a scoped run saw.
+   * The two forms are cached apart — a scoped pass is never served as a full.
+   */
+  it('runs the scoped form by default and the full command when asked', async () => {
+    const counter = join(mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-full-gate-')), 'ran')
+    cleanups.push(() => rmSync(dirname(counter), { recursive: true, force: true }))
+    const rig = setup(scopedPeers(renderGate({ append: { path: counter, line: 'full' } })), { cache: true })
+    await work(rig, 'p1', 0)
+
+    const scoped = await rig.invoke('p1', 'run_gate')
+    expect(scoped.facts?.gate).toMatchObject({ exit_code: 0 })
+    expect(scoped.facts?.gate).not.toHaveProperty('scope')
+    expect(existsSync(counter)).toBe(false)
+
+    const full = await rig.invoke('p1', 'run_gate', { scope: 'full' })
+    expect(full.facts?.gate).toMatchObject({ exit_code: 0, scope: 'full', cached: false })
+    expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
+
+    // Unchanged tree: the full verdict is a hit for the full form.
+    const again = await rig.invoke('p1', 'run_gate', { scope: 'full' })
+    expect(again.facts?.gate).toMatchObject({ cached: true })
+    expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
+  })
+
+  /** A plan or project too slow for a full suite per phase skips it with `verify_gates: scoped`. */
+  it('keeps the scoped form in verify under verify_gates: scoped', async () => {
+    const counter = join(mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-full-gate-')), 'ran')
+    cleanups.push(() => rmSync(dirname(counter), { recursive: true, force: true }))
+    const workflow = scopedPeers(renderGate({ append: { path: counter, line: 'full' } }))
+    const rig = setup(() => WorkflowSchema.parse({ ...workflow(), defaults: { ...workflow().defaults, verify_gates: 'scoped' } }))
+    await work(rig, 'p1', 0)
+
+    const verified = await rig.invoke('p1', 'run_gate', { scope: 'full' })
+    expect(verified.facts?.gate).toMatchObject({ exit_code: 0 })
+    expect(verified.facts?.gate).not.toHaveProperty('scope')
+    expect(existsSync(counter)).toBe(false)
+  })
+
+  /**
    * The wave's suite is the longest silent stretch of `integrate`: no agent,
    * minutes of it, and the phase read as frozen. It is a step now, with its
    * log, inside the node's hold on the worktree.
@@ -1591,7 +1631,7 @@ describe('the git verbs', () => {
     await rig.invoke('p2', 'git_merge')
   }
 
-  it('runs the plan’s gates in full on the final wave by default', async () => {
+  it('runs the gates in full on every wave by default, so the next builds on a passing tree', async () => {
     // Every phase green on its own branch was the whole check: a signal sender
     // and its sibling's receiver disagreed, and 22 tests failed on a merged
     // tree no gate ever ran on.
@@ -1599,18 +1639,25 @@ describe('the git verbs', () => {
     const rig = setup(countedChain(counter))
     await mergeChain(rig)
 
-    expect(ranCount(counter)).toBe(1)
+    expect(ranCount(counter)).toBe(2)
     const rows = rig.journal.events(RUN_ID).filter((event) => event.type === 'wave_gate_result')
     expect(rows.map((row) => ({ node: row.nodeId, wave: (row.payload as { wave: number }).wave }))).toEqual([
+      { node: 'p1', wave: 1 },
       { node: 'p2', wave: 2 },
     ])
+  })
+
+  it('runs only the final wave’s under wave_gates: final', async () => {
+    const counter = counterFile()
+    await mergeChain(setup(countedChain(counter, 'final')))
+    expect(ranCount(counter)).toBe(1)
   })
 
   it('fails the final wave when the merged tree is red, before the plan PR', async () => {
     const rig = setup(() =>
       WorkflowSchema.parse({
         ...twoNodes(),
-        defaults: { ...twoNodes().defaults, gate_scope: 'full' },
+        defaults: { ...twoNodes().defaults, gate_scope: 'full', wave_gates: 'final' },
         gates: { unit: { cmd: renderGate({ exit: 1 }) } },
         nodes: twoNodes().nodes.map((node) => ({ ...node, gates: ['unit'] })),
       }),
@@ -1630,7 +1677,7 @@ describe('the git verbs', () => {
     const rig = setup(() =>
       WorkflowSchema.parse({
         ...twoNodes(),
-        defaults: { ...twoNodes().defaults, gate_scope: 'full' },
+        defaults: { ...twoNodes().defaults, gate_scope: 'full', wave_gates: 'final' },
         gates: {
           typecheck: { cmd: renderGate({ exit: 1 }) },
           unit: { cmd: renderGate({ append: { path: counter, line: 'full' } }) },
@@ -1663,7 +1710,7 @@ describe('the git verbs', () => {
     const conflicting = (): Workflow =>
       WorkflowSchema.parse({
         ...ragged(),
-        defaults: { ...twoPeers().defaults, gate_scope: 'full' },
+        defaults: { ...twoPeers().defaults, gate_scope: 'full', wave_gates: 'final' },
         gates: { unit: { cmd: renderGate({ append: { path: counter, line: 'full' } }) } },
         nodes: ragged().nodes.map((node) => ({ ...node, gates: ['unit'] })),
       })
@@ -1750,6 +1797,73 @@ describe('the git verbs', () => {
    * `integ-` branch, and the plan PR off the final wave, opened by the phase
    * that closed it — after that phase's own PR, so the plan PR can list it.
    */
+  /**
+   * A multi-dependency phase's base is a merged tree too. A clean merge ran
+   * nothing, so two dependencies that broke together handed the phase a red
+   * tree its own scoped gates never looked at.
+   */
+  describe('the gates on a merged base', () => {
+    const gatedDiamond = (unit: string) => (): Workflow =>
+      WorkflowSchema.parse({
+        schema_version: 1,
+        id: 'diamond',
+        base_branch: 'main',
+        defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase', wave_gates: 'off' },
+        resources: { lane: { capacity: 3, kind: 'worktree' } },
+        gates: { unit: { cmd: unit, scoped_cmd: 'echo {changed_files}' } },
+        nodes: [
+          { id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['unit'] },
+          { id: 'p2', name: 'Two', prompt_ref: 'plan.md#2', gates: ['unit'] },
+          {
+            id: 'p3',
+            name: 'Three',
+            prompt_ref: 'plan.md#3',
+            gates: [],
+            depends_on: [
+              { node: 'p1', artifact: 'one' },
+              { node: 'p2', artifact: 'two' },
+            ],
+          },
+        ],
+      })
+
+    it('runs the dependencies’ gates in full on the base before the phase starts, once per tree', async () => {
+      const counter = join(mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-base-gate-')), 'ran')
+      cleanups.push(() => rmSync(dirname(counter), { recursive: true, force: true }))
+      const rig = setup(gatedDiamond(renderGate({ append: { path: counter, line: 'full' } })), { cache: true })
+      await work(rig, 'p1', 0)
+      await work(rig, 'p2', 1)
+      expect(existsSync(counter)).toBe(false)
+
+      await work(rig, 'p3', 2)
+      expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
+      const steps = rig.journal.integrationTimeline(RUN_ID, 'p3').filter((row) => row.step === 'base_gate')
+      expect(steps).toMatchObject([{ gate: 'unit', branch: 'plan/diamond/integ-p3', outcome: 'ok' }])
+
+      // A retry on the same base: the merged tree already passed.
+      await rig.invoke('p3', 'git_branch')
+      expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
+    })
+
+    it('starts the phase on the base unchecked under base_gates: off', async () => {
+      const counter = join(mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-base-gate-')), 'ran')
+      cleanups.push(() => rmSync(dirname(counter), { recursive: true, force: true }))
+      const workflow = gatedDiamond(renderGate({ append: { path: counter, line: 'full' } }))
+      const rig = setup(() => WorkflowSchema.parse({ ...workflow(), defaults: { ...workflow().defaults, base_gates: 'off' } }))
+      await work(rig, 'p1', 0)
+      await work(rig, 'p2', 1)
+      await work(rig, 'p3', 2)
+      expect(existsSync(counter)).toBe(false)
+    })
+
+    it('does not start the phase on a base its dependencies broke together', async () => {
+      const rig = setup(gatedDiamond(renderGate({ exit: 1 })))
+      await work(rig, 'p1', 0)
+      await work(rig, 'p2', 1)
+      await expect(work(rig, 'p3', 2)).rejects.toThrow(/the base of p3 .* gate "unit" failed on it/)
+    })
+  })
+
   it('opens the integration and plan PRs a diamond needs to land', async () => {
     const diamond = (): Workflow =>
       WorkflowSchema.parse({

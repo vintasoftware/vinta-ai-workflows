@@ -13,7 +13,8 @@
  * - **A check may only get stricter.** No gate dropped from a phase or from
  *   the defaults, no chore dropped, no gate definition removed, no judge gate
  *   or chore definition edited, no review pipeline touched, `hooks`,
- *   `allow_ungated_phases`, `gate_scope` and `wave_gates` never loosened. A
+ *   `allow_ungated_phases`, `gate_scope`, `verify_gates`, `base_gates` and
+ *   `wave_gates` never loosened. A
  *   gate's command is the one subtle case: `--reuse-db` and `-k "not slow"` are
  *   the same edit to the same string, so a command may only gain tokens, in
  *   order, and only tokens its gate lists in `tuning.allowed_flags` — a list a
@@ -99,6 +100,12 @@ export function coordinatorRefusals(before: Workflow, after: Workflow): readonly
   }
   if (before.defaults.gate_scope === 'full' && after.defaults.gate_scope !== 'full') {
     refuse(['defaults', 'gate_scope'], 'phase gates may not be narrowed')
+  }
+  if (before.defaults.verify_gates === 'full' && after.defaults.verify_gates !== 'full') {
+    refuse(['defaults', 'verify_gates'], 'a phase may not skip its full gates after review')
+  }
+  if (before.defaults.base_gates === 'full' && after.defaults.base_gates !== 'full') {
+    refuse(['defaults', 'base_gates'], 'a merged base may not go unchecked')
   }
   if (WAVE_GATES_ORDER.indexOf(after.defaults.wave_gates) < WAVE_GATES_ORDER.indexOf(before.defaults.wave_gates)) {
     refuse(['defaults', 'wave_gates'], 'the merged tree may not be checked less often')

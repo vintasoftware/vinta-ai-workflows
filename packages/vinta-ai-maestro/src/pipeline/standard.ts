@@ -41,12 +41,14 @@
  * the phase goes to `--on-failure`. Unattended it answers `continue` once,
  * then `stop` (`askToContinue`).
  *
- * **`verify` runs the gates again, on the tree that merges.** The review loop
- * and the polish chores both edit it. The loop runs the gates through the
- * orchestrator as it goes (`vinta-ai-maestro gate`), on the same cache, so a
- * tree it left green and the polish left alone is a cache hit here rather than
- * a second run. A red `verify` goes back through `fix` and `gate` to the
- * review, because the fix changed code after the reviewer approved it.
+ * **`verify` runs the gates again, in full, on the tree that merges.** `gate`
+ * and the review loop run each gate's scoped form under `gate_scope: scoped` —
+ * cheap enough to run on every fix. `verify` runs every gate's whole `cmd`
+ * (`scope: 'full'`), once the review has approved: a PR never ships a suite
+ * only a scoped run looked at. That can cost more review rounds; a failing
+ * suite in a PR costs more. A red `verify` goes back through `fix` and `gate`
+ * to the review, because the fix changed code after the reviewer approved it,
+ * and the fixer is told the gate failed in full and how to run it that way.
  *
  * **`fix` answers red gates only.** The fixer continues `main`, so it is the
  * implementer with its own reasons for the code still in its context. The
@@ -118,10 +120,11 @@ const FIXABLE = `gate.exit_code != 0 && !(${STALLED}) && (${UNLIMITED} || fix_ro
 const NOT_FIXABLE = `gate.exit_code != 0 && (${STALLED} || (!${UNLIMITED} && fix_rounds >= node.max_fix_rounds))`
 
 /** `gate` and `verify` run the same check, on different trees. */
-const runGates = (id: string) => ({
+const runGates = (id: string, scope?: 'full') => ({
   id,
   definitionId: 'run_gate',
   description: 'The gates this node declared, in declaration order.',
+  ...(scope === undefined ? {} : { params: { scope } }),
 })
 
 /**
@@ -239,7 +242,7 @@ export const STANDARD_PHASE: Pipeline = PipelineSchema.parse({
         },
       ],
     },
-    { id: 'verify', name: 'Verify', position: { x: 800, y: 0 }, onEnter: [runGates('e-verify')] },
+    { id: 'verify', name: 'Verify', position: { x: 800, y: 0 }, onEnter: [runGates('e-verify', 'full')] },
     {
       id: 'integrate',
       name: 'Integrate',

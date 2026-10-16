@@ -172,6 +172,12 @@ describe('the coordinator’s amendment policy', () => {
     expect(allowed((draft) => {
       draft.defaults.wave_gates = 'off'
     })).toEqual(['defaults.wave_gates'])
+    expect(allowed((draft) => {
+      draft.defaults.verify_gates = 'scoped'
+    })).toEqual(['defaults.verify_gates'])
+    expect(allowed((draft) => {
+      draft.defaults.base_gates = 'off'
+    })).toEqual(['defaults.base_gates'])
   })
 
   it('lets a check get stricter', () => {
