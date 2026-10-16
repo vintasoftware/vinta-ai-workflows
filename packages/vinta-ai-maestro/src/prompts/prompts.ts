@@ -52,6 +52,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { type Decision, REJECTED_MARKER, selectDecisions } from '../decisions/index.ts'
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
@@ -185,6 +186,14 @@ export interface SpawnPromptRequest {
    * tool either cannot find it or reaches for the wrong one.
    */
   readonly harness?: string
+  /**
+   * What was settled for this phase so far (`src/decisions`), oldest first.
+   *
+   * Rendered on every form, the delta included, because the point is the
+   * session that was *not* there: a reviewer spawned fresh, a session
+   * replaced after a stale token, a retry. Absent is none.
+   */
+  readonly decisions?: readonly Decision[]
 }
 
 /**
@@ -380,6 +389,8 @@ interface Continuation {
   readonly facts: GuardContext
   /** How this harness backgrounds work, or null where a turn ends with it (`backgroundWork`). */
   readonly background: BackgroundTerms | null
+  /** What was settled for this phase. Host state, so a delta carries it too. */
+  readonly decisions: readonly Decision[]
 }
 
 /** What a cold turn is composed from: the above, plus everything read off disk. */
@@ -412,6 +423,7 @@ function resume(request: SpawnPromptRequest, workspace: string): Continuation {
       request.backgroundWork === true
         ? (BACKGROUND_TERMS[request.harness ?? ''] ?? GENERIC_TERMS)
         : null,
+    decisions: request.decisions ?? [],
   }
 }
 
@@ -673,6 +685,7 @@ function renderImplementer(materials: Materials): string {
     '',
     `## Your tasks (${node.id} only)`,
     materials.brief,
+    ...settled(materials),
     '',
     '## Working instructions',
     '1. Read the code paths your changes touch before you write anything.',
@@ -1328,6 +1341,7 @@ function renderFixer(materials: Materials): string {
     '',
     '## The phase this branch is implementing',
     materials.brief,
+    ...settled(materials),
     ...fixerProtocol(),
     '',
     '## Verify',
@@ -1537,7 +1551,7 @@ function reviewRules(materials: Continuation, chore: ChoreMaterials, cold: boole
     'each finding as a lead, not an order: check it against the code, the tests and',
     'the callers, fix the ones that hold up, and reject the ones that do not with',
     'concrete counter-evidence. Then send the same reviewer what changed, the',
-    'findings you rejected and why, and any decisions the operator made, and ask it',
+    'findings you rejected and why, and the decisions made so far, and ask it',
     'to review the whole diff again. The loop ends when the reviewer explicitly',
     'approves. Passing gates are not approval.',
     ...(chore.skill === null
@@ -1610,6 +1624,7 @@ function reviewRules(materials: Continuation, chore: ChoreMaterials, cold: boole
     'the block under "When you need a human decision", each with the evidence, the',
     'reviewer’s recommendation and yours. For the first two, your recommendation is',
     'normally to reject the finding.',
+    ...settledFindings(materials),
     '',
     ...(materials.background !== null
       ? backgroundVerify(materials, materials.background)
@@ -1687,6 +1702,11 @@ function verdictProtocol(): string[] {
     '- How many passes the reviewer made, and the commit each round of fixes made.',
     '- Each finding: fixed (and how), rejected (and the counter-evidence), or decided',
     '  by the operator.',
+    '- Each finding you rejected, again, on a line of its own that starts with the',
+    '  marker, in this form:',
+    `    ${REJECTED_MARKER} <the finding, in one sentence> — <the counter-evidence: file:line, a test, or the decision it re-opened>`,
+    '  The orchestrator keeps these as decisions of this phase and hands them to every',
+    '  later turn and reviewer, so a finding rejected once is not raised again.',
     '- The gates you ran and what they returned.',
     '- The reviewer’s final verdict, in one line of its own words.',
     '',
@@ -1790,6 +1810,7 @@ function renderChore(materials: Materials, chore: ChoreMaterials): string {
         ]),
     '',
     materials.brief,
+    ...settled(materials),
     ...choreTail(materials, chore),
   ])
 }
@@ -1813,6 +1834,7 @@ function renderChoreContinuation(materials: Continuation, chore: ChoreMaterials)
     '',
     '## The chore',
     chore.instruction,
+    ...settled(materials),
     ...choreTail(materials, chore),
   ])
 }
@@ -1851,6 +1873,7 @@ function renderFixerContinuation(materials: Continuation): string {
     '',
     '## What came back',
     ...failure(materials),
+    ...settled(materials),
     ...fixerProtocol(),
     '',
     '## Verify',
@@ -1888,6 +1911,7 @@ function renderImplementerContinuation(materials: Continuation): string {
     'If the work is already finished and committed, say so in your report instead of',
     'redoing it — re-implementing what is already committed is the one failure this',
     'message exists to prevent.',
+    ...settled(materials),
     '',
     '## What is left',
     'Finish the working instructions you were given, in the order you were given',
@@ -1921,6 +1945,72 @@ function failure(materials: Continuation): string[] {
     typeof logRef === 'string'
       ? `Its output is at ${logRef} — read it first; it says what broke.`
       : 'Re-run the gate command below to see what broke.',
+  ]
+}
+
+/**
+ * What was settled for this phase, for a turn that may not have been there
+ * when it was (`src/decisions`).
+ *
+ * Bounded by `selectDecisions`, so a phase that ran for hours does not grow
+ * every prompt with it: the newest answers and notes, the newest rejected
+ * findings, and a count of what was left out.
+ */
+function settled(materials: Continuation): string[] {
+  const { shown, omitted } = selectDecisions(materials.decisions)
+  if (shown.length === 0) return []
+  return [
+    '',
+    '## Decisions already made in this phase',
+    'Settled earlier in this phase, and binding on this turn whether or not this',
+    'session was there when they were made. Do not re-open one, and do not ask about',
+    'it again. If you find evidence that one cannot hold — evidence it did not weigh —',
+    'say so in your report, citing it.',
+    ...(omitted === 0 ? [] : [`(${omitted} older decisions are not repeated here.)`]),
+    ...shown.flatMap((entry) => {
+      const [first, ...rest] = entry.text.split('\n')
+      const label = DECIDED[`${entry.kind}:${entry.by}`] ?? `${entry.kind} (${entry.by})`
+      return [`- ${label}: ${first}`, ...rest.map((line) => `  ${line}`)]
+    }),
+  ]
+}
+
+/** How each decision is introduced, by kind and by who settled it. */
+const DECIDED: Readonly<Record<string, string>> = {
+  'answer:operator': 'The operator answered',
+  'answer:coordinator': 'The run coordinator answered',
+  'answer:unattended': 'Nobody answered, so the run took the recommended option',
+  'context:operator': 'The operator said',
+  'context:coordinator': 'The run coordinator said',
+  'rejected:review': 'A review finding rejected with counter-evidence',
+}
+
+/**
+ * What a review does with a finding that re-opens a decision: rejects it,
+ * citing the decision, or puts it to the operator once.
+ *
+ * Without this a fresh reviewer raised a settled finding again on every pass,
+ * the fixer turned it into the same question, and the run answered it again —
+ * four times for one decision, in some thirty rounds that never converged.
+ */
+function settledFindings(materials: Continuation): string[] {
+  return [
+    '',
+    '## Findings that re-open a decision',
+    ...(materials.decisions.length > 0
+      ? [
+          'Hand the reviewer the decisions under "Decisions already made in this phase",',
+          'and any made during this turn, with the scope: on its first pass, on every',
+          'later one, and whenever you spawn a fresh reviewer.',
+        ]
+      : [
+          'Hand the reviewer every decision made during this turn — an operator’s answer,',
+          'a finding you rejected — on every later pass and whenever you spawn a fresh one.',
+        ]),
+    'A finding that re-raises a decision is not a finding: reject it, citing the',
+    'decision, and do not fix it or ask about it again. Only a finding that brings',
+    'evidence the decision did not weigh goes to the operator — once, in one block,',
+    'naming the decision — and their answer replaces it.',
   ]
 }
 

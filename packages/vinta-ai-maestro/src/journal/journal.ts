@@ -45,6 +45,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { type Decision, parseDecision } from '../decisions/index.ts'
 import { computeWaves } from '../graph.ts'
 import type { Workflow } from '../types.ts'
 import { formatIssues, parseWorkflow } from '../validate.ts'
@@ -489,6 +490,43 @@ export class Journal {
     } finally {
       closeSync(fd)
     }
+  }
+
+  /**
+   * Records one of a node's decisions (`src/decisions`) in `decisions.jsonl`
+   * beside its transcript. A file rather than an event for the reason the
+   * transcript is one: a decision is the operator's or the agent's prose (§11).
+   */
+  appendDecision(runId: string, nodeId: string, decision: Decision): void {
+    mkdirSync(this.nodeDir(runId, nodeId), { recursive: true })
+    appendFileSync(join(this.nodeDir(runId, nodeId), 'decisions.jsonl'), `${JSON.stringify(decision)}\n`)
+  }
+
+  /**
+   * A node's decisions, oldest first: what a resumed run hands every later
+   * prompt. A line this build cannot read is skipped rather than failing the
+   * resume over it — and so is a half-written last line from a killed process.
+   */
+  decisions(runId: string, nodeId: string): Decision[] {
+    let text: string
+    try {
+      text = readFileSync(join(this.nodeDir(runId, nodeId), 'decisions.jsonl'), 'utf8')
+    } catch {
+      return []
+    }
+    const found: Decision[] = []
+    for (const line of text.split('\n')) {
+      if (line.trim() === '') continue
+      let raw: unknown
+      try {
+        raw = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const parsed = parseDecision(raw)
+      if (parsed !== null) found.push(parsed)
+    }
+    return found
   }
 
   /** Where the gate runner streams its output. The directory is created here. */

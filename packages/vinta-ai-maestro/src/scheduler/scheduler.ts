@@ -132,6 +132,14 @@ import {
 } from '../prompts/index.ts'
 import { choresFor } from '../chores.ts'
 import {
+  answerDecisions,
+  appendDecision,
+  decision,
+  readRejections,
+  type DecidedBy,
+  type Decision,
+} from '../decisions/index.ts'
+import {
   AGENT_QUESTION_TEXT,
   decodeAnswers,
   encodeAnswers,
@@ -564,6 +572,17 @@ interface NodeState {
    */
   undelivered: string[]
   /**
+   * What was settled for this phase, oldest first (`src/decisions`): agents'
+   * questions with their answers, the operator's notes, findings the review
+   * rejected. Every later prompt carries them, whichever session it reaches —
+   * a fresh reviewer, a session replaced after a stale token, a retry.
+   *
+   * Kept across attempts on purpose, unlike everything `#restartAttempt`
+   * clears: a retry discards the branch, not what the operator decided about
+   * the phase. Mirrored to `decisions.jsonl`, which `#seed` reads back.
+   */
+  decisions: Decision[]
+  /**
    * §15's session ledger: slot name to the session that slot last ran.
    *
    * Per node, never shared. Two nodes running the same phase pipeline both
@@ -963,6 +982,7 @@ export class Scheduler {
       live: null,
       pending: [],
       undelivered: [],
+      decisions: [],
       sessions: new Map(),
       crew: null,
       lastMember: null,
@@ -1057,6 +1077,10 @@ export class Scheduler {
       state.status = 'done'
       return
     }
+    // Unlike the session id above, a decision does not describe a worktree:
+    // it is what the operator settled about the phase, and the re-driven
+    // phase is the same phase.
+    state.decisions = this.#options.journal.decisions(this.#options.runId, state.node.id)
     // The two statuses that are already true need no correction, and writing
     // one anyway is not free: a resume of a wide graph would put a `pending`
     // row against every phase it has not reached yet, which is a transition
@@ -1345,6 +1369,9 @@ export class Scheduler {
     if (this.#settledNode(state)) return this.#operation(state, 'add_context', text, 'ignored', actor)
 
     const said = attributed(text, actor)
+    // Delivered once, to one session, so it is also kept: the session that
+    // reads it is not the last one this phase will run.
+    this.#decide(state, decision('context', actor, text))
     const live = state.live
     if (live !== null && live.adapter.capabilities.inject) {
       await live.session.send(said)
@@ -1367,6 +1394,7 @@ export class Scheduler {
     }
 
     await this.#interruptLive(state)
+    this.#decide(state, decision('context', actor, instruction))
     state.pending.push({ op: 'redirect', text: attributed(instruction, actor) })
     return this.#operation(state, 'redirect', instruction, 'queued', actor)
   }
@@ -2040,6 +2068,8 @@ export class Scheduler {
    * session would hold a memory of files that are no longer there.
    */
   #restartAttempt(state: NodeState): void {
+    // `state.decisions` is the one thing about an attempt deliberately left
+    // here: the branch goes, what was decided about the phase does not.
     state.fixRounds = 0
     state.agentRan = false
     state.unattendedGiven.clear()
@@ -2504,6 +2534,16 @@ export class Scheduler {
     return delivery
   }
 
+  /**
+   * Keeps one of the phase's decisions, in memory and on disk, unless it is
+   * already kept. Logged by kind only: the text is prose (§11).
+   */
+  #decide(state: NodeState, entry: Decision): void {
+    if (!appendDecision(state.decisions, entry)) return
+    this.#options.journal.appendDecision(this.#options.runId, state.node.id, entry)
+    this.#log.info('node.decision', { node: state.node.id, kind: entry.kind, by: entry.by })
+  }
+
   #stateOf(nodeId: string): NodeState {
     const state = this.#states.get(nodeId)
     if (state === undefined) throw new Error(`unknown node "${nodeId}"`)
@@ -2801,6 +2841,9 @@ export class Scheduler {
         // has nothing to be re-oriented about; a cold one has no memory to
         // correct.
         ...(plan.crossPhase && reorientation !== null ? { reorientation } : {}),
+        // On every form, a delta included: a decision made in another session
+        // — a reviewer's, a replaced one's — is not in this one.
+        decisions: state.decisions,
       }),
       model: this.#modelFor(state, params),
       ...(Object.keys(env).length === 0 ? {} : { env }),
@@ -2953,7 +2996,16 @@ export class Scheduler {
         throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything, resumed and cold`)
       }
     }
-    await this.#agentQuestions(state, turn, watch, drained.sessionId)
+    const last = await this.#agentQuestions(state, turn, watch, drained.sessionId)
+
+    // The review's rejected findings, from its closing report. Kept so the
+    // next reviewer — a fresh one, after a resume, a retry or an `unapproved`
+    // continue — is handed them rather than raising them again (§16.4).
+    if (chore?.chore.when === 'review') {
+      for (const finding of readRejections(last.prose())) {
+        this.#decide(state, decision('rejected', 'review', finding))
+      }
+    }
 
     // A fix round is a fixer turn, not a state called `fix`.
     if (params['role'] === 'fixer') state.fixRounds += 1
@@ -3078,25 +3130,28 @@ export class Scheduler {
    * `retryAfterMs`, through the same `answer` path a click takes. A harness
    * that cannot resume has no way to deliver an answer, so its question is left
    * in the transcript and the turn ends as it would have.
+   *
+   * Returns the watch over the turn's last session, whose prose is the report
+   * the turn closed on.
    */
   async #agentQuestions(
     state: NodeState,
     turn: Turn,
     first: QuestionWatch,
     firstSessionId: string,
-  ): Promise<void> {
+  ): Promise<QuestionWatch> {
     const { runId, journal } = this.#options
     let watch = first
     let sessionId = firstSessionId
     for (;;) {
       const ask = watch.result()
-      if (ask === null) return
+      if (ask === null) return watch
       if (!turn.adapter.capabilities.resume) {
         this.#log.warn('node.agent_question_unanswerable', {
           node: state.node.id,
           harness: turn.adapter.id,
         })
-        return
+        return watch
       }
 
       state.agentQuestions += 1
@@ -3121,7 +3176,12 @@ export class Scheduler {
       }
 
       const answers = decodeAnswers(facts.human?.['answer'], ask)
-      const message = formatAnswers(ask, answers, { unattended: facts.human?.['unattended'] === true })
+      const unattended = facts.human?.['unattended'] === true
+      const message = formatAnswers(ask, answers, { unattended })
+      // The session that asked is the only one this message reaches. Every
+      // later one — the next reviewer above all — gets it from here.
+      const by: DecidedBy = unattended ? 'unattended' : facts.human?.['by'] === 'coordinator' ? 'coordinator' : 'operator'
+      for (const entry of answerDecisions(ask, answers, by)) this.#decide(state, entry)
       // The adapter hands `prompt` to the CLI without echoing it, so the
       // answer is written here — under whoever gave it, like their steering.
       journal.appendTranscript(runId, state.node.id, {

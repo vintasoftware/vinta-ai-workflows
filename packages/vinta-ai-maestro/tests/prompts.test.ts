@@ -41,6 +41,7 @@ import {
   type Reorientation,
 } from '../src/prompts/index.ts'
 import { ChoreSchema, SideEffectSchema, WorkflowSchema, type Workflow } from '../src/types.ts'
+import { readRejections, REJECTED_LIMIT, SETTLED_LIMIT, type Decision } from '../src/decisions/index.ts'
 
 const RUN_ID = 'run-1'
 
@@ -198,6 +199,8 @@ function compose(
     readonly backgroundWork?: boolean
     /** The harness the turn runs on, for its tool names. */
     readonly harness?: string
+    /** What was settled for this phase so far. */
+    readonly decisions?: readonly Decision[]
   } = {},
 ): string {
   const workflow = options.workflow ?? diamond()
@@ -219,6 +222,7 @@ function compose(
     ...(options.chore === undefined ? {} : { chore: options.chore }),
     ...(options.backgroundWork === undefined ? {} : { backgroundWork: options.backgroundWork }),
     ...(options.harness === undefined ? {} : { harness: options.harness }),
+    ...(options.decisions === undefined ? {} : { decisions: options.decisions }),
   })
 }
 
@@ -1686,6 +1690,80 @@ describe('the review chore prompt', () => {
 // ---------------------------------------------------------------------------
 // 6. prompt_template is the seam
 // ---------------------------------------------------------------------------
+
+describe('a phase’s decisions', () => {
+  const DECIDED: readonly Decision[] = [
+    { kind: 'answer', by: 'unattended', text: 'Storage — Keep invoices in the existing table?\nAnswer: Existing table' },
+    { kind: 'context', by: 'operator', text: 'keep the v1 endpoint' },
+    { kind: 'rejected', by: 'review', text: 'Add a null check — validated upstream (src/api.ts:12)' },
+  ]
+  const HEADING = '## Decisions already made in this phase'
+
+  it('reaches every role, cold and continued — the session that was not there is the point', () => {
+    const forms = [
+      compose('api-layer', 'implementer', { decisions: DECIDED }),
+      compose('api-layer', 'implementer', { decisions: DECIDED, continuation: true }),
+      compose('api-layer', 'fixer', { decisions: DECIDED }),
+      compose('api-layer', 'fixer', { decisions: DECIDED, continuation: true }),
+      compose('api-layer', 'chore', { decisions: DECIDED, chore: reviewChore() }),
+      compose('api-layer', 'chore', { decisions: DECIDED, chore: reviewChore(), continuation: true }),
+      compose('api-layer', 'chore', { decisions: DECIDED, chore: chore({ prompt: 'Tidy up.' }), continuation: true }),
+    ]
+    for (const prompt of forms) {
+      expect(prompt).toContain(HEADING)
+      expect(prompt).toContain(
+        '- Nobody answered, so the run took the recommended option: Storage — Keep invoices in the existing table?\n  Answer: Existing table',
+      )
+      expect(prompt).toContain('- The operator said: keep the v1 endpoint')
+      expect(prompt).toContain('- A review finding rejected with counter-evidence: Add a null check')
+    }
+  })
+
+  it('says nothing about them when there are none', () => {
+    expect(compose('api-layer', 'implementer')).not.toContain(HEADING)
+    expect(compose('api-layer', 'chore', { chore: reviewChore() })).not.toContain(HEADING)
+  })
+
+  it('carries only the newest of each group, and says how many it left out', () => {
+    const many: Decision[] = [
+      ...Array.from({ length: 20 }, (_, i): Decision => ({ kind: 'context', by: 'operator', text: `note ${i}` })),
+      ...Array.from({ length: 15 }, (_, i): Decision => ({ kind: 'rejected', by: 'review', text: `finding ${i}` })),
+    ]
+    const prompt = compose('api-layer', 'implementer', { decisions: many })
+
+    const omitted = 20 - SETTLED_LIMIT + (15 - REJECTED_LIMIT)
+    expect(prompt).toContain(`(${omitted} older decisions are not repeated here.)`)
+    expect(prompt).not.toContain('note 7\n')
+    expect(prompt).toContain('note 8\n')
+    expect(prompt).toContain('note 19\n')
+    expect(prompt).not.toContain('finding 6\n')
+    expect(prompt).toContain('finding 7\n')
+  })
+
+  it('tells the review to reject a finding that re-opens a decision, or put it to the operator once', () => {
+    for (const decisions of [DECIDED, []]) {
+      const prompt = compose('api-layer', 'chore', { decisions, chore: reviewChore() })
+      expect(prompt).toContain('## Findings that re-open a decision')
+      expect(prompt).toContain('A finding that re-raises a decision is not a finding: reject it, citing the')
+      expect(prompt).toContain('evidence the decision did not weigh goes to the operator — once, in one block,')
+    }
+    expect(compose('api-layer', 'chore', { decisions: DECIDED, chore: reviewChore() })).toContain(
+      'Hand the reviewer the decisions under "Decisions already made in this phase",',
+    )
+  })
+
+  it('asks the review for the REJECTED lines the scheduler reads, in a form it reads', () => {
+    const prompt = compose('api-layer', 'chore', { chore: reviewChore() })
+    const asked = prompt.split('\n').find((line) => line.trim().startsWith('REJECTED:'))
+
+    expect(asked).toBeDefined()
+    expect(readRejections(asked ?? '')).toEqual([
+      '<the finding, in one sentence> — <the counter-evidence: file:line, a test, or the decision it re-opened>',
+    ])
+    // Only the review is asked: no other chore states findings.
+    expect(compose('api-layer', 'chore', { chore: chore({ prompt: 'Tidy up.' }) })).not.toContain('REJECTED:')
+  })
+})
 
 describe('prompt_template', () => {
   it('selects the role’s composition', () => {

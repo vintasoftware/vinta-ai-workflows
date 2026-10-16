@@ -32,6 +32,24 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: a phase's decisions outlive the session they were
+  made in.** Each node now keeps a list of what was settled for it: agents'
+  questions with their answers (marked as the operator's, the coordinator's,
+  or unattended), the operator's `node context` and `redirect` text, and the
+  findings the review rejected with their counter-evidence. Every later
+  prompt carries the list — implementer, fixer, chores, and the review, which
+  hands it to its reviewer — so a fresh reviewer, a replaced session or a
+  retry no longer re-asks or re-raises what was already decided. Before
+  this, an unattended run answered one question four times and a phase ran
+  some thirty rounds without converging, and operator context sent with
+  `node context` had to be re-sent after a session change. The review now
+  rejects a finding that re-opens a decision, citing it, and asks the
+  operator about it at most once, and only with new evidence. It ends its
+  report with a `REJECTED:` line per rejected finding, which the run keeps.
+  The list is bounded (the newest 12 answers and notes and the newest 8
+  rejected findings), kept across retries, written to
+  `runs/<id>/nodes/<node>/decisions.jsonl` and read back when a run resumes.
+
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or

@@ -266,6 +266,7 @@ Each step runs on what the step before it passed. The gates run first because th
     nodes/<node-id>/
       transcript.jsonl            # normalized AgentEvent stream, append-only
       raw.jsonl                   # harness-native stream, append-only
+      decisions.jsonl             # the phase's decisions (§16.4), append-only
       gates/<gate-id>.log
 ```
 
@@ -502,7 +503,7 @@ Five operations on a running node, exposed in the UI and over the API:
 
 | Operation | Mechanism |
 |---|---|
-| Add context | `session.send(text)` where `capabilities.inject`; otherwise queued and delivered on the next resume |
+| Add context | `session.send(text)` where `capabilities.inject`; otherwise queued and delivered on the next resume. Either way it is also kept as a decision of the phase (§16.4), so a later session gets it too |
 | Redirect | interrupt, then send the new instruction (or resume with an amended prompt) |
 | Pause | finish the current turn, then `await_human` (§9.1) |
 | Abort node | kill the session; mark failed; dependents blocked |
@@ -533,6 +534,7 @@ Delivery is **once per pause**. Reminders for an unanswered gate are **off by de
 - **The node view renders them as a card to click.** Each option is a button with its consequence under it and the recommended one marked. The last choice is always **Other**, a text field for an answer no option covers. On a single-choice question it is exclusive, since the agent should get one answer and not an option with a sentence that may contradict it. The daemon applies the same rule when it decodes an answer. On a multi-choice question Other is one more box to tick. A single single-choice question answers on the click. Several questions are a wizard: one step per question, then a review step, then Send.
 - **The answer resumes the same session.** It is journalled as option indices plus the operator's own words. It reaches the agent as one message that restates each question with its answer, and is recorded in the transcript as the operator's. The effect that spawned the turn returns only once the agent ends a session without asking, so the pipeline's guards read the work the answer led to.
 - **An unattended run answers itself.** Under `--retry-after` it picks each question's recommended option after the interval, and the row is marked `unattended`, as a plan question's `unattended_answer` is.
+- **The answer outlives the session.** The message reaches only the session that asked, so each answered question is also kept as a decision of the phase, marked as the operator's, the coordinator's or unattended (§16.4), and every later prompt carries it.
 - **A harness that cannot resume** has no way to deliver an answer. Its question stays in the transcript and the turn ends as it would have.
 
 **A paused node keeps its lane** and releases its gate resources immediately. This resolves O3: the human is being asked about work in progress *in that lane*, the diff and log views read from it, and a takeover attaches to it. Releasing it would destroy the thing the question is about. Idle disk is the cheapest resource in the system; the gate slot, which is the expensive one, is freed at once.
@@ -896,7 +898,7 @@ The per-node rows come from the journal, not from a projection, over the existin
 
 A phase's code review is the **thermo-nuclear review loop** Vinta runs by hand: one reviewer held to a demanding standard, a fixer that checks every finding before acting on it, scope questions sent to a person rather than assumed by either agent, and a loop that ends only on the reviewer's explicit approval. The skill it comes from, `thermo-nuclear-review-loop`, runs both roles from one host session — the host is the fixer and spawns the reviewer as a sub-agent. Maestro runs it the same way, as a **chore** on the implementer's own session.
 
-**Correction: this used to be two pipeline roles.** An earlier design spread the loop across the state machine: a `reviewer` role on its own session slot, a `fix` state for its findings, a `consult` state for scope questions, a review ledger file carrying rejected findings and settled decisions between them, reviewer members on the roster, and a host check that the reviewer had not edited the lane. Every round was a cold spawn or a resume, a prompt rebuilt from the plan and the ledger, and a pass through the scheduler. It was too slow and too expensive to run on every phase. Inside one turn a round is a message to a warm reviewer, and the state the ledger carried between sessions is simply in the implementer's context.
+**Correction: this used to be two pipeline roles.** An earlier design spread the loop across the state machine: a `reviewer` role on its own session slot, a `fix` state for its findings, a `consult` state for scope questions, a review ledger file carrying rejected findings and settled decisions between them, reviewer members on the roster, and a host check that the reviewer had not edited the lane. Every round was a cold spawn or a resume, a prompt rebuilt from the plan and the ledger, and a pass through the scheduler. It was too slow and too expensive to run on every phase. Inside one turn a round is a message to a warm reviewer, and the state the ledger carried between sessions is simply in the implementer's context. That holds only as long as the session does, so the one part of the ledger worth keeping — what was decided — is back, as a list the host keeps and every prompt renders rather than a file the agents edit (§16.4).
 
 ### 16.1 The review chore
 
@@ -908,7 +910,8 @@ A chore with `when: review` (§8) runs in `standard-phase`'s `review` state, onc
 - **how to wait**, where the harness has `backgroundWork`. The reviewer's first pass is a foreground spawn; every later pass is a message to it, and a resumed reviewer answers in the background whatever the prompt says. The agent waits for it, and for the gates, the way an interactive session does: it ends its turn and is woken in the same session when each reports. It is told not to sleep, poll or start a monitor, and that a message ending a turn to wait carries no `VERDICT:` line. Before this, the session ended with that turn and took the reviewer with it, so every round after the first ended "waiting on the reviewer" with no verdict, went to the operator as `unapproved`, and restarted cold. The rule is the one every turn gets on such a harness (§15.3) with two lines added — the reviewer and the verdict; on a harness without it the turn keeps the foreground rule;
 - **the budget**: none by default — the loop runs until the reviewer approves. With `max_fix_rounds` set, at most that many passes return blockers, after which the loop stops and reports rather than pausing on its own — a headless turn that stops to ask whether to continue is a turn that ends;
 - **how a scope question reaches a person**: the `NEEDS_INPUT` block (§9.1), not the harness's question tool. The node parks, the operator answers in the node view, and the same session resumes with the answer. The reviewer may not survive the resume; the prompt says to spawn a fresh one and hand it the rejected findings and the decisions;
-- **the verdict**: the turn's last line is `VERDICT: pass` — the reviewer explicitly approved — or `VERDICT: fail`.
+- **the decisions made so far** (§16.4), to hand the reviewer with the scope, and what to do with a finding that re-opens one;
+- **the verdict**: the turn's last line is `VERDICT: pass` — the reviewer explicitly approved — or `VERDICT: fail`. Before it, each finding the loop rejected is restated on a `REJECTED:` line with its counter-evidence, which the scheduler keeps (§16.4).
 
 The skill the chore names carries the loop's own procedure and the reviewer's standard (a project `REVIEW.md` where there is one). Where the skill and the prompt disagree, the prompt wins.
 
@@ -929,7 +932,23 @@ The chore's `chore_result` row says `failed` for an unapproved review, so the po
 
 **Unattended, the plan supplies the answer and `--retry-after` supplies the moment.** A plan question may declare `unattended_answer`; with `--retry-after` set, the host answers it with that value once the window passes and journals the answer `unattended`. `unattended_answer` may be a list: the nth unattended answer to that question within an attempt is its nth entry, the last repeating. Both `exhausted` and `unapproved` declare `[continue, stop]` — one more budget where the session already is, then the phase stops — so an unattended run spends at most one budget past each. They used to declare `stop`, and that was the dearest answer: the failure's unattended retry re-drove the phase from `implement` on a cold session, gates and review from scratch, to reach the same question again — twelve failed attempts in one observed run, each a review that needed one more round. A scope question the review loop raises is an agent question, answered unattended with its recommended options (§9.1). A plan question that declares none still waits for a person.
 
-### 16.4 Not done here
+### 16.4 Decisions that outlive a session
+
+A decision used to live in the session it was made in. An agent's question answered under `--retry-after` reached the session that asked; an operator's `node context` reached the next spawn and was then cleared; a finding the loop rejected lived in the implementer's context. Every review pass is a fresh reviewer, so it raised the same finding again, the implementer asked the same question again, and the run answered it again: one observed phase asked one decision four times and another twice, in some thirty review, fix and polish rounds that never converged. A session replaced after a stale token or a cold retry lost the operator's note the same way, and it had to be sent again.
+
+So each node keeps a list of **decisions** (`src/decisions`), appended where they happen:
+
+- **`answer`** — each answered question of an agent's ask, with the option it got and that option's consequence, marked `operator`, `coordinator` or `unattended` (§9.1);
+- **`context`** — the text of an `add_context` or `redirect`, the operator's or the coordinator's, whether it was sent into a live session or queued (§9);
+- **`rejected`** — each `REJECTED:` line of a review chore's closing report: a finding the loop rejected, with its counter-evidence (§16.1).
+
+The same kind with the same words is one decision. The list is prose — the operator's and the agent's — so it is mirrored to `decisions.jsonl` beside the transcript, never to the event log (§11). It survives what a session does not: `#restartAttempt` clears everything else about an attempt and keeps it, because a retry discards the branch, not what was decided about the phase; a resumed run reads it back from the file (`#seed`).
+
+**Every prompt renders it**, the delta included, under "Decisions already made in this phase": the session that was not there when a decision was made is the reason the list exists. The block says each one is settled and binding on the turn, and that evidence one cannot hold goes in the report rather than into re-opening it. It is **bounded**: the newest twelve answers and notes and the newest eight rejected findings, in the order they were made, with a count of what was left out — rejected findings have their own allowance so a long review cannot push the operator's answers out of every prompt — and each entry is cut at 800 characters.
+
+**A finding that re-opens a decision is rejected, or escalated once.** The review chore's prompt tells it to hand the decisions to the reviewer with the scope — on the first pass, on every later one, and whenever it spawns a fresh reviewer. A finding that re-raises one is not a finding: the loop rejects it citing the decision, and neither fixes it nor asks about it again. Only a finding that brings evidence the decision did not weigh goes to the operator, once, in one `NEEDS_INPUT` block naming the decision; the answer is kept like any other and stands after it. This is the smallest rule consistent with §16.1 — the loop's procedure stays in the turn, and the host only remembers — so nothing in the scheduler compares findings with decisions or answers a repeated question on its own.
+
+### 16.5 Not done here
 
 - **The skills path's host.** `review-phase` runs the same `thermo-nuclear-review-loop` (`partials/review-loop.md`), but the conductor hosts it rather than the implementer, because a sub-agent cannot spawn sub-agents of its own. The conductor spawns the one reviewer, continues the phase's implementer as the fixer, and asks the gate questions itself. Its reviewer runs one tier above the tier the implementer ran at, and it pauses after 20 unapproved passes; neither rule is specified here.
 - **Reviewer edits.** The prompt tells the implementer to check `HEAD` and `git status` around each pass and not to build on anything the reviewer changed. The host no longer checks it, because the reviewer is a sub-agent of the implementer's turn and the turn itself edits the tree.
