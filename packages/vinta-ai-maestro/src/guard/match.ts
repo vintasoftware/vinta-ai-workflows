@@ -2,7 +2,7 @@
  * The gate guard's question: is this shell line a gate, or a command a pool
  * exists to ration, run without going through the daemon?
  *
- * Two rules, both read off the run's definition as it stands:
+ * Three rules, all read off the run's definition as it stands:
  *
  * - **A gate's own command** — its full `cmd`, exactly — is the daemon's to
  *   run. Run bare it is invisible to the gate cache, outside the gate's pools,
@@ -17,6 +17,12 @@
  * - **A command matching a pool's `match` pattern** needs that pool's lease.
  *   Run bare it stampedes the CPU or the shared server the pool is rationing.
  *   The answer is `vinta-ai-maestro with <pool> -- <cmd>`.
+ * - **`vinta-ai-maestro gate` inside `with`** is the two answers above
+ *   combined, and it deadlocks: `with` holds the pool, the gate takes its own
+ *   leases and queues for the same pool, and `with` cannot let go until the
+ *   gate returns. The daemon refuses the gate too, but by then the agent has
+ *   a refusal it has to read; here it is told before anything runs. The
+ *   answer is `vinta-ai-maestro gate <id>`, on its own.
  *
  * It is a guardrail against habit, and says so wherever it is described: it
  * compares command *lines*, so `bash -c "…"`, a script that runs the suite, or
@@ -32,6 +38,7 @@ import { isJudgeGate, type Workflow } from '../types.ts'
 export type GuardHit =
   | { readonly rule: 'gate'; readonly gate: string }
   | { readonly rule: 'pool'; readonly pool: string }
+  | { readonly rule: 'nested_gate'; readonly gate: string; readonly pool: string }
 
 /** The binary agents reach the daemon through, by any of its usual launchers. */
 const MAESTRO = 'vinta-ai-maestro'
@@ -48,6 +55,8 @@ export function checkCommand(workflow: Workflow, command: string): GuardHit | nu
     const leased = leasedPools(tokens)
     const inner = leased === null ? tokens : innerCommand(tokens)
     if (inner === null) continue
+    const nested = leased === null ? null : nestedGate(tokens, inner)
+    if (nested !== null) return nested
     const text = inner.join(' ')
     const hit = gateHit(workflow, text) ?? poolHit(workflow, text, leased ?? new Set())
     if (hit !== null) return hit
@@ -57,11 +66,24 @@ export function checkCommand(workflow: Workflow, command: string): GuardHit | nu
 
 /** The deny reason an agent reads. It is the instruction, so it names the verb to use. */
 export function guardReason(hit: GuardHit): string {
-  return hit.rule === 'gate'
-    ? `this is gate "${hit.gate}" — run \`${MAESTRO} gate ${hit.gate}\` instead. The daemon runs ` +
+  switch (hit.rule) {
+    case 'gate':
+      return (
+        `this is gate "${hit.gate}" — run \`${MAESTRO} gate ${hit.gate}\` instead. The daemon runs ` +
         'it in this lane with its pools held and its result cached, and the run’s own gate uses that result.'
-    : `this command needs the "${hit.pool}" pool — run it as \`${MAESTRO} with ${hit.pool} -- <command>\` ` +
+      )
+    case 'pool':
+      return (
+        `this command needs the "${hit.pool}" pool — run it as \`${MAESTRO} with ${hit.pool} -- <command>\` ` +
         'so it waits its turn instead of competing with the other lanes.'
+      )
+    case 'nested_gate':
+      return (
+        `do not wrap \`${MAESTRO} gate\` in \`with\` — run \`${MAESTRO} gate ${hit.gate}\` on its own. ` +
+        `A gate takes its own leases, so inside \`with ${hit.pool}\` it would queue for a pool your ` +
+        'own command is holding and never start.'
+      )
+  }
 }
 
 function gateHit(workflow: Workflow, text: string): GuardHit | null {
@@ -91,6 +113,18 @@ function leasedPools(tokens: readonly string[]): Set<string> | null {
   if (tokens[start + 1] !== 'with') return new Set()
   const pool = tokens[start + 2]
   return new Set(pool === undefined ? [] : [pool])
+}
+
+/**
+ * A `vinta-ai-maestro gate <id>` as the command a `with` runs, or null. Any
+ * gate id: the daemon is what knows whether it exists, and a gate inside
+ * `with` is wrong whichever gate it is.
+ */
+function nestedGate(outer: readonly string[], inner: readonly string[]): GuardHit | null {
+  const start = maestroIndex(inner)
+  if (start === null || inner[start + 1] !== 'gate') return null
+  const pool = outer[(maestroIndex(outer) ?? 0) + 2] ?? ''
+  return { rule: 'nested_gate', gate: inner[start + 2] ?? '', pool }
 }
 
 function innerCommand(tokens: readonly string[]): string[] | null {

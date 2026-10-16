@@ -721,10 +721,11 @@ interface NodePayloads {
    * The gate guard (`src/guard/`) refused a Bash line before it ran: it was a
    * gate's own command, or a command a pool's `match` names, run without going
    * through the daemon. `rule` says which, and the id says which gate or pool —
-   * never the command, which is repository content (§11).
+   * never the command, which is repository content (§11). `nested_gate` is a
+   * `gate` run inside `with`, which holds the pool the gate then waits for.
    */
   bare_gate_blocked: {
-    readonly rule: 'gate' | 'pool'
+    readonly rule: 'gate' | 'pool' | 'nested_gate'
     readonly gate?: string
     readonly pool?: string
     readonly harness: string
@@ -735,7 +736,7 @@ interface NodePayloads {
    * wired). A record of what happened rather than a prevention.
    */
   bare_gate_detected: {
-    readonly rule: 'gate' | 'pool'
+    readonly rule: 'gate' | 'pool' | 'nested_gate'
     readonly gate?: string
     readonly pool?: string
     readonly harness: string

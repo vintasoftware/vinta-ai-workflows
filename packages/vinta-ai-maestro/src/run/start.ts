@@ -443,6 +443,9 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
 
   const pools = new ResourcePools(workflow.resources)
   const agentLeases = new AgentLeaseBroker(pools, journal, runId)
+  // The `gate` verb's route in. Absent for a host with no lanes, and then the
+  // verb refuses rather than running a gate against a directory it guessed.
+  const agentGates = host.gatesFor?.(pools, agentLeases)
   const admission = new AdmissionControl({
     journal,
     runId,
@@ -483,6 +486,12 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     // safe as long as the agent is told which files moved under it.
     ...(host.laneDelta === undefined ? {} : { laneDelta: host.laneDelta }),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
+    // A session's leftover commands lose their leases and their places in
+    // line the moment the session ends, rather than when they finally exit.
+    onTurnEnded: (nodeId, turnId) => {
+      agentLeases.endTurn(nodeId, turnId)
+      agentGates?.endTurn(nodeId, turnId)
+    },
   })
   // A merge commit git refused is the operator's call, asked on the node whose
   // merge it is; `abort` is answered for them under `--retry-after`.
@@ -522,6 +531,17 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
       ? createPermissionJudge({ systemOne: options.systemOne, journal, runId })
       : undefined
 
+  // Before the scheduler's drain, which waits for every node to reach a step
+  // boundary: an agent turn queued in `with` or `gate` never reaches one by
+  // itself. Its waits are answered with this code and its client tells the
+  // agent to end the turn, which is the boundary. Nothing is lost — whatever
+  // it was waiting to run is run again after the resume.
+  const haltAgents = (mode: 'paused' | 'cancelled' | 'interrupted'): void => {
+    const code = mode === 'paused' ? 'run_pausing' : 'run_stopping'
+    agentLeases.halt(code)
+    agentGates?.halt(code)
+  }
+
   const registered: DaemonRun = {
     runId,
     control: runControl(scheduler),
@@ -530,7 +550,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     agentLeases,
     // The `gate` verb's route in. Absent for a host with no lanes, and then the
     // verb refuses rather than running a gate against a directory it guessed.
-    ...(host.gatesFor === undefined ? {} : { agentGates: host.gatesFor(pools) }),
+    ...(agentGates === undefined ? {} : { agentGates }),
     ...(host.gateCache === undefined ? {} : { gateCache: host.gateCache }),
     ...(amend === undefined ? {} : { amend }),
     ...(permissionJudge === undefined ? {} : { permissionJudge }),
@@ -549,7 +569,9 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     gateGuard: createGateGuard({ journal, runId, workflow: () => current }),
     halt: async (mode) => {
       options.onHalt?.(mode)
+      haltAgents(mode)
       await scheduler.halt(mode)
+      return scheduler.activity()
     },
   }
   daemon.register(registered)
@@ -639,6 +661,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     registered,
     finished,
     interrupt: async () => {
+      haltAgents('interrupted')
       await Promise.all([scheduler.halt('interrupted'), host.interrupt?.()])
     },
   }

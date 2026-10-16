@@ -46,7 +46,7 @@ import {
 import { MONITOR_ROLE } from '../journal/transcript.ts'
 import { type AgentAsk, AgentAskSchema, encodeAnswers } from '../questions/agent-questions.ts'
 import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
-import { WorkflowSchema, type Workflow } from '../types.ts'
+import { isJudgeGate, WorkflowSchema, type Workflow } from '../types.ts'
 import type { Actor } from '../journal/events.ts'
 import { CoordinatorForbidden } from '../coordinator/actor.ts'
 import { coordinatorRefusals } from '../coordinator/policy.ts'
@@ -54,6 +54,7 @@ import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
 import { AgentGateRefusal } from '../resources/agent-gates.ts'
+import { AgentLeaseRefusal, type AgentLeaseHeld } from '../resources/agent-leases.ts'
 import { loadProjectConfig } from '../config/project-config.ts'
 import { ownDocument } from '../config/own.ts'
 import { resolveWorkflow } from '../config/resolve.ts'
@@ -91,6 +92,9 @@ import {
   type AgentGateWaitingResponse,
   type AgentLeaseGrantResponse,
   type AgentLeaseWaitingResponse,
+  type HaltResponse,
+  type NodeActivity,
+  type ResourceHolder,
   type EventPage,
   type LogPage,
   type MonitorAsked,
@@ -571,9 +575,8 @@ export function createApi(options: ApiOptions): Hono {
 
     const body = await readBody(c, AgentLeaseRequestSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
-    if (!journal.nodes(found.row.id).some((node) => node.node_id === body.value.holderNode)) {
-      return fail(c, 400, 'invalid_holder')
-    }
+    const holder = refuseHolder(c, found.row.id, body.value.holderNode)
+    if (holder !== null) return holder
 
     const wf = workflow(found.row.id)
     if (
@@ -606,17 +609,27 @@ export function createApi(options: ApiOptions): Hono {
         body.value.holderNode,
         {
           ...(body.value.waitToken === undefined ? {} : { waitToken: body.value.waitToken }),
+          ...(body.value.turn === undefined ? {} : { turn: body.value.turn }),
+          ...(body.value.pid === undefined ? {} : { pid: body.value.pid }),
           withinMs: options.leaseWaitMs ?? LEASE_WAIT_MS,
         },
       )
       // Still queued behind someone, which is the ordinary case and not an
-      // error: 202 is "come back", and the client does.
+      // error: 202 is "come back", and the client does. It says who, because
+      // "held by another lane" was wrong in exactly the case that mattered:
+      // a lease the asking phase held itself, which no amount of waiting ends.
       if ('waiting' in outcome) {
-        return c.json(outcome satisfies AgentLeaseWaitingResponse, 202)
+        const waiting: AgentLeaseWaitingResponse = {
+          ...outcome,
+          holders: holdersOf(found.row.id, found.run, body.value.resources),
+        }
+        return c.json(waiting, 202)
       }
       return c.json(outcome satisfies AgentLeaseGrantResponse, 201)
-    } catch {
-      return fail(c, 409, 'lease_unavailable')
+    } catch (error) {
+      // `turn_ended`, `run_pausing`, `run_stopping`: answers the client turns
+      // into what the agent should do next. Anything else is opaque.
+      return fail(c, 409, error instanceof AgentLeaseRefusal ? error.code : 'lease_unavailable')
     }
   })
 
@@ -674,29 +687,42 @@ export function createApi(options: ApiOptions): Hono {
 
     const body = await readBody(c, AgentGateRequestSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
-    if (!journal.nodes(found.row.id).some((node) => node.node_id === body.value.holderNode)) {
-      return fail(c, 400, 'invalid_holder')
-    }
-    if (workflow(found.row.id).gates[body.value.gate] === undefined) {
-      return fail(c, 400, 'unknown_gate')
-    }
+    const holder = refuseHolder(c, found.row.id, body.value.holderNode)
+    if (holder !== null) return holder
+    const gate = workflow(found.row.id).gates[body.value.gate]
+    if (gate === undefined) return fail(c, 400, 'unknown_gate')
 
     try {
       const outcome = await found.run.agentGates.hop(body.value.gate, body.value.holderNode, {
         withinMs: options.gateWaitMs ?? GATE_WAIT_MS,
         ...(body.value.noCache === true ? { noCache: true } : {}),
+        ...(body.value.turn === undefined ? {} : { turn: body.value.turn }),
       })
-      // Still running, which is the ordinary case and not an error.
+      // Still queued or running, which is the ordinary case and not an error.
+      // A queued gate says who holds its pools, as a queued lease does.
       if ('waiting' in outcome) {
-        return c.json(outcome satisfies AgentGateWaitingResponse, 202)
+        const waiting: AgentGateWaitingResponse =
+          outcome.state === 'queued' && !isJudgeGate(gate)
+            ? { ...outcome, holders: holdersOf(found.row.id, found.run, gate.requires) }
+            : outcome
+        return c.json(waiting, 202)
       }
       return c.json(outcome satisfies AgentGateResultResponse)
     } catch (error) {
       // Codes only, and the code is the broker's own where it had one. A gate
       // that failed is a `200` with a non-zero `exitCode`; reaching here means
-      // the gate could not be *started* — no lane, or a `requires` that would
-      // have deadlocked against the lane the node is holding.
-      return fail(c, 409, error instanceof AgentGateRefusal ? error.code : 'gate_unavailable')
+      // the gate could not be *started* — no lane, a `requires` that would
+      // have deadlocked against what the node is holding, or a session or run
+      // that is ending.
+      if (!(error instanceof AgentGateRefusal)) return fail(c, 409, 'gate_unavailable')
+      if (error.held.length === 0) return fail(c, 409, error.code)
+      const lanes = laneIndex(found.row.id)
+      const holders = error.held.flatMap((held) =>
+        held.resources
+          .filter((resource) => (isJudgeGate(gate) ? [] : gate.requires).includes(resource))
+          .map((resource) => withHolder(held, resource, lanes)),
+      )
+      return c.json({ error: error.code, issues: null, holders }, 409)
     }
   })
 
@@ -1160,9 +1186,17 @@ export function createApi(options: ApiOptions): Hono {
     if (run !== null) {
       if (run.halt === undefined) return fail(c, 501, 'halt_unsupported')
       if (row.status !== 'running') return fail(c, 409, 'run_not_running')
-      await run.halt(mode)
-      log.info('runs.halt_requested', { run: row.id, mode })
-      return c.json({ ok: true } as const, 202)
+      const waitingOn = (await run.halt(mode)) ?? undefined
+      log.info('runs.halt_requested', {
+        run: row.id,
+        mode,
+        ...(waitingOn === undefined ? {} : { waiting_on: waitingOn.map(activityField).join(',') }),
+      })
+      const answer: HaltResponse = {
+        ok: true,
+        ...(waitingOn === undefined ? {} : { waitingOn: [...waitingOn] }),
+      }
+      return c.json(answer, 202)
     }
     if (mode === 'paused') return fail(c, 409, 'run_not_live')
     if (row.status === 'done' || row.status === 'cancelled') {
@@ -1587,6 +1621,64 @@ export function createApi(options: ApiOptions): Hono {
     return { run: run as DaemonRun & { agentLeases: NonNullable<DaemonRun['agentLeases']> }, row }
   }
 
+  /**
+   * The answer for a holder the daemon will not serve, or null to go on.
+   *
+   * A node that is not `running` has no live session, so whatever is asking
+   * on its behalf is a leftover — a command its last session backgrounded and
+   * left behind — and queueing it would hold capacity for nobody.
+   */
+  function refuseHolder(c: Context, runId: string, holderNode: string): Response | null {
+    const row = journal.nodes(runId).find((node) => node.node_id === holderNode)
+    if (row === undefined) return fail(c, 400, 'invalid_holder')
+    if (row.status !== 'running') return fail(c, 409, 'holder_not_running')
+    return null
+  }
+
+  function laneIndex(runId: string): ReadonlyMap<string, string | null> {
+    return new Map(journal.nodes(runId).map((row) => [row.node_id, row.lane]))
+  }
+
+  /**
+   * Everyone holding any of `resources` right now: agents' leases, gates
+   * agents asked for, and phases' own gate steps (the scheduler's journal
+   * rows). Ids, lanes and a pid — never a command (§11).
+   */
+  function holdersOf(runId: string, run: DaemonRun, resources: readonly string[]): ResourceHolder[] {
+    const wanted = new Set(resources)
+    const lanes = laneIndex(runId)
+    const holders: ResourceHolder[] = []
+    const agentLeases = run.agentLeases?.held() ?? []
+    for (const held of agentLeases) {
+      for (const resource of held.resources) {
+        if (wanted.has(resource)) holders.push(withHolder(held, resource, lanes))
+      }
+    }
+    for (const flight of run.agentGates?.running?.() ?? []) {
+      for (const resource of flight.requires) {
+        if (!wanted.has(resource)) continue
+        holders.push({
+          resource,
+          node: flight.holderNode,
+          lane: lanes.get(flight.holderNode) ?? null,
+          via: 'gate',
+          gate: flight.gateId,
+        })
+      }
+    }
+    const leaseIds = new Set(agentLeases.map((held) => held.leaseId))
+    for (const row of journal.leases()) {
+      if (!wanted.has(row.resource) || !lanes.has(row.holder_node) || leaseIds.has(row.lease_id)) continue
+      holders.push({
+        resource: row.resource,
+        node: row.holder_node,
+        lane: lanes.get(row.holder_node) ?? null,
+        via: 'gate_step',
+      })
+    }
+    return holders
+  }
+
   /** `resolveLeaseRun`'s twin. Same three refusals, about the other port. */
   function resolveGateRun(
     c: Context,
@@ -1918,6 +2010,26 @@ function fail(
   issues?: Issue[],
 ): Response {
   return c.json({ error, issues: issues ?? null }, status)
+}
+
+/** An agent's `with` lease, as a waiter is told about it. */
+function withHolder(
+  held: AgentLeaseHeld,
+  resource: string,
+  lanes: ReadonlyMap<string, string | null>,
+): ResourceHolder {
+  return {
+    resource,
+    node: held.holderNode,
+    lane: lanes.get(held.holderNode) ?? null,
+    via: 'with',
+    ...(held.pid === undefined ? {} : { pid: held.pid }),
+  }
+}
+
+/** One node a halt waits on, as one token of a log field: `node:doing`. */
+function activityField(activity: NodeActivity): string {
+  return `${activity.node}:${activity.doing}`
 }
 
 /** The last `bytes` of a file, dropping the partial first line. Null if absent. */

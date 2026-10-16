@@ -26,6 +26,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { HaltResponseSchema, type NodeActivity } from '../daemon/schemas.ts'
 import { isAlive, liveJob, type JobRecord } from '../job/job.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
 import { killTree } from '../platform/platform.ts'
@@ -111,7 +112,8 @@ async function haltCommand(
 
     if (job === null) return haltUnhosted(mode, journal, runId, state, io)
 
-    const asked = await ask(job, mode, deps.fetch ?? fetch)
+    const answer = await ask(job, mode, deps.fetch ?? fetch)
+    const asked = typeof answer === 'string' ? answer : 'accepted'
     if (asked === 'unreachable') {
       if (mode === 'pause') {
         io.err(
@@ -132,6 +134,13 @@ async function haltCommand(
         ? `vinta-ai-maestro: pausing run ${runId}. Running phases finish their current step, then the job exits.`
         : `vinta-ai-maestro: stopping run ${runId}.`,
     )
+    // What the drain is waiting for, so a pause that takes a while is a list
+    // of named steps rather than a silence.
+    const waitingOn = typeof answer === 'string' ? [] : answer
+    if (waitingOn.length > 0) {
+      io.out(`vinta-ai-maestro: waiting on ${waitingOn.length} phase(s):`)
+      for (const activity of waitingOn) io.out(`  ${activity.node}  ${describeActivity(activity)}`)
+    }
     if (parsed.values.wait !== true) {
       io.out(`vinta-ai-maestro: follow it with: vinta-ai-maestro logs ${runId} --follow`)
       return OK
@@ -145,12 +154,30 @@ async function haltCommand(
   }
 }
 
-/** The run's own API, asked. `refused` is a 409: the run is not running. */
+/** One step a halt waits on, in words. */
+function describeActivity(activity: NodeActivity): string {
+  switch (activity.doing) {
+    case 'agent_turn':
+      return `an agent turn${activity.harness === undefined ? '' : ` (${activity.harness})`} — it ends at its next step boundary`
+    case 'gate':
+      return 'a gate, holding its resources'
+    case 'question':
+      return 'a question, being unwound'
+    case 'step':
+      return 'between steps'
+  }
+}
+
+/**
+ * The run's own API, asked. `refused` is a 409: the run is not running. An
+ * accepted request answers with what the drain is still waiting on, when the
+ * job says.
+ */
 async function ask(
   job: JobRecord,
   mode: Mode,
   fetchImpl: typeof fetch,
-): Promise<'accepted' | 'refused' | 'unreachable'> {
+): Promise<readonly NodeActivity[] | 'refused' | 'unreachable'> {
   try {
     const response = await fetchImpl(
       `${job.url}/api/runs/${encodeURIComponent(job.runId)}/${mode}`,
@@ -161,7 +188,10 @@ async function ask(
         signal: AbortSignal.timeout(10_000),
       },
     )
-    if (response.ok) return 'accepted'
+    if (response.ok) {
+      const body = HaltResponseSchema.safeParse(await response.json().catch(() => null))
+      return body.success ? (body.data.waitingOn ?? []) : []
+    }
     return response.status === 409 ? 'refused' : 'unreachable'
   } catch {
     return 'unreachable'

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
-import { AgentLeaseBroker } from '../src/resources/agent-leases.ts'
+import { AgentLeaseBroker, AgentLeaseRefusal } from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import type { Resource } from '../src/types.ts'
 
@@ -250,6 +250,129 @@ describe('agent-held resource leases', () => {
     tick(60)
     expect(pools.held('test-suite')).toBe(0)
     expect(broker.renew(first.leaseId)).toBeNull()
+  })
+})
+
+/**
+ * A session's commands, after the session. Adapters cancel the background work
+ * they track when a session ends, but a command backgrounded with `&` is
+ * reparented and keeps hopping; one run had nine of them queued, up to
+ * fifty-five minutes old, in front of lanes that were still working.
+ */
+describe('the end of an agent session', () => {
+  it('cancels the waits its commands queued, wakes the one being watched, and refuses the rest', async () => {
+    const { broker, pools, tick } = rig()
+    const holder = await broker.acquire(['test-suite'], 'other')
+
+    // One wait parked between hops, one hop being watched right now.
+    const parked = broker.hop(['test-suite'], 'phase-a', { turn: 'turn-1', withinMs: 50 })
+    tick(50)
+    const ticket = await parked
+    if ('leaseId' in ticket) throw new Error('unreachable')
+    const watching = broker.hop(['test-suite'], 'phase-a', { turn: 'turn-1', withinMs: 50 })
+    await settle()
+    expect(pools.waiting).toBe(2)
+
+    broker.endTurn('phase-a', 'turn-1')
+
+    await expect(watching).rejects.toEqual(new AgentLeaseRefusal('turn_ended'))
+    expect(pools.waiting).toBe(0)
+    // The parked one's client comes back to a refusal, not a fresh place in line.
+    await expect(
+      broker.hop(['test-suite'], 'phase-a', {
+        turn: 'turn-1',
+        waitToken: ticket.waitToken,
+        withinMs: 50,
+      }),
+    ).rejects.toMatchObject({ code: 'turn_ended' })
+    expect(pools.waiting).toBe(0)
+    broker.release(holder.leaseId)
+  })
+
+  it('releases a lease the session still held, and leaves its other sessions and nodes alone', async () => {
+    const { broker, pools, journal } = rig()
+    const ended = await broker.acquire(['test-suite'], 'phase-a', { turn: 'turn-1', pid: 41 })
+    const next = broker.hop(['test-suite'], 'phase-a', { turn: 'turn-2', withinMs: 50 })
+    const elsewhere = broker.hop(['test-suite'], 'phase-b', { turn: 'turn-1', withinMs: 50 })
+    await settle()
+
+    broker.endTurn('phase-a', 'turn-1')
+    await settle()
+
+    // The first session's lease is gone, from the pool and the journal both,
+    // and its renewal now fails — which is how its client stops the command.
+    expect(broker.renew(ended.leaseId)).toBeNull()
+    expect(journal.leases().map((row) => row.lease_id)).not.toContain(ended.leaseId)
+    // The node's next session takes the slot it freed; another node's wait,
+    // even one carrying the same turn id, is untouched.
+    const granted = await next
+    if (!('leaseId' in granted)) throw new Error('the next session was not granted')
+    expect(pools.held('test-suite')).toBe(1)
+    expect(pools.waiting).toBe(1)
+    broker.release(granted.leaseId)
+    expect('leaseId' in (await elsewhere)).toBe(true)
+  })
+})
+
+describe('a pause, from the queue’s side', () => {
+  it('fails every queued wait with the drain’s code and refuses new ones, leaving held leases alone', async () => {
+    const { broker, pools, tick } = rig()
+    const holder = await broker.acquire(['test-suite'], 'phase-a', { turn: 'turn-1' })
+
+    // Two waits parked between hops: the clients are asleep when the pause lands.
+    const b = broker.hop(['test-suite'], 'phase-b', { withinMs: 50 })
+    const c = broker.hop(['test-suite'], 'phase-c', { withinMs: 50 })
+    tick(50)
+    const ticket = await b
+    await c
+    if ('leaseId' in ticket) throw new Error('unreachable')
+    expect(pools.waiting).toBe(2)
+
+    broker.halt('run_pausing')
+
+    expect(pools.waiting).toBe(0)
+    // A client waking up with its token is told about the pause, not re-queued.
+    await expect(
+      broker.hop(['test-suite'], 'phase-b', { waitToken: ticket.waitToken, withinMs: 50 }),
+    ).rejects.toMatchObject({ code: 'run_pausing' })
+    await expect(broker.hop(['test-suite'], 'phase-d', { withinMs: 50 })).rejects.toEqual(
+      new AgentLeaseRefusal('run_pausing'),
+    )
+    await expect(broker.acquire(['test-suite'], 'phase-d')).rejects.toMatchObject({ code: 'run_pausing' })
+
+    // The command under a held lease is a step in flight: it keeps its lease.
+    expect(broker.renew(holder.leaseId)).not.toBeNull()
+    expect(pools.held('test-suite')).toBe(1)
+    broker.release(holder.leaseId)
+  })
+
+  it('wakes a hop being watched at the moment of the pause rather than at the end of its window', async () => {
+    const { broker } = rig()
+    await broker.acquire(['test-suite'], 'phase-a')
+    const watching = broker.hop(['test-suite'], 'phase-b', { withinMs: 60_000 })
+    await settle()
+
+    broker.halt('run_pausing')
+
+    await expect(watching).rejects.toMatchObject({ code: 'run_pausing' })
+  })
+})
+
+describe('the holder index', () => {
+  it('names each live lease with its node, session and process, and forgets it on release', async () => {
+    const { broker } = rig()
+    const grant = await broker.acquire(['test-suite'], 'phase-a', { turn: 'turn-1', pid: 4242 })
+    expect(broker.held()).toEqual([
+      {
+        leaseId: grant.leaseId,
+        holderNode: 'phase-a',
+        resources: ['test-suite'],
+        turn: 'turn-1',
+        pid: 4242,
+      },
+    ])
+    broker.release(grant.leaseId)
+    expect(broker.held()).toEqual([])
   })
 })
 

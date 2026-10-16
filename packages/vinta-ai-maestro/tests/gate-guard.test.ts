@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { checkGateGuard } from '../src/doctor/index.ts'
 import { createGateGuard } from '../src/guard/guard.ts'
 import { guardHookMain } from '../src/guard/hook.ts'
-import { checkCommand, shellLineOf } from '../src/guard/match.ts'
+import { checkCommand, guardReason, shellLineOf } from '../src/guard/match.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 
@@ -63,6 +63,27 @@ describe('checkCommand', () => {
     expect(checkCommand(wf, 'vinta-ai-maestro with test-suite -- uv run mypy .')).toEqual({ rule: 'gate', gate: 'types' })
   })
 
+  /**
+   * `with test-suite -- vinta-ai-maestro gate unit` deadlocked a run for
+   * fifty-five minutes: `with` held the only slot, and the gate queued for it.
+   */
+  it('refuses the gate verb inside `with`, and tells the agent to run it on its own', () => {
+    const hit = checkCommand(wf, 'vinta-ai-maestro with test-suite -- vinta-ai-maestro gate unit')
+    expect(hit).toEqual({ rule: 'nested_gate', gate: 'unit', pool: 'test-suite' })
+    expect(checkCommand(wf, "npx vinta-ai-maestro with test-suite -- 'npx vinta-ai-maestro gate types'")).toEqual({
+      rule: 'nested_gate',
+      gate: 'types',
+      pool: 'test-suite',
+    })
+    expect(checkCommand(wf, 'cd api && vinta-ai-maestro with test-suite -- vinta-ai-maestro gate unit &')).toMatchObject({
+      rule: 'nested_gate',
+    })
+    if (hit === null) throw new Error('unreachable')
+    const reason = guardReason(hit)
+    expect(reason).toContain('run `vinta-ai-maestro gate unit` on its own')
+    expect(reason).toContain('takes its own leases')
+  })
+
   it('lets the verbs themselves, and everything unrelated, through', () => {
     expect(checkCommand(wf, 'vinta-ai-maestro gate unit')).toBeNull()
     expect(checkCommand(wf, 'git diff --stat')).toBeNull()
@@ -97,6 +118,16 @@ describe('the daemon side', () => {
     const rows = journal.events('run-1').filter((event) => event.type === 'bare_gate_blocked')
     expect(rows.map((row) => row.payload)).toEqual([{ rule: 'gate', gate: 'types', harness: 'claude-code' }])
     expect(JSON.stringify(rows)).not.toContain('mypy')
+
+    // The nested form is journalled as what it is, with the gate and pool ids.
+    expect(guard.check({ holderNode: 'p1', command: 'vinta-ai-maestro with test-suite -- vinta-ai-maestro gate unit' }).allow).toBe(false)
+    expect(
+      journal
+        .events('run-1')
+        .filter((event) => event.type === 'bare_gate_blocked')
+        .map((row) => row.payload)
+        .at(-1),
+    ).toEqual({ rule: 'nested_gate', gate: 'unit', pool: 'test-suite', harness: 'claude-code' })
 
     // A retune moves what the guard matches.
     current = workflow({ gates: { types: { cmd: 'uv run mypy --strict .' } } })

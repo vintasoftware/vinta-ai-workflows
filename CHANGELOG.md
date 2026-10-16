@@ -1044,6 +1044,37 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the run. A retry sent while the aborted attempt is still winding down is
   applied once it has.
 
+- **`vinta-ai-maestro`: a gate run inside `with` no longer deadlocks every
+  lane.** `vinta-ai-maestro with test-suite -- vinta-ai-maestro gate test`
+  held the only `test-suite` slot while the gate queued for it, and every
+  lane's tests and gates queued behind the pair (55 minutes in one run). The
+  gate guard now refuses `gate` inside `with` and tells the agent to run the
+  gate on its own. The daemon refuses a gate whose resources the asking phase
+  already holds through `with` (`holds_required:<resource>`), naming the
+  process holding them. The agent prompts state the same rule.
+- **`vinta-ai-maestro`: `with` and `gate` say who they are waiting on.** A
+  queued answer names each holder of the resource: the phase, its lane, and
+  how it holds it (`with` with its process id, a gate an agent ran, or the
+  phase's own gate step). When the holder is the asking phase itself, the
+  message says so. It used to say "held by another lane" in exactly that case.
+  `gate` now says "queued" until the gate has its resources and "running"
+  after; it used to say "running" throughout.
+- **`vinta-ai-maestro`: commands left behind by an ended agent session stop
+  holding capacity.** Each agent session gets a turn id
+  (`VINTA_AI_MAESTRO_TURN_ID`), which `with` and `gate` send with every
+  request. When the session ends, the leases its commands hold are released,
+  their queued waits and queued gates are cancelled, and their next request is
+  refused (`turn_ended`). A request for a phase that is not running is refused
+  too (`holder_not_running`). A command backgrounded with `&` used to keep its
+  place in the queue for as long as it lived: one run had nine such waiters,
+  up to 55 minutes old.
+- **`vinta-ai-maestro`: `pause` finishes while an agent waits on a lease or a
+  gate.** A pause (or stop) now answers every queued `with` and `gate` with
+  `run_pausing` (`run_stopping`) and refuses new ones. The CLIs tell the agent
+  to end its turn, which is the step boundary the pause waits for. Commands
+  and gates already running finish as before. The halt log names each node
+  the drain is still waiting on and what it is doing, and
+  `vinta-ai-maestro pause` prints the same list.
 
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when

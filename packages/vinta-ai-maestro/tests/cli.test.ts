@@ -66,6 +66,7 @@ import type { EffectExecutor } from '../src/pipeline/effects.ts'
 import { isWindows } from '../src/platform/platform.ts'
 import {
   MAESTRO_NODE_ENV,
+  MAESTRO_TURN_ENV,
   MAESTRO_RUN_ENV,
   MAESTRO_TOKEN_ENV,
   MAESTRO_URL_ENV,
@@ -553,12 +554,14 @@ describe('vinta-ai-maestro with', () => {
       [MAESTRO_TOKEN_ENV]: process.env[MAESTRO_TOKEN_ENV],
       [MAESTRO_RUN_ENV]: process.env[MAESTRO_RUN_ENV],
       [MAESTRO_NODE_ENV]: process.env[MAESTRO_NODE_ENV],
+      [MAESTRO_TURN_ENV]: process.env[MAESTRO_TURN_ENV],
     }
     Object.assign(process.env, {
       [MAESTRO_URL_ENV]: 'http://127.0.0.1:4321',
       [MAESTRO_TOKEN_ENV]: 'lease-secret',
       [MAESTRO_RUN_ENV]: 'run-1',
       [MAESTRO_NODE_ENV]: 'phase-a',
+      [MAESTRO_TURN_ENV]: 'turn-1',
     })
     try {
       await body()
@@ -709,6 +712,77 @@ describe('vinta-ai-maestro with', () => {
     })
   })
 
+  /**
+   * "Held by another lane" was printed while the asking phase held the lease
+   * itself — `with test-suite -- vinta-ai-maestro gate test` — which is the one
+   * wait that never ends. The daemon names the holder now, and this says it.
+   */
+  it('says who holds the resource, and when it is its own phase', async () => {
+    await leaseEnv(async () => {
+      const bodies: unknown[] = []
+      let attempts = 0
+      const request: typeof fetch = async (_input, init) => {
+        if (init?.method !== 'POST') return Response.json({ ok: true })
+        attempts += 1
+        bodies.push(JSON.parse(String(init.body)))
+        const holders =
+          attempts === 1
+            ? [{ resource: 'test-suite', node: 'phase-b', lane: 'run-1-lane-2', via: 'with', pid: 99 }]
+            : [{ resource: 'test-suite', node: 'phase-a', lane: 'run-1-lane-1', via: 'with', pid: 77 }]
+        return attempts < 3
+          ? Response.json({ waiting: true, waitToken: 'ticket', holders }, { status: 202 })
+          : grant()
+      }
+      const io = recorder()
+
+      const code = await withCommand(['test-suite', '--', 'pnpm', 'test'], io.io, {
+        fetch: request,
+        sleep: async () => {},
+        run: async () => 0,
+      })
+
+      expect(code).toBe(0)
+      const text = io.err.join('\n')
+      expect(text).toContain('"test-suite" is held by phase phase-b (lane run-1-lane-2) through `with` (pid 99)')
+      // Said again when the holder changed, and this time it is the asker.
+      expect(text).toContain('"test-suite" is held by your own phase through `with` (pid 77)')
+      expect(text).not.toContain('another lane')
+      // The session and the process go with every ask.
+      expect(bodies[0]).toMatchObject({ turn: 'turn-1', pid: process.pid })
+    })
+  })
+
+  it('tells the agent to end its turn when the run is pausing, and runs nothing', async () => {
+    await leaseEnv(async () => {
+      let attempts = 0
+      const request: typeof fetch = async (_input, init) => {
+        if (init?.method !== 'POST') return Response.json({ ok: true })
+        attempts += 1
+        return attempts === 1
+          ? Response.json({ waiting: true, waitToken: 'ticket', holders: [] }, { status: 202 })
+          : Response.json({ error: 'run_pausing', issues: null }, { status: 409 })
+      }
+      const io = recorder()
+      const commands: string[] = []
+
+      const code = await withCommand(['test-suite', '--', 'pnpm', 'test'], io.io, {
+        fetch: request,
+        sleep: async () => {},
+        run: async (command) => {
+          commands.push(command)
+          return 0
+        },
+      })
+
+      expect(code).toBe(FAILED)
+      expect(commands).toEqual([])
+      const text = io.err.join('\n')
+      expect(text).toContain('"test-suite" is free, but others queued for it first.')
+      expect(text).toContain('the run is pausing')
+      expect(text).toContain('End your turn now')
+    })
+  })
+
   it('acquires, runs, and releases while keeping the daemon token off output', async () => {
     const prior = {
       url: process.env[MAESTRO_URL_ENV],
@@ -749,6 +823,7 @@ describe('vinta-ai-maestro with', () => {
       expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
         resources: ['test-suite'],
         holderNode: 'phase-a',
+        pid: process.pid,
       })
       expect(io.all().join('\n')).not.toContain('lease-secret')
     } finally {
@@ -813,6 +888,76 @@ describe('vinta-ai-maestro gate', () => {
       }
     }
   }
+
+  it('says queued, naming the holder, until the gate has its pools, and running after', async () => {
+    await gateEnv(async () => {
+      const answers = [
+        Response.json(
+          {
+            waiting: true,
+            gateId: 'unit',
+            state: 'queued',
+            holders: [{ resource: 'test-suite', node: 'phase-b', lane: 'run-1-lane-2', via: 'gate_step' }],
+          },
+          { status: 202 },
+        ),
+        Response.json({ waiting: true, gateId: 'unit', state: 'running' }, { status: 202 }),
+        Response.json({ gateId: 'unit', status: 'passed', exitCode: 0, cached: false, logRef: '/gates/unit.log' }),
+      ]
+      const bodies: unknown[] = []
+      const request: typeof fetch = async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)))
+        return answers.shift() as Response
+      }
+      const io = recorder()
+      process.env[MAESTRO_TURN_ENV] = 'turn-9'
+      try {
+        expect(await gateCommand(['unit'], io.io, { fetch: request, sleep: async () => {} })).toBe(0)
+      } finally {
+        delete process.env[MAESTRO_TURN_ENV]
+      }
+
+      const text = io.err.join('\n')
+      expect(text).toContain(
+        'gate unit is queued, not running yet: "test-suite" is held by phase phase-b (lane run-1-lane-2) at its gate step.',
+      )
+      expect(text).toContain('gate unit is running. Waiting for it.')
+      expect(text.indexOf('queued')).toBeLessThan(text.indexOf('is running'))
+      expect(bodies[0]).toEqual({ gate: 'unit', holderNode: 'phase-a', turn: 'turn-9' })
+    })
+  })
+
+  it('refuses a gate run inside its own phase’s `with`, telling it to run the gate on its own', async () => {
+    await gateEnv(async () => {
+      const request: typeof fetch = async () =>
+        Response.json(
+          {
+            error: 'holds_required:test-suite',
+            issues: null,
+            holders: [{ resource: 'test-suite', node: 'phase-a', lane: 'run-1-lane-1', via: 'with', pid: 4242 }],
+          },
+          { status: 409 },
+        )
+      const io = recorder()
+
+      expect(await gateCommand(['unit'], io.io, { fetch: request, sleep: async () => {} })).toBe(FAILED)
+
+      const text = io.err.join('\n')
+      expect(text).toContain('your phase already holds "test-suite" through `vinta-ai-maestro with` (pid 4242)')
+      expect(text).toContain('run `vinta-ai-maestro gate unit` on its own, not inside `with`')
+    })
+  })
+
+  it('tells the agent to end its turn when the run is pausing', async () => {
+    await gateEnv(async () => {
+      const request: typeof fetch = async () =>
+        Response.json({ error: 'run_pausing', issues: null }, { status: 409 })
+      const io = recorder()
+
+      expect(await gateCommand(['unit'], io.io, { fetch: request, sleep: async () => {} })).toBe(FAILED)
+      expect(io.err.join('\n')).toContain('the run is pausing, so nothing new is granted. End your turn now')
+    })
+  })
 
   it('asks by id and exits with the gate’s own code, saying where the output is', async () => {
     await gateEnv(async () => {
@@ -2726,6 +2871,34 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
     expect(code).toBe(OK)
     expect(requests).toEqual([{ url: 'http://127.0.0.1:9/api/runs/hosted/stop', auth: 'Bearer job-secret' }])
     expect(io.all().join('\n')).not.toContain('job-secret')
+  })
+
+  it('says what a pause is still waiting on, as the job reports it', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'draining')
+    writeJob(dir, { runId: 'draining', pid: 999_996, url: 'http://127.0.0.1:9', token: 't', state: 'running', startedAt: 0 })
+    const io = recorder()
+
+    const code = await pauseCommand(['draining', '--repo', dir], io.io, {
+      alive: () => true,
+      fetch: (async () =>
+        Response.json(
+          {
+            ok: true,
+            waitingOn: [
+              { node: 'a', doing: 'agent_turn', harness: 'claude-code' },
+              { node: 'b', doing: 'gate' },
+            ],
+          },
+          { status: 202 },
+        )) as unknown as typeof fetch,
+    })
+
+    expect(code).toBe(OK)
+    const text = io.out.join('\n')
+    expect(text).toContain('waiting on 2 phase(s):')
+    expect(text).toContain('a  an agent turn (claude-code)')
+    expect(text).toContain('b  a gate, holding its resources')
   })
 
   it('ends a job that will not answer by force, and cancels the run', async () => {
