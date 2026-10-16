@@ -1419,6 +1419,29 @@ describe('the git verbs', () => {
     ])
   })
 
+  /**
+   * The wave's suite is the longest silent stretch of `integrate`: no agent,
+   * minutes of it, and the phase read as frozen. It is a step now, with its
+   * log, inside the node's hold on the worktree.
+   */
+  it('journals the hold on the worktree and the wave gate running in it', async () => {
+    const rig = setup(scopedPeers(renderGate({ exit: 0 })))
+    await work(rig, 'p1', 0)
+    await work(rig, 'p2', 1)
+    await rig.invoke('p1', 'git_merge')
+    await rig.invoke('p2', 'git_merge')
+
+    const rows = rig.journal.integrationTimeline(RUN_ID, 'p2')
+    // Two holds: cutting the phase branch takes the worktree too.
+    expect(rows.map((row) => [row.step, row.outcome])).toEqual([
+      ['hold', 'ok'],
+      ['hold', 'ok'],
+      ['wave_gate', 'ok'],
+    ])
+    expect(rows[2]).toMatchObject({ wave: 1, gate: 'unit', log: expect.stringContaining('wave-1-unit') })
+    expect(rig.journal.integrationWorktree(RUN_ID).holder).toBeNull()
+  })
+
   it('fails the merge when the full form is red, naming the wave and the gate', async () => {
     const rig = setup(scopedPeers(renderGate({ exit: 3 })))
     await work(rig, 'p1', 0)

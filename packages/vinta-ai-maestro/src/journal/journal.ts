@@ -44,12 +44,20 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { type Decision, parseDecision } from '../decisions/index.ts'
 import { computeWaves } from '../graph.ts'
 import type { Workflow } from '../types.ts'
 import { formatIssues, parseWorkflow } from '../validate.ts'
-import type { HumanQuestion, NewEvent, NodeStatus, RunStatus, StoredEvent } from './events.ts'
+import type {
+  HumanQuestion,
+  IntegrationStepKind,
+  IntegrationStepPayload,
+  NewEvent,
+  NodeStatus,
+  RunStatus,
+  StoredEvent,
+} from './events.ts'
 
 export interface RunRow {
   readonly id: string
@@ -78,6 +86,33 @@ export interface NodeRow {
  * is a cache of the log like every other projection here — never a second
  * source of truth.
  */
+/** One step a node took in the integration worktree, as `integrationTimeline` pairs it. */
+export interface IntegrationStepRow {
+  readonly step: IntegrationStepKind
+  readonly branch: string | null
+  readonly incoming: string | null
+  readonly wave: number | null
+  readonly gate: string | null
+  readonly round: number | null
+  readonly log: string | null
+  readonly startedAt: number
+  /** Null while it is still going. */
+  readonly finishedAt: number | null
+  /** `interrupted`: the process holding it ended before it finished. */
+  readonly outcome: 'ok' | 'resolved' | 'failed' | 'interrupted' | null
+}
+
+/** The integration worktree as `integrationWorktree` folds it. */
+export interface IntegrationWorktreeState {
+  readonly holder: string | null
+  /** Epoch ms the holder took it. */
+  readonly since: number | null
+  /** The holder's step in progress, when it is inside one. */
+  readonly step: IntegrationStepRow | null
+  /** Nodes queued behind it, in the order they queued. */
+  readonly queue: readonly string[]
+}
+
 export interface PendingQuestion {
   readonly runId: string
   readonly nodeId: string
@@ -555,6 +590,114 @@ export class Journal {
     return waits
   }
 
+  /** The pipeline state each node last entered (`node_step`), for `status` and the run view. */
+  nodeSteps(runId: string): Map<string, string> {
+    const rows = this.db
+      .prepare("SELECT node_id, payload_json FROM events WHERE run_id = ? AND type = 'node_step' ORDER BY id")
+      .all(runId) as { node_id: string; payload_json: string }[]
+    const steps = new Map<string, string>()
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json) as { state?: string }
+      if (typeof payload.state === 'string') steps.set(row.node_id, payload.state)
+    }
+    return steps
+  }
+
+  /**
+   * What a node has done in the integration worktree this attempt, oldest
+   * first: each `integration_step` paired with its finish, the open one last.
+   *
+   * "This attempt" starts at the node's first `node_step` with a new attempt
+   * number, or the first after the run resumed — an earlier attempt's merges
+   * are not what the phase is doing now. A step a killed process left open is
+   * closed `interrupted` at the next `run_resumed` or `run_ended`.
+   */
+  integrationTimeline(runId: string, nodeId: string): IntegrationStepRow[] {
+    let rows: IntegrationStepRow[] = []
+    let attempt: number | null = null
+    let resumed = false
+    for (const event of this.#integrationEvents(runId)) {
+      if (event.type === 'run_resumed' || event.type === 'run_ended') {
+        rows = rows.map((row) => (row.finishedAt === null ? { ...row, finishedAt: event.ts, outcome: 'interrupted' } : row))
+        resumed = true
+        continue
+      }
+      if (event.nodeId !== nodeId) continue
+      if (event.type === 'node_step') {
+        const next = typeof event.payload['attempt'] === 'number' ? event.payload['attempt'] : null
+        if (attempt === null || next !== attempt || resumed) rows = []
+        attempt = next
+        resumed = false
+        continue
+      }
+      if (event.type === 'integration_step') rows = foldStep(rows, event.payload as unknown as IntegrationStepPayload, event.ts)
+    }
+    return rows
+  }
+
+  /**
+   * The integration worktree now: the node holding it and since when, the
+   * step it is on, and the nodes queued behind it — folded from `hold` steps
+   * and `node_wait`. Empty again whenever the run resumes or ends, because a
+   * hold does not survive the process that took it.
+   */
+  integrationWorktree(runId: string): IntegrationWorktreeState {
+    let holder: { node: string; since: number } | null = null
+    let steps: IntegrationStepRow[] = []
+    const queue = new Map<string, string | null>()
+    for (const event of this.#integrationEvents(runId)) {
+      if (event.type === 'run_resumed' || event.type === 'run_ended') {
+        holder = null
+        steps = []
+        queue.clear()
+        continue
+      }
+      if (event.nodeId === null) continue
+      if (event.type === 'node_wait') {
+        if (event.payload['state'] === 'queued') queue.set(event.nodeId, (event.payload['holder'] as string | null) ?? null)
+        else queue.delete(event.nodeId)
+        continue
+      }
+      if (event.type !== 'integration_step') continue
+      const payload = event.payload as unknown as IntegrationStepPayload
+      if (payload.step === 'hold') {
+        if (payload.state === 'started') {
+          holder = { node: event.nodeId, since: event.ts }
+          steps = []
+        } else if (holder?.node === event.nodeId) {
+          holder = null
+          steps = []
+        }
+        continue
+      }
+      if (holder?.node === event.nodeId) steps = foldStep(steps, payload, event.ts)
+    }
+    const step = [...steps].reverse().find((row) => row.finishedAt === null) ?? null
+    return {
+      holder: holder?.node ?? null,
+      since: holder?.since ?? null,
+      step,
+      queue: [...queue.keys()],
+    }
+  }
+
+  #integrationEvents(
+    runId: string,
+  ): { type: string; nodeId: string | null; ts: number; payload: Record<string, unknown> }[] {
+    const rows = this.db
+      .prepare(
+        'SELECT node_id, type, ts, payload_json FROM events WHERE run_id = ? AND type IN ' +
+          "('node_step', 'integration_step', 'node_wait', 'run_resumed', 'run_ended') ORDER BY id",
+      )
+      .all(runId) as { node_id: string | null; type: string; ts: number; payload_json: string }[]
+    return rows.map((row) => ({
+      type: row.type,
+      nodeId: row.node_id,
+      ts: row.ts,
+      payload: JSON.parse(row.payload_json) as Record<string, unknown>,
+    }))
+  }
+
   /**
    * Nodes the operator paused while they were parked on a question
    * (`Scheduler.pause` — `held`), still held: no answer and no status change
@@ -630,6 +773,16 @@ export class Journal {
 
   close(): void {
     this.db.close()
+  }
+
+  /**
+   * Whether `path` is a file inside this run's own directory. A log path
+   * read back out of an event is served only when it is: the API reads what
+   * the journal points at, and must not read anything else on that word.
+   */
+  ownsRunFile(runId: string, path: string): boolean {
+    const inside = relative(this.runDir(runId), resolve(path))
+    return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)
   }
 
   private runDir(runId: string): string {
@@ -778,6 +931,48 @@ export class Journal {
   private dropQuestion(runId: string, nodeId: string): void {
     this.db.prepare('DELETE FROM questions WHERE run_id = ? AND node_id = ?').run(runId, nodeId)
   }
+}
+
+/**
+ * A `started` step opens a row; a `finished` one closes the newest open row of
+ * the same step — and the same round or gate where the start named one. What
+ * only the finish knows (the gate `verify` found red, its log) is copied on.
+ */
+function foldStep(rows: IntegrationStepRow[], payload: IntegrationStepPayload, ts: number): IntegrationStepRow[] {
+  if (payload.state === 'started') {
+    return [
+      ...rows,
+      {
+        step: payload.step,
+        branch: payload.branch ?? null,
+        incoming: payload.incoming ?? null,
+        wave: payload.wave ?? null,
+        gate: payload.gate ?? null,
+        round: payload.round ?? null,
+        log: payload.log ?? null,
+        startedAt: ts,
+        finishedAt: null,
+        outcome: null,
+      },
+    ]
+  }
+  const index = rows.findLastIndex(
+    (row) =>
+      row.finishedAt === null &&
+      row.step === payload.step &&
+      (row.round === null || row.round === (payload.round ?? null)) &&
+      (row.gate === null || payload.gate === undefined || row.gate === payload.gate),
+  )
+  if (index === -1) return rows
+  const open = rows[index] as IntegrationStepRow
+  const closed: IntegrationStepRow = {
+    ...open,
+    gate: open.gate ?? payload.gate ?? null,
+    log: open.log ?? payload.log ?? null,
+    finishedAt: ts,
+    outcome: payload.outcome ?? 'ok',
+  }
+  return rows.map((row, i) => (i === index ? closed : row))
 }
 
 /** Statuses past which a pending question cannot still be pending. */

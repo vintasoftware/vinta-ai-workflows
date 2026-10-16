@@ -351,6 +351,11 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // until then, for the reason `bindCommitDecision` gives.
     onCommitFailure: (failure) =>
       decideCommit === null ? Promise.resolve('abort' as const) : decideCommit(failure),
+    // Against the node whose turn the merge is: that is the phase the operator
+    // is watching sit in `running`.
+    onStep: (forNode, payload) => {
+      journal.append({ runId, nodeId: forNode, type: 'integration_step', payload })
+    },
     onReclaimed: (merge) => {
       journal.append({
         runId,

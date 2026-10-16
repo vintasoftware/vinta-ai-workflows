@@ -41,6 +41,12 @@ export interface ConflictRequest {
   readonly round: number
   /** The gate the merged tree failed after the previous round, or before any round. */
   readonly redGate?: RedGate
+  /**
+   * The node whose turn this merge is — the phase being based, or the one
+   * building the wave. Not `nodeId` whenever an earlier phase's branch is the
+   * one coming in, and it is the phase the operator is watching.
+   */
+  readonly forNode?: string
 }
 
 /**
@@ -275,7 +281,15 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
           // `attribute` for §7's reason: the operator's steering arrives on this
           // same stream, echoed back by the adapter, and must not be filed as the
           // agent's words.
-          options.record?.(request.nodeId, { ...event, by: attribute(event, by) })
+          const entry = { ...event, by: attribute(event, by) }
+          options.record?.(request.nodeId, entry)
+          // And under the phase whose turn the merge is, when that is another:
+          // a base merge for p5 resolving p3's branch was written only to p3,
+          // finished long ago, while p5 — the phase being watched — showed
+          // nothing at all.
+          if (request.forNode !== undefined && request.forNode !== request.nodeId) {
+            options.record?.(request.forNode, entry)
+          }
         }
       } finally {
         clearTimeout(timer)

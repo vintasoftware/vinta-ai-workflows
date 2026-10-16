@@ -36,6 +36,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { computeWaves } from '../graph.ts'
+import type { IntegrationStepPayload } from '../journal/events.ts'
 import type { RedGate } from '../prompts/index.ts'
 import type { ConflictFixer, ConflictRequest } from './fixer.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
@@ -333,6 +334,13 @@ export interface IntegratorOptions {
    * count and a branch name (§11).
    */
   readonly onConflict?: (conflict: ReportedConflict) => void
+  /**
+   * Each step taken in the worktree — a merge, a fix round, a `verify` — as it
+   * starts and as it finishes, with the node whose turn it is
+   * (`integration_step`). A merge runs no agent of its own, so without this a
+   * phase in `integrate` read as frozen for as long as its merge took.
+   */
+  readonly onStep?: (forNode: string, step: IntegrationStepPayload) => void
   /**
    * Asked what to do when git refuses to commit a resolved merge — a
    * pre-commit hook that fails in the integration worktree, almost always.
@@ -884,6 +892,24 @@ export class Integrator {
     alreadyMerged: readonly string[],
     forNode: string,
   ): Promise<ConflictRecord | null> {
+    const step = { step: 'merge', branch: into, incoming: nodeId } as const
+    this.#options.onStep?.(forNode, { ...step, state: 'started' })
+    try {
+      const record = await this.#mergeOne(into, nodeId, alreadyMerged, forNode)
+      this.#options.onStep?.(forNode, { ...step, state: 'finished', outcome: record === null ? 'ok' : 'resolved' })
+      return record
+    } catch (error) {
+      this.#options.onStep?.(forNode, { ...step, state: 'finished', outcome: 'failed' })
+      throw error
+    }
+  }
+
+  async #mergeOne(
+    into: string,
+    nodeId: string,
+    alreadyMerged: readonly string[],
+    forNode: string,
+  ): Promise<ConflictRecord | null> {
     const cwd = this.#options.integrationPath
     const incoming = this.nodeBranch(nodeId)
     // --no-ff always: a fast-forward erases that this was a separate phase,
@@ -918,7 +944,7 @@ export class Integrator {
       // Already resolved, so 0 rounds: the gates decide, as they would after a
       // fixer. Only a red one reaches the fixer — two migrations on one parent
       // merge cleanly and break together.
-      red = await this.#verify(cwd)
+      red = await this.#verify(cwd, forNode)
       if (red === null) {
         await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'], paths.length > 0)
         return paths.length === 0 ? null : { nodes, paths, rounds: 0 }
@@ -950,9 +976,12 @@ export class Integrator {
     } satisfies Omit<ConflictRequest, 'round'>
 
     for (let round = 1; round <= this.#maxFixRounds; round += 1) {
+      this.#options.onStep?.(forNode, { step: 'fix_round', state: 'started', round, incoming: nodeId })
       try {
-        await this.#options.fixer.fix({ ...request, round, ...(red === null ? {} : { redGate: red }) })
+        await this.#options.fixer.fix({ ...request, round, forNode, ...(red === null ? {} : { redGate: red }) })
+        this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round })
       } catch (error) {
+        this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round, outcome: 'failed' })
         // A fixer that could not run — refused for capacity, a harness that
         // died — has resolved nothing, and the merge it was handed must not
         // outlive it: the next thing to touch this worktree is another
@@ -992,7 +1021,7 @@ export class Integrator {
       // in: a fixer must not be able to dodge the gate by committing its own
       // work, which is the one thing committing early would otherwise buy it.
       // A red gate goes to the next round, named, so the fixer reads why.
-      red = await this.#verify(cwd)
+      red = await this.#verify(cwd, forNode)
       if (red !== null) continue
 
       if (await this.#merging(cwd)) {
@@ -1029,11 +1058,22 @@ export class Integrator {
   }
 
   /** The outer gate on the merged tree: null when green or not configured, else what went red. */
-  async #verify(cwd: string): Promise<RedGate | null> {
+  async #verify(cwd: string, forNode: string): Promise<RedGate | null> {
     if (this.#options.verify === undefined) return null
-    const verdict = await this.#options.verify(cwd)
-    if (verdict === true) return null
-    return verdict === false ? {} : verdict
+    this.#options.onStep?.(forNode, { step: 'verify', state: 'started' })
+    const verdict = await this.#options.verify(cwd).catch((error: unknown) => {
+      this.#options.onStep?.(forNode, { step: 'verify', state: 'finished', outcome: 'failed' })
+      throw error
+    })
+    const red = verdict === true ? null : verdict === false ? {} : verdict
+    this.#options.onStep?.(forNode, {
+      step: 'verify',
+      state: 'finished',
+      outcome: red === null ? 'ok' : 'failed',
+      ...(red?.gateId === undefined ? {} : { gate: red.gateId }),
+      ...(red?.logPath === undefined ? {} : { log: red.logPath }),
+    })
+    return red
   }
 
   /**

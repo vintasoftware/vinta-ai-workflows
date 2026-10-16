@@ -424,6 +424,34 @@ interface RunPayloads {
   }
 }
 
+/** What a node is doing in the integration worktree (`integration_step`). */
+export type IntegrationStepKind =
+  | 'hold'
+  | 'merge'
+  | 'fix_round'
+  | 'verify'
+  | 'wave_gate'
+  | 'push'
+  | 'open_pr'
+
+export interface IntegrationStepPayload {
+  readonly step: IntegrationStepKind
+  readonly state: 'started' | 'finished'
+  /** The branch merged into, built, or pushed. */
+  readonly branch?: string
+  /** The phase whose branch is being merged. */
+  readonly incoming?: string
+  readonly wave?: number
+  /** The gate a `verify` or `wave_gate` step ran — on `verify`, the one that went red. */
+  readonly gate?: string
+  /** A fix round, 1-based. */
+  readonly round?: number
+  /** Where the gate's output is. */
+  readonly log?: string
+  /** On `finished`: `ok`, a conflict a fixer settled (`resolved`), or `failed`. */
+  readonly outcome?: 'ok' | 'resolved' | 'failed'
+}
+
 /**
  * Events about one node. `node_assigned` is a partial patch — the scheduler
  * learns a node's lane, its branch and its harness session id at three
@@ -494,6 +522,27 @@ interface NodePayloads {
     /** The node holding the worktree when this one queued, or null when it was unknown. */
     readonly holder: string | null
   }
+  /**
+   * The pipeline state an attempt at a node entered — `implement`, `gate`,
+   * `review`, `integrate` — written as the state's first effect starts.
+   *
+   * A node's status says `running` from its first turn to its PR, and nothing
+   * else said where in that it was. A phase in `integrate` runs no agent — a
+   * merge, a suite on the merged tree, a push — and read as a frozen phase
+   * with a silent transcript. `attempt` is the one `node_error` counts, so a
+   * reader can tell this attempt's steps from the last one's.
+   */
+  node_step: { readonly state: string; readonly attempt: number }
+  /**
+   * One step of work in the integration worktree, as it starts and as it
+   * finishes, filed against the node whose turn is doing it — the node an
+   * operator is watching, not the incoming phase, which may be long done.
+   *
+   * `hold` brackets the whole time a node holds the worktree; the others are
+   * the steps inside it. Identifiers, a round number and a log path only
+   * (§11): never a gate's output or a conflicted hunk.
+   */
+  integration_step: IntegrationStepPayload
   /**
    * A merge conflict an agent settled, filed against the node whose merge hit
    * it.

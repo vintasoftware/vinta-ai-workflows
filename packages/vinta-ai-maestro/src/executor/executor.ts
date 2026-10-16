@@ -84,7 +84,7 @@ import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipelin
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readVerdict, resolveBrief } from '../prompts/index.ts'
 import { isJudgeGate, type CommandGate, type JudgeGate, type Node, type Workflow } from '../types.ts'
-import type { SystemOneJudge } from '../journal/events.ts'
+import type { IntegrationStepPayload, SystemOneJudge } from '../journal/events.ts'
 import type { SystemOne } from '../system-one/config.ts'
 import {
   judgeCacheKey,
@@ -315,9 +315,9 @@ export class RunEffectExecutor implements EffectExecutor {
       case 'git_merge':
         return await this.#merge(nodeId, params)
       case 'git_push':
-        return await this.#push(nodeId)
+        return await this.#stepped(nodeId, { step: 'push' }, () => this.#push(nodeId))
       case 'open_pr':
-        return await this.#openPr(nodeId, params)
+        return await this.#stepped(nodeId, { step: 'open_pr' }, () => this.#openPr(nodeId, params))
       case 'write_tracking':
         return await this.#writeTracking(nodeId, params)
       case 'await_human':
@@ -956,13 +956,21 @@ export class RunEffectExecutor implements EffectExecutor {
         WAVE_GATE_NODE,
         `wave-${wave}-${gateId}`,
       )
+      // The longest silent stretch of an `integrate` step: a full suite on the
+      // merged tree, with no agent and nothing else to show for minutes.
+      const step = { step: 'wave_gate', wave, gate: gateId, log: logPath } as const
+      this.#step(nodeId, { ...step, state: 'started' })
       const result = await executeGate({
         gateId,
         gate,
         cwd: this.#options.integrationPath,
         env: this.#options.integrationEnv ?? {},
         logPath,
+      }).catch((error: unknown) => {
+        this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
+        throw error
       })
+      this.#step(nodeId, { ...step, state: 'finished', outcome: result.status === 'passed' ? 'ok' : 'failed' })
       const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
       this.#options.journal.append({
         runId: this.#options.runId,
@@ -1468,6 +1476,28 @@ export class RunEffectExecutor implements EffectExecutor {
     return known
   }
 
+  /** One `integration_step` row, filed against the node whose turn it is. */
+  #step(nodeId: string, payload: IntegrationStepPayload): void {
+    this.#options.journal.append({ runId: this.#options.runId, nodeId, type: 'integration_step', payload })
+  }
+
+  /** `work`, bracketed by its step's start and finish. */
+  async #stepped<T>(
+    nodeId: string,
+    step: Omit<IntegrationStepPayload, 'state' | 'outcome'>,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    this.#step(nodeId, { ...step, state: 'started' })
+    try {
+      const result = await work()
+      this.#step(nodeId, { ...step, state: 'finished', outcome: 'ok' })
+      return result
+    } catch (error) {
+      this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
+      throw error
+    }
+  }
+
   /** Serializes work in the single integration worktree. */
   async #integration<T>(
     work: () => Promise<T>,
@@ -1484,9 +1514,15 @@ export class RunEffectExecutor implements EffectExecutor {
     const held = async (): Promise<T> => {
       this.#integrationHolder = nodeId ?? label ?? '?'
       if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'granted', holder)
+      // Who has the worktree, between its steps as well as during them.
+      if (nodeId !== null) this.#step(nodeId, { step: 'hold', state: 'started' })
+      let failed = true
       try {
-        return await work()
+        const result = await work()
+        failed = false
+        return result
       } finally {
+        if (nodeId !== null) this.#step(nodeId, { step: 'hold', state: 'finished', outcome: failed ? 'failed' : 'ok' })
         this.#integrationDepth -= 1
         if (this.#integrationDepth === 0) this.#integrationHolder = null
       }

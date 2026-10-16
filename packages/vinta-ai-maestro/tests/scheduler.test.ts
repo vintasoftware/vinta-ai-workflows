@@ -2128,6 +2128,23 @@ describe('§16 the review', () => {
     expectDrained(r)
   })
 
+  /**
+   * `running` covered a phase from its first turn to its PR, and `integrate`
+   * — a merge and a suite with no agent — read as a frozen phase. Each state is
+   * journalled as its first effect starts, with the attempt it belongs to.
+   */
+  it('journals each pipeline state as the node enters it', async () => {
+    const r = rig(reviewedWorkflow(['review', 'deslop']), { outcomes: APPROVED })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    const steps = r.journal
+      .events('run-1')
+      .flatMap((event) => (event.type === 'node_step' ? [event.payload] : []))
+    expect(steps.map((step) => step.state)).toEqual(['implement', 'gate', 'review', 'polish', 'verify', 'integrate'])
+    expect(new Set(steps.map((step) => step.attempt))).toEqual(new Set([1]))
+    expect(r.journal.nodeSteps('run-1').get('a')).toBe('integrate')
+  })
+
   it('runs the polish chores only once the review approved, and gates what they leave', async () => {
     const r = rig(reviewedWorkflow(['review', 'deslop']), { outcomes: APPROVED })
 

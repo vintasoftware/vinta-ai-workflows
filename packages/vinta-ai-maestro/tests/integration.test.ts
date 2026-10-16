@@ -1024,6 +1024,75 @@ describe('merge conflicts', () => {
     expect(recorded.every((line) => line.entry.by?.role === 'conflict-fixer')).toBe(true)
   })
 
+  /**
+   * A base merge for `c` that resolves `b`'s branch was written only to `b`,
+   * which finished long ago, while `c` — the phase being watched, sitting in
+   * `running` — showed nothing.
+   */
+  it('records the fixer’s turn under the phase being based too', async () => {
+    const repo = await conflictingPair()
+    const recorded: { nodeId: string; entry: TranscriptEntry }[] = []
+    const agent = createAgentConflictFixer({
+      adapter: new MockAdapter(),
+      model: 'mock-model',
+      record: (nodeId, entry) => recorded.push({ nodeId, entry }),
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(async (request) => {
+        await agent.fix(request)
+        await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+      }),
+    })
+
+    await integrator.prepareBase('c')
+
+    const into = (nodeId: string) => recorded.filter((line) => line.nodeId === nodeId).map((line) => line.entry)
+    expect(into('c').length).toBeGreaterThan(0)
+    expect(into('c')).toEqual(into('b'))
+  })
+
+  /** What a phase in `integrate` is doing, step by step, filed against it. */
+  it('reports each step it takes, against the node whose turn it is', async () => {
+    const repo = await conflictingPair()
+    const steps: { node: string; step: string; state: string; round?: number; outcome?: string; gate?: string }[] = []
+    let verified = 0
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+      }),
+      verify: async () => (verified++ === 0 ? RED_GATE : true),
+      onStep: (forNode, payload) =>
+        steps.push({
+          node: forNode,
+          step: payload.step,
+          state: payload.state,
+          ...(payload.round === undefined ? {} : { round: payload.round }),
+          ...(payload.outcome === undefined ? {} : { outcome: payload.outcome }),
+          ...(payload.gate === undefined ? {} : { gate: payload.gate }),
+        }),
+    })
+
+    await integrator.prepareBase('c')
+
+    expect(new Set(steps.map((step) => step.node))).toEqual(new Set(['c']))
+    expect(steps.map(({ node: _, ...rest }) => rest)).toEqual([
+      { step: 'merge', state: 'started' },
+      { step: 'fix_round', state: 'started', round: 1 },
+      { step: 'fix_round', state: 'finished', round: 1 },
+      { step: 'verify', state: 'started' },
+      { step: 'verify', state: 'finished', outcome: 'failed', gate: 'test' },
+      { step: 'fix_round', state: 'started', round: 2 },
+      { step: 'fix_round', state: 'finished', round: 2 },
+      { step: 'verify', state: 'started' },
+      { step: 'verify', state: 'finished', outcome: 'ok' },
+      { step: 'merge', state: 'finished', outcome: 'resolved' },
+    ])
+  })
+
   it('sends a resolution that fails the gate back to the fixer', async () => {
     const repo = await conflictingPair()
     let attempt = 0

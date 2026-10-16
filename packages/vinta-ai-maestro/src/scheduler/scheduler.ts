@@ -674,6 +674,8 @@ interface NodeState {
   unattendedAnswer: string | null
   /** Sets the unattended timer going again, once it fired on a held node and stood down. */
   rearm: (() => void) | null
+  /** The pipeline state this attempt is in, as last journalled (`node_step`). Null before its first. */
+  step: string | null
   /**
    * Unattended answers given this attempt, by the effect that asked. A plan's
    * `unattended_answer` may be a list — its nth entry is the nth answer, and the
@@ -1072,6 +1074,7 @@ export class Scheduler {
       parkedEffectId: null,
       unattendedAnswer: null,
       rearm: null,
+      step: null,
       unattendedGiven: new Map(),
       fixRounds: 0,
       lastGate: null,
@@ -2336,6 +2339,7 @@ export class Scheduler {
     state.lastGate = null
     state.lastRed = null
     state.lastVerdict = null
+    state.step = null
     if (state.crew === null) state.sessions.clear()
     else this.#ledgerFor(state.crew.member).clear()
   }
@@ -2830,6 +2834,19 @@ export class Scheduler {
         // gate, a chore, a question. Shut under a halt.
         if (this.#halt !== null) throw new Halted()
         const verb = invocation.effect.definitionId
+        // The state's first effect is the moment it is entered; the
+        // interpreter reports a state only once its effects are done, which
+        // is too late to say what the node is doing now.
+        const origin = invocation.origin
+        if (origin.kind === 'onEnter' && origin.stateId !== state.step) {
+          state.step = origin.stateId
+          this.#options.journal.append({
+            runId: this.#options.runId,
+            nodeId: state.node.id,
+            type: 'node_step',
+            payload: { state: origin.stateId, attempt: state.retries + state.autoRetries + 1 },
+          })
+        }
         // Past setup: from here a failure is the phase's, not the machinery's.
         if (verb === 'spawn_agent' || verb === 'run_chore') state.agentRan = true
         if (verb === 'spawn_agent') return this.#observe(state, await this.#spawnTurn(state, invocation))

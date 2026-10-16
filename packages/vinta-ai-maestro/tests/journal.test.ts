@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { IntegrationStepPayload } from '../src/journal/events.ts'
 import { Journal, openJournal } from '../src/journal/journal.ts'
 import type { Workflow } from '../src/types.ts'
 import { parseWorkflow } from '../src/validate.ts'
@@ -452,5 +453,90 @@ describe('integration waits', () => {
       journal.close()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('integration steps', () => {
+  let dir: string
+  let journal: Journal
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-journal-'))
+    journal = openJournal(dir)
+    journal.createRun('r', golden())
+  })
+
+  afterEach(() => {
+    journal.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const nodeStep = (nodeId: string, state: string, attempt = 1) =>
+    journal.append({ runId: 'r', nodeId, type: 'node_step', payload: { state, attempt } })
+  const step = (nodeId: string, payload: IntegrationStepPayload) =>
+    journal.append({ runId: 'r', nodeId, type: 'integration_step', payload })
+
+  it('pairs each step with its finish, and keeps the open one open', () => {
+    nodeStep('p2', 'integrate')
+    step('p2', { step: 'hold', state: 'started' })
+    step('p2', { step: 'merge', state: 'started', branch: 'plan/x/wave-1', incoming: 'p2' })
+    step('p2', { step: 'fix_round', state: 'started', round: 1, incoming: 'p2' })
+    step('p2', { step: 'fix_round', state: 'finished', round: 1 })
+    step('p2', { step: 'verify', state: 'started' })
+    step('p2', { step: 'verify', state: 'finished', outcome: 'failed', gate: 'test', log: '/l/test.log' })
+    step('p2', { step: 'merge', state: 'finished', outcome: 'resolved' })
+    step('p2', { step: 'wave_gate', state: 'started', wave: 1, gate: 'test', log: '/l/wave-1-test.log' })
+
+    const rows = journal.integrationTimeline('r', 'p2')
+    expect(rows.map((row) => [row.step, row.outcome])).toEqual([
+      ['hold', null],
+      ['merge', 'resolved'],
+      ['fix_round', 'ok'],
+      ['verify', 'failed'],
+      ['wave_gate', null],
+    ])
+    // What only the finish knew is on the row.
+    expect(rows[3]).toMatchObject({ gate: 'test', log: '/l/test.log' })
+
+    expect(journal.integrationWorktree('r')).toMatchObject({
+      holder: 'p2',
+      step: { step: 'wave_gate', gate: 'test', wave: 1 },
+      queue: [],
+    })
+    expect(journal.nodeSteps('r').get('p2')).toBe('integrate')
+  })
+
+  it('starts a node’s timeline again on a new attempt, and after a resume', () => {
+    nodeStep('p2', 'implement', 1)
+    step('p2', { step: 'merge', state: 'started', branch: 'plan/x/integ-p2', incoming: 'p1' })
+    step('p2', { step: 'merge', state: 'finished', outcome: 'ok' })
+    nodeStep('p2', 'gate', 1)
+    expect(journal.integrationTimeline('r', 'p2')).toHaveLength(1)
+
+    nodeStep('p2', 'implement', 2)
+    expect(journal.integrationTimeline('r', 'p2')).toEqual([])
+
+    step('p2', { step: 'hold', state: 'started' })
+    step('p2', { step: 'merge', state: 'started', branch: 'plan/x/integ-p2', incoming: 'p1' })
+    journal.append({ runId: 'r', type: 'run_resumed', payload: { attempt: 2 } })
+    // A killed process's open steps are closed, not left running forever.
+    expect(journal.integrationTimeline('r', 'p2').map((row) => row.outcome)).toEqual(['interrupted', 'interrupted'])
+    expect(journal.integrationWorktree('r').holder).toBeNull()
+    nodeStep('p2', 'implement', 2)
+    expect(journal.integrationTimeline('r', 'p2')).toEqual([])
+  })
+
+  it('names the holder between its steps, and who is queued behind it', () => {
+    step('p1', { step: 'hold', state: 'started' })
+    step('p1', { step: 'merge', state: 'started', branch: 'plan/x/wave-1', incoming: 'p1' })
+    step('p1', { step: 'merge', state: 'finished', outcome: 'ok' })
+    journal.append({ runId: 'r', nodeId: 'p3', type: 'node_wait', payload: { on: 'integration_worktree', state: 'queued', holder: 'p1' } })
+
+    expect(journal.integrationWorktree('r')).toMatchObject({ holder: 'p1', step: null, queue: ['p3'] })
+
+    step('p1', { step: 'hold', state: 'finished' })
+    journal.append({ runId: 'r', nodeId: 'p3', type: 'node_wait', payload: { on: 'integration_worktree', state: 'granted', holder: 'p1' } })
+    step('p3', { step: 'hold', state: 'started' })
+    expect(journal.integrationWorktree('r')).toMatchObject({ holder: 'p3', queue: [] })
   })
 })
