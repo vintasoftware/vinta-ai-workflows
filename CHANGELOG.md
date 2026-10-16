@@ -891,6 +891,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a claude-code review no longer loses a reviewer answer
+  that comes back early.** When a reviewer resumed with `SendMessage` answered
+  while the agent was still writing its last message, the session ended at the
+  turn's `result` and killed the turn the CLI starts to hand over the answer.
+  The review then stated no verdict and went to the operator as `unapproved`.
+  The session now waits for that turn, for at most a minute of silence.
+
 - **`vinta-ai-maestro`: a turn the agent never took part in is no longer read
   as work.** A session that ended with no text and no tool call — observed when
   a resumed claude-code session closed a replay of killed background tasks

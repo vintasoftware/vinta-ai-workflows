@@ -1154,6 +1154,48 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
       expect(usage[1]?.costUsd).toBeCloseTo(0.03)
     })
 
+    /**
+     * Both orderings recorded from 2.1.285 with a reviewer resumed by
+     * `SendMessage`. When it answers while the agent is writing its last
+     * message, the list is empty by the `result` and the answer arrives in a
+     * turn the CLI starts on its own; ended at the `result`, that turn — the
+     * verdict — was killed with the process.
+     */
+    const toolResult = JSON.stringify({
+      type: 'user',
+      parent_tool_use_id: null,
+      message: { content: [{ type: 'tool_result', tool_use_id: 'send', content: 'Resuming agent' }] },
+    })
+
+    it('waits for the turn that delivers work which finished before the result', async () => {
+      const seen = await spawnFake([
+        INIT,
+        running('reviewer'),
+        toolResult,
+        running(),
+        notified('reviewer'),
+        text('Waiting on the reviewer.'),
+        result(),
+        INIT,
+        text('VERDICT: pass'),
+        result({ num_turns: 1 }),
+      ])
+
+      expect(seen.filter((event) => event.type === 'session_ended')).toHaveLength(1)
+      expect(seen.at(-2)).toEqual({ type: 'assistant_text', text: 'VERDICT: pass' })
+    })
+
+    it('does not wait for work the agent already read inside its turn', async () => {
+      const started = Date.now()
+      const seen = await spawnFake(
+        [INIT, running('reviewer'), running(), notified('reviewer'), toolResult, text('VERDICT: pass'), result()],
+        { lingerMs: 10_000 },
+      )
+
+      expect(Date.now() - started).toBeLessThan(5_000)
+      expect(seen.at(-1)).toEqual({ type: 'session_ended', result: 'ok' })
+    })
+
     it('counts a backgrounded task from its start frame when the CLI sends no list', async () => {
       const seen = await spawnFake([
         INIT,
