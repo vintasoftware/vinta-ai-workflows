@@ -23,6 +23,7 @@ import { openJournal } from '../src/journal/journal.ts'
 import type { ProjectSpec } from '../src/lanes/pool.ts'
 import { WorktreeSummarySchema, writeSummary, type WorktreeSummaryInput } from '../src/lanes/summary.ts'
 import { planTeardown } from '../src/lanes/teardown.ts'
+import { shellQuote } from '../src/platform/platform.ts'
 import { parseWorkflow } from '../src/validate.ts'
 
 const temps: string[] = []
@@ -149,6 +150,15 @@ async function summary(dir: string, name: string, extra: Partial<WorktreeSummary
 
 const summaryOf = (dir: string, name: string): string => join(summaryDirOf(dir), `${name}.yaml`)
 
+/**
+ * The command lines as this machine's shell gets them: single quotes on POSIX,
+ * double quotes on Windows. The tests check what is quoted, not how.
+ */
+const q = (value: string): string => shellQuote(value)
+const down = (project: string): string => `docker compose -p ${q(project)} down`
+const VOLUME_RM = `docker volume rm --force ${q('repo_over-lane-1_pgdata')}`
+const DROP_ARGS = `-h ${q('db.local')} -p ${q('5432')} --if-exists ${q('app_wt_over_lane_1')}`
+
 describe('purge --lanes keeps what a run can still resume', () => {
   it.each(['paused', 'failed', 'interrupted'] as const)(
     'keeps the lanes of a %s run, its integration worktree included, from a bulk purge',
@@ -269,9 +279,9 @@ describe('purge --lanes tears down what a lane made outside git', () => {
     expect(stub.ran).toEqual([])
     expect(existsSync(path)).toBe(true)
     const text = io.out.join('\n')
-    expect(text).toContain("docker compose -p 'repo_over-lane-1' down")
-    expect(text).toContain("docker volume rm --force 'repo_over-lane-1_pgdata'")
-    expect(text).toContain("dropdb -h 'db.local' -p '5432' --if-exists 'app_wt_over_lane_1'")
+    expect(text).toContain(down('repo_over-lane-1'))
+    expect(text).toContain(VOLUME_RM)
+    expect(text).toContain(`dropdb ${DROP_ARGS}`)
     expect(text).toContain('reset service cache namespace over-lane-1 (its reset_cmd)')
     // A reset_cmd is the project's own text and may carry a credential.
     expect(text).not.toContain('s3cret')
@@ -288,10 +298,10 @@ describe('purge --lanes tears down what a lane made outside git', () => {
     expect(await purgeCommand(['--repo', dir, '--lanes', '--yes'], recorder().io, { exec: stub.exec })).toBe(OK)
 
     expect(stub.ran).toEqual([
-      "docker compose -p 'repo_over-lane-1' down",
-      "docker volume rm --force 'repo_over-lane-1_pgdata'",
+      down('repo_over-lane-1'),
+      VOLUME_RM,
       'redis-cli -u redis://:s3cret@h/0 flushdb',
-      "dropdb -h 'db.local' -p '5432' --if-exists 'app_wt_over_lane_1'",
+      `dropdb ${DROP_ARGS}`,
     ])
     expect(existsSync(path)).toBe(false)
     expect(existsSync(summaryOf(dir, 'over-lane-1'))).toBe(false)
@@ -310,7 +320,7 @@ describe('purge --lanes tears down what a lane made outside git', () => {
     await purgeCommand(['--repo', dir, '--lanes', '--yes'], recorder().io, { exec: stub.exec })
 
     expect(stub.ran).toEqual([
-      "docker compose exec -T db dropdb -h 'db.local' -p '5432' --if-exists 'app_wt_over_lane_1'",
+      `docker compose exec -T db dropdb ${DROP_ARGS}`,
     ])
   })
 
@@ -326,7 +336,7 @@ describe('purge --lanes tears down what a lane made outside git', () => {
     expect(stub.ran).toHaveLength(4)
     expect(existsSync(path)).toBe(false)
     expect(existsSync(summaryOf(dir, 'over-lane-1'))).toBe(true)
-    expect(io.err.join('\n')).toContain("dropdb -h 'db.local' -p '5432' --if-exists 'app_wt_over_lane_1' (lane over-lane-1)")
+    expect(io.err.join('\n')).toContain(`dropdb ${DROP_ARGS} (lane over-lane-1)`)
   })
 
   it('tears down nothing for a lane it keeps', async () => {
@@ -352,7 +362,7 @@ describe('orphan summaries', () => {
 
     expect(await purgeCommand(['--repo', dir, '--lanes', '--yes'], io.io, { exec: stub.exec })).toBe(OK)
 
-    expect(stub.ran).toEqual(["docker compose -p 'repo_over-lane-2' down"])
+    expect(stub.ran).toEqual([down('repo_over-lane-2')])
     expect(existsSync(summaryOf(dir, 'over-lane-2'))).toBe(false)
     expect(existsSync(join(summaryDirOf(dir), 'over-lane-2.docker-compose.override.yml'))).toBe(false)
   })
