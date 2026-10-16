@@ -283,6 +283,8 @@ function sessionReason(reason: string): string {
       return 'The previous turn ended without the agent doing anything. It was retried cold.'
     case 'no_slot':
       return 'This step asked for a fresh session.'
+    case 'operator_fresh':
+      return 'The operator dropped the session, so this turn started over.'
     default:
       return reason
   }

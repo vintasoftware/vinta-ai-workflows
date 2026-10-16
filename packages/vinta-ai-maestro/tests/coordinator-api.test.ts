@@ -104,6 +104,9 @@ function actorControl(): RunControl & { readonly calls: ActorCall[] } {
     abortNode: (nodeId, actor) => {
       calls.push({ op: 'abortNode', nodeId, actor })
     },
+    freshSession: (nodeId, actor) => {
+      calls.push({ op: 'freshSession', nodeId, actor })
+    },
   }
 }
 
@@ -201,6 +204,7 @@ describe('who is asking', () => {
     { path: 'redirect', body: { instruction: 'use the fixture' }, op: 'redirect' },
     { path: 'pause', body: {}, op: 'pause' },
     { path: 'abort', body: {}, op: 'abortNode' },
+    { path: 'fresh', body: {}, op: 'freshSession' },
     { path: 'answer', body: { answer: 'retry' }, op: 'answer' },
   ] as const
 

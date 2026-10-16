@@ -597,6 +597,12 @@ interface NodeState {
   bodyActive: boolean
   /** A retry arrived while an aborted body was still unwinding; it is applied as the body exits. */
   retryQueued: boolean
+  /**
+   * The operator asked for a fresh session (`freshSession`): the node's next
+   * turn starts cold whatever its ledger would have continued, journalled
+   * `operator_fresh`.
+   */
+  freshRequested: boolean
   /** The effect the node is parked on, for the answer event that closes it. */
   parkedEffectId: string | null
   /**
@@ -984,6 +990,7 @@ export class Scheduler {
       aborted: false,
       bodyActive: false,
       retryQueued: false,
+      freshRequested: false,
       parkedEffectId: null,
       unattendedAnswer: null,
       unattendedGiven: new Map(),
@@ -1517,6 +1524,35 @@ export class Scheduler {
     // is how it reaches the abort check and stops stepping.
     if (resume !== null) resume({})
     return 'sent'
+  }
+
+  /**
+   * Drops the node's agent session, so its next turn starts cold, with the
+   * whole brief rather than a delta (§15). Journalled `operator_fresh` on that
+   * turn's `node_session` row.
+   *
+   * The operator's way out of a session gone wrong — an agent replaying work
+   * its last process was killed under, or carrying on with the phase before —
+   * that does not cost the attempt. The only route used to be `abort`, which
+   * throws the attempt away with the session.
+   *
+   * It does not interrupt a live turn: one cut short moves the pipeline on
+   * with whatever the turn left. Pair it with `redirect` to end the turn now.
+   * An answer to an agent's own question still goes to the session that asked
+   * it; the turn after that is the cold one. A settled node has no next turn,
+   * and a `retry` is cold anyway, so both are `ignored`.
+   */
+  freshSession(nodeId: string, actor: Actor = 'operator'): OperatorDelivery {
+    const state = this.#stateOf(nodeId)
+    if (this.#settledNode(state)) return this.#operation(state, 'fresh', undefined, 'ignored', actor)
+    state.freshRequested = true
+    // The takeover handoff too: it is a session id the next spawn would resume.
+    state.resumeSessionId = null
+    // Every slot, not only the one the next turn uses: a chore slot continued
+    // later would carry the same context forward.
+    this.#ledgerOf(state).clear()
+    this.#log.info('node.fresh_session', { node: state.node.id })
+    return this.#operation(state, 'fresh', undefined, 'queued', actor)
   }
 
   /** Node statuses as of now. A projection of the same facts the journal holds. */
@@ -3306,6 +3342,22 @@ export class Scheduler {
    * its own rather than through whichever schedule a run happens to produce.
    */
   #sessionPlan(
+    state: NodeState,
+    params: Readonly<Record<string, unknown>>,
+    adapter: HarnessAdapter,
+  ): SessionPlan {
+    const plan = this.#plannedSession(state, params, adapter)
+    // The operator's `fresh`, on the first turn that would have had a session
+    // to continue. Over the plan rather than inside `planSession`: the ledger
+    // is already cleared, and what this adds is the reason, and the one case
+    // the ledger cannot carry — a member's warm session a pending phase would
+    // otherwise have been handed.
+    if (!state.freshRequested || plan.slot === null) return plan
+    state.freshRequested = false
+    return { ...plan, resumeSessionId: null, continuation: false, crossPhase: false, reason: 'operator_fresh', turns: 1 }
+  }
+
+  #plannedSession(
     state: NodeState,
     params: Readonly<Record<string, unknown>>,
     adapter: HarnessAdapter,

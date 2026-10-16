@@ -41,6 +41,10 @@ export const NODE_USAGE = `usage: vinta-ai-maestro node <op> <runId> <phase> [te
                                           A run left with nothing to run stays
                                           up for retry; stop it to end it.
   retry    <runId> <phase>                Run a failed phase again.
+  fresh    <runId> <phase>                Drop its agent session: the next turn
+                                          starts cold, with the whole brief.
+                                          The current turn is not stopped; use
+                                          redirect for that.
   answer   <runId> <phase> <choice>       Answer the question it is parked on.
            [--answers <json>]             An agent's questions take one JSON
                                           array of answers instead.
@@ -86,6 +90,7 @@ const NODE_OPS = {
   pause: { path: 'pause', field: null },
   abort: { path: 'abort', field: null },
   retry: { path: 'retry', field: null },
+  fresh: { path: 'fresh', field: null },
   answer: { path: 'answer', field: 'answer' },
 } as const
 

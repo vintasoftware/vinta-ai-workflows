@@ -57,7 +57,7 @@ export interface HumanQuestion {
 export type HumanAnswer = string | number | boolean | null
 
 /** The §9 operations that steer a node. `take over` is a PTY attach, not an event. */
-export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort'
+export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'abort' | 'fresh'
 
 /**
  * Which edge of a gate-pool acquisition a `gate_pool` event marks.
@@ -152,6 +152,12 @@ export type SessionFreshReason =
    * turn it took — a cold start is cheaper than a poisoned one.
    */
   | 'prior_phase_failed'
+  /**
+   * An operator (or the coordinator) dropped the node's session (`node
+   * fresh`): its next turn starts cold whatever the ledger would have
+   * continued.
+   */
+  | 'operator_fresh'
 
 /**
  * Why a phase went to somebody other than the member the plan named. A closed

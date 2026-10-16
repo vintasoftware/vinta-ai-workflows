@@ -32,6 +32,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `node fresh <run> <phase>` drops a phase's agent
+  session without failing the attempt.** The phase's next turn starts cold with
+  the whole brief, journalled `node_session` `reason: operator_fresh`; the turn
+  in flight is not stopped (pair it with `redirect` for that). It is the way out
+  of a session gone wrong — an agent replaying killed work or carrying on with
+  the previous phase — that used to cost an `abort`. Also `POST
+  /api/runs/:run/nodes/:node/fresh`, and the run coordinator can use it. The
+  post-mortem's `operations.node_operations[].op` gains `fresh` (additive, in
+  `postmortem.v1.schema.json`).
+
 - **`vinta-ai-maestro`: a busy crew member is replaced, not borrowed
   (`defaults.max_spare_crew`, default 2).** When the member a phase is planned
   for — or the one an operator picked with `retry with <member>` — is busy, or

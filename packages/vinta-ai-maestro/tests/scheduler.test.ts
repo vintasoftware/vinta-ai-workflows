@@ -2694,6 +2694,34 @@ describe('session slots', () => {
     ])
   })
 
+  it('starts the next turn cold when the operator drops the session', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's first turn to open")
+
+    expect(r.scheduler.freshSession('a')).toBe('queued')
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // The turn in flight was not cut short; the next one did not continue it.
+    expect(r.adapter.spawned.map((task) => task.resumeSessionId)).toEqual([undefined, undefined])
+    expect(sessionsOf(r, 'a')).toEqual([
+      { slot: 'main', disposition: 'fresh', reason: 'no_prior_session' },
+      { slot: 'main', disposition: 'fresh', reason: 'operator_fresh' },
+    ])
+    expect(operationsOf(r, 'a')).toEqual([{ op: 'fresh', delivery: 'queued' }])
+    expectDrained(r)
+  })
+
+  it('ignores a dropped session on a settled node: there is no next turn', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'reuse' })]))
+    await r.scheduler.run()
+
+    expect(r.scheduler.freshSession('a')).toBe('ignored')
+    expect(operationsOf(r, 'a')).toEqual([{ op: 'fresh', delivery: 'ignored' }])
+  })
+
   it('keeps a turn on another slot out of the implementer’s session', async () => {
     const r = rig(makeWorkflow([node('a', [], { pipeline: 'slots' })]))
     await r.scheduler.run()

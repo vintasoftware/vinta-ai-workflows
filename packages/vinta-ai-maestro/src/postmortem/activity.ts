@@ -86,12 +86,12 @@ export const OperationsSchema = z
       .array(
         z.strictObject({
           node: Id,
-          op: z.enum(['add_context', 'redirect', 'pause', 'abort']),
+          op: z.enum(['add_context', 'redirect', 'pause', 'abort', 'fresh']),
           by: z.enum(['operator', 'coordinator']),
           count: z.number().int().min(1),
         }),
       )
-      .describe('Steering, pauses and aborts, per phase.'),
+      .describe('Steering, pauses, aborts and dropped sessions, per phase.'),
     questions: z
       .strictObject({
         asked: z.number().int().min(0),

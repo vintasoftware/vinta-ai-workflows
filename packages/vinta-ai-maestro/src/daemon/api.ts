@@ -1062,6 +1062,18 @@ export function createApi(options: ApiOptions): Hono {
     }),
   )
 
+  /**
+   * Drop a phase's agent session, so its next turn starts cold (§15). For a
+   * session gone wrong that the attempt should outlive — `abort` throws both
+   * away. Answers `queued`, or `ignored` for a settled phase.
+   */
+  app.post('/api/runs/:runId/nodes/:nodeId/fresh', (c) =>
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => {
+      if (run.control.freshSession === undefined) throw new UnsupportedOperation('fresh')
+      return run.control.freshSession(nodeId, actor)
+    }),
+  )
+
   app.post('/api/runs/:runId/nodes/:nodeId/answer', (c) =>
     operate(c, AnswerRequestSchema, (run, nodeId, body, actor) =>
       run.control.answer(

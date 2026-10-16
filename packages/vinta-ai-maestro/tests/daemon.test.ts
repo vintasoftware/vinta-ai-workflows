@@ -180,6 +180,7 @@ function recordingControl(): RunControl & { readonly calls: ControlCall[] } {
     // The second argument of these two is the actor, not a payload.
     pause: (nodeId) => record('pause')(nodeId),
     abortNode: (nodeId) => record('abortNode')(nodeId),
+    freshSession: (nodeId) => record('freshSession')(nodeId),
     question: (nodeId) =>
       nodeId === 'a'
         ? { question: 'Ship it?', kind: 'confirm' as const, context: { diffRef: 'phase/a' } }
@@ -1229,6 +1230,7 @@ describe('§9 operations', () => {
     { path: 'redirect', body: { instruction: 'use a migration' }, op: 'redirect', arg: 'use a migration' },
     { path: 'pause', body: {}, op: 'pause', arg: null },
     { path: 'abort', body: {}, op: 'abortNode', arg: null },
+    { path: 'fresh', body: {}, op: 'freshSession', arg: null },
   ] as const
 
   for (const operation of operations) {
@@ -1305,6 +1307,9 @@ describe('§9 operations', () => {
       body: {},
     })
     expect(paused.status).toBe(409)
+    // So does an optional one it does not have.
+    const fresh = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/fresh`, { method: 'POST', body: {} })
+    expect(fresh.status).toBe(409)
   })
 })
 
