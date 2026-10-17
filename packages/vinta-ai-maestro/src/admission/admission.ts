@@ -451,6 +451,11 @@ export class AdmissionControl {
     this.#state(harness).loginRequired = null
   }
 
+  /** Whether this run configured a ceiling — that is, loaded an adapter — for the harness. */
+  has(harness: string): boolean {
+    return this.#options.ceilings[harness] !== undefined
+  }
+
   /** The effective ceiling — the discovered one, not the configured one. */
   ceiling(harness: string): number {
     return this.#state(harness).ceiling

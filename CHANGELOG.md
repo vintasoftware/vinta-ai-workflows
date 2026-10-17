@@ -1031,6 +1031,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: an amended harness reaches every phase it moved.** An
+  amendment changed the harness only on phases still `pending`; a failed or
+  blocked one waiting on a retry kept naming the old harness in `status` and
+  the run view, and once the job loaded only the new harness's adapter the
+  run view answered 500 `unknown harness`. Phases past `pending` now take the
+  new harness without losing their status, and the run view leaves out the
+  capacity of a harness the live run loaded no adapter for.
 - **`vinta-ai-maestro`: a claude-code turn the CLI calls "blocked" no longer
   fails unless a tool was refused in it.** The CLI's own turn summary marks a
   turn `blocked` whenever its last message names a next step for a person —

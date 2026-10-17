@@ -2499,6 +2499,41 @@ describe('harness capabilities', () => {
     expect(unknown?.capabilities).toBeNull()
     expect(harnessCapabilities('some-other-harness')).toBeNull()
   })
+
+  it('leaves out a harness this run loaded no adapter for, instead of failing the snapshot', async () => {
+    const r = await rig()
+    // A node still projected under a harness the live run never configured —
+    // amended away from before this daemon came up. Admission throws on it.
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'z',
+      type: 'node_registered',
+      payload: { wave: 1, harness: 'codex' },
+    })
+    const known = (id: string): number => {
+      if (id !== 'claude-code') throw new Error(`unknown harness "${id}"`)
+      return 1
+    }
+    r.daemon.register({
+      runId: RUN_ID,
+      control: r.control,
+      pools: r.pools,
+      admission: {
+        ceiling: known,
+        inFlight: known,
+        wakeAt: (id) => (known(id), undefined),
+        has: (id) => id === 'claude-code',
+      },
+      agentLeases: r.agentLeases,
+    })
+
+    const response = await call(r.daemon, `/api/runs/${RUN_ID}`)
+    expect(response.status).toBe(200)
+    const snapshot = RunSnapshotSchema.parse(response.body)
+    expect(snapshot.harnesses.map((state) => state.id)).toEqual(['claude-code'])
+    // The node keeps its row; only the capacity block skips the harness.
+    expect(snapshot.nodes.find((node) => node.nodeId === 'z')?.harness).toBe('codex')
+  })
 })
 
 // ---------------------------------------------------------------------------

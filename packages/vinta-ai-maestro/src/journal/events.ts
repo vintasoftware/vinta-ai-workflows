@@ -605,6 +605,15 @@ interface NodePayloads {
     readonly base_branch?: string
     readonly session_id?: string
     /**
+     * The harness the node now runs on, when an amendment moved a node that is
+     * past `pending` (§9). A pending node is re-registered instead, but
+     * `node_registered` resets status, so a failed or blocked node waiting on
+     * a retry needs this to carry the new harness onto its row — without it
+     * `status` and the snapshot kept naming the harness it was amended away
+     * from, and admission asked about one this run may never have loaded.
+     */
+    readonly harness?: string
+    /**
      * What the phase branch pointed at *before* this attempt took it over, or
      * null on the first one. A commit id, which is an identifier and not
      * repository content.
