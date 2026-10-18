@@ -271,21 +271,30 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
   let current = workflow
   // Bound by `bindCommitDecision` once a scheduler exists to ask through.
   let decideCommit: ((failure: CommitFailure) => Promise<CommitDecision>) | null = null
-  const fixer = conflictFixer(
-    workflow,
-    adapters,
-    // The same overlay every lane's agent gets. The fixer is an agent: it
-    // reports progress and asks for gates over the same `MAESTRO_URL` /
-    // `MAESTRO_TOKEN` / `MAESTRO_RUN` triple, and without it a fix round is
-    // the one agent turn in a run that cannot talk back to the daemon.
-    { ...integration.env, ...options.agentEnv },
-    () => journal.crewAssignments(runId),
-    // Into the incoming phase's own transcript, beside the implementer, fixer
-    // and chore turns that produced the branches now being merged — which is
-    // where somebody asking "why does the merge look like this" is already
-    // reading. Its `by.role` is what keeps it distinguishable from them.
-    (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
-  )
+  // Every fixer built, the start-time one and one per amendment: a teardown
+  // interrupts all of them, since a round already running when an amendment
+  // landed keeps the fixer it started with.
+  const fixers: ConflictFixer[] = []
+  const fixerFor = (definition: Workflow): ConflictFixer => {
+    const built = conflictFixer(
+      definition,
+      adapters,
+      // The same overlay every lane's agent gets. The fixer is an agent: it
+      // reports progress and asks for gates over the same `MAESTRO_URL` /
+      // `MAESTRO_TOKEN` / `MAESTRO_RUN` triple, and without it a fix round is
+      // the one agent turn in a run that cannot talk back to the daemon.
+      { ...integration.env, ...options.agentEnv },
+      () => journal.crewAssignments(runId),
+      // Into the incoming phase's own transcript, beside the implementer, fixer
+      // and chore turns that produced the branches now being merged — which is
+      // where somebody asking "why does the merge look like this" is already
+      // reading. Its `by.role` is what keeps it distinguishable from them.
+      (nodeId, entry) => journal.appendTranscript(runId, nodeId, entry),
+    )
+    fixers.push(built)
+    return built
+  }
+  const fixer = fixerFor(workflow)
   const integrator = new RecordingIntegrator({
     // `Workflow` satisfies `IntegrationPlan` structurally.
     plan: workflow,
@@ -442,7 +451,10 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     adopt: (amended: Workflow) => {
       current = amended
       executor.adopt(amended)
-      integrator.adopt(amended)
+      // With a fixer staffed from the amended crew: one built from the
+      // start-time workflow kept spawning on a harness the amendment had
+      // taken every desk off.
+      integrator.adopt(amended, fixerFor(amended))
       // The pool too: a single-use lane re-provisioned after this point gets
       // the amended `env_files`, not the ones the run started with.
       pool.adoptProject(projectSpec(amended.project))
@@ -468,7 +480,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     // Only a merge this run started: one somebody else has standing there is
     // theirs, and the next phase to need the worktree names it.
     interrupt: async () => {
-      await fixer.interrupt?.()
+      for (const built of fixers) await built.interrupt?.()
       await integrator.reclaim().catch(() => null)
     },
     // Read through the pool rather than captured, because a recycle that had to

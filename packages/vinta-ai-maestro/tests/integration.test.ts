@@ -2108,3 +2108,30 @@ describe('a fix round with a time limit', () => {
     expect(midMerge(repo.integ)).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Staging only what the merge touched, an amended fixer, a stopped round kept
+// ---------------------------------------------------------------------------
+
+describe('an amended crew', () => {
+  /**
+   * An amendment moved every desk from Codex to Claude Code, and the fixer
+   * built at start kept spawning on Codex: seven failures on "conflict fixer
+   * spawn refused: codex".
+   */
+  it('hands the next conflict to the fixer adopted with the plan', async () => {
+    const repo = await conflictingPair()
+    const before = spyFixer()
+    const after = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    const integrator = new Integrator({ plan: plan(nodes), integrationPath: repo.integ, fixer: before })
+
+    integrator.adopt(plan(nodes), after)
+    await integrator.prepareBase('c')
+
+    expect(before.calls).toHaveLength(0)
+    expect(after.calls).toHaveLength(1)
+  })
+})

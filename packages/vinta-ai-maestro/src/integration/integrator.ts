@@ -398,10 +398,13 @@ export class Integrator {
   #plan: IntegrationPlan
   #nodes: Map<string, IntegrationNode>
   #waves: Map<string, number>
+  /** The fixer as the crew stands *now*; replaced by `adopt` alongside the plan. */
+  #fixer: ConflictFixer
   readonly #maxFixRounds: number
 
   constructor(options: IntegratorOptions) {
     this.#options = options
+    this.#fixer = options.fixer
     this.#plan = options.plan
     this.#nodes = new Map(options.plan.nodes.map((node) => [node.id, node]))
     this.#waves = computeWaves(options.plan.nodes)
@@ -435,8 +438,17 @@ export class Integrator {
    * moved, and `openPr` for a phase whose name or brief did. Branch *names* are
    * safe either way — they are built from the plan id, and an amendment that
    * changes the id is refused as `id_mismatch`.
+   *
+   * **`fixer` is the amended crew's**, and it has to come with the plan. The
+   * fixer is staffed from `crew` and `defaults` (`integration/staffing.ts`),
+   * and the one built at start kept spawning on the harness the run started
+   * with: after an amendment moved every desk from Codex to Claude Code, one
+   * observed phase failed seven times on "conflict fixer spawn refused: codex"
+   * while every implementer was already on the new harness. A round already
+   * running keeps the fixer it started with; the next round takes this one.
    */
-  adopt(plan: IntegrationPlan): void {
+  adopt(plan: IntegrationPlan, fixer?: ConflictFixer): void {
+    if (fixer !== undefined) this.#fixer = fixer
     this.#plan = plan
     this.#nodes = new Map(plan.nodes.map((node) => [node.id, node]))
     this.#waves = computeWaves(plan.nodes)
@@ -978,7 +990,7 @@ export class Integrator {
     for (let round = 1; round <= this.#maxFixRounds; round += 1) {
       this.#options.onStep?.(forNode, { step: 'fix_round', state: 'started', round, incoming: nodeId })
       try {
-        await this.#options.fixer.fix({ ...request, round, forNode, ...(red === null ? {} : { redGate: red }) })
+        await this.#fixer.fix({ ...request, round, forNode, ...(red === null ? {} : { redGate: red }) })
         this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round })
       } catch (error) {
         this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round, outcome: 'failed' })
