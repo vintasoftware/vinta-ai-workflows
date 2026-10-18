@@ -50,6 +50,7 @@ import {
   type LaunchResult,
 } from '../src/job/job.ts'
 import { runCommand } from '../src/cli/run.ts'
+import { jobArgs, policyPathFor, readStoredPolicy, toRunPolicy } from '../src/cli/policy.ts'
 import { serveCommand, reachableUrl } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
 import { gateCommand } from '../src/cli/gate.ts'
@@ -2367,6 +2368,62 @@ describe('vinta-ai-maestro run --resume', () => {
 
     expect(code).toBe(FAILED)
     expect(io.err.join('\n')).toContain('no run "ghost-run"')
+  })
+
+  it('remembers the policy it ran under, and a later resume reuses it under any flag given', async () => {
+    const dir = makeTemp()
+    interrupt(dir, 'policy-run')
+    const code = await runCommand(
+      [
+        '--foreground', '--resume', 'policy-run', '--repo', dir,
+        '--on-failure', 'stop', '--retries', '2', '--retry-after', '15m', '--no-coordinator',
+      ],
+      recorder().io,
+      { adapters: { 'claude-code': new MockAdapter({ id: 'claude-code' }) }, executor: NO_EFFECTS },
+    )
+    expect(code).toBe(OK)
+    expect(readStoredPolicy(dir, 'policy-run')).toEqual({
+      permission: 'auto',
+      'on-failure': 'stop',
+      retries: '2',
+      'retry-after': '15m',
+      'no-coordinator': true,
+    })
+
+    // A second run, interrupted, with a stored policy from its first attempt.
+    interrupt(dir, 'again-run')
+    writeFileSync(
+      policyPathFor(dir, 'again-run'),
+      JSON.stringify({ permission: 'full', 'on-failure': 'stop', retries: '2', host: '127.0.0.2' }),
+    )
+    const seen: (readonly string[])[] = []
+    const io = recorder()
+    await runCommand(['--resume', 'again-run', '--repo', dir, '--retries', '4'], io.io, {
+      launch: async (args) => {
+        seen.push(args)
+        return { ok: false, output: '' }
+      },
+    })
+    const args = seen[0] ?? []
+    const flag = (name: string): string | undefined => args[args.indexOf(name) + 1]
+    expect(flag('--permission')).toBe('full')
+    expect(flag('--on-failure')).toBe('stop')
+    expect(flag('--host')).toBe('127.0.0.2')
+    // Given on the command line, so it wins over the stored `2`.
+    expect(flag('--retries')).toBe('4')
+    expect(io.out.join('\n')).toContain("resuming with this run's stored --permission, --on-failure, --host")
+  })
+
+  it('leaves --permission to the job when nobody chose one, so the stored one can stand', () => {
+    const io = recorder()
+    const policy = toRunPolicy({}, io.io)
+    if (policy === null) throw new Error('refused')
+    expect(jobArgs({ kind: 'resume', runId: 'r' }, { repoPath: '/repo' }, policy, {})).not.toContain('--permission')
+    const chosen = toRunPolicy({ permission: 'full' }, io.io)
+    if (chosen === null) throw new Error('refused')
+    expect(jobArgs({ kind: 'resume', runId: 'r' }, { repoPath: '/repo' }, chosen, {})).toEqual(
+      expect.arrayContaining(['--permission', 'full']),
+    )
   })
 
   it('refuses a workflow path and a --resume id together', async () => {

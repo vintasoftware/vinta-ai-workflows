@@ -639,6 +639,10 @@ Two operations on a run as a whole, beside §9's five on a node, and both are jo
 
 Pause is upgradeable to stop; the reverse is ignored. A run whose last node settles in the same turn it is halted ends as what it actually was. A paused run writes no post-mortem: it has not ended in the sense §13.6 means.
 
+**A resume runs under the policy the run last ran under.** Every job writes `runs/<id>/policy.json` as it starts: `--permission`, `--system-one` (absolute), `--on-failure`, `--retries`, `--retry-after`, `--no-coordinator`, the job's `--host`, and the `--harness-profile` names. `run --resume` fills every flag it was not given from that file, and says which; a flag given wins and is what the next file records. A launcher hands its job only the flags somebody chose — `--permission` included, which it used to spell out at its default — so the UI's Resume, which passes the `ui` command's own flags, takes the stored values for the rest. One observed run had every resume restate six flags recovered from `ps` output, and a resume that forgot `--permission` would have run at the default.
+
+**Harness profiles are the operator's.** A profile (`src/harness/profiles.ts`) names a harness, an optional binary and environment variables, in an operator-level YAML file (`$VINTA_AI_MAESTRO_PROFILES`, else `$XDG_CONFIG_HOME` or `~/.config`, `vinta-ai-maestro/profiles.yaml`), never in the plan, for `--permission`'s reason. The job applies the profiles to its own environment before the preflight, so the doctor's login check and every adapter see the same account; a profile cannot reinstate a key `childEnv` strips. At most one profile per harness. The run records names, not values.
+
 ---
 
 ## 10. UI

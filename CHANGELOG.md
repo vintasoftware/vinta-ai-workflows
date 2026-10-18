@@ -35,6 +35,17 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: a resume remembers how the run was started.** Every
+  job records its `--permission`, `--system-one`, `--on-failure`, `--retries`,
+  `--retry-after`, `--no-coordinator`, `--host` and `--harness-profile` in
+  `runs/<id>/policy.json`, and `run --resume` (and the UI's Resume) reuses
+  them, saying which; a flag given on the command line still wins. Each resume
+  used to need all of them restated.
+- **`vinta-ai-maestro`: harness profiles.** `--harness-profile <name>` on `run`
+  and `ui` picks a named binary and environment for one harness — a second
+  Claude account's `CLAUDE_CONFIG_DIR`, say — from the operator's
+  `~/.config/vinta-ai-maestro/profiles.yaml` (or `$VINTA_AI_MAESTRO_PROFILES`).
+  The run keeps the name, so a resume picks the same account.
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
   agent — showed `running` over a silent transcript, and one queued behind it

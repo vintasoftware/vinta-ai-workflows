@@ -72,6 +72,7 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                            [--system-one <config.json>]
                            [--on-failure <stop|retry|ask>] [--retries <n>]
                            [--retry-after <15m>] [--no-coordinator]
+                           [--harness-profile <name>]
                            [--log-level <debug|info|warn|error>] [--log-stderr]
                            [--log-detail <kind|message>]
        vinta-ai-maestro serve …   (the same command)
@@ -177,7 +178,14 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                  weaken a check, never answer a question you hold, and never
                  halt the run; it is woken at most 24 times. With this flag you
                  can still ask it things. (\`--no-intervene\` is the old name.)
-                 The operator sets this, never the workflow document.`
+                 The operator sets this, never the workflow document.
+  --harness-profile <name>
+                 Run a harness under a named profile from the operator's
+                 profiles file (~/.config/vinta-ai-maestro/profiles.yaml, or
+                 $VINTA_AI_MAESTRO_PROFILES): its binary and environment — a
+                 second Claude account's CLAUDE_CONFIG_DIR, say. One per
+                 harness; repeat the flag for several. A run remembers the
+                 name, and its resume reads the profile again.`
 
 /** One name for one command; `ui` is the one the help leads with. */
 export const UI_USAGE = SERVE_USAGE
@@ -291,6 +299,7 @@ export async function serveCommand(
         'retry-after': { type: 'string' },
         'no-intervene': { type: 'boolean' },
         'no-coordinator': { type: 'boolean' },
+        'harness-profile': { type: 'string', multiple: true },
         'log-level': { type: 'string' },
         'log-stderr': { type: 'boolean' },
         'log-detail': { type: 'string' },

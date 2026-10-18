@@ -91,7 +91,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `doctor <workflow.json> [--repo <dir>] [--resume <run-id>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
 | `run <workflow.json> [--repo <dir>]` | Starts the workflow as a **background job** and returns once it is under way. The run does not need the terminal: close it and the run carries on. `--foreground` hosts it in this process instead and exits when it ends, for CI. |
-| `run --resume <run-id>` | Picks a paused, interrupted or failed run back up, as a background job. Done phases stay done; every other phase — a failed run's failed and blocked phases included — is attempted again. Only `done` and `cancelled` runs are refused. |
+| `run --resume <run-id>` | Picks a paused, interrupted or failed run back up, as a background job. Done phases stay done; every other phase — a failed run's failed and blocked phases included — is attempted again. Only `done` and `cancelled` runs are refused. It runs under the run's own `--permission`, `--system-one`, `--on-failure`, `--retries`, `--retry-after`, `--no-coordinator`, `--host` and `--harness-profile`, kept in `runs/<id>/policy.json` — the UI's Resume too; a flag given on the command line overrides the stored one. |
 | `status [run-id] [--json]` | Every run in the project and what it is doing — or one run, phase by phase. A run whose job died without ending it shows as `interrupted`. |
 | `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
 | `pause <run-id> [--wait]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
@@ -1034,6 +1034,19 @@ Point the adapter at a specific binary with an environment variable, which overr
 | `claude-code` | `VINTA_AI_MAESTRO_CLAUDE_BIN` | `claude` |
 | `codex` | `VINTA_AI_MAESTRO_CODEX_BIN` | `codex` |
 | `opencode` | `VINTA_AI_MAESTRO_OPENCODE_BIN` | `opencode` |
+
+**A second account is a harness profile.** Name a binary and an environment once, in `~/.config/vinta-ai-maestro/profiles.yaml` (`$XDG_CONFIG_HOME`, or `$VINTA_AI_MAESTRO_PROFILES` for another file), and pick it per run with `--harness-profile <name>` on `run` or `ui`:
+
+```yaml
+harness_profiles:
+  claude-second:
+    harness: claude-code
+    bin: ~/.local/bin/claude      # optional; sets VINTA_AI_MAESTRO_CLAUDE_BIN
+    env:
+      CLAUDE_CONFIG_DIR: ~/.claude-second
+```
+
+One profile per harness per run. The job applies it to its own environment before the preflight, so `doctor`'s login check asks the same account the agents use. The run keeps only the profile's name, and a resume reads the file again; the provider keys each adapter strips are still stripped.
 
 ### What an agent may do in its lane
 

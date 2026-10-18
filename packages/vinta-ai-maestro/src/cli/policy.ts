@@ -7,7 +7,10 @@
  * more permissive than the command line would be a second, quieter way to
  * start a run `run` would have refused.
  */
-import { resolve } from 'node:path'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+
+import { z } from 'zod'
 
 import {
   AGENT_PERMISSIONS,
@@ -15,11 +18,17 @@ import {
   isAgentPermission,
   type AgentPermission,
 } from '../harness/permissions.ts'
+import {
+  HarnessProfileError,
+  loadHarnessProfiles,
+  type HarnessProfile,
+} from '../harness/profiles.ts'
 import { liveJob } from '../job/job.ts'
 import type { Journal } from '../journal/journal.ts'
 import { loadSystemOne, SystemOneConfigError, type SystemOne } from '../system-one/config.ts'
 import type { Io } from './io.ts'
 import type { LogValues } from './logging.ts'
+import { runsRootFor } from './paths.ts'
 import type { Bind } from './serve.ts'
 
 /**
@@ -94,6 +103,15 @@ export interface RunPolicy {
   readonly retryAfter?: string
   readonly retryAfterMs?: number
   readonly intervene: boolean
+  /** `--harness-profile`, resolved from the operator's profiles file. */
+  readonly harnessProfiles: readonly HarnessProfile[]
+  /**
+   * The flags this policy was parsed from, exactly as given. A launched job
+   * is handed these and not the defaults filled in around them, so the job's
+   * own merge with the run's stored policy (`withStoredPolicy`) can tell an
+   * operator's choice from a value nobody chose.
+   */
+  readonly given: PolicyValues
 }
 
 /** The flag values `toRunPolicy` reads, as `parseArgs` produced them. */
@@ -105,6 +123,7 @@ export interface PolicyValues {
   readonly 'retry-after'?: string | undefined
   readonly 'no-intervene'?: boolean | undefined
   readonly 'no-coordinator'?: boolean | undefined
+  readonly 'harness-profile'?: readonly string[] | undefined
 }
 
 /** `null` on a bad flag, already reported; the message names the flag. */
@@ -150,6 +169,14 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
     return null
   }
 
+  let harnessProfiles: readonly HarnessProfile[]
+  try {
+    harnessProfiles = loadHarnessProfiles(values['harness-profile'] ?? [])
+  } catch (error) {
+    io.err(`vinta-ai-maestro: --harness-profile: ${error instanceof HarnessProfileError ? error.message : 'could not be loaded'}`)
+    return null
+  }
+
   return {
     permission,
     ...(systemOnePath === undefined ? {} : { systemOnePath }),
@@ -161,7 +188,95 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
     // `--no-intervene` is the flag's name from before the monitor became the
     // coordinator, and still works.
     intervene: values['no-intervene'] !== true && values['no-coordinator'] !== true,
+    harnessProfiles,
+    given: {
+      ...values,
+      // Absolute, so a job started from another directory reads the same file.
+      ...(systemOnePath === undefined ? {} : { 'system-one': systemOnePath }),
+    },
   }
+}
+
+// ---------------------------------------------------------------------------
+// The run's own policy, remembered for its resume
+// ---------------------------------------------------------------------------
+
+/**
+ * What a run was last started or resumed with: the policy flags, the job's
+ * `--host`, and the harness profiles by name. Flag-shaped, because what it is
+ * for is standing in for flags an operator did not retype.
+ *
+ * Every `--resume` used to need `--permission`, `--system-one`,
+ * `--on-failure`, `--retries`, `--retry-after` and `--host` restated — one
+ * observed run recovered them from `ps` output — and a resume that forgot one
+ * quietly ran under the default, which for `--permission` is the wrong end of
+ * the range to be surprised at. Profile *values* are not stored: they are the
+ * operator's, and a resume reads them again from the profiles file.
+ */
+const StoredPolicySchema = z.object({
+  permission: z.string().optional(),
+  'system-one': z.string().optional(),
+  'on-failure': z.string().optional(),
+  retries: z.string().optional(),
+  'retry-after': z.string().optional(),
+  'no-coordinator': z.boolean().optional(),
+  host: z.string().optional(),
+  'harness-profile': z.array(z.string()).optional(),
+})
+
+export type StoredPolicy = z.infer<typeof StoredPolicySchema>
+
+export const policyPathFor = (repoPath: string, runId: string): string =>
+  join(runsRootFor(repoPath), runId, 'policy.json')
+
+/** Records what this job runs under, for the next `--resume` of the run. */
+export function writeStoredPolicy(repoPath: string, runId: string, policy: RunPolicy, bind: Bind): void {
+  const stored: StoredPolicy = {
+    permission: policy.permission,
+    ...(policy.systemOnePath === undefined ? {} : { 'system-one': policy.systemOnePath }),
+    ...(policy.onFailure === undefined ? {} : { 'on-failure': policy.onFailure }),
+    ...(policy.retries === undefined ? {} : { retries: String(policy.retries) }),
+    ...(policy.retryAfter === undefined ? {} : { 'retry-after': policy.retryAfter }),
+    ...(policy.intervene ? {} : { 'no-coordinator': true }),
+    ...(bind.host === undefined ? {} : { host: bind.host }),
+    ...(policy.harnessProfiles.length === 0
+      ? {}
+      : { 'harness-profile': policy.harnessProfiles.map((profile) => profile.name) }),
+  }
+  const path = policyPathFor(repoPath, runId)
+  mkdirSync(join(runsRootFor(repoPath), runId), { recursive: true })
+  const temp = `${path}.${process.pid}.tmp`
+  writeFileSync(temp, `${JSON.stringify(stored, null, 2)}\n`, 'utf8')
+  renameSync(temp, path)
+}
+
+/** The run's stored policy, or `null` for a run from before it was kept, or one that will not parse. */
+export function readStoredPolicy(repoPath: string, runId: string): StoredPolicy | null {
+  try {
+    const parsed = StoredPolicySchema.safeParse(JSON.parse(readFileSync(policyPathFor(repoPath, runId), 'utf8')))
+    return parsed.success ? parsed.data : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The flags a resume runs with: the stored ones, with every flag given on
+ * this command line over them. `reused` names the stored flags that took
+ * effect, so the command can say what it did not need to be told.
+ */
+export function withStoredPolicy<V extends PolicyValues & { readonly host?: string | undefined }>(
+  values: V,
+  stored: StoredPolicy | null,
+): { readonly values: V; readonly reused: readonly string[] } {
+  if (stored === null) return { values, reused: [] }
+  const given = values as Record<string, unknown>
+  const reused = Object.keys(stored).filter((key) => given[key] === undefined)
+  // `--no-intervene` is `--no-coordinator`'s old name; either given wins.
+  const kept = reused.filter((key) => !(key === 'no-coordinator' && given['no-intervene'] !== undefined))
+  const merged = { ...values } as Record<string, unknown>
+  for (const key of kept) merged[key] = stored[key as keyof StoredPolicy]
+  return { values: merged as V, reused: kept }
 }
 
 /** Which run a job hosts: a document to start, or a run id to pick up. */
@@ -186,7 +301,10 @@ export function jobArgs(
   const args = ['run']
   if (target.kind === 'workflow') args.push(resolve(target.path), '--run-id', target.runId)
   else args.push('--resume', target.runId)
-  args.push('--foreground', '--repo', bind.repoPath, '--permission', policy.permission)
+  args.push('--foreground', '--repo', bind.repoPath)
+  // Only when given: a resumed job fills what was not from the run's stored
+  // policy, and a default spelled out here would read there as a choice.
+  if (policy.given.permission !== undefined) args.push('--permission', policy.permission)
   if (bind.host !== undefined) args.push('--host', bind.host)
   if (bind.port !== undefined) args.push('--port', String(bind.port))
   if (policy.systemOnePath !== undefined) args.push('--system-one', policy.systemOnePath)
@@ -194,6 +312,7 @@ export function jobArgs(
   if (policy.retries !== undefined) args.push('--retries', String(policy.retries))
   if (policy.retryAfter !== undefined) args.push('--retry-after', policy.retryAfter)
   if (!policy.intervene) args.push('--no-coordinator')
+  for (const profile of policy.harnessProfiles) args.push('--harness-profile', profile.name)
   if (log['log-level'] !== undefined) args.push('--log-level', log['log-level'])
   if (log['log-detail'] !== undefined) args.push('--log-detail', log['log-detail'])
   args.push('--log-stderr')
