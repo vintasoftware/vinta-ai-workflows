@@ -1042,6 +1042,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is rebuilt from the amended crew when the plan is amended, so a run whose
   desks moved to another harness stops failing on "conflict fixer spawn
   refused" for the harness it left.
+- **`vinta-ai-maestro`: a conflict fixer stopped by its time limit keeps its
+  work.** What the round had is kept under `refs/vinta-ai-maestro/abandoned/`
+  (an interrupted round's too), and the retry's fixer is pointed at it to
+  continue instead of redoing the resolution from scratch.
 - **`vinta-ai-maestro`: a claude-code turn the CLI calls "blocked" no longer
   fails unless a tool was refused in it.** The CLI's own turn summary marks a
   turn `blocked` whenever its last message names a next step for a person —

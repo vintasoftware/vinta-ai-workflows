@@ -115,6 +115,8 @@ export interface ConflictContext {
   readonly implemented?: readonly string[]
   /** The gate the merged tree failed after the last round, when that is why this round runs. */
   readonly redGate?: RedGate
+  /** Where a stopped earlier round of this merge kept its tree, to continue from. */
+  readonly previousAttempt?: string
 }
 
 /**
@@ -357,6 +359,14 @@ export function composeConflictPrompt(context: ConflictContext): string {
       ? `Conflicted paths: ${context.paths.join(' ')}`
       : 'Git merged it with no textual conflict left; what conflicts is the merged code.',
     ...(red === undefined ? [] : redGateLines(red)),
+    ...(context.previousAttempt === undefined
+      ? []
+      : [
+          `An earlier attempt at this merge was stopped before it finished; what it had is kept at ` +
+            `${context.previousAttempt}. Continue from it (\`git diff HEAD ${context.previousAttempt}\`, ` +
+            `\`git checkout ${context.previousAttempt} -- <path>\`) rather than starting over — it passed ` +
+            'no gate and may still hold conflict markers.',
+        ]),
     `Nodes involved: ${context.nodes.join(' ')}`,
     ...(mine.length === 0
       ? []

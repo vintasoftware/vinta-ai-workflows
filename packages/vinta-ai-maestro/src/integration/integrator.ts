@@ -38,7 +38,12 @@ import { dirname, join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { IntegrationStepPayload } from '../journal/events.ts'
 import type { RedGate } from '../prompts/index.ts'
-import type { ConflictFixer, ConflictRequest } from './fixer.ts'
+import {
+  type ConflictFixer,
+  ConflictFixerInterrupted,
+  ConflictFixerTimeout,
+  type ConflictRequest,
+} from './fixer.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
@@ -980,6 +985,11 @@ export class Integrator {
       await this.#abandonMerge(cwd)
       await gitOk(cwd, ['merge', '--no-ff', '--no-edit', incoming])
     }
+    // An earlier round of this same merge that was stopped part-way — a time
+    // limit, a teardown — kept what it had (`#keepAbandoned`). Named to the
+    // fixer so the retry continues it: one observed retry restarted a 13-file
+    // resolution from scratch after its predecessor ran out of time.
+    const previous = await this.#previousAttempt(cwd, into, incoming)
     const request = {
       cwd,
       into,
@@ -988,6 +998,7 @@ export class Integrator {
       nodes,
       paths,
       promptRefs: nodes.map((id) => this.#node(id).prompt_ref),
+      ...(previous === null ? {} : { previousAttempt: previous }),
     } satisfies Omit<ConflictRequest, 'round'>
 
     for (let round = 1; round <= this.#maxFixRounds; round += 1) {
@@ -1004,6 +1015,17 @@ export class Integrator {
         // of this one's spawn. Abandoned, so the retry starts the merge
         // afresh. Only an unresolved conflict (below) is left standing on
         // purpose.
+        //
+        // A round that was *stopped* — its time limit, a teardown — did
+        // resolve things, possibly most of them, and is kept first under
+        // `ABANDONED_REFS` exactly as `reclaim` keeps a merge a kill caught,
+        // so the retry's fixer is pointed at it rather than starting over.
+        if (
+          (error instanceof ConflictFixerTimeout || error instanceof ConflictFixerInterrupted) &&
+          (await this.#merging(cwd))
+        ) {
+          await this.#keepAbandoned(cwd, into, incoming)
+        }
         await this.#abandonMerge(cwd)
         throw error
       }
@@ -1251,6 +1273,21 @@ export class Integrator {
   }
 
   /**
+   * What an earlier, stopped round of this same merge left under
+   * `ABANDONED_REFS`, when it is still about this merge — its parents are the
+   * branch's tip and the incoming tip. Null otherwise.
+   */
+  async #previousAttempt(cwd: string, into: string, incoming: string): Promise<string | null> {
+    const ref = `${ABANDONED_REFS}/${into.slice(`plan/${this.#plan.id}/`.length)}`
+    const [line] = await gitLines(cwd, ['rev-list', '--parents', '-n', '1', ref]).catch(() => [])
+    if (line === undefined) return null
+    const [, ...parents] = line.split(' ')
+    const head = (await git(cwd, ['rev-parse', 'HEAD']).catch(() => '')).trim()
+    const tip = (await git(cwd, ['rev-parse', incoming]).catch(() => '')).trim()
+    return parents.length === 2 && parents[0] === head && parents[1] === tip ? ref : null
+  }
+
+  /**
    * Stages a fixer's resolution: every tracked path (`add -u`, which also
    * settles unmerged entries and records deletions) plus the merge's own
    * paths — and nothing untracked.
@@ -1363,7 +1400,8 @@ export class Integrator {
    * null when nothing could be kept. Plumbing, so no hook runs. Tracked paths
    * are staged first: a killed fixer round leaves unmerged paths, which
    * `write-tree` refuses, and the merge is about to be undone anyway. Never
-   * untracked ones, for `#stageResolution`'s reason.
+   * untracked ones, for `#stageResolution`'s reason — this ref is handed to
+   * the next fixer as a starting point.
    */
   async #keepAbandoned(cwd: string, into: string, incoming: string): Promise<string | null> {
     try {

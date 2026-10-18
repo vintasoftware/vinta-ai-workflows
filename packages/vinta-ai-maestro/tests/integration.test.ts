@@ -2196,3 +2196,32 @@ describe('an amended crew', () => {
     expect(after.calls).toHaveLength(1)
   })
 })
+
+describe('a fix round stopped by its time limit', () => {
+  it('keeps what it had under the abandoned refs and points the retry at it', async () => {
+    const repo = await conflictingPair()
+    const { adapter } = hangingAdapter()
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    const integrator = new Integrator({
+      plan: plan(nodes),
+      integrationPath: repo.integ,
+      fixer: createAgentConflictFixer({ adapter, model: 'm', timeoutMs: 50 }),
+    })
+    await writeFile(join(repo.integ, 'untracked.log'), 'not the merge\n')
+
+    const failure = await integrator.prepareBase('c').then(() => null, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(ConflictFixerTimeout)
+    expect(midMerge(repo.integ)).toBe(false)
+
+    const ref = 'refs/vinta-ai-maestro/abandoned/integ-c'
+    expect(parents(repo.integ, ref)).toHaveLength(2)
+    expect(run(repo.integ, 'ls-tree', '--name-only', ref)).not.toContain('untracked.log')
+
+    const retry = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    integrator.adopt(plan(nodes), retry)
+    await integrator.prepareBase('c')
+    expect(retry.calls[0]?.previousAttempt).toBe(ref)
+  })
+})
