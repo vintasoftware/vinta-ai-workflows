@@ -146,6 +146,17 @@ export const MissingDependencySchema = z
       'edge against the plan before adding it.',
   )
 
+export const RevertedDeletionSchema = z
+  .strictObject({
+    path: z.string().max(500),
+    node: z
+      .string()
+      .max(200)
+      .describe('The phase whose deletion was reverted, or the branch standing in when no phase on that side touched the path.'),
+    lines: z.number().int().min(1).describe('Lines that side deleted and the resolution kept. A count, never the lines.'),
+  })
+  .describe('A deletion a merge resolution undid. Identifiers and a count only.')
+
 export const WaveConflictSchema = z
   .strictObject({
     wave: z.number().int().min(1).describe('The wave whose merge produced the conflict.'),
@@ -160,6 +171,14 @@ export const WaveConflictSchema = z
       .int()
       .min(0)
       .describe('Conflict-fixer rounds the resolution took. High is a strong split signal.'),
+    reverted_deletions: z
+      .array(RevertedDeletionSchema)
+      .optional()
+      .describe(
+        'Paths where the resolution kept lines one side had deleted — a fixer keeping “both sides”, ' +
+          'or the `append_only` union driver. Flagged, not refused: check each deletion reached the ' +
+          'branch. Absent when there were none.',
+      ),
   })
   .describe('Two same-wave phases that actually fought over the same code at integration.')
 
@@ -426,6 +445,7 @@ export type PostMortem = z.infer<typeof PostMortemSchema>
 export type Edge = z.infer<typeof EdgeSchema>
 export type MissingDependency = z.infer<typeof MissingDependencySchema>
 export type WaveConflict = z.infer<typeof WaveConflictSchema>
+export type RevertedDeletion = z.infer<typeof RevertedDeletionSchema>
 export type GateCost = z.infer<typeof GateCostSchema>
 export type DurationDivergence = z.infer<typeof DurationDivergenceSchema>
 export type CriticalPath = z.infer<typeof CriticalPathSchema>
@@ -461,6 +481,7 @@ export interface IntegrationWaveRecord {
     readonly nodes: readonly string[]
     readonly paths: readonly string[]
     readonly rounds: number
+    readonly revertedDeletions?: readonly RevertedDeletion[]
   }[]
 }
 
@@ -937,6 +958,7 @@ function waveConflicts(
         nodes: [...conflict.nodes],
         paths: [...conflict.paths],
         fix_rounds: conflict.rounds,
+        ...revertedField(conflict.reverted_deletions),
       }))
   }
   const conflicts: WaveConflict[] = []
@@ -949,10 +971,24 @@ function waveConflicts(
         nodes,
         paths: [...conflict.paths],
         fix_rounds: conflict.rounds,
+        ...revertedField(conflict.revertedDeletions),
       })
     }
   }
   return conflicts
+}
+
+function revertedField(
+  entries: readonly RevertedDeletion[] | undefined,
+): { reverted_deletions?: RevertedDeletion[] } {
+  if (entries === undefined || entries.length === 0) return {}
+  return {
+    reverted_deletions: entries.map((entry) => ({
+      path: entry.path.slice(0, 500),
+      node: entry.node.slice(0, 200),
+      lines: Math.max(1, entry.lines),
+    })),
+  }
 }
 
 /**

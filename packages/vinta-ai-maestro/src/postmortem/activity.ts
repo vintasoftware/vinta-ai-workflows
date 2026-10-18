@@ -169,6 +169,30 @@ export const UnattendedDecisionsSchema = z
         'What the coordinator did on its own, oldest first. Its reasons are in its conversation and, ' +
           'for steering, in the phase’s decisions — not here.',
       ),
+    reverted_deletions: z
+      .array(
+        z.strictObject({
+          at_ms: z.number().int(),
+          node: z
+            .string()
+            .max(200)
+            .describe('The phase whose deletion was reverted, or the branch standing in when no phase on that side touched the path.'),
+          path: z.string().max(500),
+          lines: z.number().int().min(1).describe('Lines that side deleted and the resolution kept. A count, never the lines.'),
+          branch: z.string().describe('The branch the merge was made on.'),
+          fix_rounds: z
+            .number()
+            .int()
+            .min(0)
+            .describe('Conflict-fixer rounds the resolution took; 0 is git’s own merge, the `append_only` union driver.'),
+        }),
+      )
+      .optional()
+      .describe(
+        'Merge resolutions that kept lines a phase deliberately deleted, oldest first: flagged, not refused. ' +
+          'Unused code breaks no gate, so check each deletion reached the branch. Absent when there were ' +
+          'none, and on post-mortems written before it was checked.',
+      ),
   })
   .describe(
     'Every decision made with nobody watching. A plan whose run decided much on its own left those ' +
@@ -201,6 +225,7 @@ export interface JournalConflict {
   readonly nodes: readonly string[]
   readonly paths: readonly string[]
   readonly rounds: number
+  readonly reverted_deletions?: readonly { readonly path: string; readonly node: string; readonly lines: number }[]
 }
 
 type Payload = Record<string, unknown>
@@ -233,6 +258,9 @@ export function journalConflicts(
       nodes: [...new Set((payload['nodes'] as string[] | undefined) ?? [])],
       paths: [...((payload['paths'] as string[] | undefined) ?? [])],
       rounds: typeof payload['rounds'] === 'number' ? payload['rounds'] : 0,
+      ...(Array.isArray(payload['reverted_deletions'])
+        ? { reverted_deletions: payload['reverted_deletions'] as JournalConflict['reverted_deletions'] & object }
+        : {}),
     })
   }
   return found
@@ -373,6 +401,7 @@ export function operations(events: readonly StoredEvent[]): Operations {
 export function unattendedDecisions(events: readonly StoredEvent[]): UnattendedDecisions {
   const answers: UnattendedDecisions['answers'] = []
   const actions: UnattendedDecisions['coordinator_actions'] = []
+  const reverted: NonNullable<UnattendedDecisions['reverted_deletions']> = []
   for (const entry of foldUnattended(events)) {
     if (entry.type === 'answer') {
       answers.push({
@@ -383,6 +412,15 @@ export function unattendedDecisions(events: readonly StoredEvent[]): UnattendedD
         answer: typeof entry.answer === 'string' ? entry.answer.slice(0, 200) : entry.answer,
         ...(entry.waitedMs === null ? {} : { waited_ms: Math.max(0, entry.waitedMs) }),
       })
+    } else if (entry.type === 'reverted_deletion') {
+      reverted.push({
+        at_ms: entry.at,
+        node: entry.node.slice(0, 200),
+        path: entry.path.slice(0, 500),
+        lines: entry.lines,
+        branch: entry.branch,
+        fix_rounds: entry.rounds,
+      })
     } else {
       actions.push({
         at_ms: entry.at,
@@ -392,7 +430,7 @@ export function unattendedDecisions(events: readonly StoredEvent[]): UnattendedD
       })
     }
   }
-  return { answers, coordinator_actions: actions }
+  return { answers, coordinator_actions: actions, ...(reverted.length === 0 ? {} : { reverted_deletions: reverted }) }
 }
 
 /** Wave gates that failed on a merged tree, with the wave's members. */

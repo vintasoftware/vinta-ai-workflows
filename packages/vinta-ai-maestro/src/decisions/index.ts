@@ -25,6 +25,7 @@ export {
   type CoordinatorAction,
   type CoordinatorActionKind,
   type DescribeOptions,
+  type RevertedDeletionEntry,
   type UnattendedAnswer,
   type UnattendedCategory,
   type UnattendedDecision,

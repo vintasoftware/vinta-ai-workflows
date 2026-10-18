@@ -498,6 +498,43 @@ describe('same-wave conflicts', () => {
     ])
     expect(gapOf(report, 'integration_record_unavailable')).toBeUndefined()
   })
+
+  it('carries the deletions a resolution reverted, on the conflict and in the unattended decisions', () => {
+    const tape = new Tape(chain()).begin()
+    tape.ran('p1', T0 + MIN, T0 + 11 * MIN)
+    tape.ran('p2', T0 + 12 * MIN, T0 + 22 * MIN)
+    tape.ran('p3', T0 + 12 * MIN, T0 + 24 * MIN)
+    tape.push(T0 + 30 * MIN, {
+      runId: RUN,
+      nodeId: 'p3',
+      type: 'node_conflict',
+      payload: {
+        where: 'wave',
+        branch: 'plan/flow/wave-2',
+        nodes: ['p2', 'p3'],
+        paths: ['kinds.py'],
+        rounds: 1,
+        reverted_deletions: [{ path: 'kinds.py', node: 'p2', lines: 1 }],
+      },
+    })
+    tape.ran('p4', T0 + 25 * MIN, T0 + 35 * MIN)
+    tape.end(T0 + 36 * MIN)
+
+    const report = postMortem(tape, RUN)
+    expect(report.findings.wave_conflicts).toEqual([
+      {
+        wave: 2,
+        where: 'wave',
+        nodes: ['p2', 'p3'],
+        paths: ['kinds.py'],
+        fix_rounds: 1,
+        reverted_deletions: [{ path: 'kinds.py', node: 'p2', lines: 1 }],
+      },
+    ])
+    expect(report.findings.unattended_decisions?.reverted_deletions).toEqual([
+      { at_ms: T0 + 30 * MIN, node: 'p2', path: 'kinds.py', lines: 1, branch: 'plan/flow/wave-2', fix_rounds: 1 },
+    ])
+  })
 })
 
 describe('what was done to the run', () => {

@@ -902,7 +902,7 @@ export const UnattendedResponseSchema = z.strictObject({
       at: z.number().int(),
       node: z.string().nullable(),
       by: z.enum(['unattended', 'coordinator']),
-      category: z.enum(['retry', 'agent_question', 'plan_question', 'merge_commit', 'other', 'action']),
+      category: z.enum(['retry', 'agent_question', 'plan_question', 'merge_commit', 'other', 'action', 'reverted_deletion']),
       summary: z.string(),
     }),
   ),

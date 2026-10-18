@@ -153,8 +153,10 @@ There are also `judge-hook` and `guard-hook`, which are internal: they are the h
   agents' design questions given their recommended option — and everything the
   coordinator did on its own is listed in `status <run-id>` (*Decided without
   you*), the run view's panel of that name, the plan PR's *Decided without a
-  person* section and the post-mortem's `unattended_decisions`. Review it
-  before merging: each line is a choice nobody made.
+  person* section and the post-mortem's `unattended_decisions`. So is every
+  merge resolution that kept lines a phase had deleted (a fixer keeping "both
+  sides", or the union driver): the path, the phase and a line count. Review
+  it before merging: each line is a choice nobody made.
 - **One PR per run** with `defaults.pull_requests: plan`: the plan PR alone,
   instead of a PR per phase and per integration branch (`phase`, the default).
 
@@ -674,6 +676,13 @@ Files every phase only adds entries to — a DI container, URL routes, a registr
 a beat schedule. Merges in the integration worktree use git's `union` driver for
 them, so two phases each adding a line is not a conflict. The merged tree is
 then gated as any other, which is what catches a union that reads wrong.
+
+A union keeps every line either side has — including one a phase deleted on
+purpose, which no gate notices because unused code breaks nothing. After every
+merge (a fixer's resolution as well) the integrator checks for lines one side
+deleted that the result kept, and lists them with *Decided without you* and in
+the post-mortem's `wave_conflicts` (`reverted_deletions`). It flags; it does
+not block the merge.
 
 Both are usually project facts: put them under `maestro.codegen` and
 `maestro.append_only` in `.vinta-ai-workflows.yaml` and every plan takes them.

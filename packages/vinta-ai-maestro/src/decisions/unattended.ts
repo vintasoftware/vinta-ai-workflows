@@ -1,7 +1,7 @@
 /**
  * What the run decided while nobody was watching: every question a
- * `--retry-after` timer or the run coordinator answered, and every operation
- * the coordinator made on its own.
+ * `--retry-after` timer or the run coordinator answered, every operation the
+ * coordinator made on its own, and every deletion a merge resolution undid.
  *
  * An observed run answered 79 of its 125 questions this way — 22 review loops
  * stopped, agents' design questions given their first option, one of them
@@ -53,7 +53,27 @@ export interface CoordinatorAction {
   readonly failed?: true
 }
 
-export type UnattendedDecision = UnattendedAnswer | CoordinatorAction
+/**
+ * A merge resolution that kept lines a phase deleted — the conflict fixer
+ * keeping "both sides", or the union driver on an `append_only` file
+ * (`integration/reverted.ts`). Nobody chose to undo the deletion, and no gate
+ * notices unused code coming back, so it is listed with the choices a person
+ * did not make. One per path and phase.
+ */
+export interface RevertedDeletionEntry {
+  readonly type: 'reverted_deletion'
+  readonly at: number
+  /** The phase whose deletion was reverted, or the branch standing in for it. */
+  readonly node: string
+  readonly path: string
+  readonly lines: number
+  /** The branch the merge was made on. */
+  readonly branch: string
+  /** Fix rounds the resolution took; 0 is git's own merge (the union driver). */
+  readonly rounds: number
+}
+
+export type UnattendedDecision = UnattendedAnswer | CoordinatorAction | RevertedDeletionEntry
 
 /** One answered agent question, as the phase's `decisions.jsonl` records it. */
 export interface AgentDetail {
@@ -134,6 +154,19 @@ export function unattendedDecisions(events: readonly StoredEvent[]): UnattendedD
           ...(event.payload.exit_code === 0 ? {} : { failed: true as const }),
         })
         continue
+      case 'node_conflict':
+        for (const entry of event.payload.reverted_deletions ?? []) {
+          found.push({
+            type: 'reverted_deletion',
+            at: event.ts,
+            node: entry.node,
+            path: entry.path,
+            lines: entry.lines,
+            branch: event.payload.branch,
+            rounds: event.payload.rounds,
+          })
+        }
+        continue
       case 'gate_cache_invalidated':
         if (event.payload.by !== 'coordinator') continue
         found.push({ type: 'action', at: event.ts, node: null, action: 'gate_cache_invalidate', target: event.payload.gate })
@@ -204,6 +237,11 @@ export interface DescribeOptions {
  * Migration: Add published_at (Recommended)`.
  */
 export function describeUnattended(entry: UnattendedDecision, options: DescribeOptions = {}): string {
+  if (entry.type === 'reverted_deletion') {
+    const by = entry.rounds === 0 ? 'union merge' : 'conflict fix'
+    const lines = `${entry.lines} line${entry.lines === 1 ? '' : 's'}`
+    return `${entry.node} · ${by} into ${entry.branch} · kept ${lines} it deleted in ${entry.path}`
+  }
   if (entry.type === 'action') {
     const where = entry.node ?? 'run'
     const what = ACTION_LABEL[entry.action]

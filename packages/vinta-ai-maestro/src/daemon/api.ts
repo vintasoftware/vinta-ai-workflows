@@ -605,8 +605,8 @@ export function createApi(options: ApiOptions): Hono {
       decisions: unattendedDecisions(journal.events(runId)).map((entry) => ({
         at: entry.at,
         node: entry.node,
-        by: entry.type === 'action' ? 'coordinator' : entry.by,
-        category: entry.type === 'action' ? 'action' : entry.category,
+        by: entry.type === 'answer' ? entry.by : entry.type === 'action' ? 'coordinator' : 'unattended',
+        category: entry.type === 'answer' ? entry.category : entry.type,
         summary: describeUnattended(entry, { details }),
       })),
     } satisfies UnattendedResponse)

@@ -21,7 +21,7 @@ import {
 import { probeCodegen } from '../src/codegen/determinism.ts'
 import { createIntegrationCodegen } from '../src/codegen/integration.ts'
 import type { ConflictRequest } from '../src/integration/fixer.ts'
-import { Integrator, type IntegrationNode } from '../src/integration/integrator.ts'
+import { Integrator, type IntegrationNode, type ReportedConflict } from '../src/integration/integrator.ts'
 import { composeConflictPrompt } from '../src/prompts/index.ts'
 import { CodegenStepSchema, type Workflow } from '../src/types.ts'
 import { formatIssues, parseWorkflow } from '../src/validate.ts'
@@ -254,7 +254,9 @@ describe('codegen in integration', () => {
     run(main, 'worktree', 'add', '--detach', integ, 'main')
     const fixes: ConflictRequest[] = []
     const asked: string[] = []
+    const conflicts: ReportedConflict[] = []
     const integrator = new Integrator({
+      onConflict: (conflict) => conflicts.push(conflict),
       plan: { id: 'wf', base_branch: 'main', nodes: [node('a'), node('b'), node('c', ['a', 'b'])] },
       integrationPath: integ,
       fixer: {
@@ -285,7 +287,7 @@ describe('codegen in integration', () => {
       await writeFile(path, hook)
       chmodSync(path, 0o755)
     }
-    return { integ, integrator, fixes, asked }
+    return { integ, integrator, fixes, asked, conflicts }
   }
 
   it('settles a conflict confined to generated files by regenerating them, with no fixer', async () => {
@@ -342,7 +344,7 @@ describe('codegen in integration', () => {
   })
 
   it('merges an append-only file with the union driver, with no fixer', async () => {
-    const { integ, integrator, fixes } = await setup(
+    const { integ, integrator, fixes, conflicts } = await setup(
       { 'registry.txt': 'one\n' },
       { 'registry.txt': 'one\ntwo\n' },
       { 'registry.txt': 'one\nthree\n' },
@@ -351,6 +353,43 @@ describe('codegen in integration', () => {
     await integrator.prepareBase('c')
     expect(fixes).toHaveLength(0)
     expect(run(integ, 'show', 'plan/wf/integ-c:registry.txt').split('\n').sort()).toEqual(['one', 'three', 'two'])
+    // Two appends: nothing was deleted, so nothing was reverted and nothing is reported.
+    expect(conflicts).toEqual([])
+  })
+
+  it('flags a line the union driver re-added after one phase deleted it', async () => {
+    const { integ, integrator, fixes, conflicts } = await setup(
+      { 'registry.txt': 'alpha\nunused\nomega\n' },
+      // Phase a replaces the unused kind; phase b appends right after it.
+      { 'registry.txt': 'alpha\nbeta\nomega\n' },
+      { 'registry.txt': 'alpha\nunused\ngamma\nomega\n' },
+      { codegen: {}, append_only: ['registry.txt'] },
+    )
+    await integrator.prepareBase('c')
+    expect(fixes).toHaveLength(0)
+    expect(run(integ, 'show', 'plan/wf/integ-c:registry.txt')).toContain('unused')
+    expect(conflicts).toEqual([
+      {
+        where: 'base',
+        branch: 'plan/wf/integ-c',
+        nodes: ['a', 'b'],
+        paths: ['registry.txt'],
+        rounds: 0,
+        revertedDeletions: [{ path: 'registry.txt', node: 'a', lines: 1 }],
+      },
+    ])
+  })
+
+  it('does not flag a deletion in a generated file, which the steps regenerate', async () => {
+    const { conflicts, integrator } = await setup(
+      { 'in/base.txt': 'base\n', 'gen.txt': 'base\n', 'registry.txt': 'alpha\nunused\nomega\n' },
+      { 'in/x-a.txt': 'a\n', 'registry.txt': 'alpha\nbeta\nomega\n' },
+      { 'in/y-b.txt': 'b\n', 'registry.txt': 'alpha\nunused\ngamma\nomega\n' },
+      { codegen: { gen: GENERATE }, append_only: ['registry.txt'] },
+    )
+    await integrator.prepareBase('c')
+    // Only the source file is reported; gen.txt lost lines on both sides and is regenerated.
+    expect(conflicts.flatMap((conflict) => conflict.revertedDeletions ?? []).map((entry) => entry.path)).toEqual(['registry.txt'])
   })
 
   it('still hands a conflict in a file that is not append-only to the fixer', async () => {

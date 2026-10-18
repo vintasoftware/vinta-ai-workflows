@@ -153,6 +153,21 @@ describe('unattendedDecisions', () => {
     payload: { effect_id: effect, answer, ...extra },
   })
 
+  it('lists every deletion a merge resolution reverted, one line per path and phase', () => {
+    const found = unattendedDecisions(
+      tape(
+        [1_000, { runId: 'r', nodeId: 'p34', type: 'node_conflict', payload: { where: 'wave', branch: 'plan/wf/wave-6', nodes: ['p33', 'p34'], paths: ['kinds.py'], rounds: 2, reverted_deletions: [{ path: 'kinds.py', node: 'p33', lines: 1 }] } }],
+        [2_000, { runId: 'r', nodeId: 'p35', type: 'node_conflict', payload: { where: 'wave', branch: 'plan/wf/wave-6', nodes: ['p34', 'p35'], paths: ['urls.py'], rounds: 0, reverted_deletions: [{ path: 'urls.py', node: 'p34', lines: 3 }] } }],
+        // A conflict that reverted nothing is not a decision.
+        [3_000, { runId: 'r', nodeId: 'p36', type: 'node_conflict', payload: { where: 'wave', branch: 'plan/wf/wave-6', nodes: ['p35', 'p36'], paths: ['a.py'], rounds: 1 } }],
+      ),
+    )
+    expect(found.map((entry) => describeUnattended(entry))).toEqual([
+      'p33 · conflict fix into plan/wf/wave-6 · kept 1 line it deleted in kinds.py',
+      'p34 · union merge into plan/wf/wave-6 · kept 3 lines it deleted in urls.py',
+    ])
+  })
+
   it('collects what a timer or the coordinator answered and what the coordinator did, never a person', () => {
     const events = tape(
       [0, asked('p12', 'agent-question:p12:1', 'The agent stopped to ask for a decision.', 'agent')],
@@ -170,7 +185,7 @@ describe('unattendedDecisions', () => {
       [9_000, { runId: 'r', type: 'workspace_exec', payload: { target: 'integration', exit_code: 2, duration_ms: 1, by: 'coordinator' } }],
     )
     const found = unattendedDecisions(events)
-    expect(found.map((entry) => (entry.type === 'answer' ? [entry.node, entry.category, entry.by] : [entry.node, entry.action]))).toEqual([
+    expect(found.map((entry) => (entry.type === 'answer' ? [entry.node, entry.category, entry.by] : entry.type === 'action' ? [entry.node, entry.action] : [entry.node, entry.type]))).toEqual([
       ['p12', 'agent_question', 'unattended'],
       ['p3', 'plan_question', 'unattended'],
       ['p4', 'retry', 'coordinator'],

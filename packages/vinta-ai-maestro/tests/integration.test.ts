@@ -33,6 +33,7 @@ import {
   Integrator,
   type IntegrationNode,
   type IntegrationPlan,
+  type ReportedConflict,
   UnresolvedConflictError,
 } from '../src/integration/integrator.ts'
 import { GIT_STDERR_LIMIT, GitCommandError, git } from '../src/integration/git.ts'
@@ -1223,6 +1224,59 @@ describe('merge conflicts', () => {
 
     await expect(integrator.mergeWave(1)).rejects.toBeInstanceOf(UnresolvedConflictError)
     expect(fixer.calls.map((call) => call.round)).toEqual([1, 2])
+  })
+
+  describe('a resolution that keeps a line one phase deleted', () => {
+    // Observed: a phase deleted an unused notification kind on its agent's
+    // answer to a design question, the fixer kept "both sides", and every gate
+    // passed — unused code breaks nothing — so the deletion never landed.
+    const REGISTRY = { 'kinds.ts': 'export const KINDS = [\n  "email",\n  "sms",\n  "fax",\n]\n' }
+
+    async function deletingPair(): Promise<Repo> {
+      const repo = await makeRepo(REGISTRY)
+      const one = await repo.lane('lane-1')
+      const two = await repo.lane('lane-2')
+      run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+      await repo.commit(one, { 'kinds.ts': 'export const KINDS = [\n  "email",\n  "sms",\n]\n' }, 'phase a: drop fax')
+      run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+      await repo.commit(two, { 'kinds.ts': 'export const KINDS = [\n  "email",\n  "sms",\n  "fax",\n  "push",\n]\n' }, 'phase b: push')
+      return repo
+    }
+
+    it('flags the reverted deletion on the conflict record, naming the phase and the count', async () => {
+      const repo = await deletingPair()
+      const seen: ReportedConflict[] = []
+      const fixer = spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'kinds.ts'), 'export const KINDS = [\n  "email",\n  "sms",\n  "fax",\n  "push",\n]\n')
+      })
+      const integrator = new Integrator({
+        plan: plan([node('a'), node('b')]),
+        integrationPath: repo.integ,
+        fixer,
+        onConflict: (conflict) => seen.push(conflict),
+      })
+
+      const wave = await integrator.mergeWave(1)
+
+      expect(wave.conflicts).toEqual([
+        { nodes: ['a', 'b'], paths: ['kinds.ts'], rounds: 1, revertedDeletions: [{ path: 'kinds.ts', node: 'a', lines: 1 }] },
+      ])
+      expect(seen[0]?.revertedDeletions).toEqual([{ path: 'kinds.ts', node: 'a', lines: 1 }])
+      // Flagged, not refused: the merge is made as the fixer left it.
+      expect(run(repo.integ, 'show', `${wave.branch}:kinds.ts`)).toContain('"fax"')
+    })
+
+    it('says nothing when the resolution keeps the deletion', async () => {
+      const repo = await deletingPair()
+      const fixer = spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'kinds.ts'), 'export const KINDS = [\n  "email",\n  "sms",\n  "push",\n]\n')
+      })
+      const integrator = new Integrator({ plan: plan([node('a'), node('b')]), integrationPath: repo.integ, fixer })
+
+      const wave = await integrator.mergeWave(1)
+
+      expect(wave.conflicts).toEqual([{ nodes: ['a', 'b'], paths: ['kinds.ts'], rounds: 1 }])
+    })
   })
 
   it('reports a conflict surviving max_fix_rounds as a plan defect naming both nodes', async () => {

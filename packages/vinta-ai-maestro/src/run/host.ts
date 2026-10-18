@@ -419,6 +419,11 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
           nodes: conflict.nodes,
           paths: conflict.paths,
           rounds: conflict.rounds,
+          ...(conflict.revertedDeletions === undefined
+            ? {}
+            : {
+                reverted_deletions: conflict.revertedDeletions.map(({ path, node, lines }) => ({ path, node, lines })),
+              }),
         },
       })
     },
