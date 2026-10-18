@@ -1,8 +1,11 @@
 /** Public surface of the daemon unit: the server, its ports, and the wire contract. */
 export { createToken, isLoopback, presentedToken, tokenMatches, TOKEN_QUERY } from './auth.ts'
 export {
+  fixerControl,
   runControl,
+  UnknownHarness,
   UnsupportedOperation,
+  type FixerControl,
   type CapacityView,
   type AgentGatePort,
   type GateCachePort,

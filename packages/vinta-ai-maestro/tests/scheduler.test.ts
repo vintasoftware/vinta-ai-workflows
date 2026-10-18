@@ -18,6 +18,7 @@ import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { AdmissionControl } from '../src/admission/admission.ts'
+import { amendRun } from '../src/amend/index.ts'
 import { analyzeRun } from '../src/analytics/analytics.ts'
 import type { Clock } from '../src/admission/clock.ts'
 import { PtyRegistry } from '../src/daemon/pty.ts'
@@ -27,7 +28,7 @@ import type {
   HarnessCapabilities,
   SpawnRefusalKind,
 } from '../src/harness/adapter.ts'
-import { DEFAULT_SCRIPT, MockAdapter, type MockScript } from '../src/harness/mock.ts'
+import { DEFAULT_SCRIPT, MockAdapter, type MockAdapterOptions, type MockScript } from '../src/harness/mock.ts'
 import { ConflictFixerRefused } from '../src/integration/fixer.ts'
 import type { Decision } from '../src/decisions/index.ts'
 import { CoordinatorForbidden } from '../src/coordinator/actor.ts'
@@ -46,12 +47,15 @@ import {
   AGENT_ANSWER_FLOOR_MS,
   agentAnswerAfter,
   createScheduler,
+  ReassignRefused,
+  StepRefused,
   type RunReport,
   type Scheduler,
 } from '../src/scheduler/index.ts'
 import { WorkflowSchema, type EffectId, type Workflow } from '../src/types.ts'
 
 const HARNESS = 'claude-code'
+const CODEX = 'codex'
 
 // ---------------------------------------------------------------------------
 // Rig
@@ -229,6 +233,8 @@ interface Rig {
   readonly pools: ResourcePools
   readonly journal: Journal
   readonly adapter: MockAdapter
+  /** The second harness, when the rig was asked for one. */
+  readonly codex: MockAdapter | null
   readonly calls: Call[]
   readonly advance: (ms: number) => Promise<void>
   readonly poolNames: readonly string[]
@@ -283,6 +289,10 @@ function rig(
     readonly retries?: number
     /** The harness's configured admission ceiling. Defaults to 8. */
     readonly ceiling?: number
+    /** A second harness, `codex`, for moving phases between harnesses. Never stalled. */
+    readonly codex?: MockAdapterOptions
+    /** `run --coordinator-authority`. */
+    readonly coordinatorAuthority?: 'standard' | 'full'
   readonly retryAfterMs?: number
     readonly agentAnswerAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
@@ -333,10 +343,11 @@ function rig(
     ...(options.midTurnRefusal === undefined ? {} : { midTurnRefusal: options.midTurnRefusal }),
   })
   const stall = stalling(adapter)
+  const codex = options.codex === undefined ? null : new MockAdapter({ id: CODEX, ...options.codex })
   const admission = new AdmissionControl({
     journal,
     runId,
-    ceilings: { [HARNESS]: options.ceiling ?? 8 },
+    ceilings: { [HARNESS]: options.ceiling ?? 8, [CODEX]: 8 },
     clock,
     // Full jitter with a fixed draw: the backoff is then the cap itself, which
     // is a number this test can advance past exactly.
@@ -352,7 +363,11 @@ function rig(
     journal,
     pools,
     admission,
-    adapters: { [HARNESS]: options.stall === true ? stall.adapter : adapter },
+    adapters: {
+      [HARNESS]: options.stall === true ? stall.adapter : adapter,
+      ...(codex === null ? {} : { [CODEX]: codex }),
+    },
+    ...(options.coordinatorAuthority === undefined ? {} : { coordinatorAuthority: options.coordinatorAuthority }),
     executor,
     laneRoot: join(dir, 'lanes'),
     takeovers,
@@ -389,6 +404,7 @@ function rig(
     journal,
     adapter,
     calls: executor.calls,
+    codex,
     advance,
     poolNames: Object.keys(workflow.resources),
     laneRoot: join(dir, 'lanes'),
@@ -727,6 +743,7 @@ function makeWorkflow(
     readonly pipeline?: string
     readonly crew?: Record<string, unknown>
     readonly modelFallbacks?: Record<string, string>
+    readonly harnessFallbacks?: Record<string, { harness: string; model: string }>
     readonly substitution?: 'same_tier' | 'up_one_tier' | 'any'
     readonly maxSpareCrew?: number
   } = {},
@@ -742,6 +759,7 @@ function makeWorkflow(
       pipeline: options.pipeline ?? 'solo',
       ...(options.defaultChores === undefined ? {} : { chores: options.defaultChores }),
       ...(options.modelFallbacks === undefined ? {} : { model_fallbacks: options.modelFallbacks }),
+      ...(options.harnessFallbacks === undefined ? {} : { harness_fallbacks: options.harnessFallbacks }),
       ...(options.substitution === undefined ? {} : { substitution: options.substitution }),
       ...(options.maxSpareCrew === undefined ? {} : { max_spare_crew: options.maxSpareCrew }),
     },
@@ -2743,6 +2761,378 @@ describe('§9 operations', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Taking a phase over: interrupt, reassign, step, switch-harness
+//
+// Moving a phase to somebody else used to take abort, amend and retry, and the
+// retry started the pipeline from the top: a phase in review went back to
+// implementing. Each test here asserts the phase carried on where it was.
+// ---------------------------------------------------------------------------
+
+/** The journalled payloads of one event type, for one node or for the run. */
+const eventsOf = (rig_: Rig, type: string, nodeId?: string): unknown[] =>
+  rig_.journal
+    .events('run-1')
+    .filter(
+      (event) => event.type === type && (nodeId === undefined || (event as { nodeId?: string }).nodeId === nodeId),
+    )
+    .map((event) => event.payload)
+
+/** How many times an effect ran. */
+const ranTimes = (rig_: Rig, effect: string): number => rig_.calls.filter((call) => call.effect === effect).length
+
+describe('interrupt, reassign, step', () => {
+  it('interrupts a running node now and holds it, keeping its lane, and runs the cut step again on resume', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    expect(await r.scheduler.interrupt('a')).toBe('sent')
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to be held')
+
+    // Held, not failed: the lane is still the phase's, and nothing but a
+    // person releases it — not the coordinator.
+    expect(r.pools.held('lane')).toBe(1)
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question.question).toBe('The operator interrupted this node. Resume it?')
+    expect(() => r.scheduler.answer('a', { human: { answer: 'resume' } }, 'coordinator')).toThrow(CoordinatorForbidden)
+
+    expect(r.scheduler.resume('a')).toBe('delivered')
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // The cut turn's state ran again; nothing after it ran twice.
+    expect([ranTimes(r, 'e-1'), ranTimes(r, 'e-2'), ranTimes(r, 'e-3')]).toEqual([2, 1, 1])
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'interrupt', delivery: 'sent' },
+      { op: 'resume', delivery: 'delivered' },
+    ])
+    expectDrained(r)
+  })
+
+  it('holds a node already parked on a question, as pause does', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'gated' })]), { retryAfterMs: 60_000 })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+
+    expect(await r.scheduler.interrupt('a', 'operator', 'checking the migration by hand')).toBe('held')
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'interrupt', delivery: 'held', reason: 'checking the migration by hand' },
+    ])
+    r.scheduler.answer('a', { human: { answer: 'ship' } })
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+
+  it('reassigns a running node to another harness: the step runs again there, fresh, with a handoff', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true, codex: {} })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    expect(await r.scheduler.reassign('a', { harness: CODEX, model: 'gpt-5' }, { reason: 'claude account is out' })).toBe(
+      'sent',
+    )
+    r.stall.release()
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    // No question in between: a reassignment is its own answer.
+    expect(eventsOf(r, 'human_question', 'a')).toEqual([])
+    // s1 again, then s2 and s3, all on the new harness and model.
+    expect(r.adapter.spawned).toHaveLength(1)
+    expect(r.codex?.spawned.map((task) => task.model)).toEqual(['gpt-5', 'gpt-5', 'gpt-5'])
+    expect(r.codex?.spawned[0]?.operatorText).toContain('You are taking this phase over from claude-code (opus)')
+    // Spent by the first turn it reached.
+    expect(r.codex?.spawned[1]?.operatorText).toBeUndefined()
+    expect(eventsOf(r, 'node_reassigned', 'a')).toEqual([
+      {
+        from: { harness: HARNESS, model: 'opus' },
+        to: { harness: CODEX, model: 'gpt-5' },
+        session: 'fresh',
+        reason: 'claude account is out',
+      },
+    ])
+    expect(operationsOf(r, 'a')).toEqual([
+      { op: 'reassign', text: 'codex gpt-5', delivery: 'sent', reason: 'claude account is out' },
+    ])
+    expectDrained(r)
+  })
+
+  it('lets the turn finish under --after-turn, and changes who takes the next one', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true, codex: {} })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    expect(await r.scheduler.reassign('a', { harness: CODEX, model: 'gpt-5' }, { when: 'after_turn' })).toBe('queued')
+    r.stall.release()
+    expect((await running).statuses).toEqual({ a: 'done' })
+
+    expect(ranTimes(r, 'e-1')).toBe(1)
+    expect(r.adapter.spawned).toHaveLength(1)
+    expect(r.codex?.spawned).toHaveLength(2)
+    expectDrained(r)
+  })
+
+  it('keeps the session when only the model changes', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.reassign('a', { model: 'sonnet' }, { when: 'after_turn' })
+    r.stall.release()
+    await running
+
+    expect(r.adapter.spawned.map((task) => task.model)).toEqual(['opus', 'sonnet', 'sonnet'])
+    expect(r.adapter.spawned[1]?.operatorText).toBeUndefined()
+    expect(eventsOf(r, 'node_reassigned', 'a')).toEqual([
+      { from: { harness: HARNESS, model: 'opus' }, to: { harness: HARNESS, model: 'sonnet' }, session: 'kept' },
+    ])
+    expectDrained(r)
+  })
+
+  it('reassigns a held node at once and releases it', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true, codex: {} })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    await r.scheduler.interrupt('a')
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to be held')
+
+    expect(await r.scheduler.reassign('a', { harness: CODEX, model: 'gpt-5' })).toBe('delivered')
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expect(ranTimes(r, 'e-1')).toBe(2)
+    expect(r.codex?.spawned).toHaveLength(3)
+    expectDrained(r)
+  })
+
+  it('takes an amendment of a held node: the new harness runs the cut step on resume', async () => {
+    const workflow = makeWorkflow([node('a', [], { pipeline: 'long' })])
+    const r = rig(workflow, { stall: true, codex: {} })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    await r.scheduler.interrupt('a')
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to be held')
+
+    const amended = await amendRun({
+      journal: r.journal,
+      runId: 'run-1',
+      proposed: { ...workflow, nodes: [{ ...workflow.nodes[0], harness: CODEX, model: 'gpt-5' }] },
+      runner: {
+        statuses: () => r.scheduler.statuses,
+        adopt: (next) => r.scheduler.adopt(next),
+        vet: (next) => r.scheduler.vetAmendment(next),
+      },
+    })
+    expect(amended.ok).toBe(true)
+    expect(r.scheduler.resume('a')).toBe('delivered')
+    expect((await running).statuses).toEqual({ a: 'done' })
+
+    expect(ranTimes(r, 'e-1')).toBe(2)
+    expect(r.codex?.spawned.map((task) => task.model)).toEqual(['gpt-5', 'gpt-5', 'gpt-5'])
+    expect(eventsOf(r, 'node_reassigned', 'a')).toEqual([
+      {
+        from: { harness: HARNESS, model: 'opus' },
+        to: { harness: CODEX, model: 'gpt-5' },
+        session: 'fresh',
+        cause: 'amendment',
+      },
+    ])
+    expectDrained(r)
+  })
+
+  it('hands a phase to another crew member, who works in the worktree the phase is in', async () => {
+    const workflow = makeWorkflow([node('a', [], { crew: 'a1', pipeline: 'long' }), node('b', ['a'], { crew: 'b1' })], {
+      crew: { a1: { tier: 1, model: 'm1' }, b1: { tier: 1, model: 'm2', harness: CODEX } },
+      maxSpareCrew: 0,
+    })
+    const r = rig(workflow, { stall: true, codex: {} })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    await r.scheduler.interrupt('a')
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to be held')
+
+    await expect(r.scheduler.reassign('a', { crew: 'nobody' })).rejects.toThrow(ReassignRefused)
+    expect(await r.scheduler.reassign('a', { crew: 'b1' })).toBe('delivered')
+    // a1's desk holds the work, so a1 stays busy beside b1 until the phase lets it go.
+    expect(r.scheduler.busyCrew()).toEqual(['a1', 'b1'])
+
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done' })
+    expect(eventsOf(r, 'node_reassigned', 'a')).toEqual([
+      {
+        from: { member: 'a1', harness: HARNESS, model: 'm1' },
+        to: { member: 'b1', harness: CODEX, model: 'm2' },
+        session: 'fresh',
+      },
+    ])
+    // The phase stayed on a1's desk.
+    const lanes = eventsOf(r, 'node_assigned', 'a').flatMap((payload) => {
+      const lane = (payload as { lane?: string }).lane
+      return lane === undefined ? [] : [lane]
+    })
+    expect(new Set(lanes).size).toBe(1)
+    expect(lanes[0]).toContain('a1')
+    expectDrained(r)
+  })
+
+  it('refuses a crew member who is working on another phase', async () => {
+    const workflow = makeWorkflow([node('a', [], { crew: 'a1' }), node('b', [], { crew: 'b1' })], {
+      crew: { a1: { tier: 1, model: 'm1' }, b1: { tier: 1, model: 'm2' } },
+    })
+    const r = rig(workflow, { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.busyCrew().length === 2 && r.stall.live(), 'both members to start')
+
+    await expect(r.scheduler.reassign('a', { crew: 'b1' })).rejects.toThrow('working on another phase')
+    r.stall.release()
+    await running
+    expectDrained(r)
+  })
+
+  it('steps a held node to a later state by hand, and the gates still decide', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+    await r.scheduler.interrupt('a')
+    r.stall.release()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to be held')
+
+    await expect(r.scheduler.step('a', 'done')).rejects.toThrow(StepRefused)
+    await expect(r.scheduler.step('a', 'nowhere')).rejects.toThrow(StepRefused)
+    await expect(r.scheduler.step('a', 's3', 'coordinator', 'finished by hand')).rejects.toThrow(CoordinatorForbidden)
+    expect(await r.scheduler.step('a', 's3', 'operator', 'finished by hand')).toBe('delivered')
+
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expect([ranTimes(r, 'e-1'), ranTimes(r, 'e-2'), ranTimes(r, 'e-3')]).toEqual([1, 0, 1])
+    expectDrained(r)
+  })
+
+  it('steps a running node: the turn is cut and the pipeline goes where it was sent', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' })]), { stall: true })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    expect(await r.scheduler.step('a', 's3')).toBe('sent')
+    r.stall.release()
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expect([ranTimes(r, 'e-1'), ranTimes(r, 'e-2'), ranTimes(r, 'e-3')]).toEqual([1, 0, 1])
+    expectDrained(r)
+  })
+
+  it('lets the coordinator lift its own interrupt, and not the operator’s', async () => {
+    const r = rig(makeWorkflow([node('a', [], { pipeline: 'long' }), node('b', [], { pipeline: 'long' })]), {
+      stall: true,
+    })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), 'sessions to open')
+    await r.scheduler.interrupt('a', 'coordinator', 'a is looping on the same test')
+    await r.scheduler.interrupt('b', 'operator')
+    r.stall.release()
+    await until(
+      () => r.scheduler.statuses['a'] === 'awaiting_human' && r.scheduler.statuses['b'] === 'awaiting_human',
+      'both to be held',
+    )
+
+    expect(r.journal.pendingQuestion('run-1', 'a')?.question.question).toBe(
+      'The run coordinator interrupted this node. Resume it?',
+    )
+    expect(() => r.scheduler.resume('b', 'coordinator')).toThrow(CoordinatorForbidden)
+    expect(r.scheduler.resume('a', 'coordinator', 'fixed the fixture')).toBe('delivered')
+    expect(r.scheduler.resume('b')).toBe('delivered')
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done' })
+    expectDrained(r)
+  })
+
+  it('lets the coordinator answer a plan question only under --coordinator-authority full', async () => {
+    for (const authority of ['standard', 'full'] as const) {
+      const r = rig(makeWorkflow([node('a', [], { pipeline: 'gated' })]), { coordinatorAuthority: authority })
+      const running = r.scheduler.run()
+      await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'node a to park')
+      const answer = (): void =>
+        r.scheduler.answer('a', { human: { answer: 'ship' } }, 'coordinator', 'the gate log is clean')
+      if (authority === 'standard') {
+        expect(answer).toThrow(CoordinatorForbidden)
+        r.scheduler.answer('a', { human: { answer: 'ship' } })
+      } else {
+        answer()
+        expect(eventsOf(r, 'human_answered', 'a')).toContainEqual(
+          expect.objectContaining({ by: 'coordinator', reason: 'the gate log is clean' }),
+        )
+      }
+      expect((await running).statuses).toEqual({ a: 'done' })
+    }
+  })
+})
+
+describe('switch-harness and harness_fallbacks', () => {
+  it('moves every phase on a harness to another, without a pause and resume', async () => {
+    const workflow = makeWorkflow([
+      node('a', [], { pipeline: 'long' }),
+      node('b', [], { pipeline: 'long' }),
+      node('c', ['a']),
+    ])
+    const r = rig(workflow, { stall: true, codex: {} })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live() && r.scheduler.statuses['b'] === 'running', 'a and b to start')
+
+    expect(await r.scheduler.switchHarness(HARNESS, CODEX, 'gpt-5', { reason: 'credits ran out' })).toEqual(['a', 'b'])
+    r.stall.release()
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+
+    // Only the turns that were live when it switched ran on the old harness;
+    // c, which had not started, never touched it.
+    expect(r.adapter.spawned.map((task) => task.nodeId).sort()).toEqual(['a', 'b'])
+    expect(r.codex?.spawned.filter((task) => task.nodeId === 'c')).toHaveLength(1)
+    expect(eventsOf(r, 'harness_switched')).toEqual([
+      { from: HARNESS, to: CODEX, model: 'gpt-5', reason: 'credits ran out' },
+    ])
+    expect(eventsOf(r, 'node_reassigned')).toHaveLength(2)
+    expectDrained(r)
+  })
+
+  it('falls back to another harness when the one it asked for is out of quota at the spawn', async () => {
+    const workflow = makeWorkflow([node('a', [], { pipeline: 'long' })], {
+      harnessFallbacks: { [HARNESS]: { harness: CODEX, model: 'gpt-5' } },
+    })
+    const r = rig(workflow, { spawns: ['quota'], codex: {} })
+    const report = await r.scheduler.run()
+
+    // No wait for the window: the run moved on at once.
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(0)
+    expect(r.codex?.spawned).toHaveLength(3)
+    expect(eventsOf(r, 'harness_switched')).toEqual([
+      { from: HARNESS, to: CODEX, model: 'gpt-5', cause: 'harness_fallback', reason: 'claude-code is out of quota' },
+    ])
+    expect(statusesOf(r, 'a').at(-1)).toBe('done')
+    expectDrained(r)
+  })
+
+  it('falls back mid-turn and runs the same step again on the fallback', async () => {
+    const workflow = makeWorkflow([node('a', [], { pipeline: 'long' })], {
+      harnessFallbacks: { [HARNESS]: { harness: CODEX, model: 'gpt-5' } },
+    })
+    const r = rig(workflow, { midTurnRefusal: { kind: 'quota', reason: 'credits' }, codex: {} })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(1)
+    // s1 again, then s2 and s3 — the attempt was not re-driven from the top.
+    expect(r.codex?.spawned).toHaveLength(3)
+    expect(eventsOf(r, 'node_reassigned', 'a')).toEqual([
+      {
+        from: { harness: HARNESS, model: 'opus' },
+        to: { harness: CODEX, model: 'gpt-5' },
+        session: 'fresh',
+        cause: 'harness_fallback',
+        reason: 'claude-code is out of quota',
+      },
+    ])
+    expectDrained(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 8.1: §9's fifth operation — the offer the PTY channel resolves against
 //
 // The registry is the daemon's third security boundary: nothing is reachable
@@ -3666,7 +4056,8 @@ describe('crew', () => {
           amendment: 1,
           author: 'scheduler',
           targets: ['node:a'],
-          reason: {
+          reason: 'review did not approve 2 times on tier1; moved up to tier2-1',
+          rule: {
             kind: 'review_rejections',
             node: 'a',
             from: 'tier1',

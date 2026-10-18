@@ -221,6 +221,32 @@ export class PipelineRun {
     return await this.#drain()
   }
 
+  /**
+   * Enters `stateId` again — or for the first time — without taking a
+   * transition, and runs its `onEnter` effects. Facts merge first, as on
+   * `send`.
+   *
+   * The one way into a state that is not an edge, and it exists for the
+   * operator (§9): a turn interrupted to hand the phase to someone else has to
+   * be run again by them, not read as finished, and `step --to` moves the
+   * pipeline where a person says. Allowed from a run that is ready or parked
+   * on a question; what the question had queued behind it is dropped, because
+   * the state it belonged to is being left. Never into a final state: that
+   * would settle a phase no gate decided.
+   */
+  async enter(stateId: string, facts?: GuardContext): Promise<StepResult> {
+    if (this.#status !== 'ready' && this.#status !== 'awaiting_human') {
+      throw new Error(`cannot enter a state while status is "${this.#status}"`)
+    }
+    if (!this.#states.has(stateId)) throw new Error(`unknown state "${stateId}"`)
+    if (this.#finals.has(stateId)) throw new Error(`state "${stateId}" is final`)
+    this.#merge(facts)
+    this.#status = 'ready'
+    this.#via = undefined
+    this.#queue = [{ kind: 'arrive', stateId }, ...this.#enterSteps(stateId)]
+    return await this.#drain()
+  }
+
   // -------------------------------------------------------------------------
 
   #stateOf(id: string): StateNode {

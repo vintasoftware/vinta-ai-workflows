@@ -681,8 +681,13 @@
                       "add_context",
                       "redirect",
                       "pause",
+                      "resume",
                       "abort",
-                      "fresh"
+                      "fresh",
+                      "interrupt",
+                      "reassign",
+                      "step",
+                      "retry"
                     ]
                   },
                   "by": {
@@ -939,7 +944,11 @@
                       "fresh",
                       "amend",
                       "exec",
-                      "gate_cache_invalidate"
+                      "gate_cache_invalidate",
+                      "interrupt",
+                      "reassign",
+                      "retry",
+                      "step"
                     ]
                   },
                   "target": {

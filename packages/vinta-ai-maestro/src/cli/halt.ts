@@ -26,10 +26,11 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { HaltResponseSchema, type NodeActivity } from '../daemon/schemas.ts'
+import { HaltResponseSchema, REASON_HEADER, type NodeActivity } from '../daemon/schemas.ts'
 import { isAlive, liveJob, type JobRecord } from '../job/job.ts'
 import { openJournal, type Journal } from '../journal/journal.ts'
 import { killTree } from '../platform/platform.ts'
+import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
 import { isResumable, runState } from './status.ts'
@@ -52,10 +53,14 @@ export const STOP_USAGE = `usage: vinta-ai-maestro stop <runId> [--repo <dir>] [
   interrupted run can be stopped too, which makes it final.
 
   --repo <dir>   The project. Defaults to the current directory.
-  --wait         Return once the job has exited, not once it has the request.`
+  --wait         Return once the job has exited, not once it has the request.
+  --reason <why> Why, journalled with the request. The run coordinator must
+                 give one — and may pause a run, but stop one only under
+                 \`run --coordinator-authority full\`.`
 
 export interface HaltDeps {
   readonly fetch?: typeof fetch
+  readonly env?: NodeJS.ProcessEnv
   readonly alive?: (pid: number) => boolean
   readonly kill?: (pid: number, signal: NodeJS.Signals) => void
   readonly sleep?: (ms: number) => Promise<void>
@@ -80,7 +85,7 @@ async function haltCommand(
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { repo: { type: 'string' }, wait: { type: 'boolean' } },
+      options: { repo: { type: 'string' }, wait: { type: 'boolean' }, reason: { type: 'string' } },
       allowPositionals: true,
     })
   } catch {
@@ -110,9 +115,28 @@ async function haltCommand(
     const job = liveJob(repoPath, runId, alive)
     const state = runState(row, job)
 
+    // Inside the coordinator's own session the request carries its token, and
+    // the job holds it to what the coordinator may do: there is no force-stop
+    // behind a refusal, and nothing hosted means nothing for it to end.
+    const env = deps.env ?? process.env
+    if (env[MAESTRO_RUN_ENV] === runId && env[MAESTRO_URL_ENV] !== undefined && env[MAESTRO_TOKEN_ENV] !== undefined) {
+      const status = await askAs(
+        { url: env[MAESTRO_URL_ENV] as string, token: env[MAESTRO_TOKEN_ENV] as string, runId },
+        mode,
+        deps.fetch ?? fetch,
+        parsed.values.reason,
+      )
+      if (status < 400) {
+        io.out(`vinta-ai-maestro: ${mode} of run ${runId} requested.`)
+        return OK
+      }
+      io.err(`vinta-ai-maestro: refused (${status})`)
+      return FAILED
+    }
+
     if (job === null) return haltUnhosted(mode, journal, runId, state, io)
 
-    const answer = await ask(job, mode, deps.fetch ?? fetch)
+    const answer = await ask(job, mode, deps.fetch ?? fetch, parsed.values.reason)
     const asked = typeof answer === 'string' ? answer : 'accepted'
     if (asked === 'unreachable') {
       if (mode === 'pause') {
@@ -177,13 +201,14 @@ async function ask(
   job: JobRecord,
   mode: Mode,
   fetchImpl: typeof fetch,
+  reason?: string,
 ): Promise<readonly NodeActivity[] | 'refused' | 'unreachable'> {
   try {
     const response = await fetchImpl(
       `${job.url}/api/runs/${encodeURIComponent(job.runId)}/${mode}`,
       {
         method: 'POST',
-        headers: { authorization: `Bearer ${job.token}`, 'content-type': 'application/json' },
+        headers: haltHeaders(job.token, reason),
         body: '{}',
         signal: AbortSignal.timeout(10_000),
       },
@@ -195,6 +220,34 @@ async function ask(
     return response.status === 409 ? 'refused' : 'unreachable'
   } catch {
     return 'unreachable'
+  }
+}
+
+function haltHeaders(token: string, reason: string | undefined): Record<string, string> {
+  return {
+    authorization: `Bearer ${token}`,
+    'content-type': 'application/json',
+    ...(reason === undefined || reason.trim() === '' ? {} : { [REASON_HEADER]: encodeURIComponent(reason) }),
+  }
+}
+
+/** The coordinator's request, answered with the status code alone; 0 when unreachable. */
+async function askAs(
+  target: { readonly url: string; readonly token: string; readonly runId: string },
+  mode: Mode,
+  fetchImpl: typeof fetch,
+  reason: string | undefined,
+): Promise<number> {
+  try {
+    const response = await fetchImpl(`${target.url}/api/runs/${encodeURIComponent(target.runId)}/${mode}`, {
+      method: 'POST',
+      headers: haltHeaders(target.token, reason),
+      body: '{}',
+      signal: AbortSignal.timeout(10_000),
+    })
+    return response.status
+  } catch {
+    return 503
   }
 }
 

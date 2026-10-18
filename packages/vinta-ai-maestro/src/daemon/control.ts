@@ -26,6 +26,9 @@ import type { AmendRunner } from '../amend/amend.ts'
 import type { Actor, NodeStatus, OperatorDelivery } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion, NodeActivity } from './schemas.ts'
+import type { HarnessAdapter } from '../harness/adapter.ts'
+import type { ConflictFixer } from '../integration/fixer.ts'
+import type { CoordinatorAuthority, ReassignTarget, ReassignWhen } from '../scheduler/index.ts'
 import type { ExecPort } from '../coordinator/exec.ts'
 import type { BranchPort } from '../landing/live.ts'
 import type {
@@ -48,34 +51,57 @@ import type {
  */
 export type Operated = void | OperatorDelivery | Promise<void | OperatorDelivery>
 
-/** The five operations of §9, plus the two reads `Scheduler` already exposes. */
+/**
+ * The five operations of §9, plus the two reads `Scheduler` already exposes.
+ *
+ * Every acting verb takes the actor and the caller's reason — the reason is
+ * journalled with the operation, and the coordinator is refused without one
+ * (`api.ts`), so every decision it makes unattended can be listed with why.
+ */
 export interface RunControl {
   /** Live node statuses. The journal projection is authoritative; this is the peek. */
   readonly statuses: Readonly<Record<string, NodeStatus>>
   /** §9.1 — the answer enters the guard context as `human.answer` and resumes the node. */
-  answer(nodeId: string, facts: GuardContext, actor?: Actor): void | Promise<void>
+  answer(nodeId: string, facts: GuardContext, actor?: Actor, reason?: string): void | Promise<void>
   /** §9 — `session.send(text)`, or queued for the next resume. */
-  addContext(nodeId: string, text: string, actor?: Actor): Operated
+  addContext(nodeId: string, text: string, actor?: Actor, reason?: string): Operated
   /** §9 — interrupt, then send the new instruction. */
-  redirect(nodeId: string, instruction: string, actor?: Actor): Operated
+  redirect(nodeId: string, instruction: string, actor?: Actor, reason?: string): Operated
   /**
    * §9 — finish the current turn, then `await_human`; on a node already
    * parked on a question, hold it there (`held`).
    */
-  pause(nodeId: string, actor?: Actor): Operated
+  pause(nodeId: string, actor?: Actor, reason?: string): Operated
   /** §9 — undo `pause`: withdraw it, release the parked phase, or give a held one its timer back. */
-  resume?(nodeId: string, actor?: Actor): Operated
+  resume?(nodeId: string, actor?: Actor, reason?: string): Operated
   /**
    * §9 — kill the session, mark failed, block dependents. A run left with
    * nothing to run stays up for the node's `retry` (§9).
    */
-  abortNode(nodeId: string, actor?: Actor): Operated
+  abortNode(nodeId: string, actor?: Actor, reason?: string): Operated
   /**
    * Drop the node's agent session: its next turn starts cold, with the whole
    * brief (§15). Optional, like `retry`, and refused rather than faked by a
    * host that does not keep sessions.
    */
-  freshSession?(nodeId: string, actor?: Actor): Operated
+  freshSession?(nodeId: string, actor?: Actor, reason?: string): Operated
+  /** Stop the turn now without failing the phase: it is held, keeping its lane and its work. */
+  interrupt?(nodeId: string, actor?: Actor, reason?: string): Operated
+  /** Hand the phase to a crew member, or a harness and model, at the step it is at. */
+  reassign?(
+    nodeId: string,
+    target: ReassignTarget,
+    options?: { readonly when?: ReassignWhen; readonly actor?: Actor; readonly reason?: string },
+  ): Operated
+  /** Move the phase's pipeline to `to` by hand. Never into a final state. */
+  step?(nodeId: string, to: string, actor?: Actor, reason?: string): Operated
+  /** Move the whole run off a harness. Resolves with the phases it moved. */
+  switchHarness?(
+    from: string,
+    to: string,
+    model: string,
+    options?: { readonly when?: ReassignWhen; readonly actor?: Actor; readonly reason?: string },
+  ): Promise<readonly string[]>
   /**
    * Run a failed node again, and unblock what its failure blocked.
    *
@@ -282,6 +308,13 @@ export interface DaemonRun {
    */
   readonly branches?: BranchPort
   /**
+   * `run --coordinator-authority`: how far the coordinator's token reaches on
+   * this run. Absent is `standard`.
+   */
+  readonly coordinatorAuthority?: CoordinatorAuthority
+  /** The conflict fixer's round, by hand. Absent on a host with no fixer. */
+  readonly fixer?: FixerControl
+  /**
    * §13.4's cache, as far as an operator or the coordinator may reach it:
    * forgetting a verdict. Absent on a host with no cache, and the endpoint
    * then refuses. An agent never reaches it — its way past a stale entry is
@@ -304,6 +337,43 @@ export interface PermissionJudgePort {
 export class UnsupportedOperation extends Error {}
 
 /**
+ * Hands on the conflict fixer's round (`fixer interrupt` / `fixer reassign`):
+ * the integration counterpart of `interrupt` and `reassign`, for a fix round
+ * that is going nowhere on an agent that cannot see why.
+ */
+export interface FixerControl {
+  /** Ends the running round as a round spent; false when none was running. */
+  interrupt(): Promise<boolean>
+  /**
+   * Every later round goes to this harness and model; with `now`, the running
+   * round ends so the next one starts on them. Throws `UnknownHarness`.
+   */
+  reassign(harness: string, model: string, now: boolean): Promise<boolean>
+  /** The running round's harness and model, or null. */
+  running(): { readonly harness: string; readonly model: string } | null
+}
+
+/** A harness this run has no adapter for. The message is ids only. */
+export class UnknownHarness extends Error {}
+
+export function fixerControl(
+  fixer: ConflictFixer,
+  adapters: Readonly<Record<string, HarnessAdapter>>,
+): FixerControl {
+  return {
+    interrupt: async () => (await fixer.endRound?.()) ?? false,
+    reassign: async (harness, model, now) => {
+      const adapter = adapters[harness]
+      if (adapter === undefined) throw new UnknownHarness(`no adapter registered for harness "${harness}"`)
+      if (fixer.reassign === undefined) throw new UnsupportedOperation('fixer reassign')
+      fixer.reassign({ adapter, model })
+      return now ? ((await fixer.endRound?.()) ?? false) : false
+    },
+    running: () => fixer.running?.() ?? null,
+  }
+}
+
+/**
  * Builds a `RunControl` from what `Scheduler` actually implements, letting the
  * host supply the rest. The unsupplied verbs refuse rather than silently
  * succeeding: an operator who pressed Abort and got a 200 back would believe
@@ -319,7 +389,8 @@ export function runControl(
   }
   // Destructured off the prototype, so every forward re-binds `this` to the
   // scheduler: these are class methods reaching private state.
-  const { addContext, redirect, pause, resume, abortNode, question, retry, freshSession } = scheduler
+  const { addContext, redirect, pause, resume, abortNode, question, retry, freshSession, interrupt, reassign, step, switchHarness } =
+    scheduler
   const own =
     operations.question ??
     (question === undefined ? undefined : (nodeId: string) => question.call(scheduler, nodeId))
@@ -328,25 +399,27 @@ export function runControl(
     get statuses() {
       return scheduler.statuses
     },
-    answer: (nodeId, facts, actor) => scheduler.answer(nodeId, facts, actor),
+    answer: (nodeId, facts, actor, reason) => scheduler.answer(nodeId, facts, actor, reason),
     addContext:
       operations.addContext ??
       (addContext === undefined
         ? unsupported('add_context')
-        : (nodeId, text, actor) => addContext.call(scheduler, nodeId, text, actor)),
+        : (nodeId, text, actor, reason) => addContext.call(scheduler, nodeId, text, actor, reason)),
     redirect:
       operations.redirect ??
       (redirect === undefined
         ? unsupported('redirect')
-        : (nodeId, instruction, actor) => redirect.call(scheduler, nodeId, instruction, actor)),
+        : (nodeId, instruction, actor, reason) => redirect.call(scheduler, nodeId, instruction, actor, reason)),
     pause:
       operations.pause ??
-      (pause === undefined ? unsupported('pause') : (nodeId, actor) => pause.call(scheduler, nodeId, actor)),
+      (pause === undefined
+        ? unsupported('pause')
+        : (nodeId, actor, reason) => pause.call(scheduler, nodeId, actor, reason)),
     abortNode:
       operations.abortNode ??
       (abortNode === undefined
         ? unsupported('abort')
-        : (nodeId, actor) => abortNode.call(scheduler, nodeId, actor)),
+        : (nodeId, actor, reason) => abortNode.call(scheduler, nodeId, actor, reason)),
     ...(own === undefined ? {} : { question: own }),
     // Optional all the way through: a host without it answers "unsupported"
     // rather than accepting a retry it will not perform.
@@ -359,11 +432,49 @@ export function runControl(
       ? { resume: operations.resume }
       : resume === undefined
         ? {}
-        : { resume: (nodeId: string, actor?: Actor) => resume.call(scheduler, nodeId, actor) }),
+        : { resume: (nodeId: string, actor?: Actor, reason?: string) => resume.call(scheduler, nodeId, actor, reason) }),
     ...(operations.freshSession !== undefined
       ? { freshSession: operations.freshSession }
       : freshSession === undefined
         ? {}
-        : { freshSession: (nodeId: string, actor?: Actor) => freshSession.call(scheduler, nodeId, actor) }),
+        : {
+            freshSession: (nodeId: string, actor?: Actor, reason?: string) =>
+              freshSession.call(scheduler, nodeId, actor, reason),
+          }),
+    // The phase-control verbs: optional like `retry`, refused by a host
+    // without them rather than faked.
+    ...(operations.interrupt !== undefined
+      ? { interrupt: operations.interrupt }
+      : interrupt === undefined
+        ? {}
+        : {
+            interrupt: (nodeId: string, actor?: Actor, reason?: string) =>
+              interrupt.call(scheduler, nodeId, actor, reason),
+          }),
+    ...(operations.reassign !== undefined
+      ? { reassign: operations.reassign }
+      : reassign === undefined
+        ? {}
+        : {
+            reassign: (nodeId: string, target: ReassignTarget, options?: Parameters<NonNullable<RunControl['reassign']>>[2]) =>
+              reassign.call(scheduler, nodeId, target, options),
+          }),
+    ...(operations.step !== undefined
+      ? { step: operations.step }
+      : step === undefined
+        ? {}
+        : { step: (nodeId: string, to: string, actor?: Actor, reason?: string) => step.call(scheduler, nodeId, to, actor, reason) }),
+    ...(operations.switchHarness !== undefined
+      ? { switchHarness: operations.switchHarness }
+      : switchHarness === undefined
+        ? {}
+        : {
+            switchHarness: (
+              from: string,
+              to: string,
+              model: string,
+              options?: Parameters<NonNullable<RunControl['switchHarness']>>[3],
+            ) => switchHarness.call(scheduler, from, to, model, options),
+          }),
   }
 }

@@ -87,7 +87,18 @@ export const OperationsSchema = z
       .array(
         z.strictObject({
           node: Id,
-          op: z.enum(['add_context', 'redirect', 'pause', 'abort', 'fresh']),
+          op: z.enum([
+            'add_context',
+            'redirect',
+            'pause',
+            'resume',
+            'abort',
+            'fresh',
+            'interrupt',
+            'reassign',
+            'step',
+            'retry',
+          ]),
           by: z.enum(['operator', 'coordinator']),
           count: z.number().int().min(1),
         }),
@@ -146,7 +157,7 @@ export const UnattendedDecisionsSchema = z
         z.strictObject({
           at_ms: z.number().int(),
           node: Id.optional(),
-          action: z.enum(['add_context', 'redirect', 'pause', 'abort', 'fresh', 'amend', 'exec', 'gate_cache_invalidate']),
+          action: z.enum(['add_context', 'redirect', 'pause', 'abort', 'fresh', 'amend', 'exec', 'gate_cache_invalidate', 'interrupt', 'reassign', 'retry', 'step']),
           target: z
             .string()
             .max(500)

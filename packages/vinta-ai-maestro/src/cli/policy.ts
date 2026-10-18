@@ -25,6 +25,7 @@ import {
 } from '../harness/profiles.ts'
 import { liveJob } from '../job/job.ts'
 import type { Journal } from '../journal/journal.ts'
+import type { CoordinatorAuthority } from '../scheduler/index.ts'
 import { loadSystemOne, SystemOneConfigError, type SystemOne } from '../system-one/config.ts'
 import type { Io } from './io.ts'
 import type { LogValues } from './logging.ts'
@@ -115,6 +116,8 @@ export interface RunPolicy {
    * operator's choice from a value nobody chose.
    */
   readonly given: PolicyValues
+  /** `--coordinator-authority`. Absent is `standard`. */
+  readonly coordinatorAuthority?: CoordinatorAuthority
 }
 
 /** The flag values `toRunPolicy` reads, as `parseArgs` produced them. */
@@ -128,6 +131,7 @@ export interface PolicyValues {
   readonly 'no-intervene'?: boolean | undefined
   readonly 'no-coordinator'?: boolean | undefined
   readonly 'harness-profile'?: readonly string[] | undefined
+  readonly 'coordinator-authority'?: string | undefined
 }
 
 /** `null` on a bad flag, already reported; the message names the flag. */
@@ -164,6 +168,14 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
   if (retryAfterMs === null) return null
   const agentAnswerAfterMs = toRetryAfterMs(values['agent-answer-after'], io, '--agent-answer-after')
   if (agentAnswerAfterMs === null) return null
+
+  // Rejected rather than defaulted, like `--permission`: a typo that became
+  // `standard` would look like it worked until the coordinator was refused.
+  const authority = values['coordinator-authority']
+  if (authority !== undefined && authority !== 'standard' && authority !== 'full') {
+    io.err('vinta-ai-maestro: --coordinator-authority must be one of standard, full')
+    return null
+  }
 
   // A budget, so it is bounded and finite. Zero is meaningful — it is `ask`
   // spelled through this flag — and anything unparseable is a typo worth
@@ -202,6 +214,7 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
       // Absolute, so a job started from another directory reads the same file.
       ...(systemOnePath === undefined ? {} : { 'system-one': systemOnePath }),
     },
+    ...(authority === undefined ? {} : { coordinatorAuthority: authority }),
   }
 }
 
@@ -228,6 +241,7 @@ const StoredPolicySchema = z.object({
   retries: z.string().optional(),
   'retry-after': z.string().optional(),
   'agent-answer-after': z.string().optional(),
+  'coordinator-authority': z.string().optional(),
   'no-coordinator': z.boolean().optional(),
   host: z.string().optional(),
   'harness-profile': z.array(z.string()).optional(),
@@ -247,6 +261,7 @@ export function writeStoredPolicy(repoPath: string, runId: string, policy: RunPo
     ...(policy.retries === undefined ? {} : { retries: String(policy.retries) }),
     ...(policy.retryAfter === undefined ? {} : { 'retry-after': policy.retryAfter }),
     ...(policy.agentAnswerAfter === undefined ? {} : { 'agent-answer-after': policy.agentAnswerAfter }),
+    ...(policy.coordinatorAuthority === undefined ? {} : { 'coordinator-authority': policy.coordinatorAuthority }),
     ...(policy.intervene ? {} : { 'no-coordinator': true }),
     ...(bind.host === undefined ? {} : { host: bind.host }),
     ...(policy.harnessProfiles.length === 0
@@ -324,6 +339,7 @@ export function jobArgs(
   if (policy.agentAnswerAfter !== undefined) args.push('--agent-answer-after', policy.agentAnswerAfter)
   if (!policy.intervene) args.push('--no-coordinator')
   for (const profile of policy.harnessProfiles) args.push('--harness-profile', profile.name)
+  if (policy.coordinatorAuthority !== undefined) args.push('--coordinator-authority', policy.coordinatorAuthority)
   if (log['log-level'] !== undefined) args.push('--log-level', log['log-level'])
   if (log['log-detail'] !== undefined) args.push('--log-detail', log['log-detail'])
   args.push('--log-stderr')

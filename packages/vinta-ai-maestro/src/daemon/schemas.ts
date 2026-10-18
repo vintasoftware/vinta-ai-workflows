@@ -87,6 +87,67 @@ export const RedirectRequestSchema = z.strictObject({ instruction: z.string().mi
 export const NoArgsRequestSchema = z.strictObject({})
 
 /**
+ * Why the caller acted, URI-encoded, on any request that acts on a live run.
+ * A header rather than a body field so that every verb — an amendment whose
+ * body is a whole workflow included — carries it the same way. The run
+ * coordinator is refused without one (`reason_required`); a person may leave
+ * it out. Journalled as payload with what it explains, never logged.
+ */
+export const REASON_HEADER = 'x-maestro-reason'
+
+/** The longest reason journalled; the rest is cut. A sentence, not a transcript. */
+export const MAX_REASON_CHARS = 2_000
+
+const When = z.enum(['now', 'after_turn'])
+
+/**
+ * `POST …/nodes/:nodeId/reassign` — hand the phase to a crew member, or to a
+ * harness and a model (or a model alone, which keeps the session).
+ * `when` defaults to `now`: the live turn is cut and its step runs again.
+ */
+export const ReassignRequestSchema = z
+  .strictObject({
+    crew: z.string().min(1).optional(),
+    harness: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    when: When.optional(),
+  })
+  .refine((body) => body.crew !== undefined || body.harness !== undefined || body.model !== undefined, {
+    message: 'name a crew member, or a harness and a model',
+  })
+
+/** `POST …/nodes/:nodeId/step` — move the pipeline to `to` by hand. */
+export const StepRequestSchema = z.strictObject({ to: z.string().min(1) })
+
+/** `POST /api/runs/:runId/switch-harness` — move the whole run off a harness. */
+export const SwitchHarnessRequestSchema = z.strictObject({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  model: z.string().min(1),
+  when: When.optional(),
+})
+
+export const SwitchHarnessResponseSchema = z.strictObject({
+  ok: z.literal(true),
+  /** The phases in flight it moved. Phases yet to start take the switch when they do. */
+  moved: z.array(z.string()),
+})
+
+/** `POST /api/runs/:runId/fixer/reassign` — who fixes the conflict's later rounds. */
+export const FixerReassignRequestSchema = z.strictObject({
+  harness: z.string().min(1),
+  model: z.string().min(1),
+  /** End the running round now, so the next starts on these. Default true. */
+  now: z.boolean().optional(),
+})
+
+export const FixerResponseSchema = z.strictObject({
+  ok: z.literal(true),
+  /** Whether a round was running and was ended. */
+  ended: z.boolean(),
+})
+
+/**
  * `POST /api/runs/:runId/exec` — one shell command, run in a lane (by name)
  * or in the integration worktree (`integration`).
  */

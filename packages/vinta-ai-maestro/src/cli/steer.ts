@@ -22,11 +22,12 @@ import { parseArgs } from 'node:util'
 import { liveJob } from '../job/job.ts'
 import { openJournal } from '../journal/journal.ts'
 import { shellQuote } from '../platform/platform.ts'
+import { REASON_HEADER } from '../daemon/schemas.ts'
 import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
 
-export const NODE_USAGE = `usage: vinta-ai-maestro node <op> <runId> <phase> [text] [--repo <dir>]
+export const NODE_USAGE = `usage: vinta-ai-maestro node <op> <runId> <phase> [text] [--reason <why>] [--repo <dir>]
 
   Acts on one phase of a live run, as the run view's buttons do.
 
@@ -41,6 +42,24 @@ export const NODE_USAGE = `usage: vinta-ai-maestro node <op> <runId> <phase> [te
   resume   <runId> <phase>                Undo pause: withdraw one not yet
                                           taken, release the paused phase, or
                                           give a held one its timer back.
+  interrupt <runId> <phase>               Stop its turn now without failing it.
+                                          It is held — lane, branch, commits and
+                                          uncommitted work kept — until resume,
+                                          reassign or step lets it go; the cut
+                                          step runs again then.
+  reassign <runId> <phase> --crew <member> | --harness <h> --model <m> | --model <m>
+           [--after-turn]                 Hand it to someone else and carry on at
+                                          the same step: interrupt, amend and
+                                          resume in one. --after-turn lets the
+                                          turn finish first. The same member on
+                                          the same harness keeps its session;
+                                          anyone else starts fresh with a
+                                          handoff (last report, the work in the
+                                          lane, the red gate).
+  step     <runId> <phase> <state>        Move its pipeline to <state> by hand —
+                                          for work finished in the lane by
+                                          someone else. Never a final state:
+                                          the gates still decide.
   abort    <runId> <phase>                Kill it, fail it, block dependents.
                                           A run left with nothing to run stays
                                           up for retry; stop it to end it.
@@ -56,16 +75,41 @@ export const NODE_USAGE = `usage: vinta-ai-maestro node <op> <runId> <phase> [te
   Prints what the run did with it: sent, queued, held, delivered, or ignored
   when the phase had nothing for it to act on.
 
+  --reason <why> Why, journalled with the operation. The run coordinator must
+                 give one; for a person it is optional.
   --repo <dir>   The project. Defaults to the current directory.`
 
-export const AMEND_USAGE = `usage: vinta-ai-maestro amend <runId> <workflow.json> [--repo <dir>]
+export const SWITCH_HARNESS_USAGE = `usage: vinta-ai-maestro switch-harness <runId> --from <harness> --to <harness> --model <m>
+                                       [--after-turn] [--reason <why>] [--repo <dir>]
+
+  Moves a live run off a harness — an account out of credits, a vendor having
+  a bad day — without pausing and resuming it. Every phase in flight on
+  <from> is reassigned to <to> on <model> at the step it is at (its live turn
+  is cut and run again, or with --after-turn allowed to finish), and every
+  phase yet to start runs there when it does. The conflict fixer moves too.
+  Prints the phases it moved. \`defaults.harness_fallbacks\` does the same by
+  itself when a harness runs out of quota.`
+
+export const FIXER_USAGE = `usage: vinta-ai-maestro fixer interrupt <runId> [--reason <why>] [--repo <dir>]
+       vinta-ai-maestro fixer reassign <runId> --harness <h> --model <m> [--after-round] [--reason <why>] [--repo <dir>]
+
+  The conflict fixer's round, by hand. \`interrupt\` ends the running round as a
+  round spent: what it left in the integration worktree stays, and the run
+  reads it as it reads any finished round — resolved, or the next round goes
+  on from it. \`reassign\` hands every later round to <h>/<m>, ending the
+  running one so the next starts on them (--after-round lets it finish).`
+
+export const AMEND_USAGE = `usage: vinta-ai-maestro amend <runId> <workflow.json> [--reason <why>] [--repo <dir>]
 
   Applies an edited workflow to a live run (§9). Phases not yet started take
   it at once; finished phases whose base moved are rebased; a change that
-  would move a phase still running is refused until it stops. Start from
-  \`vinta-ai-maestro workflow <runId>\`, which prints the run's definition as
-  it stands.
+  would move a phase still running is refused until it stops. A phase that
+  is held (\`node interrupt\`), or parked on a question, may change its
+  harness, model or crew member: it carries on at the step it is at. Start
+  from \`vinta-ai-maestro workflow <runId>\`, which prints the run's
+  definition as it stands.
 
+  --reason <why> Why, journalled with the amendment. The coordinator must give one.
   --repo <dir>   The project. Defaults to the current directory.`
 
 export const WORKFLOW_USAGE = `usage: vinta-ai-maestro workflow <runId> [--repo <dir>]
@@ -75,7 +119,7 @@ export const WORKFLOW_USAGE = `usage: vinta-ai-maestro workflow <runId> [--repo 
 
   --repo <dir>   The project. Defaults to the current directory.`
 
-export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <runId> <gate-id> [--tree <hash>] [--repo <dir>]
+export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <runId> <gate-id> [--tree <hash>] [--reason <why>] [--repo <dir>]
 
   Forgets a gate's cached results, so the next run of it — by the phase's gate
   step or by an agent — runs the command instead of replaying the verdict.
@@ -110,6 +154,10 @@ const NODE_OPS = {
   retry: { path: 'retry', field: null },
   fresh: { path: 'fresh', field: null },
   answer: { path: 'answer', field: 'answer' },
+  interrupt: { path: 'interrupt', field: null },
+  step: { path: 'step', field: 'to' },
+  // Flags, not text: assembled below.
+  reassign: { path: 'reassign', field: null },
 } as const
 
 type NodeOp = keyof typeof NODE_OPS
@@ -139,11 +187,16 @@ async function post(
   path: string,
   body: string,
   fetchImpl: typeof fetch,
+  reason?: string,
 ): Promise<{ readonly status: number; readonly body: unknown } | null> {
   try {
     const response = await fetchImpl(`${target.url}${path}`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${target.token}`, 'content-type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${target.token}`,
+        'content-type': 'application/json',
+        ...(reason === undefined || reason.trim() === '' ? {} : { [REASON_HEADER]: encodeURIComponent(reason) }),
+      },
       body,
     })
     return { status: response.status, body: await response.json().catch(() => null) }
@@ -172,7 +225,16 @@ export async function nodeCommand(argv: readonly string[], io: Io, deps: SteerDe
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { repo: { type: 'string' }, answers: { type: 'string' } },
+      options: {
+        repo: { type: 'string' },
+        answers: { type: 'string' },
+        reason: { type: 'string' },
+        crew: { type: 'string' },
+        harness: { type: 'string' },
+        model: { type: 'string' },
+        'after-turn': { type: 'boolean' },
+        now: { type: 'boolean' },
+      },
       allowPositionals: true,
     })
   } catch {
@@ -185,8 +247,26 @@ export async function nodeCommand(argv: readonly string[], io: Io, deps: SteerDe
     return USAGE
   }
   const spec = NODE_OPS[op as NodeOp]
+  const { crew, harness, model } = parsed.values
+  const reassigning = crew !== undefined || harness !== undefined || model !== undefined
+  // Flags that belong to `reassign` alone are a usage error anywhere else.
+  if ((op === 'reassign') !== reassigning || (op !== 'reassign' && parsed.values['after-turn'] === true)) {
+    io.err(NODE_USAGE)
+    return USAGE
+  }
   let body: Record<string, unknown> = {}
-  if (op === 'answer' && parsed.values.answers !== undefined) {
+  if (op === 'reassign') {
+    if (rest.length > 0 || (parsed.values['after-turn'] === true && parsed.values.now === true)) {
+      io.err(NODE_USAGE)
+      return USAGE
+    }
+    body = {
+      ...(crew === undefined ? {} : { crew }),
+      ...(harness === undefined ? {} : { harness }),
+      ...(model === undefined ? {} : { model }),
+      when: parsed.values['after-turn'] === true ? 'after_turn' : 'now',
+    }
+  } else if (op === 'answer' && parsed.values.answers !== undefined) {
     try {
       body = { answers: JSON.parse(parsed.values.answers) as unknown }
     } catch {
@@ -209,7 +289,7 @@ export async function nodeCommand(argv: readonly string[], io: Io, deps: SteerDe
   const target = reach(repoPath, runId, deps.env ?? process.env)
   if (target === null) return notLive(io, runId)
   const path = `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/${spec.path}`
-  const answered = await post(target, path, JSON.stringify(body), deps.fetch ?? fetch)
+  const answered = await post(target, path, JSON.stringify(body), deps.fetch ?? fetch, parsed.values.reason)
   if (answered === null) return notLive(io, runId)
   if (answered.status >= 400) return refused(io, answered.status, answered.body)
   const delivery = (answered.body as { delivery?: string } | null)?.delivery
@@ -227,7 +307,11 @@ function answerOf(text: string): string | boolean {
 export async function amendCommand(argv: readonly string[], io: Io, deps: SteerDeps = {}): Promise<number> {
   let parsed
   try {
-    parsed = parseArgs({ args: [...argv], options: { repo: { type: 'string' } }, allowPositionals: true })
+    parsed = parseArgs({
+      args: [...argv],
+      options: { repo: { type: 'string' }, reason: { type: 'string' } },
+      allowPositionals: true,
+    })
   } catch {
     io.err(AMEND_USAGE)
     return USAGE
@@ -247,7 +331,13 @@ export async function amendCommand(argv: readonly string[], io: Io, deps: SteerD
   const repoPath = resolve(parsed.values.repo ?? process.cwd())
   const target = reach(repoPath, runId, deps.env ?? process.env)
   if (target === null) return notLive(io, runId)
-  const answered = await post(target, `/api/runs/${encodeURIComponent(runId)}/amend`, text, deps.fetch ?? fetch)
+  const answered = await post(
+    target,
+    `/api/runs/${encodeURIComponent(runId)}/amend`,
+    text,
+    deps.fetch ?? fetch,
+    parsed.values.reason,
+  )
   if (answered === null) return notLive(io, runId)
   if (answered.status >= 400) return refused(io, answered.status, answered.body)
   const result = answered.body as {
@@ -298,7 +388,7 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { repo: { type: 'string' }, tree: { type: 'string' } },
+      options: { repo: { type: 'string' }, tree: { type: 'string' }, reason: { type: 'string' } },
       allowPositionals: true,
     })
   } catch {
@@ -315,11 +405,109 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
   const target = reach(repoPath, runId, deps.env ?? process.env)
   if (target === null) return notLive(io, runId)
   const path = `/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateId)}/invalidate`
-  const answered = await post(target, path, JSON.stringify(tree === undefined ? {} : { tree }), deps.fetch ?? fetch)
+  const answered = await post(
+    target,
+    path,
+    JSON.stringify(tree === undefined ? {} : { tree }),
+    deps.fetch ?? fetch,
+    parsed.values.reason,
+  )
   if (answered === null) return notLive(io, runId)
   if (answered.status >= 400) return refused(io, answered.status, answered.body)
   const removed = (answered.body as { removed?: number } | null)?.removed ?? 0
   io.out(`gate ${gateId}: ${removed} cached result${removed === 1 ? '' : 's'} forgotten`)
+  return OK
+}
+
+export async function switchHarnessCommand(argv: readonly string[], io: Io, deps: SteerDeps = {}): Promise<number> {
+  let parsed
+  try {
+    parsed = parseArgs({
+      args: [...argv],
+      options: {
+        repo: { type: 'string' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        model: { type: 'string' },
+        'after-turn': { type: 'boolean' },
+        reason: { type: 'string' },
+      },
+      allowPositionals: true,
+    })
+  } catch {
+    io.err(SWITCH_HARNESS_USAGE)
+    return USAGE
+  }
+  const [runId] = parsed.positionals
+  const { from, to, model } = parsed.values
+  if (runId === undefined || parsed.positionals.length > 1 || from === undefined || to === undefined || model === undefined) {
+    io.err(SWITCH_HARNESS_USAGE)
+    return USAGE
+  }
+  const repoPath = resolve(parsed.values.repo ?? process.cwd())
+  const target = reach(repoPath, runId, deps.env ?? process.env)
+  if (target === null) return notLive(io, runId)
+  const body = { from, to, model, when: parsed.values['after-turn'] === true ? 'after_turn' : 'now' }
+  const answered = await post(
+    target,
+    `/api/runs/${encodeURIComponent(runId)}/switch-harness`,
+    JSON.stringify(body),
+    deps.fetch ?? fetch,
+    parsed.values.reason,
+  )
+  if (answered === null) return notLive(io, runId)
+  if (answered.status >= 400) return refused(io, answered.status, answered.body)
+  const moved = (answered.body as { moved?: string[] } | null)?.moved ?? []
+  io.out(`run ${runId}: ${from} → ${to} (${model}); moved ${moved.length === 0 ? 'no phase in flight' : moved.join(', ')}`)
+  return OK
+}
+
+export async function fixerCommand(argv: readonly string[], io: Io, deps: SteerDeps = {}): Promise<number> {
+  let parsed
+  try {
+    parsed = parseArgs({
+      args: [...argv],
+      options: {
+        repo: { type: 'string' },
+        harness: { type: 'string' },
+        model: { type: 'string' },
+        'after-round': { type: 'boolean' },
+        reason: { type: 'string' },
+      },
+      allowPositionals: true,
+    })
+  } catch {
+    io.err(FIXER_USAGE)
+    return USAGE
+  }
+  const [verb, runId] = parsed.positionals
+  const { harness, model } = parsed.values
+  const reassign = verb === 'reassign'
+  if (
+    (verb !== 'interrupt' && !reassign) ||
+    runId === undefined ||
+    parsed.positionals.length > 2 ||
+    reassign !== (harness !== undefined && model !== undefined) ||
+    (!reassign && (harness !== undefined || model !== undefined || parsed.values['after-round'] === true))
+  ) {
+    io.err(FIXER_USAGE)
+    return USAGE
+  }
+  const repoPath = resolve(parsed.values.repo ?? process.cwd())
+  const target = reach(repoPath, runId, deps.env ?? process.env)
+  if (target === null) return notLive(io, runId)
+  const body = reassign ? { harness, model, now: parsed.values['after-round'] !== true } : {}
+  const answered = await post(
+    target,
+    `/api/runs/${encodeURIComponent(runId)}/fixer/${verb}`,
+    JSON.stringify(body),
+    deps.fetch ?? fetch,
+    parsed.values.reason,
+  )
+  if (answered === null) return notLive(io, runId)
+  if (answered.status >= 400) return refused(io, answered.status, answered.body)
+  const ended = (answered.body as { ended?: boolean } | null)?.ended === true
+  io.out(`fixer ${verb}: ${ended ? 'the running round was ended' : 'no round was running'}`)
   return OK
 }
 

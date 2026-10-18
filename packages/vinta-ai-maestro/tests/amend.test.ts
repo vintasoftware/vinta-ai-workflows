@@ -625,6 +625,93 @@ describe('amending a live run', () => {
     await rig.finished
   })
 
+  it('lets a node parked on a question change hands — harness, model — and nothing else', async () => {
+    const { journal } = store()
+    const wf = workflow([{ id: 'a' }, { id: 'b', deps: ['a'] }])
+    journal.createRun(RUN_ID, wf)
+    const adopted: Workflow[] = []
+    const runner: AmendRunner = { statuses: () => ({ a: 'awaiting_human' }), adopt: (next) => adopted.push(next) }
+
+    const moved = await amendRun({
+      journal,
+      runId: RUN_ID,
+      proposed: edit(wf, 'a', { harness: 'codex', model: 'gpt-5' }),
+      runner,
+      reason: 'claude is out of credits',
+    })
+    expect(moved.ok).toBe(true)
+    if (!moved.ok) throw new Error('refused')
+    expect(moved.changes).toEqual([
+      { node: 'a', kind: 'harness_changed' },
+      { node: 'a', kind: 'model_changed' },
+    ])
+    // In flight, so not one of the unstarted nodes that took it "at once" —
+    // the scheduler hands it over (`adopt`).
+    expect(moved.applied).not.toContain('a')
+    expect(adopted).toHaveLength(1)
+    expect(journal.events(RUN_ID).find((event) => event.type === 'workflow_amended')?.payload).toEqual(
+      expect.objectContaining({ reason: 'claude is out of credits' }),
+    )
+
+    // The brief is still not its to change while it is parked.
+    const rewritten = await amendRun({
+      journal,
+      runId: RUN_ID,
+      proposed: edit(moved.workflow, 'a', { harness: 'claude-code', prompt_ref: 'plan.md#other' }),
+      runner,
+    })
+    expect(rewritten.ok).toBe(false)
+    if (rewritten.ok) throw new Error('applied')
+    expect(rewritten.code).toBe('nodes_in_flight')
+  })
+
+  it('still refuses a harness change on a node that is running a turn', async () => {
+    const { journal } = store()
+    const wf = workflow([{ id: 'a' }])
+    journal.createRun(RUN_ID, wf)
+    const result = await amendRun({
+      journal,
+      runId: RUN_ID,
+      proposed: edit(wf, 'a', { harness: 'codex' }),
+      runner: { statuses: () => ({ a: 'running' }) },
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('applied')
+    expect(result.code).toBe('nodes_in_flight')
+  })
+
+  it('refuses what the live run says it cannot give a parked node', async () => {
+    const { journal } = store()
+    const wf = workflow([{ id: 'a' }])
+    journal.createRun(RUN_ID, wf)
+    const result = await amendRun({
+      journal,
+      runId: RUN_ID,
+      proposed: edit(wf, 'a', { harness: 'codex' }),
+      runner: {
+        statuses: () => ({ a: 'awaiting_human' }),
+        vet: () => [{ path: ['nodes', 0, 'harness'], message: 'no adapter registered for harness "codex"' }],
+      },
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('applied')
+    expect(result.code).toBe('reassignment_refused')
+    expect(journal.readWorkflow(RUN_ID).nodes[0]?.harness).toBeUndefined()
+  })
+
+  it('classifies a crew change as `crew_changed`, and lets a done node be renamed to another member', () => {
+    const base = WorkflowSchema.parse({
+      ...workflow([{ id: 'a' }]),
+      crew: { m1: { tier: 1, model: 'opus' }, m2: { tier: 1, model: 'sonnet' } },
+      nodes: [{ ...workflow([{ id: 'a' }]).nodes[0], crew: 'm1' }, { ...workflow([{ id: 'b' }]).nodes[0], crew: 'm2' }],
+    })
+    const diff = diffWorkflows(base, edit(base, 'a', { crew: 'm2' }))
+    expect(diff.changes).toEqual([{ node: 'a', kind: 'crew_changed' }])
+    expect(diff.reassignedOnly).toEqual(['a'])
+    // A done phase was built by whoever built it: naming another member rebuilds nothing.
+    expect(diff.contentChanged).toEqual([])
+  })
+
   it('refuses for a node parked on capacity or on a human, and says which', async () => {
     const { journal } = store()
     const wf = workflow([{ id: 'a' }, { id: 'b', deps: ['a'] }])

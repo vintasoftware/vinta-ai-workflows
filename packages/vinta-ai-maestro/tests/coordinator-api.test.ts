@@ -31,6 +31,8 @@ import type { DaemonRun } from '../src/daemon/control.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
+import { REASON_HEADER } from '../src/daemon/schemas.ts'
+import { ReassignRefused, StepRefused } from '../src/scheduler/index.ts'
 
 const RUN_ID = 'run-1'
 
@@ -82,6 +84,9 @@ interface ActorCall {
   readonly op: string
   readonly nodeId: string
   readonly actor: Actor | undefined
+  /** Present only on the phase-control verbs, whose tests are about it. */
+  readonly reason?: string | undefined
+  readonly detail?: unknown
 }
 
 /** A `RunControl` that records who asked, which is the one thing these tests are about. */
@@ -90,6 +95,24 @@ function actorControl(): RunControl & { readonly calls: ActorCall[] } {
   return {
     calls,
     statuses: { a: 'running', b: 'pending' },
+    interrupt: (nodeId, actor, reason) => {
+      calls.push({ op: 'interrupt', nodeId, actor, reason })
+      return 'sent'
+    },
+    reassign: (nodeId, target, options) => {
+      if (target.crew === 'busy') throw new ReassignRefused('crew member "busy" is working on another phase')
+      calls.push({ op: 'reassign', nodeId, actor: options?.actor, reason: options?.reason, detail: { target, when: options?.when } })
+      return 'sent'
+    },
+    step: (nodeId, to, actor, reason) => {
+      if (to === 'done') throw new StepRefused('"done" is a final state; the gates decide when a phase is done')
+      calls.push({ op: 'step', nodeId, actor, reason, detail: to })
+      return 'delivered'
+    },
+    switchHarness: async (from, to, model, options) => {
+      calls.push({ op: 'switchHarness', nodeId: '', actor: options?.actor, reason: options?.reason, detail: { from, to, model } })
+      return ['a']
+    },
     answer: (nodeId, _facts, actor) => {
       calls.push({ op: 'answer', nodeId, actor })
     },
@@ -159,17 +182,30 @@ interface Result {
   readonly body: unknown
 }
 
+/**
+ * One request. The coordinator's carry a reason unless `reason: null` says
+ * otherwise — it is refused without one — and an operator's carry one only
+ * when given.
+ */
 async function call(
   daemon: Daemon,
   path: string,
-  options: { readonly method?: string; readonly token?: string | null; readonly body?: unknown } = {},
+  options: {
+    readonly method?: string
+    readonly token?: string | null
+    readonly body?: unknown
+    readonly reason?: string | null
+  } = {},
 ): Promise<Result> {
   const token = options.token === undefined ? daemon.token : options.token
+  const reason =
+    options.reason === undefined ? (token === daemon.coordinatorToken ? 'the coordinator’s reason' : null) : options.reason
   const response = await fetch(`${daemon.url}${path}`, {
     method: options.method ?? 'GET',
     headers: {
       'content-type': 'application/json',
       ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+      ...(reason === null ? {} : { [REASON_HEADER]: encodeURIComponent(reason) }),
     },
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
   })
@@ -235,6 +271,17 @@ describe('who is asking', () => {
     })
   }
 
+  /** Every decision the coordinator makes unattended has to say why, so it can be listed with it. */
+  it('refuses the coordinator without a reason, and not the operator', async () => {
+    const r = await rig()
+    const path = `/api/runs/${RUN_ID}/nodes/a/pause`
+    const refused = await call(r.daemon, path, { method: 'POST', token: r.daemon.coordinatorToken, body: {}, reason: null })
+    expect(refused.status).toBe(400)
+    expect(ErrorResponseSchema.parse(refused.body).error).toBe('reason_required')
+    expect(r.control.calls).toEqual([])
+    expect((await call(r.daemon, path, { method: 'POST', body: {} })).status).toBe(200)
+  })
+
   /** A second accepted token must not widen the check to "any token at all". */
   it('still refuses a token that is neither', async () => {
     const r = await rig()
@@ -285,30 +332,49 @@ describe('who is asking', () => {
 // ---------------------------------------------------------------------------
 
 describe('what the coordinator may not do', () => {
-  /** Ending the run is a decision about the whole of it, and the coordinator lives inside it. */
-  it('cannot pause or stop the run; the operator still can', async () => {
+  /**
+   * A pause is resumable and runs nothing twice that a resume would not, so
+   * the coordinator may; a stop is final, and is the operator's unless they
+   * gave it full authority. Both are journalled with who asked and why.
+   */
+  it('may pause the run, and stop it only under full authority', async () => {
     const r = await rig()
     const modes: string[] = []
-    r.register({
-      halt: async (mode) => {
-        modes.push(mode)
-      },
-    })
+    const halt = async (mode: 'paused' | 'cancelled'): Promise<void> => {
+      modes.push(mode)
+    }
+    r.register({ halt })
 
-    for (const verb of ['pause', 'stop']) {
-      const refused = await call(r.daemon, `/api/runs/${RUN_ID}/${verb}`, {
+    const stop = () =>
+      call(r.daemon, `/api/runs/${RUN_ID}/stop`, {
         method: 'POST',
         token: r.daemon.coordinatorToken,
         body: {},
+        reason: 'every phase is blocked on the same broken fixture',
       })
-      expect(refused.status).toBe(403)
-      expect(ErrorResponseSchema.parse(refused.body).error).toBe('coordinator_forbidden')
-    }
-    expect(modes).toEqual([])
+    const refused = await stop()
+    expect(refused.status).toBe(403)
+    expect(ErrorResponseSchema.parse(refused.body).error).toBe('coordinator_forbidden')
 
-    expect((await call(r.daemon, `/api/runs/${RUN_ID}/pause`, { method: 'POST', body: {} })).status).toBe(202)
-    expect((await call(r.daemon, `/api/runs/${RUN_ID}/stop`, { method: 'POST', body: {} })).status).toBe(202)
+    const paused = await call(r.daemon, `/api/runs/${RUN_ID}/pause`, {
+      method: 'POST',
+      token: r.daemon.coordinatorToken,
+      body: {},
+      reason: 'the database container is down',
+    })
+    expect(paused.status).toBe(202)
+    expect(modes).toEqual(['paused'])
+    expect(r.journal.events(RUN_ID).find((event) => event.type === 'run_halt_requested')?.payload).toEqual({
+      mode: 'paused',
+      by: 'coordinator',
+      reason: 'the database container is down',
+    })
+
+    r.register({ halt, coordinatorAuthority: 'full' })
+    expect((await stop()).status).toBe(202)
     expect(modes).toEqual(['paused', 'cancelled'])
+
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/stop`, { method: 'POST', body: {} })).status).toBe(202)
   })
 
   /** The plan documents are reviewed source; the coordinator amends the live run through `/amend`. */
@@ -368,6 +434,36 @@ describe('a coordinator amendment', () => {
     expect(r.journal.readWorkflow(RUN_ID).nodes.map((node) => node.id)).toEqual(['a', 'b'])
   })
 
+  /**
+   * Full authority reaches the plan's shape — a phase added, a phase split —
+   * and still never a check: the dropped gate is refused just the same.
+   */
+  it('may add a phase under full authority, and still may not drop a gate', async () => {
+    const { r, adopted, base } = await amendable()
+    r.register({ amend: { adopt: (workflow) => adopted.push(workflow) }, coordinatorAuthority: 'full' })
+    const phase = { id: 'c', name: 'C', prompt_ref: 'plan.md#c', gates: ['unit'] }
+
+    const weakened = await call(r.daemon, `/api/runs/${RUN_ID}/amend`, {
+      method: 'POST',
+      token: r.daemon.coordinatorToken,
+      body: { ...base, nodes: [base.nodes[0], { ...base.nodes[1], gates: [] }, phase] },
+    })
+    expect(weakened.status).toBe(409)
+    expect(ErrorResponseSchema.parse(weakened.body).issues?.map((issue) => issue.path)).toEqual(['nodes.b.gates'])
+
+    const split = await call(r.daemon, `/api/runs/${RUN_ID}/amend`, {
+      method: 'POST',
+      token: r.daemon.coordinatorToken,
+      body: { ...base, nodes: [...base.nodes, phase] },
+      reason: 'b is two phases: the model and its admin',
+    })
+    expect(split.status).toBe(200)
+    expect(amended(r)[0]?.payload).toMatchObject({
+      author: 'coordinator',
+      reason: 'b is two phases: the model and its admin',
+    })
+  })
+
   /** The same proposal from the operator is a policy-free amendment, so the refusal above is the token's. */
   it('lets the operator make the change the coordinator may not', async () => {
     const { r, base } = await amendable()
@@ -398,6 +494,109 @@ describe('a coordinator amendment', () => {
     const events = amended(r)
     expect(events).toHaveLength(1)
     expect(events[0]?.payload).toMatchObject({ author: 'coordinator' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Taking a phase over, and the conflict fixer
+// ---------------------------------------------------------------------------
+
+describe('phase control', () => {
+  it('interrupts, reassigns and steps a phase for either caller, with the actor and the reason', async () => {
+    const r = await rig()
+    const base = `/api/runs/${RUN_ID}/nodes/a`
+    const post = (path: string, body: unknown, coordinator = true) =>
+      call(r.daemon, `${base}/${path}`, {
+        method: 'POST',
+        body,
+        ...(coordinator ? { token: r.daemon.coordinatorToken, reason: 'a is looping' } : {}),
+      })
+
+    expect((await post('interrupt', {})).body).toEqual({ ok: true, delivery: 'sent' })
+    expect((await post('reassign', { harness: 'codex', model: 'gpt-5', when: 'after_turn' })).status).toBe(200)
+    expect((await post('step', { to: 'verify' }, false)).body).toEqual({ ok: true, delivery: 'delivered' })
+
+    expect(r.control.calls).toEqual([
+      { op: 'interrupt', nodeId: 'a', actor: 'coordinator', reason: 'a is looping' },
+      {
+        op: 'reassign',
+        nodeId: 'a',
+        actor: 'coordinator',
+        reason: 'a is looping',
+        detail: { target: { harness: 'codex', model: 'gpt-5' }, when: 'after_turn' },
+      },
+      { op: 'step', nodeId: 'a', actor: 'operator', reason: undefined, detail: 'verify' },
+    ])
+  })
+
+  it('says what a reassignment or a step could not do, located by code', async () => {
+    const r = await rig()
+    const busy = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/reassign`, { method: 'POST', body: { crew: 'busy' } })
+    expect(busy.status).toBe(409)
+    expect(ErrorResponseSchema.parse(busy.body)).toEqual({
+      error: 'reassign_refused',
+      issues: [{ path: '', code: 'reassign_refused', message: 'crew member "busy" is working on another phase' }],
+    })
+    const final = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/step`, { method: 'POST', body: { to: 'done' } })
+    expect(ErrorResponseSchema.parse(final.body).error).toBe('step_refused')
+    const empty = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/reassign`, { method: 'POST', body: {} })
+    expect(empty.status).toBe(400)
+  })
+
+  it('switches the run off a harness and answers with the phases it moved', async () => {
+    const r = await rig()
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/switch-harness`, {
+      method: 'POST',
+      token: r.daemon.coordinatorToken,
+      body: { from: 'codex', to: 'claude-code', model: 'opus' },
+      reason: 'codex is out of credits',
+    })
+    expect(result).toEqual({ status: 200, body: { ok: true, moved: ['a'] } })
+    expect(r.control.calls).toEqual([
+      {
+        op: 'switchHarness',
+        nodeId: '',
+        actor: 'coordinator',
+        reason: 'codex is out of credits',
+        detail: { from: 'codex', to: 'claude-code', model: 'opus' },
+      },
+    ])
+  })
+
+  it('ends and re-staffs the conflict fixer’s round, and journals who and why', async () => {
+    const r = await rig()
+    const asked: unknown[] = []
+    r.register({
+      fixer: {
+        interrupt: async () => true,
+        reassign: async (harness, model, now) => {
+          asked.push({ harness, model, now })
+          return now
+        },
+        running: () => ({ harness: 'codex', model: 'gpt-5' }),
+      },
+    })
+
+    const ended = await call(r.daemon, `/api/runs/${RUN_ID}/fixer/reassign`, {
+      method: 'POST',
+      token: r.daemon.coordinatorToken,
+      body: { harness: 'claude-code', model: 'opus' },
+      reason: 'the fixer keeps undoing the rename',
+    })
+    expect(ended).toEqual({ status: 200, body: { ok: true, ended: true } })
+    expect(asked).toEqual([{ harness: 'claude-code', model: 'opus', now: true }])
+    expect(r.journal.events(RUN_ID).find((event) => event.type === 'fixer_operation')?.payload).toEqual({
+      op: 'reassign',
+      ended: true,
+      from: { harness: 'codex', model: 'gpt-5' },
+      to: { harness: 'claude-code', model: 'opus' },
+      by: 'coordinator',
+      reason: 'the fixer keeps undoing the rename',
+    })
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/fixer/interrupt`, { method: 'POST', body: {} })).body).toEqual({
+      ok: true,
+      ended: true,
+    })
   })
 })
 
@@ -658,7 +857,7 @@ describe('gate cache invalidation', () => {
     ])
     const rows = r.journal.events(RUN_ID).filter((event) => event.type === 'gate_cache_invalidated')
     expect(rows.map((event) => event.payload)).toEqual([
-      { gate: 'unit', tree: TREE, removed: 1, by: 'coordinator' },
+      { gate: 'unit', tree: TREE, removed: 1, by: 'coordinator', reason: 'the coordinator’s reason' },
       { gate: 'unit', removed: 1 },
     ])
   })

@@ -81,6 +81,8 @@ export type AmendRefusalCode =
   | 'dependency_not_done'
   | 'rebase_unavailable'
   | 'rebase_failed'
+  /** A parked node's new harness, model or member is one the live run cannot give it. */
+  | 'reassignment_refused'
 
 export interface AmendRefusal {
   readonly ok: false
@@ -126,8 +128,17 @@ export interface AmendRunner {
   statuses?(): Readonly<Record<string, NodeStatus>>
   /** Rebuilds `integ-` bases and re-cuts `done` branches, in the order given. */
   rebase?(request: RebaseRequest): Promise<void>
-  /** Hands the amended workflow to the live scheduler for its unstarted nodes. */
+  /**
+   * Hands the amended workflow to the live scheduler for its unstarted nodes,
+   * and the new harness, model or crew member to a parked one.
+   */
   adopt?(workflow: Workflow): void
+  /**
+   * What the live run cannot take of this amendment — a crew member busy on
+   * another phase, a harness with no adapter. Checked with the other
+   * refusals, before anything moves.
+   */
+  vet?(workflow: Workflow): readonly ValidationIssue[]
 }
 
 export interface AmendOptions {
@@ -148,8 +159,10 @@ export interface AmendOptions {
   readonly targets?: readonly string[]
   /** On a `config` amendment: the commit its layers were read at. */
   readonly source?: string
-  /** On a `scheduler` amendment: the rule that made it (`workflow_amended.reason`). */
-  readonly reason?: AmendmentReason
+  /** On a `scheduler` amendment: the rule that made it (`workflow_amended.rule`). */
+  readonly rule?: AmendmentReason
+  /** Why, in the author's words. Journalled as payload; the coordinator always gives one. */
+  readonly reason?: string
 }
 
 /**
@@ -180,8 +193,10 @@ export async function amendRun(options: AmendOptions): Promise<AmendResult> {
 
   const diff = diffWorkflows(snapshot, proposed)
   const status = statuses(options)
-  const refusal = refuse(diff, status, snapshot, proposed, options.runner)
+  const refusal = refuse(diff, status, snapshot, proposed, options.runner, options.author)
   if (refusal !== null) return refusal
+  const vetted = options.runner?.vet?.(proposed) ?? []
+  if (vetted.length > 0) return { ok: false, code: 'reassignment_refused', issues: vetted }
 
   const rebase = diff.rebaseable.filter((id) => status(id) === 'done')
   if (rebase.length > 0) {
@@ -225,6 +240,7 @@ export async function amendRun(options: AmendOptions): Promise<AmendResult> {
       targets: [...(options.targets ?? targetsOf(snapshot, proposed))],
       ...(options.source === undefined ? {} : { source: options.source }),
       ...(options.reason === undefined ? {} : { reason: options.reason }),
+      ...(options.rule === undefined ? {} : { rule: options.rule }),
     },
   })
   registerNodes(journal, runId, proposed, status, diff)
@@ -275,6 +291,7 @@ function refuse(
   snapshot: Workflow,
   proposed: Workflow,
   runner: AmendRunner | undefined,
+  author: AmendmentAuthor | undefined,
 ): AmendRefusal | null {
   const at = locator(snapshot, proposed)
 
@@ -293,7 +310,17 @@ function refuse(
   // This is not an exception carved out for one caller: an operator retuning a
   // slow gate in the editor mid-run gets exactly the same relief, and it is
   // what makes a mis-tuned run fixable without throwing the run away.
-  const inFlight = diff.blocking.filter((id) => IN_FLIGHT.has(status(id) as NodeStatus))
+  // One relief beside the gate table: a node that is in flight but parked —
+  // held, or waiting on a question — may change hands. Who works it is read at
+  // its next spawn, and none has happened; the scheduler hands it over at the
+  // step it is at. Nothing that moves its base or its body is in this set.
+  // The scheduler's own escalation (`escalate_after_rejections`) reassigns a
+  // node it is running: it reads the new desk at the node's next claim, so
+  // no turn in progress sees the change.
+  const parked = new Set(
+    diff.reassignedOnly.filter((id) => author === 'scheduler' || status(id) === 'awaiting_human'),
+  )
+  const inFlight = diff.blocking.filter((id) => IN_FLIGHT.has(status(id) as NodeStatus) && !parked.has(id))
   if (inFlight.length > 0) {
     return {
       ok: false,
@@ -372,7 +399,9 @@ function refuse(
 
 function reason(status: NodeStatus): string {
   if (status === 'waiting_on_capacity') return 'waiting on harness capacity and resumes on its own'
-  if (status === 'awaiting_human') return 'paused on a human question and still holds its lane'
+  if (status === 'awaiting_human') {
+    return 'paused on a human question and still holds its lane (only its harness, model or crew member may change now)'
+  }
   return 'running'
 }
 

@@ -120,6 +120,7 @@ export function unattendedDecisions(events: readonly StoredEvent[]): UnattendedD
           node: null,
           action: 'amend',
           ...(event.payload.targets === undefined ? {} : { target: event.payload.targets.join(', ') }),
+          ...(event.payload.reason === undefined ? {} : { text: event.payload.reason }),
         })
         continue
       case 'workspace_exec':
@@ -269,6 +270,10 @@ const ACTION_LABEL: Record<CoordinatorActionKind, string> = {
   amend: 'amended',
   exec: 'ran a command in',
   gate_cache_invalidate: 'invalidated the gate cache for',
+  interrupt: 'interrupted',
+  reassign: 'reassigned',
+  retry: 'retried',
+  step: 'moved the pipeline of',
 }
 
 function clip(text: string, limit: number): string {

@@ -32,7 +32,8 @@ import { createGateGuard } from '../guard/guard.ts'
 import { AdmissionControl } from '../admission/admission.ts'
 import type { AmendRunner } from '../amend/amend.ts'
 import type { Daemon, DaemonRun } from '../daemon/index.ts'
-import { runControl } from '../daemon/index.ts'
+import { fixerControl, runControl } from '../daemon/index.ts'
+import type { CoordinatorAuthority } from '../scheduler/index.ts'
 import { takeovers } from '../daemon/pty.ts'
 import { runDoctor, type DoctorReport } from '../doctor/index.ts'
 import type { DoctorOverrides } from '../cli/doctor.ts'
@@ -87,6 +88,8 @@ export interface StartRunOptions {
   readonly repoPath: string
   readonly permission: AgentPermission
   readonly onFailure?: 'stop' | 'retry' | 'ask'
+  /** `run --coordinator-authority` (§9.2). Absent is `standard`. */
+  readonly coordinatorAuthority?: CoordinatorAuthority
   readonly retries?: number
   /**
    * Milliseconds an unanswered *failure* question waits before retrying itself.
@@ -472,6 +475,12 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(options.retries === undefined ? {} : { retries: options.retries }),
     ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
     ...(options.agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs: options.agentAnswerAfterMs }),
+    ...(options.coordinatorAuthority === undefined ? {} : { coordinatorAuthority: options.coordinatorAuthority }),
+    // A conflict fixer is spawned outside the scheduler, and moves with it.
+    onHarnessSwitched: (from, to, model) => {
+      const adapter = adapters[to]
+      if (adapter !== undefined) host.fixer?.reroute?.(from, { adapter, model })
+    },
     // §9's take over, wired: the scheduler offers each live turn here and the
     // daemon's PTY channel resolves an `attach` against the same registry.
     takeovers,
@@ -526,6 +535,8 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
             host.adopt?.(amended)
             scheduler.adopt(amended)
           },
+          vet: (amended: Workflow) =>
+            scheduler.vetAmendment(amended).map((issue) => ({ path: issue.path, message: issue.message })),
         }
   // The scheduler's own amendments (a desk escalated after review rejections)
   // reach the host the way an operator's do.
@@ -552,6 +563,8 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
   const registered: DaemonRun = {
     runId,
     control: runControl(scheduler),
+    coordinatorAuthority: options.coordinatorAuthority ?? 'standard',
+    ...(host.fixer === undefined ? {} : { fixer: fixerControl(host.fixer, adapters) }),
     pools,
     admission,
     agentLeases,

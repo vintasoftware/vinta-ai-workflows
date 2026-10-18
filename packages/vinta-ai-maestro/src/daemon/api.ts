@@ -53,6 +53,7 @@ import { CoordinatorForbidden } from '../coordinator/actor.ts'
 import { execHolder } from '../coordinator/exec.ts'
 import { coordinatorRefusals } from '../coordinator/policy.ts'
 import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
+import { ReassignRefused, StepRefused } from '../scheduler/index.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
@@ -64,6 +65,7 @@ import { resolveWorkflow } from '../config/resolve.ts'
 import type { Upstream, UpstreamFor } from './proxy.ts'
 import { presentedToken, tokenMatches } from './auth.ts'
 import {
+  UnknownHarness,
   UnsupportedOperation,
   type DaemonRun,
   type RunStartPort,
@@ -73,6 +75,12 @@ import { harnessCapabilities } from './harnesses.ts'
 import { createStaticHandler, DEFAULT_UI_DIR } from './static.ts'
 import {
   AddContextRequestSchema,
+  FixerReassignRequestSchema,
+  MAX_REASON_CHARS,
+  REASON_HEADER,
+  ReassignRequestSchema,
+  StepRequestSchema,
+  SwitchHarnessRequestSchema,
   AgentGateRequestSchema,
   GateCacheInvalidateSchema,
   GuardRequestSchema,
@@ -311,6 +319,22 @@ export function createApi(options: ApiOptions): Hono {
   /** Requests the coordinator's token authenticated. Everyone else is the operator. */
   const actors = new WeakMap<Request, Actor>()
   const actorOf = (c: Context): Actor => actors.get(c.req.raw) ?? 'operator'
+  /** `X-Maestro-Reason`, decoded and bounded; undefined when absent, blank or malformed. */
+  const reasonOf = (c: Context): string | undefined => {
+    const raw = c.req.header(REASON_HEADER)
+    if (raw === undefined) return undefined
+    let text: string
+    try {
+      text = decodeURIComponent(raw).trim()
+    } catch {
+      return undefined
+    }
+    if (text === '') return undefined
+    return text.length <= MAX_REASON_CHARS ? text : text.slice(0, MAX_REASON_CHARS)
+  }
+  /** How far the coordinator reaches on this run (`run --coordinator-authority`). */
+  const authorityOf = (run: DaemonRun | undefined | null): 'standard' | 'full' =>
+    run?.coordinatorAuthority ?? 'standard'
   /**
    * Monitor turns in flight, by run. The one piece of state this module keeps.
    *
@@ -786,6 +810,8 @@ export function createApi(options: ApiOptions): Hono {
 
     const { tree } = body.value
     const actor = actorOf(c)
+    const reason = reasonOf(c)
+    if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
     const removed = run.gateCache.invalidate(gateId, tree)
     journal.append({
       runId,
@@ -795,6 +821,7 @@ export function createApi(options: ApiOptions): Hono {
         ...(tree === undefined ? {} : { tree }),
         removed,
         ...(actor === 'coordinator' ? { by: actor } : {}),
+        ...(reason === undefined ? {} : { reason }),
       },
     })
     log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, removed })
@@ -860,7 +887,10 @@ export function createApi(options: ApiOptions): Hono {
         { path: '', code: 'invalid_json', message: 'Body is not valid JSON' },
       ])
     }
-    const outcome = await amendHere(runId, proposed, run, actorOf(c))
+    const actor = actorOf(c)
+    const reason = reasonOf(c)
+    if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
+    const outcome = await amendHere(runId, proposed, run, actor, reason)
     return outcome.ok ? c.json(outcome.body) : fail(c, 409, outcome.code, outcome.issues)
   })
 
@@ -1211,32 +1241,166 @@ export function createApi(options: ApiOptions): Hono {
   // run's control port, and answers with a code — never with what went wrong
   // inside, which is the one place agent output could leak into a response.
   app.post('/api/runs/:runId/nodes/:nodeId/context', (c) =>
-    operate(c, AddContextRequestSchema, (run, nodeId, body, actor) =>
-      run.control.addContext(nodeId, body.text, actor),
+    operate(c, AddContextRequestSchema, (run, nodeId, body, actor, reason) =>
+      run.control.addContext(nodeId, body.text, actor, reason),
     ),
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/redirect', (c) =>
-    operate(c, RedirectRequestSchema, (run, nodeId, body, actor) =>
-      run.control.redirect(nodeId, body.instruction, actor),
+    operate(c, RedirectRequestSchema, (run, nodeId, body, actor, reason) =>
+      run.control.redirect(nodeId, body.instruction, actor, reason),
     ),
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/pause', (c) =>
-    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => run.control.pause(nodeId, actor)),
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor, reason) => run.control.pause(nodeId, actor, reason)),
   )
 
   /** §9 — undo `pause` (`Scheduler.resume`). */
   app.post('/api/runs/:runId/nodes/:nodeId/resume', (c) =>
-    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => {
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor, reason) => {
       if (run.control.resume === undefined) throw new UnsupportedOperation('resume')
-      return run.control.resume(nodeId, actor)
+      return run.control.resume(nodeId, actor, reason)
     }),
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/abort', (c) =>
-    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => run.control.abortNode(nodeId, actor)),
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor, reason) =>
+      run.control.abortNode(nodeId, actor, reason),
+    ),
   )
+
+  /**
+   * Stop the phase's turn now without failing it: it is held, keeping its
+   * lane, branch, commits and uncommitted work, until `resume`, `reassign` or
+   * `step` releases it. `held` for a phase already parked on a question.
+   */
+  app.post('/api/runs/:runId/nodes/:nodeId/interrupt', (c) =>
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor, reason) => {
+      if (run.control.interrupt === undefined) throw new UnsupportedOperation('interrupt')
+      return run.control.interrupt(nodeId, actor, reason)
+    }),
+  )
+
+  /**
+   * Hand the phase to a crew member, or a harness and model, and let it carry
+   * on at the same step: `sent` (the turn was cut), `queued` (`after_turn`),
+   * `delivered` (it was parked, and took it at once). 409 `reassign_refused`
+   * names what the run cannot do — an unknown or busy member, a harness it has
+   * no adapter for.
+   */
+  app.post('/api/runs/:runId/nodes/:nodeId/reassign', (c) =>
+    operate(c, ReassignRequestSchema, (run, nodeId, body, actor, reason) => {
+      if (run.control.reassign === undefined) throw new UnsupportedOperation('reassign')
+      const { when, crew, harness, model } = body
+      const target = {
+        ...(crew === undefined ? {} : { crew }),
+        ...(harness === undefined ? {} : { harness }),
+        ...(model === undefined ? {} : { model }),
+      }
+      return run.control.reassign(nodeId, target, {
+        actor,
+        ...(when === undefined ? {} : { when }),
+        ...(reason === undefined ? {} : { reason }),
+      })
+    }),
+  )
+
+  /**
+   * Move the phase's pipeline to a state by hand, for work finished in the
+   * lane by somebody else. Never a final state: the gates still decide. The
+   * coordinator needs `--coordinator-authority full`.
+   */
+  app.post('/api/runs/:runId/nodes/:nodeId/step', (c) =>
+    operate(c, StepRequestSchema, (run, nodeId, body, actor, reason) => {
+      if (run.control.step === undefined) throw new UnsupportedOperation('step')
+      return run.control.step(nodeId, body.to, actor, reason)
+    }),
+  )
+
+  /**
+   * Move the whole run off a harness: phases in flight on it are reassigned,
+   * phases yet to start take the switch when they do. What an account out of
+   * credits needs, without a pause and a resume.
+   */
+  app.post('/api/runs/:runId/switch-harness', async (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    const actor = actorOf(c)
+    const reason = reasonOf(c)
+    if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
+    const body = await readBody(c, SwitchHarnessRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    if (run.control.switchHarness === undefined) return fail(c, 501, 'switch_unsupported')
+    const { from, to, model, when } = body.value
+    try {
+      const moved = await run.control.switchHarness(from, to, model, {
+        actor,
+        ...(when === undefined ? {} : { when }),
+        ...(reason === undefined ? {} : { reason }),
+      })
+      log.info('runs.harness_switched', { run: runId, from, to, actor, moved: moved.length })
+      return c.json({ ok: true as const, moved: [...moved] })
+    } catch (error) {
+      const refused = refusalOf(error)
+      if (refused !== null) return fail(c, 409, refused.code, [{ path: '', code: refused.code, message: refused.message }])
+      return fail(c, 409, 'operation_failed')
+    }
+  })
+
+  /**
+   * The conflict fixer's round, by hand. `interrupt` ends the running round as
+   * a round spent — what it left in the integration worktree stays, and the
+   * integrator reads it as any finished round. `reassign` names who fixes the
+   * rounds after it, ending the running one unless `now` is false.
+   */
+  const fixerRoute = (verb: 'interrupt' | 'reassign') => async (c: Context) => {
+    const runId = c.req.param('runId') as string
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    if (run.fixer === undefined) return fail(c, 501, 'fixer_unavailable')
+    const actor = actorOf(c)
+    const reason = reasonOf(c)
+    if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
+    const was = run.fixer.running()
+    let ended: boolean
+    let to: { harness: string; model: string } | undefined
+    if (verb === 'interrupt') {
+      const body = await readBody(c, NoArgsRequestSchema)
+      if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+      ended = await run.fixer.interrupt()
+    } else {
+      const body = await readBody(c, FixerReassignRequestSchema)
+      if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+      to = { harness: body.value.harness, model: body.value.model }
+      try {
+        ended = await run.fixer.reassign(to.harness, to.model, body.value.now ?? true)
+      } catch (error) {
+        const refused = refusalOf(error)
+        if (refused !== null) return fail(c, 409, refused.code, [{ path: '', code: refused.code, message: refused.message }])
+        return fail(c, 409, 'operation_failed')
+      }
+    }
+    journal.append({
+      runId,
+      type: 'fixer_operation',
+      payload: {
+        op: verb,
+        ended,
+        ...(was === null ? {} : { from: was }),
+        ...(to === undefined ? {} : { to }),
+        ...(actor === 'coordinator' ? { by: actor } : {}),
+        ...(reason === undefined ? {} : { reason }),
+      },
+    })
+    log.info('runs.fixer_operation', { run: runId, op: verb, actor, ended })
+    return c.json({ ok: true as const, ended })
+  }
+  app.post('/api/runs/:runId/fixer/interrupt', fixerRoute('interrupt'))
+  app.post('/api/runs/:runId/fixer/reassign', fixerRoute('reassign'))
 
   /** §9.1 — the answer enters the guard context as `human.answer`. */
   /**
@@ -1248,8 +1412,22 @@ export function createApi(options: ApiOptions): Hono {
    * That comes back as 409, like every other "not now".
    */
   app.post('/api/runs/:runId/nodes/:nodeId/retry', (c) =>
-    operate(c, NoArgsRequestSchema, (run, nodeId) => {
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor, reason) => {
       if (run.control.retry === undefined) throw new UnsupportedOperation('retry')
+      // `retry` journals no operation of its own; the reason goes with the status it moves.
+      if (actor === 'coordinator' || reason !== undefined) {
+        journal.append({
+          runId: run.runId,
+          nodeId,
+          type: 'node_operation',
+          payload: {
+            op: 'retry',
+            delivery: 'sent',
+            ...(actor === 'coordinator' ? { by: actor } : {}),
+            ...(reason === undefined ? {} : { reason }),
+          },
+        })
+      }
       return run.control.retry(nodeId)
     }),
   )
@@ -1260,14 +1438,14 @@ export function createApi(options: ApiOptions): Hono {
    * away. Answers `queued`, or `ignored` for a settled phase.
    */
   app.post('/api/runs/:runId/nodes/:nodeId/fresh', (c) =>
-    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor) => {
+    operate(c, NoArgsRequestSchema, (run, nodeId, _body, actor, reason) => {
       if (run.control.freshSession === undefined) throw new UnsupportedOperation('fresh')
-      return run.control.freshSession(nodeId, actor)
+      return run.control.freshSession(nodeId, actor, reason)
     }),
   )
 
   app.post('/api/runs/:runId/nodes/:nodeId/answer', (c) =>
-    operate(c, AnswerRequestSchema, (run, nodeId, body, actor) =>
+    operate(c, AnswerRequestSchema, (run, nodeId, body, actor, reason) =>
       run.control.answer(
         nodeId,
         {
@@ -1278,6 +1456,7 @@ export function createApi(options: ApiOptions): Hono {
           },
         },
         actor,
+        reason,
       ),
     ),
   )
@@ -1299,17 +1478,33 @@ export function createApi(options: ApiOptions): Hono {
    * never reaches this branch.
    */
   const halt = (mode: 'paused' | 'cancelled') => async (c: Context) => {
-    // The coordinator lives inside the run it would be ending, and ending a run
-    // is a decision about the whole of it: the operator's.
-    if (actorOf(c) === 'coordinator') return fail(c, 403, 'coordinator_forbidden')
+    // The coordinator lives inside the run it would be ending. A pause is
+    // resumable and costs nothing that is not run again, so it may; a stop is
+    // final and is the operator's unless they gave it full authority. Either
+    // way it says why.
+    const actor = actorOf(c)
+    const reason = reasonOf(c)
+    if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
     const body = await readBody(c, NoArgsRequestSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
     const found = resolveRead(c)
     if ('response' in found) return found.response
     const { run, row } = found
+    if (actor === 'coordinator' && (run === null || (mode === 'cancelled' && authorityOf(run) !== 'full'))) {
+      return fail(c, 403, 'coordinator_forbidden')
+    }
     if (run !== null) {
       if (run.halt === undefined) return fail(c, 501, 'halt_unsupported')
       if (row.status !== 'running') return fail(c, 409, 'run_not_running')
+      journal.append({
+        runId: row.id,
+        type: 'run_halt_requested',
+        payload: {
+          mode,
+          ...(actor === 'coordinator' ? { by: actor } : {}),
+          ...(reason === undefined ? {} : { reason }),
+        },
+      })
       const waitingOn = (await run.halt(mode)) ?? undefined
       log.info('runs.halt_requested', {
         run: row.id,
@@ -1603,6 +1798,7 @@ export function createApi(options: ApiOptions): Hono {
     proposed: unknown,
     run: DaemonRun | undefined,
     actor: Actor = 'operator',
+    reason?: string,
   ): Promise<
     | { readonly ok: true; readonly body: AmendResponse }
     | { readonly ok: false; readonly code: string; readonly issues: Issue[] }
@@ -1613,7 +1809,9 @@ export function createApi(options: ApiOptions): Hono {
       // which refuses it with located issues.
       const parsed = WorkflowSchema.safeParse(proposed)
       if (parsed.success) {
-        const refusals = coordinatorRefusals(journal.readWorkflow(runId), parsed.data)
+        const refusals = coordinatorRefusals(journal.readWorkflow(runId), parsed.data, {
+          authority: authorityOf(run),
+        })
         if (refusals.length > 0) {
           return {
             ok: false,
@@ -1630,6 +1828,7 @@ export function createApi(options: ApiOptions): Hono {
       proposed,
       ...(runner === undefined ? {} : { runner }),
       ...(actor === 'coordinator' ? { author: 'coordinator' as const } : {}),
+      ...(reason === undefined ? {} : { reason }),
     })
     if (!result.ok) return { ok: false, code: result.code, issues: toWireIssues(result.issues, result.code) }
     return {
@@ -1826,7 +2025,7 @@ export function createApi(options: ApiOptions): Hono {
   async function operate<T>(
     c: Context,
     schema: z.ZodType<T>,
-    apply: (run: DaemonRun, nodeId: string, body: T, actor: Actor) => unknown,
+    apply: (run: DaemonRun, nodeId: string, body: T, actor: Actor, reason: string | undefined) => unknown,
   ): Promise<Response> {
     const found = resolveNode(c)
     if ('response' in found) return found.response
@@ -1836,17 +2035,24 @@ export function createApi(options: ApiOptions): Hono {
     // operator hunting for a typo instead of reading the status in front of
     // them.
     if (found.run === null) return fail(c, 409, 'run_not_live')
+    const actor = actorOf(c)
+    const reason = reasonOf(c)
+    if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
 
     const body = await readBody(c, schema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
 
     let result: unknown
     try {
-      result = await apply(found.run, found.node.node_id, body.value, actorOf(c))
+      result = await apply(found.run, found.node.node_id, body.value, actor, reason)
     } catch (error) {
       // A refusal of the coordinator is its own code: it is not a failure of
       // the operation, and the coordinator reads it to know to stop asking.
       if (error instanceof CoordinatorForbidden) return fail(c, 403, 'coordinator_forbidden')
+      // A reassignment or a step the run cannot make says which and why —
+      // ids only, composed by the scheduler for exactly this.
+      const refused = refusalOf(error)
+      if (refused !== null) return fail(c, 409, refused.code, [{ path: '', code: refused.code, message: refused.message }])
       // Codes only. The thrown message belongs to a harness or a scheduler and
       // is not this layer's to relay into a browser.
       return fail(c, 409, 'operation_failed')
@@ -2144,6 +2350,19 @@ const STATUS_FOR: Readonly<Record<RunStartRefusal, 404 | 409>> = {
  * something behind this API rather than of the request. Both are distinct from
  * "your request was wrong", which is what the other four say.
  */
+/**
+ * A refusal the scheduler composed for the caller — a reassignment or a step
+ * the run cannot make, a harness with no adapter — as a code and its message.
+ * Those messages are ids by construction; nothing else thrown is repeated.
+ */
+function refusalOf(error: unknown): { readonly code: string; readonly message: string } | null {
+  if (error instanceof ReassignRefused || error instanceof UnknownHarness) {
+    return { code: 'reassign_refused', message: error.message }
+  }
+  if (error instanceof StepRefused) return { code: 'step_refused', message: error.message }
+  return null
+}
+
 function fail(
   c: Context,
   status: 400 | 401 | 403 | 404 | 409 | 501 | 503,

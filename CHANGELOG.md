@@ -55,8 +55,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across attempts, the scheduler amends the run. The phase moves to the
   cheapest member of the next tier up and takes the new desk from its next
   attempt. The amendment is journalled as `workflow_amended` with the new
-  author `scheduler` and a new `reason` field (`review_rejections`, the
-  members, the tiers and the count). A phase already at the top tier stays
+  author `scheduler`, a one-line `reason` and a new `rule` field
+  (`review_rejections`, the members, the tiers and the count). A phase already at the top tier stays
   where it is. Amendments may now leave a member the run already had with no
   phase, so moving a member's last phase is no longer refused.
 - **`vinta-ai-maestro`: `purge` drops lane rescues whose work landed.** The
@@ -152,6 +152,42 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   beat schedules as `append_only` — preferring `maestro.codegen` /
   `maestro.append_only` in the project file. `vinta-bootstrap-ai-tools` offers
   to record them there once.
+- **`vinta-ai-maestro`: take a phase over without failing it.** Moving a phase
+  to another agent took abort, amend and retry, and the retry restarted its
+  pipeline from the top — one phase went from review back to implementing.
+  `node interrupt <run> <phase>` stops the turn now and **holds** the phase,
+  lane, branch, commits and uncommitted work kept, until `resume`, `reassign`
+  or `step` releases it; the cut step runs again then. `node reassign <run>
+  <phase> --crew <member> | --harness <h> --model <m>` is interrupt, amend and
+  resume in one (`--after-turn` lets the turn finish): the phase carries on at
+  the same step, keeps its session when only the model changes, and otherwise
+  starts fresh with a handoff — the last report, the work in the lane, the red
+  gate. `node step <run> <phase> <state>` moves the pipeline by hand, never
+  into a final state. Journalled as `node_reassigned` and `node_operation`.
+- **`vinta-ai-maestro`: `amend` accepts a held phase, or one waiting on a
+  question.** Its harness, model or crew member (`crew_changed`, a new
+  amendment kind) may change while it is parked, and it carries on at its
+  step. A brief, a gate list or a base still waits for the phase to stop.
+- **`vinta-ai-maestro`: `switch-harness <run> --from --to --model` and
+  `defaults.harness_fallbacks`.** A live run moves off a harness — an account
+  out of credits — without a pause and resume: phases in flight are
+  reassigned at their step, later phases run on the new harness, and the
+  conflict fixer moves too. With `harness_fallbacks` the run does it by
+  itself when a harness parks on a quota refusal, the refused turn going
+  again at once on the fallback. Journalled `harness_switched`.
+- **`vinta-ai-maestro`: `fixer interrupt|reassign <run>`.** End the conflict
+  fixer's running round as a round spent (what it left stays), or hand later
+  rounds to another harness and model. Journalled `fixer_operation`.
+- **`vinta-ai-maestro`: one API for the operator and the coordinator, and every
+  act says why.** Every acting request takes a reason (`--reason` on every
+  verb, the `X-Maestro-Reason` header on the API), journalled with what it
+  explains; the coordinator is refused without one (`reason_required`). The
+  coordinator gains `interrupt`, `reassign`, `switch-harness`, `fixer`,
+  `resume` of its own holds, and `pause` of the run (`run_halt_requested`).
+  `run --coordinator-authority full` also lets it change the plan's shape —
+  phases, dependency edges, briefs, touch lists, deferrals — answer any
+  question you are not holding, `node step`, and stop the run. A check is
+  never weakened under either authority.
 
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
