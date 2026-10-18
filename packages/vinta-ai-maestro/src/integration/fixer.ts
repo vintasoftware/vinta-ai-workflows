@@ -137,6 +137,23 @@ export interface ConflictFixer {
    * because a spy has nothing to end.
    */
   interrupt?(): Promise<void>
+  /**
+   * Ends the round in progress now, as a round spent rather than a teardown:
+   * what the agent left in the worktree stays, and the integrator reads it as
+   * it reads any finished round — resolved, or the next round goes on from it.
+   * True when a round was running. An operator's or the coordinator's
+   * `fixer interrupt`, and the first half of `fixer reassign`.
+   */
+  endRound?(): Promise<boolean>
+  /**
+   * Who fixes every round from now on, over the staffing; null hands rounds
+   * back to it. The round in progress is not touched — `endRound` for that.
+   */
+  reassign?(agent: FixerAgent | null): void
+  /** Rounds that would run on harness `from` run on `to` instead (a run's harness switch). */
+  reroute?(from: string, to: FixerAgent): void
+  /** The round in progress — its harness and model — or null when none is. */
+  running?(): { readonly harness: string; readonly model: string } | null
 }
 
 /** One conflict's staffing: the capability to spawn with, never a session. */
@@ -214,16 +231,58 @@ export interface AgentConflictFixerOptions {
 export function createAgentConflictFixer(options: AgentConflictFixerOptions): ConflictFixer {
   /** The round's session while it runs, so a teardown can end it. */
   let live: { kill(): Promise<void> } | null = null
+  let liveAgent: { readonly harness: string; readonly model: string } | null = null
   let interrupted = false
+  let ended = false
+  /** `reassign`'s pick, over the staffing for every later round. */
+  let assigned: FixerAgent | null = null
+  /** Harnesses the run switched away from, and where to. */
+  const reroutes = new Map<string, FixerAgent>()
   const timeoutMs = options.timeoutMs ?? DEFAULT_FIXER_TIMEOUT_MS
+  /** The staffed agent with the run's reroutes applied, followed as a chain. */
+  const routed = (agent: FixerAgent): FixerAgent => {
+    let current = agent
+    const seen = new Set<string>()
+    for (
+      let next = reroutes.get(current.adapter.id);
+      next !== undefined && !seen.has(current.adapter.id);
+      next = reroutes.get(current.adapter.id)
+    ) {
+      seen.add(current.adapter.id)
+      current = next
+    }
+    return current
+  }
   return {
     async interrupt(): Promise<void> {
       if (live === null) return
       interrupted = true
       await live.kill().catch(() => {})
     },
+    async endRound(): Promise<boolean> {
+      if (live === null) return false
+      ended = true
+      await live.kill().catch(() => {})
+      return true
+    },
+    reassign(agent: FixerAgent | null): void {
+      assigned = agent
+    },
+    reroute(from: string, to: FixerAgent): void {
+      reroutes.set(from, to)
+    },
+    running() {
+      return liveAgent
+    },
     async fix(request: ConflictRequest): Promise<void> {
-      const staffed = options.staff?.(request) ?? null
+      const staffing = options.staff?.(request) ?? null
+      const chosen = routed(assigned ?? staffing ?? { adapter: options.adapter, model: options.model })
+      // The member's implemented list stays the staffing's: it is about whose
+      // work is in the conflict, not about who resolves it.
+      const staffed: FixerAgent = {
+        ...chosen,
+        ...(staffing?.implemented === undefined ? {} : { implemented: staffing.implemented }),
+      }
       const context =
         staffed?.implemented === undefined
           ? request
@@ -268,6 +327,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       // would be reading it as the wrong job.
       const by: Attribution = { role: CONFLICT_FIXER_ROLE }
       live = outcome.session
+      liveAgent = { harness: adapter.id, model }
       // The drain, against the clock. A timer firing kills the session, which
       // ends the stream; the timeout is then the round's result rather than
       // whatever the stream said last.
@@ -294,10 +354,16 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       } finally {
         clearTimeout(timer)
         live = null
+        liveAgent = null
       }
       if (interrupted) {
         interrupted = false
         throw new ConflictFixerInterrupted(request.nodeId, request.round)
+      }
+      // Ended by hand: the round is over, and the worktree says how it went.
+      if (ended) {
+        ended = false
+        return
       }
       if (timedOut) throw new ConflictFixerTimeout(request.nodeId, request.round, timeoutMs)
     },

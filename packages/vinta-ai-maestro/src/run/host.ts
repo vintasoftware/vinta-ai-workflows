@@ -72,6 +72,8 @@ export interface HostWiring {
   readonly executor: EffectExecutor
   /** Read after `run_ended`. Absent for an injected executor, which owns its own. */
   readonly waveResults?: () => readonly IntegrationWaveRecord[]
+  /** The conflict fixer, for the operator's and the coordinator's hands on a running round. */
+  readonly fixer?: ConflictFixer
   /** `DaemonRun.amend`'s rebase. Absent means an amendment that needs one is refused. */
   readonly rebase?: NonNullable<AmendRunner['rebase']>
   /** The scheduler's lane hand-over (§8). Absent for a host that owns its lanes. */
@@ -433,6 +435,9 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
 
   return {
     executor,
+    // `fixer interrupt` / `fixer reassign`, and a harness switch reaching the
+    // one agent the scheduler does not spawn.
+    fixer,
     waveResults: () => integrator.records,
     // Through the executor's queue: the rebase and the wave merges write in
     // the same worktree, and an amendment lands whenever the nodes it blocks
