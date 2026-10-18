@@ -14,3 +14,18 @@ export {
   type Decision,
   type DecisionKind,
 } from './decisions.ts'
+export {
+  agentDetailsFrom,
+  categoryOf,
+  describeUnattended,
+  runAgentDetails,
+  unattendedDecisions,
+  type AgentDetail,
+  type AgentDetails,
+  type CoordinatorAction,
+  type CoordinatorActionKind,
+  type DescribeOptions,
+  type UnattendedAnswer,
+  type UnattendedCategory,
+  type UnattendedDecision,
+} from './unattended.ts'

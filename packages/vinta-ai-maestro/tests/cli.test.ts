@@ -2871,6 +2871,42 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
     expect(JSON.parse(one.out.join(''))).toMatchObject({ runId: 'orphaned', state: 'interrupted', pid: null })
   })
 
+  it('lists what the run decided without the operator', async () => {
+    const dir = gitRepo()
+    orphan(dir, 'decided')
+    const journal = openJournal(dir)
+    journal.append({
+      runId: 'decided',
+      nodeId: 'a',
+      type: 'human_question',
+      payload: { effect_id: 'agent-question:a:1', question: 'The agent stopped to ask for a decision.', kind: 'agent' },
+    })
+    journal.appendDecision('decided', 'a', {
+      kind: 'answer',
+      by: 'unattended',
+      text: 'Schema — Add a column?\nAnswer: Add published_at (Recommended)',
+      effect: 'agent-question:a:1',
+    })
+    journal.append({
+      runId: 'decided',
+      nodeId: 'a',
+      type: 'human_answered',
+      payload: { effect_id: 'agent-question:a:1', answer: '[{"selected":[0]}]', unattended: true },
+    })
+    journal.close()
+
+    const io = recorder()
+    expect(await statusCommand(['decided', '--repo', dir], io.io)).toBe(OK)
+    const out = io.out.join('\n')
+    expect(out).toContain('Decided without you (1):')
+    expect(out).toMatch(/a · unattended after \d+s · agent question → Schema: Add published_at \(Recommended\)/)
+    const json = recorder()
+    expect(await statusCommand(['decided', '--repo', dir, '--json'], json.io)).toBe(OK)
+    expect(JSON.parse(json.out.join('')).unattended).toEqual([
+      expect.objectContaining({ type: 'answer', node: 'a', category: 'agent_question', by: 'unattended' }),
+    ])
+  })
+
   it('shows a phase staffed above its plan, and on whom', async () => {
     // 73 substitutions in one run, 24 of them a tier or two dearer than
     // planned, and `status` showed every one of those phases as just `running`.

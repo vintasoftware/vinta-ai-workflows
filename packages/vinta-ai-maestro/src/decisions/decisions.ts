@@ -34,6 +34,12 @@ export interface Decision {
   readonly kind: DecisionKind
   readonly by: DecidedBy
   readonly text: string
+  /**
+   * The question's effect id, on an `answer`: what joins it to its
+   * `human_answered` row, so the list of decisions made unattended can say
+   * what an agent's question was about (`unattended.ts`).
+   */
+  readonly effect?: string
 }
 
 const KINDS: ReadonlySet<string> = new Set<DecisionKind>(['answer', 'context', 'rejected'])
@@ -58,16 +64,16 @@ const REJECTED_LINE = /^[ \t]*(?:[-*][ \t]+)?`?REJECTED:[ \t]*(.+?)`?[ \t]*$/gm
 /** A stored line, or null for one this build cannot read. */
 export function parseDecision(raw: unknown): Decision | null {
   if (raw === null || typeof raw !== 'object') return null
-  const { kind, by, text } = raw as Record<string, unknown>
+  const { kind, by, text, effect } = raw as Record<string, unknown>
   if (typeof kind !== 'string' || !KINDS.has(kind)) return null
   if (typeof by !== 'string' || !BY.has(by)) return null
   if (typeof text !== 'string' || text.trim() === '') return null
-  return { kind: kind as DecisionKind, by: by as DecidedBy, text: clip(text) }
+  return decision(kind as DecisionKind, by as DecidedBy, text, typeof effect === 'string' ? effect : undefined)
 }
 
 /** A decision as it is stored: trimmed and cut to `DECISION_TEXT_LIMIT`. */
-export function decision(kind: DecisionKind, by: DecidedBy, text: string): Decision {
-  return { kind, by, text: clip(text) }
+export function decision(kind: DecisionKind, by: DecidedBy, text: string, effect?: string): Decision {
+  return effect === undefined ? { kind, by, text: clip(text) } : { kind, by, text: clip(text), effect }
 }
 
 /**
@@ -104,7 +110,12 @@ export function selectDecisions(list: readonly Decision[]): {
  * agent put it and the option it got, with that option's consequence, so it
  * reads without the card in view. A question nobody answered settles nothing.
  */
-export function answerDecisions(ask: AgentAsk, answers: readonly AgentAnswer[], by: DecidedBy): Decision[] {
+export function answerDecisions(
+  ask: AgentAsk,
+  answers: readonly AgentAnswer[],
+  by: DecidedBy,
+  effect?: string,
+): Decision[] {
   return ask.questions.flatMap((question, index) => {
     const answer = answers[index] ?? { selected: [] }
     const picked = answer.selected.flatMap((choice) => {
@@ -115,7 +126,7 @@ export function answerDecisions(ask: AgentAsk, answers: readonly AgentAnswer[], 
     const lines = [`${question.header} — ${question.question}`]
     if (picked.length > 0) lines.push(`Answer: ${picked.join('; ')}`)
     if (answer.text !== undefined) lines.push(`${picked.length > 0 ? 'Also' : 'Answer'}: ${answer.text}`)
-    return lines.length === 1 ? [] : [decision('answer', by, lines.join('\n'))]
+    return lines.length === 1 ? [] : [decision('answer', by, lines.join('\n'), effect)]
   })
 }
 

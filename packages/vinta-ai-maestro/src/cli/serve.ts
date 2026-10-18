@@ -73,7 +73,8 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                            [--permission <ask|auto|full|judged>]
                            [--system-one <config.json>]
                            [--on-failure <stop|retry|ask>] [--retries <n>]
-                           [--retry-after <15m>] [--no-coordinator]
+                           [--retry-after <15m>] [--agent-answer-after <30m>]
+                           [--no-coordinator]
                            [--harness-profile <name>]
                            [--log-level <debug|info|warn|error>] [--log-stderr]
                            [--log-detail <kind|message>]
@@ -131,6 +132,14 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                  An attempt that fails faster than the interval doubles the
                  next wait, up to 8x (15m becomes 2h); one that runs at least
                  the interval long puts it back to 15m.
+  --agent-answer-after
+                 How long an agent's own question (a design choice it stopped
+                 to ask about) waits before it takes the recommended options.
+                 Defaults, under --retry-after, to twice that interval and never
+                 less than 30m: such an answer can add a migration or pick an
+                 API shape, which is worth more of a person's time than a retry.
+                 Set it alone to answer agents' questions without retrying
+                 failures. Same spellings as --retry-after.
   --log-level    How much the daemon records about itself, in
                  .vinta-ai-maestro/logs/daemon.ndjson and in the UI's Logs view.
                  Defaults to info: what it bound, what it refused, every node
@@ -309,6 +318,7 @@ export async function serveCommand(
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
         'retry-after': { type: 'string' },
+        'agent-answer-after': { type: 'string' },
         'no-intervene': { type: 'boolean' },
         'no-coordinator': { type: 'boolean' },
         'harness-profile': { type: 'string', multiple: true },

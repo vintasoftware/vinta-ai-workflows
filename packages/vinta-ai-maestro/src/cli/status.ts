@@ -12,13 +12,15 @@
  * shown as `interrupted`, with the command that picks it up.
  *
  * Identifiers only, as everywhere else on a stream (§11): run and node ids,
- * statuses, counts and times. Questions are counted, not quoted — their text
- * is the plan's prose about the repository, and the UI is where it is read.
+ * statuses, counts and times — plus, for one run, its pending questions and
+ * the decisions made without the operator, since a terminal on the operator's
+ * own machine is where they are read when the UI is not open.
  */
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
 import { jobLogPathFor, liveJob, type JobRecord } from '../job/job.ts'
 import { describeStep } from '../journal/integration-steps.ts'
 import {
@@ -184,6 +186,10 @@ function showRun(
   // worktree: a phase in `integrate` runs no agent, and read as frozen.
   const steps = journal.nodeSteps(runId)
   const worktree = state === 'running' ? journal.integrationWorktree(runId) : null
+  // What the run decided with nobody watching (F5's list): retries, agents'
+  // questions and plan questions a timer or the coordinator answered.
+  const decided = unattendedDecisions(journal.events(runId))
+  const details = runAgentDetails(journal, runId)
   const crewNote = (nodeId: string): string => {
     const row = substituted.get(nodeId)
     if (row === undefined) return ''
@@ -220,6 +226,7 @@ function showRun(
           step: steps.get(node.node_id) ?? null,
           substitution: substituted.get(node.node_id) ?? null,
         })),
+        unattended: decided.map((entry) => ({ ...entry, summary: describeUnattended(entry, { details }) })),
       }),
     )
     return OK
@@ -249,6 +256,11 @@ function showRun(
   )
   io.out('')
   if (worktree !== null && (worktree.holder !== null || worktree.queue.length > 0)) io.out(integrationLine(worktree))
+  if (decided.length > 0) {
+    io.out(`Decided without you (${decided.length}):`)
+    for (const entry of decided) io.out(`  ${new Date(entry.at).toLocaleString()}  ${describeUnattended(entry, { details })}`)
+    io.out('')
+  }
   for (const [nodeId, pending] of questions) {
     const choices = pending.question.choices ?? []
     io.out(`${nodeId} asks: ${pending.question.question}${choices.length === 0 ? '' : ` [${choices.join(' | ')}]`}`)

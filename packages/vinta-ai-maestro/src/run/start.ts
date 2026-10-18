@@ -93,6 +93,8 @@ export interface StartRunOptions {
    * Absent waits for a person, which is what every run did before the flag.
    */
   readonly retryAfterMs?: number
+  /** Milliseconds an unanswered *agent* question waits (`agentAnswerAfter`). */
+  readonly agentAnswerAfterMs?: number
   /**
    * Pick up a run the journal already holds instead of creating one.
    *
@@ -469,6 +471,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(options.onFailure === undefined ? {} : { onFailure: options.onFailure }),
     ...(options.retries === undefined ? {} : { retries: options.retries }),
     ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs }),
+    ...(options.agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs: options.agentAnswerAfterMs }),
     // §9's take over, wired: the scheduler offers each live turn here and the
     // daemon's PTY channel resolves an `attach` against the same registry.
     takeovers,

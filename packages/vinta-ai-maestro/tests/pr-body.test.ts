@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest'
 import {
   composeIntegrationPrBody,
   composePlanPrBody,
+  PLAN_PR_UNATTENDED_LIMIT,
   composePrBody,
   readPrContext,
   PRS_CONTEXT_DIR,
@@ -177,6 +178,18 @@ describe('the integration branch PR', () => {
 })
 
 describe('the plan PR', () => {
+  it('lists what the run decided without a person, capped with a pointer to status', () => {
+    const base = { runId: 'run-7', planId: 'x', baseBranch: 'main', head: 'plan/x/wave-2', steps: [] }
+    expect(composePlanPrBody(base).body).not.toContain('Decided without a person')
+    const lines = Array.from({ length: PLAN_PR_UNATTENDED_LIMIT + 2 }, (_, i) => `p${i} · unattended after 30m 00s · failed attempt → retried`)
+    const body = composePlanPrBody({ ...base, unattended: lines }).body
+    expect(body).toContain('## Decided without a person')
+    expect(body).toContain(`answered ${PLAN_PR_UNATTENDED_LIMIT + 2} question(s)`)
+    expect(body).toContain('- p0 · unattended after 30m 00s · failed attempt → retried')
+    expect(body).not.toContain(`- p${PLAN_PR_UNATTENDED_LIMIT} ·`)
+    expect(body).toContain('… and 2 more: `vinta-ai-maestro status run-7` lists them all.')
+  })
+
   it('is the one PR to merge, and lists the review units it carries', () => {
     const text = composePlanPrBody({
       runId: 'run-7',

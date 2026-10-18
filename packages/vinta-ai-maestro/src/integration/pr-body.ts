@@ -27,7 +27,12 @@
  * **Everything here is identifiers (§11).** Gate ids, exit codes, counts, node
  * ids, branch names and paths. No gate output, no diff, no transcript text —
  * a PR body is published to a forge, which is the last place repository
- * content should arrive by accident.
+ * content should arrive by accident. The plan PR's list of decisions made
+ * unattended is the one exception, and a narrow one: it carries the plan's own
+ * question text and, for an agent's question, its short header and the option
+ * label it got — the labels the agent wrote for a person to choose between,
+ * as `prs-context` carries its own words — and never the coordinator's
+ * steering text.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -301,7 +306,15 @@ export interface PlanFacts {
   readonly head: string
   /** Every PR the run opened or tried to, in an order that merges cleanly. */
   readonly steps: readonly PlanPrStep[]
+  /**
+   * What the run decided with nobody watching, one line each, oldest first
+   * (`describeUnattended` with `published`).
+   */
+  readonly unattended?: readonly string[]
 }
+
+/** The most unattended decisions a plan PR lists before pointing at `status`. */
+export const PLAN_PR_UNATTENDED_LIMIT = 60
 
 /**
  * The PR that lands the whole plan: the final wave branch into `base_branch`.
@@ -346,6 +359,25 @@ export function composePlanPrBody(facts: PlanFacts): PrText {
           : `phase \`${step.nodeId}\``
       const link = step.url === undefined ? '(no PR opened)' : step.url
       lines.push(`- ${what}: ${link} — \`${step.head}\` into \`${step.base}\``)
+    }
+  }
+
+  const decided = facts.unattended ?? []
+  if (decided.length > 0) {
+    lines.push(
+      '',
+      '## Decided without a person',
+      '',
+      `The run answered ${decided.length} question(s) or acted on its own while nobody was watching — a ` +
+        '`--retry-after` timer or the run coordinator. Review these before merging: each one is a choice ' +
+        'nobody made.',
+      '',
+    )
+    for (const line of decided.slice(0, PLAN_PR_UNATTENDED_LIMIT)) lines.push(`- ${line}`)
+    if (decided.length > PLAN_PR_UNATTENDED_LIMIT) {
+      lines.push(
+        `- … and ${decided.length - PLAN_PR_UNATTENDED_LIMIT} more: \`vinta-ai-maestro status ${facts.runId}\` lists them all.`,
+      )
     }
   }
 

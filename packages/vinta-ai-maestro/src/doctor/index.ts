@@ -56,6 +56,7 @@ import { openJournal } from '../journal/journal.ts'
 import { storeFor } from '../cli/paths.ts'
 import { describeUnscopedGate, unscopedGates } from '../config/resolve.ts'
 import { loadProjectConfig, type ProjectConfig } from '../config/project-config.ts'
+import { quoteCommand, readCiCommands, uncoveredCommands } from './ci.ts'
 
 const run = promisify(execFile)
 
@@ -1167,6 +1168,50 @@ export function checkGateScope(workflow: Workflow, config: ProjectConfig | null)
   })
 }
 
+/** Uncovered CI commands named one by one, before the rest are counted. */
+const CI_GAPS_SHOWN = 12
+
+/**
+ * Commands the project's CI runs that no gate runs (`ci.ts`), one warning
+ * each: a run whose gates all pass then opens PRs that CI fails. Nothing when
+ * the project has no GitHub Actions workflow. A warning, never a failure — the
+ * matching is a heuristic, and a CI-only step (a deploy, a publish) is often
+ * meant to stay one.
+ */
+export async function checkCiCoverage(repoPath: string, workflow: Workflow): Promise<CheckResult[]> {
+  const ci = await readCiCommands(repoPath)
+  if (ci.length === 0) return []
+  const gaps = uncoveredCommands(ci, workflow)
+  if (gaps.length === 0) {
+    return [pass('ci-coverage', `ci: every check the GitHub Actions workflows run has a gate (${ci.length} command(s) read)`)]
+  }
+  const remedy =
+    'add a gate that runs it (gates.<id>.cmd) and name it in defaults.gates, or leave it to CI if it needs CI ' +
+    '(credentials, a deploy) — this check matches commands by name and can be wrong'
+  const shown = gaps.slice(0, CI_GAPS_SHOWN).map((gap, index) =>
+    flag(
+      `ci-coverage:${index}`,
+      `ci: ${gap.file} (${gap.job} › ${gap.step}) runs \`${quoteCommand(gap.command)}\`, which ` +
+        (gap.nearest === undefined
+          ? 'no gate runs'
+          : `gate ${gap.nearest} runs without ${gap.missingFlags.join(' ')}`),
+      'warn',
+      remedy,
+    ),
+  )
+  if (gaps.length > CI_GAPS_SHOWN) {
+    shown.push(
+      flag(
+        'ci-coverage:more',
+        `ci: ${gaps.length - CI_GAPS_SHOWN} more CI command(s) no gate runs`,
+        'warn',
+        remedy,
+      ),
+    )
+  }
+  return shown
+}
+
 /**
  * The project's file as the checkout has it, for the one check that explains
  * itself by it. `null` when there is none or it does not parse — the workflow
@@ -1242,6 +1287,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const systemOne = await checkSystemOne(workflow, options.systemOne, options.permission)
   const leftovers = await checkLeftovers(repoPath, options.leftovers)
   const config = await checkoutConfig(repoPath)
+  const ciCoverage = await checkCiCoverage(repoPath, workflow)
 
   const checks = [
     ...harnesses,
@@ -1256,6 +1302,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ...checkGates(workflow),
     ...checkComposeTty(workflow),
     ...checkGateScope(workflow, config),
+    ...ciCoverage,
     ...envFiles,
     ...briefs,
     ...branches,

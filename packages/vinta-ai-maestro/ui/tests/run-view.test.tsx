@@ -430,6 +430,40 @@ test('a daemon that cannot serve the rollup does not stop the run view drawing',
   expect(container.querySelector('.error')).toBe(null)
 })
 
+test('lists what the run decided without a person, each linked to its phase', async () => {
+  const stub = await startStubDaemon({
+    ...oneNode(),
+    unattended: {
+      [RUN_ID]: [
+        {
+          at: 1_700_000_000_000,
+          node: 'impl',
+          by: 'unattended',
+          category: 'agent_question',
+          summary: 'impl · unattended after 30m 00s · agent question → Migration: Add published_at (Recommended)',
+        },
+        { at: 1_700_000_100_000, node: null, by: 'coordinator', category: 'action', summary: 'run · coordinator · amended gate:unit' },
+      ],
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-unattended-row]')).not.toBe(null))
+  const rows = [...container.querySelectorAll('[data-unattended-row]')]
+  expect(rows.map((row) => row.getAttribute('data-unattended-row'))).toEqual(['agent_question', 'action'])
+  expect(rows[0]?.textContent).toContain('agent question → Migration: Add published_at (Recommended)')
+  expect(rows[0]?.querySelector('a')?.getAttribute('href')).toBe(`#/runs/${RUN_ID}/nodes/impl`)
+  expect(rows[1]?.textContent).toContain('amended gate:unit')
+})
+
+test('a run that decided nothing on its own says so', async () => {
+  const stub = await startStubDaemon(oneNode())
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+  await waitFor(() => expect(textOf(container, '[data-unattended]')).toContain('Nothing decided without a person yet.'))
+})
+
 test('the lane column drops the run id every lane name repeats', async () => {
   // Lane names are `${runId}-...`, so spelled in full the column is the same
   // prefix on every row — width the table has to scroll for, carrying nothing

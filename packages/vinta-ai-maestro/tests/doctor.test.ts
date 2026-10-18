@@ -24,7 +24,9 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { stringify } from 'yaml'
 import { afterAll, describe, expect, it } from 'vitest'
+import { commandLines, signatureWords } from '../src/doctor/ci.ts'
 import {
+  checkCiCoverage,
   exampleTarget,
   formatDoctorReport,
   runDoctor,
@@ -1073,5 +1075,100 @@ describe('doctor exercises the database commands', () => {
     } finally {
       server.close()
     }
+  })
+})
+
+describe('gates checked against CI', () => {
+  const ciWorkflow = (gates: Record<string, string>): Workflow =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'ci-fixture',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase', gates: Object.keys(gates) },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      gates: Object.fromEntries(Object.entries(gates).map(([id, cmd]) => [id, { cmd }])),
+      nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+    })
+
+  const repoWithCi = async (files: Record<string, unknown>): Promise<string> => {
+    const root = makeTemp()
+    await mkdir(join(root, '.github', 'workflows'), { recursive: true })
+    for (const [name, doc] of Object.entries(files)) {
+      await writeFile(join(root, '.github', 'workflows', name), typeof doc === 'string' ? doc : stringify(doc))
+    }
+    return root
+  }
+
+  const DJANGO_CI = {
+    name: 'ci',
+    on: ['pull_request'],
+    jobs: {
+      test: {
+        'runs-on': 'ubuntu-latest',
+        steps: [
+          { uses: 'actions/checkout@v4' },
+          { name: 'Install', run: 'pip install uv\nuv sync --frozen' },
+          { name: 'Tests', run: 'uv run pytest --cov=app' },
+          {
+            name: 'Django checks',
+            run: 'cd backend\nDJANGO_SETTINGS_MODULE=app.settings.prod \\\n  uv run python manage.py check --deploy --fail-level WARNING',
+          },
+          { name: 'Client is current', run: 'pnpm run generate-client && git diff --exit-code -- frontend/src/client' },
+        ],
+      },
+    },
+  }
+
+  it('names each CI command no gate runs, and the flag a near gate leaves out', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const checks = await checkCiCoverage(
+      root,
+      ciWorkflow({ unit: 'docker compose run --rm -T web pytest -x', check: 'uv run python manage.py check' }),
+    )
+
+    expect(checks.map((check) => check.status)).toEqual(['warn', 'warn', 'warn'])
+    const labels = checks.map((check) => check.label)
+    // pytest is covered: --cov is an output flag, not a different check.
+    expect(labels.some((label) => label.includes('pytest'))).toBe(false)
+    expect(labels[0]).toContain('.github/workflows/ci.yml (test › Django checks)')
+    expect(labels[0]).toContain('which gate check runs without --deploy --fail-level')
+    expect(labels[1]).toContain('`pnpm run generate-client`, which no gate runs')
+    expect(labels[2]).toContain('`git diff --exit-code -- frontend/src/client`, which no gate runs')
+    expect(checks[0]?.remedy).toContain('gates.<id>.cmd')
+  })
+
+  it('passes once every CI check has a gate, and says nothing without a workflow', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const covered = ciWorkflow({
+      unit: 'pytest',
+      deploy: 'python manage.py check --deploy --fail-level WARNING',
+      client: 'npm run generate-client && git diff --exit-code -- frontend/src/client',
+    })
+    expect((await checkCiCoverage(root, covered)).map((check) => [check.id, check.status])).toEqual([
+      ['ci-coverage', 'pass'],
+    ])
+    expect(await checkCiCoverage(makeTemp(), covered)).toEqual([])
+  })
+
+  it('reads commands, not setup, and reduces wrappers to the tool they run', () => {
+    expect(commandLines('set -euo pipefail\n# lint\nnpm ci\nnpx eslint . && npx tsc --noEmit\necho done')).toEqual([
+      'npx eslint .',
+      'npx tsc --noEmit',
+    ])
+    expect(signatureWords('FOO=1 uv run --frozen --with x python -m mypy src')).toEqual(['mypy', 'src'])
+    expect(signatureWords('docker compose exec -T -e A=1 api ./manage.py test')).toEqual(['manage.py', 'test'])
+    expect(signatureWords('pnpm lint')).toEqual(['run', 'lint'])
+    expect(signatureWords('yarn run lint')).toEqual(['run', 'lint'])
+  })
+
+  it('reports a matrix repeat once, and skips a workflow that does not parse', async () => {
+    const root = await repoWithCi({
+      'a.yml': { jobs: { one: { steps: [{ run: 'ruff check .' }] }, two: { steps: [{ run: 'ruff check .' }] } } },
+      'b.yaml': 'jobs: [unclosed',
+    })
+    const checks = await checkCiCoverage(root, ciWorkflow({ unit: 'pytest' }))
+    expect(checks.map((check) => check.label)).toEqual([
+      'ci: .github/workflows/a.yml (one › 1) runs `ruff check .`, which no gate runs',
+    ])
   })
 })

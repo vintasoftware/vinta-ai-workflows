@@ -42,7 +42,13 @@ import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
-import { createScheduler, type RunReport, type Scheduler } from '../src/scheduler/index.ts'
+import {
+  AGENT_ANSWER_FLOOR_MS,
+  agentAnswerAfter,
+  createScheduler,
+  type RunReport,
+  type Scheduler,
+} from '../src/scheduler/index.ts'
 import { WorkflowSchema, type EffectId, type Workflow } from '../src/types.ts'
 
 const HARNESS = 'claude-code'
@@ -278,6 +284,7 @@ function rig(
     /** The harness's configured admission ceiling. Defaults to 8. */
     readonly ceiling?: number
   readonly retryAfterMs?: number
+    readonly agentAnswerAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
     readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
     /** Told when a session's stream drains, with its turn id. */
@@ -367,6 +374,7 @@ function rig(
     ...(options.onFailure === null ? {} : { onFailure: options.onFailure ?? 'stop' }),
     ...(options.retries === undefined ? {} : { retries: options.retries }),
     ...(options.retryAfterMs === undefined ? {} : { retryAfterMs: options.retryAfterMs, clock }),
+    ...(options.agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs: options.agentAnswerAfterMs, clock }),
   })
 
   cleanups.push(() => {
@@ -5187,7 +5195,11 @@ describe('an agent that stops to ask', () => {
     const running = r.scheduler.run()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
 
+    // A design question waits longer than a retry: twice the interval, never
+    // under thirty minutes.
     await r.advance(60_000)
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    await r.advance(AGENT_ANSWER_FLOOR_MS - 60_000)
     const report = await running
 
     expect(report.statuses).toEqual({ a: 'done' })
@@ -5196,6 +5208,27 @@ describe('an agent that stops to ask', () => {
     ])
     expect(r.adapter.spawned[1]?.prompt).toMatch(/^Nobody answered your questions/)
     expect(r.adapter.spawned[1]?.prompt).toContain('Answer: Existing table (Recommended)')
+  })
+
+  it('derives the agent-question wait from --retry-after, longer and never under thirty minutes', () => {
+    expect(agentAnswerAfter(undefined, undefined)).toBeUndefined()
+    expect(agentAnswerAfter(60_000, undefined)).toBe(AGENT_ANSWER_FLOOR_MS)
+    expect(agentAnswerAfter(3_600_000, undefined)).toBe(7_200_000)
+    expect(agentAnswerAfter(60_000, 120_000)).toBe(120_000)
+    expect(agentAnswerAfter(undefined, 120_000)).toBe(120_000)
+  })
+
+  it('waits --agent-answer-after on an agent question, without --retry-after', async () => {
+    const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE], agentAnswerAfterMs: 5 * 60_000 })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
+    await r.advance(5 * 60_000 - 1)
+    expect(r.scheduler.statuses['a']).toBe('awaiting_human')
+    await r.advance(1)
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expect(answersOf_(r)).toEqual([
+      { effect_id: 'agent-question:a:1', answer: '[{"selected":[0]}]', unattended: true },
+    ])
   })
 
   it('does not park on a harness that cannot resume, since nothing could deliver the answer', async () => {
@@ -5261,6 +5294,7 @@ describe('a phase’s decisions', () => {
         kind: 'answer',
         by: 'operator',
         text: 'Storage — Keep invoices in the existing table?\nAnswer: New table (Adds a migration.)',
+        effect: 'agent-question:a:1',
       },
       {
         kind: 'rejected',
@@ -5283,7 +5317,7 @@ describe('a phase’s decisions', () => {
     const r = rig(makeWorkflow([node('a')]), { scripts: [ASKING, DONE], retryAfterMs: 60_000 })
     const running = r.scheduler.run()
     await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the agent question')
-    await r.advance(60_000)
+    await r.advance(AGENT_ANSWER_FLOOR_MS)
     await running
 
     expect(keptOf(r)).toEqual([

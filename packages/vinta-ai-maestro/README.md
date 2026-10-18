@@ -142,6 +142,13 @@ There are also `judge-hook` and `guard-hook`, which are internal: they are the h
   that did not approve it on one desk, the scheduler amends the run to the
   cheapest member of the next tier up, journalled with the reason. `0` turns
   it off.
+- **Read what was decided without you.** Every question a `--retry-after`
+  timer or the coordinator answered — failure retries, review budgets stopped,
+  agents' design questions given their recommended option — and everything the
+  coordinator did on its own is listed in `status <run-id>` (*Decided without
+  you*), the run view's panel of that name, the plan PR's *Decided without a
+  person* section and the post-mortem's `unattended_decisions`. Review it
+  before merging: each line is a choice nobody made.
 - **One PR per run** with `defaults.pull_requests: plan`: the plan PR alone,
   instead of a PR per phase and per integration branch (`phase`, the default).
 
@@ -416,6 +423,17 @@ for a soak — carries `deferred` with the reason. When its dependencies are don
 the run asks instead of starting it: `start` runs it now, `stop` fails it with
 the reason and blocks what depends on it. Nothing answers that question for
 you, whatever `--retry-after` says.
+
+### Gates should run what CI runs
+
+`doctor` reads `.github/workflows/*.yml` and warns about each `run:` command no
+gate runs — `manage.py check --deploy`, a `git diff --exit-code` after
+regenerating a client — or runs without a flag CI passes. Otherwise every gate
+passes and CI fails every PR the run opens. Matching is by tool and subcommand
+after wrappers (`uv run`, `npx`, `docker compose run -T svc`, `pnpm x` = `npm
+run x`) and is heuristic: `uses:` actions are not read, a script is compared
+by its name, and a CI-only step such as a deploy may rightly stay out of the
+gates. It is always a warning.
 
 ### Compose commands need `-T`
 
@@ -712,7 +730,7 @@ An implementer that hits a decision it should not make alone ends its turn with 
 - one single-choice question is answered by clicking an option;
 - several questions are a wizard: one step each, number keys to pick, then a review step and **Send answers**.
 
-The answer resumes the agent's own session, so it carries on from where it stopped with its context intact. Under `--retry-after`, nobody answering means the recommended options are taken after the interval, and the answer is marked unattended. The questions stay in the transcript, and the journal records only that the node paused and which options were picked (see [SPEC.md §9.1](SPEC.md)).
+The answer resumes the agent's own session, so it carries on from where it stopped with its context intact. Unattended, nobody answering means the recommended options are taken after `--agent-answer-after` — by default twice `--retry-after` and never under 30 minutes, because an agent's design choice (a migration, an API shape) deserves more of your time than a retry — and the answer is marked unattended. The questions stay in the transcript, and the journal records only that the node paused and which options were picked (see [SPEC.md §9.1](SPEC.md)).
 
 ## Reviewing a plan before it runs
 
