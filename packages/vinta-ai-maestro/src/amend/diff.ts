@@ -76,6 +76,19 @@ const TOPOLOGY_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>([
  */
 const LIVE_SAFE_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>(['gates_changed'])
 
+/**
+ * Kinds that change *who* works a phase, not what it is: its harness, its
+ * model, its crew member. A node that is in flight but parked — held by an
+ * operator, or waiting on a question — may take these (`amend.ts`): nothing is
+ * running to have read them, and the scheduler hands the phase over at the
+ * step it is at (`Scheduler.adopt`).
+ */
+export const ASSIGNMENT_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>([
+  'harness_changed',
+  'model_changed',
+  'crew_changed',
+])
+
 export interface WorkflowDiff {
   /** One entry per node per way it moved, in the proposal's node order. */
   readonly changes: readonly AmendmentChange[]
@@ -100,6 +113,11 @@ export interface WorkflowDiff {
   readonly blocking: readonly string[]
   /** Changed nodes whose branch *content* would have to be rebuilt by an agent. */
   readonly contentChanged: readonly string[]
+  /**
+   * Changed nodes whose every change is an `ASSIGNMENT_KINDS` one and whose
+   * base did not move: the ones a parked node may take while in flight.
+   */
+  readonly reassignedOnly: readonly string[]
 }
 
 /** A node's definition with every workflow-level default already resolved. */
@@ -111,6 +129,7 @@ interface Effective {
   readonly model: string
   readonly pipeline: string
   readonly body: string
+  readonly crew: string
 }
 
 export function diffWorkflows(before: Workflow, after: Workflow): WorkflowDiff {
@@ -158,10 +177,29 @@ export function diffWorkflows(before: Workflow, after: Workflow): WorkflowDiff {
   // rewrite of one either: a gate command moving after a phase passed it is
   // the next gate run's business, and refusing it for that phase would make a
   // gate unretunable for the whole second half of a run.
+  // `crew_changed` is not content either: a done phase was built by whoever
+  // built it, and naming another member afterwards rebuilds nothing.
   const contentChanged = [
     ...new Set(
       changes
-        .filter((change) => !TOPOLOGY_KINDS.has(change.kind) && !LIVE_SAFE_KINDS.has(change.kind))
+        .filter(
+          (change) =>
+            !TOPOLOGY_KINDS.has(change.kind) && !LIVE_SAFE_KINDS.has(change.kind) && change.kind !== 'crew_changed',
+        )
+        .map((change) => change.node),
+    ),
+  ]
+  const rebaseableSet = new Set(rebaseable)
+  const reassignedOnly = [
+    ...new Set(
+      changes
+        .filter((change) => !rebaseableSet.has(change.node))
+        .filter((change) =>
+          changes
+            .filter((other) => other.node === change.node)
+            .every((other) => ASSIGNMENT_KINDS.has(other.kind) || LIVE_SAFE_KINDS.has(other.kind)),
+        )
+        .filter((change) => ASSIGNMENT_KINDS.has(change.kind))
         .map((change) => change.node),
     ),
   ]
@@ -179,6 +217,7 @@ export function diffWorkflows(before: Workflow, after: Workflow): WorkflowDiff {
     rebaseable: sortBy(rebaseable, order),
     blocking: sortBy([...blocking], order),
     contentChanged: sortBy(contentChanged, order),
+    reassignedOnly: sortBy(reassignedOnly, order),
   }
 }
 
@@ -295,6 +334,7 @@ function effective(workflow: Workflow, node: Node): Effective {
       node.max_fix_rounds,
       node.gates,
     ]),
+    crew: node.crew ?? '',
   }
 }
 
@@ -314,5 +354,6 @@ function kindsFor(old: Effective, next: Effective): AmendmentKind[] {
   if (old.model !== next.model) kinds.push('model_changed')
   if (old.pipeline !== next.pipeline) kinds.push('pipeline_changed')
   if (old.body !== next.body) kinds.push('body_changed')
+  if (old.crew !== next.crew) kinds.push('crew_changed')
   return kinds
 }

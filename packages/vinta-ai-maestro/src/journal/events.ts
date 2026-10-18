@@ -56,8 +56,23 @@ export interface HumanQuestion {
 /** The scalar the answer re-enters the guard context with, as `human.answer`. */
 export type HumanAnswer = string | number | boolean | null
 
-/** The §9 operations that steer a node. `take over` is a PTY attach, not an event. */
-export type OperatorOp = 'add_context' | 'redirect' | 'pause' | 'resume' | 'abort' | 'fresh'
+/**
+ * The §9 operations that steer a node. `take over` is a PTY attach, not an
+ * event. `interrupt`, `reassign` and `step` move a phase to somebody else, or
+ * to another step of its pipeline, without failing it.
+ */
+export type OperatorOp =
+  | 'add_context'
+  | 'redirect'
+  | 'pause'
+  | 'resume'
+  | 'abort'
+  | 'fresh'
+  | 'interrupt'
+  | 'reassign'
+  | 'step'
+  /** A failed phase run again. Journalled only when the coordinator retries, or a reason was given. */
+  | 'retry'
 
 /**
  * Which edge of a gate-pool acquisition a `gate_pool` event marks.
@@ -231,6 +246,8 @@ export type AmendmentKind =
   | 'pipeline_changed'
   /** Name, `prompt_ref`, `touches` or `max_fix_rounds` — the phase body. */
   | 'body_changed'
+  /** The crew member the phase is assigned to (`nodes[].crew`). */
+  | 'crew_changed'
 
 /**
  * Who amended a run.
@@ -263,6 +280,13 @@ export type AmendmentAuthor = 'operator' | 'monitor' | 'coordinator' | 'config'
  */
 export type Actor = 'operator' | 'coordinator'
 
+/** Who works a phase: a crew member when the run is staffed, and the harness and model its turns run on. */
+export interface Assignee {
+  readonly member?: string
+  readonly harness: string
+  readonly model: string
+}
+
 /** One node and one way it moved. Both fields are identifiers. */
 export interface AmendmentChange {
   readonly node: string
@@ -292,6 +316,46 @@ interface RunPayloads {
     readonly tree?: string
     readonly removed: number
     readonly by?: Actor
+    /** Why, in the caller's words. Payload, never a log field. The coordinator always gives one. */
+    readonly reason?: string
+  }
+  /**
+   * The conflict fixer's round, by hand (`fixer interrupt` / `fixer reassign`):
+   * whether a round was running and was ended, who it ran on, and who fixes the
+   * rounds after it. Harness and model ids, and the caller's reason.
+   */
+  fixer_operation: {
+    readonly op: 'interrupt' | 'reassign'
+    readonly ended: boolean
+    readonly from?: { readonly harness: string; readonly model: string }
+    readonly to?: { readonly harness: string; readonly model: string }
+    readonly by?: Actor
+    readonly reason?: string
+  }
+  /**
+   * The run was asked to end early — `pause` drains it, `stop` cancels it —
+   * by whom and why. `run_ended` records when it actually did.
+   */
+  run_halt_requested: {
+    readonly mode: 'paused' | 'cancelled'
+    readonly by?: Actor
+    readonly reason?: string
+  }
+  /**
+   * The run moved off a harness: every turn that would have run on `from` runs
+   * on `to` with `model` from here on (`switch-harness`, or
+   * `defaults.harness_fallbacks` when `from` ran out of quota — `cause`). The
+   * phases it moved each have a `node_reassigned` row. Harness and model ids,
+   * and the caller's reason.
+   */
+  harness_switched: {
+    readonly from: string
+    readonly to: string
+    readonly model: string
+    readonly by?: Actor
+    /** Set when the run switched by itself; absent when a person or the coordinator did. */
+    readonly cause?: 'harness_fallback'
+    readonly reason?: string
   }
   /**
    * A finished run's compose stacks, stopped (`docker compose down`, volumes
@@ -421,6 +485,8 @@ interface RunPayloads {
     readonly targets?: readonly string[]
     /** On a `config` row: the plan-branch commit the configuration was read at. */
     readonly source?: string
+    /** Why, in the author's words. The coordinator always gives one. Payload, never a log field. */
+    readonly reason?: string
   }
 }
 
@@ -643,6 +709,8 @@ interface NodePayloads {
     readonly unattended?: true
     /** Set when the run coordinator answered, rather than a person. */
     readonly by?: Actor
+    /** Why, in the answerer's words. The coordinator always gives one. */
+    readonly reason?: string
   }
   /**
    * One §9 operation. `text` is the operator's own steering message: it is
@@ -655,6 +723,31 @@ interface NodePayloads {
     readonly delivery: OperatorDelivery
     /** Set when the run coordinator operated, rather than a person. */
     readonly by?: Actor
+    /**
+     * Why, in the caller's words — payload, like `text`, and never a log
+     * field. The coordinator always gives one, so every decision it made
+     * unattended can be listed with its reason.
+     */
+    readonly reason?: string
+  }
+  /**
+   * The phase changed hands mid-run (`reassign`, an amendment of a held phase,
+   * or a harness switch): who held it, who holds it now, and whether the agent
+   * session survived the move. `kept` is the same member on the same harness —
+   * a model change alone; `fresh` starts the next turn cold with a handoff.
+   * Ids, and the caller's reason.
+   */
+  node_reassigned: {
+    readonly from: Assignee
+    readonly to: Assignee
+    readonly session: 'kept' | 'fresh'
+    readonly by?: Actor
+    /**
+     * Set when nobody called `reassign`: the run moved the phase off a harness
+     * out of quota, or an amendment of the parked phase named someone else.
+     */
+    readonly cause?: 'harness_fallback' | 'amendment'
+    readonly reason?: string
   }
   /**
    * What one spawn decided about its session slot (§15).
