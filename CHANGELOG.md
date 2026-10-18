@@ -108,6 +108,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (`schemas/postmortem.v1.schema.json`, additive), which `plan-feature`
     now reads: an agent question answered unattended is a decision the plan
     left open.
+- **`vinta-ai-maestro`: merge resolutions that undo a phase's deletion are
+  flagged.** One run's phase deleted an unused notification kind; the
+  conflict fixer kept "both sides" and every gate passed, so the deletion
+  never landed. After every merge in the integration worktree — a fixer's
+  resolution, or the `append_only` union driver, which re-adds lines one side
+  removed — the integrator counts lines one side deleted that the result
+  kept (codegen outputs excluded). Each is recorded as path, phase and line
+  count, never the lines: on the `node_conflict` journal row
+  (`reverted_deletions`), in the post-mortem's `wave_conflicts` and new
+  optional `unattended_decisions.reverted_deletions`
+  (`schemas/postmortem.v1.schema.json`, additive), and in the list of what
+  was decided without you (`status`, the run view, the plan PR body). It
+  flags; it does not block the merge. The conflict-fixer prompt now says a
+  phase's intent includes what it deleted.
 - **`vinta-ai-maestro`: `--agent-answer-after` on `run` and `ui`.** How long an
   agent's own question waits before it takes the recommended options. It
   used to be `--retry-after`, so a one-minute retry interval answered design

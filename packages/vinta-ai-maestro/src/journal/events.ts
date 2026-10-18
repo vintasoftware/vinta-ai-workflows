@@ -701,6 +701,13 @@ interface NodePayloads {
     readonly paths: readonly string[]
     /** Fix rounds the agent needed. 1 is first-try. */
     readonly rounds: number
+    /**
+     * Paths where the resolution kept lines one side deleted, the phase whose
+     * deletion it was, and how many lines (`integration/reverted.ts`). A
+     * count, never the lines (§11). Absent when there were none, and on rows
+     * written before it was checked.
+     */
+    readonly reverted_deletions?: readonly { readonly path: string; readonly node: string; readonly lines: number }[]
   }
   node_assigned: {
     readonly lane?: string

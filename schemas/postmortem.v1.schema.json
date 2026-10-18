@@ -199,6 +199,37 @@
                 "minimum": 0,
                 "maximum": 9007199254740991,
                 "description": "Conflict-fixer rounds the resolution took. High is a strong split signal."
+              },
+              "reverted_deletions": {
+                "description": "Paths where the resolution kept lines one side had deleted — a fixer keeping “both sides”, or the `append_only` union driver. Flagged, not refused: check each deletion reached the branch. Absent when there were none.",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "node": {
+                      "type": "string",
+                      "maxLength": 200,
+                      "description": "The phase whose deletion was reverted, or the branch standing in when no phase on that side touched the path."
+                    },
+                    "lines": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991,
+                      "description": "Lines that side deleted and the resolution kept. A count, never the lines."
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "node",
+                    "lines"
+                  ],
+                  "additionalProperties": false,
+                  "description": "A deletion a merge resolution undid. Identifiers and a count only."
+                }
               }
             },
             "required": [
@@ -964,6 +995,54 @@
                 "additionalProperties": false
               },
               "description": "What the coordinator did on its own, oldest first. Its reasons are in its conversation and, for steering, in the phase’s decisions — not here."
+            },
+            "reverted_deletions": {
+              "description": "Merge resolutions that kept lines a phase deliberately deleted, oldest first: flagged, not refused. Unused code breaks no gate, so check each deletion reached the branch. Absent when there were none, and on post-mortems written before it was checked.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "node": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "The phase whose deletion was reverted, or the branch standing in when no phase on that side touched the path."
+                  },
+                  "path": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "lines": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Lines that side deleted and the resolution kept. A count, never the lines."
+                  },
+                  "branch": {
+                    "type": "string",
+                    "description": "The branch the merge was made on."
+                  },
+                  "fix_rounds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "description": "Conflict-fixer rounds the resolution took; 0 is git’s own merge, the `append_only` union driver."
+                  }
+                },
+                "required": [
+                  "at_ms",
+                  "node",
+                  "path",
+                  "lines",
+                  "branch",
+                  "fix_rounds"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [

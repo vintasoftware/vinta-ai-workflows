@@ -49,6 +49,7 @@ import {
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
+import { type RevertedDeletion, revertedDeletions } from './reverted.ts'
 
 /** What integration reads from a node. `Node` satisfies it structurally. */
 export interface IntegrationNode {
@@ -77,6 +78,12 @@ export interface ConflictRecord {
   readonly nodes: readonly string[]
   readonly paths: readonly string[]
   readonly rounds: number
+  /**
+   * Lines one side deleted that the resolution kept (`reverted.ts`): a fixer
+   * that kept "both sides", or the union driver on an `append_only` file.
+   * Flagged, never refused — see SPEC §8. Absent when there were none.
+   */
+  readonly revertedDeletions?: readonly RevertedDeletion[]
 }
 
 export interface WaveResult {
@@ -953,7 +960,32 @@ export class Integrator {
     const step = { step: 'merge', branch: into, incoming: branch ?? nodeId } as const
     this.#options.onStep?.(forNode, { ...step, state: 'started' })
     try {
-      const record = await this.#mergeOne(into, nodeId, alreadyMerged, forNode, branch)
+      const cwd = this.#options.integrationPath
+      const sides = await Promise.all([
+        git(cwd, ['rev-parse', 'HEAD']),
+        git(cwd, ['rev-parse', '--verify', `${branch ?? this.nodeBranch(nodeId)}^{commit}`]),
+      ]).then(
+        (shas) => shas.map((sha) => sha.trim()) as [string, string],
+        () => null,
+      )
+      let record = await this.#mergeOne(into, nodeId, alreadyMerged, forNode, branch)
+      const reverted = sides === null ? [] : await this.#revertedDeletions(sides, into, nodeId, alreadyMerged, branch)
+      if (reverted.length > 0) {
+        // A union merge git made by itself is still a resolution, and the
+        // record is where the reverted deletion is reported from.
+        const paths = [...new Set(reverted.map((entry) => entry.path))]
+        record = {
+          ...(record ?? {
+            nodes:
+              branch === undefined
+                ? await this.#owners(paths, alreadyMerged, nodeId)
+                : await this.#owners(paths, alreadyMerged, null).then((owners) => (owners.length > 0 ? owners : [nodeId])),
+            paths,
+            rounds: 0,
+          }),
+          revertedDeletions: reverted,
+        }
+      }
       this.#options.onStep?.(forNode, { ...step, state: 'finished', outcome: record === null ? 'ok' : 'resolved' })
       return record
     } catch (error) {
@@ -1154,6 +1186,39 @@ export class Integrator {
     // failing test.
     if (red !== null) throw new IntegrationVerifyError(nodes, paths, this.#maxFixRounds, red, into, incoming)
     throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds)
+  }
+
+  /**
+   * What the merge just concluded kept of lines one side had deleted. The
+   * incoming side is the phase being merged (or, for `mergeBranch`, the branch
+   * itself); the side merged into is whichever phase already here last
+   * touched the path. Codegen outputs are not read: the steps regenerate them,
+   * and a stale line there is the step's to drop. A check that fails reports
+   * nothing — it must never fail a merge that is already made.
+   */
+  async #revertedDeletions(
+    [ours, theirs]: readonly [string, string],
+    into: string,
+    nodeId: string,
+    alreadyMerged: readonly string[],
+    branch: string | undefined,
+  ): Promise<RevertedDeletion[]> {
+    const cwd = this.#options.integrationPath
+    try {
+      return await revertedDeletions({
+        cwd,
+        ours,
+        theirs,
+        result: (await git(cwd, ['rev-parse', 'HEAD'])).trim(),
+        exclude: this.#options.codegen?.generated() ?? [],
+        attribute: async (side, path) => {
+          if (side === 'theirs') return branch ?? nodeId
+          return (await this.#owners([path], alreadyMerged, null)).at(-1) ?? into
+        },
+      })
+    } catch {
+      return []
+    }
   }
 
   /**
