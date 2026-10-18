@@ -5278,6 +5278,42 @@ describe('a failure before any agent ran', () => {
     expectDrained(r)
   })
 
+  it('keeps the unattended retry for a red gate on the merged base', async () => {
+    // Observed: a base gate failed once on a test that broke only near
+    // midnight, and every retry was reported as "failed during setup, before
+    // any agent ran" with the unattended retry withheld. A red base is a
+    // verdict on code a retry can take back, not the machinery failing.
+    class BaseGateError extends Error {
+      override name = 'BaseGateError'
+    }
+    let attempt = 0
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      tap: (call) => {
+        if (call.verb !== 'git_branch') return
+        attempt += 1
+        if (attempt <= 2) throw new BaseGateError('the base of a (plan/x/integ-a) merged, but gate "unit" failed on it (exit 1)')
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after two attempts')
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).not.toContain('before any agent ran')
+    const setupFlags = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_error' && event.nodeId === 'a')
+      .map((event) => (event.payload as { setup?: boolean }).setup ?? false)
+    expect(setupFlags).toEqual([false, false])
+
+    await r.advance(60_000)
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(answersOf(r)).toEqual([{ effect_id: 'retry:a:1', answer: 'retry', unattended: true }])
+    expectDrained(r)
+  })
+
   it('keeps the unattended retry while the setup failures differ', async () => {
     let attempt = 0
     const r = rig(branchFirstWorkflow(), {

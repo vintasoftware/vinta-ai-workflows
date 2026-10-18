@@ -557,23 +557,29 @@ export class RunEffectExecutor implements EffectExecutor {
    * `runGateCached` does for `--no-cache`, and stores after, so the fresh
    * verdict is the one the next lookup gets — and a fresh run that times out
    * leaves no stale verdict behind.
+   *
+   * `'red'` replays a green hit and re-runs a red one — the merged base's
+   * gates (`#baseGates`). See there for why.
    */
   async #gate(
     gateId: string,
     lane: ExecutorLane,
     options: Omit<RunGateOptions, 'pools'>,
-    fresh = false,
+    fresh: boolean | 'red' = false,
   ): Promise<GateRun> {
     const cache = this.#options.cache
     if (cache === undefined) return { result: await executeGate(options), cached: false }
 
     const treeHash = laneTreeHash(lane.path)
     const config = gateConfigKey(options.gate)
-    if (fresh) {
+    if (fresh === true) {
       cache.invalidate(gateId, treeHash)
     } else {
       const hit = cache.lookup(gateId, treeHash, config)
-      if (hit !== undefined) return { result: hit, cached: true, tree: treeHash }
+      if (hit !== undefined && !(fresh === 'red' && hit.status !== 'passed')) {
+        return { result: hit, cached: true, tree: treeHash }
+      }
+      if (hit !== undefined) cache.invalidate(gateId, treeHash)
     }
     const result = await executeGate(options)
     cache.store(treeHash, config, result)
@@ -1032,6 +1038,14 @@ export class RunEffectExecutor implements EffectExecutor {
    * gates — narrowed to what it changed — never looked. Cached on the merged
    * tree, so a retry on the same base is a hit, not a second suite. Red stops
    * the phase in its setup and names the gate and its log.
+   *
+   * **Only green is replayed.** A red verdict on the base is re-run when the
+   * phase comes back to it, which is only ever a retry: the base's tree is the
+   * dependencies' merge, and nothing in this phase can change it, so a cached
+   * red answered every retry with the same failure. One observed run failed a
+   * base gate once on a test that broke only near midnight, and seven retries
+   * replayed that verdict until an operator ran `gate-cache invalidate`. A red
+   * that is real costs one more suite per retry and says the same thing.
    */
   async #baseGates(nodeId: string): Promise<void> {
     const base = this.#options.integrator.base(nodeId)
@@ -1054,7 +1068,7 @@ export class RunEffectExecutor implements EffectExecutor {
         cwd: integration.path,
         env: integration.env,
         logPath,
-      }).catch((error: unknown) => {
+      }, 'red').catch((error: unknown) => {
         this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
         throw error
       })

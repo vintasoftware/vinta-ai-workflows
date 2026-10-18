@@ -659,6 +659,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: a red gate on a merged base is re-run on retry.** One
+  run's base test gate failed once on a test that broke only near midnight.
+  Seven retries replayed the cached verdict, each reported as "failed during
+  setup, before any agent ran", and the unattended retry was withheld until an
+  operator ran `gate-cache invalidate`. The base gates now replay only a green
+  verdict and re-run a red one, and a red base gate no longer counts as a
+  setup failure, so `--retry-after` keeps retrying it with its usual backoff.
+
 - **`vinta-ai-maestro`: a lane that will not recycle says why.** One run
   failed 20 attempts with only "could not be recycled (worktree)" or
   "(database)" in the journal and the daemon log. The failure now carries the

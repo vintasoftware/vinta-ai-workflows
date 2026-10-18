@@ -4053,7 +4053,13 @@ export class Scheduler {
     // verbatim is deterministic: counted, so `#offerRetry` can stop retrying
     // it unattended. A failure after an agent ran clears the count — the
     // setup got through, whatever happened next.
-    const setup = !state.agentRan
+    //
+    // A red gate on the merged base is not the machinery's, though it happens
+    // before any agent: it is a verdict on the dependencies' code, which a
+    // flaky test can give once and a retry can take back. Counted as setup it
+    // repeated verbatim — a cached verdict replayed seven times — and the
+    // unattended retry was withheld from the one failure a retry could fix.
+    const setup = !state.agentRan && !(error instanceof Error && error.name === 'BaseGateError')
     state.setupFailure = !setup
       ? null
       : state.setupFailure?.reason === reason
