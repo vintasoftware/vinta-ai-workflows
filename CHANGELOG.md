@@ -35,6 +35,38 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: codegen steps — generated files are regenerated, not
+  merged.** A workflow (or `maestro.codegen` in `.vinta-ai-workflows.yaml`)
+  declares `codegen.<id>`: a deterministic command, the files it writes
+  (`outputs`), the files they are a function of (`inputs`), and `after` for the
+  chain (schema, then client). The steps run in every lane before the gates
+  and their outputs are committed there; in the integration worktree a
+  conflict confined to their outputs is settled by taking either side and
+  running them, with no conflict fixer, and every merge is regenerated before
+  it is committed. A failing step is a red gate. `inputs` skip a step whose
+  inputs and outputs match a recorded run, a step that writes different
+  outputs from the same inputs is journalled `nondeterministic`, and a
+  `format: true` step formats only the files the phase changed. Agents are told
+  which files are generated and regenerate them mid-turn with
+  `vinta-ai-maestro codegen [<step>]`; `doctor --codegen` runs each step twice
+  to flag non-deterministic or stale output. Generated files caused most of one
+  run's 37 wave conflicts. `workflow.v1` and the config schema gain the
+  additive `codegen` field.
+
+- **`vinta-ai-maestro`: append-only files merge as a union.** `append_only` (or
+  `maestro.append_only`) lists files phases only add entries to — DI
+  containers, URL routes, notification kinds, beat schedules — and merges in
+  the integration worktree use git's `union` driver for them, so two phases
+  each adding an entry no longer needs a fixer round. The merged tree is gated
+  as before. Additive in `workflow.v1` and the config schema.
+
+- **`plan-feature`: emits codegen steps and append-only files** detected from the
+  project — the OpenAPI schema, generated API clients, route trees and
+  file-modifying pre-commit hooks as `codegen`; DI containers, URL routes and
+  beat schedules as `append_only` — preferring `maestro.codegen` /
+  `maestro.append_only` in the project file. `vinta-bootstrap-ai-tools` offers
+  to record them there once.
+
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
   agent — showed `running` over a silent transcript, and one queued behind it
@@ -1030,6 +1062,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in gates and the `project` block, and `plan-feature` says so.
 
 ### Fixed
+
+- **`vinta-ai-maestro`: a hook that rewrites files no longer refuses the
+  commit outright.** When a commit fails having left modified files behind — a
+  `pre-commit` formatter or schema generator — they are staged and the commit
+  is tried once more before the operator is asked, in lanes and in the
+  integration worktree. One run had seven merge commits refused this way.
 
 - **`vinta-ai-maestro`: a claude-code turn the CLI calls "blocked" no longer
   fails unless a tool was refused in it.** The CLI's own turn summary marks a
