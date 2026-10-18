@@ -55,16 +55,46 @@ const WHAT_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>([
 
 const WAVE_GATES_ORDER = ['off', 'final', 'every'] as const
 
+/**
+ * What `--coordinator-authority full` adds: the plan's shape — phases added
+ * (a phase split in two), dependency edges, and a phase's brief, name, touch
+ * list and deferral. Never a pipeline, the base branch or the plan documents,
+ * and never anything below: a check is not weakened under any authority.
+ */
+const FULL_KINDS: ReadonlySet<AmendmentKind> = new Set<AmendmentKind>([
+  'node_added',
+  'node_removed',
+  'dependency_added',
+  'dependency_removed',
+  'dependency_reordered',
+])
+
+export interface PolicyOptions {
+  /** `run --coordinator-authority`. Absent is `standard`. */
+  readonly authority?: 'standard' | 'full'
+}
+
 /** Every reason the coordinator may not make this amendment. Empty means it may. */
-export function coordinatorRefusals(before: Workflow, after: Workflow): readonly PolicyIssue[] {
+export function coordinatorRefusals(
+  before: Workflow,
+  after: Workflow,
+  options: PolicyOptions = {},
+): readonly PolicyIssue[] {
   const issues: PolicyIssue[] = []
   const refuse = (path: readonly (string | number)[], message: string): void => {
     issues.push({ path, message })
   }
+  const full = options.authority === 'full'
+  const beyond = full ? '' : ' (allowed under --coordinator-authority full)'
 
   for (const change of diffWorkflows(before, after).changes) {
+    if (full && FULL_KINDS.has(change.kind)) continue
     if (WHAT_KINDS.has(change.kind)) {
-      refuse(['nodes', change.node], `${change.kind.replaceAll('_', ' ')} on ${change.node} changes what the plan builds`)
+      refuse(
+        ['nodes', change.node],
+        `${change.kind.replaceAll('_', ' ')} on ${change.node} changes what the plan builds` +
+          (FULL_KINDS.has(change.kind) ? beyond : ''),
+      )
     }
   }
 
@@ -77,8 +107,9 @@ export function coordinatorRefusals(before: Workflow, after: Workflow): readonly
     const next = afterNodes.get(node.id)
     if (next === undefined) continue
     for (const field of ['name', 'prompt_ref', 'touches', 'deferred'] as const) {
+      if (full) break
       if (!same(node[field], next[field])) {
-        refuse(['nodes', node.id, field], `${node.id}'s \`${field}\` is the plan's, not the coordinator's`)
+        refuse(['nodes', node.id, field], `${node.id}'s \`${field}\` is the plan's, not the coordinator's${beyond}`)
       }
     }
     for (const gate of dropped(node.gates, next.gates)) {

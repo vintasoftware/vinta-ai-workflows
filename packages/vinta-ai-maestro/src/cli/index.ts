@@ -40,6 +40,10 @@ import {
   gateCacheCommand,
   nodeCommand,
   workflowCommand,
+  FIXER_USAGE,
+  fixerCommand,
+  SWITCH_HARNESS_USAGE,
+  switchHarnessCommand,
 } from './steer.ts'
 import { VALIDATE_USAGE, validateCommand } from './validate.ts'
 import { WITH_USAGE, withCommand } from './with.ts'
@@ -67,7 +71,14 @@ usage: vinta-ai-maestro <command> [options]
   pause <run-id>             Let running steps finish, then stop. Resumable.
   stop <run-id>              Kill the run now. Final.
   node <op> <run-id> <phase> Steer one phase of a live run: context, redirect,
-                             pause, abort, retry, answer.
+                             pause, resume, interrupt, reassign, step, abort,
+                             retry, fresh, answer.
+  switch-harness <run-id> --from <h> --to <h> --model <m>
+                             Move a live run off a harness, phases in flight
+                             included, without pausing it.
+  fixer interrupt|reassign <run-id>
+                             End, or hand to another agent, the conflict
+                             fixer's running round.
   workflow <run-id>          Print a run's workflow as it stands now.
   amend <run-id> <file>      Apply an edited workflow to a live run.
   exec <run-id> <lane|integration> -- <cmd>
@@ -123,6 +134,8 @@ const USAGES: Readonly<Record<string, string>> = {
   amend: AMEND_USAGE,
   exec: EXEC_USAGE,
   'gate-cache': GATE_CACHE_USAGE,
+  'switch-harness': SWITCH_HARNESS_USAGE,
+  fixer: FIXER_USAGE,
   land: LAND_USAGE,
   propagate: PROPAGATE_USAGE,
   purge: PURGE_USAGE,
@@ -187,6 +200,10 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await execCommand(rest, io)
     case 'gate-cache':
       return await gateCacheCommand(rest, io)
+    case 'switch-harness':
+      return await switchHarnessCommand(rest, io)
+    case 'fixer':
+      return await fixerCommand(rest, io)
     case 'land':
       return await landCommand(rest, io)
     case 'propagate':

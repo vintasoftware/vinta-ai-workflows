@@ -17,6 +17,7 @@ import {
 } from '../harness/permissions.ts'
 import { liveJob } from '../job/job.ts'
 import type { Journal } from '../journal/journal.ts'
+import type { CoordinatorAuthority } from '../scheduler/index.ts'
 import { loadSystemOne, SystemOneConfigError, type SystemOne } from '../system-one/config.ts'
 import type { Io } from './io.ts'
 import type { LogValues } from './logging.ts'
@@ -94,6 +95,8 @@ export interface RunPolicy {
   readonly retryAfter?: string
   readonly retryAfterMs?: number
   readonly intervene: boolean
+  /** `--coordinator-authority`. Absent is `standard`. */
+  readonly coordinatorAuthority?: CoordinatorAuthority
 }
 
 /** The flag values `toRunPolicy` reads, as `parseArgs` produced them. */
@@ -105,6 +108,7 @@ export interface PolicyValues {
   readonly 'retry-after'?: string | undefined
   readonly 'no-intervene'?: boolean | undefined
   readonly 'no-coordinator'?: boolean | undefined
+  readonly 'coordinator-authority'?: string | undefined
 }
 
 /** `null` on a bad flag, already reported; the message names the flag. */
@@ -140,6 +144,14 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
   const retryAfterMs = toRetryAfterMs(values['retry-after'], io)
   if (retryAfterMs === null) return null
 
+  // Rejected rather than defaulted, like `--permission`: a typo that became
+  // `standard` would look like it worked until the coordinator was refused.
+  const authority = values['coordinator-authority']
+  if (authority !== undefined && authority !== 'standard' && authority !== 'full') {
+    io.err('vinta-ai-maestro: --coordinator-authority must be one of standard, full')
+    return null
+  }
+
   // A budget, so it is bounded and finite. Zero is meaningful — it is `ask`
   // spelled through this flag — and anything unparseable is a typo worth
   // catching rather than a silent fallback to the default.
@@ -161,6 +173,7 @@ export function toRunPolicy(values: PolicyValues, io: Io): RunPolicy | null {
     // `--no-intervene` is the flag's name from before the monitor became the
     // coordinator, and still works.
     intervene: values['no-intervene'] !== true && values['no-coordinator'] !== true,
+    ...(authority === undefined ? {} : { coordinatorAuthority: authority }),
   }
 }
 
@@ -194,6 +207,7 @@ export function jobArgs(
   if (policy.retries !== undefined) args.push('--retries', String(policy.retries))
   if (policy.retryAfter !== undefined) args.push('--retry-after', policy.retryAfter)
   if (!policy.intervene) args.push('--no-coordinator')
+  if (policy.coordinatorAuthority !== undefined) args.push('--coordinator-authority', policy.coordinatorAuthority)
   if (log['log-level'] !== undefined) args.push('--log-level', log['log-level'])
   if (log['log-detail'] !== undefined) args.push('--log-detail', log['log-detail'])
   args.push('--log-stderr')

@@ -105,6 +105,15 @@ export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
                  Defaults to 127.0.0.1; there is no reason to change it unless
                  agents run somewhere that cannot reach loopback.
   --port <n>     Defaults to 0 — an OS-assigned port.
+  --coordinator-authority standard|full
+                 How far the run coordinator reaches. \`standard\` (the
+                 default): it changes how the run executes — harnesses,
+                 models, crew, fix budgets — answers what a --retry-after
+                 timer could, and holds and moves phases. \`full\` also
+                 answers any question you are not holding, steps a pipeline
+                 by hand, stops the run, and changes what the plan builds:
+                 dependency edges, new phases, briefs, a deferred phase's
+                 condition. A check is never weakened under either.
   --on-failure, --retries, --retry-after, --permission, --system-one,
   --no-coordinator, --log-level, --log-stderr, --log-detail
                  As for \`vinta-ai-maestro ui --help\`, which documents each.`
@@ -184,6 +193,7 @@ export async function runCommand(
         'log-detail': { type: 'string' },
         'no-intervene': { type: 'boolean' },
         'no-coordinator': { type: 'boolean' },
+        'coordinator-authority': { type: 'string' },
       },
       allowPositionals: true,
     })
@@ -521,6 +531,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       ...(policy.onFailure === undefined ? {} : { onFailure: policy.onFailure }),
       ...(policy.retries === undefined ? {} : { retries: policy.retries }),
       ...(policy.retryAfterMs === undefined ? {} : { retryAfterMs: policy.retryAfterMs }),
+      ...(policy.coordinatorAuthority === undefined ? {} : { coordinatorAuthority: policy.coordinatorAuthority }),
       ...(deps.executor === undefined ? {} : { executor: deps.executor }),
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
       ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),

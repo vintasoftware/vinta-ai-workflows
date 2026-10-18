@@ -15,7 +15,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { main } from '../src/cli/index.ts'
 import { FAILED, OK, USAGE, type Io } from '../src/cli/io.ts'
-import { amendCommand, execCommand, gateCacheCommand, nodeCommand, workflowCommand } from '../src/cli/steer.ts'
+import {
+  amendCommand,
+  execCommand,
+  fixerCommand,
+  gateCacheCommand,
+  nodeCommand,
+  switchHarnessCommand,
+  workflowCommand,
+} from '../src/cli/steer.ts'
+import { REASON_HEADER } from '../src/daemon/schemas.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import { shellQuote } from '../src/platform/platform.ts'
 import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
@@ -120,6 +129,50 @@ describe('node', () => {
     expect(r.out).toEqual(['fresh p1: queued'])
   })
 
+  /** Why travels in a header, so it reads the same on every verb — an amendment included. */
+  it('sends --reason in the reason header, URI-encoded', async () => {
+    const f = fakeFetch(json({ ok: true, delivery: 'sent' }))
+    const code = await nodeCommand(
+      ['interrupt', RUN_ID, 'p1', '--reason', 'p1 is looping — same test, 4 times', '--repo', emptyRepo()],
+      recorder().io,
+      { env: ENV, fetch: f.fetch },
+    )
+    expect(code).toBe(OK)
+    expect(f.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/nodes/p1/interrupt`)
+    expect(decodeURIComponent(f.sent[0]?.headers[REASON_HEADER] ?? '')).toBe('p1 is looping — same test, 4 times')
+  })
+
+  it('posts a reassignment from its flags, now unless --after-turn', async () => {
+    const f = fakeFetch(json({ ok: true, delivery: 'queued' }))
+    const repo = emptyRepo()
+    const deps = { env: ENV, fetch: f.fetch }
+    expect(await nodeCommand(['reassign', RUN_ID, 'p1', '--crew', 'senior', '--repo', repo], recorder().io, deps)).toBe(OK)
+    expect(
+      await nodeCommand(
+        ['reassign', RUN_ID, 'p1', '--harness', 'codex', '--model', 'gpt-5', '--after-turn', '--repo', repo],
+        recorder().io,
+        deps,
+      ),
+    ).toBe(OK)
+    expect(f.sent.map((sent) => JSON.parse(sent.body))).toEqual([
+      { crew: 'senior', when: 'now' },
+      { harness: 'codex', model: 'gpt-5', when: 'after_turn' },
+    ])
+    // Reassign with nothing to reassign to, and its flags on another verb, are usage errors.
+    expect(await nodeCommand(['reassign', RUN_ID, 'p1', '--repo', repo], recorder().io, deps)).toBe(USAGE)
+    expect(await nodeCommand(['pause', RUN_ID, 'p1', '--crew', 'x', '--repo', repo], recorder().io, deps)).toBe(USAGE)
+  })
+
+  it('posts a step with the state to move to', async () => {
+    const f = fakeFetch(json({ ok: true, delivery: 'delivered' }))
+    const code = await nodeCommand(['step', RUN_ID, 'p1', 'verify', '--repo', emptyRepo()], recorder().io, {
+      env: ENV,
+      fetch: f.fetch,
+    })
+    expect(code).toBe(OK)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({ to: 'verify' })
+  })
+
   /** An operation that did nothing must not exit 0: a script would read it as done. */
   it('exits 1 when the run ignored the operation', async () => {
     const r = recorder()
@@ -189,6 +242,38 @@ describe('node', () => {
 // ---------------------------------------------------------------------------
 // amend
 // ---------------------------------------------------------------------------
+
+describe('switch-harness and fixer', () => {
+  it('moves the run off a harness and prints the phases it moved', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ ok: true, moved: ['p1', 'p2'] }))
+    const code = await switchHarnessCommand(
+      [RUN_ID, '--from', 'codex', '--to', 'claude-code', '--model', 'opus', '--reason', 'out of credits', '--repo', emptyRepo()],
+      r.io,
+      { env: ENV, fetch: f.fetch },
+    )
+    expect(code).toBe(OK)
+    expect(f.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/switch-harness`)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({ from: 'codex', to: 'claude-code', model: 'opus', when: 'now' })
+    expect(r.out).toEqual([`run ${RUN_ID}: codex → claude-code (opus); moved p1, p2`])
+    expect(await switchHarnessCommand([RUN_ID, '--from', 'codex'], recorder().io, { env: ENV, fetch: f.fetch })).toBe(USAGE)
+  })
+
+  it('ends or re-staffs the fixer’s round', async () => {
+    const f = fakeFetch(json({ ok: true, ended: true }))
+    const repo = emptyRepo()
+    const deps = { env: ENV, fetch: f.fetch }
+    expect(await fixerCommand(['interrupt', RUN_ID, '--repo', repo], recorder().io, deps)).toBe(OK)
+    expect(
+      await fixerCommand(['reassign', RUN_ID, '--harness', 'claude-code', '--model', 'opus', '--after-round', '--repo', repo], recorder().io, deps),
+    ).toBe(OK)
+    expect(f.sent.map((sent) => [sent.url.replace(URL, ''), JSON.parse(sent.body)])).toEqual([
+      [`/api/runs/${RUN_ID}/fixer/interrupt`, {}],
+      [`/api/runs/${RUN_ID}/fixer/reassign`, { harness: 'claude-code', model: 'opus', now: false }],
+    ])
+    expect(await fixerCommand(['reassign', RUN_ID, '--harness', 'codex', '--repo', repo], recorder().io, deps)).toBe(USAGE)
+  })
+})
 
 describe('amend', () => {
   function proposalFile(contents: string): string {
