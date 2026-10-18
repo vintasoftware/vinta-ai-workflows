@@ -28,7 +28,7 @@ import { RUN_USAGE, runCommand } from './run.ts'
 import { SERVE_USAGE, serveCommand } from './serve.ts'
 import { SIMULATE_USAGE, simulateCommand } from './simulate.ts'
 import { STATUS_USAGE, statusCommand } from './status.ts'
-import { LAND_USAGE, PROPAGATE_USAGE, landCommand, propagateCommand } from './land.ts'
+import { LAND_USAGE, PROPAGATE_USAGE, SYNC_BASE_USAGE, landCommand, propagateCommand, syncBaseCommand } from './land.ts'
 import {
   AMEND_USAGE,
   EXEC_USAGE,
@@ -78,8 +78,10 @@ usage: vinta-ai-maestro <command> [options]
                              runs the command rather than replaying them.
   land <run-id> [--close]    Which PR lands a finished run, and which of its
                              review PRs are done; --close closes those.
-  propagate <run-id> <phase> Carry a fix made on a phase after the run into
-                             every integ-* and wave-* branch that has it.
+  propagate <run-id> <phase> Carry a fix made on a phase into every integ-*
+                             and wave-* branch that has it, live run or not.
+  sync-base <run-id>         Bring a base branch that moved on into the plan
+                             branch and every wave, live run or not.
   ui                         Serve the browser UI for every run and print the
                              URL to open. Closing it leaves runs running.
                              (\`serve\` is the same command.)
@@ -125,6 +127,7 @@ const USAGES: Readonly<Record<string, string>> = {
   'gate-cache': GATE_CACHE_USAGE,
   land: LAND_USAGE,
   propagate: PROPAGATE_USAGE,
+  'sync-base': SYNC_BASE_USAGE,
   purge: PURGE_USAGE,
   with: WITH_USAGE,
   gate: GATE_USAGE,
@@ -191,6 +194,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await landCommand(rest, io)
     case 'propagate':
       return await propagateCommand(rest, io)
+    case 'sync-base':
+      return await syncBaseCommand(rest, io)
     case 'purge':
       return await purgeCommand(rest, io)
     case 'with':

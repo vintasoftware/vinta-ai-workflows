@@ -95,6 +95,19 @@ export const ExecRequestSchema = z.strictObject({
   command: z.string().min(1),
 })
 
+/** `POST /api/runs/:runId/branches/propagate` — carry a fix on a phase into the branches built from it. */
+export const PropagateRequestSchema = z.strictObject({
+  phase: z.string().min(1),
+  dryRun: z.boolean().optional(),
+  push: z.boolean().optional(),
+})
+
+/** `POST /api/runs/:runId/branches/sync-base` — bring a moved `base_branch` into the plan branch and every wave. */
+export const SyncBaseRequestSchema = z.strictObject({
+  dryRun: z.boolean().optional(),
+  push: z.boolean().optional(),
+})
+
 /**
  * Forgetting one gate's cached results (§13.4). No `tree` is every tree. A tree
  * is a git object id, so it is held to that shape rather than passed to SQLite

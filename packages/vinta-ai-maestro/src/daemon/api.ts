@@ -81,6 +81,8 @@ import {
   MonitorAskSchema,
   NoArgsRequestSchema,
   ExecRequestSchema,
+  PropagateRequestSchema,
+  SyncBaseRequestSchema,
   OperationResponseSchema,
   RedirectRequestSchema,
   StartRunRequestSchema,
@@ -894,6 +896,74 @@ export function createApi(options: ApiOptions): Hono {
       },
     })
     return new Response(stream, { headers: { 'content-type': 'application/x-ndjson' } })
+  })
+
+  /**
+   * `propagate` and `sync-base` on a live run (`landing/live.ts`): the merges
+   * are made here, holding the integration worktree's queue, and the answer
+   * is the result as the commands print it. Journalled as `branches_moved`
+   * unless it was a dry run. Branch names and paths only (§11).
+   */
+  const moved = (
+    runId: string,
+    op: 'propagate' | 'sync_base',
+    node: string | null,
+    result: { readonly kind: string },
+    actor: Actor,
+  ): void => {
+    if (result.kind === 'planned') return
+    const outcome = result as
+      | { kind: 'done'; steps: readonly { branch: string }[] }
+      | { kind: 'conflict'; done: readonly { branch: string }[]; at: { branch: string }; paths: readonly string[] }
+      | { kind: 'held'; branch: string }
+    journal.append({
+      runId,
+      type: 'branches_moved',
+      payload: {
+        op,
+        ...(node === null ? {} : { node }),
+        moved: (outcome.kind === 'done' ? outcome.steps : outcome.kind === 'conflict' ? outcome.done : []).map(
+          (step) => step.branch,
+        ),
+        outcome: outcome.kind,
+        ...(outcome.kind === 'conflict' ? { at: outcome.at.branch, paths: outcome.paths } : {}),
+        ...(outcome.kind === 'held' ? { at: outcome.branch } : {}),
+        ...(actor === 'coordinator' ? { by: actor } : {}),
+      },
+    })
+  }
+
+  app.post('/api/runs/:runId/branches/propagate', async (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    if (run.branches === undefined) return fail(c, 501, 'branches_unsupported')
+    const body = await readBody(c, PropagateRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    const { phase, dryRun, push } = body.value
+    const result = await run.branches.propagate({ nodeId: phase, dryRun: dryRun === true, push: push !== false })
+    if (result === null) {
+      return fail(c, 404, 'unknown_phase', [
+        { path: 'phase', code: 'unknown_phase', message: `run ${runId} has no phase "${phase}" with a recorded base` },
+      ])
+    }
+    moved(runId, 'propagate', phase, result, actorOf(c))
+    return c.json(result)
+  })
+
+  app.post('/api/runs/:runId/branches/sync-base', async (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const run = runs.get(runId)
+    if (run === undefined) return fail(c, 409, 'run_not_live')
+    if (run.branches === undefined) return fail(c, 501, 'branches_unsupported')
+    const body = await readBody(c, SyncBaseRequestSchema)
+    if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
+    const { dryRun, push } = body.value
+    const result = await run.branches.syncBase({ dryRun: dryRun === true, push: push !== false })
+    moved(runId, 'sync_base', null, result, actorOf(c))
+    return c.json(result)
   })
 
   app.post('/api/runs/:runId/guard', async (c) => {

@@ -27,6 +27,7 @@ import type { Actor, NodeStatus, OperatorDelivery } from '../journal/events.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
 import type { HumanQuestion, NodeActivity } from './schemas.ts'
 import type { ExecPort } from '../coordinator/exec.ts'
+import type { BranchPort } from '../landing/live.ts'
 import type {
   AgentGateHopOptions,
   AgentGateResult,
@@ -267,6 +268,12 @@ export interface DaemonRun {
   readonly halt?: (mode: 'paused' | 'cancelled') => Promise<readonly NodeActivity[] | void>
   /** `vinta-ai-maestro exec`: a command run by hand in a lane or the integration worktree. */
   readonly exec?: ExecPort
+  /**
+   * `propagate` and `sync-base` on this run, made here holding the integration
+   * worktree's queue (`landing/live.ts`). Absent on a host with no
+   * integration worktree, and both endpoints then refuse.
+   */
+  readonly branches?: BranchPort
   /**
    * §13.4's cache, as far as an operator or the coordinator may reach it:
    * forgetting a verdict. Absent on a host with no cache, and the endpoint

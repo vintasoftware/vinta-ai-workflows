@@ -35,6 +35,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `propagate` works on a live run.** It refused one, so
+  a fix on a phase could not reach older `integ-*` branches until the run
+  ended, and their PRs stayed red. On a live run the run's job now makes the
+  merges, holding the integration worktree's queue, so none of the run's own
+  merges interleave with them.
+- **`vinta-ai-maestro`: `sync-base <run>` brings a moved `base_branch` into a
+  running plan.** It merges the base (the remote's, when ahead) into
+  `plan/<id>/base`, then the plan branch into the lowest wave and each wave
+  into the one above. On a live run a wave's conflict goes to the run's
+  conflict fixer, gated as a phase merge is; the plan branch's own conflict,
+  and any conflict on a run that is not live, stops it with the branch as it
+  was. Both commands journal `branches_moved` on a live run.
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
   agent — showed `running` over a silent transcript, and one queued behind it
