@@ -94,11 +94,16 @@ Every command runs against a project checkout — your project, not this one. `-
 | `run --resume <run-id>` | Picks a paused, interrupted or failed run back up, as a background job. Done phases stay done; every other phase — a failed run's failed and blocked phases included — is attempted again. Only `done` and `cancelled` runs are refused. |
 | `status [run-id] [--json]` | Every run in the project and what it is doing — or one run, phase by phase. A run whose job died without ending it shows as `interrupted`. |
 | `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
-| `pause <run-id> [--wait]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
-| `stop <run-id> [--wait]` | Kills every live agent turn and gate now. The run is `cancelled` and cannot be resumed. |
-| `node <context\|redirect\|pause\|abort\|retry\|fresh\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, or `ignored`, which exits 1). `fresh` drops the phase's agent session so its next turn starts cold. A run whose last runnable phase was aborted stays up for its `retry`. |
+| `pause <run-id> [--wait] [--reason <why>]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
+| `stop <run-id> [--wait] [--reason <why>]` | Kills every live agent turn and gate now. The run is `cancelled` and cannot be resumed. |
+| `node <context\|redirect\|pause\|resume\|abort\|retry\|fresh\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, `delivered`, or `ignored`, which exits 1). `fresh` drops the phase's agent session so its next turn starts cold. A run whose last runnable phase was aborted stays up for its `retry`. Every `node` verb takes `--reason <why>`, journalled with it. |
+| `node interrupt <run-id> <phase>` | Stops the phase's turn **now** without failing it. It is held — lane, branch, commits and uncommitted work kept — until `resume`, `reassign` or `step` lets it go, and the step it was cut in runs again then. |
+| `node reassign <run-id> <phase> --crew <member> \| --harness <h> --model <m> [--after-turn]` | Hands the phase to someone else and lets it carry on **at the same pipeline step**: interrupt, amend and resume in one. `--after-turn` lets the live turn finish first. The same member on the same harness keeps its session; anyone else starts fresh with a handoff (the last report, the work in the lane, the red gate). |
+| `node step <run-id> <phase> <state>` | Moves the phase's pipeline to `<state>` by hand — for work finished in the lane by someone else. Never a final state: the gates still decide. |
+| `switch-harness <run-id> --from <h> --to <h> --model <m> [--after-turn]` | Moves a live run off a harness — an account out of credits — without pausing it: phases in flight are reassigned at their step, phases yet to start run on `<to>`, and the conflict fixer moves too. `defaults.harness_fallbacks` does this by itself on a quota refusal. |
+| `fixer interrupt\|reassign <run-id> [--harness <h> --model <m>]` | Ends the conflict fixer's running round as a round spent (what it left stays), or hands later rounds to another agent. |
 | `workflow <run-id>` | Prints the run's workflow as it stands now, every amendment applied. |
-| `amend <run-id> <workflow.json>` | Applies an edited workflow to a live run (§9's amend: refused while a phase it would move is running). |
+| `amend <run-id> <workflow.json> [--reason <why>]` | Applies an edited workflow to a live run (§9's amend: refused while a phase it would move is running). A held phase, or one waiting on a question, may change its harness, model or crew member. |
 | `land <run-id> [--close]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base; `--close` closes those with a comment. |
 | `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch after the run into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Stops at a conflict, leaving that branch as it was. |
 | `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
@@ -150,18 +155,27 @@ or gate crosses its cost threshold (an hour running; half an hour of uncached
 gate time). A burst is one wake, wakes are at least two minutes apart, and a
 run wakes it at most 24 times. `--no-coordinator` turns the wakes off.
 
-It **acts** with the commands above — `node`, `workflow`/`amend`, `exec` —
-through the run's API, with a token of its own, so everything it does is
-recorded as its own. Its limits are enforced by the run, not by its prompt:
+It **acts** with the commands above — `node` (interrupt and reassign
+included), `switch-harness`, `fixer`, `workflow`/`amend`, `gate-cache`,
+`exec`, `pause` — through the run's API, with a token of its own, so
+everything it does is recorded as its own. **Every act carries a reason**, and
+the run refuses one from the coordinator without it (`reason_required`): its
+unattended decisions can be listed, each with why. Its limits are enforced by
+the run, not by its prompt:
 
-- it may change *how* the run executes (models, fix budgets, gate timeouts,
-  resources, the project environment, a gate flag the gate's
-  `tuning.allowed_flags` lists) and never *what* the plan builds;
+- it may change *how* the run executes (models, harnesses and crew, fix
+  budgets, gate timeouts, resources, the project environment, a gate flag the
+  gate's `tuning.allowed_flags` lists) and move phases between agents;
 - it may never weaken a check — drop a gate or chore, rewrite a gate command,
-  edit a judge gate, change `hooks`, lower `wave_gates`;
-- it answers only the questions `--retry-after` could answer, never one you
-  are holding, never a deferred start or a plan's human gate;
-- it cannot pause or stop the run.
+  edit a judge gate, change `hooks`, lower `wave_gates` — whatever authority
+  it has;
+- it answers the questions `--retry-after` could answer and its own holds,
+  never one you are holding;
+- it may pause the run; it may not stop it, change *what* the plan builds,
+  answer a deferred start or a plan's human gate, or `node step` a pipeline —
+  unless you started the run with **`--coordinator-authority full`**, which
+  lets it do those (phases, dependency edges, briefs, touch lists and
+  deferrals; never a pipeline, chores or the base branch).
 
 ### A run is a background job
 
