@@ -39,12 +39,13 @@
  * `runGate` behind it, store after — so it is used as it stands rather than
  * copied into a third spelling that could drift from the other two.
  */
+import { type CodegenCache, codegenLogName, codegenPools, runCodegen } from '../codegen/codegen.ts'
 import { gateConfigKey, laneTreeHash, runGateCached, type GateCache } from '../gates/cache.ts'
 import { TIMEOUT_EXIT } from '../gates/runner.ts'
-import { phaseGate } from '../gates/scope.ts'
+import { changedFiles, phaseGate } from '../gates/scope.ts'
 import type { Journal } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
-import { isJudgeGate, type Workflow } from '../types.ts'
+import { CODEGEN_GATE_PREFIX, isJudgeGate, type Workflow } from '../types.ts'
 import type { AgentLeaseHeld } from './agent-leases.ts'
 import { AcquireAborted, type ResourcePools } from './pools.ts'
 
@@ -92,6 +93,11 @@ export interface AgentGateBrokerOptions {
   readonly journal: Pick<Journal, 'nodes' | 'append' | 'appendTranscript' | 'gateLogPath'>
   readonly pools: ResourcePools
   readonly cache: GateCache
+  /**
+   * The codegen steps' skip cache — the one the lanes' gate step reads, so a
+   * step an agent ran on a tree is a skip for the gate step afterwards.
+   */
+  readonly codegenCache?: CodegenCache
   /**
    * The leases agents hold through `with`, by holder. A gate asked for by a
    * node that already holds one of its pools would queue behind that node's
@@ -281,7 +287,11 @@ export class AgentGateBroker {
         settled: started,
         holderNode,
         gateId,
-        requires: declared === undefined || isJudgeGate(declared) ? [] : declared.requires,
+        requires: gateId.startsWith(CODEGEN_GATE_PREFIX)
+          ? this.#codegenRequires(gateId.slice(CODEGEN_GATE_PREFIX.length))
+          : declared === undefined || isJudgeGate(declared)
+            ? []
+            : declared.requires,
         state: 'queued',
         turn,
         abort,
@@ -361,6 +371,10 @@ export class AgentGateBroker {
     } = {},
   ): Promise<AgentGateResult> {
     const { runId, journal } = this.#options
+
+    if (gateId.startsWith(CODEGEN_GATE_PREFIX)) {
+      return await this.#codegen(gateId, gateId.slice(CODEGEN_GATE_PREFIX.length), holderNode, flight)
+    }
 
     const gate = this.#workflow.gates[gateId]
     if (gate === undefined) throw new AgentGateRefusal('unknown_gate')
@@ -483,6 +497,94 @@ export class AgentGateBroker {
       exitCode,
       cached: result.cached,
       logRef: result.logPath,
+    }
+  }
+
+  /** The pools the codegen steps `vinta-ai-maestro codegen [<step>]` runs hold. */
+  #codegenRequires(stepId: string): string[] {
+    return codegenPools(this.#workflow, stepId)
+  }
+
+  /**
+   * `vinta-ai-maestro codegen [<step>]`: the plan's codegen steps — or one,
+   * with the steps it comes after — in the asking node's lane, under their
+   * pools, through the same flight as a gate so a killed client attaches to
+   * the run on its next call. Nothing is committed: the outputs land in the
+   * agent's tree, which it commits with its work, and the gate step commits
+   * whatever is left. `--no-cache` runs a step its skip cache would skip.
+   */
+  async #codegen(
+    gateId: string,
+    stepId: string,
+    holderNode: string,
+    flight: { readonly noCache?: boolean; readonly signal?: AbortSignal; readonly onRunning?: () => void },
+  ): Promise<AgentGateResult> {
+    const { runId, journal } = this.#options
+    const steps = this.#workflow.codegen
+    if (Object.keys(steps).length === 0 || (stepId !== '' && steps[stepId] === undefined)) {
+      throw new AgentGateRefusal('unknown_gate')
+    }
+    const requires = this.#codegenRequires(stepId)
+    const own = (this.#options.leases?.held() ?? []).filter(
+      (held) => held.holderNode === holderNode && held.resources.some((name) => requires.includes(name)),
+    )
+    const taken = own[0]?.resources.find((name) => requires.includes(name))
+    if (taken !== undefined) throw new AgentGateRefusal(`holds_required:${taken}`, own)
+
+    const row = journal.nodes(runId).find((candidate) => candidate.node_id === holderNode)
+    const laneName = row?.lane
+    if (laneName === null || laneName === undefined) throw new AgentGateRefusal('no_lane')
+    const lane = this.#options.lane(laneName)
+    const base = row?.base_branch ?? null
+
+    const lease = await (flight.signal === undefined
+      ? this.#options.pools.acquire(requires)
+      : this.#options.pools.acquire(requires, { signal: flight.signal })
+    ).catch((error: unknown) => {
+      const reason: unknown = flight.signal?.reason
+      if (error instanceof AcquireAborted && typeof reason === 'string') throw new AgentGateRefusal(reason)
+      throw error
+    })
+    let outcome: Awaited<ReturnType<typeof runCodegen>>
+    try {
+      flight.onRunning?.()
+      outcome = await runCodegen({
+        steps,
+        ...(stepId === '' ? {} : { only: [stepId] }),
+        cwd: lane.path,
+        env: lane.env,
+        logPath: (id) => journal.gateLogPath(runId, holderNode, codegenLogName(id)),
+        ...(this.#options.codegenCache === undefined ? {} : { cache: this.#options.codegenCache }),
+        force: flight.noCache === true,
+        ...(base === null ? {} : { changedFiles: () => changedFiles({ lanePath: lane.path, base, touches: [] }) }),
+        onResult: (run) => {
+          journal.append({
+            runId,
+            nodeId: holderNode,
+            type: 'codegen_result',
+            payload: {
+              step: run.id,
+              where: 'agent',
+              status: run.status,
+              exit_code: run.exitCode,
+              duration_ms: run.durationMs,
+              ...(run.skipped === undefined ? {} : { skipped: run.skipped }),
+              ...(run.nondeterministic === true ? { nondeterministic: true } : {}),
+            },
+          })
+        },
+      })
+    } finally {
+      lease.release()
+    }
+    const failed = outcome.failed
+    const last = failed ?? outcome.runs[outcome.runs.length - 1]
+    return {
+      gateId,
+      status: failed === null ? 'passed' : failed.status,
+      exitCode: failed === null ? 0 : failed.exitCode,
+      cached: outcome.runs.every((run) => run.status === 'skipped'),
+      logRef: last?.logPath ?? journal.gateLogPath(runId, holderNode, codegenLogName(stepId === '' ? 'all' : stepId)),
     }
   }
 

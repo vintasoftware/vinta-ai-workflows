@@ -20,14 +20,14 @@
  * up, so nobody has to learn a second set:
  *
  * - **Maps keyed by id merge per id, and the higher layer's entry wins whole.**
- *   `gates`, `resources`, `chores`, `project.services`, `project.databases`. A
+ *   `gates`, `resources`, `chores`, `codegen`, `project.services`, `project.databases`. A
  *   plan redeclaring the `test-suite` pool replaces the project's, rather than
  *   inheriting half of it.
  * - **A typed gate is the one exception, merged field by field.** That is what
  *   `type` is for: `{ "type": "test", "timeout_s": 600 }` keeps the project's
  *   command and changes only how long it may take.
  * - **Lists replace.** `defaults.chores`, `defaults.gates`, a node's `gates`,
- *   `env_files`. Merging a list would leave no way to say "not this one here",
+ *   `env_files`, `append_only`. Merging a list would leave no way to say "not this one here",
  *   which is the reason `nodes[].chores: []` is an opt-out today.
  * - **Plain objects merge field by field.** `defaults`, `project`,
  *   `project.commands`, `project.compose`.
@@ -84,6 +84,13 @@ export function resolveDocument(authored: unknown, config: ProjectConfig | null)
 
   const chores = mergeById(maestro.chores, authored.chores)
   if (chores !== undefined) doc.chores = chores
+
+  const codegen = mergeById(maestro.codegen, authored.codegen)
+  if (codegen !== undefined) doc.codegen = codegen
+
+  if (authored.append_only === undefined && Array.isArray(maestro.append_only)) {
+    doc.append_only = [...maestro.append_only]
+  }
 
   const gates = resolveGates(gateTypeDefaults(commands, maestro.gates), authored.gates)
   if (gates !== undefined) doc.gates = gates

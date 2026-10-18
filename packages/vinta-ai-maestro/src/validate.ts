@@ -63,6 +63,8 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
     if (isJudgeGate(gate)) issues.push(...judgeIssues(gateId, gate.judge))
   }
 
+  issues.push(...codegenIssues(workflow, resourceIds))
+
   // A chore with neither instruction is an agent turn with nothing to do, and a
   // chore with both leaves nothing to say which one the agent is handed. Both
   // are shape rules in spirit; they live here because expressing "exactly one
@@ -231,6 +233,48 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
  * may only name labels the classifier is offered, because a label it is never
  * asked about scores zero and the gate would pass for ever.
  */
+/**
+ * Codegen steps: an `after` naming a step that exists, no cycle through
+ * `after` (the chain would have no first step), pools that exist and are not
+ * the lane the step already runs in, and a formatter that can be told which
+ * files to format.
+ */
+function codegenIssues(workflow: Workflow, resourceIds: ReadonlySet<string>): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const steps = workflow.codegen
+  for (const [stepId, step] of Object.entries(steps)) {
+    step.after.forEach((before, i) => {
+      if (steps[before] === undefined) {
+        issues.push({ path: ['codegen', stepId, 'after', i], message: `unknown codegen step "${before}"` })
+      }
+    })
+    step.requires.forEach((resource, i) => {
+      if (resource === 'lane') {
+        issues.push({
+          path: ['codegen', stepId, 'requires', i],
+          message: 'a codegen step runs in the lane its phase already holds — it cannot require `lane`',
+        })
+      } else if (!resourceIds.has(resource)) {
+        issues.push({ path: ['codegen', stepId, 'requires', i], message: `unknown resource pool "${resource}"` })
+      }
+    })
+    if (step.format && !step.cmd.includes('{changed_files}')) {
+      issues.push({
+        path: ['codegen', stepId, 'cmd'],
+        message: `format step "${stepId}" must take \`{changed_files}\` — it formats only what the phase changed`,
+      })
+    }
+  }
+  const cycle = findCycle(
+    Object.entries(steps).map(([id, step]) => ({
+      id,
+      depends_on: step.after.filter((before) => steps[before] !== undefined).map((node) => ({ node })),
+    })),
+  )
+  if (cycle !== null) issues.push({ path: ['codegen'], message: `codegen cycle through \`after\`: ${cycle.join(' → ')}` })
+  return issues
+}
+
 function judgeIssues(gateId: string, judge: Judge): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   const at = ['gates', gateId, 'judge']

@@ -430,6 +430,84 @@ export const ChoreSchema = z.strictObject({
   description: z.string().optional(),
 })
 
+// ---------------------------------------------------------------------------
+// Codegen steps — a deterministic command that writes declared files
+//
+// The third kind of step beside gates and chores. A gate judges and never
+// changes the tree; a chore is an agent changing code. A codegen step is a
+// shell command that rewrites files the plan names — an OpenAPI schema, the
+// client generated from it, a route tree, a formatter's output — committed as
+// it comes out, with no agent turn and no fix round.
+//
+// It exists because generated files were most of one run's merge conflicts:
+// two phases each regenerated `schema.yml` and the client behind it, and the
+// fixer was handed a 400-line reorder no person would resolve by hand. A file
+// that is a function of others is not merged; it is regenerated. So the steps
+// run after every implement or fix turn (before the gates), in integration
+// right after a merge — where a conflict confined to their outputs is settled
+// by taking either side and running them — and before every integration
+// commit, so a hook that would rewrite the same files finds nothing to do.
+// ---------------------------------------------------------------------------
+
+export const CodegenStepSchema = z.strictObject({
+  cmd: z
+    .string()
+    .min(1)
+    .describe(
+      'Shell command, run in the worktree with its environment — the lane’s or the integration ' +
+        'worktree’s. Must be deterministic: the same inputs produce byte-identical outputs ' +
+        '(`doctor --codegen` checks). A `format` step’s command takes `{changed_files}`.',
+    ),
+  outputs: z
+    .array(z.string().min(1))
+    .min(1)
+    .describe(
+      'The files the command writes, as git glob pathspecs relative to the repository root ' +
+        '(`schema.yml`, `frontend/src/api-client/**`, `**/*.gen.ts`). What it changes among them ' +
+        'is committed; anything else it changes is left alone. Agents are told these are not ' +
+        'to be edited by hand, and a merge conflict confined to them is settled by running the ' +
+        'step instead of by a fixer.',
+    ),
+  inputs: z
+    .array(z.string().min(1))
+    .default([])
+    .describe(
+      'The files the outputs are a function of, as git glob pathspecs. When the step last ran ' +
+        'on exactly these contents and its outputs are still what it wrote, it is skipped, as a ' +
+        'gate is on a tree the cache has seen. Empty — the default — runs it every time.',
+    ),
+  after: z
+    .array(Id)
+    .default([])
+    .describe(
+      'Steps that run before this one: the schema before the client generated from it, the ' +
+        'client before whatever reads it.',
+    ),
+  requires: z
+    .array(Id)
+    .default([])
+    .describe('Resource pool ids held while the step runs, as a gate’s are. Never `lane`.'),
+  timeout_s: z.number().int().min(1).default(600),
+  format: z
+    .boolean()
+    .default(false)
+    .describe(
+      'A formatter rather than a generator. `{changed_files}` in `cmd` is the files the phase ' +
+        'changed that match `outputs`, shell-quoted; with none, the step is skipped. Formatting ' +
+        'the whole repository makes diffs in files the phase never touched. A format step’s ' +
+        'outputs are ordinary source, so they are not listed as hand-edit-free and a conflict ' +
+        'in them still goes to the fixer.',
+    ),
+  description: z.string().optional(),
+})
+
+/**
+ * The gate id a codegen step answers to wherever a gate's result is read — the
+ * pipeline's `gate` fact, the fixer's prompt, the agent's `gate` verb. A colon
+ * is not a legal `Id` character, so it can never shadow a declared gate.
+ */
+export const CODEGEN_GATE_PREFIX = 'codegen:'
+
 export const DependencySchema = z.strictObject({
   node: Id.describe('The upstream node id.'),
   artifact: z
@@ -1020,6 +1098,25 @@ export const WorkflowSchema = z
         'Agent turns a phase runs beside its gates, by id. A gate judges and a chore changes ' +
           'the tree, so they are separate registries — see ChoreSchema.',
       ),
+    codegen: z
+      .record(Id, CodegenStepSchema)
+      .default({})
+      .describe(
+        'Deterministic commands that write declared files, by id — see CodegenStepSchema. They ' +
+          'run in every lane before its gates and in the integration worktree around every ' +
+          'merge, in `after` order. A failing step is a red gate.',
+      ),
+    append_only: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Files every phase only appends to — a DI container, a URL route list, a registry of ' +
+          'notification kinds, a beat schedule — as gitattributes patterns. Merged in the ' +
+          'integration worktree with git’s `union` driver, which keeps both sides’ lines, so ' +
+          'two phases each adding an entry is not a conflict. The merged tree is gated as ' +
+          'any other is; a union that reads wrong (a duplicate key, a missing comma) is a red ' +
+          'gate there, not a silent pass.',
+      ),
     nodes: z.array(NodeSchema).min(1),
     pipelines: z
       .record(Id, PipelineSchema)
@@ -1086,6 +1183,7 @@ export type CommandGate = z.infer<typeof CommandGateSchema>
 export type JudgeGate = z.infer<typeof JudgeGateSchema>
 export type Judge = z.infer<typeof JudgeSchema>
 export type Chore = z.infer<typeof ChoreSchema>
+export type CodegenStep = z.infer<typeof CodegenStepSchema>
 export type GateTuning = z.infer<typeof GateTuningSchema>
 export type Project = z.infer<typeof ProjectSchema>
 export type ProjectService = z.infer<typeof ServiceSchema>

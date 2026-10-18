@@ -42,6 +42,11 @@ export interface ConflictRequest {
   /** The gate the merged tree failed after the previous round, or before any round. */
   readonly redGate?: RedGate
   /**
+   * The codegen steps' output patterns: files the integrator regenerates after
+   * the fixer stops, so the fixer is told to leave them alone.
+   */
+  readonly generated?: readonly string[]
+  /**
    * The node whose turn this merge is — the phase being based, or the one
    * building the wave. Not `nodeId` whenever an earlier phase's branch is the
    * one coming in, and it is the phase the operator is watching.

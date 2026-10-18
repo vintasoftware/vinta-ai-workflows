@@ -3800,12 +3800,19 @@ export class Scheduler {
     for (const resource of needs) this.#options.journal.acquireLease(resource, state.node.id)
   }
 
-  /** The pools a `run_gate` needs: one named gate's, or every gate the node declared. */
+  /**
+   * The pools a `run_gate` needs: one named gate's, or every gate the node
+   * declared — and every codegen step's, since the steps run first in the
+   * same effect.
+   */
   #gateNeeds(node: Node, named: unknown): string[] {
     const ids = typeof named === 'string' ? [named] : node.gates
     const needs = new Set<string>()
     for (const id of ids) {
       for (const resource of this.#workflow.gates[id]?.requires ?? []) needs.add(resource)
+    }
+    for (const step of Object.values(this.#workflow.codegen)) {
+      for (const resource of step.requires) needs.add(resource)
     }
     return [...needs]
   }

@@ -18,6 +18,7 @@ import { FAILED, OK, USAGE, loadWorkflow, type Io } from './io.ts'
 
 export const DOCTOR_USAGE = `usage: vinta-ai-maestro doctor <workflow.json> [--repo <dir>] [--resume <run-id>]
                                 [--permission <mode>] [--system-one <config.json>]
+                                [--codegen]
 
   --repo <dir>     The project checkout the lanes will be worktrees of.
                    Defaults to the current directory.
@@ -27,7 +28,11 @@ export const DOCTOR_USAGE = `usage: vinta-ai-maestro doctor <workflow.json> [--r
   --permission     The mode the run will use. Only judged changes the answer:
                    it needs a permission judge and a harness that can host it.
   --system-one     The classifier config the run will use. Checked offline —
-                   no question is sent.`
+                   no question is sent.
+  --codegen        Run each codegen step twice in the checkout to flag output
+                   that is not deterministic or already stale at HEAD, then
+                   put the generated files back. Refused while they have
+                   uncommitted changes.`
 
 /**
  * Overrides merged into the assembled options — the injected binaries and disk
@@ -51,6 +56,7 @@ export async function doctorCommand(
         resume: { type: 'string' },
         permission: { type: 'string' },
         'system-one': { type: 'string' },
+        codegen: { type: 'boolean' },
       },
       allowPositionals: true,
     })
@@ -102,6 +108,7 @@ export async function doctorCommand(
     ...(resumeRunId === undefined ? {} : { resumeRunId }),
     permission,
     ...(systemOne === undefined ? {} : { systemOne }),
+    ...(parsed.values.codegen === true ? { codegen: true } : {}),
     ...overrides,
   })
 

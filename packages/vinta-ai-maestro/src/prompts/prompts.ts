@@ -56,7 +56,7 @@ import { type Decision, REJECTED_MARKER, selectDecisions } from '../decisions/in
 import { computeWaves } from '../graph.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { GuardContext } from '../pipeline/guard.ts'
-import { AGENT_ROLES, isJudgeGate, type AgentRole, type Chore, type ChoreTiming, type Node, type Workflow } from '../types.ts'
+import { AGENT_ROLES, CODEGEN_GATE_PREFIX, isJudgeGate, type AgentRole, type Chore, type ChoreTiming, type Node, type Workflow } from '../types.ts'
 
 /** The line a review chore is asked to end on, and the one `executor.ts` reads. */
 export const VERDICT_MARKER = 'VERDICT:'
@@ -115,6 +115,8 @@ export interface ConflictContext {
   readonly implemented?: readonly string[]
   /** The gate the merged tree failed after the last round, when that is why this round runs. */
   readonly redGate?: RedGate
+  /** Codegen output patterns the integrator regenerates once the fixer stops. */
+  readonly generated?: readonly string[]
 }
 
 /**
@@ -366,6 +368,12 @@ export function composeConflictPrompt(context: ConflictContext): string {
             'privilege your own side of the conflict.',
         ]),
     `Phase briefs: ${context.promptRefs.join(' ')}`,
+    ...(context.generated === undefined || context.generated.length === 0
+      ? []
+      : [
+          `Generated files (${context.generated.join(' ')}) are not yours to edit: the integrator`,
+          'regenerates them from their sources once you stop. Resolve the sources.',
+        ]),
     'Resolve for both phases’ intents. Never resolve with --ours or --theirs.',
     'Verify only the files you touched — a typecheck or the tests that cover',
     'them. Do not run the whole suite, and do not loop on a check that cannot',
@@ -705,6 +713,7 @@ function renderImplementer(materials: Materials): string {
     ...commandBlock(materials),
     ...composeDatabaseBlock(materials),
     ...gateBlock(materials),
+    ...codegenBlock(materials),
     ...leaseBlock(materials),
     ...planLevel(materials, [
       'These are the whole plan’s Goals, Non-goals and Guiding Decisions, verbatim,',
@@ -1301,6 +1310,35 @@ const hasGates = (materials: Continuation): boolean =>
  * name, and a block explaining a verb it cannot use is one more thing to
  * misread.
  */
+function codegenBlock(materials: Continuation): string[] {
+  const steps = Object.entries(materials.workflow.codegen)
+  if (steps.length === 0) return []
+  const generated = steps.flatMap(([, step]) => (step.format ? [] : step.outputs))
+  const formatters = steps.filter(([, step]) => step.format).map(([id]) => id)
+  return [
+    '',
+    '## Generated files — never edit them by hand',
+    ...(generated.length === 0
+      ? []
+      : [
+          'These paths are written by the plan’s codegen steps, from their sources:',
+          ...generated.map((pattern) => `   - \`${pattern}\``),
+          'Change the sources and regenerate rather than editing them:',
+        ]),
+    ...(generated.length === 0 ? ['To run the plan’s codegen steps:'] : []),
+    '    vinta-ai-maestro codegen',
+    'It runs every step in order in your lane, through the orchestrator, and leaves',
+    'what they write in your working tree for you to commit with your work. Run',
+    'one step and the ones it depends on with `vinta-ai-maestro codegen <step>`.',
+    'The orchestrator runs them again after your turn, before the gates, and',
+    'commits whatever they change — a hand edit to a generated file is overwritten',
+    'there, and a merge conflict in one is settled by regenerating it.',
+    ...(formatters.length === 0
+      ? []
+      : [`Formatting (${formatters.join(', ')}) is applied the same way, to the files this phase changed.`]),
+  ]
+}
+
 function gateBlock(materials: Continuation): string[] {
   const first = agentGates(materials)[0]
   if (first === undefined) return []
@@ -1381,6 +1419,7 @@ function renderFixer(materials: Materials): string {
     `Work entirely inside \`${materials.workspace}\`, on branch \`${materials.branch}\`.`,
     ...commandBlock(materials),
     ...gateBlock(materials),
+    ...codegenBlock(materials),
     ...leaseBlock(materials),
     '',
     '## What came back',
@@ -1988,6 +2027,18 @@ function failure(materials: Continuation): string[] {
   const id = gate?.['id']
   const logRef = gate?.['log_ref']
   const name = typeof id === 'string' ? id : 'unknown'
+  if (name.startsWith(CODEGEN_GATE_PREFIX)) {
+    const step = name.slice(CODEGEN_GATE_PREFIX.length)
+    return [
+      step === 'commit'
+        ? 'The codegen steps passed, but committing what they wrote was refused.'
+        : `Codegen step ${step} failed with exit code ${exitCode} — a generator that cannot run on this tree means the code it reads is broken.`,
+      typeof logRef === 'string'
+        ? `Its output is at ${logRef} — read it first; it says what broke.`
+        : 'Run `vinta-ai-maestro codegen` to see what broke.',
+      'Fix the sources it reads, never its outputs, and check with `vinta-ai-maestro codegen`.',
+    ]
+  }
   return [
     `Gate ${name} failed with exit code ${exitCode}.`,
     typeof logRef === 'string'

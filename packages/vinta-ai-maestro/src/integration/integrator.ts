@@ -38,6 +38,8 @@ import { dirname, join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { IntegrationStepPayload } from '../journal/events.ts'
 import type { RedGate } from '../prompts/index.ts'
+import { codegenMessage, commitOutputs, restageHookEdits } from '../codegen/codegen.ts'
+import type { IntegrationCodegen } from '../codegen/integration.ts'
 import type { ConflictFixer, ConflictRequest } from './fixer.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
@@ -373,6 +375,13 @@ export interface IntegratorOptions {
    * `base_branch` inside the plan's own PRs.
    */
   readonly runBase?: string
+  /**
+   * Codegen steps and append-only files (`src/codegen/integration.ts`). A
+   * conflict confined to a step's outputs is settled by running the step; every
+   * merge result is regenerated before it is committed; and every merge takes
+   * the union driver for the plan's `append_only` files. Absent, none of it.
+   */
+  readonly codegen?: IntegrationCodegen
 }
 
 /** A settled conflict, plus which merge it came out of. */
@@ -914,16 +923,18 @@ export class Integrator {
     const incoming = this.nodeBranch(nodeId)
     // --no-ff always: a fast-forward erases that this was a separate phase,
     // and a squash erases the phase's unit commits.
+    const mergeArgs = (await this.#options.codegen?.mergeArgs(cwd)) ?? []
     let refused: GitCommandError
     try {
-      await git(cwd, ['merge', '--no-ff', '--no-edit', incoming])
+      await git(cwd, [...mergeArgs, 'merge', '--no-ff', '--no-edit', incoming])
+      await this.#regenerateMerged(cwd, incoming, forNode)
       return null
     } catch (error) {
       if (!(error instanceof GitCommandError)) throw error
       refused = error
     }
 
-    const unmerged = await this.#conflictedPaths()
+    let unmerged = await this.#conflictedPaths()
     // **A merge that stopped with nothing unmerged is not a conflict to hand
     // a fixer.** Git merged the trees and stopped short of the commit:
     // `rerere.autoupdate` replayed a recorded resolution and staged it, or a
@@ -939,12 +950,21 @@ export class Integrator {
     const paths = unmerged.length > 0 ? unmerged : await this.#conflictingPaths(cwd)
     const nodes = await this.#owners(paths, alreadyMerged, nodeId)
 
+    // A conflict in a generated file is not one to resolve: either side is
+    // taken and the step that writes it runs. What is left — a source file —
+    // is the fixer's. A merge whose only conflicts were outputs needs no fixer.
+    const codegen = this.#options.codegen
+    if (codegen !== undefined && unmerged.length > 0) {
+      if ((await codegen.settle(cwd, unmerged)).length > 0) unmerged = await this.#conflictedPaths()
+    }
+
     let red: RedGate | null = null
     if (unmerged.length === 0 && !(await this.#unresolved(paths))) {
       // Already resolved, so 0 rounds: the gates decide, as they would after a
       // fixer. Only a red one reaches the fixer — two migrations on one parent
-      // merge cleanly and break together.
-      red = await this.#verify(cwd, forNode)
+      // merge cleanly and break together. Regenerated first: the gates judge
+      // the tree that is committed, and a failing step is a red gate.
+      red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
       if (red === null) {
         await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'], paths.length > 0)
         return paths.length === 0 ? null : { nodes, paths, rounds: 0 }
@@ -963,7 +983,8 @@ export class Integrator {
         return { nodes, paths, rounds: 0 }
       }
       await this.#abandonMerge(cwd)
-      await gitOk(cwd, ['merge', '--no-ff', '--no-edit', incoming])
+      await gitOk(cwd, [...mergeArgs, 'merge', '--no-ff', '--no-edit', incoming])
+      if (codegen !== undefined) await codegen.settle(cwd, await this.#conflictedPaths())
     }
     const request = {
       cwd,
@@ -973,6 +994,7 @@ export class Integrator {
       nodes,
       paths,
       promptRefs: nodes.map((id) => this.#node(id).prompt_ref),
+      ...(codegen === undefined || codegen.generated().length === 0 ? {} : { generated: codegen.generated() }),
     } satisfies Omit<ConflictRequest, 'round'>
 
     for (let round = 1; round <= this.#maxFixRounds; round += 1) {
@@ -1020,8 +1042,9 @@ export class Integrator {
       // Before anything is committed, whichever shape the resolution arrived
       // in: a fixer must not be able to dodge the gate by committing its own
       // work, which is the one thing committing early would otherwise buy it.
-      // A red gate goes to the next round, named, so the fixer reads why.
-      red = await this.#verify(cwd, forNode)
+      // A red gate goes to the next round, named, so the fixer reads why. The
+      // generated files are regenerated from the resolved sources first.
+      red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
       if (red !== null) continue
 
       if (await this.#merging(cwd)) {
@@ -1055,6 +1078,28 @@ export class Integrator {
     // failing test.
     if (red !== null) throw new IntegrationVerifyError(nodes, paths, this.#maxFixRounds, red, into, incoming)
     throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds)
+  }
+
+  /**
+   * A merge git committed by itself still has generated files to bring up to
+   * date: each side regenerated from its own sources, and the merged sources
+   * are neither. The steps run on the merge commit, and what they change is
+   * one more commit on top. A step that fails here, or a commit refused, is
+   * put back rather than thrown: nothing conflicted, so there is no fixer to
+   * hand it to, and the merged tree's gates (§8) are what judge it.
+   */
+  async #regenerateMerged(cwd: string, incoming: string, forNode: string): Promise<void> {
+    const codegen = this.#options.codegen
+    if (codegen === undefined) return
+    const red = await codegen.refresh(cwd, forNode).catch(() => ({}))
+    const staged = (await git(cwd, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter((path) => path.length > 0)
+    if (red === null && staged.length > 0) {
+      const committed = await commitOutputs(cwd, staged, codegenMessage([], `after merging ${incoming}`))
+        .then(() => true)
+        .catch(() => false)
+      if (committed) return
+    }
+    if (staged.length > 0 || red !== null) await gitOk(cwd, ['reset', '-q', '--hard', 'HEAD'])
   }
 
   /** The outer gate on the merged tree: null when green or not configured, else what went red. */
@@ -1117,12 +1162,22 @@ export class Integrator {
     conflicted = true,
   ): Promise<void> {
     let extra: readonly string[] = []
+    let restaged = false
     for (let attempt = 1; ; attempt += 1) {
       try {
         await git(cwd, ['commit', ...extra, ...args])
         return
       } catch (error) {
         if (!(error instanceof GitCommandError)) throw error
+        // A hook that rewrote what it was handed — a formatter, a schema
+        // generator — and failed the commit for it. The rewrite is the fix:
+        // staged, and the commit tried once more before anyone is asked. Seven
+        // merge commits in one run were refused this way over a reorder.
+        if (!restaged && (await restageHookEdits(cwd).catch(() => false))) {
+          restaged = true
+          attempt -= 1
+          continue
+        }
         const refused = error
         let decision: CommitDecision
         try {

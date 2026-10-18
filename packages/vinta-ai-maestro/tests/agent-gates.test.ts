@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { gateCommand } from '../src/cli/gate.ts'
+import { codegenCommand, gateCommand } from '../src/cli/gate.ts'
 import { USAGE } from '../src/cli/io.ts'
 import { runControl, startDaemon } from '../src/daemon/index.ts'
 import { GateCache, gateConfigKey, laneTreeHash } from '../src/gates/cache.ts'
@@ -67,6 +67,8 @@ function rig(
     readonly leases?: readonly AgentLeaseHeld[]
     /** Give `unit` a scoped form that runs nothing the counter sees, on a lane cut from `main`. */
     readonly scoped?: boolean
+    /** The workflow's codegen steps. */
+    readonly codegen?: Readonly<Record<string, unknown>>
   } = {},
 ): Rig {
   const root = mkdtempSync(join(tmpdir(), 'vinta-agent-gate-'))
@@ -105,6 +107,7 @@ function rig(
       },
       ...(options.lintExit === undefined ? {} : { lint: { cmd: renderGate({ exit: options.lintExit }) } }),
     },
+    ...(options.codegen === undefined ? {} : { codegen: options.codegen }),
     nodes: [
       {
         id: NODE,
@@ -498,6 +501,22 @@ describe('a gate run with --no-cache', () => {
     const err: string[] = []
     return { err, io: { out: () => {}, err: (line: string) => err.push(line), confirm: async () => false } }
   }
+
+  it('runs the codegen steps through the same route, leaving their outputs uncommitted', async () => {
+    const r = rig({ codegen: { gen: { cmd: 'echo generated > gen.txt', outputs: ['gen.txt'] } } })
+    const { env } = await served(r)
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value)
+    cleanups.push(() => vi.unstubAllEnvs())
+
+    const ran = recorder()
+    expect(await codegenCommand([], ran.io)).toBe(0)
+    expect(readFileSync(join(r.lane, 'gen.txt'), 'utf8')).toBe('generated\n')
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: r.lane, encoding: 'utf8' })).toContain('gen.txt')
+
+    const unknown = recorder()
+    expect(await codegenCommand(['nope'], unknown.io)).not.toBe(0)
+    expect(unknown.err.join('\n')).toContain('no codegen step called "nope"')
+  }, 30_000)
 
   it('runs past a stale red the cache would replay, and the fresh green replaces it', async () => {
     const r = rig()

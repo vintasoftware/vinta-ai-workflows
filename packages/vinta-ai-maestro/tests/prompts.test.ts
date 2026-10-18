@@ -302,6 +302,33 @@ describe('the implementer prompt', () => {
     expect(prompt).toContain('`vinta-ai-maestro gate unit`')
     expect(prompt).not.toContain('unit: `pnpm test`')
   })
+
+  it('lists the codegen outputs as not hand-editable, and the verb that regenerates them', () => {
+    const workflow = WorkflowSchema.parse({
+      ...diamond(),
+      codegen: {
+        schema: { cmd: 'make schema', outputs: ['schema.yml'] },
+        client: { cmd: 'make client', outputs: ['client/**'], after: ['schema'] },
+      },
+    })
+    const prompt = compose('api-layer', 'implementer', { workflow })
+
+    expect(prompt).toContain('## Generated files — never edit them by hand')
+    expect(prompt).toContain('   - `schema.yml`')
+    expect(prompt).toContain('   - `client/**`')
+    expect(prompt).toContain('    vinta-ai-maestro codegen')
+    expect(compose('api-layer', 'implementer')).not.toContain('Generated files')
+  })
+
+  it('tells a fixer a codegen step failed, and to fix its sources', () => {
+    const workflow = WorkflowSchema.parse({ ...diamond(), codegen: { schema: { cmd: 'x', outputs: ['schema.yml'] } } })
+    const prompt = compose('api-layer', 'fixer', {
+      workflow,
+      facts: { gate: { id: 'codegen:schema', exit_code: 2, status: 'failed', log_ref: '/l/codegen-schema.log' } },
+    })
+    expect(prompt).toContain('Codegen step schema failed with exit code 2')
+    expect(prompt).toContain('Fix the sources it reads, never its outputs')
+  })
 })
 
 /**

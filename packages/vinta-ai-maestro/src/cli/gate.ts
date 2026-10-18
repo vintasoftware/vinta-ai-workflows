@@ -67,6 +67,7 @@ import {
   MAESTRO_TURN_ENV,
   MAESTRO_URL_ENV,
 } from '../resources/agent-leases.ts'
+import { CODEGEN_GATE_PREFIX } from '../types.ts'
 import { endingRefusal, heldBy, readRefusal } from './holders.ts'
 import { FAILED, USAGE, type Io } from './io.ts'
 
@@ -134,7 +135,51 @@ export async function gateCommand(
     io.err(GATE_USAGE)
     return USAGE
   }
+  return await requestGate(gateId, { noCache, full }, io, deps)
+}
 
+export const CODEGEN_USAGE = `usage: vinta-ai-maestro codegen [<step-id>] [--no-cache]
+
+  Runs this plan's codegen steps — or one, with the steps it comes after —
+  against your lane: the commands that write its generated files (an API
+  schema, the client generated from it, a route tree). The daemon runs them,
+  holding whatever resources they need, and exits with the first failing
+  step's exit code — \`0\` when every step passed or had nothing to do.
+
+  The files they write are left in your working tree; commit them with your
+  work. They are not to be edited by hand: change their sources and run this
+  again. The orchestrator also runs every step after your turn, before the
+  gates, and commits what they change.
+
+  --no-cache   Run a step even though its inputs and outputs match a run
+               it has already recorded.`
+
+/**
+ * `vinta-ai-maestro codegen [<step>]` — the plan's codegen steps, run by the
+ * daemon in this turn's lane. The gate verb's transport, wait loop and
+ * refusals, under the `codegen:` gate id the broker answers for steps.
+ */
+export async function codegenCommand(
+  argv: readonly string[],
+  io: Io,
+  deps: GateDeps = {},
+): Promise<number> {
+  const noCache = argv.includes('--no-cache')
+  const [stepId, ...rest] = argv.filter((arg) => arg !== '--no-cache')
+  if ((stepId !== undefined && (stepId.trim() === '' || stepId.startsWith('-'))) || rest.length > 0) {
+    io.err(CODEGEN_USAGE)
+    return USAGE
+  }
+  return await requestGate(`${CODEGEN_GATE_PREFIX}${stepId ?? ''}`, { noCache, full: false }, io, deps)
+}
+
+async function requestGate(
+  gateId: string,
+  flags: { readonly noCache: boolean; readonly full: boolean },
+  io: Io,
+  deps: GateDeps,
+): Promise<number> {
+  const { noCache, full } = flags
   const url = process.env[MAESTRO_URL_ENV]
   const token = process.env[MAESTRO_TOKEN_ENV]
   const runId = process.env[MAESTRO_RUN_ENV]
@@ -243,7 +288,7 @@ export async function gateCommand(
     if (cached && exitCode !== 0) {
       io.err(
         `vinta-ai-maestro: if what you changed is not tracked by git (an ignored file, a cache ` +
-          `directory, an installed dependency), run "vinta-ai-maestro gate ${gateId} --no-cache".`,
+          `directory, an installed dependency), run "${rerunLine(gateId)} --no-cache".`,
       )
     }
     io.err(`vinta-ai-maestro: its output is at ${logRef}`)
@@ -262,6 +307,13 @@ export async function gateCommand(
 const DO_NOT_WORK_AROUND =
   'Do not run the gate command yourself instead. Report this — a gate you ran ' +
   'by hand is not the gate, and it takes the machine without queueing for it.'
+
+/** The command that asks for this gate again: `gate <id>`, or `codegen [<step>]`. */
+function rerunLine(gateId: string): string {
+  if (!gateId.startsWith(CODEGEN_GATE_PREFIX)) return `vinta-ai-maestro gate ${gateId}`
+  const step = gateId.slice(CODEGEN_GATE_PREFIX.length)
+  return step === '' ? 'vinta-ai-maestro codegen' : `vinta-ai-maestro codegen ${step}`
+}
 
 /** What a `202` says the gate is doing: queued behind someone, or running. */
 function waitingLine(gateId: string, self: string, body: unknown): string {
@@ -307,7 +359,11 @@ async function refusal(response: Response, gateId: string): Promise<string> {
   }
   switch (code) {
     case 'unknown_gate':
-      return `this plan declares no gate called "${gateId}" — the ones it does are listed in your instructions.`
+      return gateId.startsWith(CODEGEN_GATE_PREFIX)
+        ? gateId === CODEGEN_GATE_PREFIX
+          ? 'this plan declares no codegen steps.'
+          : `this plan declares no codegen step called "${gateId.slice(CODEGEN_GATE_PREFIX.length)}" — run \`vinta-ai-maestro codegen\` for all of them.`
+        : `this plan declares no gate called "${gateId}" — the ones it does are listed in your instructions.`
     case 'invalid_holder':
       return 'this turn is not attributed to a phase of the running plan.'
     case 'no_lane':
