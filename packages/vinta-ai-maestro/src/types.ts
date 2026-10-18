@@ -963,6 +963,25 @@ export const DefaultsSchema = z.strictObject({
         'when it stated none. Chains are followed; a fallback refused for quota too means the ' +
         'account is out, not the model, and the harness parks as it would have.',
     ),
+  harness_fallbacks: z
+    .partialRecord(
+      z.enum(HARNESS_IDS),
+      z.strictObject({
+        harness: z.enum(HARNESS_IDS).describe('The harness the run moves to.'),
+        model: z.string().min(1).describe('The model every moved turn runs on there.'),
+      }),
+    )
+    .default({})
+    .describe(
+      'Harness id → where the run moves once that harness is out of quota and has no model ' +
+        'fallback left (§6.1). Instead of parking every phase on it until the window resets, the ' +
+        'run switches: the turn that was refused runs again at once on the fallback, at the same ' +
+        'pipeline step, and every later turn that would have run on the harness runs there — ' +
+        'phases in a turn move when it ends. A moved phase starts a fresh session with a handoff ' +
+        '(the previous agent’s last report, its work in the lane, the red gate). One switch per ' +
+        'harness; a fallback that runs out too parks as it would have. One observed run moved ' +
+        'five phases off an account out of credits by aborting and retrying each by hand.',
+    ),
   max_session_turns: z
     .number()
     .int()

@@ -85,6 +85,7 @@ import { computeHeights, computeWaves, findCycle, transitiveDependents } from '.
 import { gitLines } from '../integration/git.ts'
 import type { AgentSession, AgentTask, HarnessAdapter } from '../harness/adapter.ts'
 import type {
+  Assignee,
   ChoreStatus,
   GatePoolPhase,
   HumanAnswer,
@@ -401,6 +402,18 @@ export interface SchedulerOptions {
    * projections or a transcript.
    */
   readonly logger?: Logger
+  /**
+   * How far the run coordinator reaches (`run --coordinator-authority`, §9.2).
+   * `standard` — the default — answers only the questions a `--retry-after`
+   * timer could, and its own holds. `full` answers any question the operator
+   * is not holding, and may change what the plan builds (`coordinator/policy.ts`).
+   */
+  readonly coordinatorAuthority?: CoordinatorAuthority
+  /**
+   * Told when the run moves off a harness (`switchHarness`), so what spawns
+   * outside the scheduler — the conflict fixer — moves with it.
+   */
+  readonly onHarnessSwitched?: (from: string, to: string, model: string) => void
 }
 
 /** Why a run stopped short. Node, pool and harness ids only. */
@@ -585,6 +598,77 @@ class Aborted extends Error {}
  */
 class Halted extends Error {}
 
+/**
+ * Raised when the turn's harness ran out of quota *inside* the turn and the
+ * run moved to its fallback (`defaults.harness_fallbacks`): the turn is spawned
+ * again on the fallback, at the same step, instead of re-driving the attempt.
+ */
+class HarnessFellBack extends Error {}
+
+/**
+ * A reassignment this run cannot make — an unknown member, a busy one, a
+ * harness with no adapter. Ids only, so the API may repeat it.
+ */
+export class ReassignRefused extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ReassignRefused'
+  }
+}
+
+/** A `step --to` the node's pipeline cannot take. Ids only. */
+export class StepRefused extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StepRefused'
+  }
+}
+
+/** Who a phase goes to: a crew member, or a harness and a model (or a model alone). */
+export interface ReassignTarget {
+  readonly crew?: string
+  readonly harness?: string
+  readonly model?: string
+}
+
+/** `now` cuts the live turn; `after_turn` lets it finish. */
+export type ReassignWhen = 'now' | 'after_turn'
+
+/** See `SchedulerOptions.coordinatorAuthority`. */
+export type CoordinatorAuthority = 'standard' | 'full'
+
+
+/** One reassignment, as it waits for a boundary or is applied. */
+interface Reassignment extends ReassignTarget {
+  /** Absent when the run moved the phase itself (`cause`). */
+  readonly actor?: Actor
+  readonly cause?: 'harness_fallback' | 'amendment'
+  readonly reason?: string
+  /** Who held the phase, when the caller had to read it before something changed it. */
+  readonly from?: Assignee
+}
+
+function describeTarget(target: ReassignTarget): string {
+  if (target.crew !== undefined) return `crew ${target.crew}`
+  if (target.harness === undefined) return `model ${target.model ?? ''}`
+  return `${target.harness} ${target.model ?? ''}`.trim()
+}
+
+/** How much of the last report a handoff quotes. Enough to orient, not a transcript. */
+const HANDOFF_REPORT_CHARS = 4_000
+
+/** The last thing an agent said in this node's transcript, bounded; null when it said nothing. */
+function lastReport(entries: readonly unknown[]): string | null {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i] as { type?: unknown; text?: unknown } | null
+    if (entry?.type !== 'assistant_text' || typeof entry.text !== 'string') continue
+    const text = entry.text.trim()
+    if (text === '') continue
+    return text.length <= HANDOFF_REPORT_CHARS ? text : `…${text.slice(text.length - HANDOFF_REPORT_CHARS)}`
+  }
+  return null
+}
+
 interface NodeState {
   /** Replaced by `adopt` while the node is unstarted — §9's amend path. */
   node: Node
@@ -664,6 +748,57 @@ interface NodeState {
    * `operator_fresh`.
    */
   freshRequested: boolean
+  /**
+   * Set by `interrupt`: at the pipeline's next boundary the node is held — it
+   * parks on the operator's hold question, keeping its lane, branch and work —
+   * instead of stepping on. `pauseRequested`'s twin, for a turn that was cut
+   * short rather than allowed to finish.
+   */
+  holdRequested: boolean
+  /**
+   * The hold cut a live turn short, so the state that turn belonged to is run
+   * again when the node is released — by whoever holds the phase then. A hold
+   * that landed between steps continues as a pause does.
+   */
+  holdCut: boolean
+  /** `step --to`: the state the node enters when it is next released. */
+  stepTo: string | null
+  /**
+   * A reassignment waiting for the node to reach a boundary (`reassign
+   * --after-turn`, or `--now` on a turn still unwinding). Applied there, and the
+   * node goes on without parking.
+   */
+  pendingReassign: Reassignment | null
+  /**
+   * Who works this phase now, when an operator or the coordinator moved it off
+   * what the plan and the roster say (`reassign`). Read before the member and
+   * the node in `#harnessOf` and `#modelFor`, and kept across attempts.
+   */
+  assignment: { readonly harness?: string; readonly model?: string } | null
+  /**
+   * The member whose worktree this node is in, when the phase was handed to a
+   * different member mid-attempt. The lane stays where the work is, so that
+   * member stays busy until the node lets the lane go.
+   */
+  desk: string | null
+  /**
+   * What the next turn is told about the work it is taking over: the previous
+   * agent's last report, where the diff is and the red gate. Written by a
+   * reassignment that could not keep the session, spent by the next spawn.
+   * Prompt text only — never journalled.
+   */
+  handoff: string | null
+  /** Who put the node on hold — `pause`, `interrupt`, or a hold on its question. */
+  heldBy: Actor | null
+  /**
+   * Which of `#drive`'s two parks the node is asleep in: its own hold (a pause
+   * or an interrupt, between steps) or a question its pipeline asked. Null for
+   * every other park — an agent's question inside a turn, a failure, a deferred
+   * start, a login — which `step` cannot move the pipeline out of.
+   */
+  parkKind: 'hold' | 'pipeline' | null
+  /** Ends a capacity wait early: the node was reassigned off the harness it waits on. */
+  nudge: (() => void) | null
   /** The effect the node is parked on, for the answer event that closes it. */
   parkedEffectId: string | null
   /**
@@ -933,6 +1068,11 @@ export class Scheduler {
   readonly #usedLanes = new Set<string>()
   /** Roster members currently holding a turn. Empty in an unstaffed workflow. */
   readonly #busyCrew = new Set<string>()
+  /**
+   * Harnesses the run moved off, and where to (`switchHarness`). Every turn
+   * that would resolve to a key here runs on its value instead.
+   */
+  readonly #switches = new Map<string, { readonly harness: string; readonly model: string }>()
   /** Whether this workflow declared a roster at all. Fixed for the run. */
   readonly #staffed: boolean
   /**
@@ -1079,6 +1219,16 @@ export class Scheduler {
       bodyActive: false,
       retryQueued: false,
       freshRequested: false,
+      holdRequested: false,
+      holdCut: false,
+      stepTo: null,
+      pendingReassign: null,
+      assignment: null,
+      desk: null,
+      handoff: null,
+      heldBy: null,
+      parkKind: null,
+      nudge: null,
       parkedEffectId: null,
       unattendedAnswer: null,
       rearm: null,
@@ -1218,6 +1368,12 @@ export class Scheduler {
       if (state === undefined) {
         this.#states.set(node.id, this.#fresh(node))
         this.#order.push(node.id)
+        continue
+      }
+      // Parked mid-phase: `amend` let through only who works it (and the gate
+      // table), so the node takes the new definition and keeps its pipeline.
+      if (state.status === 'awaiting_human') {
+        this.#adoptAssignment(state, node)
         continue
       }
       if (state.status !== 'pending' && state.status !== 'blocked') continue
@@ -1504,21 +1660,42 @@ export class Scheduler {
    * where it parked. The facts land in the guard context — `human.answer` is
    * what §5.2's guards read.
    */
-  answer(nodeId: string, facts: GuardContext, actor: Actor = 'operator'): void {
+  answer(nodeId: string, facts: GuardContext, actor: Actor = 'operator', reason?: string): void {
     const state = this.#states.get(nodeId)
-    const resume = state?.resume
-    if (state === undefined || resume === undefined || resume === null) {
+    if (state === undefined || state.resume === null) {
       throw new Error(`node "${nodeId}" is not awaiting an answer`)
     }
-    // The coordinator stands in for a timer, never for a person: it answers
-    // what `--retry-after` could, and nothing the operator is holding.
-    if (actor === 'coordinator' && (!state.delegable || state.held)) {
-      throw new CoordinatorForbidden(
-        state.held ? 'the operator paused this node' : 'this question is the operator\u2019s to answer',
-      )
+    if (actor === 'coordinator') {
+      const refusal = this.#coordinatorMayNotAnswer(state)
+      if (refusal !== null) throw new CoordinatorForbidden(refusal)
     }
+    this.#settleQuestion(state, facts, actor, reason)
+  }
+
+  /**
+   * Why the coordinator may not answer what this node is parked on, or null.
+   *
+   * By default it stands in for a timer, never for a person: it answers what
+   * `--retry-after` could, and a hold it put on the node itself. Under
+   * `--coordinator-authority full` it answers any question — except one the
+   * operator is holding, which stays the operator's whatever the setting.
+   */
+  #coordinatorMayNotAnswer(state: NodeState): string | null {
+    if (state.held || state.parkKind === 'hold') {
+      return state.heldBy === 'coordinator' ? null : 'the operator paused this node'
+    }
+    if (state.delegable) return null
+    if (this.#options.coordinatorAuthority === 'full') return null
+    return 'this question is the operator\u2019s to answer'
+  }
+
+  /** Closes the question a node is parked on, journalled as `actor`'s answer, and wakes it. */
+  #settleQuestion(state: NodeState, facts: GuardContext, actor: Actor, reason?: string): void {
+    const resume = state.resume
+    if (resume === null) return
     state.resume = null
     state.held = false
+    state.heldBy = null
     state.delegable = false
     const answer = facts.human?.['answer']
     this.#options.journal.append({
@@ -1532,6 +1709,7 @@ export class Scheduler {
         // it, so its absence is what says a person decided.
         ...(facts.human?.['unattended'] === true ? { unattended: true as const } : {}),
         ...(actor === 'coordinator' ? { by: actor } : {}),
+        ...(reason === undefined ? {} : { reason }),
       },
     })
     state.parkedEffectId = null
@@ -1552,9 +1730,9 @@ export class Scheduler {
    * queue drained into the node's next resume. The refusal a harness without
    * `inject` would raise is not the operator's to see, so it is never asked.
    */
-  async addContext(nodeId: string, text: string, actor: Actor = 'operator'): Promise<OperatorDelivery> {
+  async addContext(nodeId: string, text: string, actor: Actor = 'operator', reason?: string): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
-    if (this.#settledNode(state)) return this.#operation(state, 'add_context', text, 'ignored', actor)
+    if (this.#settledNode(state)) return this.#operation(state, 'add_context', text, 'ignored', actor, reason)
 
     const said = attributed(text, actor)
     // Delivered once, to one session, so it is also kept: the session that
@@ -1563,10 +1741,10 @@ export class Scheduler {
     const live = state.live
     if (live !== null && live.adapter.capabilities.inject) {
       await live.session.send(said)
-      return this.#operation(state, 'add_context', text, 'sent', actor)
+      return this.#operation(state, 'add_context', text, 'sent', actor, reason)
     }
     state.pending.push({ op: 'add_context', text: said })
-    return this.#operation(state, 'add_context', text, 'queued', actor)
+    return this.#operation(state, 'add_context', text, 'queued', actor, reason)
   }
 
   /**
@@ -1575,16 +1753,21 @@ export class Scheduler {
    * of this verb — "resume with an amended prompt" — is the one that can
    * actually deliver it.
    */
-  async redirect(nodeId: string, instruction: string, actor: Actor = 'operator'): Promise<OperatorDelivery> {
+  async redirect(
+    nodeId: string,
+    instruction: string,
+    actor: Actor = 'operator',
+    reason?: string,
+  ): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
     if (this.#settledNode(state)) {
-      return this.#operation(state, 'redirect', instruction, 'ignored', actor)
+      return this.#operation(state, 'redirect', instruction, 'ignored', actor, reason)
     }
 
     await this.#interruptLive(state)
     this.#decide(state, decision('context', actor, instruction))
     state.pending.push({ op: 'redirect', text: attributed(instruction, actor) })
-    return this.#operation(state, 'redirect', instruction, 'queued', actor)
+    return this.#operation(state, 'redirect', instruction, 'queued', actor, reason)
   }
 
   /**
@@ -1612,16 +1795,29 @@ export class Scheduler {
    * question and its lane, no timer answers it, and the next answer — which
    * can only be a person's — releases it.
    */
-  async pause(nodeId: string, actor: Actor = 'operator'): Promise<OperatorDelivery> {
+  async pause(nodeId: string, actor: Actor = 'operator', reason?: string): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
     if (state.status === 'awaiting_human' && state.resume !== null) {
-      state.held = true
-      this.#log.info('node.held', { node: state.node.id })
-      return this.#operation(state, 'pause', undefined, 'held', actor)
+      this.#holdQuestion(state, actor)
+      return this.#operation(state, 'pause', undefined, 'held', actor, reason)
     }
-    if (state.status !== 'running') return this.#operation(state, 'pause', undefined, 'ignored', actor)
+    if (state.status !== 'running') return this.#operation(state, 'pause', undefined, 'ignored', actor, reason)
     state.pauseRequested = true
-    return this.#operation(state, 'pause', undefined, 'sent', actor)
+    state.heldBy = actor
+    return this.#operation(state, 'pause', undefined, 'sent', actor, reason)
+  }
+
+  /**
+   * Holds the question a node is parked on: no timer answers it. The
+   * coordinator cannot take a hold off a node the operator is holding.
+   */
+  #holdQuestion(state: NodeState, actor: Actor): void {
+    if (actor === 'coordinator' && state.held && state.heldBy !== 'coordinator') {
+      throw new CoordinatorForbidden('the operator paused this node')
+    }
+    state.held = true
+    state.heldBy = actor
+    this.#log.info('node.held', { node: state.node.id })
   }
 
   /**
@@ -1630,12 +1826,12 @@ export class Scheduler {
    * who aborts sees the containment immediately; the loop discovers the abort
    * at its next step and stops without failing the node a second time.
    */
-  async abortNode(nodeId: string, actor: Actor = 'operator'): Promise<OperatorDelivery> {
+  async abortNode(nodeId: string, actor: Actor = 'operator', reason?: string): Promise<OperatorDelivery> {
     const state = this.#stateOf(nodeId)
-    if (this.#settledNode(state)) return this.#operation(state, 'abort', undefined, 'ignored', actor)
+    if (this.#settledNode(state)) return this.#operation(state, 'abort', undefined, 'ignored', actor, reason)
 
     state.aborted = true
-    this.#operation(state, 'abort', undefined, 'sent', actor)
+    this.#operation(state, 'abort', undefined, 'sent', actor, reason)
 
     const live = state.live
     state.live = null
@@ -1683,32 +1879,38 @@ export class Scheduler {
    * interval from now if it had already stood down. Anything else is `ignored`.
    * The coordinator cannot resume what the operator paused (§9.2).
    */
-  resume(nodeId: string, actor: Actor = 'operator'): OperatorDelivery {
+  resume(nodeId: string, actor: Actor = 'operator', reason?: string): OperatorDelivery {
     const state = this.#stateOf(nodeId)
-    if (actor === 'coordinator') throw new CoordinatorForbidden('the operator paused this node')
-    if (state.pauseRequested) {
-      state.pauseRequested = false
-      return this.#operation(state, 'resume', undefined, 'delivered', actor)
+    // The coordinator lifts its own holds and nobody else's (§9.2).
+    if (actor === 'coordinator' && state.heldBy !== 'coordinator') {
+      throw new CoordinatorForbidden('the operator paused this node')
     }
-    if (state.resume !== null && state.parkedEffectId?.startsWith('operator-pause:') === true) {
-      const delivered = this.#operation(state, 'resume', undefined, 'delivered', actor)
-      this.answer(nodeId, { human: { answer: 'resume' } }, actor)
+    if (state.pauseRequested || state.holdRequested) {
+      state.pauseRequested = false
+      state.holdRequested = false
+      state.heldBy = null
+      return this.#operation(state, 'resume', undefined, 'delivered', actor, reason)
+    }
+    if (state.resume !== null && state.parkKind === 'hold') {
+      const delivered = this.#operation(state, 'resume', undefined, 'delivered', actor, reason)
+      this.#settleQuestion(state, { human: { answer: 'resume' } }, actor)
       return delivered
     }
     if (state.held) {
       state.held = false
+      state.heldBy = null
       const rearm = state.rearm
       state.rearm = null
       rearm?.()
       this.#log.info('node.resumed', { node: state.node.id })
-      return this.#operation(state, 'resume', undefined, 'delivered', actor)
+      return this.#operation(state, 'resume', undefined, 'delivered', actor, reason)
     }
-    return this.#operation(state, 'resume', undefined, 'ignored', actor)
+    return this.#operation(state, 'resume', undefined, 'ignored', actor, reason)
   }
 
-  freshSession(nodeId: string, actor: Actor = 'operator'): OperatorDelivery {
+  freshSession(nodeId: string, actor: Actor = 'operator', reason?: string): OperatorDelivery {
     const state = this.#stateOf(nodeId)
-    if (this.#settledNode(state)) return this.#operation(state, 'fresh', undefined, 'ignored', actor)
+    if (this.#settledNode(state)) return this.#operation(state, 'fresh', undefined, 'ignored', actor, reason)
     state.freshRequested = true
     // The takeover handoff too: it is a session id the next spawn would resume.
     state.resumeSessionId = null
@@ -1716,7 +1918,421 @@ export class Scheduler {
     // later would carry the same context forward.
     this.#ledgerOf(state).clear()
     this.#log.info('node.fresh_session', { node: state.node.id })
-    return this.#operation(state, 'fresh', undefined, 'queued', actor)
+    return this.#operation(state, 'fresh', undefined, 'queued', actor, reason)
+  }
+
+  // -------------------------------------------------------------------------
+  // Taking a phase over: interrupt, reassign, step, switch-harness
+  //
+  // `pause` waits for the turn, `redirect` keeps the session, `abort` fails
+  // the phase and `fresh` changes nothing until the next turn. None of them
+  // moves a phase to somebody else and lets it carry on from where it was,
+  // which is what an operator needs when a harness runs out of credits under
+  // five phases at once. These do, and none of them fails anything.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Stops the node's turn now without failing it. The node is **held**: it
+   * parks on a question at the turn's boundary, keeping its lane, its branch,
+   * its commits and its uncommitted work, and nothing answers that question
+   * but `resume` (or a `reassign` or `step`, which release it). The state the
+   * cut turn belonged to runs again on release, so nothing is skipped.
+   *
+   * A node already parked on a question is held there, as `pause` does.
+   */
+  async interrupt(nodeId: string, actor: Actor = 'operator', reason?: string): Promise<OperatorDelivery> {
+    const state = this.#stateOf(nodeId)
+    if (state.status === 'awaiting_human' && state.resume !== null) {
+      this.#holdQuestion(state, actor)
+      return this.#operation(state, 'interrupt', undefined, 'held', actor, reason)
+    }
+    if (state.status !== 'running') return this.#operation(state, 'interrupt', undefined, 'ignored', actor, reason)
+    state.holdRequested = true
+    state.heldBy = actor
+    await this.#cutTurn(state)
+    return this.#operation(state, 'interrupt', undefined, 'sent', actor, reason)
+  }
+
+  /**
+   * Interrupts the live turn, and remembers that the state it belonged to has
+   * to run again. A harness that cannot be interrupted finishes its turn, and
+   * the node goes on from there instead.
+   */
+  async #cutTurn(state: NodeState): Promise<void> {
+    const live = state.live
+    if (live === null || !live.adapter.capabilities.interrupt) return
+    state.holdCut = true
+    await live.session.interrupt()
+  }
+
+  /**
+   * Hands the phase to another crew member, or another harness and model, and
+   * lets it carry on at the same pipeline step: `interrupt`, `amend` and
+   * `resume` in one call.
+   *
+   * `now` (the default) cuts the live turn and runs its state again under the
+   * new assignment; `after_turn` lets it finish and changes who takes the next
+   * one. A held node, or one parked on a question, takes the change at once —
+   * and a hold is released. The same member on the same harness keeps its
+   * session (a model change alone); anyone else starts fresh with a handoff:
+   * the previous agent's last report, where the work is, and the red gate.
+   * Kept across later attempts of the phase, and over what the plan says.
+   */
+  async reassign(
+    nodeId: string,
+    target: ReassignTarget,
+    options: { readonly when?: ReassignWhen; readonly actor?: Actor; readonly reason?: string } = {},
+  ): Promise<OperatorDelivery> {
+    const state = this.#stateOf(nodeId)
+    const actor = options.actor ?? 'operator'
+    const text = describeTarget(target)
+    if (this.#settledNode(state)) return this.#operation(state, 'reassign', text, 'ignored', actor, options.reason)
+    this.#vetReassign(state, target, actor)
+    const change: Reassignment = {
+      ...target,
+      actor,
+      ...(options.reason === undefined ? {} : { reason: options.reason }),
+    }
+    // In a step, holding a lane: the change waits for the boundary.
+    if (state.status === 'running' && state.resume === null && state.lane !== null) {
+      state.pendingReassign = change
+      if ((options.when ?? 'now') === 'after_turn') {
+        return this.#operation(state, 'reassign', text, 'queued', actor, options.reason)
+      }
+      await this.#cutTurn(state)
+      return this.#operation(state, 'reassign', text, 'sent', actor, options.reason)
+    }
+    this.#applyReassign(state, change)
+    const delivered = this.#operation(state, 'reassign', text, 'delivered', actor, options.reason)
+    // A hold is the operator's own question; the reassignment is its answer.
+    if (state.resume !== null && state.parkKind === 'hold') {
+      this.#settleQuestion(state, { human: { answer: 'resume' } }, actor, options.reason)
+    }
+    // Asleep on the old harness's capacity wait: there is nothing to wait for now.
+    state.nudge?.()
+    return delivered
+  }
+
+  /** Refuses a reassignment this run cannot make, before anything moves. */
+  #vetReassign(state: NodeState, target: ReassignTarget, actor: Actor): void {
+    if (actor === 'coordinator' && (state.held || state.parkKind === 'hold') && state.heldBy !== 'coordinator') {
+      throw new CoordinatorForbidden('the operator paused this node')
+    }
+    const { crew, harness, model } = target
+    if (crew === undefined && harness === undefined && model === undefined) {
+      throw new ReassignRefused('name a crew member, or a harness and a model')
+    }
+    if (crew !== undefined) {
+      if (harness !== undefined || model !== undefined) {
+        throw new ReassignRefused('a crew member carries a harness and a model; name one or the other')
+      }
+      if (!this.#staffed) throw new ReassignRefused('this workflow has no crew')
+      if (this.#roster()[crew] === undefined) throw new ReassignRefused(`unknown crew member "${crew}"`)
+      const theirs = crew === state.crew?.member || crew === state.desk
+      if (!theirs && this.#busyCrew.has(crew)) {
+        throw new ReassignRefused(`crew member "${crew}" is working on another phase`)
+      }
+      return
+    }
+    if (harness !== undefined) {
+      if (this.#options.adapters[harness] === undefined) {
+        throw new ReassignRefused(`no adapter registered for harness "${harness}"`)
+      }
+      if (model === undefined) throw new ReassignRefused(`a move to harness "${harness}" needs a model`)
+    }
+  }
+
+  /**
+   * Makes the change, and says so: who held the phase, who holds it now, and
+   * whether the session survives the move.
+   *
+   * A different member keeps working in the worktree the phase is in — the
+   * work is there — so the member whose desk it is stays busy until the node
+   * lets the lane go (`desk`).
+   */
+  #applyReassign(state: NodeState, change: Reassignment): void {
+    const before = change.from ?? this.#who(state)
+    if (change.crew !== undefined) {
+      // Later attempts are claimed for them too.
+      state.retryMember = change.crew
+      state.assignment = null
+      const current = state.crew
+      if (current !== null && current.member !== change.crew) {
+        const member = this.#roster()[change.crew] as CrewMember
+        if (state.desk === null) state.desk = current.member
+        else this.#busyCrew.delete(current.member)
+        if (state.desk === change.crew) state.desk = null
+        this.#busyCrew.add(change.crew)
+        state.crew = {
+          member: change.crew,
+          tier: member.tier,
+          model: member.model,
+          harness: member.harness ?? null,
+        }
+      }
+    } else {
+      state.assignment = {
+        ...(state.assignment ?? {}),
+        ...(change.harness === undefined ? {} : { harness: change.harness }),
+        ...(change.model === undefined ? {} : { model: change.model }),
+      }
+    }
+    this.#recordReassign(state, before, change)
+  }
+
+  /** The tail of every change of hands: the handoff when the session cannot follow, and the record. */
+  #recordReassign(state: NodeState, before: Assignee, change: Omit<Reassignment, 'from'>): void {
+    const after = this.#who(state)
+    const kept = before.member === after.member && before.harness === after.harness
+    // Only a phase that has done something has anything to hand over.
+    if (!kept && state.step !== null) state.handoff = this.#composeHandoff(state, before)
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      nodeId: state.node.id,
+      type: 'node_reassigned',
+      payload: {
+        from: before,
+        to: after,
+        session: kept ? 'kept' : 'fresh',
+        ...(change.actor === 'coordinator' ? { by: change.actor } : {}),
+        ...(change.cause === undefined ? {} : { cause: change.cause }),
+        ...(change.reason === undefined ? {} : { reason: change.reason }),
+      },
+    })
+    this.#log.info('node.reassigned', {
+      node: state.node.id,
+      harness: after.harness,
+      model: after.model,
+      ...(after.member === undefined ? {} : { member: after.member }),
+    })
+  }
+
+  /**
+   * An amendment reached a parked node: its harness, model or crew member may
+   * have moved. The node takes the new definition, the member is swapped as
+   * `reassign` swaps one, and a change of hands is recorded like any other.
+   */
+  #adoptAssignment(state: NodeState, node: Node): void {
+    const before = this.#who(state)
+    const crewMoved = node.crew !== state.node.crew
+    state.node = node
+    if (crewMoved && node.crew !== undefined && state.crew !== null && state.crew.member !== node.crew) {
+      this.#applyReassign(state, { crew: node.crew, cause: 'amendment', from: before })
+      return
+    }
+    const after = this.#who(state)
+    if (after.harness !== before.harness || after.model !== before.model) {
+      this.#recordReassign(state, before, { cause: 'amendment' })
+    }
+  }
+
+  /**
+   * What an amendment asks of the live run that it cannot give a parked node:
+   * a crew member who is busy elsewhere, a harness it has no adapter for.
+   * Located like every other amendment refusal.
+   */
+  vetAmendment(workflow: Workflow): readonly { readonly path: (string | number)[]; readonly message: string }[] {
+    const issues: { path: (string | number)[]; message: string }[] = []
+    workflow.nodes.forEach((node, index) => {
+      const state = this.#states.get(node.id)
+      if (state === undefined || state.status !== 'awaiting_human') return
+      const crew = node.crew
+      if (crew !== undefined && crew !== state.node.crew && crew !== state.crew?.member && crew !== state.desk) {
+        if (this.#busyCrew.has(crew)) {
+          issues.push({ path: ['nodes', index, 'crew'], message: `crew member "${crew}" is working on another phase` })
+        }
+      }
+      const harness = node.harness
+      if (harness !== undefined && harness !== state.node.harness && this.#options.adapters[harness] === undefined) {
+        issues.push({ path: ['nodes', index, 'harness'], message: `no adapter registered for harness "${harness}"` })
+      }
+    })
+    return issues
+  }
+
+  /** Who works this node now: its member, if any, and the harness and model its next turn runs on. */
+  #who(state: NodeState): Assignee {
+    const { harness, model } = this.#resolved(state)
+    return { ...(state.crew === null ? {} : { member: state.crew.member }), harness, model }
+  }
+
+  /**
+   * What a fresh agent taking the phase over is told, beside its brief: whose
+   * work it continues, where that work is, what the last agent last said, and
+   * the gate that was red. Prompt text, handed to the next spawn and to nothing
+   * else — the transcript it quotes already holds the same words.
+   */
+  #composeHandoff(state: NodeState, before: Assignee): string {
+    const who = before.member === undefined ? `${before.harness} (${before.model})` : `crew member "${before.member}" (${before.harness}, ${before.model})`
+    const lines = [
+      `You are taking this phase over from ${who}, which was stopped${state.step === null ? '' : ` in pipeline step "${state.step}"`}. ` +
+        'Continue its work rather than starting again.',
+      '',
+      'The work so far is in this worktree: the commits on its branch, and whatever it left uncommitted. ' +
+        'Read it before changing anything — `git status`, `git log --oneline`, and `git diff` against the branch’s base.',
+    ]
+    const report = lastReport(this.#options.journal.tailTranscript(this.#options.runId, state.node.id, 200))
+    if (report !== null) lines.push('', 'The previous agent’s last report:', '', ...report.split('\n').map((line) => `> ${line}`))
+    const gate = state.lastGate
+    if (gate !== null && gate.id !== null && gate.exitCode !== 0) {
+      lines.push(
+        '',
+        `Gate "${gate.id}" is red (exit ${gate.exitCode}). Its log: ` +
+          this.#options.journal.gateLogPath(this.#options.runId, state.node.id, gate.id),
+      )
+    }
+    return lines.join('\n')
+  }
+
+  /**
+   * Moves the node's pipeline to `to` by hand, so a person — or the
+   * coordinator, under `--coordinator-authority full` — who finished the work
+   * in the lane can hand it straight to the gates. The gates still decide: a
+   * final state is refused, so no phase is ever *declared* done this way.
+   *
+   * A held or paused node, or one parked on its pipeline's own question, is
+   * released into `to`. A running one has its turn cut and goes there at the
+   * boundary. Anything else — a failure question, an agent's question in the
+   * middle of a turn — is `ignored`: there is no pipeline position to move.
+   */
+  async step(nodeId: string, to: string, actor: Actor = 'operator', reason?: string): Promise<OperatorDelivery> {
+    const state = this.#stateOf(nodeId)
+    if (actor === 'coordinator' && this.#options.coordinatorAuthority !== 'full') {
+      throw new CoordinatorForbidden('moving a pipeline by hand needs --coordinator-authority full')
+    }
+    if (!state.pipeline.states.some((candidate) => candidate.id === to)) {
+      throw new StepRefused(`node "${nodeId}"'s pipeline has no state "${to}"`)
+    }
+    if (state.pipeline.finalStateIds.includes(to)) {
+      throw new StepRefused(`"${to}" is a final state; the gates decide when a phase is done`)
+    }
+    if (state.status === 'awaiting_human' && state.resume !== null && state.parkKind !== null) {
+      if (actor === 'coordinator') {
+        const refusal = this.#coordinatorMayNotAnswer(state)
+        if (refusal !== null) throw new CoordinatorForbidden(refusal)
+      }
+      state.stepTo = to
+      const delivered = this.#operation(state, 'step', to, 'delivered', actor, reason)
+      this.#settleQuestion(state, { human: { answer: `step:${to}` } }, actor, reason)
+      return delivered
+    }
+    if (state.status === 'running' && state.resume === null) {
+      state.stepTo = to
+      await this.#cutTurn(state)
+      return this.#operation(state, 'step', to, 'sent', actor, reason)
+    }
+    return this.#operation(state, 'step', to, 'ignored', actor, reason)
+  }
+
+  #takeStep(state: NodeState): string | null {
+    const to = state.stepTo
+    state.stepTo = null
+    return to
+  }
+
+  /**
+   * Moves the run off a harness: every turn that would have run on `from`
+   * runs on `to` with `model` instead, for the rest of the run. Phases in
+   * flight on it are reassigned (`when`, as `reassign` takes it), and phases
+   * yet to start take the switch when they do. Returns the phases it moved.
+   *
+   * What `defaults.harness_fallbacks` does by itself when a harness runs out
+   * of quota, and what an operator does by hand when an account runs out of
+   * credits — without pausing the run and resuming it.
+   */
+  async switchHarness(
+    from: string,
+    to: string,
+    model: string,
+    options: {
+      readonly when?: ReassignWhen
+      readonly actor?: Actor
+      readonly reason?: string
+      /** The state that found the harness out, which the caller moves itself. */
+      readonly except?: string
+      readonly cause?: 'harness_fallback'
+    } = {},
+  ): Promise<readonly string[]> {
+    if (from === to) throw new ReassignRefused(`harness "${from}" cannot be switched to itself`)
+    if (this.#options.adapters[to] === undefined) throw new ReassignRefused(`no adapter registered for harness "${to}"`)
+    const actor = options.actor ?? 'operator'
+    // Read before the switch: afterwards every one of them resolves to `to`.
+    const moving = [...this.#states.values()].filter(
+      (state) =>
+        state.node.id !== options.except &&
+        (state.status === 'running' || state.status === 'awaiting_human' || state.status === 'waiting_on_capacity') &&
+        this.#resolved(state).harness === from,
+    )
+    // Who each one was, taken before the switch changes the answer.
+    const was = new Map(moving.map((state) => [state, this.#who(state)]))
+    this.#switches.set(from, { harness: to, model })
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      type: 'harness_switched',
+      payload: {
+        from,
+        to,
+        model,
+        ...(actor === 'coordinator' ? { by: actor } : {}),
+        ...(options.cause === undefined ? {} : { cause: options.cause }),
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
+      },
+    })
+    this.#log.warn('scheduler.harness_switched', { from, to, model, nodes: moving.length })
+    this.#options.onHarnessSwitched?.(from, to, model)
+    for (const state of moving) {
+      const change: Reassignment = {
+        harness: to,
+        model,
+        from: was.get(state) as Assignee,
+        ...(options.cause === undefined ? { actor } : { cause: options.cause }),
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
+      }
+      // Holds stay as they are: a switch moves who works, not whether.
+      if (state.status === 'running' && state.resume === null && state.lane !== null) {
+        state.pendingReassign = change
+        if ((options.when ?? 'now') === 'now') await this.#cutTurn(state)
+        continue
+      }
+      this.#applyReassign(state, change)
+      state.nudge?.()
+    }
+    return moving.map((state) => state.node.id)
+  }
+
+  /**
+   * `defaults.harness_fallbacks`: the harness this turn asked for is parked on
+   * a quota refusal, and the plan names another to move to. Switches the run
+   * and moves this node at once; true when the turn should be spawned again.
+   * A harness switches once — a fallback that runs out too parks as before.
+   */
+  async #fallBackHarness(state: NodeState, harness: string): Promise<boolean> {
+    if (this.#switches.has(harness)) {
+      // Another phase found it out first, and the switch caught this one
+      // mid-spawn: its move is applied now, before the turn it is for.
+      const pending = state.pendingReassign
+      state.pendingReassign = null
+      if (pending !== null) this.#applyReassign(state, pending)
+      if (this.#resolved(state).harness === harness) return false
+      this.#setStatus(state, 'running')
+      return true
+    }
+    const fallbacks: Readonly<Record<string, { readonly harness: string; readonly model: string } | undefined>> =
+      this.#workflow.defaults.harness_fallbacks
+    const fallback = fallbacks[harness]
+    if (fallback === undefined || this.#options.adapters[fallback.harness] === undefined) return false
+    const reason = `${harness} is out of quota`
+    const from = this.#who(state)
+    await this.switchHarness(harness, fallback.harness, fallback.model, {
+      cause: 'harness_fallback',
+      when: 'after_turn',
+      reason,
+      except: state.node.id,
+    })
+    this.#applyReassign(state, { harness: fallback.harness, model: fallback.model, cause: 'harness_fallback', reason, from })
+    // Admission wrote the wait; the node never took it.
+    this.#setStatus(state, 'running')
+    return true
   }
 
   /** Node statuses as of now. A projection of the same facts the journal holds. */
@@ -1978,8 +2594,12 @@ export class Scheduler {
           this.#restartAttempt(state)
           this.#setStatus(state, 'waiting_on_capacity')
           // Raced, because a capacity window can be hours and nothing else
-          // would end this wait for a halt.
-          await Promise.race([error.waitFor(), this.#halting.promise])
+          // would end this wait for a halt — or for a reassignment off the
+          // harness it is waiting on.
+          const nudged = deferred()
+          state.nudge = nudged.resolve
+          await Promise.race([error.waitFor(), this.#halting.promise, nudged.promise])
+          state.nudge = null
           if (state.aborted) return
           if (this.#halt !== null) return this.#unwindHalted(state)
           this.#setStatus(state, 'running')
@@ -2348,12 +2968,22 @@ export class Scheduler {
     state.lastRed = null
     state.lastVerdict = null
     state.step = null
+    // A new attempt starts its pipeline from the top: there is no cut turn to
+    // run again and no position to move. A pending hold still applies.
+    state.holdCut = false
+    state.stepTo = null
     if (state.crew === null) state.sessions.clear()
     else this.#ledgerFor(state.crew.member).clear()
   }
 
   /** Gives the node's member back to the roster and wakes whoever is waiting. */
   #releaseCrew(state: NodeState): void {
+    // The member whose worktree a reassigned phase was in goes back with it.
+    if (state.desk !== null) {
+      this.#busyCrew.delete(state.desk)
+      state.desk = null
+      this.#wake()
+    }
     if (state.crew === null) return
     this.#busyCrew.delete(state.crew.member)
     state.lastMember = state.crew.member
@@ -2440,9 +3070,17 @@ export class Scheduler {
         // node only records which pause it is asleep on.
         state.parkedEffectId = result.effectId
         const cancel = this.#armUnattendedAnswer(state)
-        const facts = await this.#park(state)
+        state.parkKind = 'pipeline'
+        const facts = await this.#park(state).finally(() => {
+          state.parkKind = null
+        })
         cancel()
-        result = await run.resume(this.#withPending(state, run, facts))
+        // `step --to` answered the question by moving past it.
+        const to = this.#takeStep(state)
+        result =
+          to === null
+            ? await run.resume(this.#withPending(state, run, facts))
+            : await run.enter(to, this.#withPending(state, run, { ...facts, fix_rounds: state.fixRounds }))
         continue
       }
       if (result.kind === 'final') {
@@ -2461,20 +3099,41 @@ export class Scheduler {
       // `PipelineStuckError`.
       if (result.kind === 'stuck') throw new PipelineStuckError(result.state, result.reason)
 
-      // §9's pause, taken between turns: the lane stays, the gate pools are
-      // already back, and the node waits on the same promise a human gate does.
-      if (state.pauseRequested) {
+      // §9's pause, taken between turns, and `interrupt`'s hold: the lane
+      // stays, the gate pools are already back, and the node waits on the same
+      // promise a human gate does. A reassignment or a `step` that was waiting
+      // for this boundary is applied here instead, and the node goes on.
+      if (state.pauseRequested || state.holdRequested || state.stepTo !== null || state.pendingReassign !== null) {
+        const holding = state.holdRequested
+        const cut = state.holdCut
         state.pauseRequested = false
-        const effectId = `operator-pause:${state.node.id}`
-        this.#ask(state, effectId, {
-          question: 'The operator paused this node. Resume it?',
-          kind: 'confirm',
-        })
-        state.parkedEffectId = effectId
-        const facts = await this.#park(state)
-        result = await run.send({
-          facts: this.#withPending(state, run, { ...facts, fix_rounds: state.fixRounds }),
-        })
+        state.holdRequested = false
+        state.holdCut = false
+        const reassign = state.pendingReassign
+        state.pendingReassign = null
+        let facts: GuardContext = {}
+        if (reassign !== null) this.#applyReassign(state, reassign)
+        if (reassign === null && state.stepTo === null) {
+          const effectId = `${holding ? 'operator-hold' : 'operator-pause'}:${state.node.id}`
+          const by = state.heldBy === 'coordinator' ? 'The run coordinator' : 'The operator'
+          this.#ask(state, effectId, {
+            question: holding ? `${by} interrupted this node. Resume it?` : `${by} paused this node. Resume it?`,
+            kind: 'confirm',
+          })
+          state.parkedEffectId = effectId
+          // An interrupt holds the node — no timer answers it — and `amend`
+          // and `reassign` may move it while it waits.
+          if (holding) state.held = true
+          state.parkKind = 'hold'
+          facts = await this.#park(state).finally(() => {
+            state.parkKind = null
+          })
+        }
+        // A turn that was cut short is run again, by whoever holds the phase
+        // now; anything else goes on as a pause does.
+        const to = this.#takeStep(state) ?? (cut ? result.state : null)
+        const next = this.#withPending(state, run, { ...facts, fix_rounds: state.fixRounds })
+        result = to === null ? await run.send({ facts: next }) : await run.enter(to, next)
         continue
       }
 
@@ -2787,6 +3446,7 @@ export class Scheduler {
     text: string | undefined,
     delivery: OperatorDelivery,
     actor: Actor = 'operator',
+    reason?: string,
   ): OperatorDelivery {
     this.#options.journal.append({
       runId: this.#options.runId,
@@ -2797,6 +3457,7 @@ export class Scheduler {
         delivery,
         ...(text === undefined ? {} : { text }),
         ...(actor === 'coordinator' ? { by: actor } : {}),
+        ...(reason === undefined ? {} : { reason }),
       },
     })
     return delivery
@@ -3134,7 +3795,13 @@ export class Scheduler {
     // because a capacity retry that swallowed it would lose the steering for
     // good.
     const carried = state.pending.length
-    const owed = [...state.undelivered, ...state.pending.map((entry) => entry.text)]
+    // A reassignment's handoff first: it says whose work the rest is about.
+    const handoff = state.handoff
+    const owed = [
+      ...(handoff === null ? [] : [handoff]),
+      ...state.undelivered,
+      ...state.pending.map((entry) => entry.text),
+    ]
 
     // Every role runs in the node's own lane.
     const cwd = join(this.#options.laneRoot, state.lane as string)
@@ -3217,6 +3884,11 @@ export class Scheduler {
       fallbacks: this.#workflow.defaults.model_fallbacks,
     }
     let outcome = await this.#admitLoggedIn(state, adapter, () => build(plan), priority)
+    // The harness is out of quota and the plan names one to move to: the turn
+    // goes there now, at this step, rather than waiting out the window.
+    if (outcome.status === 'retry' && outcome.kind === 'quota' && (await this.#fallBackHarness(state, adapter.id))) {
+      return await this.#spawnTurn(state, invocation, chore)
+    }
 
     // §15.4: the vendor has forgotten the session this task asked to continue.
     // Exactly one retry, cold and with the full prompt — the harness is
@@ -3260,6 +3932,7 @@ export class Scheduler {
     }
     state.undelivered = []
     state.resumeSessionId = null
+    if (state.handoff === handoff) state.handoff = null
 
     // Journalled here rather than at the decision: this is the first moment a
     // turn is certain to happen. A capacity refusal unwinds and re-drives the
@@ -3280,6 +3953,9 @@ export class Scheduler {
       // Three chores on one slot are one stretch of transcript without it.
       ...(chore === undefined ? {} : { chore: chore.id }),
     }
+    // Read once: a reassignment while the agent waits on an answer moves the
+    // phase's next turn, not the session this one resumes.
+    const turnModel = this.#modelFor(state, params)
     let turn: Turn = {
       adapter,
       cwd,
@@ -3293,14 +3969,21 @@ export class Scheduler {
         nodeId: state.node.id,
         cwd,
         prompt,
-        model: this.#modelFor(state, params),
+        model: turnModel,
         ...envField(),
         resumeSessionId,
       }),
       turnId: () => turnId,
     }
     let watch = new QuestionWatch()
-    let drained = await this.#drain(state, outcome, turn, watch)
+    let drained: { readonly sessionId: string; readonly empty: boolean }
+    try {
+      drained = await this.#drain(state, outcome, turn, watch)
+    } catch (error) {
+      // Out of quota partway through, and moved: the same step, on the fallback.
+      if (error instanceof HarnessFellBack) return await this.#spawnTurn(state, invocation, chore)
+      throw error
+    }
 
     // A turn the model never took part in: the session started and ended with
     // no text and no tool call. Its prompt did not reach the agent, so nothing
@@ -3466,7 +4149,18 @@ export class Scheduler {
         model: outcome.model,
         ...(turn.priority.fallbacks === undefined ? {} : { fallbacks: turn.priority.fallbacks }),
       })
-      if (parked.status === 'retry') throw new CapacityRetry(parked.wait)
+      if (parked.status === 'retry') {
+        // Parked — not a model the turn could fall back from — and the plan
+        // names a harness to move to.
+        if (
+          closed.kind === 'quota' &&
+          admission.wakeAt(adapter.id) !== undefined &&
+          (await this.#fallBackHarness(state, adapter.id))
+        ) {
+          throw new HarnessFellBack()
+        }
+        throw new CapacityRetry(parked.wait)
+      }
     }
     return { sessionId, empty: !worked && !interrupted && this.#halt === null }
   }
@@ -4238,23 +4932,38 @@ export class Scheduler {
 
   #harnessOf(state: NodeState, override?: unknown): string {
     if (typeof override === 'string') return override
-    return state.crew?.harness ?? state.node.harness ?? this.#workflow.defaults.harness
+    return this.#resolved(state).harness
   }
 
   /**
    * Which model this turn runs on.
    *
-   * The effect's own override, then the member holding the node, then the
-   * node's model, then the default.
+   * The effect's own override, then a reassignment, then the member holding
+   * the node, then the node's model, then the default — and a harness the run
+   * switched away from takes the switch's model with it.
    */
   #modelFor(state: NodeState, params: Readonly<Record<string, unknown>>): string {
     const override = params['model']
     if (typeof override === 'string') return override
+    return this.#resolved(state).model
+  }
 
-    const crew = state.crew
-    if (crew !== null) return crew.model
-
-    return String(state.node.model ?? this.#workflow.defaults.model)
+  /**
+   * The harness and model this node's turns run on, before any effect
+   * overrides: a reassignment, the member, the node, the defaults, in that
+   * order — then the run's harness switches, followed as a chain.
+   */
+  #resolved(state: NodeState): { readonly harness: string; readonly model: string } {
+    const own = state.assignment
+    let harness = own?.harness ?? state.crew?.harness ?? state.node.harness ?? this.#workflow.defaults.harness
+    let model = String(own?.model ?? state.crew?.model ?? state.node.model ?? this.#workflow.defaults.model)
+    const seen = new Set<string>()
+    for (let next = this.#switches.get(harness); next !== undefined && !seen.has(harness); next = this.#switches.get(harness)) {
+      seen.add(harness)
+      harness = next.harness
+      model = next.model
+    }
+    return { harness, model }
   }
 
   #adapter(id: string): HarnessAdapter {

@@ -504,6 +504,43 @@
             "minLength": 1
           }
         },
+        "harness_fallbacks": {
+          "default": {},
+          "description": "Harness id → where the run moves once that harness is out of quota and has no model fallback left (§6.1). Instead of parking every phase on it until the window resets, the run switches: the turn that was refused runs again at once on the fallback, at the same pipeline step, and every later turn that would have run on the harness runs there — phases in a turn move when it ends. A moved phase starts a fresh session with a handoff (the previous agent’s last report, its work in the lane, the red gate). One switch per harness; a fallback that runs out too parks as it would have. One observed run moved five phases off an account out of credits by aborting and retrying each by hand.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode"
+            ]
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "harness": {
+                "type": "string",
+                "enum": [
+                  "claude-code",
+                  "codex",
+                  "opencode"
+                ],
+                "description": "The harness the run moves to."
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The model every moved turn runs on there."
+              }
+            },
+            "required": [
+              "harness",
+              "model"
+            ],
+            "additionalProperties": false
+          }
+        },
         "max_session_turns": {
           "default": 12,
           "description": "Turns one reused session slot may take before the next spawn starts fresh (§15.5). A shared session only ever grows; without a ceiling a long node eventually dies on a context-window error that reads as a broken harness.",

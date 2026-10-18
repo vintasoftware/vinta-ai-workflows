@@ -680,8 +680,13 @@
                       "add_context",
                       "redirect",
                       "pause",
+                      "resume",
                       "abort",
-                      "fresh"
+                      "fresh",
+                      "interrupt",
+                      "reassign",
+                      "step",
+                      "retry"
                     ]
                   },
                   "by": {
