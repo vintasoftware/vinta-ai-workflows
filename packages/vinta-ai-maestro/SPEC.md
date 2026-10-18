@@ -647,7 +647,9 @@ Pause is upgradeable to stop; the reverse is ignored. A run whose last node sett
 
 ## 10. UI
 
-React + Vite, served by `vinta-ai-maestro ui` at `127.0.0.1` behind a random token in the URL, minted when `ui` starts. `ui` hosts no run (§4): a live run's traffic is forwarded to its job, so the views below behave the same whichever process answers them. Chosen for mature `xterm.js` bindings, virtualized log views, and the general ecosystem weight the app shell needs. Both graph surfaces are Web Components and mount unchanged: `vinta-dag-editor` (ours, §3) for the plan DAG, `vinta-state-machine-editor@0.10.0` for pipelines.
+React + Vite, served by `vinta-ai-maestro ui` at `127.0.0.1` behind a random token in the URL, minted when `ui` starts. `ui` hosts no run (§4): a live run's traffic is forwarded to its job, so the views below behave the same whichever process answers them.
+
+**A `ui` says when it is stale.** It outlives upgrades — one observed was serving code from days before, beside jobs started from the new release — and cannot reload itself. So it writes `.vinta-ai-maestro/ui/<pid>.json` (pid, the version it loaded, start time; no URL, no token) while up, rereads its own `package.json` every minute and warns once, on stderr and as `serve.version_drift`, when the installed version differs; `run`, `status` and a second `ui` warn about each live record whose version is not theirs. A record whose pid is gone is dropped on read. Chosen for mature `xterm.js` bindings, virtualized log views, and the general ecosystem weight the app shell needs. Both graph surfaces are Web Components and mount unchanged: `vinta-dag-editor` (ours, §3) for the plan DAG, `vinta-state-machine-editor@0.10.0` for pipelines.
 
 | View | Contents |
 |---|---|

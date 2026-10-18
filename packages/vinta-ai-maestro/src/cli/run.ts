@@ -65,6 +65,7 @@ import {
   type RunPolicy,
 } from './policy.ts'
 import { applyHarnessProfiles } from '../harness/profiles.ts'
+import { warnStaleUis } from './ui-record.ts'
 import { monitorFactory, toBind, untilSignalled, type Bind } from './serve.ts'
 import { createErrorFeed, tapErrors } from '../coordinator/errors.ts'
 import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
@@ -299,6 +300,9 @@ async function launchRun(request: RunRequest): Promise<number> {
   }
 
   const { runId } = target
+  // The `ui` forwards this run's traffic and launches its resumes; one left
+  // up across an upgrade does both with the old release's code.
+  warnStaleUis(bind.repoPath, io)
   io.out(`vinta-ai-maestro: starting run ${runId} in the background…`)
   const args = jobArgs(target, bind, policy, request.log)
   // The job's output as it is written, so a start that takes minutes — the

@@ -35,6 +35,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: a `ui` left up across an upgrade says so.** It warns
+  once when the installed package's version no longer matches the one it
+  loaded, and `run` and `status` warn about a live `ui` serving another
+  release. A `ui` started days earlier used to keep serving pre-upgrade code
+  without a word.
 - **`vinta-ai-maestro`: a resume remembers how the run was started.** Every
   job records its `--permission`, `--system-one`, `--on-failure`, `--retries`,
   `--retry-after`, `--no-coordinator`, `--host` and `--harness-profile` in

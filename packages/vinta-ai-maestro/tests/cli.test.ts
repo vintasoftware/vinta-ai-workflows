@@ -50,6 +50,8 @@ import {
   type LaunchResult,
 } from '../src/job/job.ts'
 import { runCommand } from '../src/cli/run.ts'
+import { liveUis, warnStaleUis, writeUiRecord } from '../src/cli/ui-record.ts'
+import { RUNNING_VERSION } from '../src/version.ts'
 import { jobArgs, policyPathFor, readStoredPolicy, toRunPolicy } from '../src/cli/policy.ts'
 import { serveCommand, reachableUrl } from '../src/cli/serve.ts'
 import { simulateCommand } from '../src/cli/simulate.ts'
@@ -1223,6 +1225,43 @@ describe('vinta-ai-maestro serve', () => {
     const { io, daemon } = await serve(['--repo', dir, '--host', '0.0.0.0'])
 
     expect(io.all().filter((line) => line.includes(daemon.token))).toHaveLength(1)
+  })
+
+  it('records the release it serves while up, and says when the package under it changed', async () => {
+    const dir = makeTemp()
+    const io = recorder()
+    let during: ReturnType<typeof liveUis> = []
+    const code = await serveCommand(['--repo', dir], io.io, {
+      versionCheckMs: 5,
+      installedVersion: () => '99.0.0',
+      wait: async () => {
+        during = liveUis(dir)
+        const deadline = Date.now() + 2_000
+        while (!io.err.some((line) => line.includes('99.0.0')) && Date.now() < deadline) {
+          await new Promise((resolve_) => setTimeout(resolve_, 5))
+        }
+      },
+    })
+    expect(code).toBe(OK)
+    expect(during).toEqual([expect.objectContaining({ pid: process.pid, version: RUNNING_VERSION })])
+    // Said once, however many checks see it.
+    expect(io.err.filter((line) => line.includes(`serving ${RUNNING_VERSION}, but 99.0.0 is now installed`))).toHaveLength(1)
+    // Gone with the process, so nothing warns about a ui that is not there.
+    expect(liveUis(dir)).toEqual([])
+  })
+
+  it('has run and status warn about a live ui serving another release', async () => {
+    const dir = makeTemp()
+    writeUiRecord(dir, { pid: process.pid, version: '0.0.1-old', startedAt: 0 })
+    const io = recorder()
+    expect(await statusCommand(['--repo', dir], io.io)).toBe(OK)
+    expect(io.err.join('\n')).toContain(`the ui running as pid ${process.pid} is serving 0.0.1-old, but this is ${RUNNING_VERSION}`)
+
+    // A record whose process is gone is no ui at all, and is cleared.
+    const quiet = recorder()
+    warnStaleUis(dir, quiet.io, RUNNING_VERSION, () => false)
+    expect(quiet.err).toEqual([])
+    expect(liveUis(dir)).toEqual([])
   })
 
   it('rejects a nonsense --port as a usage error', async () => {
