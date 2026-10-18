@@ -35,6 +35,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `purge` drops lane rescues whose work landed.** The
+  `refs/vinta-ai-maestro/wip/*` commits a recycled lane keeps of a phase's
+  uncommitted files piled up (~80 in one project). A purge now drops those of
+  the runs it purges whose phase is done and merged into a branch outside
+  `plan/` and `wt/`, and those of already-purged runs whose rescued files read
+  the same at `HEAD`. Every other rescue is kept, and `--dry-run` lists them.
 - **`vinta-ai-maestro`: a `ui` left up across an upgrade says so.** It warns
   once when the installed package's version no longer matches the one it
   loaded, and `run` and `status` warn about a live `ui` serving another
