@@ -25,6 +25,7 @@ import { basename, dirname, join } from 'node:path'
 import { stringify } from 'yaml'
 import { afterAll, describe, expect, it } from 'vitest'
 import { commandLines, signatureWords } from '../src/doctor/ci.ts'
+import { resolveWorkflow } from '../src/config/resolve.ts'
 import {
   checkCiCoverage,
   exampleTarget,
@@ -1148,6 +1149,34 @@ describe('gates checked against CI', () => {
       ['ci-coverage', 'pass'],
     ])
     expect(await checkCiCoverage(makeTemp(), covered)).toEqual([])
+  })
+
+  it('counts the project’s custom gates, which every plan resolves without declaring them', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const config = {
+      maestro: {
+        defaults: { model: 'opus', gates: ['test', 'django-check', 'api-client-fresh'] },
+        gates: {
+          test: { cmd: 'uv run pytest' },
+          'django-check': { cmd: 'uv run python manage.py check --deploy --fail-level WARNING' },
+          'api-client-fresh': { cmd: 'pnpm generate-client && git diff --exit-code -- frontend/src/client' },
+        },
+      },
+    }
+    const result = resolveWorkflow(
+      {
+        schema_version: 1,
+        id: 'ci-fixture',
+        base_branch: 'main',
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+      },
+      config,
+    )
+    if (!result.ok) throw new Error(JSON.stringify(result.issues))
+    expect((await checkCiCoverage(root, result.workflow)).map((check) => [check.id, check.status])).toEqual([
+      ['ci-coverage', 'pass'],
+    ])
   })
 
   it('reads commands, not setup, and reduces wrappers to the tool they run', () => {

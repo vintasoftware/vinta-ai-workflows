@@ -7,8 +7,8 @@
  * 1. **`commands.*`**, the project's own lines, shared with `implement-plan`.
  *    A typed gate's `cmd` and `scoped_cmd` start here.
  * 2. **`maestro.*`**, what maestro does differently or what every plan would
- *    otherwise repeat — per-type gate defaults, pools, chores, run defaults,
- *    the `project` block.
+ *    otherwise repeat — per-type gate defaults, custom project-wide gates,
+ *    pools, chores, run defaults, the `project` block.
  * 3. **The plan's workflow file.**
  * 4. **The run's own amendments**, which are not this file's: they are made to
  *    a resolved snapshot, and `src/config/reload.ts` keeps them on top when the
@@ -22,7 +22,8 @@
  * - **Maps keyed by id merge per id, and the higher layer's entry wins whole.**
  *   `gates`, `resources`, `chores`, `codegen`, `project.services`, `project.databases`. A
  *   plan redeclaring the `test-suite` pool replaces the project's, rather than
- *   inheriting half of it.
+ *   inheriting half of it, and a plan's `django-check` gate replaces the
+ *   project's custom gate of that id the same way.
  * - **A typed gate is the one exception, merged field by field.** That is what
  *   `type` is for: `{ "type": "test", "timeout_s": 600 }` keeps the project's
  *   command and changes only how long it may take.
@@ -92,7 +93,7 @@ export function resolveDocument(authored: unknown, config: ProjectConfig | null)
     doc.append_only = [...maestro.append_only]
   }
 
-  const gates = resolveGates(gateTypeDefaults(commands, maestro.gates), authored.gates)
+  const gates = resolveGates(gateTypeDefaults(commands, maestro.gates), customGates(maestro.gates), authored.gates)
   if (gates !== undefined) doc.gates = gates
 
   const defaultGates = isObject(defaults) && Array.isArray(defaults.gates) ? defaults.gates : undefined
@@ -147,19 +148,35 @@ function gateTypeDefaults(commands: Json, configured: unknown): Map<GateType, Js
 }
 
 /**
+ * `maestro.gates` entries under an id that is not a type: project-wide gates
+ * of their own, untyped, in declaration order. Each is already known to carry
+ * a `cmd` — `ProjectGatesSchema` refuses one that does not.
+ */
+function customGates(configured: unknown): Map<string, Json> {
+  const custom = new Map<string, Json>()
+  if (!isObject(configured)) return custom
+  for (const [id, gate] of Object.entries(configured)) {
+    if (!(GATE_TYPES as readonly string[]).includes(id) && isObject(gate)) custom.set(id, { ...gate })
+  }
+  return custom
+}
+
+/**
  * The gate table. Every type the project can run is available under the
  * type's own name, which is what lets a plan list `"gates": ["typecheck",
- * "test"]` on its nodes and declare no table at all; a plan entry of the same
- * id replaces it, and a typed plan entry under any id inherits from it.
+ * "test"]` on its nodes and declare no table at all; so is every custom gate
+ * the project declares, under its id. A plan entry of the same id replaces
+ * either whole, and a typed plan entry under any id inherits from its type.
  */
-function resolveGates(byType: Map<GateType, Json>, authored: unknown): Json | undefined {
+function resolveGates(byType: Map<GateType, Json>, custom: Map<string, Json>, authored: unknown): Json | undefined {
   const declared = isObject(authored) ? authored : {}
-  if (byType.size === 0 && !isObject(authored)) return undefined
+  if (byType.size === 0 && custom.size === 0 && !isObject(authored)) return undefined
 
   const gates: Json = {}
   for (const [type, inherited] of byType) {
     if (typeof inherited.cmd === 'string') gates[type] = { type, ...inherited }
   }
+  for (const [id, gate] of custom) gates[id] = gate
   for (const [id, gate] of Object.entries(declared)) {
     const type = isObject(gate) && !('judge' in gate) ? gate.type : undefined
     const inherited = typeof type === 'string' ? byType.get(type as GateType) : undefined
