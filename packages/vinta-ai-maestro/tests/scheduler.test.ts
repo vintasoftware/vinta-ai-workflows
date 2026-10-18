@@ -3601,6 +3601,99 @@ describe('crew', () => {
     expectDrained(r)
   })
 
+  /**
+   * Observed: a Tier 1 phase was rejected by its review 16 times over six
+   * hours before the coordinator moved it with four amendments.
+   */
+  describe('after repeated review rejections', () => {
+    const escalating = (limit: number, crew: Record<string, unknown>): Workflow => {
+      // Every member has a phase of its own: a roster member assigned none is a
+      // plan defect the amend path refuses.
+      const nodes = [
+        node('a', [], { gates: ['unit'], chores: ['review'], crew: 'tier1' }),
+        ...Object.keys(crew)
+          .filter((member) => member !== 'tier1')
+          .map((member) => node(`on-${member}`, ['a'], { gates: ['unit'], crew: member })),
+      ]
+      const workflow = makeWorkflow(nodes, {
+        resources: { lane: { capacity: 2, kind: 'worktree' }, 'test-suite': { capacity: 1, kind: 'semaphore' } },
+        gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+        chores: { review: REVIEW_CHORE },
+        pipelines: { 'standard-phase': STANDARD_PHASE },
+        pipeline: 'standard-phase',
+        crew,
+      })
+      return WorkflowSchema.parse({
+        ...workflow,
+        defaults: { ...workflow.defaults, escalate_after_rejections: limit },
+      })
+    }
+    const answerEach = async (r: Rig, answers: readonly string[]): Promise<void> => {
+      for (const [index, answer] of answers.entries()) {
+        await until(
+          () => r.scheduler.statuses['a'] === 'awaiting_human' && questionsOf(r, 'a').length > index,
+          `question ${index + 1}`,
+        )
+        r.scheduler.answer('a', { human: { answer } })
+      }
+    }
+
+    it('moves the phase up a tier, as an amendment with its reason', async () => {
+      const r = rig(escalating(2, { tier1: CREW.tier1, 'tier2-1': CREW['tier2-1'] }), {
+        onFailure: 'retry',
+        retries: 1,
+        outcomes: { ...APPROVED, 'e-review:review': [verdict('fail'), verdict('fail'), verdict('pass')] },
+      })
+
+      const running = r.scheduler.run()
+      // Rejected, continued, rejected again — the second is the limit — and
+      // stopped, which the automatic retry picks up on the new desk.
+      await answerEach(r, ['continue', 'stop'])
+      const report = await running
+
+      expect(report.statuses).toEqual({ a: 'done', 'on-tier2-1': 'done' })
+      const amended = r.journal.events('run-1').filter((event) => event.type === 'workflow_amended')
+      expect(amended.map((event) => event.payload)).toMatchObject([
+        {
+          amendment: 1,
+          author: 'scheduler',
+          targets: ['node:a'],
+          reason: {
+            kind: 'review_rejections',
+            node: 'a',
+            from: 'tier1',
+            to: 'tier2-1',
+            from_tier: 1,
+            to_tier: 2,
+            rejections: 2,
+          },
+        },
+      ])
+      expect(r.journal.readWorkflow('run-1').nodes[0]?.crew).toBe('tier2-1')
+      // The first attempt stayed on its desk; the retry took the new one.
+      const members = crewEvents(r).map((event) => event['member'])
+      expect(members[0]).toBe('tier1')
+      expect(members.at(-2)).toBe('tier2-1')
+      expect(r.adapter.spawned.filter((task) => task.nodeId === 'a').at(-1)?.model).toBe('medium')
+      expectDrained(r)
+    })
+
+    it('leaves the phase where it is at the top tier, and when turned off', async () => {
+      for (const [limit, crew] of [
+        [1, { tier1: CREW.tier1 }],
+        [0, { tier1: CREW.tier1, tier4: CREW.tier4 }],
+      ] as const) {
+        const r = rig(escalating(limit, crew), {
+          outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
+        })
+        const report = await runAnsweringStop(r, 'a')
+
+        expect(report.statuses['a']).toBe('failed')
+        expect(r.journal.events('run-1').filter((event) => event.type === 'workflow_amended')).toEqual([])
+      }
+    })
+  })
+
   it('leaves an unstaffed workflow on the model it always used', async () => {
     const r = rig(makeWorkflow([node('a'), node('b', ['a'], { model: 'override' })]))
     await r.scheduler.run()

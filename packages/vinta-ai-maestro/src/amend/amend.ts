@@ -55,7 +55,7 @@
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { computeWaves } from '../graph.ts'
-import type { AmendmentAuthor, AmendmentChange, NodeStatus } from '../journal/events.ts'
+import type { AmendmentAuthor, AmendmentChange, AmendmentReason, NodeStatus } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
 import type { Workflow } from '../types.ts'
 import { parseWorkflow, type ValidationIssue } from '../validate.ts'
@@ -148,6 +148,8 @@ export interface AmendOptions {
   readonly targets?: readonly string[]
   /** On a `config` amendment: the commit its layers were read at. */
   readonly source?: string
+  /** On a `scheduler` amendment: the rule that made it (`workflow_amended.reason`). */
+  readonly reason?: AmendmentReason
 }
 
 /**
@@ -161,11 +163,13 @@ export interface AmendOptions {
 export async function amendRun(options: AmendOptions): Promise<AmendResult> {
   const { journal, runId } = options
 
-  const parsed = parseWorkflow(options.proposed)
+  const snapshot = journal.readWorkflow(runId)
+  // Against the snapshot, so moving a member's last phase to another desk is
+  // not refused for leaving that member idle.
+  const parsed = parseWorkflow(options.proposed, { amending: snapshot })
   if (!parsed.ok) return { ok: false, code: 'invalid_workflow', issues: parsed.issues }
   const proposed = parsed.workflow
 
-  const snapshot = journal.readWorkflow(runId)
   if (proposed.id !== snapshot.id) {
     return {
       ok: false,
@@ -220,6 +224,7 @@ export async function amendRun(options: AmendOptions): Promise<AmendResult> {
       author: options.author ?? 'operator',
       targets: [...(options.targets ?? targetsOf(snapshot, proposed))],
       ...(options.source === undefined ? {} : { source: options.source }),
+      ...(options.reason === undefined ? {} : { reason: options.reason }),
     },
   })
   registerNodes(journal, runId, proposed, status, diff)

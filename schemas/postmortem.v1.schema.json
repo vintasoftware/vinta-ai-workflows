@@ -651,7 +651,8 @@
                       "operator",
                       "monitor",
                       "coordinator",
-                      "config"
+                      "config",
+                      "scheduler"
                     ]
                   }
                 },

@@ -437,6 +437,13 @@
             "any"
           ]
         },
+        "escalate_after_rejections": {
+          "default": 3,
+          "description": "Review rejections a phase may take on one desk before it moves up a crew tier. Every review that does not approve counts, across attempts; at the Nth the scheduler amends the run, moving the phase to the cheapest member of the next tier up, journalled as a `workflow_amended` row by `scheduler` with the reason and the count. The new desk takes the phase from its next attempt, and the count starts again there. Nothing happens at the top tier, or in a workflow with no roster. `0` turns it off. One observed run left a Tier 1 phase rejected 16 times over six hours before a person moved it.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "pull_requests": {
           "default": "phase",
           "description": "Which pull requests a run opens. `phase` — the default — one per phase, one per integration branch, and the plan PR that lands them all: the phase PRs are review units stacked in merge order. `plan` opens the plan PR alone, from the last wave branch, which already holds every phase and every conflict resolution; review happens there. One observed ten-phase refactor opened fifteen PRs that nobody was going to merge. Under `plan` a phase has no PR of its own, so its `after_pr` chores are skipped.",

@@ -121,6 +121,7 @@ import {
   type PipelineRun,
   type StepResult,
 } from '../pipeline/interpreter.ts'
+import { amendRun, type AmendRunner } from '../amend/amend.ts'
 import { LanePrepareError, LaneRecycleError, LaneSetupError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
@@ -806,6 +807,12 @@ interface NodeState {
   emptyTurns: { readonly harness: string; readonly count: number } | null
   /** The attempt that just failed ended on a `HarnessFault`. Read once by `#recover`. */
   harnessFault: boolean
+  /**
+   * Reviews that did not approve this phase on its current desk, across
+   * attempts. At `defaults.escalate_after_rejections` the phase moves up a
+   * tier (`#countRejection`), and the count starts again on the new desk.
+   */
+  reviewRejections: number
   /** Questions the host asked through `askNode`. Keeps their effect ids apart. */
   hostAsks: number
   /**
@@ -963,6 +970,11 @@ export class Scheduler {
    * through `#options`.
    */
   #workflow: Workflow
+  /**
+   * The host's side of §9's amend, for the amendments the scheduler makes
+   * itself (`bindAmendRunner`). Unbound, only this scheduler adopts them.
+   */
+  #amendRunner: AmendRunner | null = null
   readonly #takeovers: PtyRegistry
   readonly #freeLanes: string[]
   /** Lane slots a node has already run in, and which therefore need recycling. */
@@ -1137,6 +1149,7 @@ export class Scheduler {
       setupFailure: null,
       emptyTurns: null,
       harnessFault: false,
+      reviewRejections: 0,
       hostAsks: 0,
       released: false,
       landed: false,
@@ -1220,6 +1233,16 @@ export class Scheduler {
     // run up, so nothing is lost by staying quiet here.
     if (row.status === 'pending') return
     this.#setStatus(state, 'pending')
+  }
+
+  /**
+   * The composition's `AmendRunner`, so an amendment the scheduler makes on its
+   * own (`#countRejection`) reaches everything an operator's does: the
+   * executor, the gate broker and the integrator learn it through the runner's
+   * `adopt`, which ends by calling this scheduler's.
+   */
+  bindAmendRunner(runner: AmendRunner): void {
+    this.#amendRunner = runner
   }
 
   /**
@@ -3166,6 +3189,7 @@ export class Scheduler {
           this.#choreResult(state, entry.id, 'failed', startedAt)
           verdict = 'fail'
           stated = outcome.facts?.review?.['stated'] !== false
+          await this.#countRejection(state)
           break
         }
         this.#choreResult(state, entry.id, 'ran', startedAt)
@@ -3181,6 +3205,7 @@ export class Scheduler {
         if (review) {
           verdict = 'fail'
           stated = false
+          await this.#countRejection(state)
           break
         }
       }
@@ -3195,6 +3220,86 @@ export class Scheduler {
     if (when !== 'review') return outcome
     return {
       facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict, ...(stated ? {} : { stated: false }) } },
+    }
+  }
+
+  /**
+   * One more review that did not approve, and the desk moves up a tier once
+   * there have been `defaults.escalate_after_rejections` of them.
+   *
+   * One observed run left a Tier 1 phase on its desk through 16 rejections
+   * over six hours, until the coordinator moved it with four amendments. The
+   * rule is the one a person applied: the cheapest member of the next tier up
+   * the roster takes the phase. It is an amendment — `author: scheduler`, with
+   * the rule and the count as its `reason` — rather than a private override
+   * like `retry with`, so it reads in the run's history like any other change
+   * of desk, survives a resume in the snapshot, and reaches the host through
+   * `bindAmendRunner` the way an operator's does. A crew change moves no base,
+   * so it is never refused for the phase being in flight; the new desk takes
+   * the phase at its next claim, which is its next attempt.
+   *
+   * Never throws: an amendment that cannot be made leaves the phase where it
+   * was, and the review's own outcome is what the caller is reporting.
+   */
+  async #countRejection(state: NodeState): Promise<void> {
+    state.reviewRejections += 1
+    const limit = this.#workflow.defaults.escalate_after_rejections ?? 3
+    if (limit === 0 || state.reviewRejections < limit) return
+    const from = state.retryMember ?? state.node.crew
+    const desk = from === undefined ? undefined : this.#workflow.crew[from]
+    if (from === undefined || desk === undefined) return
+    const next = roster(this.#workflow.crew).find((member) => member.tier > desk.tier)
+    if (next === undefined) {
+      if (state.reviewRejections === limit) {
+        this.#log.info('node.escalation_unavailable', { node: state.node.id, member: from, tier: desk.tier })
+      }
+      return
+    }
+
+    const nodeId = state.node.id
+    const rejections = state.reviewRejections
+    const proposed: Workflow = {
+      ...this.#workflow,
+      nodes: this.#workflow.nodes.map((node) => (node.id === nodeId ? { ...node, crew: next.id } : node)),
+    }
+    try {
+      const result = await amendRun({
+        journal: this.#options.journal,
+        runId: this.#options.runId,
+        proposed,
+        runner: this.#amendRunner ?? { adopt: (workflow) => this.adopt(workflow) },
+        author: 'scheduler',
+        targets: [`node:${nodeId}`],
+        reason: {
+          kind: 'review_rejections',
+          node: nodeId,
+          from,
+          to: next.id,
+          from_tier: desk.tier,
+          to_tier: next.tier,
+          rejections,
+        },
+      })
+      if (!result.ok) {
+        this.#log.warn('node.escalation_refused', { node: nodeId, code: result.code })
+        return
+      }
+      // `adopt` replaces only unstarted nodes' definitions, and this one is
+      // running: its next claim reads the desk from here.
+      const amended = result.workflow.nodes.find((node) => node.id === nodeId)
+      if (amended !== undefined) state.node = amended
+      state.retryMember = null
+      state.reviewRejections = 0
+      this.#log.info('node.escalated', {
+        node: nodeId,
+        from,
+        to: next.id,
+        to_tier: next.tier,
+        rejections,
+        amendment: result.amendment,
+      })
+    } catch (error) {
+      this.#log.warn('node.escalation_failed', { node: nodeId, ...errorFields(error) })
     }
   }
 

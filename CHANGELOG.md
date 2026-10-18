@@ -35,6 +35,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: a phase the review keeps rejecting moves up a crew
+  tier.** One run left a Tier 1 phase on its desk through 16 review rejections
+  over six hours until the coordinator moved it by hand. New
+  `defaults.escalate_after_rejections` (default `3`, `0` turns it off): when a
+  phase's review has failed to approve that many times on one desk, counted
+  across attempts, the scheduler amends the run. The phase moves to the
+  cheapest member of the next tier up and takes the new desk from its next
+  attempt. The amendment is journalled as `workflow_amended` with the new
+  author `scheduler` and a new `reason` field (`review_rejections`, the
+  members, the tiers and the count). A phase already at the top tier stays
+  where it is. Amendments may now leave a member the run already had with no
+  phase, so moving a member's last phase is no longer refused.
+
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
   agent — showed `running` over a silent transcript, and one queued behind it

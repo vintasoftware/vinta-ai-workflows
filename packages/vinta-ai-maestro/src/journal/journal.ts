@@ -271,7 +271,7 @@ export class Journal {
   /** Reads back the frozen snapshot. Throws if it is missing or no longer valid. */
   readWorkflow(runId: string): Workflow {
     const raw: unknown = JSON.parse(readFileSync(join(this.runDir(runId), 'workflow.json'), 'utf8'))
-    const result = parseWorkflow(raw)
+    const result = parseWorkflow(raw, { frozen: true })
     if (!result.ok) {
       throw new Error(`run "${runId}": frozen workflow is invalid\n${formatIssues(result.issues)}`)
     }
