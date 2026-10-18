@@ -35,6 +35,34 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: a list of what the run decided without you.** One
+  run answered 79 of its 125 questions unattended — review loops stopped,
+  agents' design questions given their first option, one of which added a
+  migration — and none of it was anywhere a person would look. Every question
+  a `--retry-after` timer or the run coordinator answered, and everything the
+  coordinator did on its own (steering, pauses, aborts, amendments, `exec`),
+  is now listed in:
+  - `status <run>` (*Decided without you*; `unattended` in `--json`), with an
+    agent question's header and the option it got;
+  - the run view's **Decided without you** panel (`GET /api/runs/:runId/unattended`);
+  - the plan PR's *Decided without a person* section;
+  - the post-mortem's new optional `unattended_decisions` finding
+    (`schemas/postmortem.v1.schema.json`, additive), which `plan-feature`
+    now reads: an agent question answered unattended is a decision the plan
+    left open.
+- **`vinta-ai-maestro`: `--agent-answer-after` on `run` and `ui`.** How long an
+  agent's own question waits before it takes the recommended options. It
+  used to be `--retry-after`, so a one-minute retry interval answered design
+  questions in a minute. Unset, it is twice `--retry-after` and never under 30
+  minutes; set alone, agents' questions are answered while failures still
+  wait for a person.
+- **`vinta-ai-maestro`: `doctor` checks the gates against CI.** It reads
+  `.github/workflows/*.yml` and warns about each `run:` command no gate runs,
+  or runs without a flag CI passes (`manage.py check` for CI's `check
+  --deploy`) — the reason every gate passed while CI failed on twenty review
+  PRs of one run. Matching is heuristic (tool and subcommand after `uv run`,
+  `npx`, `docker compose run`, …; `uses:` steps are not read) and it is always
+  a warning.
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
   agent — showed `running` over a silent transcript, and one queued behind it
