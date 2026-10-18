@@ -106,6 +106,8 @@ These bleed across sub-skills, so capture once now:
    - **A test-suite pool.** `AskUserQuestion`: `One suite at a time (Recommended for DB-backed suites)`, `Two at a time`, `No limit`. A limit emits `maestro.resources.test-suite` (`kind: semaphore`, `capacity` 1 or 2) and `maestro.gates.test.requires: [test-suite]`. Then offer the runner's command patterns as the pool's `match` (`pytest*`, `uv run pytest*`, `pnpm test*`), which makes agents take the lease before running tests by hand.
    - **Files git does not carry.** A maestro lane is a worktree and has only what git tracks. Read `.gitignore` for entries with a tracked `*.example` / `*.sample` / `*.template` sibling, the compose file's `env_file:` lines, and the gitignored settings module the framework imports (`DJANGO_SETTINGS_MODULE`'s local module, typically). Propose the list in a multi-select `AskUserQuestion` (header `Env files`), each path pre-selected; the user confirms or drops entries. → `maestro.project.env_files`. Every hook, gate and `manage.py` call in a lane depends on these, and a plan that omits them fails in ways that look like code problems. Nothing found → omit the key and say so.
 
+   - **Generated files and append-only registries.** Read the project for generators — an API schema command (`spectacular`, an `openapi.json` dump), a generated client (`openapi-ts`, `orval`, `openapi-generator`, `graphql-codegen`; `*.gen.ts`), a route tree (`routeTree.gen.ts`) — and for file-modifying hooks in `.pre-commit-config.yaml` / `lefthook.yml` / `lint-staged` (a schema hook, `ruff format`, `prettier --write`). Propose each as a codegen step in a multi-select `AskUserQuestion` (header `Codegen`), pre-selected, showing its command, inputs and outputs; a formatter is `format: true` with `{changed_files}` in its command. → `maestro.codegen`. Then propose append-only registries — DI containers, URL route lists, notification-kind registries, beat schedules — in a second multi-select (header `Registries`). → `maestro.append_only`. Nothing found → omit both keys and say so.
+
    Everything here is a default under every plan. A plan's own `.workflow.json` overrides any of it, and a commit to this file on a running plan's branch (`plan/<workflow-id>/base`) is applied to that run.
 
 ### D. Optional foundation skills
@@ -379,6 +381,14 @@ maestro:
       capacity: <1 | 2>
       kind: semaphore
       match: <C.11 → runner command patterns, e.g. ['pytest*', 'uv run pytest*']>
+  codegen:  # C.11 → generators and file-modifying hooks; omit when none
+    <step-id>:
+      cmd: <the generator command, e.g. uv run python manage.py spectacular --file schema.yml>
+      inputs: <globs it reads, e.g. ['**/serializers.py', '**/views.py']; omit to run every time>
+      outputs: <globs it writes, e.g. [schema.yml]>
+      after: <steps that run first, e.g. [schema]; omit when none>
+      format: <true for a formatter whose cmd takes {changed_files}; omit otherwise>
+  append_only: <C.11 → registries phases only append to, e.g. [app/containers.py, app/urls.py]; omit when none>
   project:
     env_files: <C.11 → gitignored files every lane needs its own copy of, e.g. [.env, .env.docker, app/settings/local.py]; omit when none>
 

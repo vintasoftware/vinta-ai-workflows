@@ -334,7 +334,7 @@
       "default": []
     },
     "maestro": {
-      "description": "Project-wide defaults for `vinta-ai-maestro` runs, layered UNDER every plan's `ai-plans/*.workflow.json`: a plan's own value wins, and a run's mid-run amendments win over both. Maps keyed by id (`resources`, `chores`, `project.databases`, `project.services`) merge per id with the plan's entry replacing the project's whole; a typed gate merges field by field; lists replace. Shapes are the workflow schema's (`workflow.v1.schema.json`) — maestro validates them strictly at load. A run follows its plan branch (`plan/<workflow-id>/base`): committing a change to this file on that branch applies it to the live run. Absent: every plan carries everything itself.",
+      "description": "Project-wide defaults for `vinta-ai-maestro` runs, layered UNDER every plan's `ai-plans/*.workflow.json`: a plan's own value wins, and a run's mid-run amendments win over both. Maps keyed by id (`resources`, `chores`, `codegen`, `project.databases`, `project.services`) merge per id with the plan's entry replacing the project's whole; a typed gate merges field by field; lists replace. Shapes are the workflow schema's (`workflow.v1.schema.json`) — maestro validates them strictly at load. A run follows its plan branch (`plan/<workflow-id>/base`): committing a change to this file on that branch applies it to the live run. Absent: every plan carries everything itself.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -688,6 +688,43 @@
           },
           "additionalProperties": {
             "type": "object"
+          }
+        },
+        "codegen": {
+          "description": "Codegen steps by id (`cmd`, `outputs`, `inputs`, `after`, `requires`, `timeout_s`, `format`) — the workflow schema's `codegen` entries. Deterministic commands that write declared files: an OpenAPI schema, the client generated from it, a route tree, or a formatter scoped to the files a phase changed (`format: true`, `{changed_files}` in `cmd`). Maestro runs them in every lane before its gates and commits what they write, and in the integration worktree around every merge, where a conflict confined to their outputs is settled by running them instead of by a fixer agent. A failing step is a red gate.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "cmd",
+              "outputs"
+            ],
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1
+              },
+              "outputs": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "append_only": {
+          "description": "Files every phase only appends to — a DI container, a URL route list, a registry of notification kinds, a beat schedule — as gitattributes patterns. Maestro merges them in the integration worktree with git's `union` driver, so two phases each adding an entry do not conflict; the merged tree is then gated as any other. A plan's own `append_only` replaces this list.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "project": {

@@ -62,6 +62,17 @@ maestro:
     deslop:
       skill: deslop-comments
       prompt: Run the deslop-comments skill over this phase's diff.
+  codegen:
+    schema:
+      cmd: uv run python manage.py spectacular --file schema.yml
+      inputs: ['**/serializers.py', '**/views.py']
+      outputs: [schema.yml]
+    client:
+      cmd: pnpm --dir frontend generate-client
+      inputs: [schema.yml]
+      outputs: ['frontend/src/api-client/**']
+      after: [schema]
+  append_only: [app/containers.py, app/urls.py]
   project:
     migrate_cmd: uv run python manage.py migrate
     env_files: [.env]

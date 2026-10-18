@@ -1,0 +1,24 @@
+# A codegen step must say which files it writes: they are what is committed,
+# what agents are told not to edit, and what a merge conflict is settled by.
+schema_version: 1
+vinta_ai_workflows_version: 0.7.0-alpha35
+project:
+  name: acme
+  default_branch: main
+  code_host: github
+  stack_summary: Django + React
+  ai_plans_dir: ai-plans
+policies:
+  pr_creation: agents-create
+  ai_coauthor: allowed
+  commit_style: conventional
+  stage_pattern: git add <paths>
+vendors: [claude]
+foundation_skills:
+  plan-feature: enabled
+foundation_agents:
+  implementer: enabled
+maestro:
+  codegen:
+    schema:
+      cmd: uv run python manage.py spectacular --file schema.yml
