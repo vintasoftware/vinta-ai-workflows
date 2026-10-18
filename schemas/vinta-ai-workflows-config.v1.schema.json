@@ -446,7 +446,7 @@
           "additionalProperties": false
         },
         "gates": {
-          "description": "Per gate type. Each type with a command is also available to every plan under the type's own name (`gates: [typecheck, test]` on a node, with no gate table).",
+          "description": "Keyed by gate type (`test`, `lint`, `typecheck`, `e2e`) or by a custom id. Each type with a command is also available to every plan under the type's own name (`gates: [typecheck, test]` on a node, with no gate table). Any other key is a custom project-wide gate — e.g. `django-check: { cmd: uv run python manage.py check --fail-level WARNING }` — that every plan has under that id and that `maestro.defaults.gates` names like a type. A custom id is lowercase kebab-case; `codegen` is reserved (it names a plan's codegen steps).",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -598,6 +598,56 @@
               "properties": {
                 "cmd": {
                   "description": "The full check maestro runs for this type. Overrides the `commands.*` line for maestro only — `implement-plan` keeps running `commands.*`.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "scoped_cmd": {
+                  "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requires": {
+                  "description": "Resource pools the gate holds while it runs, e.g. `[test-suite]`.",
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  }
+                },
+                "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "tuning": {
+                  "description": "Flags the monitor may add to `cmd` when it retunes the gate mid-run. Same shape as a workflow gate's `tuning`.",
+                  "type": "object",
+                  "properties": {
+                    "allowed_flags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    }
+                  },
+                  "required": [
+                    "allowed_flags"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "patternProperties": {
+            "^(?!(?:test|lint|typecheck|e2e|codegen)$)[a-z0-9][a-z0-9-]*$": {
+              "description": "A custom gate every plan has under this id, untyped: nothing supplies its command but `cmd` here. A plan's own gate of the same id replaces it whole. Same fields as a gate type's entry.",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["cmd"],
+              "properties": {
+                "cmd": {
+                  "description": "The full check. Required: only the four gate types inherit a command from `commands.*`.",
                   "type": "string",
                   "minLength": 1
                 },

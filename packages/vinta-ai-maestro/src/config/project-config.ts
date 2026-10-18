@@ -59,10 +59,64 @@ export const GateTypeDefaultsSchema = z.strictObject({
   tuning: GateTuningSchema.optional(),
 })
 
+/**
+ * Gate ids a project may not declare a custom gate under. `codegen` is the
+ * agent's `vinta-ai-maestro codegen` verb and the broker's `codegen:` namespace
+ * for a plan's codegen steps: a gate of that name would read as one of them in
+ * every prompt, log line and `gate` call that names it.
+ */
+export const RESERVED_GATE_IDS: readonly string[] = ['codegen']
+
+const GATE_ID = /^[a-z0-9][a-z0-9-]*$/
+
+/**
+ * `maestro.gates`, keyed by gate type or by a custom id.
+ *
+ * Under a type's name (`test`, `lint`, `typecheck`, `e2e`) an entry is what
+ * gates of that type inherit, over the matching `commands.*` line. Under any
+ * other id it is a project-wide gate of its own — `django-check`,
+ * `api-client-fresh` — that every plan has under that id without declaring
+ * it, and that `maestro.defaults.gates` names like any other. Nothing
+ * supplies a custom gate's command but itself, so it must carry `cmd`.
+ *
+ * Checked in a refinement rather than as a key schema so that each refusal
+ * says what is wrong with the id and where, not "invalid key in record".
+ */
+export const ProjectGatesSchema = z
+  .record(z.string(), GateTypeDefaultsSchema)
+  .superRefine((gates, ctx) => {
+    for (const [id, gate] of Object.entries(gates)) {
+      if ((GATE_TYPES as readonly string[]).includes(id)) continue
+      if (!GATE_ID.test(id)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [id],
+          message:
+            'a custom gate id must be lowercase kebab-case (e.g. `django-check`) — the built-in types are ' +
+            `${GATE_TYPES.join(', ')}`,
+        })
+      } else if (RESERVED_GATE_IDS.includes(id)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [id],
+          message: `\`${id}\` is reserved: it names the plan's codegen steps (\`vinta-ai-maestro codegen\`) — pick another id`,
+        })
+      } else if (gate.cmd === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [id, 'cmd'],
+          message:
+            `custom gate "${id}" has no \`cmd\` — only the built-in types (${GATE_TYPES.join(', ')}) ` +
+            'inherit one from `commands.*`',
+        })
+      }
+    }
+  })
+
 export const MaestroConfigSchema = z
   .strictObject({
     defaults: DefaultsSchema.partial().optional(),
-    gates: z.partialRecord(z.enum(GATE_TYPES), GateTypeDefaultsSchema).optional(),
+    gates: ProjectGatesSchema.optional(),
     resources: z.record(Id, ResourceSchema).optional(),
     chores: z.record(Id, ChoreSchema).optional(),
     codegen: z.record(Id, CodegenStepSchema).optional(),

@@ -357,7 +357,7 @@ with the project's commands:
    change never undoes one of these.
 
 **The merge rules are the workflow's own.** Maps keyed by id (`resources`,
-`chores`, `project.databases`, `project.services`) merge per id, and the higher
+`chores`, custom `gates`, `project.databases`, `project.services`) merge per id, and the higher
 layer's entry replaces the lower one's whole. Lists replace (`defaults.gates`,
 `defaults.chores`, a node's `gates`), so `[]` still opts out. Plain objects
 (`defaults`, `project`, `project.commands`) merge field by field. A plan with no
@@ -449,6 +449,30 @@ after wrappers (`uv run`, `npx`, `docker compose run -T svc`, `pnpm x` = `npm
 run x`) and is heuristic: `uses:` actions are not read, a script is compared
 by its name, and a CI-only step such as a deploy may rightly stay out of the
 gates. It is always a warning.
+
+Checks like these usually belong to the project, not to one plan. Declare them
+once as **custom gates** under `maestro.gates`, keyed by an id of your own, and
+name them in `maestro.defaults.gates`:
+
+```yaml
+maestro:
+  defaults:
+    gates: [typecheck, lint, test, django-check, api-client-fresh]
+  gates:
+    django-check:
+      cmd: uv run python manage.py check --fail-level WARNING
+    api-client-fresh:
+      cmd: make api_client && git diff --exit-code -- frontend/src/api
+      timeout_s: 600
+```
+
+A custom gate takes the fields a gate type does (`cmd`, `scoped_cmd`,
+`requires`, `timeout_s`, `tuning`) and must carry its own `cmd`: only the four
+types inherit one from `commands.*`. Every plan has it under its id, with its
+own verdict, cache entry and line in `status` — rather than chained onto
+`typecheck` as one verdict for four checks. A plan entry of the same id
+replaces it whole. The id is lowercase kebab-case, and `codegen` is reserved
+(it names the plan's codegen steps); `validate` refuses either.
 
 ### Compose commands need `-T`
 

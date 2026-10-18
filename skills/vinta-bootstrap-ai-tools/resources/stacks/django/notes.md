@@ -47,7 +47,7 @@ If no multi-tenancy signals → single-tenant Django; the team's templates may s
 
 ## Gates that should mirror CI
 
-Ask which of these CI runs, and suggest each one it runs as a gate (`maestro.gates` / `commands`), so a phase cannot pass every gate and still fail CI:
+Ask which of these CI runs, and suggest each one it runs as a gate, so a phase cannot pass every gate and still fail CI. Declare each once, project-wide, as a custom gate under `maestro.gates.<id>` in `.vinta-ai-workflows.yaml` (e.g. `django-check: { cmd: ... }`, `api-client-fresh: { cmd: ... }`) and add its id to `maestro.defaults.gates` — every plan then runs it as its own gate, with its own verdict. Don't chain these onto the `typecheck` / `test` lines in `commands`: one verdict for several unrelated checks tells a fixer nothing about which one failed.
 
 - **Deploy check at warning level** — `python manage.py check --deploy --fail-level WARNING` (with the CI settings module). Catches what `check` alone passes: URL patterns Django warns about (e.g. a `path()` route that looks like a regex), security settings, model warnings. One observed run added regex-style routes that passed every gate and failed this check in CI.
 - **Migrations complete** — `python manage.py makemigrations --check --dry-run`.

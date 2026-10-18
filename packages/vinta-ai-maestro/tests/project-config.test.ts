@@ -158,6 +158,83 @@ describe('resolving a plan over its project', () => {
   })
 })
 
+describe('custom project gates', () => {
+  const config: ProjectConfig = {
+    commands: { build: 'mypy .', test_unit: 'pytest' },
+    maestro: {
+      defaults: { gates: ['typecheck', 'test', 'django-check', 'api-client-fresh'] },
+      gates: {
+        test: { timeout_s: 900 },
+        'django-check': { cmd: 'python manage.py check --fail-level WARNING' },
+        'api-client-fresh': { cmd: 'make api_client && git diff --exit-code -- client', requires: ['codegen-lock'], timeout_s: 600 },
+      },
+      resources: { 'codegen-lock': { capacity: 1, kind: 'semaphore' } },
+    },
+  }
+
+  it('gives every plan each one under its id, untyped, and runs it from `maestro.defaults.gates`', () => {
+    const workflow = resolved(plan(), config)
+    expect(Object.keys(workflow.gates)).toEqual(['test', 'typecheck', 'django-check', 'api-client-fresh'])
+    expect(workflow.gates['django-check']).toEqual({ cmd: 'python manage.py check --fail-level WARNING', requires: [], timeout_s: 1800 })
+    expect(workflow.gates['api-client-fresh']).toMatchObject({ requires: ['codegen-lock'], timeout_s: 600 })
+    expect(workflow.gates['api-client-fresh']).not.toHaveProperty('type')
+    // The type default beside them still merges into its type.
+    expect(workflow.gates['test']).toMatchObject({ type: 'test', cmd: 'pytest', timeout_s: 900 })
+    expect(workflow.nodes.find((node) => node.id === 'p1')?.gates).toEqual(['typecheck', 'test', 'django-check', 'api-client-fresh'])
+  })
+
+  it('lets a plan name one on a node, or replace it whole under the same id', () => {
+    const workflow = resolved(
+      plan({
+        gates: { 'django-check': { cmd: 'python manage.py check' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1', gates: ['api-client-fresh', 'django-check'] }],
+      }),
+      config,
+    )
+    expect(workflow.gates['django-check']).toEqual({ cmd: 'python manage.py check', requires: [], timeout_s: 1800 })
+    expect(workflow.nodes[0]?.gates).toEqual(['api-client-fresh', 'django-check'])
+  })
+
+  it('is what a plan with no project configuration never sees', () => {
+    expect(resolved(plan({ gates: { unit: { cmd: 'npm test' } } }), null).gates).not.toHaveProperty('django-check')
+  })
+
+  it('refuses a malformed or reserved id, and a custom gate with no command, at the key that is wrong', () => {
+    const issuesOf = (text: string) => {
+      const result = parseProjectConfig(text)
+      expect(result.ok).toBe(false)
+      return result.ok ? [] : result.issues
+    }
+    const [bad] = issuesOf('maestro:\n  gates:\n    Django_Check:\n      cmd: x\n')
+    expect(bad).toMatchObject({ path: ['maestro', 'gates', 'Django_Check'] })
+    expect(bad?.message).toMatch(/lowercase kebab-case.*test, lint, typecheck, e2e/)
+
+    const [reserved] = issuesOf('maestro:\n  gates:\n    codegen:\n      cmd: make api_client\n')
+    expect(reserved).toMatchObject({ path: ['maestro', 'gates', 'codegen'] })
+    expect(reserved?.message).toMatch(/reserved/)
+
+    const [commandless] = issuesOf('maestro:\n  gates:\n    django-check:\n      timeout_s: 60\n')
+    expect(commandless).toMatchObject({ path: ['maestro', 'gates', 'django-check', 'cmd'] })
+    expect(commandless?.message).toMatch(/custom gate "django-check" has no `cmd`/)
+
+    // A type's entry may still omit `cmd`: it inherits one from `commands.*`.
+    expect(parseProjectConfig('maestro:\n  gates:\n    test:\n      timeout_s: 60\n').ok).toBe(true)
+  })
+
+  it('accepts the config schema’s custom-gates fixture and refuses its invalid ones', () => {
+    const fixtures = join(import.meta.dirname, '../../../tests/schema-fixtures/vinta-ai-workflows-config.v1')
+    const valid = parseProjectConfig(readFileSync(join(fixtures, 'valid/maestro-custom-gates.yaml'), 'utf8'))
+    expect(valid.ok).toBe(true)
+    if (valid.ok) {
+      const workflow = resolved(plan(), valid.config)
+      expect(workflow.nodes[0]?.gates).toEqual(['typecheck', 'lint', 'test', 'django-check', 'api-client-fresh'])
+    }
+    for (const name of ['maestro-custom-gate-no-cmd', 'maestro-custom-gate-bad-id', 'maestro-custom-gate-reserved-id']) {
+      expect(parseProjectConfig(readFileSync(join(fixtures, `invalid/${name}.yaml`), 'utf8')).ok, name).toBe(false)
+    }
+  })
+})
+
 describe('gates that run in full on every phase', () => {
   /** Both phases gated on `gates`, so every gate named is one a phase runs. */
   const gatedPlan = (gates: readonly string[], overrides: Record<string, unknown> = {}): Record<string, unknown> =>

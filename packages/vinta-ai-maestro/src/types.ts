@@ -1199,7 +1199,8 @@ export const AuthoredWorkflowSchema = WorkflowSchema.extend({
       'Gates by id. A command gate with a `type` may omit `cmd` and inherit it from the ' +
         'project. Gates the project configures by type (`maestro.gates.<type>`, or a ' +
         '`commands.*` line) are also available under the type’s name without being declared ' +
-        'here.',
+        'here, and so is every custom gate the project declares (`maestro.gates.<id>`) under ' +
+        'its id. An entry here of the same id replaces the project’s whole.',
     ),
 }).describe(
   'An executable plan: the phase DAG, the pipelines phases run through, the capacity ' +

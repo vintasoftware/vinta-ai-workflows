@@ -1,5 +1,4 @@
-# `maestro.gates` is keyed by gate type, and `smoke` is not one: the types are
-# test, lint, typecheck and e2e, each of which reads a `commands.*` line.
+# A custom gate id is lowercase kebab-case, like every other id in a workflow.
 schema_version: 1
 vinta_ai_workflows_version: 0.7.0-alpha25
 project:
@@ -24,5 +23,5 @@ foundation_agents:
   implementer: enabled
 maestro:
   gates:
-    smoke:
-      cmd: ./smoke.sh
+    Django_Check:
+      cmd: uv run python manage.py check

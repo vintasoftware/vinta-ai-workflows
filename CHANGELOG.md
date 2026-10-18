@@ -121,6 +121,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   PRs of one run. Matching is heuristic (tool and subcommand after `uv run`,
   `npx`, `docker compose run`, …; `uses:` steps are not read) and it is always
   a warning.
+- **`vinta-ai-maestro`: project-wide custom gates.** `maestro.gates` in
+  `.vinta-ai-workflows.yaml` now takes ids of your own beside the four types —
+  `django-check: { cmd: uv run python manage.py check --fail-level WARNING }`,
+  `api-client-fresh: { cmd: make api_client && git diff --exit-code … }` —
+  with the fields a type takes (`cmd`, `scoped_cmd`, `requires`, `timeout_s`,
+  `tuning`). Every plan has each one under its id without declaring it, and
+  `maestro.defaults.gates` names it like a type, so a check CI runs is
+  declared once and keeps its own verdict instead of being chained onto
+  `typecheck` or repeated in every plan. A plan's gate of the same id replaces
+  it whole. `validate` refuses an id that is not lowercase kebab-case, the
+  reserved `codegen`, and a custom gate with no `cmd`. Previously any key but
+  a type failed with "Unrecognized keys". Additive in the config schema.
+  `plan-feature` and the Django stack notes now point CI-mirroring checks at
+  `maestro.gates.<id>`.
 - **`vinta-ai-maestro`: codegen steps — generated files are regenerated, not
   merged.** A workflow (or `maestro.codegen` in `.vinta-ai-workflows.yaml`)
   declares `codegen.<id>`: a deterministic command, the files it writes
