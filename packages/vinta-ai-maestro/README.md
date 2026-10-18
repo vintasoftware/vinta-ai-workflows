@@ -99,7 +99,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `node <context\|redirect\|pause\|abort\|retry\|fresh\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, or `ignored`, which exits 1). `fresh` drops the phase's agent session so its next turn starts cold. A run whose last runnable phase was aborted stays up for its `retry`. |
 | `workflow <run-id>` | Prints the run's workflow as it stands now, every amendment applied. |
 | `amend <run-id> <workflow.json>` | Applies an edited workflow to a live run (§9's amend: refused while a phase it would move is running). |
-| `land <run-id> [--close]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base; `--close` closes those with a comment. |
+| `land <run-id> [--close] [--ready]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base (merging them would change nothing); `--close` closes those with a comment. Names a draft plan PR; `--ready` marks it ready for review. |
 | `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch after the run into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Stops at a conflict, leaving that branch as it was. |
 | `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
 | `gate-cache invalidate <run-id> <gate-id> [--tree <hash>]` | Forgets a gate's cached results, on one lane tree or on all of them, so its next run runs the command instead of replaying a verdict whose cause was outside the lane's tracked files. The operator's and the run coordinator's. |
@@ -121,7 +121,7 @@ There are also `judge-hook` and `guard-hook`, which are internal: they are the h
   base branch) with a merge commit, and nothing else; every phase and
   integration PR says it is a review unit. `vinta-ai-maestro land <run-id>`
   shows the state of all of them, and `--close` closes the ones whose work has
-  landed.
+  landed. A draft plan PR is flagged; `--ready` marks it ready to merge.
 - **A fix after the run** goes on the phase branch, so its PR is right; then
   `vinta-ai-maestro propagate <run-id> <phase>` carries it into the
   integration and wave branches, the plan PR's included.

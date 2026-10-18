@@ -204,6 +204,60 @@ describe('land', () => {
     expect(await addsNothing(dir, null, 'plan/x/no-such-branch', 'main')).toBeNull()
   })
 
+  it('decides by content: bookkeeping merges that are not in the base still add nothing', async () => {
+    const dir = repo()
+    commit(dir, P('phase-p1'), 'p1.txt', 'p1\n')
+    commit(dir, P('phase-p2'), 'p2.txt', 'p2\n')
+    // integ-p4: p1 with p2 merged in, then main merged in on top — a merge
+    // whose first parent is the integ branch's own merge, which main never gets.
+    merge(dir, P('integ-p4'), P('phase-p2'), P('phase-p1'))
+    commit(dir, 'main', 'other.txt', 'unrelated\n')
+    merge(dir, P('integ-p4'), 'main', P('integ-p4'))
+    // The plan PR lands p1 and p2 through the waves, not through integ-p4.
+    merge(dir, P('wave-1'), P('phase-p1'))
+    merge(dir, P('wave-1'), P('phase-p2'))
+    g(dir, 'merge', '-q', '--no-ff', '--no-edit', P('wave-1'))
+
+    expect(isAncestor(dir, P('integ-p4'), 'main')).toBe(false)
+    expect(await addsNothing(dir, null, P('integ-p4'), 'main')).toBe(true)
+
+    // One more line on the integ branch is work the base lacks.
+    commit(dir, P('integ-p4'), 'p4.txt', 'p4\n')
+    expect(await addsNothing(dir, null, P('integ-p4'), 'main')).toBe(false)
+  })
+
+  it('names a draft plan PR as one, and marks it ready with --ready', async () => {
+    const dir = repo()
+    const journal = openJournal(dir)
+    journal.createRun('r1', workflow())
+    journal.append({
+      runId: 'r1',
+      type: 'run_pr',
+      payload: { opened: true, base: 'main', head: P('wave-1'), url: 'https://example.invalid/pull/plan' },
+    })
+    journal.close()
+    const readied: string[] = []
+    const forge: Forge = {
+      view: async () => ({ state: 'open', head: P('wave-1'), base: 'main', draft: true }),
+      close: async () => true,
+      ready: async (url) => {
+        readied.push(url)
+        return true
+      },
+    }
+
+    const look = recorder()
+    expect(await landCommand(['r1', '--repo', dir], look.io, { forge })).toBe(0)
+    expect(look.out.join('\n')).toContain('Plan PR: https://example.invalid/pull/plan (open, draft)')
+    expect(look.out.join('\n')).toContain('GitHub will not merge a draft')
+    expect(readied).toEqual([])
+
+    const act = recorder()
+    expect(await landCommand(['r1', '--repo', dir, '--ready'], act.io, { forge })).toBe(0)
+    expect(readied).toEqual(['https://example.invalid/pull/plan'])
+    expect(act.out).toContain('Marked it ready for review.')
+  })
+
   it('names the one PR to merge, and closes only the landed ones with --close', async () => {
     const dir = repo()
     commit(dir, P('phase-p1'), 'p1.txt', 'p1\n')

@@ -13,10 +13,17 @@
  * reading as pending work.
  *
  * So this says the one order there is, and tells a PR whose work has landed
- * from one that still carries something: a PR is **landed** when every commit
- * it has that its base lacks is a merge whose parents are all in the base —
- * which is what an "Update branch" merge on a phase whose work arrived through
- * the plan PR looks like, and what an empty one looks like too.
+ * from one that still carries something: a PR is **landed** when merging it
+ * into its base would change nothing — the merge's tree is the base's tree.
+ * That is decided by content, not ancestry. Ancestry alone (every commit the
+ * base lacks is a merge of parents the base has) catches GitHub's "Update
+ * branch" on a phase whose work arrived through the plan PR, and is still the
+ * fast path; but an `integ-*` PR stayed open after its plan PR merged because
+ * three of its bookkeeping merges were not ancestors of the base, although
+ * every branch they merged was. Their content was all there.
+ *
+ * The plan PR may still be a draft — `gh pr merge` refuses one — so a draft is
+ * named as one, and `--ready` marks it ready for review.
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -29,8 +36,15 @@ export type PrState = 'open' | 'merged' | 'closed'
 
 /** The forge, as far as landing needs it. `gh` in production; a fake in tests. */
 export interface Forge {
-  view(url: string): Promise<{ readonly state: PrState; readonly head: string; readonly base: string } | null>
+  view(url: string): Promise<{
+    readonly state: PrState
+    readonly head: string
+    readonly base: string
+    readonly draft?: boolean
+  } | null>
   close(url: string, comment: string): Promise<boolean>
+  /** Marks a draft PR ready for review. Optional: a forge without drafts never needs it. */
+  ready?(url: string): Promise<boolean>
 }
 
 export interface ReviewUnit {
@@ -47,7 +61,7 @@ export interface ReviewUnit {
 export interface LandingPlan {
   readonly runId: string
   readonly baseBranch: string
-  readonly plan: { readonly url: string; readonly state: PrState | 'unknown' } | null
+  readonly plan: { readonly url: string; readonly state: PrState | 'unknown'; readonly draft: boolean } | null
   readonly units: readonly ReviewUnit[]
 }
 
@@ -89,7 +103,7 @@ export async function planLanding(options: LandingOptions): Promise<LandingPlan>
   return {
     runId,
     baseBranch: workflow.base_branch,
-    plan: planUrl === null ? null : { url: planUrl, state: planView?.state ?? 'unknown' },
+    plan: planUrl === null ? null : { url: planUrl, state: planView?.state ?? 'unknown', draft: planView?.draft === true },
     units,
   }
 }
@@ -104,8 +118,11 @@ export function landedComment(baseBranch: string, planUrl: string | null): strin
 }
 
 /**
- * Whether `head` adds nothing to `base`: every commit on it that `base` lacks
- * is a merge whose parents are all in `base`. Null when either ref cannot be
+ * Whether `head` adds nothing to `base`: merging it into `base` would leave
+ * `base`'s tree as it is. The ancestry answer — every commit on it that `base`
+ * lacks is a merge whose parents are all in `base` — is tried first because it
+ * needs no merge; when it says no, `git merge-tree` decides by content. A merge
+ * that conflicts adds something by definition. Null when either ref cannot be
  * read — an unknown is never reported as landed.
  */
 export async function addsNothing(
@@ -124,6 +141,11 @@ export async function addsNothing(
   } catch {
     return null
   }
+  if (await onlyLandedMerges(repoPath, lines, baseRef)) return true
+  return await mergesToBase(repoPath, baseRef, headRef)
+}
+
+async function onlyLandedMerges(repoPath: string, lines: readonly string[], baseRef: string): Promise<boolean> {
   for (const line of lines) {
     const [, ...parents] = line.split(' ')
     if (parents.length < 2) return false
@@ -134,15 +156,30 @@ export async function addsNothing(
   return true
 }
 
+/**
+ * Whether merging `headRef` into `baseRef` produces `baseRef`'s tree. Exit 1 is
+ * a conflict and exit 128 a git too old for `--write-tree` (2.38); both are no.
+ */
+async function mergesToBase(repoPath: string, baseRef: string, headRef: string): Promise<boolean> {
+  try {
+    const merged = (await git(repoPath, ['merge-tree', '--write-tree', baseRef, headRef])).split('\n')[0]
+    return merged === (await git(repoPath, ['rev-parse', `${baseRef}^{tree}`]))
+  } catch {
+    return false
+  }
+}
+
 /** The forge as `gh` answers. A missing `gh` reads every PR as unknown and closes none. */
 export function ghForge(repoPath: string, ghPath = 'gh'): Forge {
   return {
     async view(url) {
       try {
-        const { stdout } = await run(ghPath, ['pr', 'view', url, '--json', 'state,headRefName,baseRefName'], { cwd: repoPath })
-        const parsed = JSON.parse(stdout) as { state?: string; headRefName?: string; baseRefName?: string }
+        const { stdout } = await run(ghPath, ['pr', 'view', url, '--json', 'state,headRefName,baseRefName,isDraft'], {
+          cwd: repoPath,
+        })
+        const parsed = JSON.parse(stdout) as { state?: string; headRefName?: string; baseRefName?: string; isDraft?: boolean }
         const state = parsed.state === 'MERGED' ? 'merged' : parsed.state === 'CLOSED' ? 'closed' : 'open'
-        return { state, head: parsed.headRefName ?? '', base: parsed.baseRefName ?? '' }
+        return { state, head: parsed.headRefName ?? '', base: parsed.baseRefName ?? '', draft: parsed.isDraft === true }
       } catch {
         return null
       }
@@ -150,6 +187,14 @@ export function ghForge(repoPath: string, ghPath = 'gh'): Forge {
     async close(url, comment) {
       try {
         await run(ghPath, ['pr', 'close', url, '--comment', comment], { cwd: repoPath })
+        return true
+      } catch {
+        return false
+      }
+    },
+    async ready(url) {
+      try {
+        await run(ghPath, ['pr', 'ready', url], { cwd: repoPath })
         return true
       } catch {
         return false

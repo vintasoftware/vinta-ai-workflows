@@ -1031,6 +1031,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: `land` decides "already in the base" by content.** A
+  review PR is landed when merging it into the base would leave the base's
+  tree unchanged. The ancestry test it used alone kept an `integ-*` PR open
+  after its plan PR merged: three bookkeeping merges were not in `main`, though
+  every branch they merged was. A draft plan PR is now named as one (GitHub
+  will not merge a draft), and `land <run> --ready` marks it ready for review.
 - **`vinta-ai-maestro`: a claude-code turn the CLI calls "blocked" no longer
   fails unless a tool was refused in it.** The CLI's own turn summary marks a
   turn `blocked` whenever its last message names a next step for a person —

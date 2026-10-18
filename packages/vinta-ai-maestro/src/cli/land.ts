@@ -14,7 +14,7 @@ import { propagate } from '../landing/propagate.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { laneRootFor, storeFor } from './paths.ts'
 
-export const LAND_USAGE = `usage: vinta-ai-maestro land <runId> [--close] [--repo <dir>]
+export const LAND_USAGE = `usage: vinta-ai-maestro land <runId> [--close] [--ready] [--repo <dir>]
 
   Says how a finished run's plan lands, and which of its PRs are done.
 
@@ -22,11 +22,14 @@ export const LAND_USAGE = `usage: vinta-ai-maestro land <runId> [--close] [--rep
   to merge, with a merge commit. Every phase and integration PR is a review
   unit it already carries; merging those too resolves the same conflicts
   again against different bases. This lists them all with their state, and
-  marks each one whose work is already in the base: every commit it adds is a
-  merge whose parents the base has (a GitHub "Update branch", say).
+  marks each one whose work is already in the base: merging it would leave
+  the base's tree unchanged (a GitHub "Update branch", or bookkeeping merges
+  of branches the base already has). A draft plan PR is named as one: GitHub
+  will not merge a draft.
 
   --close        Close every open PR whose work is already in the base, with a
                  comment saying it landed. Nothing else is closed.
+  --ready        Mark a draft plan PR ready for review, so it can be merged.
   --repo <dir>   The project. Defaults to the current directory.`
 
 export const PROPAGATE_USAGE = `usage: vinta-ai-maestro propagate <runId> <phase> [--dry-run] [--no-push] [--repo <dir>]
@@ -54,7 +57,7 @@ export async function landCommand(argv: readonly string[], io: Io, deps: LandDep
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { repo: { type: 'string' }, close: { type: 'boolean' } },
+      options: { repo: { type: 'string' }, close: { type: 'boolean' }, ready: { type: 'boolean' } },
       allowPositionals: true,
     })
   } catch {
@@ -83,7 +86,21 @@ export async function landCommand(argv: readonly string[], io: Io, deps: LandDep
     if (plan.plan === null) {
       io.out('Plan PR: none was opened. The run did not build its final wave, or `gh` was missing.')
     } else {
-      io.out(`Plan PR: ${plan.plan.url} (${plan.plan.state})`)
+      const draft = plan.plan.state === 'open' && plan.plan.draft
+      io.out(`Plan PR: ${plan.plan.url} (${plan.plan.state}${draft ? ', draft' : ''})`)
+      if (draft && parsed.values.ready === true) {
+        if (forge.ready !== undefined && (await forge.ready(plan.plan.url))) {
+          io.out('Marked it ready for review.')
+        } else {
+          io.err(`vinta-ai-maestro: could not mark ${plan.plan.url} ready. Run: gh pr ready ${plan.plan.url}`)
+          return FAILED
+        }
+      } else if (draft) {
+        io.out(
+          `It is a draft, and GitHub will not merge a draft. Mark it ready first: ` +
+            `vinta-ai-maestro land ${runId} --ready (or gh pr ready ${plan.plan.url}).`,
+        )
+      }
     }
     io.out(
       `Land it by merging the plan PR into ${plan.baseBranch} with a merge commit, and nothing else: ` +
