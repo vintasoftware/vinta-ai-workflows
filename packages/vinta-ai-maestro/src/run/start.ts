@@ -58,6 +58,7 @@ import { collectNodeUsage } from '../usage/usage.ts'
 import { createScheduler, type RunReport } from '../scheduler/index.ts'
 import type { Workflow } from '../types.ts'
 import { laneRootFor } from '../cli/paths.ts'
+import { liveBranches } from '../landing/live.ts'
 import { projectSpec } from '../cli/project.ts'
 import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
 import type { StackStop } from '../lanes/pool.ts'
@@ -571,6 +572,21 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
               agentLeases.endTurn(holder, turn)
               agentGates?.endTurn(holder, turn)
             },
+          }),
+        }),
+    // `propagate` and `sync-base` while the run is live: made here, holding
+    // the integration worktree's queue, so no merge of the run's own can
+    // interleave with theirs.
+    ...(host.holdIntegration === undefined
+      ? {}
+      : {
+          branches: liveBranches({
+            repoPath,
+            laneRoot,
+            plan: () => ({ id: current.id, baseBranch: current.base_branch }),
+            phaseBase: (nodeId) => journal.nodes(runId).find((node) => node.node_id === nodeId)?.base_branch ?? null,
+            hold: host.holdIntegration,
+            ...(host.mergeBranch === undefined ? {} : { mergeBranch: host.mergeBranch }),
           }),
         }),
     // Read through `current`, so a gate retuned mid-run is guarded on the

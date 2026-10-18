@@ -97,6 +97,12 @@ export interface HostWiring {
   readonly stopStacks?: () => Promise<readonly StackStop[]>
   /** Runs `work` holding the integration worktree's queue, as `label`. */
   readonly holdIntegration?: <T>(label: string, work: () => Promise<T>) => Promise<T>
+  /**
+   * `sync-base`'s wave merge: `incoming` into the wave branch `into`, in the
+   * integration worktree, with the conflict fixer (`Integrator.mergeBranch`).
+   * Called holding the integration queue.
+   */
+  readonly mergeBranch?: (into: string, incoming: string, wave: number) => Promise<unknown>
   readonly laneDelta?: (lane: string, sinceRef: string) => Promise<readonly string[]>
   /**
    * The `gate` verb's port, once the run's pools exist.
@@ -497,6 +503,11 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     },
     laneNames: () => pool.lanes.map((lane) => lane.name),
     holdIntegration: (label, work) => executor.integration(work, null, label),
+    mergeBranch: (into, incoming, wave) => {
+      const members: string[] = []
+      for (let at = 1; at <= wave; at += 1) members.push(...integrator.nodesAt(at))
+      return integrator.mergeBranch(into, incoming, members)
+    },
     stopStacks: () => pool.stopStacks(),
     // The same cache the executor was given, so a gate an agent ran is a hit
     // for the `gate` node afterwards. Two caches over one project would be two

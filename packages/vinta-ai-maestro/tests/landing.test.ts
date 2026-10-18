@@ -14,11 +14,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { landCommand, propagateCommand } from '../src/cli/land.ts'
+import { landCommand, propagateCommand, syncBaseCommand } from '../src/cli/land.ts'
 import type { Io } from '../src/cli/io.ts'
 import { openJournal } from '../src/journal/journal.ts'
 import { addsNothing, type Forge } from '../src/landing/land.ts'
+import { liveBranches } from '../src/landing/live.ts'
 import { planPropagation, propagate } from '../src/landing/propagate.ts'
+import { baseSource, planSyncBase, syncBase } from '../src/landing/sync-base.ts'
+import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
 import { WorkflowSchema } from '../src/types.ts'
 
 const temps: string[] = []
@@ -171,7 +174,7 @@ describe('propagate', () => {
     })
   })
 
-  it('refuses a live run and propagates a finished one from the command line', async () => {
+  it('propagates a finished run from the command line', async () => {
     const dir = builtRun()
     commit(dir, P('phase-p1'), 'p1.txt', 'p1, fixed\n')
     const journal = openJournal(dir)
@@ -202,6 +205,60 @@ describe('land', () => {
     expect(await addsNothing(dir, null, P('phase-p1'), 'main')).toBe(true)
     expect(await addsNothing(dir, null, P('phase-p2'), 'main')).toBe(false)
     expect(await addsNothing(dir, null, 'plan/x/no-such-branch', 'main')).toBeNull()
+  })
+
+  it('decides by content: bookkeeping merges that are not in the base still add nothing', async () => {
+    const dir = repo()
+    commit(dir, P('phase-p1'), 'p1.txt', 'p1\n')
+    commit(dir, P('phase-p2'), 'p2.txt', 'p2\n')
+    // integ-p4: p1 with p2 merged in, then main merged in on top — a merge
+    // whose first parent is the integ branch's own merge, which main never gets.
+    merge(dir, P('integ-p4'), P('phase-p2'), P('phase-p1'))
+    commit(dir, 'main', 'other.txt', 'unrelated\n')
+    merge(dir, P('integ-p4'), 'main', P('integ-p4'))
+    // The plan PR lands p1 and p2 through the waves, not through integ-p4.
+    merge(dir, P('wave-1'), P('phase-p1'))
+    merge(dir, P('wave-1'), P('phase-p2'))
+    g(dir, 'merge', '-q', '--no-ff', '--no-edit', P('wave-1'))
+
+    expect(isAncestor(dir, P('integ-p4'), 'main')).toBe(false)
+    expect(await addsNothing(dir, null, P('integ-p4'), 'main')).toBe(true)
+
+    // One more line on the integ branch is work the base lacks.
+    commit(dir, P('integ-p4'), 'p4.txt', 'p4\n')
+    expect(await addsNothing(dir, null, P('integ-p4'), 'main')).toBe(false)
+  })
+
+  it('names a draft plan PR as one, and marks it ready with --ready', async () => {
+    const dir = repo()
+    const journal = openJournal(dir)
+    journal.createRun('r1', workflow())
+    journal.append({
+      runId: 'r1',
+      type: 'run_pr',
+      payload: { opened: true, base: 'main', head: P('wave-1'), url: 'https://example.invalid/pull/plan' },
+    })
+    journal.close()
+    const readied: string[] = []
+    const forge: Forge = {
+      view: async () => ({ state: 'open', head: P('wave-1'), base: 'main', draft: true }),
+      close: async () => true,
+      ready: async (url) => {
+        readied.push(url)
+        return true
+      },
+    }
+
+    const look = recorder()
+    expect(await landCommand(['r1', '--repo', dir], look.io, { forge })).toBe(0)
+    expect(look.out.join('\n')).toContain('Plan PR: https://example.invalid/pull/plan (open, draft)')
+    expect(look.out.join('\n')).toContain('GitHub will not merge a draft')
+    expect(readied).toEqual([])
+
+    const act = recorder()
+    expect(await landCommand(['r1', '--repo', dir, '--ready'], act.io, { forge })).toBe(0)
+    expect(readied).toEqual(['https://example.invalid/pull/plan'])
+    expect(act.out).toContain('Marked it ready for review.')
   })
 
   it('names the one PR to merge, and closes only the landed ones with --close', async () => {
@@ -279,3 +336,163 @@ function recorder(): { io: Io; out: string[]; err: string[] } {
     io: { out: (line) => out.push(line), err: (line) => err.push(line), confirm: async () => false },
   }
 }
+
+/** builtRun, with a plan branch under its waves, and main moved on since. */
+function planRun(): string {
+  const dir = repo()
+  g(dir, 'branch', P('base'), 'main')
+  commit(dir, P('phase-p1'), 'p1.txt', 'p1\n', P('base'))
+  commit(dir, P('phase-p2'), 'p2.txt', 'p2\n', P('base'))
+  merge(dir, P('wave-1'), P('phase-p1'), P('base'))
+  merge(dir, P('wave-1'), P('phase-p2'))
+  commit(dir, P('phase-p3'), 'p3.txt', 'p3\n', P('phase-p1'))
+  merge(dir, P('wave-2'), P('phase-p3'), P('wave-1'))
+  commit(dir, 'main', 'main.txt', 'main moved on\n')
+  return dir
+}
+
+describe('sync-base', () => {
+  it('brings main into the plan branch and every wave, keeping the chain', async () => {
+    const dir = planRun()
+    const options = { repoPath: dir, planId: 'x', baseBranch: 'main' }
+    expect(await planSyncBase(options)).toEqual([
+      { branch: P('base'), source: 'main' },
+      { branch: P('wave-1'), source: P('base') },
+      { branch: P('wave-2'), source: P('wave-1') },
+    ])
+
+    expect(await syncBase(options)).toMatchObject({ kind: 'done', pushed: [] })
+    for (const branch of [P('base'), P('wave-1'), P('wave-2')]) expect(isAncestor(dir, 'main', branch)).toBe(true)
+    expect(isAncestor(dir, P('wave-1'), P('wave-2'))).toBe(true)
+    expect(await planSyncBase(options)).toEqual([])
+  })
+
+  it('reads the base from the remote when the local branch is behind it', async () => {
+    const upstream = planRun()
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-clone-'))
+    temps.push(dir)
+    g(dir, 'clone', '-q', upstream, '.')
+    for (const name of ['base', 'wave-1', 'wave-2']) g(dir, 'branch', '-q', P(name), `origin/${P(name)}`)
+    g(dir, 'reset', '-q', '--hard', 'HEAD~1')
+    expect(await baseSource(dir, 'main')).toBe('refs/remotes/origin/main')
+    const steps = await planSyncBase({ repoPath: dir, planId: 'x', baseBranch: 'main' })
+    expect(steps[0]).toEqual({ branch: P('base'), source: 'refs/remotes/origin/main' })
+  })
+
+  it('stops at a wave that conflicts with the base, leaving it as it was', async () => {
+    const dir = planRun()
+    commit(dir, P('wave-1'), 'main.txt', 'a wave said otherwise\n')
+    const wave1 = g(dir, 'rev-parse', P('wave-1'))
+    const result = await syncBase({ repoPath: dir, planId: 'x', baseBranch: 'main' })
+    expect(result).toMatchObject({
+      kind: 'conflict',
+      done: [{ branch: P('base') }],
+      at: { branch: P('wave-1') },
+      paths: ['main.txt'],
+    })
+    expect(g(dir, 'rev-parse', P('wave-1'))).toBe(wave1)
+  })
+
+  it('on a live run, merges the plan branch without a checkout and gives each wave to the fixer', async () => {
+    const dir = planRun()
+    const waves: { branch: string; source: string }[] = []
+    const after: string[] = []
+    const result = await syncBase({
+      repoPath: dir,
+      planId: 'x',
+      baseBranch: 'main',
+      mergeWave: async (step) => {
+        waves.push(step)
+        g(dir, 'checkout', '-q', step.branch)
+        g(dir, 'merge', '-q', '--no-ff', '--no-edit', step.source)
+        g(dir, 'checkout', '-q', 'main')
+        return null
+      },
+      afterMerge: async (step) => {
+        after.push(step.branch)
+      },
+    })
+    expect(result).toMatchObject({ kind: 'done' })
+    expect(isAncestor(dir, 'main', P('base'))).toBe(true)
+    expect(g(dir, 'rev-list', '--parents', '-n', '1', P('base')).split(' ')).toHaveLength(3)
+    expect(waves).toEqual([
+      { branch: P('wave-1'), source: P('base') },
+      { branch: P('wave-2'), source: P('wave-1') },
+    ])
+    expect(after).toEqual([P('base'), P('wave-1'), P('wave-2')])
+  })
+
+  it('never gives the plan branch’s own conflict to the fixer', async () => {
+    const dir = planRun()
+    commit(dir, P('base'), 'main.txt', 'the plan’s own config\n')
+    const base = g(dir, 'rev-parse', P('base'))
+    let asked = 0
+    const result = await syncBase({
+      repoPath: dir,
+      planId: 'x',
+      baseBranch: 'main',
+      mergeWave: async () => {
+        asked += 1
+        return null
+      },
+    })
+    expect(result).toMatchObject({ kind: 'conflict', at: { branch: P('base') }, paths: ['main.txt'] })
+    expect(asked).toBe(0)
+    expect(g(dir, 'rev-parse', P('base'))).toBe(base)
+  })
+
+  it('syncs a run that is not live from the command line', async () => {
+    const dir = planRun()
+    const journal = openJournal(dir)
+    journal.createRun('r1', workflow())
+    journal.close()
+    const look = recorder()
+    expect(await syncBaseCommand(['r1', '--repo', dir, '--dry-run'], look.io, { env: {} })).toBe(0)
+    expect(look.out).toContain(`would merge main into ${P('base')}`)
+    expect(await syncBaseCommand(['r1', '--repo', dir], recorder().io, { env: {} })).toBe(0)
+    expect(isAncestor(dir, 'main', P('wave-2'))).toBe(true)
+  })
+})
+
+describe('a live run', () => {
+  it('makes propagate and sync-base hold the integration queue', async () => {
+    const dir = planRun()
+    commit(dir, P('phase-p1'), 'p1.txt', 'p1, fixed\n', P('base'))
+    const held: string[] = []
+    const port = liveBranches({
+      repoPath: dir,
+      laneRoot: join(dir, '.vinta-ai-maestro', 'lanes'),
+      plan: () => ({ id: 'x', baseBranch: 'main' }),
+      phaseBase: (nodeId) => (nodeId === 'p1' ? P('base') : null),
+      hold: async (label, work) => {
+        held.push(label)
+        return await work()
+      },
+    })
+    expect(await port.propagate({ nodeId: 'nope', dryRun: false, push: false })).toBeNull()
+    expect(await port.propagate({ nodeId: 'p1', dryRun: false, push: false })).toMatchObject({ kind: 'done' })
+    expect(await port.syncBase({ dryRun: false, push: false })).toMatchObject({ kind: 'done' })
+    expect(held).toEqual(['propagate', 'sync-base'])
+    expect(isAncestor(dir, P('phase-p1'), P('wave-2'))).toBe(true)
+    expect(isAncestor(dir, 'main', P('wave-2'))).toBe(true)
+  })
+
+  it('reaches the job from the command line instead of refusing', async () => {
+    const dir = repo()
+    const sent: { url: string; body: unknown }[] = []
+    const fake = (async (url: string, init: { body: string }) => {
+      sent.push({ url, body: JSON.parse(init.body) })
+      return new Response(
+        JSON.stringify({ kind: 'done', steps: [{ branch: P('wave-1'), source: P('phase-p1') }], pushed: [] }),
+        { status: 200 },
+      )
+    }) as unknown as typeof fetch
+    const env = { [MAESTRO_URL_ENV]: 'http://job.invalid', [MAESTRO_TOKEN_ENV]: 't', [MAESTRO_RUN_ENV]: 'r1' }
+    const look = recorder()
+    expect(await propagateCommand(['r1', 'p1', '--repo', dir], look.io, { env, fetch: fake })).toBe(0)
+    expect(sent).toEqual([
+      { url: 'http://job.invalid/api/runs/r1/branches/propagate', body: { phase: 'p1', dryRun: false, push: true } },
+    ])
+    expect(look.out).toContain(`merged ${P('phase-p1')} into ${P('wave-1')}`)
+  })
+})

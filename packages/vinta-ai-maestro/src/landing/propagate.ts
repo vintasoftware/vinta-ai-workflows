@@ -16,27 +16,19 @@
  * wave above takes the wave below, so every wave still has the one under it
  * in its history.
  *
- * It works in a scratch worktree of its own and never on a live run, whose
- * integration worktree is busy. A branch another of the run's worktrees has
- * checked out is released from it first (detached at its commit, files
- * untouched). A conflict stops it: the merge is aborted, the branch is left as
- * it was, and the conflicted paths are named. Every step is a merge commit;
- * nothing is rewritten, so every step can be reverted.
+ * A finished run's merges are made in a scratch worktree of its own. A live
+ * run's are made in its job, holding the integration worktree's queue, so no
+ * wave merge or base preparation of the run's own interleaves with them
+ * (`landing/branches.ts`); the command reaches the job over its API. A branch
+ * another of the run's worktrees has checked out is released from it first
+ * (detached at its commit, files untouched). A conflict stops it: the merge is
+ * aborted, the branch is left as it was, and the conflicted paths are named.
+ * Every step is a merge commit; nothing is rewritten, so every step can be
+ * reverted.
  */
-import { execFile } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { promisify } from 'node:util'
+import { isAncestor, localBranches, mergeBase, runChain, waveBranches, type BranchStep, type ChainResult } from './branches.ts'
 
-const run = promisify(execFile)
-
-export interface PropagateStep {
-  /** The branch that moves. */
-  readonly branch: string
-  /** What is merged into it: the phase branch, or the wave below. */
-  readonly source: string
-}
+export type PropagateStep = BranchStep
 
 export interface PropagateOptions {
   readonly repoPath: string
@@ -50,16 +42,7 @@ export interface PropagateOptions {
   readonly push?: boolean
 }
 
-export type PropagateResult =
-  | { readonly kind: 'done'; readonly steps: readonly PropagateStep[]; readonly pushed: readonly string[] }
-  | { readonly kind: 'planned'; readonly steps: readonly PropagateStep[] }
-  | {
-      readonly kind: 'conflict'
-      readonly done: readonly PropagateStep[]
-      readonly at: PropagateStep
-      readonly paths: readonly string[]
-    }
-  | { readonly kind: 'held'; readonly branch: string; readonly worktree: string }
+export type PropagateResult = ChainResult | { readonly kind: 'planned'; readonly steps: readonly PropagateStep[] }
 
 /** What would move, in order. Pure reads. */
 export async function planPropagation(options: PropagateOptions): Promise<readonly PropagateStep[]> {
@@ -75,10 +58,7 @@ export async function planPropagation(options: PropagateOptions): Promise<readon
   for (const branch of branches.filter((name) => /\/integ-[^/]+$/.test(name))) {
     if ((await contains(branch)) && !(await isAncestor(repoPath, phase, branch))) steps.push({ branch, source: phase })
   }
-  const waves = branches
-    .map((name) => ({ name, wave: Number(/\/wave-(\d+)$/.exec(name)?.[1] ?? Number.NaN) }))
-    .filter((entry) => Number.isFinite(entry.wave))
-    .sort((a, b) => a.wave - b.wave)
+  const waves = await waveBranches(repoPath, planId)
   let below: string | null = null
   for (const { name } of waves) {
     if (!(await contains(name))) continue
@@ -94,99 +74,10 @@ export async function planPropagation(options: PropagateOptions): Promise<readon
 
 export async function propagate(options: PropagateOptions): Promise<PropagateResult> {
   const steps = await planPropagation(options)
-  if (options.dryRun === true || steps.length === 0) {
-    return options.dryRun === true ? { kind: 'planned', steps } : { kind: 'done', steps, pushed: [] }
-  }
-
-  const { repoPath } = options
-  // Released before anything moves: a branch checked out elsewhere cannot be
-  // checked out here, and git's refusal halfway through would leave a chain
-  // with its lower waves moved and its upper ones not.
-  const holders = await worktreeBranches(repoPath)
-  for (const step of steps) {
-    const holder = holders.get(step.branch)
-    if (holder === undefined) continue
-    if (options.ownWorktrees?.(holder) !== true) return { kind: 'held', branch: step.branch, worktree: holder }
-    await git(holder, ['checkout', '--quiet', '--detach'])
-  }
-
-  const scratch = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-propagate-'))
-  const work = join(scratch, 'tree')
-  await git(repoPath, ['worktree', 'add', '--quiet', '--detach', work])
-  const done: PropagateStep[] = []
-  try {
-    for (const step of steps) {
-      await git(work, ['checkout', '--quiet', step.branch])
-      if (await gitOk(work, ['merge', '--no-ff', '--no-edit', step.source])) {
-        done.push(step)
-        continue
-      }
-      const paths = (await git(work, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter((line) => line !== '')
-      await gitOk(work, ['merge', '--abort'])
-      return { kind: 'conflict', done, at: step, paths }
-    }
-  } finally {
-    await gitOk(repoPath, ['worktree', 'remove', '--force', work])
-    rmSync(scratch, { recursive: true, force: true })
-  }
-
-  const pushed: string[] = []
-  const remote = options.push === false ? null : await firstRemote(repoPath)
-  if (remote !== null) {
-    for (const step of done) {
-      if (await gitOk(repoPath, ['push', '--quiet', remote, step.branch])) pushed.push(step.branch)
-    }
-  }
-  return { kind: 'done', steps: done, pushed }
-}
-
-async function localBranches(repoPath: string, prefix: string): Promise<string[]> {
-  const out = await git(repoPath, ['for-each-ref', '--format=%(refname:short)', `refs/heads/${prefix}`])
-  return out.split('\n').filter((line) => line !== '')
-}
-
-/** Branch → the worktree that has it checked out. */
-async function worktreeBranches(repoPath: string): Promise<Map<string, string>> {
-  const out = await git(repoPath, ['worktree', 'list', '--porcelain'])
-  const held = new Map<string, string>()
-  let path: string | null = null
-  for (const line of out.split('\n')) {
-    if (line.startsWith('worktree ')) path = line.slice('worktree '.length)
-    if (line.startsWith('branch refs/heads/') && path !== null) {
-      // The main checkout is never released: it is the operator's. Resolved,
-      // because git prints Windows paths with forward slashes.
-      if (resolve(path) !== resolve(repoPath)) held.set(line.slice('branch refs/heads/'.length), resolve(path))
-    }
-  }
-  return held
-}
-
-async function mergeBase(cwd: string, a: string, b: string): Promise<string | null> {
-  try {
-    return await git(cwd, ['merge-base', a, b])
-  } catch {
-    return null
-  }
-}
-
-const isAncestor = (cwd: string, a: string, b: string): Promise<boolean> =>
-  gitOk(cwd, ['merge-base', '--is-ancestor', a, b])
-
-async function firstRemote(repoPath: string): Promise<string | null> {
-  const remotes = (await git(repoPath, ['remote'])).split('\n').filter((line) => line !== '')
-  return remotes[0] ?? null
-}
-
-async function git(cwd: string, args: readonly string[]): Promise<string> {
-  const { stdout } = await run('git', [...args], { cwd })
-  return stdout.trim()
-}
-
-async function gitOk(cwd: string, args: readonly string[]): Promise<boolean> {
-  try {
-    await run('git', [...args], { cwd })
-    return true
-  } catch {
-    return false
-  }
+  if (options.dryRun === true) return { kind: 'planned', steps }
+  return await runChain(steps, {
+    repoPath: options.repoPath,
+    ...(options.ownWorktrees === undefined ? {} : { ownWorktrees: options.ownWorktrees }),
+    ...(options.push === undefined ? {} : { push: options.push }),
+  })
 }

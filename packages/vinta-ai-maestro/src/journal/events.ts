@@ -313,6 +313,22 @@ interface RunPayloads {
     readonly by?: Actor
   }
   /**
+   * A run's own branches moved by hand while it ran: `propagate` carrying a
+   * fix on a phase into the branches built from it, or `sync-base` bringing a
+   * moved `base_branch` into the plan branch and every wave. Made in the job,
+   * holding the integration worktree's queue. Branch names, the outcome and
+   * any conflicted paths; nothing of their content.
+   */
+  branches_moved: {
+    readonly op: 'propagate' | 'sync_base'
+    readonly node?: string
+    readonly moved: readonly string[]
+    readonly outcome: 'done' | 'conflict' | 'held'
+    readonly at?: string
+    readonly paths?: readonly string[]
+    readonly by?: Actor
+  }
+  /**
    * A finished run's compose stacks, stopped (`docker compose down`, volumes
    * kept). Projects only; `failed` are the ones that would not stop.
    */

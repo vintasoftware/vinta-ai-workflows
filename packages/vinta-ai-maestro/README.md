@@ -99,8 +99,9 @@ Every command runs against a project checkout — your project, not this one. `-
 | `node <context\|redirect\|pause\|abort\|retry\|fresh\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, or `ignored`, which exits 1). `fresh` drops the phase's agent session so its next turn starts cold. A run whose last runnable phase was aborted stays up for its `retry`. |
 | `workflow <run-id>` | Prints the run's workflow as it stands now, every amendment applied. |
 | `amend <run-id> <workflow.json>` | Applies an edited workflow to a live run (§9's amend: refused while a phase it would move is running). |
-| `land <run-id> [--close]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base; `--close` closes those with a comment. |
-| `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch after the run into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Stops at a conflict, leaving that branch as it was. |
+| `land <run-id> [--close] [--ready]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base (merging them would change nothing); `--close` closes those with a comment. Names a draft plan PR; `--ready` marks it ready for review. |
+| `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Works on a live run: its job makes the merges, holding the integration worktree's queue. Stops at a conflict, leaving that branch as it was. |
+| `sync-base <run-id> [--dry-run] [--no-push]` | Brings a `base_branch` that moved on into `plan/<id>/base` and every wave, keeping the chain. On a live run a wave's conflict goes to the run's conflict fixer; otherwise, and for the plan branch's own merge, a conflict stops it. |
 | `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
 | `gate-cache invalidate <run-id> <gate-id> [--tree <hash>]` | Forgets a gate's cached results, on one lane tree or on all of them, so its next run runs the command instead of replaying a verdict whose cause was outside the lane's tracked files. The operator's and the run coordinator's. |
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. It records the release it loaded in `.vinta-ai-maestro/ui/<pid>.json`, says once when the package under it is upgraded, and `run` and `status` warn about a live `ui` serving another release — restart it to pick up the new code. |
@@ -121,10 +122,11 @@ There are also `judge-hook` and `guard-hook`, which are internal: they are the h
   base branch) with a merge commit, and nothing else; every phase and
   integration PR says it is a review unit. `vinta-ai-maestro land <run-id>`
   shows the state of all of them, and `--close` closes the ones whose work has
-  landed.
+  landed. A draft plan PR is flagged; `--ready` marks it ready to merge.
 - **A fix after the run** goes on the phase branch, so its PR is right; then
   `vinta-ai-maestro propagate <run-id> <phase>` carries it into the
-  integration and wave branches, the plan PR's included.
+  integration and wave branches, the plan PR's included. It works while the
+  run is still going, too: the run's job makes the merges between its own.
 - **A `done` run stops its compose stacks**, keeping their volumes, and prints
   how to remove the lanes and volumes when you are done with them. `status`
   and `doctor` list what finished runs still have running or on disk.
@@ -578,6 +580,13 @@ checkout's file, and `run` warns when that file differs from what is committed
 on the plan branch, because the next config commit would replace those edits.
 The commits ship with the plan: each later wave merges the plan branch in, so
 the plan PR carries them to `base_branch` for review with everything else.
+
+**When `base_branch` moves on mid-run**, don't merge it into the plan branch by
+hand: `vinta-ai-maestro sync-base <run-id>` merges it into the plan branch and
+then into every wave in order, so each wave keeps the one below in its history.
+On a live run the merges happen inside the run, between its own, and a wave
+that conflicts with the new base goes to the run's conflict fixer. `--dry-run`
+lists the merges first.
 
 ## Chores — the other thing a phase runs
 

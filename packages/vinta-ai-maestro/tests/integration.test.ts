@@ -2225,3 +2225,55 @@ describe('a fix round stopped by its time limit', () => {
     expect(retry.calls[0]?.previousAttempt).toBe(ref)
   })
 })
+
+// ---------------------------------------------------------------------------
+// A branch that is no phase's: sync-base's wave merges
+// ---------------------------------------------------------------------------
+
+describe('mergeBranch', () => {
+  /** wave-1 carries phase a's edit to app.ts; then main edits the same line. */
+  async function movedBase(): Promise<{ repo: Repo; wave: string }> {
+    const repo = await makeRepo(CONFLICTING)
+    const one = await repo.lane('lane-1')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'app.ts': 'const value = "a"\n' }, 'phase a: value')
+    const builder = new Integrator({ plan: plan([node('a')]), integrationPath: repo.integ, fixer: spyFixer() })
+    const { branch } = await builder.mergeWave(1)
+    await repo.commit(repo.main, { 'app.ts': 'const value = "main"\n' }, 'main moved on')
+    return { repo, wave: branch }
+  }
+
+  it('hands a conflict with the base to the fixer, naming the phases that touched the path', async () => {
+    const { repo, wave } = await movedBase()
+    const seen: { where: string; branch: string }[] = []
+    const fixer = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "main"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a')]),
+      integrationPath: repo.integ,
+      fixer,
+      onConflict: (conflict) => seen.push(conflict),
+    })
+
+    const conflict = await integrator.mergeBranch(wave, 'main', ['a'])
+
+    expect(conflict).toMatchObject({ nodes: ['a'], paths: ['app.ts'], rounds: 1 })
+    expect(fixer.calls[0]).toMatchObject({ into: wave, incoming: 'main', nodeId: 'a', nodes: ['a'] })
+    expect(isAncestor(repo.main, 'main', wave)).toBe(true)
+    expect(run(repo.main, 'show', `${wave}:app.ts`)).toBe('const value = "a" + "main"')
+    expect(seen).toEqual([expect.objectContaining({ where: 'wave', branch: wave })])
+  })
+
+  it('leaves no merge standing when no round resolves it, and the branch as it was', async () => {
+    const { repo, wave } = await movedBase()
+    const before = run(repo.main, 'rev-parse', wave)
+    const integrator = new Integrator({ plan: plan([node('a')]), integrationPath: repo.integ, fixer: spyFixer(), maxFixRounds: 1 })
+
+    await expect(integrator.mergeBranch(wave, 'main', ['a'])).rejects.toBeInstanceOf(UnresolvedConflictError)
+    expect(run(repo.main, 'rev-parse', wave)).toBe(before)
+    expect(existsSync(join(run(repo.integ, 'rev-parse', '--absolute-git-dir'), 'MERGE_HEAD'))).toBe(false)
+    // The run's next merge in that worktree is not refused over it.
+    expect(await integrator.reclaim()).toBeNull()
+  })
+})

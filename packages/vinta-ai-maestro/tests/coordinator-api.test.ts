@@ -689,3 +689,68 @@ describe('gate cache invalidation', () => {
     expect(cache.calls).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------------------
+// propagate and sync-base on a live run
+// ---------------------------------------------------------------------------
+
+describe('branches', () => {
+  /**
+   * The CLI used to refuse a live run outright. Now its job does the merges,
+   * and the route is the job's side of that: it hands the request to the
+   * run's port and journals what moved, for the coordinator as for anyone.
+   */
+  it('hands propagate and sync-base to the run, and journals what moved', async () => {
+    const r = await rig()
+    const asked: unknown[] = []
+    r.register({
+      branches: {
+        propagate: async (request) => {
+          asked.push(request)
+          return request.nodeId === 'a'
+            ? { kind: 'done', steps: [{ branch: 'plan/x/wave-1', source: 'plan/x/phase-a' }], pushed: [] }
+            : null
+        },
+        syncBase: async (request) => {
+          asked.push(request)
+          return {
+            kind: 'conflict',
+            done: [{ branch: 'plan/x/base', source: 'main' }],
+            at: { branch: 'plan/x/wave-1', source: 'plan/x/base' },
+            paths: ['uv.lock'],
+          }
+        },
+      },
+    })
+
+    const carried = await call(r.daemon, `/api/runs/${RUN_ID}/branches/propagate`, {
+      method: 'POST',
+      body: { phase: 'a' },
+      token: r.daemon.coordinatorToken,
+    })
+    expect(carried.status).toBe(200)
+    expect(carried.body).toMatchObject({ kind: 'done' })
+    const unknown = await call(r.daemon, `/api/runs/${RUN_ID}/branches/propagate`, { method: 'POST', body: { phase: 'zz' } })
+    expect(unknown.status).toBe(404)
+    const synced = await call(r.daemon, `/api/runs/${RUN_ID}/branches/sync-base`, { method: 'POST', body: { dryRun: false } })
+    expect(synced.status).toBe(200)
+
+    expect(asked).toEqual([
+      { nodeId: 'a', dryRun: false, push: true },
+      { nodeId: 'zz', dryRun: false, push: true },
+      { dryRun: false, push: true },
+    ])
+    const rows = r.journal.events(RUN_ID).filter((event) => event.type === 'branches_moved')
+    expect(rows.map((row) => row.payload)).toEqual([
+      { op: 'propagate', node: 'a', moved: ['plan/x/wave-1'], outcome: 'done', by: 'coordinator' },
+      { op: 'sync_base', moved: ['plan/x/base'], outcome: 'conflict', at: 'plan/x/wave-1', paths: ['uv.lock'] },
+    ])
+  })
+
+  it('refuses a run whose host offers no branch port', async () => {
+    const r = await rig()
+    const result = await call(r.daemon, `/api/runs/${RUN_ID}/branches/sync-base`, { method: 'POST', body: {} })
+    expect(result.status).toBe(501)
+    expect(ErrorResponseSchema.parse(result.body).error).toBe('branches_unsupported')
+  })
+})

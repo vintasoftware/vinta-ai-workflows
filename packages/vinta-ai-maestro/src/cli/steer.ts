@@ -119,13 +119,13 @@ export interface SteerDeps {
   readonly env?: NodeJS.ProcessEnv
 }
 
-interface Reach {
+export interface Reach {
   readonly url: string
   readonly token: string
 }
 
 /** The run's API: the coordinator's own when this is its session, the job's otherwise. */
-function reach(repoPath: string, runId: string, env: NodeJS.ProcessEnv): Reach | null {
+export function reach(repoPath: string, runId: string, env: NodeJS.ProcessEnv): Reach | null {
   const url = env[MAESTRO_URL_ENV]
   const token = env[MAESTRO_TOKEN_ENV]
   if (url !== undefined && token !== undefined && env[MAESTRO_RUN_ENV] === runId) return { url, token }
@@ -153,7 +153,7 @@ async function post(
 }
 
 /** A refusal as the operator reads it: the code, then each located issue. */
-function refused(io: Io, status: number, body: unknown): number {
+export function refused(io: Io, status: number, body: unknown): number {
   const error = body as { error?: string; issues?: { path?: string; message?: string }[] | null } | null
   io.err(`vinta-ai-maestro: refused (${status} ${error?.error ?? 'error'})`)
   for (const issue of error?.issues ?? []) {

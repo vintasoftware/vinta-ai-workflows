@@ -789,6 +789,37 @@ export class Integrator {
     }
   }
 
+  /**
+   * Merges `incoming` — a branch that is no phase's: the plan branch after
+   * `base_branch` was brought into it, or the wave below (`sync-base`) — into
+   * the existing branch `into`, in the integration worktree, with the fixer
+   * and `verify` on a conflict exactly as a phase's merge has. `members` are
+   * the phases `into` carries, oldest first: the candidates for who owns a
+   * contested path, and the last of them is whose turn the merge is filed
+   * under. Throws as a wave merge does when no round resolves it — but
+   * leaves no merge standing: `reclaim` does not know a wave merging the wave
+   * below as this run's, and the run's own next merge would refuse the
+   * worktree. What the merge had is kept under `ABANDONED_REFS` first.
+   */
+  async mergeBranch(into: string, incoming: string, members: readonly string[]): Promise<ConflictRecord | null> {
+    const cwd = this.#options.integrationPath
+    const forNode = members[members.length - 1]
+    if (forNode === undefined) throw new Error(`no phase is merged into ${into} to file its merge under`)
+    await this.reclaim()
+    await git(cwd, ['checkout', into])
+    try {
+      const conflict = await this.#merge(into, forNode, members, forNode, incoming)
+      if (conflict !== null) this.#options.onConflict?.({ ...conflict, where: 'wave', branch: into })
+      return conflict
+    } catch (error) {
+      if (await this.#merging(cwd)) {
+        await this.#keepAbandoned(cwd, into, incoming)
+        await this.#abandonMerge(cwd)
+      }
+      throw error
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Pull requests
   //
@@ -908,11 +939,12 @@ export class Integrator {
     nodeId: string,
     alreadyMerged: readonly string[],
     forNode: string,
+    branch?: string,
   ): Promise<ConflictRecord | null> {
-    const step = { step: 'merge', branch: into, incoming: nodeId } as const
+    const step = { step: 'merge', branch: into, incoming: branch ?? nodeId } as const
     this.#options.onStep?.(forNode, { ...step, state: 'started' })
     try {
-      const record = await this.#mergeOne(into, nodeId, alreadyMerged, forNode)
+      const record = await this.#mergeOne(into, nodeId, alreadyMerged, forNode, branch)
       this.#options.onStep?.(forNode, { ...step, state: 'finished', outcome: record === null ? 'ok' : 'resolved' })
       return record
     } catch (error) {
@@ -926,9 +958,13 @@ export class Integrator {
     nodeId: string,
     alreadyMerged: readonly string[],
     forNode: string,
+    branch?: string,
   ): Promise<ConflictRecord | null> {
     const cwd = this.#options.integrationPath
-    const incoming = this.nodeBranch(nodeId)
+    // A branch that is not a phase's (`mergeBranch`) brings no node of its
+    // own: the phases already merged that touched a contested path are the
+    // conflict's, and `nodeId` stands in when none did.
+    const incoming = branch ?? this.nodeBranch(nodeId)
     // --no-ff always: a fast-forward erases that this was a separate phase,
     // and a squash erases the phase's unit commits.
     let refused: GitCommandError
@@ -954,7 +990,10 @@ export class Integrator {
     // unmerged paths, or — when it resolved them itself — what conflicts
     // between the two sides.
     const paths = unmerged.length > 0 ? unmerged : await this.#conflictingPaths(cwd)
-    const nodes = await this.#owners(paths, alreadyMerged, nodeId)
+    const nodes =
+      branch === undefined
+        ? await this.#owners(paths, alreadyMerged, nodeId)
+        : await this.#owners(paths, alreadyMerged, null).then((owners) => (owners.length > 0 ? owners : [nodeId]))
 
     let red: RedGate | null = null
     if (unmerged.length === 0 && !(await this.#unresolved(paths))) {
@@ -1528,7 +1567,7 @@ export class Integrator {
   async #owners(
     paths: readonly string[],
     candidates: readonly string[],
-    incoming: string,
+    incoming: string | null,
   ): Promise<string[]> {
     const contested = new Set(paths)
     const owners: string[] = []
@@ -1540,7 +1579,7 @@ export class Integrator {
       ])
       if (touched.some((path) => contested.has(path))) owners.push(candidate)
     }
-    owners.push(incoming)
+    if (incoming !== null) owners.push(incoming)
     return owners
   }
 
