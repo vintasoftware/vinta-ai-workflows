@@ -29,6 +29,7 @@ import {
   MonitorHistorySchema,
   NodeChangesSchema,
   RunUsageResponseSchema,
+  UnattendedResponseSchema,
   OkResponseSchema,
   OperationResponseSchema,
   RedirectRequestSchema,
@@ -39,6 +40,7 @@ import {
   type NodeChanges,
   type NodeDetail,
   type RunUsageResponse,
+  type UnattendedResponse,
   type RunSnapshot,
   type RunSummary,
   type MonitorAsked,
@@ -123,6 +125,8 @@ export interface Client {
    * run view therefore asks for it on a slow cadence, not on every frame.
    */
   readonly usage: (runId: string) => Promise<RunUsageResponse>
+  /** What the run decided with nobody watching. Read on the rollup's slow cadence. */
+  readonly unattended: (runId: string) => Promise<UnattendedResponse>
   /** One §9 operation. Resolves when the daemon accepted it, and returns nothing. */
   readonly operate: <K extends NodeOperation>(
     runId: string,
@@ -180,6 +184,9 @@ export function createClient(origin: string, token: string): Client {
     },
     async usage(runId) {
       return await get(`/api/runs/${encodeURIComponent(runId)}/usage`, RunUsageResponseSchema)
+    },
+    async unattended(runId) {
+      return await get(`/api/runs/${encodeURIComponent(runId)}/unattended`, UnattendedResponseSchema)
     },
     async changes(runId, nodeId, options) {
       return await get(

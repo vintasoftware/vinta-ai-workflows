@@ -5095,6 +5095,7 @@ describe('a phase’s decisions', () => {
         kind: 'answer',
         by: 'operator',
         text: 'Storage — Keep invoices in the existing table?\nAnswer: New table (Adds a migration.)',
+        effect: 'agent-question:a:1',
       },
       {
         kind: 'rejected',

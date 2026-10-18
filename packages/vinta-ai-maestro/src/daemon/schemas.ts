@@ -815,6 +815,25 @@ export const CrewTotalsSchema = z.strictObject({
  * snapshot: computing it reads every node's transcript in full, and the
  * snapshot is re-read on every event that lands.
  */
+/**
+ * What the run decided with nobody watching (`src/decisions/unattended.ts`):
+ * questions a `--retry-after` timer or the coordinator answered, and the
+ * coordinator's own operations, oldest first. `summary` is the line `status`
+ * prints, an agent's question header and picked option included.
+ */
+export const UnattendedResponseSchema = z.strictObject({
+  runId: z.string(),
+  decisions: z.array(
+    z.strictObject({
+      at: z.number().int(),
+      node: z.string().nullable(),
+      by: z.enum(['unattended', 'coordinator']),
+      category: z.enum(['retry', 'agent_question', 'plan_question', 'merge_commit', 'other', 'action']),
+      summary: z.string(),
+    }),
+  ),
+})
+
 export const RunUsageResponseSchema = z.strictObject({
   runId: z.string(),
   reuse: ReuseTotalsSchema,
@@ -1131,6 +1150,7 @@ export type NodeChanges = z.infer<typeof NodeChangesSchema>
 export type ChangedFile = z.infer<typeof ChangedFileSchema>
 export type SessionTurn = z.infer<typeof SessionTurnSchema>
 export type RunUsageResponse = z.infer<typeof RunUsageResponseSchema>
+export type UnattendedResponse = z.infer<typeof UnattendedResponseSchema>
 export type StartRunResponse = z.infer<typeof StartRunResponseSchema>
 export type EventFrame = z.infer<typeof EventFrameSchema>
 export type EventPage = z.infer<typeof EventPageSchema>

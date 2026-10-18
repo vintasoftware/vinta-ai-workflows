@@ -38,6 +38,7 @@ import {
   NodeDetailSchema,
   OkResponseSchema,
   RunUsageResponseSchema,
+  UnattendedResponseSchema,
   RedirectRequestSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
@@ -50,6 +51,7 @@ import {
   type NodeDetail,
   type RunSnapshot,
   type RunUsageResponse,
+  type UnattendedResponse,
   type RunSummary,
 } from '../../src/daemon/schemas.ts'
 import { parseWorkflow } from '../../src/validate.ts'
@@ -124,6 +126,8 @@ export interface StubOptions {
    * drawing the graph through it.
    */
   readonly usage?: Readonly<Record<string, RunUsageResponse>>
+  /** Decisions made unattended, by run. A known run without an entry has none. */
+  readonly unattended?: Readonly<Record<string, UnattendedResponse['decisions']>>
   readonly events?: readonly NewEvent[]
   /** Serve a body that does not match the schema, to prove the client parses. */
   readonly corrupt?: 'snapshot' | 'frame'
@@ -345,6 +349,13 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       const totals = usageByRun.get(decodeURIComponent(usage[1] ?? ''))
       if (totals === undefined) return json(response, 404, { error: 'unknown_run', issues: null })
       return json(response, 200, RunUsageResponseSchema.parse(totals))
+    }
+
+    const unattended = /^\/api\/runs\/([^/]+)\/unattended$/.exec(url.pathname)
+    if (unattended !== null) {
+      const runId = decodeURIComponent(unattended[1] ?? '')
+      if (!snapshots.has(runId)) return json(response, 404, { error: 'unknown_run', issues: null })
+      return json(response, 200, UnattendedResponseSchema.parse({ runId, decisions: options.unattended?.[runId] ?? [] }))
     }
 
     // The monitor: a question is accepted (`202`) and answered in the

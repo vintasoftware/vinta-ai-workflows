@@ -78,6 +78,7 @@ import { computeWaves, transitiveDependents } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
 import type { Integrator } from '../integration/integrator.ts'
 import { prNumberOf } from '../integration/pr.ts'
+import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
@@ -1276,7 +1277,8 @@ export class RunEffectExecutor implements EffectExecutor {
   #planPrText(wave: number): PrText {
     const { integrator, journal, runId } = this.#options
     const urls = new Map<string, string>()
-    for (const event of journal.events(runId)) {
+    const events = journal.events(runId)
+    for (const event of events) {
       if (event.type !== 'node_pr' || event.payload.url === undefined) continue
       urls.set(`${event.payload.kind ?? 'phase'}:${event.nodeId}`, event.payload.url)
     }
@@ -1310,12 +1312,14 @@ export class RunEffectExecutor implements EffectExecutor {
       })
     }
 
+    const details = runAgentDetails(journal, runId)
     return composePlanPrBody({
       runId,
       planId: this.#workflow.id,
       baseBranch: this.#workflow.base_branch,
       head: integrator.waveBranch(wave),
       steps,
+      unattended: unattendedDecisions(events).map((entry) => describeUnattended(entry, { details, published: true })),
     })
   }
 

@@ -37,7 +37,7 @@ import {
   TableHeader,
   TableRow,
 } from 'vinta-design-system/ui/table'
-import type { RunSnapshot, RunUsageResponse } from '../../src/daemon/schemas.ts'
+import type { RunSnapshot, RunUsageResponse, UnattendedResponse } from '../../src/daemon/schemas.ts'
 import { cacheShare } from '../../src/usage/usage.ts'
 import { Chip } from './Chip.tsx'
 import type { Client } from './client.ts'
@@ -165,6 +165,7 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
         />
         <IntegrationWorktree worktree={snapshot.integration} />
         <Rollup client={client} runId={runId} />
+        <Unattended client={client} runId={runId} />
         <MonitorPanel client={client} runId={runId} />
         <Pools resources={snapshot.resources} />
         <GateQueue queue={snapshot.gateQueue} now={now} />
@@ -172,6 +173,77 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
       </div>
     </section>
   )
+}
+
+/**
+ * What the run decided with nobody watching: questions a `--retry-after` timer
+ * or the coordinator answered, and what the coordinator did on its own. Each
+ * one is a choice no person made, and the operator coming back to a run is
+ * the one who has to find them.
+ */
+function Unattended({ client, runId }: { readonly client: Client; readonly runId: string }) {
+  const [decisions, setDecisions] = useState<UnattendedResponse['decisions'] | null>(null)
+  const tick = useNow(USAGE_REFRESH_MS)
+
+  useEffect(() => {
+    let stopped = false
+    client.unattended(runId).then(
+      (next) => {
+        if (!stopped) setDecisions(next.decisions)
+      },
+      // As the rollup: a list that cannot be read says nothing.
+      () => {},
+    )
+    return () => {
+      stopped = true
+    }
+  }, [client, runId, tick])
+
+  return (
+    <Panel
+      title="Decided without you"
+      description="Answers a timer or the coordinator gave, and what the coordinator did."
+      data-unattended
+    >
+      {decisions === null ? (
+        <EmptyNote>Reading the run’s decisions…</EmptyNote>
+      ) : decisions.length === 0 ? (
+        <EmptyNote>Nothing decided without a person yet.</EmptyNote>
+      ) : (
+        <ul className="divide-y">
+          {decisions.map((decision, index) => (
+            <li
+              key={`${decision.at}-${index}`}
+              data-unattended-row={decision.category}
+              className="flex flex-col gap-1 py-2 first:pt-0 last:pb-0"
+            >
+              <span className="flex items-center gap-2">
+                {decision.node !== null && (
+                  <a
+                    className="font-medium"
+                    href={`#/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(decision.node)}`}
+                  >
+                    {decision.node}
+                  </a>
+                )}
+                <Badge variant="outline" className="muted">
+                  {decision.by}
+                </Badge>
+                <span className="text-xs text-muted-foreground">{new Date(decision.at).toLocaleString()}</span>
+              </span>
+              <span className="text-sm">{withoutNode(decision.summary, decision.node)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  )
+}
+
+/** The summary as `status` prints it, less the node and actor the row already shows. */
+function withoutNode(summary: string, node: string | null): string {
+  const parts = summary.split(' · ')
+  return parts[0] === (node ?? 'run') ? parts.slice(2).join(' · ') || summary : summary
 }
 
 /**

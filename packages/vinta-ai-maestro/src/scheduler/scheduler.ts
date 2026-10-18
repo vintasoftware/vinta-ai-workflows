@@ -3570,7 +3570,7 @@ export class Scheduler {
       // The session that asked is the only one this message reaches. Every
       // later one — the next reviewer above all — gets it from here.
       const by: DecidedBy = unattended ? 'unattended' : facts.human?.['by'] === 'coordinator' ? 'coordinator' : 'operator'
-      for (const entry of answerDecisions(ask, answers, by)) this.#decide(state, entry)
+      for (const entry of answerDecisions(ask, answers, by, effectId)) this.#decide(state, entry)
       // The adapter hands `prompt` to the CLI without echoing it, so the
       // answer is written here — under whoever gave it, like their steering.
       journal.appendTranscript(runId, state.node.id, {

@@ -86,6 +86,8 @@ import {
   journalConflicts,
   operations,
   OperationsSchema,
+  unattendedDecisions,
+  UnattendedDecisionsSchema,
 } from './activity.ts'
 
 export const POSTMORTEM_SCHEMA_URL =
@@ -409,6 +411,7 @@ export const PostMortemSchema = z
       crew_substitutions: z.array(CrewSubstitutionSchema).optional(),
       operations: OperationsSchema.optional(),
       cross_phase_failures: z.array(CrossPhaseFailureSchema).optional(),
+      unattended_decisions: UnattendedDecisionsSchema.optional(),
     }),
     gaps: z.array(PostMortemGapSchema),
   })
@@ -676,6 +679,7 @@ export function postMortem(
       cross_phase_failures: crossPhaseFailures(events, (wave) =>
         workflow.nodes.filter((node) => waves.get(node.id) === wave).map((node) => node.id),
       ),
+      unattended_decisions: unattendedDecisions(events),
     },
     gaps: gaps(workflow, traces, selfChanges),
   } satisfies PostMortem)

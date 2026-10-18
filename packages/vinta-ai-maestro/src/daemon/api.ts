@@ -51,6 +51,7 @@ import type { Actor } from '../journal/events.ts'
 import { CoordinatorForbidden } from '../coordinator/actor.ts'
 import { execHolder } from '../coordinator/exec.ts'
 import { coordinatorRefusals } from '../coordinator/policy.ts'
+import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
@@ -105,6 +106,7 @@ import {
   type RunSnapshot,
   type RunSummary,
   type RunUsageResponse,
+  type UnattendedResponse,
   type SessionTurn,
   type StartRunResponse,
   type WorkflowListResponse,
@@ -559,6 +561,28 @@ export function createApi(options: ApiOptions): Hono {
       cost: usage.totals.cost,
       cache: usage.totals.cache,
     } satisfies RunUsageResponse)
+  })
+
+  /**
+   * The decisions the run made with nobody watching, for the run view. Its own
+   * read for the reason `usage` is: it folds the run's whole log and reads
+   * every asking phase's `decisions.jsonl`, which the snapshot must not do on
+   * every event.
+   */
+  app.get('/api/runs/:runId/unattended', (c) => {
+    const runId = c.req.param('runId') ?? ''
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const details = runAgentDetails(journal, runId)
+    return c.json({
+      runId,
+      decisions: unattendedDecisions(journal.events(runId)).map((entry) => ({
+        at: entry.at,
+        node: entry.node,
+        by: entry.type === 'action' ? 'coordinator' : entry.by,
+        category: entry.type === 'action' ? 'action' : entry.category,
+        summary: describeUnattended(entry, { details }),
+      })),
+    } satisfies UnattendedResponse)
   })
 
   /**

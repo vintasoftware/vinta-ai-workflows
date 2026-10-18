@@ -840,6 +840,128 @@
             "additionalProperties": false,
             "description": "A gate that every phase passed on its own branch and that failed on the merged wave: two of `members` (or one of them and an earlier wave) disagree. The evidence of a missing dependency or a missing contract test that `missing_dependencies`’ ordering cannot see."
           }
+        },
+        "unattended_decisions": {
+          "type": "object",
+          "properties": {
+            "answers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  },
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "retry",
+                      "agent_question",
+                      "plan_question",
+                      "merge_commit",
+                      "other"
+                    ],
+                    "description": "`retry`: a failed attempt retried or stopped. `agent_question`: a design question the agent stopped to ask, given its recommended options. `plan_question`: a pipeline question such as an exhausted review budget, given the plan’s `unattended_answer`. `merge_commit`: a merge commit git refused."
+                  },
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "unattended",
+                      "coordinator"
+                    ]
+                  },
+                  "answer": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The answer’s value: a choice, or an agent question’s picked option indices as JSON."
+                  },
+                  "waited_ms": {
+                    "description": "How long the question stood unanswered.",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "node",
+                  "at_ms",
+                  "category",
+                  "by",
+                  "answer"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Questions a `--retry-after` timer or the run coordinator answered, oldest first."
+            },
+            "coordinator_actions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "at_ms": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "add_context",
+                      "redirect",
+                      "pause",
+                      "abort",
+                      "fresh",
+                      "amend",
+                      "exec",
+                      "gate_cache_invalidate"
+                    ]
+                  },
+                  "target": {
+                    "description": "An amendment’s targets, an `exec` target or a gate id.",
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "at_ms",
+                  "action"
+                ],
+                "additionalProperties": false
+              },
+              "description": "What the coordinator did on its own, oldest first. Its reasons are in its conversation and, for steering, in the phase’s decisions — not here."
+            }
+          },
+          "required": [
+            "answers",
+            "coordinator_actions"
+          ],
+          "additionalProperties": false,
+          "description": "Every decision made with nobody watching. A plan whose run decided much on its own left those choices to chance: a design question answered unattended belonged in the plan."
         }
       },
       "required": [

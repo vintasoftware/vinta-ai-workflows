@@ -567,6 +567,18 @@ describe('what was done to the run', () => {
     })
     // The coordinator's amendment is still scored as the run's own.
     expect(report.findings.interventions.map((finding) => finding.amendment)).toEqual([2])
+    // And every decision nobody made is listed, the person's answer left out.
+    expect(report.findings.unattended_decisions).toEqual({
+      answers: [
+        { node: 'p3', at_ms: T0 + 10 * MIN, category: 'plan_question', by: 'unattended', answer: 'retry', waited_ms: MIN },
+        { node: 'p3', at_ms: T0 + 10 * MIN, category: 'plan_question', by: 'coordinator', answer: 'retry', waited_ms: MIN },
+      ],
+      coordinator_actions: [
+        { at_ms: T0 + 6 * MIN, action: 'amend', target: 'gate:unit' },
+        { at_ms: T0 + 8 * MIN, node: 'p2', action: 'add_context' },
+        { at_ms: T0 + 11 * MIN, action: 'exec', target: 'integration' },
+      ],
+    })
   })
 
   it('names every phase staffed above its plan, with the model and what the phase cost', () => {

@@ -20,6 +20,7 @@
  */
 import { z } from 'zod'
 
+import { unattendedDecisions as foldUnattended } from '../decisions/unattended.ts'
 import type { StoredEvent } from '../journal/events.ts'
 
 const Id = z
@@ -117,6 +118,52 @@ export const OperationsSchema = z
       'maestro — a wave branch rebuilt in another checkout — leave no record and are not counted.',
   )
 
+export const UnattendedDecisionsSchema = z
+  .strictObject({
+    answers: z
+      .array(
+        z.strictObject({
+          node: Id,
+          at_ms: z.number().int(),
+          category: z
+            .enum(['retry', 'agent_question', 'plan_question', 'merge_commit', 'other'])
+            .describe(
+              '`retry`: a failed attempt retried or stopped. `agent_question`: a design question the agent ' +
+                'stopped to ask, given its recommended options. `plan_question`: a pipeline question such as ' +
+                'an exhausted review budget, given the plan’s `unattended_answer`. `merge_commit`: a merge ' +
+                'commit git refused.',
+            ),
+          by: z.enum(['unattended', 'coordinator']),
+          answer: z
+            .union([z.string().max(200), z.number(), z.boolean(), z.null()])
+            .describe('The answer’s value: a choice, or an agent question’s picked option indices as JSON.'),
+          waited_ms: z.number().int().min(0).optional().describe('How long the question stood unanswered.'),
+        }),
+      )
+      .describe('Questions a `--retry-after` timer or the run coordinator answered, oldest first.'),
+    coordinator_actions: z
+      .array(
+        z.strictObject({
+          at_ms: z.number().int(),
+          node: Id.optional(),
+          action: z.enum(['add_context', 'redirect', 'pause', 'abort', 'fresh', 'amend', 'exec', 'gate_cache_invalidate']),
+          target: z
+            .string()
+            .max(500)
+            .optional()
+            .describe('An amendment’s targets, an `exec` target or a gate id.'),
+        }),
+      )
+      .describe(
+        'What the coordinator did on its own, oldest first. Its reasons are in its conversation and, ' +
+          'for steering, in the phase’s decisions — not here.',
+      ),
+  })
+  .describe(
+    'Every decision made with nobody watching. A plan whose run decided much on its own left those ' +
+      'choices to chance: a design question answered unattended belonged in the plan.',
+  )
+
 export const CrossPhaseFailureSchema = z
   .strictObject({
     wave: z.number().int().min(1),
@@ -135,6 +182,7 @@ export type FailureCause = z.infer<typeof FailureCauseSchema>
 export type CrewSubstitution = z.infer<typeof CrewSubstitutionSchema>
 export type Operations = z.infer<typeof OperationsSchema>
 export type CrossPhaseFailure = z.infer<typeof CrossPhaseFailureSchema>
+export type UnattendedDecisions = z.infer<typeof UnattendedDecisionsSchema>
 
 export interface JournalConflict {
   readonly where: 'base' | 'wave'
@@ -305,6 +353,32 @@ export function operations(events: readonly StoredEvent[]): Operations {
   }
   questions.unanswered = Math.max(0, questions.asked - questions.by_operator - questions.unattended - questions.by_coordinator)
   return { amendments, node_operations: [...ops.values()], questions, exec_runs: [...execs.values()] }
+}
+
+/** The decisions made unattended (`src/decisions/unattended.ts`), as identifiers. */
+export function unattendedDecisions(events: readonly StoredEvent[]): UnattendedDecisions {
+  const answers: UnattendedDecisions['answers'] = []
+  const actions: UnattendedDecisions['coordinator_actions'] = []
+  for (const entry of foldUnattended(events)) {
+    if (entry.type === 'answer') {
+      answers.push({
+        node: entry.node,
+        at_ms: entry.at,
+        category: entry.category,
+        by: entry.by,
+        answer: typeof entry.answer === 'string' ? entry.answer.slice(0, 200) : entry.answer,
+        ...(entry.waitedMs === null ? {} : { waited_ms: Math.max(0, entry.waitedMs) }),
+      })
+    } else {
+      actions.push({
+        at_ms: entry.at,
+        ...(entry.node === null ? {} : { node: entry.node }),
+        action: entry.action,
+        ...(entry.target === undefined ? {} : { target: entry.target.slice(0, 500) }),
+      })
+    }
+  }
+  return { answers, coordinator_actions: actions }
 }
 
 /** Wave gates that failed on a merged tree, with the wave's members. */
