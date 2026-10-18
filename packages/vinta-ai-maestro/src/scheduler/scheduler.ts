@@ -238,6 +238,25 @@ const RETRY_WITH = 'retry with '
  */
 const UNATTENDED_BACKOFF_CAP = 8
 
+/**
+ * The least an agent's own question waits unattended when only `retryAfterMs`
+ * set the pace. An observed run answered a design question after sixty
+ * seconds, and an answer given that way added a database migration: a retry
+ * costs an attempt, an agent's choice can cost a schema.
+ */
+export const AGENT_ANSWER_FLOOR_MS = 30 * 60_000
+
+/**
+ * How long an agent's question waits before it takes its recommended options:
+ * the explicit `agentAnswerAfterMs`, else twice `retryAfterMs` and never less
+ * than `AGENT_ANSWER_FLOOR_MS`, else never (a person answers).
+ */
+export function agentAnswerAfter(retryAfterMs: number | undefined, explicit: number | undefined): number | undefined {
+  if (explicit !== undefined) return explicit > 0 ? explicit : undefined
+  if (retryAfterMs === undefined || retryAfterMs <= 0) return undefined
+  return Math.max(2 * retryAfterMs, AGENT_ANSWER_FLOOR_MS)
+}
+
 export interface SchedulerOptions {
   /** The frozen snapshot the run executes. Its `run_started` is already journalled. */
   readonly workflow: Workflow
@@ -344,6 +363,12 @@ export interface SchedulerOptions {
    * asked, which is the budget for a failure nobody has seen yet.
    */
   readonly retryAfterMs?: number
+  /**
+   * The unattended wait on an agent's own question (`#agentQuestions`), which
+   * is a design choice rather than a retry and so waits longer. Absent derives
+   * it from `retryAfterMs` (`agentAnswerAfter`).
+   */
+  readonly agentAnswerAfterMs?: number
   /** Drives `retryAfterMs`. Injected in tests; the real one is `systemClock`. */
   readonly clock?: Clock
   /**
@@ -3528,7 +3553,10 @@ export class Scheduler {
       state.parkedEffectId = effectId
       state.unattendedAnswer = encodeAnswers(recommendedAnswers(ask))
 
-      const cancel = this.#armUnattendedAnswer(state)
+      const cancel = this.#armUnattendedAnswer(
+        state,
+        agentAnswerAfter(this.#options.retryAfterMs, this.#options.agentAnswerAfterMs),
+      )
       let facts: GuardContext
       try {
         facts = await this.#park(state)
@@ -4086,12 +4114,11 @@ export class Scheduler {
    *
    * One shot and no backoff: the question is not retried, it is answered.
    */
-  #armUnattendedAnswer(state: NodeState): () => void {
+  #armUnattendedAnswer(state: NodeState, after = this.#options.retryAfterMs): () => void {
     const answer = state.unattendedAnswer
     const effect = state.parkedEffectId
     state.unattendedAnswer = null
     state.delegable = answer !== null
-    const after = this.#options.retryAfterMs
     if (answer === null || after === undefined || after <= 0) return () => {}
 
     const clock = this.#options.clock ?? systemClock

@@ -105,7 +105,8 @@ export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
                  Defaults to 127.0.0.1; there is no reason to change it unless
                  agents run somewhere that cannot reach loopback.
   --port <n>     Defaults to 0 — an OS-assigned port.
-  --on-failure, --retries, --retry-after, --permission, --system-one,
+  --on-failure, --retries, --retry-after, --agent-answer-after,
+  --permission, --system-one,
   --no-coordinator, --log-level, --log-stderr, --log-detail
                  As for \`vinta-ai-maestro ui --help\`, which documents each.`
 
@@ -174,6 +175,7 @@ export async function runCommand(
         'on-failure': { type: 'string' },
         retries: { type: 'string' },
         'retry-after': { type: 'string' },
+        'agent-answer-after': { type: 'string' },
         resume: { type: 'string' },
         foreground: { type: 'boolean' },
         // Internal: the id the launcher chose, so it can say which run it
@@ -521,6 +523,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
       ...(policy.onFailure === undefined ? {} : { onFailure: policy.onFailure }),
       ...(policy.retries === undefined ? {} : { retries: policy.retries }),
       ...(policy.retryAfterMs === undefined ? {} : { retryAfterMs: policy.retryAfterMs }),
+      ...(policy.agentAnswerAfterMs === undefined ? {} : { agentAnswerAfterMs: policy.agentAnswerAfterMs }),
       ...(deps.executor === undefined ? {} : { executor: deps.executor }),
       ...(deps.adapters === undefined ? {} : { adapters: deps.adapters }),
       ...(deps.perLaneBytes === undefined ? {} : { perLaneBytes: deps.perLaneBytes }),
