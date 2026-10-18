@@ -27,6 +27,8 @@ A test should fail when the behavior breaks and pass when it's correct — nothi
 6. **Decouple from internals** — assert observable state/output, not private methods or call counts. The test survives a behavior-preserving rewrite.
 7. **One behavior per test**, named for what it pins (`returns_zero_for_empty_cart`).
 8. **Kill nondeterminism** — control every entropy source (clock, randomness, timezone/locale, iteration/DB order, concurrency). Freeze/inject them; a test that passes only sometimes is worse than none.
+   - **Time-independent:** a test that touches a date, a "today", an expiry or a timezone freezes the clock to a fixed instant and sets the timezone explicitly. Never compute the expected value from the real "now", and never assume the host's timezone. A date test that is green all day can fail in the hour around midnight UTC, or on a CI runner in another zone; pick a frozen instant near a day boundary when the code does date arithmetic, so the edge is exercised on purpose.
+   - **Deterministic generated output:** a test (or gate) that compares generated output — an OpenAPI/GraphQL schema, a generated client, a snapshot — must get the same bytes on every machine. Values that come from the host (the OS timezone database, installed locales, the filesystem order, the Python/Node version) make it differ by machine. Source them from a locked package (e.g. `tzdata` pinned in the lockfile for a timezone enum) and sort anything whose order isn't defined.
 9. **Cover the branches, not just the happy path** — aim high (95%+ branch coverage): each error path, guard, and edge (empty, boundary, null) gets a case. Coverage is the floor, correct assertions are the point.
 
 ## Regression tests
@@ -52,3 +54,4 @@ Apply these; `framework-default` defers to the pack. If the existing suite contr
 - Giant snapshots as a substitute for asserting the fields that matter.
 - `delete all rows` in setup instead of rollback — masks leaked state, races other tests.
 - Testing the framework/ORM/language instead of your behavior on top of it.
+- `date.today()` / `new Date()` in the expected value — the test passes until the clock crosses a day boundary between the call under test and the assertion.
