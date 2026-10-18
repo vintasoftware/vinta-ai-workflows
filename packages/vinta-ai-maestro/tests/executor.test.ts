@@ -713,12 +713,12 @@ describe('the review verdict', () => {
     const rig = setup(onePhase)
     turn(rig, 'Looks good to me.')
     expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
-      review: { verdict: 'fail' },
+      review: { verdict: 'fail', stated: false },
     })
 
     turn(rig, `${VERDICT_MARKER} pass`, 'error')
     expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
-      review: { verdict: 'fail' },
+      review: { verdict: 'fail', stated: false },
     })
   })
 

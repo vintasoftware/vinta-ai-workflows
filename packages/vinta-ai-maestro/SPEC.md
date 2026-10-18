@@ -960,6 +960,8 @@ The skill the chore names carries the loop's own procedure and the reviewer's st
 - `pass` when every review chore approved, and when the node runs none;
 - `fail` at the first review chore that did not, without running the rest. A turn that stated no verdict, errored or was refused by its harness for good reads as `fail`: a merge on a review's silence is the one failure a review exists to prevent. A capacity refusal is not skipped, as a polish chore's is — skipping it would merge a phase nobody reviewed.
 
+Silence is stated as such beside the verdict, `review.stated: false`, and the failure reason says `the review turn stated no verdict` instead of `review verdict "fail"`. The two are different failures: a rejection is the reviewer's judgement and its findings were worked inside the turn (§16.1), while silence is a turn that ended before the reviewer answered. One run recorded 22 failed attempts as `review verdict "fail"; 0 fix rounds spent`, read afterwards as reviews whose findings no fixer was handed. Their transcripts showed review turns ending "waiting for the reviewer's verdict" — a reviewer resumed with `SendMessage` whose answer arrived after the headless session closed, fixed in 0.7.0-alpha33 — and turns cut "blocked" over a `NEEDS_INPUT` block, fixed in alpha34; none had a `VERDICT: fail`. The budget clause of a failure reason counts gate fixers only, and says so (`gate fix rounds spent`): a review's findings never go to a separate fix round.
+
 The chore's `chore_result` row says `failed` for an unapproved review, so the post-run report counts it.
 
 ### 16.3 Budget, and what an unattended run does

@@ -1901,6 +1901,27 @@ describe('standard-phase under the scheduler', () => {
     })
   })
 
+  it('tells a review turn that stated no verdict apart from a rejection', async () => {
+    // One run recorded 22 attempts as `review verdict "fail"; 0 fix rounds
+    // spent`: every one was a review turn its harness ended while the
+    // reviewer was still working, and none had rejected anything.
+    const r = rig(
+      standardWorkflow(
+        [node('a', [], { gates: ['unit'], chores: ['review'], max_fix_rounds: undefined })],
+        { review: REVIEW_CHORE },
+      ),
+      { outcomes: { ...APPROVED, 'e-review:review': { facts: { review: { verdict: 'fail', stated: false } } } } },
+    )
+
+    const report = await runAnsweringStop(r, 'a')
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(errorsOf(r, 'a')).toEqual([
+      'pipeline ended in state "failed" via "t-review-stop"; the review turn stated no verdict; ' +
+        '0 gate fix rounds spent',
+    ])
+  })
+
   it('names no budget in a failure reason when the node set none', async () => {
     const r = rig(
       standardWorkflow(
@@ -1918,7 +1939,7 @@ describe('standard-phase under the scheduler', () => {
       .filter((event) => event.type === 'node_error')
       .map((event) => (event.payload as { reason?: string }).reason)
     expect(reasons).toEqual([
-      'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; 0 fix rounds spent',
+      'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; 0 gate fix rounds spent',
     ])
   })
 
@@ -1992,11 +2013,11 @@ describe('standard-phase under the scheduler', () => {
 
     expect(reasonsFor(red, 'a')).toEqual([
       'pipeline ended in state "failed" via "t-stop"; gate "unit" exited 2; ' +
-        '4 of 4 fix rounds spent',
+        '4 of 4 gate fix rounds spent',
     ])
     expect(reasonsFor(rejected, 'a')).toEqual([
       'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; ' +
-        '0 of 4 fix rounds spent',
+        '0 of 4 gate fix rounds spent',
     ])
 
     // §11: a gate id and an exit code, never what the gate printed. The
@@ -2032,7 +2053,7 @@ describe('standard-phase under the scheduler', () => {
         .map((event) => String((event.payload as { reason: unknown }).reason)),
     ).toEqual([
       'pipeline ended in state "failed" via "t-stop"; gate "unit" timed out; ' +
-        '4 of 4 fix rounds spent',
+        '4 of 4 gate fix rounds spent',
     ])
     expectDrained(r)
   })
@@ -2086,7 +2107,7 @@ describe('standard-phase under the scheduler', () => {
         .events('run-1')
         .filter((event) => event.type === 'node_error')
         .map((event) => String((event.payload as { reason: unknown }).reason)),
-    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 4 fix rounds spent'])
+    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 4 gate fix rounds spent'])
     expectDrained(r)
   })
 })

@@ -518,11 +518,18 @@ function settledReason(settled: Settled, state: NodeState): string {
     )
   }
   if (state.lastVerdict === 'fail') clauses.push('review verdict "fail"')
+  // Not a rejection: the turn ended — or errored — before it stated one. One
+  // run recorded 22 of these as `review verdict "fail"`; every one was a review
+  // turn the harness ended while its reviewer was still working.
+  if (state.lastVerdict === 'silent') clauses.push('the review turn stated no verdict')
+  // Gate fixers only. A review's findings are fixed inside its own turn (§16),
+  // and "0 fix rounds spent" beside a failed review read as findings nobody
+  // had been handed.
   const budget = state.node.max_fix_rounds
   clauses.push(
     budget === undefined
-      ? `${state.fixRounds} fix rounds spent`
-      : `${state.fixRounds} of ${budget} fix rounds spent`,
+      ? `${state.fixRounds} gate fix rounds spent`
+      : `${state.fixRounds} of ${budget} gate fix rounds spent`,
   )
 
   return clauses.join('; ')
@@ -736,13 +743,15 @@ interface NodeState {
    */
   lastRed: { readonly gate: string; readonly tree: string; fixedSince: boolean } | null
   /**
-   * The last verdict the review chores stated this attempt (`pass` | `fail`).
+   * The last verdict the review chores stated this attempt (`pass` | `fail`),
+   * or `silent` for a review that did not approve because its turn stated no
+   * verdict at all — the guards read that as `fail`, the failure reason does not.
    *
-   * A closed vocabulary of two words, decided by `readVerdict` from the
-   * transcript and handed here as a fact — so it carries none of the review's
-   * prose, which is what §11 keeps in the transcript file.
+   * A closed vocabulary, decided by `readVerdict` from the transcript and
+   * handed here as a fact — so it carries none of the review's prose, which is
+   * what §11 keeps in the transcript file.
    */
-  lastVerdict: 'pass' | 'fail' | null
+  lastVerdict: 'pass' | 'fail' | 'silent' | null
   lane: string | null
   /**
    * A member the operator picked for the next attempt, in place of the one the
@@ -3051,7 +3060,9 @@ export class Scheduler {
       }
     }
     const verdict = outcome.facts?.review?.['verdict']
-    if (verdict === 'pass' || verdict === 'fail') state.lastVerdict = verdict
+    if (verdict === 'pass' || verdict === 'fail') {
+      state.lastVerdict = verdict === 'fail' && outcome.facts?.review?.['stated'] === false ? 'silent' : verdict
+    }
     return outcome
   }
 
@@ -3110,6 +3121,8 @@ export class Scheduler {
         : choresFor(this.#workflow, state.node, when)
     const prOpened = invocation.context.pr?.['opened'] === true
     let verdict: 'pass' | 'fail' = 'pass'
+    // False when the review that did not approve stated nothing at all (§16.2).
+    let stated = true
 
     // The `after_pr` chores run after the merge, the push and the PR — a review
     // canvas, a PR comment. They edit nothing anybody builds on, and when none
@@ -3152,6 +3165,7 @@ export class Scheduler {
         if (review && outcome.facts?.review?.['verdict'] !== 'pass') {
           this.#choreResult(state, entry.id, 'failed', startedAt)
           verdict = 'fail'
+          stated = outcome.facts?.review?.['stated'] !== false
           break
         }
         this.#choreResult(state, entry.id, 'ran', startedAt)
@@ -3166,6 +3180,7 @@ export class Scheduler {
         this.#choreResult(state, entry.id, 'failed', startedAt)
         if (review) {
           verdict = 'fail'
+          stated = false
           break
         }
       }
@@ -3178,7 +3193,9 @@ export class Scheduler {
     // something a guard branches on.
     const outcome = await this.#options.executor.execute(invocation)
     if (when !== 'review') return outcome
-    return { facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict } } }
+    return {
+      facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict, ...(stated ? {} : { stated: false }) } },
+    }
   }
 
   #choreResult(state: NodeState, chore: string, status: ChoreStatus, startedAt: number): void {

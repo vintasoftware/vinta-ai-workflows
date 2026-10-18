@@ -323,7 +323,7 @@ export class RunEffectExecutor implements EffectExecutor {
 
     switch (invocation.effect.definitionId) {
       case 'spawn_agent':
-        return params['verdict'] === true ? { facts: { review: { verdict: this.#verdict(nodeId) } } } : {}
+        return params['verdict'] === true ? { facts: { review: this.#verdict(nodeId) } } : {}
       case 'run_gate':
         return await this.#runGate(nodeId, params)
       case 'run_chore':
@@ -363,10 +363,13 @@ export class RunEffectExecutor implements EffectExecutor {
 
   /**
    * The last verdict the review stated in the turn that just ended. A turn
-   * that errored, or stated nothing, takes the fail-closed default.
+   * that errored, or stated nothing, takes the fail-closed default, and says
+   * it stated nothing: a review that rejected the phase and a turn that ended
+   * before its reviewer answered both read `fail`, and only the second is a
+   * harness's doing (§16.2).
    */
-  #verdict(nodeId: string): 'pass' | 'fail' {
-    const fallback = this.#options.defaultVerdict ?? 'fail'
+  #verdict(nodeId: string): { readonly verdict: 'pass' | 'fail'; readonly stated?: false } {
+    const fallback = { verdict: this.#options.defaultVerdict ?? 'fail', stated: false } as const
     const turn = this.#lastTurn(nodeId)
     if (!turn.ok) return fallback
     for (const text of turn.texts) {
@@ -374,7 +377,7 @@ export class RunEffectExecutor implements EffectExecutor {
       // this reads, so the protocol cannot drift out of one of the two places.
       // The verdict only — the transcript text itself goes no further.
       const stated = readVerdict(text)
-      if (stated !== undefined) return stated
+      if (stated !== undefined) return { verdict: stated }
     }
     return fallback
   }

@@ -659,6 +659,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: a review that stated no verdict is no longer reported
+  as a rejection.** One run recorded 22 attempts as `review verdict "fail"; 0
+  fix rounds spent`. None had rejected anything: each was a review turn that
+  ended before its reviewer answered (fixed in alpha33 and alpha34). The
+  pipeline still treats silence as `fail`, but the failure reason now says
+  `the review turn stated no verdict`, and the `review` fact carries
+  `stated: false`. The budget clause is renamed to `gate fix rounds spent`,
+  since a review's findings are fixed inside its own turn and never in a
+  separate fix round.
+
 - **`vinta-ai-maestro`: two empty turns in a row park the phase instead of
   burning its retries.** Right after one run moved its desks to codex, "codex
   ended the turn without the agent doing anything" failed 20 attempts across 4
