@@ -26,7 +26,7 @@ The flow is destructive (force-push). Every modification is gated on user confir
 - Default branch: `{{DEFAULT_BRANCH}}`.
 - Branch naming convention (set by [implement-plan](../implement-plan/SKILL.md)): `plan/{plan-id-kebab}/phase-{phase.id}`.
 - **`WORKROOT`.** Resolve once, same as the [implement-plan Resolve WORKROOT step](../implement-plan/SKILL.md#step-05--resolve-workroot): the main checkout by default, or the plan's worktree when `run_options.use_worktree = true` in `run.md`. When the run used a **lane pool**, amend in the **integration worktree** — lanes are sized for forward implementation and may still hold state from their last phase. Every `git` call below runs with `git -C <WORKROOT>`; when no worktree is in play, `WORKROOT` is the main checkout and the commands read exactly as in-place git.
-- **Amend only when no implementation is in flight.** A rewrite force-pushes branches other lanes may be based on. If `run.md` shows any phase `running`, stop and tell the user to let the run finish (or stop it) first.
+- **Amend only when no implementation is in flight.** A rewrite force-pushes branches other lanes may be based on. If `run.md` shows any phase `running`, stop and tell the user to let the run finish (or stop it) first. A plan run by `vinta-ai-maestro` is the exception: that run is amended through its own CLI, never by force-pushing its branches — see [Step 0.5](#step-05--a-live-maestro-run).
 
 ## When to use
 
@@ -120,6 +120,10 @@ The flow is destructive (force-push). Every modification is gated on user confir
    - `Stop`
 
    Anything in `merged-to-default` state shown explicitly with a warning. **Do not** include those in the force-push list — user must convert those to `append-new` phases instead.
+
+## Step 0.5 — A live maestro run
+
+<!-- include: partials/maestro-live-run.md#AMEND_LIVE_RUN -->
 
 ## Step 1 — Edit the plan file
 
@@ -337,6 +341,8 @@ After every queue entry processes:
 
 <!-- include: partials/relay-questions.md#RELAY -->
 
+<!-- include: partials/maestro-live-run.md#OPERATOR_RECIPES -->
+
 ## Important rules
 
 - **Never `--force`. Always `--force-with-lease`.** Protects against silent overwrites.
@@ -358,6 +364,7 @@ After every queue entry processes:
 ## Quick checklist (orchestrator, per amendment run)
 
 - [ ] User-requested change captured verbatim; classification determined (`body-rewrite` / `insert-new` / `append-new` / `guiding-decisions-change`).
+- [ ] Live maestro run checked: when one exists and the user chose to amend it, the plan and the workflow were edited, committed on `plan/<workflow-id>/base`, and applied with `vinta-ai-maestro amend`; Steps 2–5 skipped.
 - [ ] Plan parsed; per-phase state map built (state, branch, base, pr_status, merged_to_default); `WORKROOT` resolved from tracking `run_options`.
 - [ ] Blast-radius signals computed; `low` → straight to confirmation, `high-blast-radius` / `restart-recommended` → user offered `Restart` / `Amend in place` / `Stop` before the force-push plan is shown.
 - [ ] On `Restart` choice: new plan drafted (or hand-off to [plan-feature](../plan-feature/SKILL.md)); old plan annotated `Superseded`; tracking marked; this skill exits.

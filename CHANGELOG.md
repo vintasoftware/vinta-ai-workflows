@@ -35,6 +35,19 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`amend-plan` amends a live `vinta-ai-maestro` run instead of rewriting
+  its branches.** When a run of the plan is running, paused, interrupted or
+  failed, the skill asks whether to amend it, then edits the plan and the
+  run's own workflow copy (`vinta-ai-maestro workflow`, so earlier operator and
+  coordinator amendments survive), commits both on `plan/<workflow-id>/base`
+  and applies them with `vinta-ai-maestro amend`, which rebases the done
+  phases the change reaches. Before, the plan file changed and the run went on
+  building its snapshot. The skill also carries operator recipes for a live
+  run: switching harness or model, switching the account a harness runs as,
+  resuming with the same policy flags, and moving the base forward. New
+  partial `plan-execution/partials/maestro-live-run.md`; re-run
+  `vinta-derive-skills` to pick it up.
+
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
   agent — showed `running` over a silent transcript, and one queued behind it
@@ -658,6 +671,33 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   happened instead of nothing.
 
 ### Changed
+
+- **`plan-feature`: a rename of a shared symbol is an interface change.** A
+  phase that renames something a same-wave sibling also uses does it in the
+  foundation phase or keeps the old name as an alias until the wave lands.
+  One run had a phase call a helper its sibling renamed; each passed alone and
+  the merged wave failed the typecheck.
+- **`plan-feature`: gates cover what CI runs.** The workflow rules now tell the
+  author to read the CI config and give every locally runnable CI job a gate,
+  naming the checks plans miss: a deploy check at warning level, a
+  migrations-complete check, a "generated client is up to date" check. The
+  Django stack notes suggest `manage.py check --deploy --fail-level WARNING`,
+  `makemigrations --check` and a regenerate-and-diff gate for the schema or
+  client. One run's regex-style routes passed every gate and failed CI.
+- **`write-unit-test`: time-independent tests and deterministic generated
+  output.** Rule 8 now requires a frozen clock and an explicit timezone on any
+  test touching dates, and host-independent schema or client generation
+  (values from a locked package such as `tzdata`, sorted). The Django pack and
+  stack notes spell out `freezegun` / `time-machine` with
+  `override_settings(TIME_ZONE=...)` and `tzdata`-sourced timezone choices.
+  One run had a date test fail only near midnight UTC, and a timezone enum
+  differ by machine.
+- **`vinta-bootstrap-ai-tools`: test-tool caches are ignored before lanes run.**
+  The maestro defaults step reads `.gitignore` for the selected runners'
+  caches and reports (`.testmondata*`, `junit/`, coverage outputs, …),
+  checks for the `check-added-large-files` pre-commit hook, which a committed
+  testmon database trips on every lane and merge commit, and offers to append
+  the missing entries.
 
 - **`vinta-ai-maestro`: the full suite runs before a PR, and on every merged
   tree.** Under `gate_scope: scoped`, a phase's gates ran their scoped form

@@ -45,6 +45,20 @@ If no multi-tenancy signals → single-tenant Django; the team's templates may s
 - One-off script invocation surface (Jupyter notebook in `notebooks/<name>/`, Django management command, both) — drives the `run-one-off-script-django` skill's runner artefact + which `Runtime` adapter ships
 - Notebook directory path (`notebooks/`, `<project>/notebooks/`) — only when Jupyter is selected as a runner surface
 
+## Gates that should mirror CI
+
+Ask which of these CI runs, and suggest each one it runs as a gate (`maestro.gates` / `commands`), so a phase cannot pass every gate and still fail CI:
+
+- **Deploy check at warning level** — `python manage.py check --deploy --fail-level WARNING` (with the CI settings module). Catches what `check` alone passes: URL patterns Django warns about (e.g. a `path()` route that looks like a regex), security settings, model warnings. One observed run added regex-style routes that passed every gate and failed this check in CI.
+- **Migrations complete** — `python manage.py makemigrations --check --dry-run`.
+- **Generated client / schema up to date** — when the project generates an OpenAPI/GraphQL schema or a typed frontend client from the Django API (drf-spectacular, Strawberry, django-ninja + an openapi codegen), a gate that regenerates it and fails on a diff (`<generate command> && git diff --exit-code <schema/client paths>`).
+
+Placeholders to ask about: the settings module CI runs checks with, and the schema/client generate command and its output paths.
+
+## Test determinism
+
+Tests that touch dates freeze the clock and set the timezone explicitly (`freezegun` / `time-machine` + `override_settings(TIME_ZONE=...)`), and schema generation reads no host state — timezone choices come from a pinned `tzdata`, not the OS tz database. Ask whether the project already has `freezegun`/`time-machine` and `tzdata` in its dev/lock dependencies; the `write-unit-test` Django pack assumes them.
+
 ## When this stack doesn't apply cleanly
 
 - Django REST framework but no DB (read-only API on top of an external service) → most of these skills don't apply.

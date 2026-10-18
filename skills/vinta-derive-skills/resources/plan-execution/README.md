@@ -65,6 +65,15 @@ A dispatched agent cannot reach the human: Claude Code and Codex refuse their qu
 
 The shape is defined once, in the **Asking the human** section every project's `AGENTS.md` carries ([source](../../../vinta-write-agents-md/resources/asking-the-human.md)). [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) parses the same block from a dispatched agent's report and renders it as a question card, so a plan run under the daemon and one run under the skills unblock the same way.
 
+## The live-run seam (`partials/maestro-live-run.md`)
+
+A plan run by [vinta-ai-maestro](https://github.com/vintasoftware/vinta-ai-workflows/tree/main/packages/vinta-ai-maestro) is amended through the run, not by rewriting its branches, and its operator changes (harness, account, resume policy, base branch) go through the maestro CLI.
+
+| Block | Consumed by | What it owns |
+|---|---|---|
+| `AMEND_LIVE_RUN` | `amend-plan` Step 0.5 | detecting a live run of the plan; editing the run's own workflow copy, committing on the plan branch, applying it with `amend`, handling a refusal |
+| `OPERATOR_RECIPES` | `amend-plan` | switching harness or model, switching the account a harness runs as, resuming with the same policy flags, moving the base forward |
+
 ## The parallel-lanes seam (`partials/parallel-lanes.md`)
 
 The plan gives every phase a `**Depends on**:` line. The conductor turns those into a DAG and dispatches a phase the moment its dependencies are green and a lane is free. Six blocks:
