@@ -1834,6 +1834,20 @@ describe('the conflict-fixer prompt', () => {
     expect(prompt).toContain('time limit')
   })
 
+  it('tells the fixer to stage new files itself, and where a stopped attempt was kept', () => {
+    const prompt = composeConflictPrompt({
+      into: 'plan/wf/integ-c',
+      incoming: 'plan/wf/phase-b',
+      nodes: ['a', 'b'],
+      paths: ['app.ts'],
+      promptRefs: ['plan.md#phase-a', 'plan.md#phase-b'],
+      previousAttempt: 'refs/vinta-ai-maestro/abandoned/integ-c',
+    })
+    expect(prompt).toContain('`git add` any new')
+    expect(prompt).toContain('kept at refs/vinta-ai-maestro/abandoned/integ-c')
+    expect(prompt).toContain('Continue from it')
+  })
+
   it('tells the next round which gate the merged tree failed, and where its output is', () => {
     const prompt = composeConflictPrompt({
       into: 'plan/wf/wave-1',

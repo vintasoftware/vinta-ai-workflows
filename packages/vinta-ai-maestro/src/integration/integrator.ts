@@ -38,7 +38,12 @@ import { dirname, join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { IntegrationStepPayload } from '../journal/events.ts'
 import type { RedGate } from '../prompts/index.ts'
-import type { ConflictFixer, ConflictRequest } from './fixer.ts'
+import {
+  type ConflictFixer,
+  ConflictFixerInterrupted,
+  ConflictFixerTimeout,
+  type ConflictRequest,
+} from './fixer.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
@@ -398,10 +403,13 @@ export class Integrator {
   #plan: IntegrationPlan
   #nodes: Map<string, IntegrationNode>
   #waves: Map<string, number>
+  /** The fixer as the crew stands *now*; replaced by `adopt` alongside the plan. */
+  #fixer: ConflictFixer
   readonly #maxFixRounds: number
 
   constructor(options: IntegratorOptions) {
     this.#options = options
+    this.#fixer = options.fixer
     this.#plan = options.plan
     this.#nodes = new Map(options.plan.nodes.map((node) => [node.id, node]))
     this.#waves = computeWaves(options.plan.nodes)
@@ -435,8 +443,17 @@ export class Integrator {
    * moved, and `openPr` for a phase whose name or brief did. Branch *names* are
    * safe either way — they are built from the plan id, and an amendment that
    * changes the id is refused as `id_mismatch`.
+   *
+   * **`fixer` is the amended crew's**, and it has to come with the plan. The
+   * fixer is staffed from `crew` and `defaults` (`integration/staffing.ts`),
+   * and the one built at start kept spawning on the harness the run started
+   * with: after an amendment moved every desk from Codex to Claude Code, one
+   * observed phase failed seven times on "conflict fixer spawn refused: codex"
+   * while every implementer was already on the new harness. A round already
+   * running keeps the fixer it started with; the next round takes this one.
    */
-  adopt(plan: IntegrationPlan): void {
+  adopt(plan: IntegrationPlan, fixer?: ConflictFixer): void {
+    if (fixer !== undefined) this.#fixer = fixer
     this.#plan = plan
     this.#nodes = new Map(plan.nodes.map((node) => [node.id, node]))
     this.#waves = computeWaves(plan.nodes)
@@ -956,15 +973,23 @@ export class Integrator {
     // rather than redone — one fixer round is minutes and real money. The
     // kept commit descends from HEAD, so merging it cannot conflict; should
     // it fail anyway, the original conflicted merge is put back for the fixer.
-    const kept = await this.#keptResolution(cwd, nodeId, incoming)
+    const kept = await this.#keptResolution(cwd, nodeId, incoming, paths)
     if (kept !== null) {
       await this.#abandonMerge(cwd)
       if (await gitOk(cwd, ['merge', '--no-ff', '--no-edit', kept])) {
         return { nodes, paths, rounds: 0 }
       }
+      // Refused again: dropped, so the next attempt does not replay it. A
+      // kept resolution that cannot be committed is a loop, not a shortcut.
+      await gitOk(cwd, ['update-ref', '-d', kept])
       await this.#abandonMerge(cwd)
       await gitOk(cwd, ['merge', '--no-ff', '--no-edit', incoming])
     }
+    // An earlier round of this same merge that was stopped part-way — a time
+    // limit, a teardown — kept what it had (`#keepAbandoned`). Named to the
+    // fixer so the retry continues it: one observed retry restarted a 13-file
+    // resolution from scratch after its predecessor ran out of time.
+    const previous = await this.#previousAttempt(cwd, into, incoming)
     const request = {
       cwd,
       into,
@@ -973,12 +998,13 @@ export class Integrator {
       nodes,
       paths,
       promptRefs: nodes.map((id) => this.#node(id).prompt_ref),
+      ...(previous === null ? {} : { previousAttempt: previous }),
     } satisfies Omit<ConflictRequest, 'round'>
 
     for (let round = 1; round <= this.#maxFixRounds; round += 1) {
       this.#options.onStep?.(forNode, { step: 'fix_round', state: 'started', round, incoming: nodeId })
       try {
-        await this.#options.fixer.fix({ ...request, round, forNode, ...(red === null ? {} : { redGate: red }) })
+        await this.#fixer.fix({ ...request, round, forNode, ...(red === null ? {} : { redGate: red }) })
         this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round })
       } catch (error) {
         this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round, outcome: 'failed' })
@@ -989,6 +1015,17 @@ export class Integrator {
         // of this one's spawn. Abandoned, so the retry starts the merge
         // afresh. Only an unresolved conflict (below) is left standing on
         // purpose.
+        //
+        // A round that was *stopped* — its time limit, a teardown — did
+        // resolve things, possibly most of them, and is kept first under
+        // `ABANDONED_REFS` exactly as `reclaim` keeps a merge a kill caught,
+        // so the retry's fixer is pointed at it rather than starting over.
+        if (
+          (error instanceof ConflictFixerTimeout || error instanceof ConflictFixerInterrupted) &&
+          (await this.#merging(cwd))
+        ) {
+          await this.#keepAbandoned(cwd, into, incoming)
+        }
         await this.#abandonMerge(cwd)
         throw error
       }
@@ -1016,7 +1053,7 @@ export class Integrator {
       // and "the fixer already did it" is accepted on the same evidence a
       // human would use: the incoming branch is an ancestor of HEAD.
       // Staging someone else's resolution. The orchestrator authored none of it.
-      await git(cwd, ['add', '--all'])
+      await this.#stageResolution(cwd, paths)
       // Before anything is committed, whichever shape the resolution arrived
       // in: a fixer must not be able to dodge the gate by committing its own
       // work, which is the one thing committing early would otherwise buy it.
@@ -1199,15 +1236,71 @@ export class Integrator {
    *
    * Asked while the conflicted merge is in progress, so "the branch's tip" is
    * `HEAD`: a merge in progress has not moved it.
+   *
+   * **One that carries files from outside the merge is dropped, not reused.**
+   * Before staging was narrowed (`#stageResolution`) a gate's leftover in the
+   * integration worktree — a 3.2 MB `.testmondata-wal` — was staged into the
+   * resolution, a large-file hook refused the commit, and the kept resolution
+   * replayed the same file into every retry: a phase that looped on its own
+   * debris. "Outside" is a path the kept commit changes against `HEAD` that
+   * the incoming side never changed and that was not in conflict.
    */
-  async #keptResolution(cwd: string, nodeId: string, incoming: string): Promise<string | null> {
+  async #keptResolution(
+    cwd: string,
+    nodeId: string,
+    incoming: string,
+    paths: readonly string[],
+  ): Promise<string | null> {
     const ref = `${RESOLUTION_REFS}/${nodeId}`
     const [line] = await gitLines(cwd, ['rev-list', '--parents', '-n', '1', ref]).catch(() => [])
     if (line === undefined) return null
     const [, ...parents] = line.split(' ')
     const head = (await git(cwd, ['rev-parse', 'HEAD'])).trim()
     const tip = (await git(cwd, ['rev-parse', incoming])).trim()
+    if (parents.length !== 2 || parents[0] !== head || parents[1] !== tip) return null
+    try {
+      const base = (await git(cwd, ['merge-base', head, tip])).trim()
+      const merged = new Set([...paths, ...(await gitLines(cwd, ['diff', '--name-only', base, tip]))])
+      const changed = await gitLines(cwd, ['diff', '--name-only', head, ref])
+      if (changed.some((path) => !merged.has(path))) {
+        await gitOk(cwd, ['update-ref', '-d', ref])
+        return null
+      }
+    } catch {
+      return null
+    }
+    return ref
+  }
+
+  /**
+   * What an earlier, stopped round of this same merge left under
+   * `ABANDONED_REFS`, when it is still about this merge — its parents are the
+   * branch's tip and the incoming tip. Null otherwise.
+   */
+  async #previousAttempt(cwd: string, into: string, incoming: string): Promise<string | null> {
+    const ref = `${ABANDONED_REFS}/${into.slice(`plan/${this.#plan.id}/`.length)}`
+    const [line] = await gitLines(cwd, ['rev-list', '--parents', '-n', '1', ref]).catch(() => [])
+    if (line === undefined) return null
+    const [, ...parents] = line.split(' ')
+    const head = (await git(cwd, ['rev-parse', 'HEAD']).catch(() => '')).trim()
+    const tip = (await git(cwd, ['rev-parse', incoming]).catch(() => '')).trim()
     return parents.length === 2 && parents[0] === head && parents[1] === tip ? ref : null
+  }
+
+  /**
+   * Stages a fixer's resolution: every tracked path (`add -u`, which also
+   * settles unmerged entries and records deletions) plus the merge's own
+   * paths — and nothing untracked.
+   *
+   * It used to be `add --all`, which took whatever else was lying in the
+   * worktree: a gate run there leaves caches and databases behind, and one
+   * such file (a 3.2 MB `.testmondata-wal`) was staged into a merge, refused
+   * by a large-file hook, and replayed on every retry. A file the fixer means
+   * to add — a merge migration — it stages itself; the prompt says so.
+   */
+  async #stageResolution(cwd: string, paths: readonly string[]): Promise<void> {
+    await git(cwd, ['add', '-u'])
+    for (const path of paths) await gitOk(cwd, ['add', '-A', '--', path])
   }
 
   /**
@@ -1304,13 +1397,15 @@ export class Integrator {
   /**
    * Keeps what an unfinished merge has in its tree as a commit under
    * `ABANDONED_REFS`, with the merge's own parents, and returns the ref — or
-   * null when nothing could be kept. Plumbing, so no hook runs. The index is
-   * staged whole first: a killed fixer round leaves unmerged paths, which
-   * `write-tree` refuses, and the merge is about to be undone anyway.
+   * null when nothing could be kept. Plumbing, so no hook runs. Tracked paths
+   * are staged first: a killed fixer round leaves unmerged paths, which
+   * `write-tree` refuses, and the merge is about to be undone anyway. Never
+   * untracked ones, for `#stageResolution`'s reason — this ref is handed to
+   * the next fixer as a starting point.
    */
   async #keepAbandoned(cwd: string, into: string, incoming: string): Promise<string | null> {
     try {
-      await git(cwd, ['add', '--all'])
+      await git(cwd, ['add', '-u'])
       const tree = (await git(cwd, ['write-tree'])).trim()
       const commit = (
         await git(cwd, [

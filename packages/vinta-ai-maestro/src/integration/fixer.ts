@@ -42,6 +42,12 @@ export interface ConflictRequest {
   /** The gate the merged tree failed after the previous round, or before any round. */
   readonly redGate?: RedGate
   /**
+   * Where an earlier round of this same merge, stopped before it finished, is
+   * kept (`refs/vinta-ai-maestro/abandoned/…`). A ref name: the fixer reads
+   * the files from it, the request never carries them.
+   */
+  readonly previousAttempt?: string
+  /**
    * The node whose turn this merge is — the phase being based, or the one
    * building the wave. Not `nodeId` whenever an earlier phase's branch is the
    * one coming in, and it is the phase the operator is watching.
