@@ -1031,6 +1031,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: the integrator no longer stages untracked files into
+  a merge resolution.** It stages tracked paths and the merge's own paths
+  instead of `git add --all`, so a gate's leftovers in the integration
+  worktree (a `.testmondata-wal`, say) stay out of the merge commit. A kept
+  resolution that changes paths outside the merge, or whose commit is refused
+  again, is dropped instead of replayed on every retry. A conflict fixer now
+  stages any new file it creates itself, and its prompt says so.
 - **`vinta-ai-maestro`: an amendment reaches the conflict fixer.** The fixer
   is rebuilt from the amended crew when the plan is amended, so a run whose
   desks moved to another harness stops failing on "conflict fixer spawn

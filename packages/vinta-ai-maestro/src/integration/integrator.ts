@@ -968,12 +968,15 @@ export class Integrator {
     // rather than redone — one fixer round is minutes and real money. The
     // kept commit descends from HEAD, so merging it cannot conflict; should
     // it fail anyway, the original conflicted merge is put back for the fixer.
-    const kept = await this.#keptResolution(cwd, nodeId, incoming)
+    const kept = await this.#keptResolution(cwd, nodeId, incoming, paths)
     if (kept !== null) {
       await this.#abandonMerge(cwd)
       if (await gitOk(cwd, ['merge', '--no-ff', '--no-edit', kept])) {
         return { nodes, paths, rounds: 0 }
       }
+      // Refused again: dropped, so the next attempt does not replay it. A
+      // kept resolution that cannot be committed is a loop, not a shortcut.
+      await gitOk(cwd, ['update-ref', '-d', kept])
       await this.#abandonMerge(cwd)
       await gitOk(cwd, ['merge', '--no-ff', '--no-edit', incoming])
     }
@@ -1028,7 +1031,7 @@ export class Integrator {
       // and "the fixer already did it" is accepted on the same evidence a
       // human would use: the incoming branch is an ancestor of HEAD.
       // Staging someone else's resolution. The orchestrator authored none of it.
-      await git(cwd, ['add', '--all'])
+      await this.#stageResolution(cwd, paths)
       // Before anything is committed, whichever shape the resolution arrived
       // in: a fixer must not be able to dodge the gate by committing its own
       // work, which is the one thing committing early would otherwise buy it.
@@ -1211,15 +1214,56 @@ export class Integrator {
    *
    * Asked while the conflicted merge is in progress, so "the branch's tip" is
    * `HEAD`: a merge in progress has not moved it.
+   *
+   * **One that carries files from outside the merge is dropped, not reused.**
+   * Before staging was narrowed (`#stageResolution`) a gate's leftover in the
+   * integration worktree — a 3.2 MB `.testmondata-wal` — was staged into the
+   * resolution, a large-file hook refused the commit, and the kept resolution
+   * replayed the same file into every retry: a phase that looped on its own
+   * debris. "Outside" is a path the kept commit changes against `HEAD` that
+   * the incoming side never changed and that was not in conflict.
    */
-  async #keptResolution(cwd: string, nodeId: string, incoming: string): Promise<string | null> {
+  async #keptResolution(
+    cwd: string,
+    nodeId: string,
+    incoming: string,
+    paths: readonly string[],
+  ): Promise<string | null> {
     const ref = `${RESOLUTION_REFS}/${nodeId}`
     const [line] = await gitLines(cwd, ['rev-list', '--parents', '-n', '1', ref]).catch(() => [])
     if (line === undefined) return null
     const [, ...parents] = line.split(' ')
     const head = (await git(cwd, ['rev-parse', 'HEAD'])).trim()
     const tip = (await git(cwd, ['rev-parse', incoming])).trim()
-    return parents.length === 2 && parents[0] === head && parents[1] === tip ? ref : null
+    if (parents.length !== 2 || parents[0] !== head || parents[1] !== tip) return null
+    try {
+      const base = (await git(cwd, ['merge-base', head, tip])).trim()
+      const merged = new Set([...paths, ...(await gitLines(cwd, ['diff', '--name-only', base, tip]))])
+      const changed = await gitLines(cwd, ['diff', '--name-only', head, ref])
+      if (changed.some((path) => !merged.has(path))) {
+        await gitOk(cwd, ['update-ref', '-d', ref])
+        return null
+      }
+    } catch {
+      return null
+    }
+    return ref
+  }
+
+  /**
+   * Stages a fixer's resolution: every tracked path (`add -u`, which also
+   * settles unmerged entries and records deletions) plus the merge's own
+   * paths — and nothing untracked.
+   *
+   * It used to be `add --all`, which took whatever else was lying in the
+   * worktree: a gate run there leaves caches and databases behind, and one
+   * such file (a 3.2 MB `.testmondata-wal`) was staged into a merge, refused
+   * by a large-file hook, and replayed on every retry. A file the fixer means
+   * to add — a merge migration — it stages itself; the prompt says so.
+   */
+  async #stageResolution(cwd: string, paths: readonly string[]): Promise<void> {
+    await git(cwd, ['add', '-u'])
+    for (const path of paths) await gitOk(cwd, ['add', '-A', '--', path])
   }
 
   /**
@@ -1316,13 +1360,14 @@ export class Integrator {
   /**
    * Keeps what an unfinished merge has in its tree as a commit under
    * `ABANDONED_REFS`, with the merge's own parents, and returns the ref — or
-   * null when nothing could be kept. Plumbing, so no hook runs. The index is
-   * staged whole first: a killed fixer round leaves unmerged paths, which
-   * `write-tree` refuses, and the merge is about to be undone anyway.
+   * null when nothing could be kept. Plumbing, so no hook runs. Tracked paths
+   * are staged first: a killed fixer round leaves unmerged paths, which
+   * `write-tree` refuses, and the merge is about to be undone anyway. Never
+   * untracked ones, for `#stageResolution`'s reason.
    */
   async #keepAbandoned(cwd: string, into: string, incoming: string): Promise<string | null> {
     try {
-      await git(cwd, ['add', '--all'])
+      await git(cwd, ['add', '-u'])
       const tree = (await git(cwd, ['write-tree'])).trim()
       const commit = (
         await git(cwd, [

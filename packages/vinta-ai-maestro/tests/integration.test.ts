@@ -2113,6 +2113,67 @@ describe('a fix round with a time limit', () => {
 // Staging only what the merge touched, an amended fixer, a stopped round kept
 // ---------------------------------------------------------------------------
 
+describe('staging a resolution', () => {
+  const RESOLVED = 'const value = "a" + "b"\n'
+
+  /**
+   * A gate run in the integration worktree left a 3.2 MB `.testmondata-wal`
+   * behind; `add --all` staged it into the merge, a large-file hook refused
+   * the commit, and the kept resolution replayed it on every retry.
+   */
+  it('leaves untracked files out, and keeps a new file the fixer staged itself', async () => {
+    const repo = await conflictingPair()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+        await writeFile(join(request.cwd, '.testmondata-wal'), 'gate leftovers\n')
+        await writeFile(join(request.cwd, 'merge-migration.ts'), 'export {}\n')
+        run(request.cwd, 'add', 'merge-migration.ts')
+      }),
+    })
+
+    const base = await integrator.prepareBase('c')
+
+    expect(run(repo.integ, 'show', `${base}:app.ts`).trim()).toBe(RESOLVED.trim())
+    expect(run(repo.integ, 'show', `${base}:merge-migration.ts`).trim()).toBe('export {}')
+    expect(run(repo.integ, 'ls-tree', '--name-only', base)).not.toContain('.testmondata-wal')
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('?? .testmondata-wal')
+  })
+
+  it('drops a kept resolution that carries files from outside the merge instead of replaying it', async () => {
+    const repo = await conflictingPair()
+    const hook = await installRefusingHook(repo)
+    let round = 0
+    const fixer = spyFixer(async (request) => {
+      round += 1
+      await writeFile(join(request.cwd, 'app.ts'), RESOLVED)
+      // The first round stages debris the way `add --all` used to.
+      if (round === 1) {
+        await writeFile(join(request.cwd, 'debris.bin'), 'large\n')
+        run(request.cwd, 'add', 'debris.bin')
+      }
+    })
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer,
+    })
+    const failure = await integrator.prepareBase('c').then(() => null, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(IntegrationCommitError)
+    const kept = (failure as IntegrationCommitError).preservedRef as string
+    expect(run(repo.integ, 'ls-tree', '--name-only', kept)).toContain('debris.bin')
+
+    await rm(hook)
+    const base = await integrator.prepareBase('c')
+
+    expect(fixer.calls).toHaveLength(2)
+    expect(run(repo.integ, 'ls-tree', '--name-only', base)).not.toContain('debris.bin')
+    expect(run(repo.integ, 'for-each-ref', 'refs/vinta-ai-maestro/resolutions/')).toBe('')
+  })
+})
+
 describe('an amended crew', () => {
   /**
    * An amendment moved every desk from Codex to Claude Code, and the fixer
