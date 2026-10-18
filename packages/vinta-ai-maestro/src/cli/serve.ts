@@ -58,6 +58,8 @@ import { openJournal } from '../journal/journal.ts'
 import { launchJob, liveJob, type LaunchResult } from '../job/job.ts'
 import { errorFields, installCrashHandlers, nullLogger, redactValue, type Logger } from '../log/index.ts'
 import { reportLogFailures, toLogSetup, type LogValues } from './logging.ts'
+import { removeUiRecord, warnStaleUis, writeUiRecord } from './ui-record.ts'
+import { installedVersion, RUNNING_VERSION } from '../version.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
 import { Monitor, monitorModel } from '../monitor/monitor.ts'
@@ -72,6 +74,7 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                            [--system-one <config.json>]
                            [--on-failure <stop|retry|ask>] [--retries <n>]
                            [--retry-after <15m>] [--no-coordinator]
+                           [--harness-profile <name>]
                            [--log-level <debug|info|warn|error>] [--log-stderr]
                            [--log-detail <kind|message>]
        vinta-ai-maestro serve …   (the same command)
@@ -177,7 +180,14 @@ export const SERVE_USAGE = `usage: vinta-ai-maestro ui [--repo <dir>] [--host <h
                  weaken a check, never answer a question you hold, and never
                  halt the run; it is woken at most 24 times. With this flag you
                  can still ask it things. (\`--no-intervene\` is the old name.)
-                 The operator sets this, never the workflow document.`
+                 The operator sets this, never the workflow document.
+  --harness-profile <name>
+                 Run a harness under a named profile from the operator's
+                 profiles file (~/.config/vinta-ai-maestro/profiles.yaml, or
+                 $VINTA_AI_MAESTRO_PROFILES): its binary and environment — a
+                 second Claude account's CLAUDE_CONFIG_DIR, say. One per
+                 harness; repeat the flag for several. A run remembers the
+                 name, and its resume reads the profile again.`
 
 /** One name for one command; `ui` is the one the help leads with. */
 export const UI_USAGE = SERVE_USAGE
@@ -269,7 +279,17 @@ export interface ServeDeps {
    * on the right page rather than on the run list.
    */
   readonly fragment?: string
+  /**
+   * How often the `ui` rereads its package manifest to notice it was upgraded
+   * under it. Defaults to a minute.
+   */
+  readonly versionCheckMs?: number
+  /** Stands in for `installedVersion`, so a test can upgrade the package. */
+  readonly installedVersion?: () => string | null
 }
+
+/** How often a `ui` checks whether the package under it was replaced. */
+const VERSION_CHECK_MS = 60_000
 
 export async function serveCommand(
   argv: readonly string[],
@@ -291,6 +311,7 @@ export async function serveCommand(
         'retry-after': { type: 'string' },
         'no-intervene': { type: 'boolean' },
         'no-coordinator': { type: 'boolean' },
+        'harness-profile': { type: 'string', multiple: true },
         'log-level': { type: 'string' },
         'log-stderr': { type: 'boolean' },
         'log-detail': { type: 'string' },
@@ -387,9 +408,31 @@ export async function serveCommand(
   announce(daemon, io, deps.fragment)
   io.out(`Daemon log: ${logging.path}`)
 
+  // Another `ui` on this project from an older or newer release is worth a
+  // line; this one's own release is recorded for the next command to compare.
+  warnStaleUis(bind.repoPath, io)
+  writeUiRecord(bind.repoPath, { pid: process.pid, version: RUNNING_VERSION, startedAt: Date.now() })
+  // A `ui` outlives upgrades — one observed was serving the release from days
+  // before. It cannot reload itself, so it says once that it should be restarted.
+  const readInstalled = deps.installedVersion ?? installedVersion
+  let drifted = false
+  const versionCheck = setInterval(() => {
+    const installed = readInstalled()
+    if (drifted || installed === null || installed === RUNNING_VERSION) return
+    drifted = true
+    log.warn('serve.version_drift', { running: RUNNING_VERSION, installed })
+    io.err(
+      `vinta-ai-maestro: this ui is serving ${RUNNING_VERSION}, but ${installed} is now installed. ` +
+        'Restart it to serve the new version; runs are separate jobs and are not affected.',
+    )
+  }, deps.versionCheckMs ?? VERSION_CHECK_MS)
+  versionCheck.unref()
+
   try {
     await (deps.wait ?? (() => untilSignalled().signalled))(daemon)
   } finally {
+    clearInterval(versionCheck)
+    removeUiRecord(bind.repoPath, process.pid)
     uninstallCrashHandlers()
     await daemon.close()
     log.info('serve.stopped')

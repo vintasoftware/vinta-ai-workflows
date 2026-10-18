@@ -39,11 +39,12 @@ import { readdir, rm } from 'node:fs/promises'
 import { basename, join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { openJournal } from '../journal/journal.ts'
+import { openJournal, type Journal } from '../journal/journal.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { laneRootFor, runsRootFor, storeFor } from './paths.ts'
 import { findReapable, reap, type Reapable, type TeardownExec } from './reap.ts'
 import { runGuard } from './run-guard.ts'
+import { dropWipRefs, landedWipRefs } from './wip-refs.ts'
 
 export const PURGE_USAGE = `usage: vinta-ai-maestro purge [run-id] [--repo <dir>] [--yes] [--dry-run]
                              [--lanes] [--branches] [--force]
@@ -52,6 +53,12 @@ export const PURGE_USAGE = `usage: vinta-ai-maestro purge [run-id] [--repo <dir>
   logs and the frozen workflow snapshot. With no run id, every run is purged
   except those that could still be resumed (paused, failed, interrupted), which
   are kept and named. A run whose job is still running is always kept.
+
+  Also drops the refs/vinta-ai-maestro/wip/* rescues a recycled lane left for
+  a purged run whose phase has since landed — it is done, and its branch is
+  reachable from a branch outside plan/ and wt/ — and, for a run already
+  purged, those whose every rescued file reads the same at HEAD. Every
+  other rescue is kept: it may be the only copy of that work.
 
   --repo <dir>   The project whose .vinta-ai-maestro/ store is purged.
                  Defaults to the current directory.
@@ -163,12 +170,20 @@ export async function purgeCommand(
       })
     : EMPTY_REAPABLE
 
+  // Before anything is deleted: which phase a rescue belonged to is in the
+  // journal rows this purge is about to forget.
+  const purged = new Set(targets.map((target) => basename(target)))
+  const landedRefs = await withJournal(repoPath, (journal) =>
+    landedWipRefs({ repoPath, journal, guard, purged: (id) => purged.has(id) }),
+  )
+
   const steps = reapable.teardowns.flatMap((teardown) => teardown.steps)
   const nothing =
     targets.length === 0 &&
     reapable.lanes.length === 0 &&
     reapable.summaries.length === 0 &&
-    reapable.emptyBranches.length === 0
+    reapable.emptyBranches.length === 0 &&
+    landedRefs.length === 0
   if (nothing) {
     // The wording widens only when the scope did. A plain `purge` that finds
     // nothing is still talking about run state, and saying "nothing to purge"
@@ -193,6 +208,7 @@ export async function purgeCommand(
   }
   for (const summary of reapable.summaries) io.out(`  ${relative(repoPath, summary)}`)
   for (const branch of reapable.emptyBranches) io.out(`  branch ${branch}`)
+  for (const ref of landedRefs) io.out(`  ref ${ref} (a recycled lane's rescue; its phase landed)`)
   if (steps.length > 0) {
     // Every command, as it will run. A database dropped is not something to
     // learn about from the summary line afterwards.
@@ -229,6 +245,7 @@ export async function purgeCommand(
     reapable.lanes.length +
     reapable.summaries.length +
     reapable.emptyBranches.length +
+    landedRefs.length +
     steps.length
   if (parsed.values.yes !== true && !(await io.confirm(`Delete ${count} items?`))) {
     io.err('vinta-ai-maestro: cancelled. Nothing was deleted.')
@@ -237,12 +254,13 @@ export async function purgeCommand(
 
   for (const target of targets) await rm(target, { recursive: true, force: true })
   forgetRuns(repoPath, targets.map((target) => basename(target)))
-  const failures = wantsLanes
+  let failures: readonly string[] = wantsLanes
     ? await reap(repoPath, reapable, {
         branches: parsed.values.branches === true,
         ...(deps.exec === undefined ? {} : { exec: deps.exec }),
       })
     : []
+  failures = [...failures, ...(await dropWipRefs(repoPath, landedRefs))]
 
   io.out(`vinta-ai-maestro: deleted ${count - failures.length} of ${count} items.`)
   if (failures.length > 0) {
@@ -254,6 +272,17 @@ export async function purgeCommand(
     return FAILED
   }
   return OK
+}
+
+/** `use` with the store's journal, or with null when there is no store to open. */
+async function withJournal<T>(repoPath: string, use: (journal: Journal | null) => Promise<T>): Promise<T> {
+  if (!existsSync(join(storeFor(repoPath), 'flow.db'))) return await use(null)
+  const journal = openJournal(repoPath)
+  try {
+    return await use(journal)
+  } finally {
+    journal.close()
+  }
 }
 
 /** The journal's rows for runs whose directories are gone. No store, nothing to forget. */

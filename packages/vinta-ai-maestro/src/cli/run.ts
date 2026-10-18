@@ -54,7 +54,18 @@ import type { DoctorOverrides } from './doctor.ts'
 import { FAILED, OK, USAGE, loadPlan, loadWorkflow, type Io } from './io.ts'
 import { errorFields, installCrashHandlers, redactValue } from '../log/index.ts'
 import { reportLogFailures, toLogSetup, type LogValues } from './logging.ts'
-import { jobArgs, resumeRefusal, toRunPolicy, type JobTarget, type RunPolicy } from './policy.ts'
+import {
+  jobArgs,
+  readStoredPolicy,
+  resumeRefusal,
+  toRunPolicy,
+  withStoredPolicy,
+  writeStoredPolicy,
+  type JobTarget,
+  type RunPolicy,
+} from './policy.ts'
+import { applyHarnessProfiles } from '../harness/profiles.ts'
+import { warnStaleUis } from './ui-record.ts'
 import { monitorFactory, toBind, untilSignalled, type Bind } from './serve.ts'
 import { createErrorFeed, tapErrors } from '../coordinator/errors.ts'
 import { MAESTRO_RUN_ENV, MAESTRO_TOKEN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
@@ -94,6 +105,10 @@ export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
                  not reach back into a run already under way. Only a run that
                  is done, or was stopped (cancelled), cannot be resumed; run
                  the plan again instead.
+                 A resume reuses the run's own --permission, --system-one,
+                 --on-failure, --retries, --retry-after, --no-coordinator,
+                 --host and --harness-profile (kept in runs/<id>/policy.json);
+                 a flag given here overrides the stored one.
   --foreground   Host the run in this process and wait for it to end, exiting
                  0 only when every phase completed. For CI, where the exit
                  code is the point. Closing the terminal then interrupts the
@@ -106,7 +121,7 @@ export const RUN_USAGE = `usage: vinta-ai-maestro run <workflow.json> [options]
                  agents run somewhere that cannot reach loopback.
   --port <n>     Defaults to 0 — an OS-assigned port.
   --on-failure, --retries, --retry-after, --permission, --system-one,
-  --no-coordinator, --log-level, --log-stderr, --log-detail
+  --no-coordinator, --harness-profile, --log-level, --log-stderr, --log-detail
                  As for \`vinta-ai-maestro ui --help\`, which documents each.`
 
 export interface RunDeps {
@@ -184,6 +199,7 @@ export async function runCommand(
         'log-detail': { type: 'string' },
         'no-intervene': { type: 'boolean' },
         'no-coordinator': { type: 'boolean' },
+        'harness-profile': { type: 'string', multiple: true },
       },
       allowPositionals: true,
     })
@@ -203,21 +219,37 @@ export async function runCommand(
     return USAGE
   }
 
-  const bind = toBind(parsed.values, io)
+  // A resume runs under what the run last ran under, unless told otherwise.
+  // Under a background start the job is handed every reused flag explicitly,
+  // so only the launching command says what it reused.
+  let values = parsed.values
+  if (resumeId !== undefined) {
+    const repoPath = resolve(values.repo ?? process.cwd())
+    const merged = withStoredPolicy(values, readStoredPolicy(repoPath, resumeId))
+    values = merged.values
+    if (merged.reused.length > 0) {
+      io.out(
+        `vinta-ai-maestro: resuming with this run's stored ${merged.reused.map((key) => `--${key}`).join(', ')}` +
+          ' (pass a flag to override it)',
+      )
+    }
+  }
+
+  const bind = toBind(values, io)
   if (bind === null) return USAGE
-  const policy = toRunPolicy(parsed.values, io)
+  const policy = toRunPolicy(values, io)
   if (policy === null) return USAGE
 
   if (parsed.values.foreground !== true) {
-    return await launchRun({ path, resumeId, bind, policy, log: parsed.values, io, deps })
+    return await launchRun({ path, resumeId, bind, policy, log: values, io, deps })
   }
   return await hostRun({
     path,
     resumeId,
-    runId: parsed.values['run-id'],
+    runId: values['run-id'],
     bind,
     policy,
-    log: parsed.values,
+    log: values,
     io,
     deps,
   })
@@ -268,6 +300,9 @@ async function launchRun(request: RunRequest): Promise<number> {
   }
 
   const { runId } = target
+  // The `ui` forwards this run's traffic and launches its resumes; one left
+  // up across an upgrade does both with the old release's code.
+  warnStaleUis(bind.repoPath, io)
   io.out(`vinta-ai-maestro: starting run ${runId} in the background…`)
   const args = jobArgs(target, bind, policy, request.log)
   // The job's output as it is written, so a start that takes minutes — the
@@ -329,6 +364,10 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
   const { bind, policy, io, deps } = request
   const { permission, systemOne } = policy
   const resumeId = request.resumeId
+
+  // Before the preflight, so its login check asks the account the run will
+  // use, and before any adapter exists, since each reads its binary at birth.
+  applyHarnessProfiles(policy.harnessProfiles)
 
   // The plan, and where it came from. A resume reads the *frozen* snapshot —
   // the document the run actually started with — rather than the file on disk,
@@ -480,6 +519,7 @@ async function hostRun(request: RunRequest & { readonly runId: string | undefine
   // Before the pool, which takes real time: `status` can already say the run
   // is starting, and `stop` can already find it.
   record('starting')
+  writeStoredPolicy(bind.repoPath, runId, policy, bind)
 
   // Installed before the run exists, so an exception during provisioning is
   // caught too — that is where a run spends its first minute, and a crash

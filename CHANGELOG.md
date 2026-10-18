@@ -59,7 +59,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   members, the tiers and the count). A phase already at the top tier stays
   where it is. Amendments may now leave a member the run already had with no
   phase, so moving a member's last phase is no longer refused.
-
+- **`vinta-ai-maestro`: `purge` drops lane rescues whose work landed.** The
+  `refs/vinta-ai-maestro/wip/*` commits a recycled lane keeps of a phase's
+  uncommitted files piled up (~80 in one project). A purge now drops those of
+  the runs it purges whose phase is done and merged into a branch outside
+  `plan/` and `wt/`, and those of already-purged runs whose rescued files read
+  the same at `HEAD`. Every other rescue is kept, and `--dry-run` lists them.
+- **`vinta-ai-maestro`: a `ui` left up across an upgrade says so.** It warns
+  once when the installed package's version no longer matches the one it
+  loaded, and `run` and `status` warn about a live `ui` serving another
+  release. A `ui` started days earlier used to keep serving pre-upgrade code
+  without a word.
+- **`vinta-ai-maestro`: a resume remembers how the run was started.** Every
+  job records its `--permission`, `--system-one`, `--on-failure`, `--retries`,
+  `--retry-after`, `--no-coordinator`, `--host` and `--harness-profile` in
+  `runs/<id>/policy.json`, and `run --resume` (and the UI's Resume) reuses
+  them, saying which; a flag given on the command line still wins. Each resume
+  used to need all of them restated.
+- **`vinta-ai-maestro`: harness profiles.** `--harness-profile <name>` on `run`
+  and `ui` picks a named binary and environment for one harness — a second
+  Claude account's `CLAUDE_CONFIG_DIR`, say — from the operator's
+  `~/.config/vinta-ai-maestro/profiles.yaml` (or `$VINTA_AI_MAESTRO_PROFILES`).
+  The run keeps the name, so a resume picks the same account.
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
   agent — showed `running` over a silent transcript, and one queued behind it
@@ -1132,6 +1153,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   work.** What the round had is kept under `refs/vinta-ai-maestro/abandoned/`
   (an interrupted round's too), and the retry's fixer is pointed at it to
   continue instead of redoing the resolution from scratch.
+- **`vinta-ai-maestro`: an amended harness reaches every phase it moved.** An
+  amendment changed the harness only on phases still `pending`; a failed or
+  blocked one waiting on a retry kept naming the old harness in `status` and
+  the run view, and once the job loaded only the new harness's adapter the
+  run view answered 500 `unknown harness`. Phases past `pending` now take the
+  new harness without losing their status, and the run view leaves out the
+  capacity of a harness the live run loaded no adapter for.
 - **`vinta-ai-maestro`: a claude-code turn the CLI calls "blocked" no longer
   fails unless a tool was refused in it.** The CLI's own turn summary marks a
   turn `blocked` whenever its last message names a next step for a person —

@@ -456,3 +456,77 @@ describe('planTeardown drops only what is provably the lane’s', () => {
     expect(planTeardown(base({}), null, 'linux').steps).toEqual([])
   })
 })
+
+describe('purge and the wip rescues of recycled lanes', () => {
+  const WIP = 'refs/vinta-ai-maestro/wip'
+
+  /** A rescue: `files` written over `parent`, kept only as a ref. */
+  const rescue = (dir: string, ref: string, parent: string, files: Record<string, string>): void => {
+    git(dir, 'checkout', '-q', '-b', 'scratch', parent)
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body, 'utf8')
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-qm', 'wip')
+    git(dir, 'update-ref', ref, 'HEAD')
+    git(dir, 'checkout', '-q', 'main')
+    git(dir, 'branch', '-q', '-D', 'scratch')
+  }
+
+  /** A finished run whose phase `a` ran in `<run>-lane-1` on its own branch. */
+  const finishedRun = (dir: string, runId: string): string => {
+    const branch = `plan/purge-fixture/phase-a-${runId}`
+    git(dir, 'checkout', '-q', '-b', branch, 'main')
+    writeFileSync(join(dir, `${runId}.txt`), 'phase work\n', 'utf8')
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-qm', `phase a of ${runId}`)
+    git(dir, 'checkout', '-q', 'main')
+    const journal = openJournal(dir)
+    try {
+      journal.createRun(runId, workflow(undefined))
+      journal.append({ runId, nodeId: 'a', type: 'node_assigned', payload: { lane: `${runId}-lane-1` } })
+      journal.append({ runId, nodeId: 'a', type: 'node_assigned', payload: { branch } })
+      journal.append({ runId, nodeId: 'a', type: 'node_status', payload: { status: 'done' } })
+      journal.append({ runId, type: 'run_ended', payload: { status: 'done' } })
+    } finally {
+      journal.close()
+    }
+    return branch
+  }
+
+  const refs = (dir: string): string[] =>
+    git(dir, 'for-each-ref', '--format=%(refname)', WIP).split('\n').filter(Boolean)
+
+  it('drops a rescue whose phase landed, and keeps one whose phase has not', async () => {
+    const dir = repo()
+    const later = Date.now() + 60_000
+    const landed = finishedRun(dir, 'r1')
+    const pending = finishedRun(dir, 'r2')
+    // r1's phase is merged into a branch a person keeps; r2's is not.
+    git(dir, 'merge', '-q', '--no-ff', '-m', 'land r1', landed)
+    rescue(dir, `${WIP}/r1-lane-1/${later}`, landed, { 'scratch.txt': 'left behind\n' })
+    rescue(dir, `${WIP}/r2-lane-1/${later}`, pending, { 'scratch.txt': 'left behind\n' })
+    // A rescue of a run already purged: only identical content counts.
+    // Taken before the merge, as a rescue of the same work would have been.
+    rescue(dir, `${WIP}/gone-lane-1/${later}`, 'main^1', { 'r1.txt': 'phase work\n' })
+    rescue(dir, `${WIP}/gone-lane-2/${later}`, 'main^1', { 'r1.txt': 'something else\n' })
+
+    const dry = recorder()
+    expect(await purgeCommand(['--repo', dir, '--dry-run'], dry.io)).toBe(OK)
+    expect(dry.out).toContain(`  ref ${WIP}/r1-lane-1/${later} (a recycled lane's rescue; its phase landed)`)
+    expect(refs(dir)).toHaveLength(4)
+
+    expect(await purgeCommand(['--repo', dir, '--yes'], recorder().io)).toBe(OK)
+    expect(refs(dir).sort()).toEqual([`${WIP}/gone-lane-2/${later}`, `${WIP}/r2-lane-1/${later}`])
+  })
+
+  it('leaves the rescues of a run it was not asked to purge', async () => {
+    const dir = repo()
+    const later = Date.now() + 60_000
+    const landed = finishedRun(dir, 'r1')
+    finishedRun(dir, 'r3')
+    git(dir, 'merge', '-q', '--no-ff', '-m', 'land r1', landed)
+    rescue(dir, `${WIP}/r1-lane-1/${later}`, landed, { 'scratch.txt': 'x\n' })
+
+    expect(await purgeCommand(['r3', '--repo', dir, '--yes'], recorder().io)).toBe(OK)
+    expect(refs(dir)).toEqual([`${WIP}/r1-lane-1/${later}`])
+  })
+})

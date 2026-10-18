@@ -30,6 +30,7 @@ import {
 } from '../journal/journal.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
+import { warnStaleUis } from './ui-record.ts'
 import { describeLeftovers, findLeftovers, type LeftoverDeps } from '../run/leftovers.ts'
 
 export const STATUS_USAGE = `usage: vinta-ai-maestro status [runId] [--repo <dir>] [--json]
@@ -91,6 +92,7 @@ export async function statusCommand(
     return OK
   }
 
+  warnStaleUis(repoPath, io)
   const journal = openJournal(repoPath)
   try {
     return runId === undefined

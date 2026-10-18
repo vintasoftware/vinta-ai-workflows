@@ -861,7 +861,8 @@ export class Journal {
         this.db
           .prepare(
             'UPDATE nodes SET lane = COALESCE(?, lane), branch = COALESCE(?, branch),' +
-              ' base_branch = COALESCE(?, base_branch), session_id = COALESCE(?, session_id)' +
+              ' base_branch = COALESCE(?, base_branch), session_id = COALESCE(?, session_id),' +
+              ' harness = COALESCE(?, harness)' +
               ' WHERE run_id = ? AND node_id = ?',
           )
           .run(
@@ -869,6 +870,7 @@ export class Journal {
             event.payload.branch ?? null,
             event.payload.base_branch ?? null,
             event.payload.session_id ?? null,
+            event.payload.harness ?? null,
             event.runId,
             event.nodeId,
           )

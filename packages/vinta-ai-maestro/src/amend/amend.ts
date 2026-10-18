@@ -427,7 +427,8 @@ function supersede(
  * projects a row at status `pending`, so re-emitting one for a node that is
  * *already* pending changes nothing a later event has to undo. A node at any
  * other status is deliberately left alone — re-registering it would reset a
- * status the log has already moved past.
+ * status the log has already moved past; its harness moves by `node_assigned`
+ * instead, which projects onto the same row without touching its status.
  */
 function registerNodes(
   journal: Journal,
@@ -445,9 +446,15 @@ function registerNodes(
     const harness = node.harness ?? workflow.defaults.harness
     const wave = waves.get(node.id) ?? 1
     const isNew = added.has(node.id) || row === undefined
-    if (!isNew && (status(node.id) !== 'pending' || (row.wave === wave && row.harness === harness))) {
+    if (!isNew && status(node.id) !== 'pending') {
+      // Past `pending`: its status stands, but the harness it runs next on is
+      // the amended one, and `status` / the snapshot read it off this row.
+      if (row.harness !== harness) {
+        journal.append({ runId, nodeId: node.id, type: 'node_assigned', payload: { harness } })
+      }
       continue
     }
+    if (!isNew && row.wave === wave && row.harness === harness) continue
     journal.append({ runId, nodeId: node.id, type: 'node_registered', payload: { wave, harness } })
   }
 }

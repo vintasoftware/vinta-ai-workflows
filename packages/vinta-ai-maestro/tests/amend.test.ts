@@ -647,6 +647,27 @@ describe('amending a live run', () => {
     }
   })
 
+  it('moves the harness of a node past `pending` onto its row, without resetting its status', async () => {
+    const { journal } = store()
+    const wf = workflow([{ id: 'a' }, { id: 'b', deps: ['a'] }])
+    journal.createRun(RUN_ID, wf)
+    journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'failed' } })
+
+    const proposed = WorkflowSchema.parse({
+      ...wf,
+      nodes: wf.nodes.map((node) => ({ ...node, harness: 'codex' })),
+    })
+    const result = await amendRun({ journal, runId: RUN_ID, proposed })
+    expect(result.ok).toBe(true)
+
+    const rows = () => Object.fromEntries(journal.nodes(RUN_ID).map((row) => [row.node_id, row]))
+    expect(rows()['a']).toMatchObject({ status: 'failed', harness: 'codex' })
+    expect(rows()['b']).toMatchObject({ status: 'pending', harness: 'codex' })
+    // A projection, not a side table: replaying the log lands on the same rows.
+    journal.rebuildProjections()
+    expect(rows()['a']).toMatchObject({ status: 'failed', harness: 'codex' })
+  })
+
   it('refuses a cycle with a located issue, before it can reach the run', async () => {
     const { journal } = store()
     const wf = workflow([{ id: 'a' }, { id: 'b', deps: ['a'] }])

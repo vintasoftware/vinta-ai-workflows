@@ -1816,17 +1816,24 @@ export function createApi(options: ApiOptions): Hono {
             acquiredAt: lease.acquired_at,
           })),
       },
-      harnesses: [...new Set(nodes.map((node) => node.harness))].sort().map((id) => ({
-        id,
-        // A finished run has no admission control to ask. Its ceiling was the
-        // lane capacity the plan declared — the number `run` is given at boot —
-        // and nothing is in flight under it any more.
-        ceiling: run === null ? (wf.resources['lane']?.capacity ?? 0) : run.admission.ceiling(id),
-        inFlight: run === null ? 0 : run.admission.inFlight(id),
-        wakeAt: run === null ? null : (run.admission.wakeAt(id) ?? null),
-        // Read off the adapter, never restated — see `harnesses.ts`.
-        capabilities: harnessCapabilities(id),
-      })),
+      // A live run only reports harnesses it loaded an adapter for. A node row
+      // can still name one it did not — a phase amended away from it before
+      // this daemon came up — and admission throws on a harness it was never
+      // configured with, which turned the whole snapshot into a 500.
+      harnesses: [...new Set(nodes.map((node) => node.harness))]
+        .filter((id) => run === null || (run.admission.has?.(id) ?? true))
+        .sort()
+        .map((id) => ({
+          id,
+          // A finished run has no admission control to ask. Its ceiling was the
+          // lane capacity the plan declared — the number `run` is given at boot —
+          // and nothing is in flight under it any more.
+          ceiling: run === null ? (wf.resources['lane']?.capacity ?? 0) : run.admission.ceiling(id),
+          inFlight: run === null ? 0 : run.admission.inFlight(id),
+          wakeAt: run === null ? null : (run.admission.wakeAt(id) ?? null),
+          // Read off the adapter, never restated — see `harnesses.ts`.
+          capabilities: harnessCapabilities(id),
+        })),
     }
   }
 }

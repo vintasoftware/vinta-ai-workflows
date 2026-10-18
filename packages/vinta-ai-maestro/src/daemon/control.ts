@@ -107,6 +107,13 @@ export interface CapacityView {
   inFlight(harness: string): number
   /** Epoch ms the harness may be tried again, or `undefined` when it is not parked. */
   wakeAt(harness: string): number | undefined
+  /**
+   * Whether this run loaded an adapter for the harness. A node row can name a
+   * harness the run never loaded — one amended away from, or one a resume
+   * dropped — and asking the three methods above about it throws. Optional so
+   * a stub that knows every harness need not say so.
+   */
+  has?(harness: string): boolean
 }
 
 /** Renewable leases exposed to an agent through the daemon API. */
