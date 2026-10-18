@@ -18,7 +18,7 @@
 import { guardHookMain } from '../guard/hook.ts'
 import { OK, USAGE, processIo, type Io } from './io.ts'
 import { DOCTOR_USAGE, doctorCommand } from './doctor.ts'
-import { GATE_USAGE, gateCommand } from './gate.ts'
+import { CODEGEN_USAGE, GATE_USAGE, codegenCommand, gateCommand } from './gate.ts'
 import { JUDGE_USAGE, judgeCommand } from './judge.ts'
 import { PAUSE_USAGE, STOP_USAGE, pauseCommand, stopCommand } from './halt.ts'
 import { LOGS_USAGE, logsCommand } from './logs.ts'
@@ -91,6 +91,8 @@ usage: vinta-ai-maestro <command> [options]
   gate <gate-id> [--no-cache]
                              Run one of a live run's declared gates against this
                              turn's lane, leased and cached by the daemon.
+  codegen [<step-id>]        Run a live run's codegen steps against this turn's
+                             lane, so its generated files match their sources.
   judge calibrate            Replay a run's commands, or a file of them,
                              against a permission-judge question and threshold.
   judge-hook                 Internal: the safety hook --permission judged
@@ -131,6 +133,7 @@ const USAGES: Readonly<Record<string, string>> = {
   purge: PURGE_USAGE,
   with: WITH_USAGE,
   gate: GATE_USAGE,
+  codegen: CODEGEN_USAGE,
   judge: JUDGE_USAGE,
 }
 
@@ -202,6 +205,8 @@ export async function main(argv: readonly string[], io: Io = processIo()): Promi
       return await withCommand(rest, io)
     case 'gate':
       return await gateCommand(rest, io)
+    case 'codegen':
+      return await codegenCommand(rest, io)
     case 'judge':
       return await judgeCommand(rest, io)
     case 'judge-hook':
@@ -242,5 +247,5 @@ export { logsCommand, type LogsDeps } from './logs.ts'
 export { pauseCommand, stopCommand, type HaltDeps } from './halt.ts'
 export { purgeCommand } from './purge.ts'
 export { withCommand, type WithDeps } from './with.ts'
-export { gateCommand, type GateDeps } from './gate.ts'
+export { codegenCommand, gateCommand, type GateDeps } from './gate.ts'
 export { laneRootFor, runsRootFor, storeFor } from './paths.ts'

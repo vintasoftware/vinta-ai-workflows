@@ -25,11 +25,13 @@
  * than quoted into a message.
  */
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { connect } from 'node:net'
+import { tmpdir } from 'node:os'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { probeCodegen } from '../codegen/determinism.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
@@ -117,6 +119,13 @@ export interface DoctorOptions {
   readonly systemOne?: SystemOne
   /** How leftovers of finished runs are looked for. Tests only. */
   readonly leftovers?: LeftoverDeps
+  /**
+   * `doctor --codegen`: run each codegen generator twice in the checkout to
+   * flag output that is not deterministic, and against HEAD to flag outputs
+   * already stale there (`src/codegen/determinism.ts`). Off by default: it
+   * runs the project's generators, which a preflight should not.
+   */
+  readonly codegen?: boolean
 }
 
 const PROBE_TIMEOUT_MS = 10_000
@@ -1245,6 +1254,57 @@ export async function checkLeftovers(repoPath: string, deps: LeftoverDeps = {}):
   }
 }
 
+/**
+ * `--codegen`: each generator twice, then the outputs put back. A failing
+ * step fails the doctor, since it fails every phase's gate step; output that
+ * differs between two runs, or from what HEAD has, is a warning.
+ */
+export async function checkCodegen(workflow: Workflow, repoPath: string): Promise<CheckResult[]> {
+  if (Object.keys(workflow.codegen).length === 0) return [pass('codegen', 'codegen: no steps declared')]
+  const probe = await probeCodegen(workflow, repoPath, mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-codegen-')))
+  if (probe.dirty !== undefined) {
+    return [
+      flag(
+        'codegen:dirty',
+        `codegen: not run — generated files have uncommitted changes (${probe.dirty.join(', ')})`,
+        'warn',
+        `commit or stash them, then run doctor --codegen again`,
+      ),
+    ]
+  }
+  if (probe.failed !== undefined) {
+    return [
+      flag(
+        `codegen:${probe.failed.id}`,
+        `codegen step ${probe.failed.id}: failed (exit ${probe.failed.exitCode}), log: ${probe.failed.logPath}`,
+        'fail',
+        `fix the step's command in the plan or the project config, then run doctor --codegen again`,
+      ),
+    ]
+  }
+  return [
+    ...probe.deterministic.map((id) => pass(`codegen-determinism:${id}`, `codegen step ${id}: deterministic`)),
+    ...probe.nondeterministic.map((id) =>
+      flag(
+        `codegen-determinism:${id}`,
+        `codegen step ${id}: two runs wrote different outputs`,
+        'warn',
+        'make the generator independent of the clock, timezone, paths and hash order — every lane would regenerate it differently',
+      ),
+    ),
+    ...(probe.stale.length === 0
+      ? []
+      : [
+          flag(
+            'codegen:stale',
+            `codegen: ${probe.stale.length} generated file(s) at HEAD differ from what the steps write`,
+            'warn',
+            'run the codegen steps and commit their outputs on the base branch before the run',
+          ),
+        ]),
+  ]
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const { workflow, repoPath } = options
   const gitBin = options.bins?.git ?? 'git'
@@ -1308,6 +1368,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ...branches,
     ...lanes,
     ...leftovers,
+    ...(options.codegen === true ? await checkCodegen(workflow, repoPath) : []),
   ]
   const ok = !checks.some((check) => check.status === 'fail')
   return { checks, ok, exitCode: ok ? 0 : 1 }

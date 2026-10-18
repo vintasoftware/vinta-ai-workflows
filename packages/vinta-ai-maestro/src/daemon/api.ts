@@ -46,7 +46,8 @@ import {
 import { MONITOR_ROLE } from '../journal/transcript.ts'
 import { type AgentAsk, AgentAskSchema, encodeAnswers } from '../questions/agent-questions.ts'
 import { MONITOR_NODE, type Monitor, runDigest } from '../monitor/monitor.ts'
-import { isJudgeGate, WorkflowSchema, type Workflow } from '../types.ts'
+import { CODEGEN_GATE_PREFIX, WorkflowSchema, type Workflow } from '../types.ts'
+import { codegenPools } from '../codegen/codegen.ts'
 import type { Actor } from '../journal/events.ts'
 import { CoordinatorForbidden } from '../coordinator/actor.ts'
 import { execHolder } from '../coordinator/exec.ts'
@@ -716,7 +717,13 @@ export function createApi(options: ApiOptions): Hono {
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
     const holder = refuseHolder(c, found.row.id, body.value.holderNode)
     if (holder !== null) return holder
-    const gate = workflow(found.row.id).gates[body.value.gate]
+    const declared = workflow(found.row.id)
+    // `codegen:` / `codegen:<step>` is `vinta-ai-maestro codegen`: the plan's
+    // codegen steps through the same flight, with their pools as its `requires`.
+    const codegen = body.value.gate.startsWith(CODEGEN_GATE_PREFIX)
+      ? { requires: codegenPools(declared, body.value.gate.slice(CODEGEN_GATE_PREFIX.length)) }
+      : undefined
+    const gate = codegen ?? declared.gates[body.value.gate]
     if (gate === undefined) return fail(c, 400, 'unknown_gate')
 
     try {
@@ -730,7 +737,7 @@ export function createApi(options: ApiOptions): Hono {
       // A queued gate says who holds its pools, as a queued lease does.
       if ('waiting' in outcome) {
         const waiting: AgentGateWaitingResponse =
-          outcome.state === 'queued' && !isJudgeGate(gate)
+          outcome.state === 'queued' && !('judge' in gate)
             ? { ...outcome, holders: holdersOf(found.row.id, found.run, gate.requires) }
             : outcome
         return c.json(waiting, 202)
@@ -747,7 +754,7 @@ export function createApi(options: ApiOptions): Hono {
       const lanes = laneIndex(found.row.id)
       const holders = error.held.flatMap((held) =>
         held.resources
-          .filter((resource) => (isJudgeGate(gate) ? [] : gate.requires).includes(resource))
+          .filter((resource) => ('judge' in gate ? [] : gate.requires).includes(resource))
           .map((resource) => withHolder(held, resource, lanes)),
       )
       return c.json({ error: error.code, issues: null, holders }, 409)

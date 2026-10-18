@@ -32,6 +32,7 @@ import { z } from 'zod'
 import { git, gitOk } from '../integration/git.ts'
 import {
   ChoreSchema,
+  CodegenStepSchema,
   DefaultsSchema,
   GATE_TYPES,
   GateTuningSchema,
@@ -64,6 +65,8 @@ export const MaestroConfigSchema = z
     gates: z.partialRecord(z.enum(GATE_TYPES), GateTypeDefaultsSchema).optional(),
     resources: z.record(Id, ResourceSchema).optional(),
     chores: z.record(Id, ChoreSchema).optional(),
+    codegen: z.record(Id, CodegenStepSchema).optional(),
+    append_only: z.array(z.string().min(1)).optional(),
     project: ProjectSchema.partial().optional(),
   })
   .describe('What every maestro run in this project starts from, before its plan is laid over it.')

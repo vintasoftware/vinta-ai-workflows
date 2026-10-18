@@ -803,6 +803,48 @@ describe('gate pools', () => {
 }, REAL_RUN_TIMEOUT_MS)
 
 // ---------------------------------------------------------------------------
+// 4b. Codegen steps run before the gates, in the lane
+// ---------------------------------------------------------------------------
+
+describe('codegen steps in the lane', () => {
+  const codegenWorkflow = (cmd: string) =>
+    WorkflowSchema.parse({
+      schema_version: 1,
+      id: 'codegen',
+      base_branch: 'main',
+      defaults: { harness: 'claude-code', model: 'opus', pipeline: 'standard-phase' },
+      resources: { lane: { capacity: 1, kind: 'worktree' } },
+      gates: { unit: { cmd: 'test -f generated.txt', timeout_s: 30 } },
+      codegen: { gen: { cmd, outputs: ['generated.txt'] } },
+      nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#1', gates: ['unit'] }],
+    })
+
+  it('commits what a step writes before the gates judge the tree', async () => {
+    const rig = setup(() => codegenWorkflow('echo generated > generated.txt'))
+    const lane = rig.lanes[0] as ExecutorLane
+    rig.journal.append({ runId: RUN_ID, nodeId: 'p1', type: 'node_assigned', payload: { lane: lane.name } })
+
+    const outcome = await rig.invoke('p1', 'run_gate')
+    expect(outcome.facts?.gate).toMatchObject({ id: 'unit', exit_code: 0 })
+    expect(g(lane.path, 'log', '-1', '--format=%s')).toBe('chore(codegen): regenerate gen')
+    expect(g(lane.path, 'status', '--porcelain')).toBe('')
+  })
+
+  it('is the red gate when a step fails, and the gates do not run', async () => {
+    const rig = setup(() => codegenWorkflow('exit 4'))
+    const lane = rig.lanes[0] as ExecutorLane
+    rig.journal.append({ runId: RUN_ID, nodeId: 'p1', type: 'node_assigned', payload: { lane: lane.name } })
+
+    const outcome = await rig.invoke('p1', 'run_gate')
+    expect(outcome.facts?.gate).toMatchObject({ id: 'codegen:gen', exit_code: 4, codegen: true })
+    const results = rig.journal.events(RUN_ID).filter((event) => event.type === 'codegen_result')
+    expect(results.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ step: 'gen', where: 'lane', status: 'failed', exit_code: 4 }),
+    ])
+  })
+}, REAL_RUN_TIMEOUT_MS)
+
+// ---------------------------------------------------------------------------
 // 5. Gate caching
 // ---------------------------------------------------------------------------
 

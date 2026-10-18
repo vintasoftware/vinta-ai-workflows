@@ -107,6 +107,7 @@ These bleed across sub-skills, so capture once now:
    - **Files git does not carry.** A maestro lane is a worktree and has only what git tracks. Read `.gitignore` for entries with a tracked `*.example` / `*.sample` / `*.template` sibling, the compose file's `env_file:` lines, and the gitignored settings module the framework imports (`DJANGO_SETTINGS_MODULE`'s local module, typically). Propose the list in a multi-select `AskUserQuestion` (header `Env files`), each path pre-selected; the user confirms or drops entries. → `maestro.project.env_files`. Every hook, gate and `manage.py` call in a lane depends on these, and a plan that omits them fails in ways that look like code problems. Nothing found → omit the key and say so.
 
    - **Test-tool caches git must not carry.** Gates in a lane write cache and report files into the worktree, and an agent's `git add -A` there commits whatever is not ignored. Read `.gitignore` for the outputs of the runners and gates selected above: `.testmondata*` (pytest-testmon's SQLite database, plus its `-shm` / `-wal` siblings — tens of MB), `.pytest_cache/`, `junit/` or `junit*.xml`, `coverage/`, `.coverage`, `.coverage.*`, `htmlcov/`, `coverage.xml`, `.nyc_output/`, `.vitest/` and `.jest-cache/` where those runners are in use. Then read `.pre-commit-config.yaml` (or the project's hook runner) for `check-added-large-files`: that hook checks staged files, so a testmon database that is not ignored fails every lane commit and every maestro merge commit (`project.hooks: run`), and looks like a hook problem rather than a missing ignore rule. Propose the missing entries in a multi-select `AskUserQuestion` (header `Cache ignores`), each pre-selected, with `Add the selected entries (Recommended)` meaning append them to `.gitignore` under a `# test-tool caches` comment. When one is already tracked, say so: ignoring it does not untrack it, and the human runs `git rm --cached <path>` themselves. Nothing missing → say so and add nothing.
+   - **Generated files and append-only registries.** Read the project for generators — an API schema command (`spectacular`, an `openapi.json` dump), a generated client (`openapi-ts`, `orval`, `openapi-generator`, `graphql-codegen`; `*.gen.ts`), a route tree (`routeTree.gen.ts`) — and for file-modifying hooks in `.pre-commit-config.yaml` / `lefthook.yml` / `lint-staged` (a schema hook, `ruff format`, `prettier --write`). Propose each as a codegen step in a multi-select `AskUserQuestion` (header `Codegen`), pre-selected, showing its command, inputs and outputs; a formatter is `format: true` with `{changed_files}` in its command. → `maestro.codegen`. Then propose append-only registries — DI containers, URL route lists, notification-kind registries, beat schedules — in a second multi-select (header `Registries`). → `maestro.append_only`. Nothing found → omit both keys and say so.
 
    Everything here is a default under every plan. A plan's own `.workflow.json` overrides any of it, and a commit to this file on a running plan's branch (`plan/<workflow-id>/base`) is applied to that run.
 
@@ -381,6 +382,14 @@ maestro:
       capacity: <1 | 2>
       kind: semaphore
       match: <C.11 → runner command patterns, e.g. ['pytest*', 'uv run pytest*']>
+  codegen:  # C.11 → generators and file-modifying hooks; omit when none
+    <step-id>:
+      cmd: <the generator command, e.g. uv run python manage.py spectacular --file schema.yml>
+      inputs: <globs it reads, e.g. ['**/serializers.py', '**/views.py']; omit to run every time>
+      outputs: <globs it writes, e.g. [schema.yml]>
+      after: <steps that run first, e.g. [schema]; omit when none>
+      format: <true for a formatter whose cmd takes {changed_files}; omit otherwise>
+  append_only: <C.11 → registries phases only append to, e.g. [app/containers.py, app/urls.py]; omit when none>
   project:
     env_files: <C.11 → gitignored files every lane needs its own copy of, e.g. [.env, .env.docker, app/settings/local.py]; omit when none>
 

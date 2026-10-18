@@ -71,8 +71,17 @@
  * this file puts any of them into a fact, an error, a tracking record or a
  * notification body.
  */
+import { writeFileSync } from 'node:fs'
+import {
+  type CodegenCache,
+  codegenGateId,
+  codegenLogName,
+  codegenMessage,
+  commitOutputs,
+  runCodegen,
+} from '../codegen/codegen.ts'
 import { gateConfigKey, laneTreeHash, type GateCache } from '../gates/cache.ts'
-import { phaseGate } from '../gates/scope.ts'
+import { changedFiles, phaseGate } from '../gates/scope.ts'
 import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from '../gates/runner.ts'
 import { computeWaves, transitiveDependents } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
@@ -142,6 +151,8 @@ export interface RunExecutorOptions {
   readonly lanes?: readonly ExecutorLane[]
   /** §13.4's gate result cache. Omitted means every gate runs. */
   readonly cache?: GateCache
+  /** What codegen steps produced from which inputs. Omitted means every step runs. */
+  readonly codegenCache?: CodegenCache
   /** Verdict for a review turn that stated none. Conservative by default. */
   readonly defaultVerdict?: 'pass' | 'fail'
   /** Injected in tests, and on a platform with no notification channel. */
@@ -425,6 +436,13 @@ export class RunEffectExecutor implements EffectExecutor {
   ): Promise<EffectOutcome> {
     const named = params['gate']
     const gateIds = typeof named === 'string' ? [named] : (this.#node(nodeId)?.gates ?? [])
+    // The generated files first, so the gates judge the tree that merges and
+    // a phase branch never carries a stale one. A step that fails is the red
+    // gate: a generator that crashes means code that does not build.
+    if (Object.keys(this.#workflow.codegen).length > 0) {
+      const red = await this.#codegen(nodeId, this.#lane(nodeId))
+      if (red !== null) return { facts: { gate: red } }
+    }
     // A node that declared no gates passes the gate state vacuously (§5.2).
     if (gateIds.length === 0) return { facts: { gate: { exit_code: 0, status: 'passed' } } }
     // `true` skips the cache for every gate this runs; a gate id, for that one
@@ -503,6 +521,64 @@ export class RunEffectExecutor implements EffectExecutor {
       if (exitCode !== 0) break
     }
     return { facts: { gate: last } }
+  }
+
+  /**
+   * The plan's codegen steps in the node's lane, and a commit of what they
+   * changed among their outputs. Null when they passed; the red gate fact when
+   * one failed or the commit was refused. Formatters are scoped to the files
+   * the phase changed against its base.
+   */
+  async #codegen(nodeId: string, lane: ExecutorLane): Promise<Record<string, ContextValue> | null> {
+    const { runId, journal } = this.#options
+    const base = this.#row(nodeId)?.base_branch ?? this.#options.integrator.base(nodeId).branch
+    const outcome = await runCodegen({
+      steps: this.#workflow.codegen,
+      cwd: lane.path,
+      env: lane.env,
+      logPath: (id) => journal.gateLogPath(runId, nodeId, codegenLogName(id)),
+      ...(this.#options.codegenCache === undefined ? {} : { cache: this.#options.codegenCache }),
+      changedFiles: () => changedFiles({ lanePath: lane.path, base, touches: [] }),
+      onResult: (run) => {
+        journal.append({
+          runId,
+          nodeId,
+          type: 'codegen_result',
+          payload: {
+            step: run.id,
+            where: 'lane',
+            status: run.status,
+            exit_code: run.exitCode,
+            duration_ms: run.durationMs,
+            ...(run.skipped === undefined ? {} : { skipped: run.skipped }),
+            ...(run.nondeterministic === true ? { nondeterministic: true } : {}),
+          },
+        })
+      },
+    })
+    const red = (id: string, exitCode: number, status: string, logRef: string): Record<string, ContextValue> => {
+      const tree = treeHashOf(lane.path)
+      return {
+        id,
+        exit_code: exitCode,
+        status,
+        cached: false,
+        log_ref: logRef,
+        codegen: true,
+        ...(tree === undefined ? {} : { tree }),
+      }
+    }
+    const failed = outcome.failed
+    if (failed !== null) return red(codegenGateId(failed.id), failed.exitCode, failed.status, failed.logPath)
+    try {
+      await commitOutputs(lane.path, outcome.changed, codegenMessage(outcome.runs))
+    } catch (error) {
+      // Git's own words, redacted (`GitCommandError`), in the log a fixer reads.
+      const logPath = journal.gateLogPath(runId, nodeId, codegenLogName('commit'))
+      writeFileSync(logPath, `${error instanceof Error ? error.message : String(error)}\n`)
+      return red(codegenGateId('commit'), 1, 'failed', logPath)
+    }
+    return null
   }
 
   /** A command gate, in the node's lane, with the cache in front. */

@@ -848,6 +848,92 @@
         "additionalProperties": false
       }
     },
+    "codegen": {
+      "default": {},
+      "description": "Deterministic commands that write declared files, by id — see CodegenStepSchema. They run in every lane before its gates and in the integration worktree around every merge, in `after` order. A failing step is a red gate.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Shell command, run in the worktree with its environment — the lane’s or the integration worktree’s. Must be deterministic: the same inputs produce byte-identical outputs (`doctor --codegen` checks). A `format` step’s command takes `{changed_files}`."
+          },
+          "outputs": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "The files the command writes, as git glob pathspecs relative to the repository root (`schema.yml`, `frontend/src/api-client/**`, `**/*.gen.ts`). What it changes among them is committed; anything else it changes is left alone. Agents are told these are not to be edited by hand, and a merge conflict confined to them is settled by running the step instead of by a fixer."
+          },
+          "inputs": {
+            "default": [],
+            "description": "The files the outputs are a function of, as git glob pathspecs. When the step last ran on exactly these contents and its outputs are still what it wrote, it is skipped, as a gate is on a tree the cache has seen. Empty — the default — runs it every time.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "after": {
+            "default": [],
+            "description": "Steps that run before this one: the schema before the client generated from it, the client before whatever reads it.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "requires": {
+            "default": [],
+            "description": "Resource pool ids held while the step runs, as a gate’s are. Never `lane`.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            }
+          },
+          "timeout_s": {
+            "default": 600,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "format": {
+            "default": false,
+            "description": "A formatter rather than a generator. `{changed_files}` in `cmd` is the files the phase changed that match `outputs`, shell-quoted; with none, the step is skipped. Formatting the whole repository makes diffs in files the phase never touched. A format step’s outputs are ordinary source, so they are not listed as hand-edit-free and a conflict in them still goes to the fixer.",
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cmd",
+          "outputs"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "append_only": {
+      "default": [],
+      "description": "Files every phase only appends to — a DI container, a URL route list, a registry of notification kinds, a beat schedule — as gitattributes patterns. Merged in the integration worktree with git’s `union` driver, which keeps both sides’ lines, so two phases each adding an entry is not a conflict. The merged tree is gated as any other is; a union that reads wrong (a duplicate key, a missing comma) is a red gate there, not a silent pass.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "nodes": {
       "minItems": 1,
       "type": "array",

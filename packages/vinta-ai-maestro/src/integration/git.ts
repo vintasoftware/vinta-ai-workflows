@@ -100,8 +100,15 @@ export async function git(
     // any exit status: nothing ran.
     const { code, stderr } = error as { code?: unknown; stderr?: unknown }
     if (typeof code !== 'number') throw error
-    throw new GitCommandError(args[0] ?? 'git', code, typeof stderr === 'string' ? stderr : '')
+    throw new GitCommandError(subcommandOf(args), code, typeof stderr === 'string' ? stderr : '')
   }
+}
+
+/** The subcommand an argument list runs, past any leading `-c <name>=<value>` pairs. */
+function subcommandOf(args: readonly string[]): string {
+  let i = 0
+  while (args[i] === '-c') i += 2
+  return args[i] ?? 'git'
 }
 
 /** True when the command exited 0. Used where failure is a real answer. */

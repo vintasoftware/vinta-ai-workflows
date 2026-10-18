@@ -88,7 +88,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `review open <workflow.json> [--repo <dir>] [--host <host>] [--port <n>]` | Serves the UI and prints the URL of that plan's [review page](#reviewing-a-plan-before-it-runs). |
 | `review wait <workflow.json> [--timeout <s>]` | The authoring agent's side of the review chat. It blocks until the person sends something, prints it as JSON, and marks it delivered. It gives up after `--timeout` (default 110 s) with `{"kind":"timeout"}`. |
 | `review reply <workflow.json> -m <text\|-> [--comment <id> [--resolve]] [--as <name>]` | Answers in the chat, or on a comment thread, as the agent. |
-| `doctor <workflow.json> [--repo <dir>] [--resume <run-id>]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. |
+| `doctor <workflow.json> [--repo <dir>] [--resume <run-id>] [--codegen]` | Preflights every check a run depends on and exits non-zero if a run cannot start. `--resume` asks the question for `run --resume <run-id>`: that run's own lanes are holding its phase branches on purpose, and are not leftovers to clear. `--codegen` also runs each codegen step twice in the checkout to flag output that is not deterministic or is stale at `HEAD`, then puts the generated files back. |
 | `simulate <workflow.json>` | Projects the schedule without running it — wall clock, critical path, pool contention. Spawns no agent. |
 | `run <workflow.json> [--repo <dir>]` | Starts the workflow as a **background job** and returns once it is under way. The run does not need the terminal: close it and the run carries on. `--foreground` hosts it in this process instead and exits when it ends, for CI. |
 | `run --resume <run-id>` | Picks a paused, interrupted or failed run back up, as a background job. Done phases stay done; every other phase — a failed run's failed and blocked phases included — is attempted again. Only `done` and `cancelled` runs are refused. It runs under the run's own `--permission`, `--system-one`, `--on-failure`, `--retries`, `--retry-after`, `--no-coordinator`, `--host` and `--harness-profile`, kept in `runs/<id>/policy.json` — the UI's Resume too; a flag given on the command line overrides the stored one. |
@@ -109,6 +109,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
 | `status <run-id>` | The run's state and every phase's, including a phase queued behind the integration worktree (and who holds it) — which otherwise reads `running` with nothing running. |
 | `gate <gate-id> [--no-cache]` | Inside an agent turn, asks the daemon to run one of the plan's declared gates against this turn's lane. The daemon holds the gate's resources and caches the result; the CLI exits with the gate's exit code. `--no-cache` runs it past a cached result and keeps the new one, for a cause git does not track (an ignored file, a tool cache). |
+| `codegen [<step-id>] [--no-cache]` | Inside an agent turn, asks the daemon to run the plan's [codegen steps](#codegen-steps--generated-files-nobody-merges) — or one, with the steps it comes after — against this turn's lane, under their resources. Leaves what they write in the working tree for the agent to commit, and exits with the first failing step's exit code. |
 
 `judge calibrate --system-one <config.json> (--run <run-id> | --commands <file>)` replays commands against the permission judge's question and threshold without running them — see [System One classifiers](#system-one-classifiers).
 
@@ -605,6 +606,63 @@ then into every wave in order, so each wave keeps the one below in its history.
 On a live run the merges happen inside the run, between its own, and a wave
 that conflicts with the new base goes to the run's conflict fixer. `--dry-run`
 lists the merges first.
+
+## Codegen steps — generated files nobody merges
+
+A gate judges the tree and a chore is an agent changing it. A codegen step is
+the third thing a phase runs: a deterministic command that writes the files it
+declares, committed as it comes out, with no agent turn and no fix round.
+
+```jsonc
+"codegen": {
+  "schema": {
+    "cmd": "uv run python manage.py spectacular --file schema.yml",
+    "inputs": ["**/serializers.py", "**/views.py"],   // skipped when these did not change
+    "outputs": ["schema.yml"]
+  },
+  "client": {
+    "cmd": "pnpm --dir web generate-client",
+    "inputs": ["schema.yml"],
+    "outputs": ["web/src/api-client/**"],
+    "after": ["schema"]                                 // the schema first
+  },
+  "format": {
+    "cmd": "uv run ruff format {changed_files}",       // only what the phase changed
+    "outputs": ["**/*.py"],
+    "format": true
+  }
+}
+```
+
+They run after every implement and fix turn, before the gates, and what they
+change among their outputs is committed in the lane. In the integration
+worktree they run after every merge: a conflict in a generated file is settled
+by taking either side and regenerating it, so it never reaches the conflict
+fixer, and a merge is regenerated before it is committed, so a hook that would
+rewrite the same files finds nothing to change. A failing step is a red gate.
+Agents are told which files are generated and never to edit them by hand, and
+regenerate them mid-turn with `vinta-ai-maestro codegen`. Run
+`vinta-ai-maestro doctor <workflow.json> --codegen` once to check each step
+writes the same output twice; a step that does not would conflict in every
+merge.
+
+A project with no steps still gets past a hook that rewrites files: when a
+commit fails having left modified files, they are staged and the commit is
+tried once more before you are asked.
+
+### Append-only files — `append_only`
+
+```jsonc
+"append_only": ["app/containers.py", "app/urls.py", "app/notifications/kinds.py"]
+```
+
+Files every phase only adds entries to — a DI container, URL routes, a registry,
+a beat schedule. Merges in the integration worktree use git's `union` driver for
+them, so two phases each adding a line is not a conflict. The merged tree is
+then gated as any other, which is what catches a union that reads wrong.
+
+Both are usually project facts: put them under `maestro.codegen` and
+`maestro.append_only` in `.vinta-ai-workflows.yaml` and every plan takes them.
 
 ## Chores — the other thing a phase runs
 

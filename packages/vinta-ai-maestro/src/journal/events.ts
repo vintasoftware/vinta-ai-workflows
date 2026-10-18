@@ -903,6 +903,27 @@ interface NodePayloads {
     readonly outcome: 'rerun_cleared' | 'escalated'
   }
   /**
+   * One codegen step (`workflow.codegen`) that ran or was skipped: in a lane
+   * before its gates, in the integration worktree around a merge, or from an
+   * agent's `vinta-ai-maestro codegen`. Ids and numbers; its output is in its
+   * log under the node's gates, as `codegen-<step>.log`.
+   */
+  codegen_result: {
+    readonly step: string
+    readonly where: 'lane' | 'integration' | 'agent'
+    readonly status: 'passed' | 'failed' | 'timed_out' | 'skipped'
+    readonly exit_code: number
+    readonly duration_ms: number
+    /** Why a skipped step was: its inputs and outputs matched a recorded run, or a formatter had no files. */
+    readonly skipped?: 'cached' | 'no_files'
+    /**
+     * Set when the step wrote different outputs from inputs a recorded run
+     * wrote other outputs from: the generator is not deterministic, and every
+     * lane will regenerate it differently.
+     */
+    readonly nondeterministic?: true
+  }
+  /**
    * What became of one chore turn (`run_chore`).
    *
    * The turn itself is in the transcript, attributed to the `chore` role, which

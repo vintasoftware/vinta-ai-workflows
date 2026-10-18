@@ -12,13 +12,15 @@
  * being a second, subtly different kind of run.
  */
 import { guardHookCommand } from '../guard/hook.ts'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import type { AmendRunner } from '../amend/amend.ts'
 import { createRebaser } from '../amend/rebase.ts'
 import type { AgentGatePort, GateCachePort } from '../daemon/index.ts'
 import { referencedHarnesses } from '../doctor/index.ts'
 import { createRunExecutor } from '../executor/index.ts'
+import { CodegenCache, codegenLogName } from '../codegen/codegen.ts'
+import { createIntegrationCodegen } from '../codegen/integration.ts'
 import { GateCache } from '../gates/cache.ts'
 import { executeGate } from '../gates/runner.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
@@ -301,9 +303,35 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     return built
   }
   const fixer = fixerFor(workflow)
+  const codegenCache = CodegenCache.forProject(repoPath)
   const integrator = new RecordingIntegrator({
     // `Workflow` satisfies `IntegrationPlan` structurally.
     plan: workflow,
+    // Codegen steps and the union driver, over the workflow as amended. Logs
+    // under the integration worktree's pseudo-node, beside its merge gates.
+    codegen: createIntegrationCodegen({
+      workflow: () => current,
+      env: { ...integration.env, ...options.agentEnv },
+      logPath: (id) => journal.gateLogPath(runId, INTEGRATION_NODE, codegenLogName(id)),
+      cache: codegenCache,
+      attributesFile: join(dirname(journal.gateLogPath(runId, INTEGRATION_NODE, 'merge')), 'merge-attributes'),
+      onResult: (forNode, run) => {
+        journal.append({
+          runId,
+          nodeId: forNode,
+          type: 'codegen_result',
+          payload: {
+            step: run.id,
+            where: 'integration',
+            status: run.status,
+            exit_code: run.exitCode,
+            duration_ms: run.durationMs,
+            ...(run.skipped === undefined ? {} : { skipped: run.skipped }),
+            ...(run.nondeterministic === true ? { nondeterministic: true } : {}),
+          },
+        })
+      },
+    }),
     integrationPath,
     ...(options.planBranch === undefined ? {} : { runBase: options.planBranch }),
     fixer,
@@ -417,6 +445,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       env: { ...env, ...options.agentEnv },
     })),
     cache,
+    codegenCache,
     integrationEnv: { ...integration.env, ...options.agentEnv },
     ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
     onIntegrationWait: (nodeId, state, holder) => {
@@ -520,6 +549,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         journal,
         pools,
         cache,
+        codegenCache,
         // The lease broker's holder index, so a gate asked for from inside a
         // `with` on its own pool is refused instead of waiting on itself.
         ...(leases === undefined ? {} : { leases }),
