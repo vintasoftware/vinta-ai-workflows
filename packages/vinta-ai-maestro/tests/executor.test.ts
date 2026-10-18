@@ -713,12 +713,12 @@ describe('the review verdict', () => {
     const rig = setup(onePhase)
     turn(rig, 'Looks good to me.')
     expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
-      review: { verdict: 'fail' },
+      review: { verdict: 'fail', stated: false },
     })
 
     turn(rig, `${VERDICT_MARKER} pass`, 'error')
     expect((await spawn(rig, { role: 'chore', verdict: true })).facts).toEqual({
-      review: { verdict: 'fail' },
+      review: { verdict: 'fail', stated: false },
     })
   })
 
@@ -1843,6 +1843,33 @@ describe('the git verbs', () => {
       // A retry on the same base: the merged tree already passed.
       await rig.invoke('p3', 'git_branch')
       expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
+    })
+
+    it('re-runs a red verdict on the base when the phase is retried, rather than replaying it', async () => {
+      // A gate that fails the first time it runs and passes after: the
+      // time-of-day flake that froze one run's phase for seven retries.
+      const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-base-gate-'))
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+      const marker = join(dir, 'flaked')
+      const flaky =
+        `node -e "const fs = require('fs'); const p = ${JSON.stringify(marker).replaceAll('"', "'")};` +
+        ` if (fs.existsSync(p)) process.exit(0); fs.writeFileSync(p, ''); process.exit(1)"`
+      const rig = setup(gatedDiamond(flaky), { cache: true })
+      await work(rig, 'p1', 0)
+      await work(rig, 'p2', 1)
+      // The dependencies' own runs are scoped; the base's is the full command.
+      rmSync(marker, { force: true })
+
+      await expect(work(rig, 'p3', 2)).rejects.toThrow(/gate "unit" failed on it/)
+      // The retry: same base, same tree. The red verdict is asked again.
+      await rig.invoke('p3', 'git_branch')
+      const steps = rig.journal.integrationTimeline(RUN_ID, 'p3').filter((row) => row.step === 'base_gate')
+      expect(steps.map((row) => row.outcome)).toEqual(['failed', 'ok'])
+
+      // And green is replayed as before: a third pass runs nothing.
+      rmSync(marker, { force: true })
+      await rig.invoke('p3', 'git_branch')
+      expect(existsSync(marker)).toBe(false)
     })
 
     it('starts the phase on the base unchecked under base_gates: off', async () => {

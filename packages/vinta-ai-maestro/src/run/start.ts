@@ -523,6 +523,9 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
             scheduler.adopt(amended)
           },
         }
+  // The scheduler's own amendments (a desk escalated after review rejections)
+  // reach the host the way an operator's do.
+  if (amend !== undefined) scheduler.bindAmendRunner(amend)
 
   // §17.6: only under `judged`. A judge registered for any other mode would
   // answer a hook nobody installed, which is harmless and also meaningless.

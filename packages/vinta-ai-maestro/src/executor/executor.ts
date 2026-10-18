@@ -323,7 +323,7 @@ export class RunEffectExecutor implements EffectExecutor {
 
     switch (invocation.effect.definitionId) {
       case 'spawn_agent':
-        return params['verdict'] === true ? { facts: { review: { verdict: this.#verdict(nodeId) } } } : {}
+        return params['verdict'] === true ? { facts: { review: this.#verdict(nodeId) } } : {}
       case 'run_gate':
         return await this.#runGate(nodeId, params)
       case 'run_chore':
@@ -363,10 +363,13 @@ export class RunEffectExecutor implements EffectExecutor {
 
   /**
    * The last verdict the review stated in the turn that just ended. A turn
-   * that errored, or stated nothing, takes the fail-closed default.
+   * that errored, or stated nothing, takes the fail-closed default, and says
+   * it stated nothing: a review that rejected the phase and a turn that ended
+   * before its reviewer answered both read `fail`, and only the second is a
+   * harness's doing (§16.2).
    */
-  #verdict(nodeId: string): 'pass' | 'fail' {
-    const fallback = this.#options.defaultVerdict ?? 'fail'
+  #verdict(nodeId: string): { readonly verdict: 'pass' | 'fail'; readonly stated?: false } {
+    const fallback = { verdict: this.#options.defaultVerdict ?? 'fail', stated: false } as const
     const turn = this.#lastTurn(nodeId)
     if (!turn.ok) return fallback
     for (const text of turn.texts) {
@@ -374,7 +377,7 @@ export class RunEffectExecutor implements EffectExecutor {
       // this reads, so the protocol cannot drift out of one of the two places.
       // The verdict only — the transcript text itself goes no further.
       const stated = readVerdict(text)
-      if (stated !== undefined) return stated
+      if (stated !== undefined) return { verdict: stated }
     }
     return fallback
   }
@@ -557,23 +560,29 @@ export class RunEffectExecutor implements EffectExecutor {
    * `runGateCached` does for `--no-cache`, and stores after, so the fresh
    * verdict is the one the next lookup gets — and a fresh run that times out
    * leaves no stale verdict behind.
+   *
+   * `'red'` replays a green hit and re-runs a red one — the merged base's
+   * gates (`#baseGates`). See there for why.
    */
   async #gate(
     gateId: string,
     lane: ExecutorLane,
     options: Omit<RunGateOptions, 'pools'>,
-    fresh = false,
+    fresh: boolean | 'red' = false,
   ): Promise<GateRun> {
     const cache = this.#options.cache
     if (cache === undefined) return { result: await executeGate(options), cached: false }
 
     const treeHash = laneTreeHash(lane.path)
     const config = gateConfigKey(options.gate)
-    if (fresh) {
+    if (fresh === true) {
       cache.invalidate(gateId, treeHash)
     } else {
       const hit = cache.lookup(gateId, treeHash, config)
-      if (hit !== undefined) return { result: hit, cached: true, tree: treeHash }
+      if (hit !== undefined && !(fresh === 'red' && hit.status !== 'passed')) {
+        return { result: hit, cached: true, tree: treeHash }
+      }
+      if (hit !== undefined) cache.invalidate(gateId, treeHash)
     }
     const result = await executeGate(options)
     cache.store(treeHash, config, result)
@@ -1032,6 +1041,14 @@ export class RunEffectExecutor implements EffectExecutor {
    * gates — narrowed to what it changed — never looked. Cached on the merged
    * tree, so a retry on the same base is a hit, not a second suite. Red stops
    * the phase in its setup and names the gate and its log.
+   *
+   * **Only green is replayed.** A red verdict on the base is re-run when the
+   * phase comes back to it, which is only ever a retry: the base's tree is the
+   * dependencies' merge, and nothing in this phase can change it, so a cached
+   * red answered every retry with the same failure. One observed run failed a
+   * base gate once on a test that broke only near midnight, and seven retries
+   * replayed that verdict until an operator ran `gate-cache invalidate`. A red
+   * that is real costs one more suite per retry and says the same thing.
    */
   async #baseGates(nodeId: string): Promise<void> {
     const base = this.#options.integrator.base(nodeId)
@@ -1054,7 +1071,7 @@ export class RunEffectExecutor implements EffectExecutor {
         cwd: integration.path,
         env: integration.env,
         logPath,
-      }).catch((error: unknown) => {
+      }, 'red').catch((error: unknown) => {
         this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
         throw error
       })

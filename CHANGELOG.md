@@ -47,6 +47,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resuming with the same policy flags, and moving the base forward. New
   partial `plan-execution/partials/maestro-live-run.md`; re-run
   `vinta-derive-skills` to pick it up.
+- **`vinta-ai-maestro`: a phase the review keeps rejecting moves up a crew
+  tier.** One run left a Tier 1 phase on its desk through 16 review rejections
+  over six hours until the coordinator moved it by hand. New
+  `defaults.escalate_after_rejections` (default `3`, `0` turns it off): when a
+  phase's review has failed to approve that many times on one desk, counted
+  across attempts, the scheduler amends the run. The phase moves to the
+  cheapest member of the next tier up and takes the new desk from its next
+  attempt. The amendment is journalled as `workflow_amended` with the new
+  author `scheduler` and a new `reason` field (`review_rejections`, the
+  members, the tiers and the count). A phase already at the top tier stays
+  where it is. Amendments may now leave a member the run already had with no
+  phase, so moving a member's last phase is no longer refused.
 
 - **`vinta-ai-maestro`: integration is visible while it happens.** A phase in
   `integrate` — a merge, a suite on the merged tree, a push, none with an
@@ -698,6 +710,40 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checks for the `check-added-large-files` pre-commit hook, which a committed
   testmon database trips on every lane and merge commit, and offers to append
   the missing entries.
+- **`vinta-ai-maestro`: a review that stated no verdict is no longer reported
+  as a rejection.** One run recorded 22 attempts as `review verdict "fail"; 0
+  fix rounds spent`. None had rejected anything: each was a review turn that
+  ended before its reviewer answered (fixed in alpha33 and alpha34). The
+  pipeline still treats silence as `fail`, but the failure reason now says
+  `the review turn stated no verdict`, and the `review` fact carries
+  `stated: false`. The budget clause is renamed to `gate fix rounds spent`,
+  since a review's findings are fixed inside its own turn and never in a
+  separate fix round.
+
+- **`vinta-ai-maestro`: two empty turns in a row park the phase instead of
+  burning its retries.** Right after one run moved its desks to codex, "codex
+  ended the turn without the agent doing anything" failed 20 attempts across 4
+  phases in about two minutes. When one harness ends two turns in a row
+  without the agent doing anything, across attempts, the phase now skips its
+  automatic retries and asks: the question says the harness is failing and
+  suggests `retry with` a member on another harness. `--retry-after` still
+  answers it, and backs off from the first question.
+
+- **`vinta-ai-maestro`: a red gate on a merged base is re-run on retry.** One
+  run's base test gate failed once on a test that broke only near midnight.
+  Seven retries replayed the cached verdict, each reported as "failed during
+  setup, before any agent ran", and the unattended retry was withheld until an
+  operator ran `gate-cache invalidate`. The base gates now replay only a green
+  verdict and re-run a red one, and a red base gate no longer counts as a
+  setup failure, so `--retry-after` keeps retrying it with its usual backoff.
+
+- **`vinta-ai-maestro`: a lane that will not recycle says why.** One run
+  failed 20 attempts with only "could not be recycled (worktree)" or
+  "(database)" in the journal and the daemon log. The failure now carries the
+  failing step's exit code and the tail of its stderr, the way a failed
+  `setup_cmd` already did, and a `reset_cmd`, `setup_cmd` or `prepare_cmd`
+  failing during a recycle reports that command's own error instead of
+  `LaneSetupError`. Command lines are still left out.
 
 - **`vinta-ai-maestro`: the full suite runs before a PR, and on every merged
   tree.** Under `gate_scope: scoped`, a phase's gates ran their scoped form

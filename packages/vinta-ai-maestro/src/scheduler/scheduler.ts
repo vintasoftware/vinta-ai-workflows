@@ -121,7 +121,8 @@ import {
   type PipelineRun,
   type StepResult,
 } from '../pipeline/interpreter.ts'
-import { LaneRecycleError } from '../lanes/pool.ts'
+import { amendRun, type AmendRunner } from '../amend/amend.ts'
+import { LanePrepareError, LaneRecycleError, LaneSetupError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import { assignCrew, type CrewDecision, roster } from './crew.ts'
@@ -206,6 +207,14 @@ const STOP = 'stop'
  * the first is an attempt, the second is the proof it is deterministic.
  */
 const REPEATED_SETUP_FAILURES = 2
+/**
+ * Turns in a row one harness ended without the agent doing anything before it
+ * is treated as broken rather than unlucky. Right after one run moved its
+ * desks to codex, "ended the turn without the agent doing anything" failed 20
+ * attempts across 4 phases in about two minutes: each automatic retry bought
+ * the same empty turn.
+ */
+const EMPTY_TURN_FAULT = 2
 
 /** The three answers to a merge commit git refused, as the operator sees them. */
 const COMMIT_NOW = 'commit'
@@ -510,11 +519,18 @@ function settledReason(settled: Settled, state: NodeState): string {
     )
   }
   if (state.lastVerdict === 'fail') clauses.push('review verdict "fail"')
+  // Not a rejection: the turn ended — or errored — before it stated one. One
+  // run recorded 22 of these as `review verdict "fail"`; every one was a review
+  // turn the harness ended while its reviewer was still working.
+  if (state.lastVerdict === 'silent') clauses.push('the review turn stated no verdict')
+  // Gate fixers only. A review's findings are fixed inside its own turn (§16),
+  // and "0 fix rounds spent" beside a failed review read as findings nobody
+  // had been handed.
   const budget = state.node.max_fix_rounds
   clauses.push(
     budget === undefined
-      ? `${state.fixRounds} fix rounds spent`
-      : `${state.fixRounds} of ${budget} fix rounds spent`,
+      ? `${state.fixRounds} gate fix rounds spent`
+      : `${state.fixRounds} of ${budget} gate fix rounds spent`,
   )
 
   return clauses.join('; ')
@@ -559,15 +575,21 @@ class SpawnFatal extends Error {}
  * one a person chose, so nothing in `#recover` may second-guess it.
  */
 class LoginDeclined extends SpawnFatal {}
+/**
+ * The same harness ended `EMPTY_TURN_FAULT` turns in a row without the agent
+ * doing anything. Not the work's failure and not one a retry changes, so
+ * `#recover` spends no automatic attempt on it and asks instead.
+ */
+class HarnessFault extends SpawnFatal {}
 
 /**
  * A lane that could not be made clean for the next node.
  *
  * Its own type rather than a bare `Error` so `failureReason` can keep the
- * message: `recycleStage` already reduced the cause to a stage or an error
- * kind, so this text is identifiers by the time it is thrown. A plain `Error`
- * would be indistinguishable from something a dependency threw, and would be
- * flattened to `Error` — losing the lane name and the stage, which are the
+ * message: `recycleFailure` already reduced the cause to the pool's own bounded
+ * words or an error kind by the time it is thrown. A plain `Error` would be
+ * indistinguishable from something a dependency threw, and would be flattened
+ * to `Error` — losing the lane name, the stage and the cause, which are the
  * whole point of the message.
  */
 class LaneUnusable extends Error {}
@@ -722,13 +744,15 @@ interface NodeState {
    */
   lastRed: { readonly gate: string; readonly tree: string; fixedSince: boolean } | null
   /**
-   * The last verdict the review chores stated this attempt (`pass` | `fail`).
+   * The last verdict the review chores stated this attempt (`pass` | `fail`),
+   * or `silent` for a review that did not approve because its turn stated no
+   * verdict at all — the guards read that as `fail`, the failure reason does not.
    *
-   * A closed vocabulary of two words, decided by `readVerdict` from the
-   * transcript and handed here as a fact — so it carries none of the review's
-   * prose, which is what §11 keeps in the transcript file.
+   * A closed vocabulary, decided by `readVerdict` from the transcript and
+   * handed here as a fact — so it carries none of the review's prose, which is
+   * what §11 keeps in the transcript file.
    */
-  lastVerdict: 'pass' | 'fail' | null
+  lastVerdict: 'pass' | 'fail' | 'silent' | null
   lane: string | null
   /**
    * A member the operator picked for the next attempt, in place of the one the
@@ -775,6 +799,20 @@ interface NodeState {
    * buys the same line again. Cleared by an attempt that got past setup.
    */
   setupFailure: { readonly reason: string; readonly count: number } | null
+  /**
+   * The harness whose turns on this node have ended empty, and how many in a
+   * row — across attempts, since the attempt boundary is exactly what an
+   * automatic retry crosses. Cleared by any turn the agent took part in.
+   */
+  emptyTurns: { readonly harness: string; readonly count: number } | null
+  /** The attempt that just failed ended on a `HarnessFault`. Read once by `#recover`. */
+  harnessFault: boolean
+  /**
+   * Reviews that did not approve this phase on its current desk, across
+   * attempts. At `defaults.escalate_after_rejections` the phase moves up a
+   * tier (`#countRejection`), and the count starts again on the new desk.
+   */
+  reviewRejections: number
   /** Questions the host asked through `askNode`. Keeps their effect ids apart. */
   hostAsks: number
   /**
@@ -839,22 +877,9 @@ interface NodeState {
 }
 
 /**
- * What went wrong recycling a lane, in words safe to print.
- *
- * `LaneRecycleError` already classifies itself into one of three stages, and
- * that is the useful answer. Anything else reaching here came from the pool's
- * own machinery rather than from a project's reset commands — a summary that
- * would not read, a git call that refused — and is reported by its *kind*:
- * an error name and, where the runtime supplies one, a `code` like `ENOENT`.
- *
- * Not its message (§11). A thrown message can carry a git diagnostic or the
- * output of something a project chose to run, and neither belongs on a stream
- * that is otherwise identifiers.
- */
-/**
  * Why a node failed, in words safe to persist.
  *
- * The same rule `recycleStage` follows, for the same reason. Two of the three
+ * The same rule `recycleFailure` follows, for the same reason. Two of the three
  * failure paths pass a literal this module wrote; the third passes whatever was
  * thrown, and "whatever was thrown" is not a closed vocabulary. A `PromptError`
  * is identifiers by construction — node id, reference, lane directory — and a
@@ -908,11 +933,29 @@ function failureReason(error: unknown): string {
   return typeof named.code === 'string' ? `${name}: ${named.code}` : name
 }
 
-function recycleStage(error: unknown): string {
-  if (error instanceof LaneRecycleError) return error.stage
+/**
+ * What went wrong recycling a lane, in words safe to print.
+ *
+ * The pool's own errors are kept whole: `LaneRecycleError` names its stage and
+ * the cause the failing step gave — an exit code and a bounded stderr tail —
+ * and the project's `reset_cmd`, `setup_cmd` or `prepare_cmd` failing on the
+ * way through is the error `LaneSetupError` and `LanePrepareError` already
+ * compose with the same bound. Twenty attempts of one observed run failed on
+ * "could not be recycled (worktree)" with no cause anywhere, which is the gap
+ * this closes.
+ *
+ * Anything else came from somewhere that did not choose its words for a log
+ * and is reported by its *kind*: an error name and, where the runtime supplies
+ * one, a `code` like `ENOENT` (§11).
+ */
+function recycleFailure(lane: string, error: unknown): string {
+  if (error instanceof LaneRecycleError) return error.message
+  if (error instanceof LaneSetupError || error instanceof LanePrepareError) {
+    return `lane "${lane}" could not be recycled: ${error.message}`
+  }
   const named = error as { name?: unknown; code?: unknown }
   const name = typeof named.name === 'string' ? named.name : 'Error'
-  return typeof named.code === 'string' ? `${name}: ${named.code}` : name
+  return `lane "${lane}" could not be recycled (${typeof named.code === 'string' ? `${name}: ${named.code}` : name})`
 }
 
 export class Scheduler {
@@ -927,6 +970,11 @@ export class Scheduler {
    * through `#options`.
    */
   #workflow: Workflow
+  /**
+   * The host's side of §9's amend, for the amendments the scheduler makes
+   * itself (`bindAmendRunner`). Unbound, only this scheduler adopts them.
+   */
+  #amendRunner: AmendRunner | null = null
   readonly #takeovers: PtyRegistry
   readonly #freeLanes: string[]
   /** Lane slots a node has already run in, and which therefore need recycling. */
@@ -1099,6 +1147,9 @@ export class Scheduler {
       attemptStartedAt: 0,
       agentRan: false,
       setupFailure: null,
+      emptyTurns: null,
+      harnessFault: false,
+      reviewRejections: 0,
       hostAsks: 0,
       released: false,
       landed: false,
@@ -1182,6 +1233,16 @@ export class Scheduler {
     // run up, so nothing is lost by staying quiet here.
     if (row.status === 'pending') return
     this.#setStatus(state, 'pending')
+  }
+
+  /**
+   * The composition's `AmendRunner`, so an amendment the scheduler makes on its
+   * own (`#countRejection`) reaches everything an operator's does: the
+   * executor, the gate broker and the integrator learn it through the runner's
+   * `adopt`, which ends by calling this scheduler's.
+   */
+  bindAmendRunner(runner: AmendRunner): void {
+    this.#amendRunner = runner
   }
 
   /**
@@ -2392,13 +2453,11 @@ export class Scheduler {
     try {
       await recycle(lane)
     } catch (error) {
-      // The lane name and the stage — and nothing the recycle commands printed
-      // (§11). The stage is one of three fixed words, and it is the difference
+      // The lane name, the stage and the cause. The stage is the difference
       // between a database that would not reset, a worktree that would not come
-      // back to its base, and a slot that could not be torn down and rebuilt.
-      // Without it "could not be recycled" sends an operator to read three
-      // different pieces of machinery.
-      throw new LaneUnusable(`lane "${lane}" could not be recycled (${recycleStage(error)})`)
+      // back to its base, and a slot that could not be torn down and rebuilt;
+      // the cause is which step refused and what it said.
+      throw new LaneUnusable(recycleFailure(lane, error))
     }
   }
 
@@ -2512,9 +2571,13 @@ export class Scheduler {
    */
   async #recover(state: NodeState): Promise<boolean> {
     const policy = this.#options.onFailure ?? 'retry'
+    const fault = state.harnessFault
+    state.harnessFault = false
     if (policy === 'stop' || state.aborted) return false
 
-    if (policy === 'retry' && state.autoRetries < (this.#options.retries ?? 1)) {
+    // A harness fault is not spent against the automatic budget: every attempt
+    // it buys is another empty turn, and the budget is gone in seconds.
+    if (policy === 'retry' && !fault && state.autoRetries < (this.#options.retries ?? 1)) {
       state.autoRetries += 1
       // Cold, for the reason a capacity retry is: the branch the last attempt
       // built is gone and its worktree will be recycled, so a resumed session
@@ -2523,10 +2586,34 @@ export class Scheduler {
       this.#setStatus(state, 'running')
       return true
     }
-    return await this.#offerRetry(state)
+    return await this.#offerRetry(state, fault)
   }
 
-  async #offerRetry(state: NodeState): Promise<boolean> {
+  /** Counts a drained turn towards `EMPTY_TURN_FAULT`, or clears the count. */
+  #countEmptyTurn(state: NodeState, adapter: HarnessAdapter, empty: boolean): void {
+    if (!empty) {
+      state.emptyTurns = null
+      return
+    }
+    const previous = state.emptyTurns
+    state.emptyTurns = {
+      harness: adapter.id,
+      count: previous?.harness === adapter.id ? previous.count + 1 : 1,
+    }
+  }
+
+  #throwIfHarnessFault(state: NodeState, adapter: HarnessAdapter): void {
+    const count = state.emptyTurns?.count ?? 0
+    if (count < EMPTY_TURN_FAULT) return
+    state.harnessFault = true
+    this.#log.warn('node.harness_fault', { node: state.node.id, harness: adapter.id, empty_turns: count })
+    throw new HarnessFault(
+      `${adapter.id} ended ${count} turns in a row without the agent doing anything — ` +
+        'treated as a harness fault, so it is not retried automatically',
+    )
+  }
+
+  async #offerRetry(state: NodeState, fault = false): Promise<boolean> {
     if (state.aborted) return false
 
     state.retries += 1
@@ -2552,7 +2639,8 @@ export class Scheduler {
       // an informed "retry" and a surprised one.
       question:
         `This phase failed. Try it again?${await this.#uncommittedNote(state)}` +
-        this.#repeatedSetupNote(state),
+        this.#repeatedSetupNote(state) +
+        (fault ? this.#harnessFaultNote(state) : ''),
       kind: 'choice',
       choices: this.#retryChoices(state),
     })
@@ -2572,7 +2660,7 @@ export class Scheduler {
     // Withheld from the timer, not from the coordinator: a setup failure that
     // repeats is exactly what it is woken to fix and then retry.
     state.delegable = true
-    const cancel = repeated ? () => {} : this.#armUnattendedRetry(state)
+    const cancel = repeated ? () => {} : this.#armUnattendedRetry(state, fault)
     const facts = await this.#park(state)
     cancel()
     if (state.aborted) return false
@@ -2590,6 +2678,21 @@ export class Scheduler {
   /** Whether the last attempts all died in setup on one and the same line. */
   #repeatedSetupFailure(state: NodeState): boolean {
     return (state.setupFailure?.count ?? 0) >= REPEATED_SETUP_FAILURES
+  }
+
+  /**
+   * Why a harness fault asks rather than retrying, and what a person can do
+   * about it: the harness, not the phase, is what is broken, so `retry with`
+   * a member on another harness is the answer most likely to work.
+   */
+  #harnessFaultNote(state: NodeState): string {
+    const harness = state.emptyTurns?.harness ?? 'the harness'
+    const count = state.emptyTurns?.count ?? EMPTY_TURN_FAULT
+    return (
+      ` ${harness} ended ${count} turns in a row without the agent doing anything, which is the ` +
+      'harness failing rather than the work, so no automatic attempt was spent on it. Check that ' +
+      `${harness} runs and is logged in, or retry with a member on another harness.`
+    )
   }
 
   /** The sentence that says why this question will not answer itself. */
@@ -2980,7 +3083,9 @@ export class Scheduler {
       }
     }
     const verdict = outcome.facts?.review?.['verdict']
-    if (verdict === 'pass' || verdict === 'fail') state.lastVerdict = verdict
+    if (verdict === 'pass' || verdict === 'fail') {
+      state.lastVerdict = verdict === 'fail' && outcome.facts?.review?.['stated'] === false ? 'silent' : verdict
+    }
     return outcome
   }
 
@@ -3039,6 +3144,8 @@ export class Scheduler {
         : choresFor(this.#workflow, state.node, when)
     const prOpened = invocation.context.pr?.['opened'] === true
     let verdict: 'pass' | 'fail' = 'pass'
+    // False when the review that did not approve stated nothing at all (§16.2).
+    let stated = true
 
     // The `after_pr` chores run after the merge, the push and the PR — a review
     // canvas, a PR comment. They edit nothing anybody builds on, and when none
@@ -3081,6 +3188,8 @@ export class Scheduler {
         if (review && outcome.facts?.review?.['verdict'] !== 'pass') {
           this.#choreResult(state, entry.id, 'failed', startedAt)
           verdict = 'fail'
+          stated = outcome.facts?.review?.['stated'] !== false
+          await this.#countRejection(state)
           break
         }
         this.#choreResult(state, entry.id, 'ran', startedAt)
@@ -3095,6 +3204,8 @@ export class Scheduler {
         this.#choreResult(state, entry.id, 'failed', startedAt)
         if (review) {
           verdict = 'fail'
+          stated = false
+          await this.#countRejection(state)
           break
         }
       }
@@ -3107,7 +3218,89 @@ export class Scheduler {
     // something a guard branches on.
     const outcome = await this.#options.executor.execute(invocation)
     if (when !== 'review') return outcome
-    return { facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict } } }
+    return {
+      facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict, ...(stated ? {} : { stated: false }) } },
+    }
+  }
+
+  /**
+   * One more review that did not approve, and the desk moves up a tier once
+   * there have been `defaults.escalate_after_rejections` of them.
+   *
+   * One observed run left a Tier 1 phase on its desk through 16 rejections
+   * over six hours, until the coordinator moved it with four amendments. The
+   * rule is the one a person applied: the cheapest member of the next tier up
+   * the roster takes the phase. It is an amendment — `author: scheduler`, with
+   * the rule and the count as its `reason` — rather than a private override
+   * like `retry with`, so it reads in the run's history like any other change
+   * of desk, survives a resume in the snapshot, and reaches the host through
+   * `bindAmendRunner` the way an operator's does. A crew change moves no base,
+   * so it is never refused for the phase being in flight; the new desk takes
+   * the phase at its next claim, which is its next attempt.
+   *
+   * Never throws: an amendment that cannot be made leaves the phase where it
+   * was, and the review's own outcome is what the caller is reporting.
+   */
+  async #countRejection(state: NodeState): Promise<void> {
+    state.reviewRejections += 1
+    const limit = this.#workflow.defaults.escalate_after_rejections ?? 3
+    if (limit === 0 || state.reviewRejections < limit) return
+    const from = state.retryMember ?? state.node.crew
+    const desk = from === undefined ? undefined : this.#workflow.crew[from]
+    if (from === undefined || desk === undefined) return
+    const next = roster(this.#workflow.crew).find((member) => member.tier > desk.tier)
+    if (next === undefined) {
+      if (state.reviewRejections === limit) {
+        this.#log.info('node.escalation_unavailable', { node: state.node.id, member: from, tier: desk.tier })
+      }
+      return
+    }
+
+    const nodeId = state.node.id
+    const rejections = state.reviewRejections
+    const proposed: Workflow = {
+      ...this.#workflow,
+      nodes: this.#workflow.nodes.map((node) => (node.id === nodeId ? { ...node, crew: next.id } : node)),
+    }
+    try {
+      const result = await amendRun({
+        journal: this.#options.journal,
+        runId: this.#options.runId,
+        proposed,
+        runner: this.#amendRunner ?? { adopt: (workflow) => this.adopt(workflow) },
+        author: 'scheduler',
+        targets: [`node:${nodeId}`],
+        reason: {
+          kind: 'review_rejections',
+          node: nodeId,
+          from,
+          to: next.id,
+          from_tier: desk.tier,
+          to_tier: next.tier,
+          rejections,
+        },
+      })
+      if (!result.ok) {
+        this.#log.warn('node.escalation_refused', { node: nodeId, code: result.code })
+        return
+      }
+      // `adopt` replaces only unstarted nodes' definitions, and this one is
+      // running: its next claim reads the desk from here.
+      const amended = result.workflow.nodes.find((node) => node.id === nodeId)
+      if (amended !== undefined) state.node = amended
+      state.retryMember = null
+      state.reviewRejections = 0
+      this.#log.info('node.escalated', {
+        node: nodeId,
+        from,
+        to: next.id,
+        to_tier: next.tier,
+        rejections,
+        amendment: result.amendment,
+      })
+    } catch (error) {
+      this.#log.warn('node.escalation_failed', { node: nodeId, ...errorFields(error) })
+    }
   }
 
   #choreResult(state: NodeState, chore: string, status: ChoreStatus, startedAt: number): void {
@@ -3320,12 +3513,19 @@ export class Scheduler {
     // session the vendor forgot: a fresh session has no replay to make and no
     // memory to be wrong about. A cold turn that is empty too is a harness that
     // is not working, and that is a failure of the turn, not of the work.
+    //
+    // **Two in a row is a harness fault**, whichever attempts they fell in:
+    // `HarnessFault` skips the automatic retries and parks the phase on the
+    // failure question, where `--retry-after` answers with its backoff.
+    this.#countEmptyTurn(state, adapter, drained.empty)
     if (drained.empty) {
       this.#log.warn('node.empty_turn', {
         node: state.node.id,
         harness: adapter.id,
         resumed: plan.resumeSessionId !== null,
+        in_a_row: state.emptyTurns?.count ?? 0,
       })
+      this.#throwIfHarnessFault(state, adapter)
       if (plan.resumeSessionId === null) {
         throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything`)
       }
@@ -3345,7 +3545,9 @@ export class Scheduler {
       turn = { ...turn, plan }
       watch = new QuestionWatch()
       drained = await this.#drain(state, cold, turn, watch)
+      this.#countEmptyTurn(state, adapter, drained.empty)
       if (drained.empty) {
+        this.#throwIfHarnessFault(state, adapter)
         throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything, resumed and cold`)
       }
     }
@@ -4050,7 +4252,13 @@ export class Scheduler {
     // verbatim is deterministic: counted, so `#offerRetry` can stop retrying
     // it unattended. A failure after an agent ran clears the count — the
     // setup got through, whatever happened next.
-    const setup = !state.agentRan
+    //
+    // A red gate on the merged base is not the machinery's, though it happens
+    // before any agent: it is a verdict on the dependencies' code, which a
+    // flaky test can give once and a retry can take back. Counted as setup it
+    // repeated verbatim — a cached verdict replayed seven times — and the
+    // unattended retry was withheld from the one failure a retry could fix.
+    const setup = !state.agentRan && !(error instanceof Error && error.name === 'BaseGateError')
     state.setupFailure = !setup
       ? null
       : state.setupFailure?.reason === reason
@@ -4142,13 +4350,15 @@ export class Scheduler {
    * `answer` throws for a node that is not awaiting one — so the stray timer
    * would surface as an exception from a node nobody was looking at.
    */
-  #armUnattendedRetry(state: NodeState): () => void {
+  #armUnattendedRetry(state: NodeState, fault = false): () => void {
     state.delegable = true
     const after = this.#options.retryAfterMs
     if (after === undefined || after <= 0) return () => {}
 
     const clock = this.#options.clock ?? systemClock
-    const quick = clock.now() - state.attemptStartedAt < after
+    // A harness fault is quick by nature, however long the attempt took to
+    // reach its empty turn: it backs off from the first question.
+    const quick = fault || clock.now() - state.attemptStartedAt < after
     state.quickFailures = quick ? state.quickFailures + 1 : 0
     const factor = Math.min(2 ** Math.max(0, state.quickFailures - 1), UNATTENDED_BACKOFF_CAP)
     const wait = after * factor

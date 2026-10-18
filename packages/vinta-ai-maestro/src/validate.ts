@@ -20,8 +20,23 @@ export type ParseResult =
   | { readonly ok: true; readonly workflow: Workflow }
   | { readonly ok: false; readonly issues: readonly ValidationIssue[] }
 
+export interface ValidateOptions {
+  /**
+   * The run’s definition an amendment replaces. A roster member it already had
+   * may be left with no node: the amendment moved that work to another desk,
+   * which is not the plan defect the idle-member rule exists to catch. A member
+   * the amendment adds is still held to it.
+   */
+  readonly amending?: Workflow
+  /**
+   * Reading a run’s frozen definition back. It was validated when it was
+   * written, and an amendment since may have left a member idle on purpose.
+   */
+  readonly frozen?: boolean
+}
+
 /** Cross-reference checks over an already shape-valid workflow. */
-export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
+export function validateWorkflow(workflow: Workflow, options: ValidateOptions = {}): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   const nodeIds = new Set<string>()
   // A workflow may name a pipeline the package ships instead of authoring one.
@@ -156,7 +171,8 @@ export function validateWorkflow(workflow: Workflow): ValidationIssue[] {
       // A member nobody was assigned to is an agent the plan pays to watch. It
       // is the exact defect a roster exists to make visible, so it is refused
       // rather than warned about.
-      if (!employed.has(memberId)) {
+      const rostered = options.amending?.crew[memberId] !== undefined
+      if (!employed.has(memberId) && !rostered && options.frozen !== true) {
         issues.push({
           path: ['crew', memberId],
           message: `crew member "${memberId}" is assigned no node`,
@@ -263,7 +279,7 @@ function judgeIssues(gateId: string, judge: Judge): ValidationIssue[] {
 }
 
 /** Shape parse followed by cross-reference validation. */
-export function parseWorkflow(input: unknown): ParseResult {
+export function parseWorkflow(input: unknown, options: ValidateOptions = {}): ParseResult {
   const shape = WorkflowSchema.safeParse(input)
   if (!shape.success) {
     return {
@@ -276,7 +292,7 @@ export function parseWorkflow(input: unknown): ParseResult {
     }
   }
 
-  const issues = validateWorkflow(shape.data)
+  const issues = validateWorkflow(shape.data, options)
   return issues.length > 0 ? { ok: false, issues } : { ok: true, workflow: shape.data }
 }
 

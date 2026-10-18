@@ -36,6 +36,7 @@ import type { CommitDecision, CommitFailure } from '../src/integration/integrato
 import type { TurnRefusal } from '../src/harness/adapter.ts'
 import type { NodeStatus } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
+import { LaneRecycleError, LaneSetupError } from '../src/lanes/pool.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
@@ -1220,6 +1221,31 @@ describe('lane reuse', () => {
     // And the lane went back on the free list rather than stranding capacity.
     expectDrained(r)
   })
+
+  it('carries the cause the pool gave, in the failure and in the attempt record', async () => {
+    // Twenty attempts of one observed run failed on "could not be recycled
+    // (worktree)" alone, in the journal and in the daemon log.
+    const r = rig(makeWorkflow([node('a'), node('b'), node('c')], { lanes: 1 }), {
+      recycleLane: async (name) => {
+        if (recycled++ === 0) {
+          throw new LaneRecycleError(name, 'worktree', [], 'exited 128\nfatal: Unable to create index.lock: File exists')
+        }
+        throw new LaneSetupError(name, 2, "ModuleNotFoundError: No module named 'settings.local'", 'reset_cmd')
+      },
+    })
+    let recycled = 0
+
+    const report = await r.scheduler.run()
+
+    expect(report.failures['b']).toBe(
+      'lane "run-1-lane-1" could not be recycled (worktree): exited 128\nfatal: Unable to create index.lock: File exists',
+    )
+    expect(errorsOf(r, 'c')).toEqual([
+      `lane "run-1-lane-1" could not be recycled: lane "run-1-lane-1": the project's reset_cmd exited 2\n` +
+        "ModuleNotFoundError: No module named 'settings.local'",
+    ])
+    expectDrained(r)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1875,6 +1901,27 @@ describe('standard-phase under the scheduler', () => {
     })
   })
 
+  it('tells a review turn that stated no verdict apart from a rejection', async () => {
+    // One run recorded 22 attempts as `review verdict "fail"; 0 fix rounds
+    // spent`: every one was a review turn its harness ended while the
+    // reviewer was still working, and none had rejected anything.
+    const r = rig(
+      standardWorkflow(
+        [node('a', [], { gates: ['unit'], chores: ['review'], max_fix_rounds: undefined })],
+        { review: REVIEW_CHORE },
+      ),
+      { outcomes: { ...APPROVED, 'e-review:review': { facts: { review: { verdict: 'fail', stated: false } } } } },
+    )
+
+    const report = await runAnsweringStop(r, 'a')
+
+    expect(report.statuses).toEqual({ a: 'failed' })
+    expect(errorsOf(r, 'a')).toEqual([
+      'pipeline ended in state "failed" via "t-review-stop"; the review turn stated no verdict; ' +
+        '0 gate fix rounds spent',
+    ])
+  })
+
   it('names no budget in a failure reason when the node set none', async () => {
     const r = rig(
       standardWorkflow(
@@ -1892,7 +1939,7 @@ describe('standard-phase under the scheduler', () => {
       .filter((event) => event.type === 'node_error')
       .map((event) => (event.payload as { reason?: string }).reason)
     expect(reasons).toEqual([
-      'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; 0 fix rounds spent',
+      'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; 0 gate fix rounds spent',
     ])
   })
 
@@ -1966,11 +2013,11 @@ describe('standard-phase under the scheduler', () => {
 
     expect(reasonsFor(red, 'a')).toEqual([
       'pipeline ended in state "failed" via "t-stop"; gate "unit" exited 2; ' +
-        '4 of 4 fix rounds spent',
+        '4 of 4 gate fix rounds spent',
     ])
     expect(reasonsFor(rejected, 'a')).toEqual([
       'pipeline ended in state "failed" via "t-review-stop"; review verdict "fail"; ' +
-        '0 of 4 fix rounds spent',
+        '0 of 4 gate fix rounds spent',
     ])
 
     // §11: a gate id and an exit code, never what the gate printed. The
@@ -2006,7 +2053,7 @@ describe('standard-phase under the scheduler', () => {
         .map((event) => String((event.payload as { reason: unknown }).reason)),
     ).toEqual([
       'pipeline ended in state "failed" via "t-stop"; gate "unit" timed out; ' +
-        '4 of 4 fix rounds spent',
+        '4 of 4 gate fix rounds spent',
     ])
     expectDrained(r)
   })
@@ -2060,7 +2107,7 @@ describe('standard-phase under the scheduler', () => {
         .events('run-1')
         .filter((event) => event.type === 'node_error')
         .map((event) => String((event.payload as { reason: unknown }).reason)),
-    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 4 fix rounds spent'])
+    ).toEqual(['pipeline ended in state "failed" via "t-gave-up"; 0 of 4 gate fix rounds spent'])
     expectDrained(r)
   })
 })
@@ -3458,6 +3505,65 @@ describe('a turn the agent never took part in', () => {
     expect(r.adapter.spawned).toHaveLength(1)
     expectDrained(r)
   })
+
+  /**
+   * Observed right after a run moved its desks to codex: "ended the turn
+   * without the agent doing anything" failed 20 attempts across 4 phases in
+   * about two minutes, every automatic retry buying the same empty turn.
+   */
+  it('parks the phase on a question after two empty turns in a row, and backs off', async () => {
+    const r = rig(makeWorkflow([node('a')]), {
+      onFailure: 'retry',
+      retries: 5,
+      retryAfterMs: 60_000,
+      scripts: [EMPTY, EMPTY, EMPTY, DEFAULT_SCRIPT],
+    })
+
+    const running = r.scheduler.run()
+    // One empty turn is an attempt; the second is the harness. Four automatic
+    // attempts were left, and none was spent on it.
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the question after the second empty turn')
+    expect(r.adapter.spawned).toHaveLength(2)
+    expect(errorsOf(r, 'a')).toEqual([
+      'claude-code ended the turn without the agent doing anything',
+      'claude-code ended 2 turns in a row without the agent doing anything — treated as a harness fault, ' +
+        'so it is not retried automatically',
+    ])
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('2 turns in a row without the agent doing anything')
+    expect(question?.question).toContain('retry with a member on another harness')
+
+    // The unattended retry still comes, one interval later.
+    await r.advance(60_000)
+    await until(() => r.adapter.spawned.length === 3, 'the unattended retry')
+    await until(() => questionsOf(r, 'a').length === 2, 'the question again')
+
+    // The next waits twice as long.
+    await r.advance(60_000)
+    expect(r.adapter.spawned).toHaveLength(3)
+    await r.advance(60_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(answersOf(r)).toEqual([
+      { effect_id: 'retry:a:1', answer: 'retry', unattended: true },
+      { effect_id: 'retry:a:2', answer: 'retry', unattended: true },
+    ])
+    expectDrained(r)
+  })
+
+  it('keeps the automatic retry for an empty turn that is not one of two in a row', async () => {
+    const r = rig(makeWorkflow([node('a')]), {
+      onFailure: 'retry',
+      retries: 1,
+      scripts: [EMPTY, DEFAULT_SCRIPT],
+    })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(2)
+    expectDrained(r)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -3493,6 +3599,99 @@ describe('crew', () => {
     expect(report.status).toBe('completed')
     expect(modelsOf(r)).toEqual(['cheap', 'dear'])
     expectDrained(r)
+  })
+
+  /**
+   * Observed: a Tier 1 phase was rejected by its review 16 times over six
+   * hours before the coordinator moved it with four amendments.
+   */
+  describe('after repeated review rejections', () => {
+    const escalating = (limit: number, crew: Record<string, unknown>): Workflow => {
+      // Every member has a phase of its own: a roster member assigned none is a
+      // plan defect the amend path refuses.
+      const nodes = [
+        node('a', [], { gates: ['unit'], chores: ['review'], crew: 'tier1' }),
+        ...Object.keys(crew)
+          .filter((member) => member !== 'tier1')
+          .map((member) => node(`on-${member}`, ['a'], { gates: ['unit'], crew: member })),
+      ]
+      const workflow = makeWorkflow(nodes, {
+        resources: { lane: { capacity: 2, kind: 'worktree' }, 'test-suite': { capacity: 1, kind: 'semaphore' } },
+        gates: { unit: { cmd: 'true', requires: ['test-suite'] } },
+        chores: { review: REVIEW_CHORE },
+        pipelines: { 'standard-phase': STANDARD_PHASE },
+        pipeline: 'standard-phase',
+        crew,
+      })
+      return WorkflowSchema.parse({
+        ...workflow,
+        defaults: { ...workflow.defaults, escalate_after_rejections: limit },
+      })
+    }
+    const answerEach = async (r: Rig, answers: readonly string[]): Promise<void> => {
+      for (const [index, answer] of answers.entries()) {
+        await until(
+          () => r.scheduler.statuses['a'] === 'awaiting_human' && questionsOf(r, 'a').length > index,
+          `question ${index + 1}`,
+        )
+        r.scheduler.answer('a', { human: { answer } })
+      }
+    }
+
+    it('moves the phase up a tier, as an amendment with its reason', async () => {
+      const r = rig(escalating(2, { tier1: CREW.tier1, 'tier2-1': CREW['tier2-1'] }), {
+        onFailure: 'retry',
+        retries: 1,
+        outcomes: { ...APPROVED, 'e-review:review': [verdict('fail'), verdict('fail'), verdict('pass')] },
+      })
+
+      const running = r.scheduler.run()
+      // Rejected, continued, rejected again — the second is the limit — and
+      // stopped, which the automatic retry picks up on the new desk.
+      await answerEach(r, ['continue', 'stop'])
+      const report = await running
+
+      expect(report.statuses).toEqual({ a: 'done', 'on-tier2-1': 'done' })
+      const amended = r.journal.events('run-1').filter((event) => event.type === 'workflow_amended')
+      expect(amended.map((event) => event.payload)).toMatchObject([
+        {
+          amendment: 1,
+          author: 'scheduler',
+          targets: ['node:a'],
+          reason: {
+            kind: 'review_rejections',
+            node: 'a',
+            from: 'tier1',
+            to: 'tier2-1',
+            from_tier: 1,
+            to_tier: 2,
+            rejections: 2,
+          },
+        },
+      ])
+      expect(r.journal.readWorkflow('run-1').nodes[0]?.crew).toBe('tier2-1')
+      // The first attempt stayed on its desk; the retry took the new one.
+      const members = crewEvents(r).map((event) => event['member'])
+      expect(members[0]).toBe('tier1')
+      expect(members.at(-2)).toBe('tier2-1')
+      expect(r.adapter.spawned.filter((task) => task.nodeId === 'a').at(-1)?.model).toBe('medium')
+      expectDrained(r)
+    })
+
+    it('leaves the phase where it is at the top tier, and when turned off', async () => {
+      for (const [limit, crew] of [
+        [1, { tier1: CREW.tier1 }],
+        [0, { tier1: CREW.tier1, tier4: CREW.tier4 }],
+      ] as const) {
+        const r = rig(escalating(limit, crew), {
+          outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
+        })
+        const report = await runAnsweringStop(r, 'a')
+
+        expect(report.statuses['a']).toBe('failed')
+        expect(r.journal.events('run-1').filter((event) => event.type === 'workflow_amended')).toEqual([])
+      }
+    })
   })
 
   it('leaves an unstaffed workflow on the model it always used', async () => {
@@ -5249,6 +5448,42 @@ describe('a failure before any agent ran', () => {
     const report = await running
     expect(report.statuses).toEqual({ a: 'failed' })
     expect(report.failures['a']).toContain(MID_MERGE)
+    expectDrained(r)
+  })
+
+  it('keeps the unattended retry for a red gate on the merged base', async () => {
+    // Observed: a base gate failed once on a test that broke only near
+    // midnight, and every retry was reported as "failed during setup, before
+    // any agent ran" with the unattended retry withheld. A red base is a
+    // verdict on code a retry can take back, not the machinery failing.
+    class BaseGateError extends Error {
+      override name = 'BaseGateError'
+    }
+    let attempt = 0
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      tap: (call) => {
+        if (call.verb !== 'git_branch') return
+        attempt += 1
+        if (attempt <= 2) throw new BaseGateError('the base of a (plan/x/integ-a) merged, but gate "unit" failed on it (exit 1)')
+      },
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after two attempts')
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).not.toContain('before any agent ran')
+    const setupFlags = r.journal
+      .events('run-1')
+      .filter((event) => event.type === 'node_error' && event.nodeId === 'a')
+      .map((event) => (event.payload as { setup?: boolean }).setup ?? false)
+    expect(setupFlags).toEqual([false, false])
+
+    await r.advance(60_000)
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(answersOf(r)).toEqual([{ effect_id: 'retry:a:1', answer: 'retry', unattended: true }])
     expectDrained(r)
   })
 

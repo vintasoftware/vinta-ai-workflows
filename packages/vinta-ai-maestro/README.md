@@ -135,6 +135,11 @@ There are also `judge-hook` and `guard-hook`, which are internal: they are the h
   default 2): a phase whose member is busy gets a spare in that member's image,
   with a worktree of its own, rather than a member another pending phase is
   planned for. `0` keeps the roster to the plan's.
+- **A phase the review keeps rejecting moves up a tier**
+  (`defaults.escalate_after_rejections`, default 3): after that many reviews
+  that did not approve it on one desk, the scheduler amends the run to the
+  cheapest member of the next tier up, journalled with the reason. `0` turns
+  it off.
 - **One PR per run** with `defaults.pull_requests: plan`: the plan PR alone,
   instead of a PR per phase and per integration branch (`phase`, the default).
 

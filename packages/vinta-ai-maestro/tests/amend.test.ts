@@ -666,6 +666,34 @@ describe('amending a live run', () => {
     expect(result.issues.map((issue) => issue.message).join('\n')).toContain('dependency cycle')
   })
 
+  it('moves a member’s last phase to another desk, and still refuses a new idle member', async () => {
+    const { journal } = store()
+    const staffed = WorkflowSchema.parse({
+      ...workflow([{ id: 'a' }, { id: 'b' }]),
+      crew: { cheap: { tier: 1, model: 'haiku' }, dear: { tier: 2, model: 'opus' } },
+      nodes: workflow([{ id: 'a' }, { id: 'b' }]).nodes.map((node) => ({
+        ...node,
+        crew: node.id === 'a' ? 'cheap' : 'dear',
+      })),
+    })
+    journal.createRun(RUN_ID, staffed)
+
+    // `cheap` loses its only phase. That is a change of desk, not a member the
+    // plan forgot to give work to — and the snapshot still reads back after it.
+    const moved = await amendRun({ journal, runId: RUN_ID, proposed: edit(staffed, 'a', { crew: 'dear' }) })
+    expect(moved.ok).toBe(true)
+    expect(journal.readWorkflow(RUN_ID).nodes.map((node) => node.crew)).toEqual(['dear', 'dear'])
+
+    const hired = await amendRun({
+      journal,
+      runId: RUN_ID,
+      proposed: { ...journal.readWorkflow(RUN_ID), crew: { ...staffed.crew, idle: { tier: 3, model: 'x' } } },
+    })
+    expect(hired.ok).toBe(false)
+    if (hired.ok) throw new Error('applied')
+    expect(hired.issues.map((issue) => issue.message)).toEqual(['crew member "idle" is assigned no node'])
+  })
+
   it('refuses removing a node others still depend on, and one that has already run', async () => {
     const { journal } = store()
     const wf = workflow([{ id: 'a' }, { id: 'b', deps: ['a'] }])

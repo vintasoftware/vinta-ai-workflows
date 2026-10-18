@@ -78,7 +78,7 @@ export const OperationsSchema = z
         z.strictObject({
           amendment: z.number().int().min(1),
           at_ms: z.number().int(),
-          author: z.enum(['operator', 'monitor', 'coordinator', 'config']),
+          author: z.enum(['operator', 'monitor', 'coordinator', 'config', 'scheduler']),
         }),
       )
       .describe('Every change to the run’s definition while it ran, whoever made it.'),
@@ -262,7 +262,10 @@ export function operations(events: readonly StoredEvent[]): Operations {
         amendments.push({
           amendment: Number(payload['amendment']),
           at_ms: event.ts,
-          author: author === 'monitor' || author === 'coordinator' || author === 'config' ? author : 'operator',
+          author:
+            author === 'monitor' || author === 'coordinator' || author === 'config' || author === 'scheduler'
+              ? author
+              : 'operator',
         })
         continue
       }

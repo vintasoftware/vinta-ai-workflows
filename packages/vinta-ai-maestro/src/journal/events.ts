@@ -252,8 +252,27 @@ export type AmendmentKind =
  * run's own decision and not a person's at the console, so it is neither of
  * the other two — and the intervention budget, which folds `monitor` rows only,
  * is not spent by it.
+ *
+ * `scheduler` is a rule the scheduler applies on its own, with the rule named
+ * in the row's `reason`: today only escalating a phase's desk after repeated
+ * review rejections (`defaults.escalate_after_rejections`).
  */
-export type AmendmentAuthor = 'operator' | 'monitor' | 'coordinator' | 'config'
+export type AmendmentAuthor = 'operator' | 'monitor' | 'coordinator' | 'config' | 'scheduler'
+
+/**
+ * Why the scheduler amended its own run. `review_rejections`: the phase's
+ * review did not approve `rejections` times on `from`'s desk, so the phase
+ * moved to `to`, the cheapest member of the next tier up.
+ */
+export interface AmendmentReason {
+  readonly kind: 'review_rejections'
+  readonly node: string
+  readonly from: string
+  readonly to: string
+  readonly from_tier: number
+  readonly to_tier: number
+  readonly rejections: number
+}
 
 /**
  * Who reached a live run through its API. `operator` is a person — the UI,
@@ -421,6 +440,8 @@ interface RunPayloads {
     readonly targets?: readonly string[]
     /** On a `config` row: the plan-branch commit the configuration was read at. */
     readonly source?: string
+    /** On a `scheduler` row: the rule that made it, and its facts. Identifiers and counts. */
+    readonly reason?: AmendmentReason
   }
 }
 
