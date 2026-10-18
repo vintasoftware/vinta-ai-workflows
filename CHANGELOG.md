@@ -659,6 +659,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: a lane that will not recycle says why.** One run
+  failed 20 attempts with only "could not be recycled (worktree)" or
+  "(database)" in the journal and the daemon log. The failure now carries the
+  failing step's exit code and the tail of its stderr, the way a failed
+  `setup_cmd` already did, and a `reset_cmd`, `setup_cmd` or `prepare_cmd`
+  failing during a recycle reports that command's own error instead of
+  `LaneSetupError`. Command lines are still left out.
+
 - **`vinta-ai-maestro`: the full suite runs before a PR, and on every merged
   tree.** Under `gate_scope: scoped`, a phase's gates ran their scoped form
   everywhere, so a PR could carry a suite only a scoped run had seen, and most

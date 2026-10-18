@@ -55,7 +55,7 @@ import {
   planDatabase,
   planTemplate,
 } from './database.ts'
-import { runDatabaseCommand } from './db-command.ts'
+import { DatabaseCommandError, runDatabaseCommand } from './db-command.ts'
 import { countWorktrees, describeWorktrees, integrationName, type WorktreeCount } from './count.ts'
 import { DiskProbeError, estimateLaneBytes, probePoolDisk } from './disk.ts'
 import { planService, type ServicePlan, type ServiceSpec } from './services.ts'
@@ -109,22 +109,30 @@ const gitLines = async (cwd: string, args: readonly string[]): Promise<string[]>
 }
 
 /**
- * A lane that could not be handed on. Carries the lane name and which half of
- * the recycle failed, and nothing else: a reset command's own output is the
- * project's data — rows, paths, migration names — and §11 keeps it out of
- * error messages the same way it keeps it out of log fields.
+ * A lane that could not be handed on. Carries the lane name, which half of the
+ * recycle failed, and the cause: what the failing step said, bounded.
  *
- * `preserve` is the exception, and it names paths. It is the stage that fires
- * when work was about to be destroyed and could not be saved, so the list of
- * what is at stake is the entire content of the message — an operator told only
- * "could not be recycled (preserve)" has been warned about nothing they can
- * act on. Bounded, and paths only: never a line of any file.
+ * The cause used to be left out, on the §11 reading `LaneSetupError` started
+ * from and then dropped. One observed run failed twenty attempts with nothing
+ * but "could not be recycled (worktree)" or "(database)" in the journal and the
+ * daemon log, and nothing anywhere said which step refused or why. The cause is
+ * the class of thing `LaneSetupError` already carries — an exit code and the
+ * tail of the step's stderr — and never the command line, which can hold a
+ * connection string.
+ *
+ * `preserve` names paths besides. It is the stage that fires when work was
+ * about to be destroyed and could not be saved, so the list of what is at stake
+ * is the message — an operator told only "could not be recycled (preserve)" has
+ * been warned about nothing they can act on. Bounded, and paths only: never a
+ * line of any file.
  */
 export class LaneRecycleError extends Error {
   constructor(
     readonly lane: string,
     readonly stage: 'preserve' | 'worktree' | 'database' | 'reprovision',
     readonly paths: readonly string[] = [],
+    /** What the failing step said (`recycleCause`). Empty when it said nothing. */
+    readonly detail: string = '',
   ) {
     const at =
       paths.length === 0
@@ -133,9 +141,31 @@ export class LaneRecycleError extends Error {
             .slice(0, PRESERVE_PATH_LIMIT)
             .map((path) => `  ${path}`)
             .join('\n')}${paths.length > PRESERVE_PATH_LIMIT ? `\n  … and ${paths.length - PRESERVE_PATH_LIMIT} more` : ''}`
-    super(`lane "${lane}" could not be recycled (${stage})${at}`)
+    super(`lane "${lane}" could not be recycled (${stage})${detail === '' ? '' : `: ${detail}`}${at}`)
     this.name = 'LaneRecycleError'
   }
+}
+
+/**
+ * What a failed recycle step said, in the shape `LaneSetupError` uses: how the
+ * child ended and the tail of its stderr — a database command's too, without
+ * the command line its own message leads with. An error no child raised — a
+ * filesystem call — is its first line, which names an errno and a path and
+ * nothing a file contained.
+ */
+export function recycleCause(error: unknown): string {
+  if (error instanceof DatabaseCommandError) {
+    const how = error.timedOut ? 'timed out' : error.exitCode === null ? 'was killed' : `exited ${error.exitCode}`
+    return `a database command ${how}${error.detail === '' ? '' : `\n${error.detail}`}`
+  }
+  const failed = error as { code?: unknown; signal?: unknown; message?: unknown } | null
+  const stderr = stderrTail(error)
+  const tail = stderr === '' ? '' : `\n${stderr}`
+  if (typeof failed?.code === 'number') return `exited ${failed.code}${tail}`
+  if (typeof failed?.signal === 'string') return `was killed (${failed.signal})${tail}`
+  if (stderr !== '') return stderr
+  const first = typeof failed?.message === 'string' ? (failed.message.split('\n')[0] ?? '') : ''
+  return first.length <= STDERR_LIMIT ? first : `${first.slice(0, STDERR_LIMIT)}…`
 }
 
 /**
@@ -672,8 +702,8 @@ export class LanePool {
         for (const service of lane.services) {
           if (service.resetCmd !== null) await sh(service.resetCmd, lane.path, lane.env)
         }
-      } catch {
-        throw new LaneRecycleError(name, 'database')
+      } catch (error) {
+        throw new LaneRecycleError(name, 'database', [], recycleCause(error))
       }
       // Last of the resets and before setup, so the project's own sees a lane
       // maestro has finished with, and `setup_cmd` sees one the project has.
@@ -722,8 +752,8 @@ export class LanePool {
         maxRetries: 10,
         retryDelay: 100,
       })
-    } catch {
-      throw new LaneRecycleError(name, 'reprovision')
+    } catch (error) {
+      throw new LaneRecycleError(name, 'reprovision', [], recycleCause(error))
     }
 
     // Inside its own guard, so a re-provision that fails says which half of the
@@ -733,8 +763,8 @@ export class LanePool {
     let fresh: Lane
     try {
       fresh = await this.#provisionWorktree(lane.name, lane.kind, lane.index)
-    } catch {
-      throw new LaneRecycleError(name, 'reprovision')
+    } catch (error) {
+      throw new LaneRecycleError(name, 'reprovision', [], recycleCause(error))
     }
     this.#all = this.#all.map((candidate) => (candidate.name === name ? fresh : candidate))
     return fresh
@@ -772,8 +802,8 @@ export class LanePool {
       await git(['checkout', '--force', summary.branch])
       await git(['reset', '--hard', summary.base_ref])
       await git(['clean', '-fdx', ...this.#cleanExclusions().flatMap((pattern) => ['-e', pattern])])
-    } catch {
-      throw new LaneRecycleError(lane.name, 'worktree')
+    } catch (error) {
+      throw new LaneRecycleError(lane.name, 'worktree', [], recycleCause(error))
     }
   }
 
@@ -1187,7 +1217,7 @@ export class LanePool {
         `${WIP_REFS}/${lane.name}/${Date.now()}`,
         commit.trim(),
       ])
-    } catch {
+    } catch (error) {
       // Fail-closed, like every other stage of a recycle. The lane goes back on
       // the free list dirty, the next node to take it fails the same way, and
       // the work is still on disk for whoever reads the message — which is the
@@ -1196,6 +1226,7 @@ export class LanePool {
         lane.name,
         'preserve',
         dirty.map((line) => line.slice(3)),
+        recycleCause(error),
       )
     }
   }

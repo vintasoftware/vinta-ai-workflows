@@ -36,6 +36,7 @@ import type { CommitDecision, CommitFailure } from '../src/integration/integrato
 import type { TurnRefusal } from '../src/harness/adapter.ts'
 import type { NodeStatus } from '../src/journal/events.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
+import { LaneRecycleError, LaneSetupError } from '../src/lanes/pool.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
@@ -1218,6 +1219,31 @@ describe('lane reuse', () => {
     expect(report.failures['b']).toBe('lane "run-1-lane-1" could not be recycled (Error)')
     expect(report.failures['b']).not.toContain('dropdb')
     // And the lane went back on the free list rather than stranding capacity.
+    expectDrained(r)
+  })
+
+  it('carries the cause the pool gave, in the failure and in the attempt record', async () => {
+    // Twenty attempts of one observed run failed on "could not be recycled
+    // (worktree)" alone, in the journal and in the daemon log.
+    const r = rig(makeWorkflow([node('a'), node('b'), node('c')], { lanes: 1 }), {
+      recycleLane: async (name) => {
+        if (recycled++ === 0) {
+          throw new LaneRecycleError(name, 'worktree', [], 'exited 128\nfatal: Unable to create index.lock: File exists')
+        }
+        throw new LaneSetupError(name, 2, "ModuleNotFoundError: No module named 'settings.local'", 'reset_cmd')
+      },
+    })
+    let recycled = 0
+
+    const report = await r.scheduler.run()
+
+    expect(report.failures['b']).toBe(
+      'lane "run-1-lane-1" could not be recycled (worktree): exited 128\nfatal: Unable to create index.lock: File exists',
+    )
+    expect(errorsOf(r, 'c')).toEqual([
+      `lane "run-1-lane-1" could not be recycled: lane "run-1-lane-1": the project's reset_cmd exited 2\n` +
+        "ModuleNotFoundError: No module named 'settings.local'",
+    ])
     expectDrained(r)
   })
 })

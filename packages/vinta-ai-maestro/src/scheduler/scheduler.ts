@@ -121,7 +121,7 @@ import {
   type PipelineRun,
   type StepResult,
 } from '../pipeline/interpreter.ts'
-import { LaneRecycleError } from '../lanes/pool.ts'
+import { LanePrepareError, LaneRecycleError, LaneSetupError } from '../lanes/pool.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import { assignCrew, type CrewDecision, roster } from './crew.ts'
@@ -564,10 +564,10 @@ class LoginDeclined extends SpawnFatal {}
  * A lane that could not be made clean for the next node.
  *
  * Its own type rather than a bare `Error` so `failureReason` can keep the
- * message: `recycleStage` already reduced the cause to a stage or an error
- * kind, so this text is identifiers by the time it is thrown. A plain `Error`
- * would be indistinguishable from something a dependency threw, and would be
- * flattened to `Error` — losing the lane name and the stage, which are the
+ * message: `recycleFailure` already reduced the cause to the pool's own bounded
+ * words or an error kind by the time it is thrown. A plain `Error` would be
+ * indistinguishable from something a dependency threw, and would be flattened
+ * to `Error` — losing the lane name, the stage and the cause, which are the
  * whole point of the message.
  */
 class LaneUnusable extends Error {}
@@ -839,22 +839,9 @@ interface NodeState {
 }
 
 /**
- * What went wrong recycling a lane, in words safe to print.
- *
- * `LaneRecycleError` already classifies itself into one of three stages, and
- * that is the useful answer. Anything else reaching here came from the pool's
- * own machinery rather than from a project's reset commands — a summary that
- * would not read, a git call that refused — and is reported by its *kind*:
- * an error name and, where the runtime supplies one, a `code` like `ENOENT`.
- *
- * Not its message (§11). A thrown message can carry a git diagnostic or the
- * output of something a project chose to run, and neither belongs on a stream
- * that is otherwise identifiers.
- */
-/**
  * Why a node failed, in words safe to persist.
  *
- * The same rule `recycleStage` follows, for the same reason. Two of the three
+ * The same rule `recycleFailure` follows, for the same reason. Two of the three
  * failure paths pass a literal this module wrote; the third passes whatever was
  * thrown, and "whatever was thrown" is not a closed vocabulary. A `PromptError`
  * is identifiers by construction — node id, reference, lane directory — and a
@@ -908,11 +895,29 @@ function failureReason(error: unknown): string {
   return typeof named.code === 'string' ? `${name}: ${named.code}` : name
 }
 
-function recycleStage(error: unknown): string {
-  if (error instanceof LaneRecycleError) return error.stage
+/**
+ * What went wrong recycling a lane, in words safe to print.
+ *
+ * The pool's own errors are kept whole: `LaneRecycleError` names its stage and
+ * the cause the failing step gave — an exit code and a bounded stderr tail —
+ * and the project's `reset_cmd`, `setup_cmd` or `prepare_cmd` failing on the
+ * way through is the error `LaneSetupError` and `LanePrepareError` already
+ * compose with the same bound. Twenty attempts of one observed run failed on
+ * "could not be recycled (worktree)" with no cause anywhere, which is the gap
+ * this closes.
+ *
+ * Anything else came from somewhere that did not choose its words for a log
+ * and is reported by its *kind*: an error name and, where the runtime supplies
+ * one, a `code` like `ENOENT` (§11).
+ */
+function recycleFailure(lane: string, error: unknown): string {
+  if (error instanceof LaneRecycleError) return error.message
+  if (error instanceof LaneSetupError || error instanceof LanePrepareError) {
+    return `lane "${lane}" could not be recycled: ${error.message}`
+  }
   const named = error as { name?: unknown; code?: unknown }
   const name = typeof named.name === 'string' ? named.name : 'Error'
-  return typeof named.code === 'string' ? `${name}: ${named.code}` : name
+  return `lane "${lane}" could not be recycled (${typeof named.code === 'string' ? `${name}: ${named.code}` : name})`
 }
 
 export class Scheduler {
@@ -2392,13 +2397,11 @@ export class Scheduler {
     try {
       await recycle(lane)
     } catch (error) {
-      // The lane name and the stage — and nothing the recycle commands printed
-      // (§11). The stage is one of three fixed words, and it is the difference
+      // The lane name, the stage and the cause. The stage is the difference
       // between a database that would not reset, a worktree that would not come
-      // back to its base, and a slot that could not be torn down and rebuilt.
-      // Without it "could not be recycled" sends an operator to read three
-      // different pieces of machinery.
-      throw new LaneUnusable(`lane "${lane}" could not be recycled (${recycleStage(error)})`)
+      // back to its base, and a slot that could not be torn down and rebuilt;
+      // the cause is which step refused and what it said.
+      throw new LaneUnusable(recycleFailure(lane, error))
     }
   }
 

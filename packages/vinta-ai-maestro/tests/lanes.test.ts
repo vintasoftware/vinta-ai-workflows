@@ -332,7 +332,7 @@ describe('lane pool', () => {
     })
   })
 
-  it('refuses loudly, naming only the lane, when a lane will not recycle', async () => {
+  it('refuses loudly, naming the lane, the stage and the cause, when a lane will not recycle', async () => {
     const pool = await provision(sqliteProject())
     const lane = pool.lanes[0] as Lane
 
@@ -344,9 +344,11 @@ describe('lane pool', () => {
     expect(failure).toBeInstanceOf(LaneRecycleError)
     expect((failure as LaneRecycleError).lane).toBe(lane.name)
     expect((failure as LaneRecycleError).stage).toBe('database')
-    // §11: the reset command and whatever it printed never reach the message.
+    // The cause: how the step ended and what it said. Twenty attempts of one
+    // run failed on "could not be recycled (database)" and nothing else.
+    expect((failure as Error).message).toMatch(/could not be recycled \(database\): a database command exited \d+\n\S/)
+    // Never the command line itself, which can carry a connection string.
     expect((failure as Error).message).not.toContain('cp ')
-    expect((failure as Error).message).not.toContain('.templates')
   })
 
   it('re-provisions a single-use lane instead of reusing it', async () => {
