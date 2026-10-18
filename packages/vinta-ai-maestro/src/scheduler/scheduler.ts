@@ -206,6 +206,14 @@ const STOP = 'stop'
  * the first is an attempt, the second is the proof it is deterministic.
  */
 const REPEATED_SETUP_FAILURES = 2
+/**
+ * Turns in a row one harness ended without the agent doing anything before it
+ * is treated as broken rather than unlucky. Right after one run moved its
+ * desks to codex, "ended the turn without the agent doing anything" failed 20
+ * attempts across 4 phases in about two minutes: each automatic retry bought
+ * the same empty turn.
+ */
+const EMPTY_TURN_FAULT = 2
 
 /** The three answers to a merge commit git refused, as the operator sees them. */
 const COMMIT_NOW = 'commit'
@@ -559,6 +567,12 @@ class SpawnFatal extends Error {}
  * one a person chose, so nothing in `#recover` may second-guess it.
  */
 class LoginDeclined extends SpawnFatal {}
+/**
+ * The same harness ended `EMPTY_TURN_FAULT` turns in a row without the agent
+ * doing anything. Not the work's failure and not one a retry changes, so
+ * `#recover` spends no automatic attempt on it and asks instead.
+ */
+class HarnessFault extends SpawnFatal {}
 
 /**
  * A lane that could not be made clean for the next node.
@@ -775,6 +789,14 @@ interface NodeState {
    * buys the same line again. Cleared by an attempt that got past setup.
    */
   setupFailure: { readonly reason: string; readonly count: number } | null
+  /**
+   * The harness whose turns on this node have ended empty, and how many in a
+   * row — across attempts, since the attempt boundary is exactly what an
+   * automatic retry crosses. Cleared by any turn the agent took part in.
+   */
+  emptyTurns: { readonly harness: string; readonly count: number } | null
+  /** The attempt that just failed ended on a `HarnessFault`. Read once by `#recover`. */
+  harnessFault: boolean
   /** Questions the host asked through `askNode`. Keeps their effect ids apart. */
   hostAsks: number
   /**
@@ -1104,6 +1126,8 @@ export class Scheduler {
       attemptStartedAt: 0,
       agentRan: false,
       setupFailure: null,
+      emptyTurns: null,
+      harnessFault: false,
       hostAsks: 0,
       released: false,
       landed: false,
@@ -2515,9 +2539,13 @@ export class Scheduler {
    */
   async #recover(state: NodeState): Promise<boolean> {
     const policy = this.#options.onFailure ?? 'retry'
+    const fault = state.harnessFault
+    state.harnessFault = false
     if (policy === 'stop' || state.aborted) return false
 
-    if (policy === 'retry' && state.autoRetries < (this.#options.retries ?? 1)) {
+    // A harness fault is not spent against the automatic budget: every attempt
+    // it buys is another empty turn, and the budget is gone in seconds.
+    if (policy === 'retry' && !fault && state.autoRetries < (this.#options.retries ?? 1)) {
       state.autoRetries += 1
       // Cold, for the reason a capacity retry is: the branch the last attempt
       // built is gone and its worktree will be recycled, so a resumed session
@@ -2526,10 +2554,34 @@ export class Scheduler {
       this.#setStatus(state, 'running')
       return true
     }
-    return await this.#offerRetry(state)
+    return await this.#offerRetry(state, fault)
   }
 
-  async #offerRetry(state: NodeState): Promise<boolean> {
+  /** Counts a drained turn towards `EMPTY_TURN_FAULT`, or clears the count. */
+  #countEmptyTurn(state: NodeState, adapter: HarnessAdapter, empty: boolean): void {
+    if (!empty) {
+      state.emptyTurns = null
+      return
+    }
+    const previous = state.emptyTurns
+    state.emptyTurns = {
+      harness: adapter.id,
+      count: previous?.harness === adapter.id ? previous.count + 1 : 1,
+    }
+  }
+
+  #throwIfHarnessFault(state: NodeState, adapter: HarnessAdapter): void {
+    const count = state.emptyTurns?.count ?? 0
+    if (count < EMPTY_TURN_FAULT) return
+    state.harnessFault = true
+    this.#log.warn('node.harness_fault', { node: state.node.id, harness: adapter.id, empty_turns: count })
+    throw new HarnessFault(
+      `${adapter.id} ended ${count} turns in a row without the agent doing anything — ` +
+        'treated as a harness fault, so it is not retried automatically',
+    )
+  }
+
+  async #offerRetry(state: NodeState, fault = false): Promise<boolean> {
     if (state.aborted) return false
 
     state.retries += 1
@@ -2555,7 +2607,8 @@ export class Scheduler {
       // an informed "retry" and a surprised one.
       question:
         `This phase failed. Try it again?${await this.#uncommittedNote(state)}` +
-        this.#repeatedSetupNote(state),
+        this.#repeatedSetupNote(state) +
+        (fault ? this.#harnessFaultNote(state) : ''),
       kind: 'choice',
       choices: this.#retryChoices(state),
     })
@@ -2575,7 +2628,7 @@ export class Scheduler {
     // Withheld from the timer, not from the coordinator: a setup failure that
     // repeats is exactly what it is woken to fix and then retry.
     state.delegable = true
-    const cancel = repeated ? () => {} : this.#armUnattendedRetry(state)
+    const cancel = repeated ? () => {} : this.#armUnattendedRetry(state, fault)
     const facts = await this.#park(state)
     cancel()
     if (state.aborted) return false
@@ -2593,6 +2646,21 @@ export class Scheduler {
   /** Whether the last attempts all died in setup on one and the same line. */
   #repeatedSetupFailure(state: NodeState): boolean {
     return (state.setupFailure?.count ?? 0) >= REPEATED_SETUP_FAILURES
+  }
+
+  /**
+   * Why a harness fault asks rather than retrying, and what a person can do
+   * about it: the harness, not the phase, is what is broken, so `retry with`
+   * a member on another harness is the answer most likely to work.
+   */
+  #harnessFaultNote(state: NodeState): string {
+    const harness = state.emptyTurns?.harness ?? 'the harness'
+    const count = state.emptyTurns?.count ?? EMPTY_TURN_FAULT
+    return (
+      ` ${harness} ended ${count} turns in a row without the agent doing anything, which is the ` +
+      'harness failing rather than the work, so no automatic attempt was spent on it. Check that ' +
+      `${harness} runs and is logged in, or retry with a member on another harness.`
+    )
   }
 
   /** The sentence that says why this question will not answer itself. */
@@ -3323,12 +3391,19 @@ export class Scheduler {
     // session the vendor forgot: a fresh session has no replay to make and no
     // memory to be wrong about. A cold turn that is empty too is a harness that
     // is not working, and that is a failure of the turn, not of the work.
+    //
+    // **Two in a row is a harness fault**, whichever attempts they fell in:
+    // `HarnessFault` skips the automatic retries and parks the phase on the
+    // failure question, where `--retry-after` answers with its backoff.
+    this.#countEmptyTurn(state, adapter, drained.empty)
     if (drained.empty) {
       this.#log.warn('node.empty_turn', {
         node: state.node.id,
         harness: adapter.id,
         resumed: plan.resumeSessionId !== null,
+        in_a_row: state.emptyTurns?.count ?? 0,
       })
+      this.#throwIfHarnessFault(state, adapter)
       if (plan.resumeSessionId === null) {
         throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything`)
       }
@@ -3348,7 +3423,9 @@ export class Scheduler {
       turn = { ...turn, plan }
       watch = new QuestionWatch()
       drained = await this.#drain(state, cold, turn, watch)
+      this.#countEmptyTurn(state, adapter, drained.empty)
       if (drained.empty) {
+        this.#throwIfHarnessFault(state, adapter)
         throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything, resumed and cold`)
       }
     }
@@ -4151,13 +4228,15 @@ export class Scheduler {
    * `answer` throws for a node that is not awaiting one — so the stray timer
    * would surface as an exception from a node nobody was looking at.
    */
-  #armUnattendedRetry(state: NodeState): () => void {
+  #armUnattendedRetry(state: NodeState, fault = false): () => void {
     state.delegable = true
     const after = this.#options.retryAfterMs
     if (after === undefined || after <= 0) return () => {}
 
     const clock = this.#options.clock ?? systemClock
-    const quick = clock.now() - state.attemptStartedAt < after
+    // A harness fault is quick by nature, however long the attempt took to
+    // reach its empty turn: it backs off from the first question.
+    const quick = fault || clock.now() - state.attemptStartedAt < after
     state.quickFailures = quick ? state.quickFailures + 1 : 0
     const factor = Math.min(2 ** Math.max(0, state.quickFailures - 1), UNATTENDED_BACKOFF_CAP)
     const wait = after * factor

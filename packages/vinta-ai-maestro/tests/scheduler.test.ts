@@ -3484,6 +3484,65 @@ describe('a turn the agent never took part in', () => {
     expect(r.adapter.spawned).toHaveLength(1)
     expectDrained(r)
   })
+
+  /**
+   * Observed right after a run moved its desks to codex: "ended the turn
+   * without the agent doing anything" failed 20 attempts across 4 phases in
+   * about two minutes, every automatic retry buying the same empty turn.
+   */
+  it('parks the phase on a question after two empty turns in a row, and backs off', async () => {
+    const r = rig(makeWorkflow([node('a')]), {
+      onFailure: 'retry',
+      retries: 5,
+      retryAfterMs: 60_000,
+      scripts: [EMPTY, EMPTY, EMPTY, DEFAULT_SCRIPT],
+    })
+
+    const running = r.scheduler.run()
+    // One empty turn is an attempt; the second is the harness. Four automatic
+    // attempts were left, and none was spent on it.
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the question after the second empty turn')
+    expect(r.adapter.spawned).toHaveLength(2)
+    expect(errorsOf(r, 'a')).toEqual([
+      'claude-code ended the turn without the agent doing anything',
+      'claude-code ended 2 turns in a row without the agent doing anything — treated as a harness fault, ' +
+        'so it is not retried automatically',
+    ])
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('2 turns in a row without the agent doing anything')
+    expect(question?.question).toContain('retry with a member on another harness')
+
+    // The unattended retry still comes, one interval later.
+    await r.advance(60_000)
+    await until(() => r.adapter.spawned.length === 3, 'the unattended retry')
+    await until(() => questionsOf(r, 'a').length === 2, 'the question again')
+
+    // The next waits twice as long.
+    await r.advance(60_000)
+    expect(r.adapter.spawned).toHaveLength(3)
+    await r.advance(60_000)
+    const report = await running
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(answersOf(r)).toEqual([
+      { effect_id: 'retry:a:1', answer: 'retry', unattended: true },
+      { effect_id: 'retry:a:2', answer: 'retry', unattended: true },
+    ])
+    expectDrained(r)
+  })
+
+  it('keeps the automatic retry for an empty turn that is not one of two in a row', async () => {
+    const r = rig(makeWorkflow([node('a')]), {
+      onFailure: 'retry',
+      retries: 1,
+      scripts: [EMPTY, DEFAULT_SCRIPT],
+    })
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.adapter.spawned).toHaveLength(2)
+    expectDrained(r)
+  })
 })
 
 // ---------------------------------------------------------------------------

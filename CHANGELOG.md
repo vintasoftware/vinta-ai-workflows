@@ -659,6 +659,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: two empty turns in a row park the phase instead of
+  burning its retries.** Right after one run moved its desks to codex, "codex
+  ended the turn without the agent doing anything" failed 20 attempts across 4
+  phases in about two minutes. When one harness ends two turns in a row
+  without the agent doing anything, across attempts, the phase now skips its
+  automatic retries and asks: the question says the harness is failing and
+  suggests `retry with` a member on another harness. `--retry-after` still
+  answers it, and backs off from the first question.
+
 - **`vinta-ai-maestro`: a red gate on a merged base is re-run on retry.** One
   run's base test gate failed once on a test that broke only near midnight.
   Seven retries replayed the cached verdict, each reported as "failed during
