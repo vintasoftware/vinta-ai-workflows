@@ -1,6 +1,7 @@
 /** `vinta-ai-maestro with <resource> -- <cmd>` — an agent-held pool lease. */
 import { spawn } from 'node:child_process'
 import { AgentLeaseGrantSchema, AgentLeaseWaitingSchema } from '../daemon/schemas.ts'
+import { stopComposeOneOffs, type ContainerCleanup } from '../platform/containers.ts'
 import { killTree, ownProcessGroup, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import {
   MAESTRO_NODE_ENV,
@@ -32,7 +33,13 @@ export const WITH_USAGE = `usage: vinta-ai-maestro with <resource> -- <cmd>
 
 export interface WithDeps {
   readonly fetch?: typeof fetch
-  readonly run?: (command: string, signal: AbortSignal) => Promise<number>
+  /**
+   * Runs the command. `interrupted` is set once the command was killed rather
+   * than left to exit — a signal to this process, or the lease lost.
+   */
+  readonly run?: (command: string, signal: AbortSignal, interrupted: Interrupted) => Promise<number>
+  /** Stops what a killed `docker compose run` left running. Injected in tests. */
+  readonly stopContainers?: ContainerCleanup
   /**
    * How the wait pauses between attempts. Injected so a test of the *loop* does
    * not pay for the politeness — real sleeping is the slowest thing about it,
@@ -40,6 +47,10 @@ export interface WithDeps {
    * flakes on a loaded machine for reasons that have nothing to do with it.
    */
   readonly sleep?: (ms: number) => Promise<void>
+}
+
+export interface Interrupted {
+  value: boolean
 }
 
 export async function withCommand(
@@ -75,6 +86,8 @@ export async function withCommand(
   let leaseId: string | null = null
   let renewal: ReturnType<typeof setInterval> | undefined
   const abort = new AbortController()
+  const interrupted: Interrupted = { value: false }
+  let commandStartedAt: number | undefined
 
   try {
     const grant = await waitForLease({
@@ -116,7 +129,8 @@ export async function withCommand(
     renewal.unref?.()
 
     try {
-      return await Promise.race([(deps.run ?? runShell)(command, abort.signal), lost])
+      commandStartedAt = Date.now()
+      return await Promise.race([(deps.run ?? runShell)(command, abort.signal, interrupted), lost])
     } catch {
       io.err('vinta-ai-maestro: the leased command could not complete')
       return FAILED
@@ -129,6 +143,15 @@ export async function withCommand(
   } finally {
     if (renewal !== undefined) clearInterval(renewal)
     abort.abort()
+    // Killing the command ends `docker compose run`, not the container it asked
+    // for. Stopped before the lease goes back, so the next holder of the pool
+    // does not share the lane's databases with it (`platform/containers.ts`).
+    const project = process.env.COMPOSE_PROJECT_NAME
+    if (interrupted.value && commandStartedAt !== undefined && project !== undefined && project !== '') {
+      try {
+        await (deps.stopContainers ?? stopComposeOneOffs)(project, commandStartedAt)
+      } catch {}
+    }
     if (leaseId !== null) {
       // Best effort and deliberately silent. Expiry may have won the race, and
       // the broker's release is idempotent for exactly this `finally`.
@@ -294,7 +317,7 @@ async function refusal(response: Response, resource: string): Promise<string> {
   }
 }
 
-function runShell(command: string, signal: AbortSignal): Promise<number> {
+function runShell(command: string, signal: AbortSignal, interrupted: Interrupted): Promise<number> {
   return new Promise((resolve) => {
     const invocation = shellInvocation(command)
     const child = spawn(invocation.file, [...invocation.args], {
@@ -304,6 +327,7 @@ function runShell(command: string, signal: AbortSignal): Promise<number> {
     })
     let settled = false
     const stop = (): void => {
+      interrupted.value = true
       if (child.pid !== undefined) killTree(child.pid, 'SIGTERM')
     }
     const signals = ['SIGINT', 'SIGTERM'] as const

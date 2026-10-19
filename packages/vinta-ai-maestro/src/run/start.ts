@@ -65,7 +65,8 @@ import { defaultAdapters, provision, refusal, type HostWiring } from './host.ts'
 import type { StackStop } from '../lanes/pool.ts'
 import { startCoordinatorLoop, type CoordinatorLoop } from '../coordinator/loop.ts'
 import type { ErrorFeed } from '../coordinator/errors.ts'
-import { execPort, type ExecPortOptions, resolveExecTarget } from '../coordinator/exec.ts'
+import { execHolder, execPort, type ExecPortOptions, resolveExecTarget } from '../coordinator/exec.ts'
+import { startOrphanSweep } from '../lanes/orphans.ts'
 import type { TriggerOptions } from '../coordinator/triggers.ts'
 import { startConfigReloader, type ConfigReloader } from '../config/reload.ts'
 import { commitOf, ensurePlanBranch, planBranchName } from './plan-branch.ts'
@@ -174,7 +175,14 @@ export interface StartRunOptions {
   readonly sources?: RunSourcesInput
   /** How often the plan branch is checked for new commits. */
   readonly configReloadMs?: number
+  /**
+   * How often idle lanes are swept for one-off containers nobody owns
+   * (`lanes/orphans.ts`); 0 turns the sweep off. Five minutes by default.
+   */
+  readonly orphanSweepMs?: number
 }
+
+const DEFAULT_ORPHAN_SWEEP_MS = 5 * 60 * 1000
 
 /**
  * `PATH` with the daemon's launcher first, under whichever spelling of the
@@ -560,6 +568,21 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     agentGates?.halt(code)
   }
 
+  const names = execNames(host.laneNames ?? (() => []), () => journal.nodes(runId), runId)
+  const exec =
+    host.workspace === undefined
+      ? undefined
+      : execPort({
+          workspace: host.workspace,
+          ...(host.holdIntegration === undefined ? {} : { holdIntegration: host.holdIntegration }),
+          ...names,
+          // A command's leases and queued waits end with it, as a turn's do.
+          onEnded: (holder, turn) => {
+            agentLeases.endTurn(holder, turn)
+            agentGates?.endTurn(holder, turn)
+          },
+        })
+
   const registered: DaemonRun = {
     runId,
     control: runControl(scheduler),
@@ -576,20 +599,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(permissionJudge === undefined ? {} : { permissionJudge }),
     // `vinta-ai-maestro exec`: a command by hand in a lane or the integration
     // worktree, for the operator and the coordinator alike.
-    ...(host.workspace === undefined
-      ? {}
-      : {
-          exec: execPort({
-            workspace: host.workspace,
-            ...(host.holdIntegration === undefined ? {} : { holdIntegration: host.holdIntegration }),
-            ...execNames(host.laneNames ?? (() => []), () => journal.nodes(runId), runId),
-            // A command's leases and queued waits end with it, as a turn's do.
-            onEnded: (holder, turn) => {
-              agentLeases.endTurn(holder, turn)
-              agentGates?.endTurn(holder, turn)
-            },
-          }),
-        }),
+    ...(exec === undefined ? {} : { exec }),
     // `propagate` and `sync-base` while the run is live: made here, holding
     // the integration worktree's queue, so no merge of the run's own can
     // interleave with theirs.
@@ -655,6 +665,22 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
           ...(options.logger === undefined ? {} : { logger: options.logger }),
         })
 
+  // Containers a killed command outside maestro's own kills left running in a
+  // lane nobody holds (`lanes/orphans.ts`). Only with lanes to sweep.
+  const sweepMs = options.orphanSweepMs ?? DEFAULT_ORPHAN_SWEEP_MS
+  const laneEnv = host.laneEnv
+  const sweeper =
+    sweepMs <= 0 || laneEnv === undefined || host.laneNames === undefined
+      ? null
+      : startOrphanSweep({
+          everyMs: sweepMs,
+          lanes: () =>
+            (host.laneNames?.() ?? []).map((name) => ({ name, project: laneEnv(name).COMPOSE_PROJECT_NAME })),
+          busy: (lane) => (names.holder?.(lane) ?? null) !== null || (exec?.holds(execHolder(lane)) ?? false),
+          onStopped: (lane, count) =>
+            journal.append({ runId, type: 'orphan_containers_stopped', payload: { lane, count } }),
+        })
+
   // Started, not awaited. The promise carries its own teardown so that the one
   // caller who never looks at it — the daemon — still gets it.
   const finished = (async (): Promise<RunOutcome> => {
@@ -690,6 +716,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
       // deliberately absent — see `HostWiring.close`.
       loop?.stop()
       reloader?.stop()
+      sweeper?.stop()
       admission.close()
       agentLeases.close()
       host.close()

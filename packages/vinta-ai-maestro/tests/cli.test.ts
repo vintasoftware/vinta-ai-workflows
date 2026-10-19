@@ -624,6 +624,42 @@ describe('vinta-ai-maestro with', () => {
   })
 
   /**
+   * Killing `with`'s command ends `docker compose run`, not its container, which
+   * then ran on against the lane's databases after the lease went back. It is
+   * stopped before the lease is released.
+   */
+  it('stops an interrupted command’s containers before releasing the lease', async () => {
+    await leaseEnv(async () => {
+      const prior = process.env.COMPOSE_PROJECT_NAME
+      process.env.COMPOSE_PROJECT_NAME = 'repo_lane-1'
+      try {
+        const order: string[] = []
+        const request: typeof fetch = async (_input, init) => {
+          if (init?.method === 'POST') return grant()
+          if (init?.method === 'DELETE') order.push('release')
+          return Response.json({ ok: true })
+        }
+        await withCommand(['test-suite', '--', 'pnpm', 'test'], recorder().io, {
+          fetch: request,
+          sleep: async () => {},
+          run: async (_command, _signal, interrupted) => {
+            interrupted.value = true
+            return 143
+          },
+          stopContainers: async (project) => {
+            order.push(`stop ${project}`)
+            return []
+          },
+        })
+        expect(order).toEqual(['stop repo_lane-1', 'release'])
+      } finally {
+        if (prior === undefined) delete process.env.COMPOSE_PROJECT_NAME
+        else process.env.COMPOSE_PROJECT_NAME = prior
+      }
+    })
+  })
+
+  /**
    * The client half of the queue-position fix. Each `202` names the wait, and
    * the next POST has to give that name back — otherwise the daemon cannot tell
    * a returning waiter from a new one, and re-queues it at the tail behind

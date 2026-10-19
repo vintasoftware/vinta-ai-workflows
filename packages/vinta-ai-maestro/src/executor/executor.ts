@@ -756,6 +756,7 @@ export class RunEffectExecutor implements EffectExecutor {
                 cpus: result.timeout.cpus,
               },
             }),
+        ...(result.containersStopped === undefined ? {} : { containers_stopped: result.containersStopped }),
       },
     })
     // And again in the node's transcript, which is where somebody reading

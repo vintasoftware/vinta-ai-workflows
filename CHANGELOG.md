@@ -1275,6 +1275,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a killed gate no longer leaves its Docker container
+  running.** A timed-out or cancelled gate, `with` command or `exec` also
+  removes the one-off `docker compose run` containers its lane's compose
+  project started since the command began, before the pools, lease or
+  integration worktree it held are released. A sweep every five minutes
+  removes one-off containers in lanes no phase or `exec` is using, journalled
+  as `orphan_containers_stopped`. Without docker, nothing changes.
 - **`vinta-ai-maestro`: the integrator no longer stages untracked files into
   a merge resolution.** It stages tracked paths and the merge's own paths
   instead of `git add --all`, so a gate's leftovers in the integration

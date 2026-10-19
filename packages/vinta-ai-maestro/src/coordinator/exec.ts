@@ -20,6 +20,7 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
+import { stopComposeOneOffs, type ContainerCleanup } from '../platform/containers.ts'
 import { killTree, ownProcessGroup, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV } from '../resources/agent-leases.ts'
 import type { Actor } from './actor.ts'
@@ -138,8 +139,10 @@ export async function runCommand(
   command: string,
   onOutput: (chunk: string) => void,
   signal: AbortSignal,
+  stopContainers: ContainerCleanup = stopComposeOneOffs,
 ): Promise<number> {
   if (signal.aborted) return EXEC_KILLED
+  const startedAt = Date.now()
   const shell = shellInvocation(command)
   const child = spawn(shell.file, [...shell.args], {
     cwd: workspace.path,
@@ -164,5 +167,13 @@ export async function runCommand(
     })
   } finally {
     signal.removeEventListener('abort', stop)
+    // A cancelled `docker compose run` leaves its container running; it is
+    // stopped before the integration worktree's hold, if any, is let go.
+    const project = workspace.env.COMPOSE_PROJECT_NAME
+    if (signal.aborted && project !== undefined && project !== '') {
+      try {
+        await stopContainers(project, startedAt)
+      } catch {}
+    }
   }
 }

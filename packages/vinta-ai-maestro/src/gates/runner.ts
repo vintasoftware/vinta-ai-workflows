@@ -30,6 +30,7 @@ import {
   shellInvocation,
   spawnOptionsFor,
 } from '../platform/platform.ts'
+import { stopComposeOneOffs, type ContainerCleanup } from '../platform/containers.ts'
 import type { ResourcePools } from '../resources/pools.ts'
 import type { CommandGate } from '../types.ts'
 
@@ -56,6 +57,12 @@ export interface GateResult {
   readonly logPath: string
   /** Present only on `timed_out`. See `TimeoutFacts`. */
   readonly timeout?: TimeoutFacts
+  /**
+   * How many one-off compose containers the gate left running when it was
+   * killed, all stopped before this result returned. Absent when it was not
+   * killed or left none.
+   */
+  readonly containersStopped?: number
 }
 
 /**
@@ -102,6 +109,11 @@ export interface RunGateOptions {
    * hit never reaches the runner, so it never fires: nothing ran.
    */
   readonly onStart?: (startedAtMs: number) => void
+  /**
+   * Stops what a killed gate's `docker compose run` left running
+   * (`platform/containers.ts`). Injected in tests; the default asks docker.
+   */
+  readonly stopContainers?: ContainerCleanup
 }
 
 /**
@@ -111,13 +123,19 @@ export interface RunGateOptions {
  */
 const live = new Set<ChildProcess>()
 
+/** Gates `killLiveGates` ended, as opposed to ones that exited on their own. */
+const cancelled = new WeakSet<ChildProcess>()
+
 /**
  * Ends every gate this process started that is still running. For a run being
  * cancelled (`Scheduler.halt`); the gate's own effect then returns failed, and
  * the node unwinds at that boundary.
  */
 export function killLiveGates(): void {
-  for (const child of live) killTree(child.pid)
+  for (const child of live) {
+    cancelled.add(child)
+    killTree(child.pid)
+  }
 }
 
 /**
@@ -187,6 +205,19 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
     child.on('close', resolve)
   })
   clearTimeout(timer)
+  // A killed gate's process group is gone, but a container its `docker compose
+  // run` asked for belongs to the docker daemon and is not. It is stopped here,
+  // before the result returns, because the caller releases the gate's pools on
+  // return — and the next holder must not share the lane's databases with it.
+  let containersStopped = 0
+  const project = options.env.COMPOSE_PROJECT_NAME ?? process.env.COMPOSE_PROJECT_NAME
+  if ((timeout !== undefined || cancelled.has(child)) && project !== undefined && project !== '') {
+    const stopped = await (options.stopContainers ?? stopComposeOneOffs)(project, startedAt)
+    containersStopped = stopped.length
+    if (containersStopped > 0) {
+      log.write(`\n[vinta-ai-maestro] stopped ${containersStopped} container(s) the killed gate left running\n`)
+    }
+  }
   await new Promise<void>((resolve) => log.end(resolve))
 
   return {
@@ -196,6 +227,7 @@ export async function executeGate(options: Omit<RunGateOptions, 'pools'>): Promi
     durationMs: Date.now() - startedAt,
     logPath: options.logPath,
     ...(timeout === undefined ? {} : { timeout }),
+    ...(containersStopped > 0 ? { containersStopped } : {}),
   }
 }
 

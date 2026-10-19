@@ -401,6 +401,15 @@ interface RunPayloads {
     readonly failed: readonly string[]
   }
   /**
+   * One-off compose containers found running in a lane no phase held, and
+   * stopped (`lanes/orphans.ts`): what a killed command outside maestro's own
+   * kills left behind. The lane and a count, never the container's command.
+   */
+  orphan_containers_stopped: {
+    readonly lane: string
+    readonly count: number
+  }
+  /**
    * The run coordinator was woken (`coordinator/`). What woke it, as kinds and
    * identifiers, and how the turn ended; what it said and did is in its
    * conversation and in the events its actions wrote.
@@ -990,6 +999,12 @@ interface NodePayloads {
       readonly load_1m?: number
       readonly cpus: number
     }
+    /**
+     * One-off compose containers the gate left running when it was killed
+     * (a timeout or a cancel), all stopped before its pools were released.
+     * Absent when there were none.
+     */
+    readonly containers_stopped?: number
   }
   /**
    * A gate red again on the tree it was red on before a fixer round, so the
