@@ -170,7 +170,7 @@ function gateRefusals(id: string, before: Gate, after: Gate): readonly PolicyIss
     issues.push({ path: [...at, 'type'], message: `gate "${id}"'s \`type\` may not be changed` })
   }
   const allowed = new Set(before.tuning?.allowed_flags ?? [])
-  for (const field of ['cmd', 'scoped_cmd'] as const) {
+  for (const field of ['cmd', 'scoped_cmd', 'fresh_cmd'] as const) {
     const was = before[field]
     const now = after[field]
     if (was === now) continue

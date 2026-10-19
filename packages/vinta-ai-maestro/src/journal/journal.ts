@@ -910,6 +910,7 @@ export class Journal {
       case 'gate_stalled':
       case 'stacks_stopped':
       case 'orphan_containers_stopped':
+      case 'integration_fresh_state':
       case 'branches_moved':
       case 'integration_reclaimed':
       case 'coordinator_woke':

@@ -1275,6 +1275,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: integration gates no longer run against a test
+  database left by another branch.** A command gate may declare `fresh_cmd`
+  (also in `maestro.gates.<type>`), the same check from a fresh database (for
+  example `pytest --create-db`). In the integration worktree it runs instead
+  of `cmd` in four cases: when the tree moved anywhere but forward since the
+  gate last ran there, on the gate's first run there, once more after a red
+  run whose output shows missing or extra columns or relations, and after a
+  conflict fixer ends its turn on `ENVIRONMENT_STALE`. That last round is
+  given back. Each fresh run is journalled as `integration_fresh_state`.
 - **`vinta-ai-maestro`: a killed gate no longer leaves its Docker container
   running.** A timed-out or cancelled gate, `with` command or `exec` also
   removes the one-off `docker compose run` containers its lane's compose

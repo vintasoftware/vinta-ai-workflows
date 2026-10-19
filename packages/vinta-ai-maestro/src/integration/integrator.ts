@@ -45,7 +45,9 @@ import {
   ConflictFixerInterrupted,
   ConflictFixerTimeout,
   type ConflictRequest,
+  type FixVerdict,
 } from './fixer.ts'
+import type { FreshReason } from './fresh.ts'
 import { git, GitCommandError, gitLines, gitOk } from './git.ts'
 import { composeIntegrationPrBody, type PrText } from './pr-body.ts'
 import { openPullRequest, type PrResult } from './pr.ts'
@@ -332,7 +334,7 @@ export interface IntegratorOptions {
    * sends the conflict back to the fixer — a resolution that does not build is
    * not a resolution.
    */
-  readonly verify?: (cwd: string) => Promise<true | false | RedGate>
+  readonly verify?: (cwd: string, force?: FreshReason) => Promise<true | false | RedGate>
   /**
    * Every conflict a fixer settled, as it is settled.
    *
@@ -1094,10 +1096,16 @@ export class Integrator {
       ...(codegen === undefined || codegen.generated().length === 0 ? {} : { generated: codegen.generated() }),
     } satisfies Omit<ConflictRequest, 'round'>
 
-    for (let round = 1; round <= this.#maxFixRounds; round += 1) {
+    // A fixer reporting the environment stale changed no code, so its round is
+    // given back once: the budget is for resolving the merge, and the round
+    // spent establishing that the database was wrong did not try to.
+    let budget = this.#maxFixRounds
+    let staleReported = false
+    for (let round = 1; round <= budget; round += 1) {
       this.#options.onStep?.(forNode, { step: 'fix_round', state: 'started', round, incoming: nodeId })
+      let verdict: FixVerdict | void
       try {
-        await this.#fixer.fix({ ...request, round, forNode, ...(red === null ? {} : { redGate: red }) })
+        verdict = await this.#fixer.fix({ ...request, round, forNode, ...(red === null ? {} : { redGate: red }) })
         this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round })
       } catch (error) {
         this.#options.onStep?.(forNode, { step: 'fix_round', state: 'finished', round, outcome: 'failed' })
@@ -1123,6 +1131,11 @@ export class Integrator {
         throw error
       }
       red = null
+      const stale = verdict === 'environment_stale' && !staleReported
+      if (stale) {
+        staleReported = true
+        budget += 1
+      }
       if (await this.#unresolved(paths)) continue
 
       // **A fixer that committed its own resolution is the ordinary case, not a
@@ -1152,7 +1165,9 @@ export class Integrator {
       // work, which is the one thing committing early would otherwise buy it.
       // A red gate goes to the next round, named, so the fixer reads why. The
       // generated files are regenerated from the resolved sources first.
-      red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+      red =
+        (await codegen?.refresh(cwd, forNode)) ??
+        (await this.#verify(cwd, forNode, stale ? 'fixer_reported' : undefined))
       if (red !== null) continue
 
       if (await this.#merging(cwd)) {
@@ -1244,10 +1259,10 @@ export class Integrator {
   }
 
   /** The outer gate on the merged tree: null when green or not configured, else what went red. */
-  async #verify(cwd: string, forNode: string): Promise<RedGate | null> {
+  async #verify(cwd: string, forNode: string, force?: FreshReason): Promise<RedGate | null> {
     if (this.#options.verify === undefined) return null
     this.#options.onStep?.(forNode, { step: 'verify', state: 'started' })
-    const verdict = await this.#options.verify(cwd).catch((error: unknown) => {
+    const verdict = await this.#options.verify(cwd, force).catch((error: unknown) => {
       this.#options.onStep?.(forNode, { step: 'verify', state: 'finished', outcome: 'failed' })
       throw error
     })

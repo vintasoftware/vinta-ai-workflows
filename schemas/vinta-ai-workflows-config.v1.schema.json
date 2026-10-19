@@ -465,6 +465,11 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "fresh_cmd": {
+                  "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
+                  "type": "string",
+                  "minLength": 1
+                },
                 "requires": {
                   "description": "Resource pools the gate holds while it runs, e.g. `[test-suite]`.",
                   "type": "array",
@@ -509,6 +514,11 @@
                 },
                 "scoped_cmd": {
                   "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "fresh_cmd": {
+                  "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
                   "type": "string",
                   "minLength": 1
                 },
@@ -559,6 +569,11 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "fresh_cmd": {
+                  "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
+                  "type": "string",
+                  "minLength": 1
+                },
                 "requires": {
                   "description": "Resource pools the gate holds while it runs, e.g. `[test-suite]`.",
                   "type": "array",
@@ -603,6 +618,11 @@
                 },
                 "scoped_cmd": {
                   "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "fresh_cmd": {
+                  "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
                   "type": "string",
                   "minLength": 1
                 },
@@ -653,6 +673,11 @@
                 },
                 "scoped_cmd": {
                   "description": "The check narrowed to what a phase changed, with `{changed_files}` and/or `{touches}`. Run by phase gates under `gate_scope: scoped`; the full `cmd` runs once on each wave's merged tree.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "fresh_cmd": {
+                  "description": "The same check run from fresh state (the test database recreated, e.g. `pytest --create-db`). Run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward, the gate has not run there yet in this process, its red output reads as a stale schema, or a conflict fixer reported `ENVIRONMENT_STALE`. Must check at least what `cmd` does.",
                   "type": "string",
                   "minLength": 1
                 },

@@ -54,6 +54,7 @@ const OptionalCommand = z.string().min(1).optional()
 export const GateTypeDefaultsSchema = z.strictObject({
   cmd: OptionalCommand,
   scoped_cmd: OptionalCommand,
+  fresh_cmd: OptionalCommand,
   requires: z.array(Id).optional(),
   timeout_s: z.number().int().min(1).optional(),
   tuning: GateTuningSchema.optional(),

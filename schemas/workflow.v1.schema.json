@@ -683,6 +683,11 @@
                 "type": "string",
                 "minLength": 1
               },
+              "fresh_cmd": {
+                "description": "The same check run from fresh state — the test database recreated (`pytest --create-db`, `make test_reset test`) — run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward since the gate last ran there, the gate has not run there in this process, its red output reads as a stale schema (missing or extra columns or relations), or a conflict fixer reported `ENVIRONMENT_STALE`. It must check at least what `cmd` does.",
+                "type": "string",
+                "minLength": 1
+              },
               "requires": {
                 "default": [],
                 "description": "Resource pool ids acquired before the gate runs, in canonical order.",

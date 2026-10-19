@@ -239,6 +239,18 @@ export const CommandGateSchema = z.strictObject({
         'file with no tests is a normal member of the list. When a placeholder would substitute ' +
         'nothing, `cmd` runs instead.',
     ),
+  fresh_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The same check run from fresh state — the test database recreated (`pytest --create-db`, ' +
+        '`make test_reset test`) — run in place of `cmd` in the integration worktree whenever ' +
+        'the state an earlier run left there may belong to another tree: the tree moved anywhere ' +
+        'but forward since the gate last ran there, the gate has not run there in this process, ' +
+        'its red output reads as a stale schema (missing or extra columns or relations), or a ' +
+        'conflict fixer reported `ENVIRONMENT_STALE`. It must check at least what `cmd` does.',
+    ),
   requires: z
     .array(Id)
     .default([])

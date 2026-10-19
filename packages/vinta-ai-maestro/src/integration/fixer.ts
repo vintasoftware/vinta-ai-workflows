@@ -141,8 +141,27 @@ export class ConflictFixerInterrupted extends Error {
 export const DEFAULT_FIXER_TIMEOUT_MS = 20 * 60_000
 
 /** One method, so the scheduler can inject a real agent and a test a spy. */
+/**
+ * What a fixer may say about a round besides the worktree, which answers the
+ * rest. `environment_stale`: the merged tree's failures are the environment's
+ * — a test database left by another tree, with columns or relations no model
+ * here defines — and the fixer changed no code. The integrator then runs the
+ * gates once from fresh state (`integration/fresh.ts`) without charging the
+ * round.
+ */
+export type FixVerdict = 'environment_stale'
+
+/** The token a fixer ends its turn on to report `environment_stale` (its prompt says so). */
+export const ENVIRONMENT_STALE = 'ENVIRONMENT_STALE'
+
+/** The verdict a fixer's last words carry, if any: the token alone on a line. */
+export function fixVerdict(lastText: string | null): FixVerdict | null {
+  if (lastText === null) return null
+  return /^\W*ENVIRONMENT_STALE\W*$/m.test(lastText) ? 'environment_stale' : null
+}
+
 export interface ConflictFixer {
-  fix(request: ConflictRequest): Promise<void>
+  fix(request: ConflictRequest): Promise<FixVerdict | void>
   /**
    * Ends the round in progress, if any — the run is being torn down. Optional
    * because a spy has nothing to end.
@@ -285,7 +304,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
     running() {
       return liveAgent
     },
-    async fix(request: ConflictRequest): Promise<void> {
+    async fix(request: ConflictRequest): Promise<FixVerdict | void> {
       const staffing = options.staff?.(request) ?? null
       const chosen = routed(assigned ?? staffing ?? { adapter: options.adapter, model: options.model })
       // The member's implemented list stays the staffing's: it is about whose
@@ -343,6 +362,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
       // ends the stream; the timeout is then the round's result rather than
       // whatever the stream said last.
       let timedOut = false
+      let lastText: string | null = null
       const timer = setTimeout(() => {
         timedOut = true
         void outcome.session.kill().catch(() => {})
@@ -353,6 +373,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
           // same stream, echoed back by the adapter, and must not be filed as the
           // agent's words.
           const entry = { ...event, by: attribute(event, by) }
+          if (event.type === 'assistant_text') lastText = event.text
           options.record?.(request.nodeId, entry)
           // And under the phase whose turn the merge is, when that is another:
           // a base merge for p5 resolving p3's branch was written only to p3,
@@ -377,6 +398,7 @@ export function createAgentConflictFixer(options: AgentConflictFixerOptions): Co
         return
       }
       if (timedOut) throw new ConflictFixerTimeout(request.nodeId, request.round, timeoutMs)
+      return fixVerdict(lastText) ?? undefined
     },
   }
 }

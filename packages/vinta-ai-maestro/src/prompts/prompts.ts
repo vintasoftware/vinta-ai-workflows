@@ -415,6 +415,9 @@ function redGateLines(red: RedGate): string[] {
       : `Its output is at ${red.logPath} — read it first; it says what broke.`,
     'Fix what the two phases break together, such as two migrations on one parent',
     'that need a merge migration, without dropping either phase’s work.',
+    'If the failures are missing or extra columns or relations that no model in this tree',
+    'defines, the test database belongs to another tree: change no code, and end your turn',
+    'with ENVIRONMENT_STALE alone on its last line. The gates then run from a fresh database.',
   ]
 }
 

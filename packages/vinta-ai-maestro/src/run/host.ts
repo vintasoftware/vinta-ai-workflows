@@ -29,6 +29,7 @@ import { CodexAdapter } from '../harness/codex.ts'
 import { OpencodeAdapter } from '../harness/opencode.ts'
 import type { AgentPermission } from '../harness/permissions.ts'
 import type { ConflictFixer } from '../integration/fixer.ts'
+import { type FreshReason, IntegrationFreshness } from '../integration/fresh.ts'
 import { gitLines } from '../integration/git.ts'
 import {
   type CommitDecision,
@@ -305,6 +306,11 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     return built
   }
   const fixer = fixerFor(workflow)
+  // Which tree the integration worktree's gate state belongs to, shared by
+  // `verify` here and the executor's base and wave gates (`integration/fresh.ts`).
+  const freshness = new IntegrationFreshness({
+    onFresh: (gate, reason) => journal.append({ runId, type: 'integration_fresh_state', payload: { gate, reason } }),
+  })
   const codegenCache = CodegenCache.forProject(repoPath)
   const integrator = new RecordingIntegrator({
     // `Workflow` satisfies `IntegrationPlan` structurally.
@@ -362,7 +368,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
      * failing the phase: the fixer gets told, and the round budget is what
      * bounds it.
      */
-    verify: async (cwd: string): Promise<true | RedGate> => {
+    verify: async (cwd: string, force?: FreshReason): Promise<true | RedGate> => {
       // Command gates only. A judge gate's question is about one phase's diff,
       // and a conflict resolution is not any phase's — asking it of the merge
       // would judge a diff the question was never written for.
@@ -372,15 +378,22 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       })
       for (const [id, gate] of gates) {
         const logPath = journal.gateLogPath(runId, INTEGRATION_NODE, id)
-        const result = await executeGate({
-          gateId: id,
+        const result = await freshness.run(
+          id,
           gate,
           cwd,
-          env: { ...integration.env, ...options.agentEnv },
-          // Filed under the integration worktree's own pseudo-node, so a merge
-          // gate's log never overwrites a phase's log for the same gate id.
-          logPath,
-        })
+          (chosen) =>
+            executeGate({
+              gateId: id,
+              gate: chosen,
+              cwd,
+              env: { ...integration.env, ...options.agentEnv },
+              // Filed under the integration worktree's own pseudo-node, so a merge
+              // gate's log never overwrites a phase's log for the same gate id.
+              logPath,
+            }),
+          force,
+        )
         // Named, with its log, so the next fix round reads why and the error
         // the rounds end on says where the cause is.
         if (result.exitCode !== 0) return { gateId: id, logPath, exitCode: result.exitCode }
@@ -454,6 +467,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     cache,
     codegenCache,
     integrationEnv: { ...integration.env, ...options.agentEnv },
+    integrationFreshness: freshness,
     ...(options.systemOne === undefined ? {} : { systemOne: options.systemOne }),
     onIntegrationWait: (nodeId, state, holder) => {
       journal.append({

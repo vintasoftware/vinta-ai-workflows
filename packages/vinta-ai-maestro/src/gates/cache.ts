@@ -134,8 +134,9 @@ CREATE TABLE IF NOT EXISTS gate_results (
  *   scoped form or the full `cmd` (`phaseGate`) — arrives as `cmd`, so an
  *   amended template misses for the scoped runs it changes and not for the
  *   full runs it cannot affect.
+ * - `fresh_cmd` is the same: when it runs, it arrives as `cmd`.
  */
-const INERT_GATE_FIELDS: ReadonlySet<string> = new Set(['description', 'tuning', 'type', 'scoped_cmd'])
+const INERT_GATE_FIELDS: ReadonlySet<string> = new Set(['description', 'tuning', 'type', 'scoped_cmd', 'fresh_cmd'])
 
 /**
  * The cache key component for a command gate — what `judgeCacheKey` is for a

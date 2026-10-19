@@ -93,6 +93,7 @@ import { GATE_ROLE } from '../journal/transcript.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readVerdict, resolveBrief } from '../prompts/index.ts'
+import type { IntegrationFreshness } from '../integration/fresh.ts'
 import { isJudgeGate, type CommandGate, type JudgeGate, type Node, type Workflow } from '../types.ts'
 import type { IntegrationStepPayload, SystemOneJudge } from '../journal/events.ts'
 import type { SystemOne } from '../system-one/config.ts'
@@ -175,6 +176,12 @@ export interface RunExecutorOptions {
    * a suite resolves to the main checkout's database and compose project.
    */
   readonly integrationEnv?: Readonly<Record<string, string>>
+  /**
+   * Picks `fresh_cmd` for a gate in the integration worktree when the state an
+   * earlier run left there may belong to another tree (`integration/fresh.ts`).
+   * Absent, those gates run `cmd`.
+   */
+  readonly integrationFreshness?: IntegrationFreshness
 }
 
 /**
@@ -1079,13 +1086,18 @@ export class RunEffectExecutor implements EffectExecutor {
       // merged tree, with no agent and nothing else to show for minutes.
       const step = { step: 'wave_gate', wave, gate: gateId, log: logPath } as const
       this.#step(nodeId, { ...step, state: 'started' })
-      const result = await executeGate({
-        gateId,
-        gate,
-        cwd: this.#options.integrationPath,
-        env: this.#options.integrationEnv ?? {},
-        logPath,
-      }).catch((error: unknown) => {
+      const run = (chosen: CommandGate) =>
+        executeGate({
+          gateId,
+          gate: chosen,
+          cwd: this.#options.integrationPath,
+          env: this.#options.integrationEnv ?? {},
+          logPath,
+        })
+      const freshness = this.#options.integrationFreshness
+      const result = await (
+        freshness === undefined ? run(gate) : freshness.run(gateId, gate, this.#options.integrationPath, run)
+      ).catch((error: unknown) => {
         this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
         throw error
       })
@@ -1143,13 +1155,20 @@ export class RunEffectExecutor implements EffectExecutor {
       const logPath = this.#options.journal.gateLogPath(this.#options.runId, WAVE_GATE_NODE, `base-${nodeId}-${gateId}`)
       const step = { step: 'base_gate', branch: base.branch, gate: gateId, log: logPath } as const
       this.#step(nodeId, { ...step, state: 'started' })
-      const { result } = await this.#gate(gateId, integration, {
-        gateId,
-        gate,
-        cwd: integration.path,
-        env: integration.env,
-        logPath,
-      }, 'red').catch((error: unknown) => {
+      const run = async (chosen: CommandGate) => {
+        const ran = await this.#gate(gateId, integration, {
+          gateId,
+          gate: chosen,
+          cwd: integration.path,
+          env: integration.env,
+          logPath,
+        }, 'red')
+        return { ...ran.result, cached: ran.cached }
+      }
+      const freshness = this.#options.integrationFreshness
+      const result = await (
+        freshness === undefined ? run(gate) : freshness.run(gateId, gate, integration.path, run)
+      ).catch((error: unknown) => {
         this.#step(nodeId, { ...step, state: 'finished', outcome: 'failed' })
         throw error
       })

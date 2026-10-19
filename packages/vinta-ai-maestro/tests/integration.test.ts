@@ -1114,6 +1114,43 @@ describe('merge conflicts', () => {
     expect(run(repo.integ, 'show', `${wave.branch}:app.ts`).trim()).toBe('const value = "2"')
   })
 
+  /**
+   * A fixer that finds the merged tree's failures are a test database from
+   * another tree changes no code and says so. The gates then run from fresh
+   * state, and the round it spent finding that out is given back.
+   */
+  it('runs verify from fresh state when the fixer reports ENVIRONMENT_STALE, and gives the round back', async () => {
+    const repo = await conflictingPair()
+    const forced: (string | undefined)[] = []
+    let rounds = 0
+    const fixer: ConflictFixer = {
+      async fix(request) {
+        rounds += 1
+        if (request.round === 1) {
+          await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+          return 'environment_stale'
+        }
+        await writeFile(join(request.cwd, 'app.ts'), 'const value = "ab"\n')
+      },
+    }
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer,
+      maxFixRounds: 1,
+      verify: async (_cwd, force) => {
+        forced.push(force)
+        return forced.length === 1 ? RED_GATE : true
+      },
+    })
+
+    const wave = await integrator.mergeWave(1)
+
+    expect(forced).toEqual(['fixer_reported', undefined])
+    expect(rounds).toBe(2)
+    expect(run(repo.integ, 'show', `${wave.branch}:app.ts`).trim()).toBe('const value = "ab"')
+  })
+
   it('changes no file content itself: the committed tree is what the fixer left', async () => {
     const repo = await conflictingPair()
     const fixer = spyFixer(async (request) => {

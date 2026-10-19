@@ -405,6 +405,17 @@ interface RunPayloads {
    * stopped (`lanes/orphans.ts`): what a killed command outside maestro's own
    * kills left behind. The lane and a count, never the container's command.
    */
+  /**
+   * A gate in the integration worktree ran its `fresh_cmd` instead of `cmd`
+   * (`integration/fresh.ts`), and why: the tree moved anywhere but forward
+   * since it last ran there, it had not run there in this process, its red
+   * output read as a stale schema, or a conflict fixer reported the
+   * environment stale.
+   */
+  integration_fresh_state: {
+    readonly gate: string
+    readonly reason: 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported'
+  }
   orphan_containers_stopped: {
     readonly lane: string
     readonly count: number

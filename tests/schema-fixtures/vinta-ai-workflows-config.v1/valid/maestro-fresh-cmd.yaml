@@ -1,0 +1,41 @@
+# A test gate whose integration-worktree runs start from a fresh test database
+schema_version: 1
+vinta_ai_workflows_version: 0.7.0-alpha25
+project:
+  name: acme
+  default_branch: main
+  code_host: github
+  stack_summary: Django
+  ai_plans_dir: ai-plans
+commands:
+  lint: ruff check
+  build: mypy .
+  test_unit: pytest
+policies:
+  pr_creation: agents-create
+  ai_coauthor: allowed
+  commit_style: conventional
+  stage_pattern: git add <paths>
+vendors: [claude]
+foundation_skills:
+  plan-feature: enabled
+foundation_agents:
+  implementer: enabled
+maestro:
+  defaults:
+    gates: [typecheck, lint, test, django-check, api-client-fresh]
+  gates:
+    test:
+      cmd: pytest --reuse-db -n auto
+      fresh_cmd: pytest --create-db -n auto
+      requires: [test-suite]
+    django-check:
+      cmd: uv run python manage.py check --fail-level WARNING
+    api-client-fresh:
+      cmd: make api_client && git diff --exit-code -- frontend/src/api
+      requires: [test-suite]
+      timeout_s: 600
+  resources:
+    test-suite:
+      capacity: 1
+      kind: semaphore

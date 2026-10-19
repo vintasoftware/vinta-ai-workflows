@@ -555,6 +555,24 @@ own is a normal member of `{changed_files}`. `vitest related` and
 only when it has a placeholder. A fixed `pnpm test:patient` is a line for an
 agent to interpret, and the daemon has no agent to do that.
 
+### Fresh state in the integration worktree
+
+The integration worktree merges one tree after another, and its gates share
+its test databases. A gate that reuses its database (`pytest --reuse-db`) then
+sees migrations from whichever tree ran before. Give it `fresh_cmd`, the same
+check from fresh state:
+
+```jsonc
+"test": { "cmd": "pytest --reuse-db -n auto", "fresh_cmd": "pytest --create-db -n auto" }
+```
+
+`fresh_cmd` runs instead of `cmd` in the integration worktree when the tree
+there moved anywhere but forward since the gate last ran, on the gate's first
+run there in a process, after a red run whose output reads as a stale schema,
+and after a conflict fixer reports `ENVIRONMENT_STALE`. Each one is journalled
+as `integration_fresh_state`. `maestro.gates.test.fresh_cmd` in
+`.vinta-ai-workflows.yaml` sets it for every `test`-typed gate.
+
 ### Lane databases on a Postgres you already run
 
 A `delivery: external` Postgres database is forked on the server `server_url`
