@@ -163,7 +163,7 @@ export interface RunExecutorOptions {
    * let in — the one wait a node can be in that no status shows. The host
    * journals it as `node_wait`.
    */
-  readonly onIntegrationWait?: (nodeId: string, state: 'queued' | 'granted', holder: string | null) => void
+  readonly onIntegrationWait?: (nodeId: string, state: 'queued' | 'granted' | 'paused', holder: string | null) => void
   /**
    * The operator's classifier (§17). Absent when the run was started without
    * `--system-one`: judge gates then answer as unavailable, and no built-in
@@ -291,9 +291,13 @@ export class RunEffectExecutor implements EffectExecutor {
    */
   /** The node whose merge is in the integration worktree now, for `node_wait`. */
   #integrationHolder: string | null = null
-  /** Turns taken or waiting for the integration worktree. */
-  #integrationDepth = 0
-  #integrationTurn: Promise<unknown> = Promise.resolve()
+  /** Whether a turn holds the integration worktree now. */
+  #integrationBusy = false
+  /** Turns waiting for it, in arrival order; a paused node's is passed over. */
+  readonly #integrationWaiting: { readonly nodeId: string | null; readonly label: string | null; readonly start: () => void }[] = []
+  /** Nodes already journalled as passed over for a pause, until they are let in. */
+  readonly #integrationPassedOver = new Set<string>()
+  #integrationPaused: (nodeId: string) => boolean = () => false
   /**
    * Set when a node's `git_merge` built the final wave, and spent by that
    * node's `open_pr`, which opens the plan PR after its own. See `#merge`.
@@ -1689,7 +1693,14 @@ export class RunEffectExecutor implements EffectExecutor {
     }
   }
 
-  /** Serializes work in the single integration worktree. */
+  /**
+   * Serializes work in the single integration worktree, first come first
+   * served — except that a paused node is passed over until its pause is
+   * lifted. One observed coordinator paused a phase queued behind the
+   * worktree; the pause was only read between pipeline steps, the phase was
+   * inside one, and it took the worktree forty-six minutes later and spent an
+   * attempt there.
+   */
   async #integration<T>(
     work: () => Promise<T>,
     nodeId: string | null = null,
@@ -1697,31 +1708,54 @@ export class RunEffectExecutor implements EffectExecutor {
   ): Promise<T> {
     // Decided at the call, not when the work starts: two callers in one tick
     // must see each other, and the holder is whoever got here first.
-    const queued = this.#integrationDepth > 0
+    const queued = this.#integrationBusy || this.#integrationWaiting.length > 0
     const holder = queued ? this.#integrationHolder : null
-    this.#integrationDepth += 1
-    if (!queued) this.#integrationHolder = nodeId ?? label ?? '?'
     if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'queued', holder)
-    const held = async (): Promise<T> => {
-      this.#integrationHolder = nodeId ?? label ?? '?'
-      if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'granted', holder)
-      // Who has the worktree, between its steps as well as during them.
-      if (nodeId !== null) this.#step(nodeId, { step: 'hold', state: 'started' })
-      let failed = true
-      try {
-        const result = await work()
-        failed = false
-        return result
-      } finally {
-        if (nodeId !== null) this.#step(nodeId, { step: 'hold', state: 'finished', outcome: failed ? 'failed' : 'ok' })
-        this.#integrationDepth -= 1
-        if (this.#integrationDepth === 0) this.#integrationHolder = null
+    await new Promise<void>((start) => {
+      this.#integrationWaiting.push({ nodeId, label, start })
+      this.#pumpIntegration()
+    })
+    if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'granted', holder)
+    // Who has the worktree, between its steps as well as during them.
+    if (nodeId !== null) this.#step(nodeId, { step: 'hold', state: 'started' })
+    let failed = true
+    try {
+      const result = await work()
+      failed = false
+      return result
+    } finally {
+      if (nodeId !== null) this.#step(nodeId, { step: 'hold', state: 'finished', outcome: failed ? 'failed' : 'ok' })
+      this.#integrationBusy = false
+      this.#integrationHolder = null
+      this.#pumpIntegration()
+    }
+  }
+
+  /** Lets the first waiter that is not paused in, when nothing holds the worktree. */
+  #pumpIntegration(): void {
+    if (this.#integrationBusy) return
+    for (const waiting of this.#integrationWaiting) {
+      if (waiting.nodeId === null || this.#integrationPassedOver.has(waiting.nodeId)) continue
+      if (this.#integrationPaused(waiting.nodeId)) {
+        this.#integrationPassedOver.add(waiting.nodeId)
+        this.#options.onIntegrationWait?.(waiting.nodeId, 'paused', this.#integrationHolder)
       }
     }
-    const turn = this.#integrationTurn.then(held, held)
-    // Swallowed on the chain only: the caller still sees the rejection.
-    this.#integrationTurn = turn.catch(() => undefined)
-    return await turn
+    const index = this.#integrationWaiting.findIndex(
+      (waiting) => waiting.nodeId === null || !this.#integrationPaused(waiting.nodeId),
+    )
+    if (index === -1) return
+    const [next] = this.#integrationWaiting.splice(index, 1)
+    if (next === undefined) return
+    if (next.nodeId !== null) this.#integrationPassedOver.delete(next.nodeId)
+    this.#integrationBusy = true
+    this.#integrationHolder = next.nodeId ?? next.label ?? '?'
+    next.start()
+  }
+
+  integrationPause(isPaused: (nodeId: string) => boolean): () => void {
+    this.#integrationPaused = isPaused
+    return () => this.#pumpIntegration()
   }
 
   /**

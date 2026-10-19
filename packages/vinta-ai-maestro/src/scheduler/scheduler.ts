@@ -1186,6 +1186,8 @@ export class Scheduler {
   readonly #laneOf = new Map<string, string>()
   /** Replacements provisioned per original lane name (`#replaceLane`). */
   readonly #replacedLanes = new Map<string, number>()
+  /** Looks at the integration queue again once a node's pause may have changed (`integrationPause`). */
+  readonly #wakeIntegration: () => void
   /** The open login question per harness, resolved with whether it was logged in (`#awaitLogin`). */
   readonly #loginAsked = new Map<string, Promise<boolean>>()
   /**
@@ -1236,6 +1238,14 @@ export class Scheduler {
     this.#workflow = workflow
     this.#takeovers = options.takeovers ?? takeovers
     this.#staffed = Object.keys(workflow.crew).length > 0
+    // A pause asked of a running node is read between its steps, and a node
+    // waiting for the integration worktree is inside one: the queue asks here
+    // instead, so the paused node is passed over until it is resumed.
+    this.#wakeIntegration =
+      options.executor.integrationPause?.((nodeId) => {
+        const state = this.#states.get(nodeId)
+        return state !== undefined && state.pauseRequested && !state.aborted && this.#halt === null
+      }) ?? (() => {})
 
     const resumed =
       options.resumeFrom === undefined
@@ -1613,6 +1623,7 @@ export class Scheduler {
       nodes: active.map((entry) => `${entry.node}:${entry.doing}`).join(','),
     })
     this.#halting.resolve()
+    this.#wakeIntegration()
     for (const state of this.#states.values()) {
       const resume = state.resume
       if (resume !== null) {
@@ -1946,6 +1957,7 @@ export class Scheduler {
     if (this.#settledNode(state)) return this.#operation(state, 'abort', undefined, 'ignored', actor, reason)
 
     state.aborted = true
+    this.#wakeIntegration()
     this.#operation(state, 'abort', undefined, 'sent', actor, reason)
 
     const live = state.live
@@ -2004,7 +2016,9 @@ export class Scheduler {
       state.pauseRequested = false
       state.holdRequested = false
       state.heldBy = null
-      return this.#operation(state, 'resume', undefined, 'delivered', actor, reason)
+      const delivered = this.#operation(state, 'resume', undefined, 'delivered', actor, reason)
+      this.#wakeIntegration()
+      return delivered
     }
     if (state.resume !== null && state.parkKind === 'hold') {
       const delivered = this.#operation(state, 'resume', undefined, 'delivered', actor, reason)

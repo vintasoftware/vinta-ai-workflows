@@ -135,6 +135,14 @@ export interface EffectOutcome {
 /** The injected seam. One method, so a test double is three lines. */
 export interface EffectExecutor {
   execute(invocation: EffectInvocation): Promise<EffectOutcome>
+  /**
+   * Tells the executor which nodes are paused, so a paused node waiting for
+   * the integration worktree is passed over rather than let in. Returns what
+   * to call when that answer may have changed — a pause lifted, a node
+   * aborted, a halt — so the queue is looked at again. Absent on an executor
+   * with no integration worktree.
+   */
+  integrationPause?(isPaused: (nodeId: string) => boolean): () => void
 }
 
 export interface RecordedEffect {

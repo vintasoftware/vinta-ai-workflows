@@ -226,7 +226,7 @@ function setup(
      */
     readonly retryAfterMs?: number
     /** `RunExecutorOptions.onIntegrationWait`, recorded. */
-    readonly onIntegrationWait?: (nodeId: string, state: 'queued' | 'granted', holder: string | null) => void
+    readonly onIntegrationWait?: (nodeId: string, state: 'queued' | 'granted' | 'paused', holder: string | null) => void
     /** The operator's classifier (§17). */
     readonly systemOne?: SystemOne
     /** What resolves a merge conflict. Absent, the fixer does nothing. */
@@ -2476,5 +2476,57 @@ describe('the integration worktree’s queue', () => {
     release()
     await byHand
     await phase
+  })
+
+  /**
+   * A coordinator paused a phase queued behind the worktree, and the phase
+   * took it forty-six minutes later anyway: the pause was read between
+   * pipeline steps, and the queue is inside one. A paused waiter is passed
+   * over, the next one goes in, and it is let in once the pause is lifted.
+   */
+  it('passes over a paused waiter and lets it in once it is resumed', async () => {
+    const waits: [string, string, string | null][] = []
+    const rig = setup(() => goldenWorkflow({}), {
+      onIntegrationWait: (nodeId, state, holder) => waits.push([nodeId, state, holder]),
+    })
+    const paused = new Set(['p2'])
+    const wake = rig.executor.integrationPause((nodeId) => paused.has(nodeId))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const order: string[] = []
+    const first = rig.executor.integration(() => held, 'p1')
+    const second = rig.executor.integration(async () => order.push('p2'), 'p2')
+    const third = rig.executor.integration(async () => order.push('p3'), 'p3')
+    release()
+    await first
+    await third
+    expect(order).toEqual(['p3'])
+    expect(waits).toContainEqual(['p2', 'paused', null])
+
+    paused.delete('p2')
+    wake()
+    await second
+    expect(order).toEqual(['p3', 'p2'])
+  })
+
+  it('lets the next waiter in as soon as a hold by hand ends', async () => {
+    const rig = setup(() => goldenWorkflow({}))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const byHand = rig.executor.integration(() => held, null, 'coordinator')
+    let granted = false
+    const phase = rig.executor.integration(async () => {
+      granted = true
+    }, 'p10')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(granted).toBe(false)
+    release()
+    await byHand
+    await phase
+    expect(granted).toBe(true)
   })
 })

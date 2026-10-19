@@ -584,8 +584,9 @@ export class Journal {
     const waits = new Map<string, string | null>()
     for (const row of rows) {
       const payload = JSON.parse(row.payload_json) as { state?: string; holder?: string | null }
+      // A paused waiter is still in the queue, passed over until it is resumed.
       if (payload.state === 'queued') waits.set(row.node_id, payload.holder ?? null)
-      else waits.delete(row.node_id)
+      else if (payload.state !== 'paused') waits.delete(row.node_id)
     }
     return waits
   }
@@ -655,7 +656,7 @@ export class Journal {
       if (event.nodeId === null) continue
       if (event.type === 'node_wait') {
         if (event.payload['state'] === 'queued') queue.set(event.nodeId, (event.payload['holder'] as string | null) ?? null)
-        else queue.delete(event.nodeId)
+        else if (event.payload['state'] !== 'paused') queue.delete(event.nodeId)
         continue
       }
       if (event.type !== 'integration_step') continue
@@ -699,9 +700,11 @@ export class Journal {
   }
 
   /**
-   * Nodes the operator paused while they were parked on a question
-   * (`Scheduler.pause` — `held`), still held: no answer and no status change
-   * since. For `status`, which would otherwise show them as merely asking.
+   * Nodes paused and still paused: held while parked on a question
+   * (`Scheduler.pause` — `held`), or running with a pause sent that has not
+   * reached a step boundary yet (`sent`) — no answer and no status change
+   * since. For `status`, which would otherwise show them as merely asking, or
+   * as running.
    */
   heldNodes(runId: string): Set<string> {
     const rows = this.db
@@ -717,7 +720,10 @@ export class Journal {
         continue
       }
       const payload = JSON.parse(row.payload_json) as { op?: string; delivery?: string }
-      if (payload.op === 'pause' && payload.delivery === 'held') held.add(row.node_id)
+      // `sent` is a pause a running node has not reached a step boundary for
+      // yet — one queued behind the integration worktree is passed over in
+      // the meantime — and it is paused as far as anyone looking can tell.
+      if (payload.op === 'pause' && (payload.delivery === 'held' || payload.delivery === 'sent')) held.add(row.node_id)
       if (payload.op === 'resume' && payload.delivery === 'delivered') held.delete(row.node_id)
     }
     return held

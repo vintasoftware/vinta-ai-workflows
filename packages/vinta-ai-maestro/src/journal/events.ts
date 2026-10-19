@@ -674,7 +674,8 @@ interface NodePayloads {
    */
   node_wait: {
     readonly on: 'integration_worktree'
-    readonly state: 'queued' | 'granted'
+    /** `paused`: passed over in the queue because the node is paused, until it is resumed. */
+    readonly state: 'queued' | 'granted' | 'paused'
     /** The node holding the worktree when this one queued, or null when it was unknown. */
     readonly holder: string | null
   }

@@ -1275,6 +1275,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a paused phase no longer takes the integration
+  worktree.** A paused node waiting in the integration queue keeps its place
+  but is passed over, and is let in once it is resumed. This is journalled
+  as `node_wait` with state `paused`. `status` shows a node as paused as soon
+  as the pause is sent, not only once it takes effect.
 - **`vinta-ai-maestro`: a lane that cannot be recycled no longer fails the
   phase handed to it.** A recycle that fails (outside the `preserve` stage)
   takes that lane out of the run and provisions a fresh one, `<lane>-r<N>`,
