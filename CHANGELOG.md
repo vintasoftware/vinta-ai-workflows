@@ -1315,6 +1315,22 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a review chore can no longer leave the lane dirty.**
+  Whatever a review leaves uncommitted, such as a mutation experiment's
+  reverted migration or a generated file, is set aside under a
+  `refs/vinta-ai-maestro/wip/` ref. The lane is then reset to `HEAD` before
+  the gates run, and `review_left_lane_dirty` is journalled. The implementer
+  and conflict-fixer prompts now say to run one test command at a time per
+  lane, to check `docker ps` for leftover run containers, and to treat a
+  single test file that runs past two minutes as a lock or hang.
+- **Plan-execution prompts and the review-canvas chore.** The implementer
+  prompt adds the same shared-test-resource rules. The conflict fixer
+  reports `ENVIRONMENT_STALE` (and changes no code) when the merged tree's
+  failures are columns or tables no model defines, and syntax-checks the
+  files git auto-merged. The reviewer leaves the worktree as it found it:
+  mutation experiments run in a throwaway worktree. `plan-feature`'s review
+  chore prompt says so too. Its review-canvas chore passes
+  `--data-dir .pr-review` inside the lane, and setup ignores `.pr-review/`.
 - **`vinta-ai-maestro`: conflicts in generated files no longer fail a
   merge.** After each conflict-fixer round, codegen outputs that the round
   left conflicted, or staged with conflict markers, are settled again and

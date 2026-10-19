@@ -117,6 +117,7 @@ spawns a new agent) with the answers.
       {If run_options.full_test_suite = true:} run the **full test suite** `{{TEST_CMD}}` instead of the scoped suite — this phase guards against regressions in untouched code too.
    {{E2E_OUTER_GATE_LINE}}
 6. Outer gate fails → return step 2 (fix regression), re-run inner loop, then 5a/5b/5c. **Never** commit, push, or proceed while any gate is red.
+7. **Shared test resources.** Run one test command at a time in `<WORKROOT>` — parallel tool calls included: every run there shares the worktree's test databases, and two at once block each other. Before starting one, check `docker ps` for a leftover `<compose project>-*-run-*` container from an earlier run. A single test file that runs longer than about two minutes means a lock or a hang: find what holds it, don't rerun it.
 
 <!-- include: partials/dispatched-agent.md#NO_NESTED_DISPATCH -->
 <!-- block-end: INNER_OUTER_LOOP -->

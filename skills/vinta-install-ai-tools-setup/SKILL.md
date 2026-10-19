@@ -120,7 +120,7 @@ Read `integrations` from `.vinta-ai-workflows.yaml`. Skip this step when nothing
    pr-review install-skill --claude-dir ai-tools/skills --codex-dir ai-tools/skills --json
    ```
 
-   Both flags point at `ai-tools/skills/`, so the tool writes one copy, `ai-tools/skills/pr-review-canvas/`. Every vendor then reaches that copy through its symlink. The tool also adds `.pr-review/settings.yml` to `.gitignore`.
+   Both flags point at `ai-tools/skills/`, so the tool writes one copy, `ai-tools/skills/pr-review-canvas/`. Every vendor then reaches that copy through its symlink. The tool also adds `.pr-review/settings.yml` to `.gitignore`. Then make sure `.gitignore` ignores the whole `.pr-review/` directory, adding the line under the tool's own when it is missing: a maestro lane's canvas chore writes its data there, inside the lane (`--data-dir .pr-review`), because an agent in a lane may not write to the main checkout, and an unignored data directory would land in the phase's commits.
 3. **Never edit `ai-tools/skills/pr-review-canvas/SKILL.md`.** The tool stamps a body hash into its frontmatter, and `pr-review doctor` and `pr-review serve` flag a modified copy as stale. To refresh the skill, run `pr-review upgrade`, not this flow.
 4. Run `pr-review doctor`. Its `skill` check must pass, and it reads the copy through `.agents/skills/`, which step 6 always links. Show any other failed checks to the user with the hints the tool prints, most often `gh auth login` / `glab auth login` or a missing `origin` remote. These do not block the bootstrap.
 5. Do not write `pr-review.config.yml`. Every key in it is optional, and the defaults are correct. Mention that the team can copy the tool's example config to change sharing or mark high-risk paths.

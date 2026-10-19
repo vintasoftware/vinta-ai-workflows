@@ -113,7 +113,9 @@ git -C <integ.workroot> push -u origin plan/{plan-id-kebab}/integ-{P.id}
 The orchestrator **never edits code**, including merge conflicts. On a conflicted `merge`:
 
 1. Capture `git -C <integ.workroot> diff --name-only --diff-filter=U`.
-2. Spawn a **fixer** subagent (the project's `fixer` agent type, at the `agent_models.fixer` model) inside the integration worktree. Its prompt carries: the conflicted paths, both phases' bodies from the plan, both phases' `phase-{id}.md` summaries, and the instruction to resolve for **both** intents — never to `--ours` / `--theirs` a conflict away.
+2. Spawn a **fixer** subagent (the project's `fixer` agent type, at the `agent_models.fixer` model) inside the integration worktree. Its prompt carries: the conflicted paths, both phases' bodies from the plan, both phases' `phase-{id}.md` summaries, and the instruction to resolve for **both** intents — never to `--ours` / `--theirs` a conflict away. It also carries two rules:
+   - **A stale environment is not a merge problem.** When the merged tree's failures are missing or extra columns or tables that no model in the tree defines, the integration worktree's test database belongs to another branch. The fixer changes no code and reports `ENVIRONMENT_STALE`; you recreate the test database there (the test command's fresh-database form) and run the outer gate again, without counting the round.
+   - **Check what git merged by itself.** Before the outer gate, syntax-check every file git auto-merged that both sides touched (`python -m py_compile <file>` for Python, the project's type check for the rest). A clean auto-merge of a list both sides appended to has left two openers that never close.
 3. After the fixer returns, re-run the **outer gate** (`{{BUILD_CMD}}` plus the test scope `run_options.full_test_suite` selects) in the integration worktree. Red → loop back to step 2 with the failure.
 4. Green → commit the merge, push the branch, and record the conflict + resolution in `waves/wave-{N}.md`.
 

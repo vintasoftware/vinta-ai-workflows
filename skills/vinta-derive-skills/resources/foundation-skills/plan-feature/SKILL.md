@@ -761,7 +761,7 @@ Emit this chore on every plan unless `maestro.chores.review` already declares it
 "review": {
   "skill": "thermo-nuclear-review-loop",
   "when": "review",
-  "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it.",
+  "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it. Leave the lane as you found it apart from committed fixes: a mutation experiment runs in a throwaway worktree (git worktree add), never here, and `git status --porcelain` is empty before you state the verdict.",
   "description": "The phase's code review: one reviewer sub-agent, the implementer fixing and answering it."
 }
 ```
@@ -776,12 +776,12 @@ Emit this chore only when `.vinta-ai-workflows.yaml` has `integrations.pr-review
 "review-canvas": {
   "skill": "pr-review-canvas",
   "when": "after_pr",
-  "prompt": "Generate the review canvas for this phase's pull request: run `/pr-review-canvas` with the PR number named above. Report the local review URL and the PR comment link it returns. Do not change any file in the repository.",
+  "prompt": "Generate the review canvas for this phase's pull request: run `/pr-review-canvas` with the PR number named above, passing `--data-dir .pr-review` so its data lands inside this worktree (the directory is gitignored; the main checkout's is outside what you may write). Report the local review URL and the PR comment link it returns. Do not change any tracked file.",
   "description": "A topic-grouped review canvas on each phase PR, for the human reviewer."
 }
 ```
 
-`"when": "after_pr"` is what makes this work. Maestro runs the chore at the end of `integrate`, once the PR is open, and tells the agent the PR's URL and number. When no PR opened, it skips the chore. Do not give it `on_failure: "fail"`; maestro refuses that for an `after_pr` chore, because the phase is already merged. The integration never changes how the plan's phases are written, so the worked example below leaves this chore out.
+`--data-dir .pr-review` is relative to the lane: a lane agent may write only inside its own worktree, and the tool's default data directory resolves to the main checkout, so every phase's canvas chore was refused and fell back to a scratch directory. `"when": "after_pr"` is what makes this work. Maestro runs the chore at the end of `integrate`, once the PR is open, and tells the agent the PR's URL and number. When no PR opened, it skips the chore. Do not give it `on_failure: "fail"`; maestro refuses that for an `after_pr` chore, because the phase is already merged. The integration never changes how the plan's phases are written, so the worked example below leaves this chore out.
 
 ### Worked example
 
@@ -924,7 +924,7 @@ and this `ai-plans/2026-03-04-bookmark-folders.workflow.json`:
     "review": {
       "skill": "thermo-nuclear-review-loop",
       "when": "review",
-      "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it.",
+      "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it. Leave the lane as you found it apart from committed fixes: a mutation experiment runs in a throwaway worktree (git worktree add), never here, and `git status --porcelain` is empty before you state the verdict.",
       "description": "The phase's code review: one reviewer sub-agent, the implementer fixing and answering it."
     },
     "deslop": {
