@@ -996,6 +996,27 @@
         "additionalProperties": false
       }
     },
+    "post_merge": {
+      "description": "A normalizing command for files a clean merge combined — see PostMergeSchema.",
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command run in the integration worktree after git merges a branch by itself, with `{files}` replaced by the files both sides changed (shell-quoted): `python -m py_compile {files} && ruff check --fix --select I,F811,F401 {files} && ruff format {files}`. What it changes is committed on top of the merge; a non-zero exit is journalled and the merged tree’s gates judge it."
+        },
+        "timeout_s": {
+          "default": 300,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
     "ci_only": {
       "default": [],
       "description": "CI checks deliberately left to CI, each with its reason. `doctor` warns about every CI command no gate runs; one listed here is reported as a decision instead of a gap.",

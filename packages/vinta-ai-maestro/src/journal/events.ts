@@ -462,6 +462,20 @@ interface RunPayloads {
    * Paths (the first twenty) and a count, never contents. Ignored files —
    * the lane's databases included — are not restored.
    */
+  /**
+   * `workflow.post_merge` ran on the files a clean merge combined: `clean`
+   * (it changed nothing), `changed` (its changes were committed on top of the
+   * merge) or `failed` (it exited non-zero; the merge stands, and the merged
+   * tree's gates judge it). Counts and an exit code; its output is in the
+   * integration worktree's `post-merge` gate log.
+   */
+  post_merge_result: {
+    readonly node: string
+    readonly status: 'clean' | 'changed' | 'failed'
+    readonly files: number
+    readonly changed: number
+    readonly exit_code: number
+  }
   review_left_lane_dirty: {
     readonly node: string
     readonly chore: string

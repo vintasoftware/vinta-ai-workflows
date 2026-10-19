@@ -97,6 +97,10 @@ export function resolveDocument(authored: unknown, config: ProjectConfig | null)
     doc.ci_only = [...maestro.ci_only]
   }
 
+  if (authored.post_merge === undefined && isObject(maestro.post_merge)) {
+    doc.post_merge = { ...maestro.post_merge }
+  }
+
   const gates = resolveGates(gateTypeDefaults(commands, maestro.gates), customGates(maestro.gates), authored.gates)
   if (gates !== undefined) doc.gates = gates
 

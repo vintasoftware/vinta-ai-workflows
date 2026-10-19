@@ -692,6 +692,61 @@ describe('wave merges', () => {
 })
 
 /**
+ * Git merged two phases' additions to one routes file without a conflict and
+ * left code that did not build (two list openers, a duplicated import), three
+ * times in one observed run. `post_merge` runs on what a clean merge combined.
+ */
+describe('post_merge', () => {
+  async function appendingPair(): Promise<Repo> {
+    const repo = await makeRepo({ 'routes.py': 'start\n\n\n\n\nend\n' })
+    const one = await repo.lane('lane-1')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'routes.py': 'start\na\n\n\n\nend\n', 'only-a.py': 'a\n' }, 'phase a: route')
+    const two = await repo.lane('lane-2')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'routes.py': 'start\n\n\n\nb\nend\n' }, 'phase b: route')
+    return repo
+  }
+
+  it('runs on the files both sides changed and commits what it changes on top of the merge', async () => {
+    const repo = await appendingPair()
+    const seen: string[][] = []
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+      postMerge: async (cwd, files) => {
+        seen.push([...files])
+        await writeFile(join(cwd, 'routes.py'), 'start\na\nb\nend\n')
+        return { ok: true, changed: ['routes.py'] }
+      },
+    })
+    const wave = await integrator.mergeWave(1)
+    expect(seen).toEqual([['routes.py']])
+    expect(run(repo.integ, 'show', `${wave.branch}:routes.py`)).toBe('start\na\nb\nend')
+    expect(subjects(repo.integ, wave.branch)[0]).toBe('chore(post-merge): normalize files merged from plan/wf/phase-b')
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+
+  it('leaves the merge as git made it when the command fails, for the gates to judge', async () => {
+    const repo = await appendingPair()
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b')]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(),
+      postMerge: async (cwd) => {
+        await writeFile(join(cwd, 'routes.py'), 'half-written\n')
+        return { ok: false, changed: ['routes.py'] }
+      },
+    })
+    const wave = await integrator.mergeWave(1)
+    expect(run(repo.integ, 'show', `${wave.branch}:routes.py`)).toBe('start\na\n\n\nb\nend')
+    expect(subjects(repo.integ, wave.branch)[0]).not.toContain('post-merge')
+    expect(run(repo.integ, 'status', '--porcelain')).toBe('')
+  })
+})
+
+/**
  * A wave conflict the fixer could not settle is finished by hand, as the error
  * says to. The next attempt used to `checkout -B wave-<N> wave-<N-1>` and merge
  * every member again, which threw the resolution away and brought the same

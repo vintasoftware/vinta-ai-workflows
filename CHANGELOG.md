@@ -36,6 +36,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `post_merge`.** A workflow (or `maestro.post_merge`)
+  may declare a command that runs in the integration worktree after git
+  merges a branch by itself, with `{files}` set to the files both sides
+  changed (for example `py_compile` plus `ruff check --fix` and
+  `ruff format`). Its changes are committed on top of the merge. If it fails,
+  the merge stays as git made it and the merged tree's gates judge it. Each
+  run is journalled as `post_merge_result`.
 - **`vinta-ai-maestro`: `ci_only` records CI checks deliberately left to
   CI.** It lives in a plan or in `maestro.ci_only` in
   `.vinta-ai-workflows.yaml`. Each entry is a CI command with the reason no

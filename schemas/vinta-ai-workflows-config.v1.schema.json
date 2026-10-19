@@ -877,6 +877,16 @@
             "minLength": 1
           }
         },
+        "post_merge": {
+          "description": "A command run in maestro's integration worktree after git merges a branch by itself, with `{files}` replaced by the files both sides changed — e.g. `python -m py_compile {files} && ruff check --fix --select I,F811,F401 {files} && ruff format {files}`. What it changes is committed on top of the merge; a non-zero exit is journalled and the merged tree's gates judge it. A plan's own `post_merge` replaces this one.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cmd"],
+          "properties": {
+            "cmd": { "type": "string", "minLength": 1 },
+            "timeout_s": { "type": "integer", "minimum": 1 }
+          }
+        },
         "ci_only": {
           "description": "CI checks deliberately left to CI, each with its reason (it needs credentials, a deploy, a hosted service). `vinta-ai-maestro doctor` warns about every CI command no gate runs; one listed here is a decision, not a gap. A plan's own `ci_only` replaces this list.",
           "type": "array",

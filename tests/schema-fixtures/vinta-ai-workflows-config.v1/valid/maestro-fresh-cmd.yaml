@@ -39,6 +39,8 @@ maestro:
       cmd: make api_client && git diff --exit-code -- frontend/src/api
       requires: [test-suite]
       timeout_s: 600
+  post_merge:
+    cmd: python -m py_compile {files} && ruff check --fix --select I,F811,F401 {files}
   ci_only:
     - command: pnpm run generate-client
       reason: needs the deployed API schema

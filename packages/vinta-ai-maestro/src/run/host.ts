@@ -11,6 +11,7 @@
  * thing through `startRun`, so a run submitted to a daemon cannot drift into
  * being a second, subtly different kind of run.
  */
+import { shellQuote } from '../platform/platform.ts'
 import { guardHookCommand } from '../guard/hook.ts'
 import { dirname, join } from 'node:path'
 
@@ -22,7 +23,7 @@ import { createRunExecutor } from '../executor/index.ts'
 import { CodegenCache, codegenLogName } from '../codegen/codegen.ts'
 import { createIntegrationCodegen } from '../codegen/integration.ts'
 import { GateCache } from '../gates/cache.ts'
-import { executeGate } from '../gates/runner.ts'
+import { executeGate, TIMEOUT_EXIT } from '../gates/runner.ts'
 import type { HarnessAdapter } from '../harness/adapter.ts'
 import { ClaudeCodeAdapter } from '../harness/claude-code.ts'
 import { CodexAdapter } from '../harness/codex.ts'
@@ -407,6 +408,34 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         if (result.exitCode !== 0) return { gateId: id, logPath, exitCode: result.exitCode }
       }
       return true
+    },
+    // `workflow.post_merge` on what a clean merge combined, under the
+    // integration worktree's pseudo-node beside its merge gates.
+    postMerge: async (cwd: string, files: readonly string[], forNode: string) => {
+      const hook = current.post_merge
+      if (hook === undefined) return { ok: true, changed: [] }
+      const quoted = files.map((file) => shellQuote(file)).join(' ')
+      const result = await executeGate({
+        gateId: 'post-merge',
+        gate: { cmd: hook.cmd.split('{files}').join(quoted), requires: [], timeout_s: hook.timeout_s },
+        cwd,
+        env: { ...integration.env, ...options.agentEnv },
+        logPath: journal.gateLogPath(runId, INTEGRATION_NODE, 'post-merge'),
+      })
+      const changed = await gitLines(cwd, ['diff', '--name-only'])
+      const ok = result.status === 'passed'
+      journal.append({
+        runId,
+        type: 'post_merge_result',
+        payload: {
+          node: forNode,
+          status: !ok ? 'failed' : changed.length > 0 ? 'changed' : 'clean',
+          files: files.length,
+          changed: changed.length,
+          exit_code: result.exitCode ?? TIMEOUT_EXIT,
+        },
+      })
+      return { ok, changed }
     },
     // Filed against the incoming node — the last of `nodes`, which is the one
     // whose merge hit the conflict and the one an operator is watching. The

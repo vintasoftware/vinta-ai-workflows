@@ -493,6 +493,26 @@ export const ChoreSchema = z.strictObject({
 // commit, so a hook that would rewrite the same files finds nothing to do.
 // ---------------------------------------------------------------------------
 
+/**
+ * A command run on the files a clean merge combined (`workflow.post_merge`).
+ * Git merges two sides' edits to one file without a conflict and still
+ * leaves code that does not build: two list openers that never close, the
+ * same import twice, imports out of order.
+ */
+export const PostMergeSchema = z.strictObject({
+  cmd: z
+    .string()
+    .min(1)
+    .describe(
+      'Shell command run in the integration worktree after git merges a branch by itself, with ' +
+        '`{files}` replaced by the files both sides changed (shell-quoted): `python -m py_compile ' +
+        '{files} && ruff check --fix --select I,F811,F401 {files} && ruff format {files}`. What it ' +
+        'changes is committed on top of the merge; a non-zero exit is journalled and the merged ' +
+        'tree’s gates judge it.',
+    ),
+  timeout_s: z.number().int().min(1).default(300),
+})
+
 export const CodegenStepSchema = z.strictObject({
   cmd: z
     .string()
@@ -1193,6 +1213,9 @@ export const WorkflowSchema = z
           'run in every lane before its gates and in the integration worktree around every ' +
           'merge, in `after` order. A failing step is a red gate.',
       ),
+    post_merge: PostMergeSchema.optional().describe(
+      'A normalizing command for files a clean merge combined — see PostMergeSchema.',
+    ),
     ci_only: z
       .array(
         z.strictObject({

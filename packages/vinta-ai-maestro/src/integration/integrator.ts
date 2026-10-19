@@ -339,6 +339,16 @@ export interface IntegratorOptions {
    */
   readonly verify?: (cwd: string, force?: FreshReason) => Promise<true | false | RedGate>
   /**
+   * `workflow.post_merge` on the files a clean merge combined: what it
+   * changed is staged for a commit on top of the merge, and `ok` is false
+   * when it exited non-zero. Absent, nothing runs.
+   */
+  readonly postMerge?: (
+    cwd: string,
+    files: readonly string[],
+    forNode: string,
+  ) => Promise<{ readonly ok: boolean; readonly changed: readonly string[] }>
+  /**
    * Every conflict a fixer settled, as it is settled.
    *
    * A conflict is a normal outcome, not an exception: the planner's file
@@ -1017,6 +1027,7 @@ export class Integrator {
     let refused: GitCommandError
     try {
       await git(cwd, [...mergeArgs, 'merge', '--no-ff', '--no-edit', incoming])
+      await this.#normalizeMerged(cwd, incoming, forNode)
       await this.#regenerateMerged(cwd, incoming, forNode)
       return null
     } catch (error) {
@@ -1249,6 +1260,43 @@ export class Integrator {
    * put back rather than thrown: nothing conflicted, so there is no fixer to
    * hand it to, and the merged tree's gates (§8) are what judge it.
    */
+  /**
+   * `post_merge` on what a clean merge combined: the files both sides changed
+   * since they parted, still present. Git merged them line by line, which is
+   * how one observed run got two `routes: list[RouteDict] = [` openers, a
+   * duplicated import and imports out of order, each one a fix round and a
+   * gate cycle. What the command changes is one more commit on top; a command
+   * that fails is put back and left to the merged tree's gates, since no
+   * conflict means no fixer to hand it to.
+   */
+  async #normalizeMerged(cwd: string, incoming: string, forNode: string): Promise<void> {
+    const postMerge = this.#options.postMerge
+    if (postMerge === undefined) return
+    const both = await this.#bothSidesChanged(cwd)
+    if (both.length === 0) return
+    const result = await postMerge(cwd, both, forNode).catch(() => ({ ok: false, changed: [] as string[] }))
+    if (result.ok && result.changed.length > 0) {
+      await git(cwd, ['add', '--', ...result.changed])
+      const committed = await commitOutputs(cwd, result.changed, `chore(post-merge): normalize files merged from ${incoming}`)
+        .then(() => true)
+        .catch(() => false)
+      if (committed) return
+    }
+    if (!result.ok || result.changed.length > 0) await gitOk(cwd, ['reset', '-q', '--hard', 'HEAD'])
+  }
+
+  /** The files both parents of the merge just made changed since their merge base, that still exist. */
+  async #bothSidesChanged(cwd: string): Promise<string[]> {
+    try {
+      const base = (await git(cwd, ['merge-base', 'HEAD^1', 'HEAD^2'])).trim()
+      const ours = new Set(await gitLines(cwd, ['diff', '--name-only', '--diff-filter=d', base, 'HEAD^1']))
+      const theirs = await gitLines(cwd, ['diff', '--name-only', '--diff-filter=d', base, 'HEAD^2'])
+      return theirs.filter((path) => ours.has(path) && existsSync(join(cwd, path)))
+    } catch {
+      return []
+    }
+  }
+
   async #regenerateMerged(cwd: string, incoming: string, forNode: string): Promise<void> {
     const codegen = this.#options.codegen
     if (codegen === undefined) return

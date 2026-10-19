@@ -921,6 +921,7 @@ export class Journal {
       case 'lane_unhealthy':
       case 'lane_seeded':
       case 'review_left_lane_dirty':
+      case 'post_merge_result':
       case 'outage_ended':
       case 'branches_moved':
       case 'integration_reclaimed':

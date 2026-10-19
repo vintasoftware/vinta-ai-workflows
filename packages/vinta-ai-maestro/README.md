@@ -572,6 +572,17 @@ own is a normal member of `{changed_files}`. `vitest related` and
 only when it has a placeholder. A fixed `pnpm test:patient` is a line for an
 agent to interpret, and the daemon has no agent to do that.
 
+### Normalizing a clean merge
+
+Git can merge two phases' additions to one file without a conflict and still
+leave code that does not build. `post_merge` runs a command on the files both
+sides of a clean merge changed, before the merged tree's gates; what it changes
+is committed on top of the merge:
+
+```jsonc
+"post_merge": { "cmd": "python -m py_compile {files} && ruff check --fix --select I,F811,F401 {files} && ruff format {files}" }
+```
+
 ### Fresh state in the integration worktree
 
 The integration worktree merges one tree after another, and its gates share
