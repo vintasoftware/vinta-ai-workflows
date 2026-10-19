@@ -416,6 +416,22 @@ interface RunPayloads {
     readonly gate: string
     readonly reason: 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported'
   }
+  /**
+   * A harness could not be reached (`network`: DNS, connection refused, a
+   * gateway's 5xx) or its login lapsed (`auth`), and every phase on it waits in
+   * place rather than failing (`harness/outage.ts`). Once per outage, at run
+   * level: no phase is charged for it.
+   */
+  outage_started: {
+    readonly harness: string
+    readonly cause: 'network' | 'auth'
+  }
+  /** The first turn on the harness that completed after `outage_started`. */
+  outage_ended: {
+    readonly harness: string
+    readonly cause: 'network' | 'auth'
+    readonly duration_ms: number
+  }
   orphan_containers_stopped: {
     readonly lane: string
     readonly count: number

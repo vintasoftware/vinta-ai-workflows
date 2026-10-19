@@ -25,8 +25,11 @@ import {
   Monitor,
   MonitorUnavailable,
   describe as describeRun,
+  describeOutage,
   monitorModel,
+  openOutages,
   runDigest,
+  troubleOf,
 } from '../src/monitor/monitor.ts'
 import { WorkflowSchema, type Workflow } from '../src/types.ts'
 
@@ -398,5 +401,37 @@ describe('the reserved node id', () => {
       nodes: [{ id: MONITOR_NODE, name: 'n', prompt_ref: 'p.md#1' }],
     })
     expect(asNodeId.success).toBe(false)
+  })
+})
+
+describe('what the digest says after an outage', () => {
+  /**
+   * A phase finished hours after a network outage still showed its ENOTFOUND
+   * lines, which read as a phase in trouble. Errors before a session that
+   * ended well are history.
+   */
+  it('drops the errors a later session that ended well put behind it', () => {
+    expect(
+      troubleOf([
+        { type: 'error', message: "API Error: Can't reach the API server (ENOTFOUND)" },
+        { type: 'session_ended', result: 'error' },
+        { type: 'session_ended', result: 'ok' },
+        { type: 'error', message: 'later trouble' },
+      ]),
+    ).toEqual(['error: later trouble'])
+  })
+
+  it('names the harnesses in an outage, once each, until it ends', () => {
+    const at = (id: number, type: string, payload: object) => ({ id, ts: id * 60_000, runId: 'r', type, payload })
+    const events = [
+      at(1, 'outage_started', { harness: 'claude-code', cause: 'network' }),
+      at(2, 'outage_started', { harness: 'codex', cause: 'auth' }),
+      at(3, 'outage_ended', { harness: 'claude-code', cause: 'network', duration_ms: 1 }),
+    ] as unknown as Parameters<typeof openOutages>[0]
+    const open = openOutages(events)
+    expect(open).toEqual([{ harness: 'codex', cause: 'auth', since: 120_000 }])
+    expect(describeOutage(open[0] as (typeof open)[number], 600_000)).toBe(
+      'harness codex needs re-authentication (for 8m); phases on it wait, none is charged',
+    )
   })
 })

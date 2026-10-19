@@ -72,6 +72,7 @@
  * Identifiers only in every journalled field and every error message. Agent
  * output goes to the transcript file, which is where §5.3 puts it.
  */
+import { infrastructureCause, isInfrastructureLine } from '../harness/outage.ts'
 import { ids as guardIds } from '../guard/guard.ts'
 import { checkCommand, shellLineOf } from '../guard/match.ts'
 import { randomUUID } from 'node:crypto'
@@ -1159,6 +1160,8 @@ export class Scheduler {
    * git can answer exactly (`#reorientation`).
    */
   readonly #laneOf = new Map<string, string>()
+  /** The open login question per harness, resolved with whether it was logged in (`#awaitLogin`). */
+  readonly #loginAsked = new Map<string, Promise<boolean>>()
   /**
    * Session ledgers, per member rather than per node.
    *
@@ -3484,12 +3487,44 @@ export class Scheduler {
   /**
    * Asks the operator to log `harness` in, and returns whether they did.
    *
-   * Every node refused by the same harness asks, so each is answerable where
-   * the operator finds it — but they are one question: the first `logged in`
-   * answers all of them, because the login it reports is the harness's, not
-   * the node's. `stop` answers only the node it was given for.
+   * **One question per harness, not per phase.** A login that lapses lapses
+   * for every phase on the harness at once, and one observed run asked it on
+   * each of them. The first node refused asks; every other node refused while
+   * that question is open waits on it (`waiting_on_capacity`) and is let go by
+   * its answer. `stop` answers only the node it was given for, so a waiter
+   * whose asker was stopped asks again itself.
    */
   async #awaitLogin(state: NodeState, harness: string): Promise<boolean> {
+    for (;;) {
+      if (state.aborted) return false
+      const open = this.#loginAsked.get(harness)
+      if (open === undefined) break
+      this.#setStatus(state, 'waiting_on_capacity')
+      const nudged = deferred()
+      state.nudge = nudged.resolve
+      const answered = await Promise.race([open, this.#halting.promise.then(() => false), nudged.promise.then(() => false)])
+      state.nudge = null
+      if (state.aborted) return false
+      if (this.#halt !== null) throw new Halted()
+      this.#setStatus(state, 'running')
+      if (answered) return true
+    }
+    let settle = (_loggedIn: boolean): void => {}
+    this.#loginAsked.set(harness, new Promise<boolean>((done) => (settle = done)))
+    try {
+      const loggedIn = await this.#askLogin(state, harness)
+      settle(loggedIn)
+      return loggedIn
+    } catch (error) {
+      settle(false)
+      throw error
+    } finally {
+      this.#loginAsked.delete(harness)
+    }
+  }
+
+  /** The login question itself, on `state`'s node. */
+  async #askLogin(state: NodeState, harness: string): Promise<boolean> {
     if (state.aborted) return false
     state.loginAsks += 1
     const effectId = `login:${state.node.id}:${state.loginAsks}`
@@ -4324,6 +4359,10 @@ export class Scheduler {
     // An interrupt ends a turn before the model may have said anything, and
     // that is the operator's doing (§9), not a turn that failed to happen.
     let interrupted = false
+    // How the session ended, and the last line that could be the
+    // infrastructure's rather than the agent's (`harness/outage.ts`).
+    let endedWithError = false
+    let infraLine: string | null = null
 
     // The registry: exactly as long-lived as the turn it points at, so a §9
     // operation can never reach a session whose stream has already ended.
@@ -4336,6 +4375,8 @@ export class Scheduler {
         if (event.type === 'assistant_text' || event.type === 'thinking' || event.type === 'tool_use') worked = true
         if (event.type === 'usage' && event.output > 0) worked = true
         if (event.type === 'session_ended' && event.result === 'interrupted') interrupted = true
+        if (event.type === 'session_ended') endedWithError = event.result === 'error'
+        infraLine = isInfrastructureLine(event) ?? infraLine
         if (event.type === 'tool_use') this.#detectBareGate(state, adapter.id, event.name, event.input)
         if (event.type === 'session_started') {
           sessionId = event.sessionId
@@ -4390,6 +4431,26 @@ export class Scheduler {
         throw new CapacityRetry(parked.wait)
       }
     }
+    // A turn that ended on the infrastructure's error, in words no adapter
+    // frame classified: a DNS failure, a refused connection, a gateway's 5xx,
+    // a lapsed login. The run's outage, not this phase's failure — so nothing
+    // is charged to the attempt, the setup-failure count or the empty-turn
+    // count. The harness parks with backoff (a lapsed login holds it for the
+    // operator instead), this node re-drives when it answers, and every other
+    // node on the harness joins the same wait.
+    const cause = closed === undefined && endedWithError && infraLine !== null ? infrastructureCause(infraLine) : null
+    if (cause === 'network') {
+      const parked = admission.refusedMidTurn(adapter.id, state.node.id, {
+        kind: 'transient',
+        reason: 'upstream-unavailable',
+      })
+      if (parked.status === 'retry') throw new CapacityRetry(parked.wait)
+    }
+    if (cause === 'auth') {
+      admission.loginLapsed(adapter.id, `${adapter.id} needs re-authentication`)
+      throw new CapacityRetry(() => Promise.resolve())
+    }
+    if (closed === undefined && !endedWithError) admission.turnCompleted(adapter.id)
     return { sessionId, empty: !worked && !interrupted && this.#halt === null }
   }
 

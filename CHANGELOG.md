@@ -1275,6 +1275,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a provider or network outage no longer fails
+  phases.** A turn that ends on an infrastructure error (DNS or connection
+  failures, `upstream-unavailable`, HTTP 5xx or 529, an expired or rejected
+  login) parks the harness with backoff and re-runs the phase when the
+  harness answers. Nothing is charged to its attempts, retries or
+  "N failures in a row" count. A lapsed login is asked once per harness, not
+  once per phase. Each outage is journalled as `outage_started` /
+  `outage_ended`, and `status` shows a line for every open one. The
+  coordinator's digest no longer lists error lines from before a phase's
+  last session that ended well.
 - **`vinta-ai-maestro`: integration gates no longer run against a test
   database left by another branch.** A command gate may declare `fresh_cmd`
   (also in `maestro.gates.<type>`), the same check from a fresh database (for

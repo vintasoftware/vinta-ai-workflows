@@ -30,6 +30,7 @@ import {
   type PendingQuestion,
   type RunRow,
 } from '../journal/journal.ts'
+import { describeOutage, openOutages } from '../monitor/monitor.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
 import { warnStaleUis } from './ui-record.ts'
@@ -203,10 +204,12 @@ function showRun(
     return ` — waiting for the integration worktree${holder === null || holder === undefined ? '' : ` (held by ${holder})`}`
   }
 
+  const outages = openOutages(journal.events(runId))
   if (json) {
     io.out(
       JSON.stringify({
         runId,
+        outages,
         workflowId: row.workflow_id,
         state,
         pid: job?.pid ?? null,
@@ -239,6 +242,7 @@ function showRun(
   io.out(`started   ${new Date(row.started_at).toLocaleString()}`)
   if (ended !== null) io.out(`ended     ${ended}`)
   io.out(`elapsed   ${duration((row.ended_at ?? Date.now()) - row.started_at)}`)
+  for (const outage of outages) io.out(`outage    ${describeOutage(outage)}`)
   io.out('')
   io.out(
     table(

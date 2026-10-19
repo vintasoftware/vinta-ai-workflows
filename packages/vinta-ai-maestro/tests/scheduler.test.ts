@@ -899,6 +899,78 @@ describe('capacity', () => {
   })
 
   /**
+   * Three hours of a network outage in one observed run charged every turn it
+   * ended to the phase running it: failed attempts, a setup-failure streak,
+   * and phases parked for a person for a DNS server that was down. A turn
+   * that ends on the infrastructure's error is the run's outage: the harness
+   * parks with backoff, nothing is charged, and the run resumes on its own.
+   */
+  it('parks the harness on a turn that ended on a network error, and charges the phase nothing', async () => {
+    const r = rig(makeWorkflow([node('a')], { lanes: 1 }), {
+      scripts: [
+        {
+          events: [{ type: 'error', message: "API Error: Can't reach the API server (ENOTFOUND)" }],
+          result: 'error',
+        },
+      ],
+      onFailure: 'retry',
+      retries: 3,
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'waiting_on_capacity', 'the outage wait')
+    const types = () => r.journal.events('run-1').map((event) => event.type)
+    expect(types()).toContain('outage_started')
+    expect(types()).not.toContain('node_error')
+
+    await r.advance(60_000)
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(types()).not.toContain('node_error')
+    const ended = r.journal.events('run-1').filter((event) => event.type === 'outage_ended')
+    expect(ended.map((event) => (event.payload as { cause: string }).cause)).toEqual(['network'])
+    expectDrained(r)
+  })
+
+  it('reads an agent writing about an error as the agent’s work, not an outage', async () => {
+    const r = rig(makeWorkflow([node('a')], { lanes: 1 }), {
+      scripts: [
+        {
+          events: [{ type: 'assistant_text', text: 'Fixed the handler that returned 401 on ECONNREFUSED.' }],
+          result: 'ok',
+        },
+      ],
+    })
+    const report = await r.scheduler.run()
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(r.journal.events('run-1').some((event) => event.type === 'outage_started')).toBe(false)
+    expectDrained(r)
+  })
+
+  it('holds a harness whose login lapsed mid-turn for the operator, without charging the phase', async () => {
+    const r = rig(makeWorkflow([node('a')], { lanes: 1 }), {
+      scripts: [
+        {
+          events: [{ type: 'error', message: 'API Error: 401 OAuth access token has expired' }],
+          result: 'error',
+        },
+      ],
+      onFailure: 'retry',
+      retries: 3,
+    })
+
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the login question')
+    const started = r.journal.events('run-1').filter((event) => event.type === 'outage_started')
+    expect(started.map((event) => (event.payload as { cause: string }).cause)).toEqual(['auth'])
+    expect(r.journal.events('run-1').some((event) => event.type === 'node_error')).toBe(false)
+
+    r.scheduler.answer('a', { human: { answer: 'logged in' } })
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+
+  /**
    * `defaults.model_fallbacks`: a model out of quota is retried on its
    * fallback at once, rather than parking the harness for a reset that a
    * credit allowance may never have.
@@ -1388,20 +1460,28 @@ describe('a logged-out harness (§6.1)', () => {
     expectDrained(r)
   })
 
-  it('resumes every node the same harness refused on one answer', async () => {
+  /**
+   * A login lapses for the harness, not for one phase: one observed run asked
+   * it on every phase that was running. One question, and the other nodes
+   * wait on its answer.
+   */
+  it('asks once per harness and resumes every node it refused on that answer', async () => {
     const r = rig(makeWorkflow([node('a'), node('b'), node('c')], { lanes: 3 }), {
       spawns: ['unauthenticated'],
     })
 
     const running = r.scheduler.run()
     await until(
-      () => ['a', 'b', 'c'].every((id) => r.scheduler.statuses[id] === 'awaiting_human'),
-      'every node asking',
+      () =>
+        Object.values(r.scheduler.statuses).filter((status) => status === 'awaiting_human').length === 1 &&
+        Object.values(r.scheduler.statuses).filter((status) => status === 'waiting_on_capacity').length === 2,
+      'one node asking, two waiting on it',
     )
     // One refusal was spent; the other two were told without spawning.
-    expect(questions(r)).toHaveLength(3)
+    const asked = questions(r)
+    expect(asked).toHaveLength(1)
 
-    r.scheduler.answer('b', { human: { answer: 'logged in' } })
+    r.scheduler.answer(asked[0]?.node as string, { human: { answer: 'logged in' } })
     const report = await running
     expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
     expectDrained(r)

@@ -46,7 +46,7 @@ import { dirname, join } from 'node:path'
 
 import type { AgentTask, HarnessAdapter, SpawnOutcome } from '../harness/adapter.ts'
 import { type ModelFallbacks, spawnWithFallbacks } from '../harness/fallback.ts'
-import type { NodeStatus } from '../journal/events.ts'
+import type { NodeStatus, StoredEvent } from '../journal/events.ts'
 import type { Journal } from '../journal/journal.ts'
 import { MONITOR_ROLE, OPERATOR_ROLE } from '../journal/transcript.ts'
 import type { Workflow } from '../types.ts'
@@ -95,6 +95,8 @@ export interface RunDigest {
   /** The plan document this run executes, if the workflow names one. */
   readonly planRef: string | null
   readonly nodes: readonly NodeDigest[]
+  /** Harnesses in an outage now, from the journal (`outage_started` with no `outage_ended`). */
+  readonly outages: readonly OpenOutage[]
 }
 
 /**
@@ -144,7 +146,36 @@ export function runDigest(journal: Journal, runId: string, workflow: Workflow): 
     storePath,
     planRef: workflow.plan_ref ?? null,
     nodes,
+    outages: openOutages(journal.events(runId)),
   }
+}
+
+export interface OpenOutage {
+  readonly harness: string
+  readonly cause: 'network' | 'auth'
+  readonly since: number
+}
+
+/** Outages the journal opened and has not closed, per harness. */
+export function openOutages(events: readonly StoredEvent[]): readonly OpenOutage[] {
+  const open = new Map<string, OpenOutage>()
+  for (const event of events) {
+    if (event.type === 'outage_started') {
+      const payload = event.payload as { harness: string; cause: 'network' | 'auth' }
+      if (!open.has(payload.harness)) open.set(payload.harness, { ...payload, since: event.ts })
+    } else if (event.type === 'outage_ended') {
+      open.delete((event.payload as { harness: string }).harness)
+    }
+  }
+  return [...open.values()]
+}
+
+/** One line per open outage, as `status` and the digest print it. */
+export function describeOutage(outage: OpenOutage, now: number = Date.now()): string {
+  const minutes = Math.max(0, Math.round((now - outage.since) / 60_000))
+  return outage.cause === 'auth'
+    ? `harness ${outage.harness} needs re-authentication (for ${minutes}m); phases on it wait, none is charged`
+    : `harness ${outage.harness} unreachable for ${minutes}m; phases on it wait and resume on their own`
 }
 
 /** The reason each failed node recorded, from its own `node_status` event. */
@@ -161,15 +192,20 @@ function failureReasons(journal: Journal, runId: string): Map<string, string> {
 }
 
 /**
- * The refusals and errors in a node's transcript.
+ * The refusals and errors in a node's transcript since its last session that
+ * ended well.
  *
  * These are the entries that explain a failure rather than describe the work.
  * A run whose phases were refused sixty-nine shell commands is exactly the case
  * where reading these in order *is* the diagnosis — and the case that motivated
  * carrying a refusal's own sentence rather than only its token.
+ *
+ * A session that ended `ok` is where they stop being the diagnosis: one
+ * observed phase finished hours after a network outage and still showed its
+ * `ENOTFOUND` lines, which read as a phase in trouble.
  */
-function troubleOf(entries: readonly unknown[]): readonly string[] {
-  const found: string[] = []
+export function troubleOf(entries: readonly unknown[]): readonly string[] {
+  let found: string[] = []
   for (const entry of entries) {
     const row = entry as {
       type?: string
@@ -177,8 +213,11 @@ function troubleOf(entries: readonly unknown[]): readonly string[] {
       reason?: string
       detail?: string
       message?: string
+      result?: string
     }
-    if (row.type === 'permission_denied') {
+    if (row.type === 'session_ended' && row.result === 'ok') {
+      found = []
+    } else if (row.type === 'permission_denied') {
       found.push(`refused ${row.tool ?? '?'}: ${row.detail ?? row.reason ?? 'no reason given'}`)
     } else if (row.type === 'error' && typeof row.message === 'string') {
       found.push(`error: ${row.message}`)
@@ -211,6 +250,7 @@ export function describe(digest: RunDigest): string {
     `Repository: ${digest.repoPath}`,
     `Store: ${digest.storePath} (journal at flow.db, run state under runs/, lane worktrees under lanes/)`,
     ...(digest.planRef === null ? [] : [`Plan document: ${digest.planRef}`]),
+    ...digest.outages.map((outage) => `Outage: ${describeOutage(outage)}.`),
     '',
   ]
   for (const node of digest.nodes) {

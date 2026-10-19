@@ -81,6 +81,7 @@
  * messages come from the adapter, which is bound by the same rule; everything
  * this module adds is a run, node or harness identifier.
  */
+import type { OutageCause } from '../harness/outage.ts'
 import type {
   AgentSession,
   AgentTask,
@@ -270,6 +271,19 @@ interface HarnessState {
    * each once, which costs one refusal rather than a stale belief.
    */
   exhausted: Map<string, number>
+  /**
+   * The outage this harness is in, from the first `transient` park or lapsed
+   * login until a turn on it completes again. One `outage_started` and one
+   * `outage_ended` per outage, however many nodes it parked.
+   */
+  outage: { readonly since: number; readonly cause: OutageCause } | null
+}
+
+/** A harness that cannot be reached, or whose login lapsed: what `status` prints for the run. */
+export interface Outage {
+  readonly harness: string
+  readonly cause: OutageCause
+  readonly since: number
 }
 
 export class AdmissionControl {
@@ -380,6 +394,7 @@ export class AdmissionControl {
       // no timer ends it. The harness holds the refusal until `loggedIn`.
       if (outcome.kind === 'unauthenticated') {
         state.loginRequired = outcome.message
+        this.#outageStarted(state, 'auth')
         return { status: 'unauthenticated', message: outcome.message }
       }
 
@@ -449,6 +464,50 @@ export class AdmissionControl {
    */
   loggedIn(harness: string): void {
     this.#state(harness).loginRequired = null
+  }
+
+  /**
+   * A turn on `harness` ended on an expired or rejected login (`harness/
+   * outage.ts`). Held exactly as an `unauthenticated` spawn refusal is, so the
+   * next spawn on it asks the operator instead of running.
+   */
+  loginLapsed(harness: string, message: string): void {
+    const state = this.#state(harness)
+    state.loginRequired = message
+    this.#outageStarted(state, 'auth')
+  }
+
+  /**
+   * A turn on `harness` completed without an infrastructure error: whatever
+   * outage it was in is over.
+   */
+  turnCompleted(harness: string): void {
+    const state = this.#state(harness)
+    const outage = state.outage
+    if (outage === null) return
+    state.outage = null
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      type: 'outage_ended',
+      payload: { harness, cause: outage.cause, duration_ms: Math.max(0, this.#clock.now() - outage.since) },
+    })
+  }
+
+  /** Harnesses in an outage now. */
+  outages(): readonly Outage[] {
+    return [...this.#states.values()].flatMap((state) =>
+      state.outage === null ? [] : [{ harness: state.harness, ...state.outage }],
+    )
+  }
+
+  #outageStarted(state: HarnessState, cause: OutageCause): void {
+    if (state.outage !== null) return
+    state.outage = { since: this.#clock.now(), cause }
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      type: 'outage_started',
+      payload: { harness: state.harness, cause },
+    })
   }
 
   /** Whether this run configured a ceiling — that is, loaded an adapter — for the harness. */
@@ -564,6 +623,7 @@ export class AdmissionControl {
     // either way and waking early only buys another refusal.
     state.wakeAt = Math.max(state.wakeAt, wakeAt)
     state.kind = kind
+    if (kind === 'transient') this.#outageStarted(state, 'network')
     this.#waitLog.record(this.#options.runId, harness, { kind, wakeAt: state.wakeAt })
     this.#arm(harness, state)
 
@@ -696,6 +756,7 @@ export class AdmissionControl {
       starting: Promise.resolve(),
       loginRequired: null,
       exhausted: new Map(),
+      outage: null,
     }
     this.#states.set(harness, state)
     return state
