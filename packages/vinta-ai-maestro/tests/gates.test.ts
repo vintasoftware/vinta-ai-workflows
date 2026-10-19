@@ -113,6 +113,25 @@ describe('gate runner', () => {
   }, 20_000)
 
   /**
+   * The time limit is the command's. A gate queued behind another lane for
+   * longer than its `timeout_s` still gets its whole budget once it runs.
+   */
+  it('starts the time limit when the gate gets its pools, not when it asks for them', async () => {
+    const pools = newPools()
+    const other = await pools.acquire(['test-suite'])
+    setTimeout(() => other.release(), 1_500)
+    const result = await runGate({
+      gateId: 'unit',
+      gate: gate({ stdout: ['ok'] }, { timeout_s: 1 }),
+      cwd: workspace,
+      env: {},
+      logPath: join(workspace, 'unit.log'),
+      pools,
+    })
+    expect(result.status).toBe('passed')
+  }, 10_000)
+
+  /**
    * Nine timeouts in one observed run, and the journal could not say whether
    * any of them was a hung suite or a host too busy to finish one: the row
    * held the status and nothing else. These are the numbers that decide it.

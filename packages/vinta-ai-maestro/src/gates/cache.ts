@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS gate_results (
  * - `fresh_cmd` and `cold_cmd` are the same: when one runs, it arrives as
  *   `cmd`. `scope_cache` only decides which line that is.
  */
-const INERT_GATE_FIELDS: ReadonlySet<string> = new Set(['description', 'tuning', 'type', 'scoped_cmd', 'cold_cmd', 'scope_cache', 'fresh_cmd'])
+const INERT_GATE_FIELDS: ReadonlySet<string> = new Set(['description', 'tuning', 'type', 'scoped_cmd', 'cold_cmd', 'scope_cache', 'fresh_cmd', 'queue_timeout_s'])
 
 /**
  * The cache key component for a command gate — what `judgeCacheKey` is for a

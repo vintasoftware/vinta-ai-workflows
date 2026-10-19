@@ -492,6 +492,11 @@
                   "type": "integer",
                   "minimum": 1
                 },
+                "queue_timeout_s": {
+                  "description": "How long a phase gate may wait for its `requires` pools before the attempt fails, naming who held them. `timeout_s` counts only the command's own runtime. Absent, it waits as long as it takes.",
+                  "type": "integer",
+                  "minimum": 1
+                },
                 "tuning": {
                   "description": "Flags the monitor may add to `cmd` when it retunes the gate mid-run. Same shape as a workflow gate's `tuning`.",
                   "type": "object",
@@ -551,6 +556,11 @@
                   }
                 },
                 "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "queue_timeout_s": {
+                  "description": "How long a phase gate may wait for its `requires` pools before the attempt fails, naming who held them. `timeout_s` counts only the command's own runtime. Absent, it waits as long as it takes.",
                   "type": "integer",
                   "minimum": 1
                 },
@@ -616,6 +626,11 @@
                   "type": "integer",
                   "minimum": 1
                 },
+                "queue_timeout_s": {
+                  "description": "How long a phase gate may wait for its `requires` pools before the attempt fails, naming who held them. `timeout_s` counts only the command's own runtime. Absent, it waits as long as it takes.",
+                  "type": "integer",
+                  "minimum": 1
+                },
                 "tuning": {
                   "description": "Flags the monitor may add to `cmd` when it retunes the gate mid-run. Same shape as a workflow gate's `tuning`.",
                   "type": "object",
@@ -675,6 +690,11 @@
                   }
                 },
                 "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "queue_timeout_s": {
+                  "description": "How long a phase gate may wait for its `requires` pools before the attempt fails, naming who held them. `timeout_s` counts only the command's own runtime. Absent, it waits as long as it takes.",
                   "type": "integer",
                   "minimum": 1
                 },
@@ -740,6 +760,11 @@
                   }
                 },
                 "timeout_s": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "queue_timeout_s": {
+                  "description": "How long a phase gate may wait for its `requires` pools before the attempt fails, naming who held them. `timeout_s` counts only the command's own runtime. Absent, it waits as long as it takes.",
                   "type": "integer",
                   "minimum": 1
                 },

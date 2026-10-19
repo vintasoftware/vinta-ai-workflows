@@ -1104,6 +1104,39 @@ describe('capacity', () => {
    * order, per node — and `analyzeRun` reading them back off a *real* journal
    * is what proves the producer and the consumer agree.
    */
+  /**
+   * A gate "killed at its time limit while queued" never ran a test. The
+   * command's `timeout_s` starts at its spawn; the wait is bounded only by
+   * `queue_timeout_s`, and its failure names the wait, the pool and who held it.
+   */
+  it('fails a gate that waited past its queue_timeout_s, naming the pool and its holder', async () => {
+    const gatePipeline = {
+      states: [
+        { id: 'gate', name: 'Gate', position: { x: 0, y: 0 }, onEnter: [{ id: 'e-gate', definitionId: 'run_gate', params: {} }] },
+        { id: 'done', name: 'Done', position: { x: 200, y: 0 } },
+      ],
+      transitions: [{ id: 't-done', from: 'gate', to: 'done' }],
+      initialStateIds: ['gate'],
+      finalStateIds: ['done'],
+    }
+    const r = rig(
+      makeWorkflow([node('a', [], { gates: ['unit'], pipeline: 'gate' })], {
+        resources: { lane: { capacity: 1, kind: 'worktree' }, 'test-suite': { capacity: 1, kind: 'semaphore' } },
+        gates: { unit: { cmd: 'true', requires: ['test-suite'], queue_timeout_s: 1 } },
+        pipelines: { gate: gatePipeline },
+        pipeline: 'gate',
+      }),
+      { onFailure: 'stop' },
+    )
+    const held = await r.pools.acquire(['test-suite'])
+    r.journal.acquireLease('test-suite', 'p6')
+    const report = await r.scheduler.run()
+    held.release()
+
+    expect(report.statuses['a']).toBe('failed')
+    expect(report.failures['a']).toMatch(/^gate unit waited 0m for test-suite behind p6, past its queue_timeout_s; it never ran/)
+  }, 10_000)
+
   it('journals every edge of a gate-pool acquisition', async () => {
     const nodes = ['a', 'b', 'c'].map((id) => node(id, [], { gates: ['unit'], pipeline: 'gate' }))
     const r = rig(

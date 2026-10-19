@@ -722,6 +722,13 @@
               },
               "timeout_s": {
                 "default": 1800,
+                "description": "How long the command may run, counted from when it starts — never the time it queued for `requires`.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "queue_timeout_s": {
+                "description": "How long a phase gate may wait for its `requires` pools before the attempt fails, naming who held them and for how long. Absent, it waits as long as it takes.",
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991

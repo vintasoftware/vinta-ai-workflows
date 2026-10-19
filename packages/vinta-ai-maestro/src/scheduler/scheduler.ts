@@ -153,11 +153,12 @@ import {
   recommendedAnswers,
 } from '../questions/agent-questions.ts'
 import { killLiveGates } from '../gates/runner.ts'
-import type { Lease, ResourcePools } from '../resources/pools.ts'
+import { AcquireAborted, type Lease, type ResourcePools } from '../resources/pools.ts'
 import {
   CHORE_TIMINGS,
   type ChoreTiming,
   type CrewMember,
+  isJudgeGate,
   type Node,
   type Pipeline,
   type SideEffect,
@@ -644,6 +645,21 @@ class HarnessFault extends SpawnFatal {}
 class LaneUnusable extends Error {}
 
 /**
+ * A phase gate that waited longer than its `queue_timeout_s` for its pools.
+ * The message names the wait, the pools and who held them — identifiers and
+ * minutes, which is what a reader needs to tell a slow suite from a queue.
+ */
+class GateQueueTimeout extends Error {
+  constructor(gates: readonly string[], pools: readonly string[], waitedMs: number, holders: readonly string[]) {
+    super(
+      `gate ${gates.join(', ')} waited ${Math.round(waitedMs / 60_000)}m for ${pools.join(', ')}` +
+        `${holders.length === 0 ? '' : ` behind ${holders.join(', ')}`}, past its queue_timeout_s; it never ran`,
+    )
+    this.name = 'GateQueueTimeout'
+  }
+}
+
+/**
  * A lane whose recycle failed: the lane's fault, not the phase's, so the phase
  * is handed a freshly provisioned lane instead of failing (`#replaceLane`).
  * One observed phase failed six times in a row on one lane that root-owned
@@ -1093,7 +1109,8 @@ function failureReason(error: unknown): string {
     error instanceof SpawnFatal ||
     error instanceof LaneUnusable ||
     // The interpreter composed this one out of a state id and a trigger id.
-    error instanceof PipelineStuckError
+    error instanceof PipelineStuckError ||
+    error instanceof GateQueueTimeout
   ) {
     return String(error.message)
   }
@@ -4923,7 +4940,30 @@ export class Scheduler {
     // the wait is the fact §13.3 wants, and an event written after the grant
     // could only report a queue time it had already lost.
     this.#gatePool(state, 'requested', needs)
-    state.gateLease = await this.#options.pools.acquire(needs)
+    // `timeout_s` is the command's and starts at the spawn (`gates/runner.ts`);
+    // the wait for the pools is bounded only by `queue_timeout_s`, and reported
+    // as a wait, not as a suite that ran out of time.
+    const queueTimeouts = this.#gateIds(state.node, invocation.effect.params['gate']).flatMap((id) => {
+      const gate = this.#workflow.gates[id]
+      return gate !== undefined && !isJudgeGate(gate) && gate.queue_timeout_s !== undefined ? [gate.queue_timeout_s] : []
+    })
+    const queuedAt = Date.now()
+    try {
+      state.gateLease = await this.#options.pools.acquire(
+        needs,
+        queueTimeouts.length === 0 ? {} : { signal: AbortSignal.timeout(Math.min(...queueTimeouts) * 1000) },
+      )
+    } catch (error) {
+      if (!(error instanceof AcquireAborted)) throw error
+      this.#gatePool(state, 'released', needs)
+      const holders = this.#options.journal
+        .leases()
+        .filter((lease) => needs.includes(lease.resource) && lease.holder_node !== state.node.id)
+        .map((lease) => lease.holder_node)
+      throw new GateQueueTimeout(this.#gateIds(state.node, invocation.effect.params['gate']), needs, Date.now() - queuedAt, [
+        ...new Set(holders),
+      ])
+    }
     state.gateHeld = needs
     this.#gatePool(state, 'granted', needs)
     for (const resource of needs) this.#options.journal.acquireLease(resource, state.node.id)
@@ -4934,8 +4974,13 @@ export class Scheduler {
    * declared — and every codegen step's, since the steps run first in the
    * same effect.
    */
+  /** The gates a `run_gate` runs: one named gate, or every gate the node declared. */
+  #gateIds(node: Node, named: unknown): string[] {
+    return typeof named === 'string' ? [named] : [...node.gates]
+  }
+
   #gateNeeds(node: Node, named: unknown): string[] {
-    const ids = typeof named === 'string' ? [named] : node.gates
+    const ids = this.#gateIds(node, named)
     const needs = new Set<string>()
     for (const id of ids) {
       for (const resource of this.#workflow.gates[id]?.requires ?? []) needs.add(resource)

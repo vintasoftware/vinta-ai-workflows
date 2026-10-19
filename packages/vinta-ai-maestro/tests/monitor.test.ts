@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import type { AgentTask, HarnessAdapter, SpawnOutcome } from '../src/harness/adapter.ts'
 import { MockAdapter } from '../src/harness/mock.ts'
+import { describePoolQueues, poolQueues } from '../src/cli/status.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import {
   MONITOR_NODE,
@@ -433,5 +434,22 @@ describe('what the digest says after an outage', () => {
     expect(describeOutage(open[0] as (typeof open)[number], 600_000)).toBe(
       'harness codex needs re-authentication (for 8m); phases on it wait, none is charged',
     )
+  })
+})
+
+describe('the pool queue in status', () => {
+  it('shows who holds a pool and who waits, in order, with how long', () => {
+    const at = (id: number, nodeId: string, type: string, payload: object) => ({ id, ts: id * 60_000, runId: 'r', nodeId, type, payload })
+    const events = [
+      at(1, 'p3b', 'gate_pool', { phase: 'requested', resources: ['test-suite'] }),
+      at(1, 'p3b', 'gate_pool', { phase: 'granted', resources: ['test-suite'] }),
+      at(2, 'p5b', 'gate_pool', { phase: 'requested', resources: ['test-suite'] }),
+      at(3, 'p5c', 'gate_pool', { phase: 'requested', resources: ['test-suite'] }),
+      at(4, 'p1', 'gate_pool', { phase: 'requested', resources: ['lint'] }),
+      at(4, 'p1', 'gate_pool', { phase: 'granted', resources: ['lint'] }),
+    ] as unknown as Parameters<typeof poolQueues>[0]
+    expect(describePoolQueues(poolQueues(events), 25 * 60_000)).toEqual([
+      'test-suite: p3b (holds 24m) → p5b (waits 23m) → p5c (waits 22m)',
+    ])
   })
 })

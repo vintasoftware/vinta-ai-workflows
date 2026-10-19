@@ -273,7 +273,21 @@ export const CommandGateSchema = z.strictObject({
     .array(Id)
     .default([])
     .describe('Resource pool ids acquired before the gate runs, in canonical order.'),
-  timeout_s: z.number().int().min(1).default(1800),
+  timeout_s: z
+    .number()
+    .int()
+    .min(1)
+    .default(1800)
+    .describe('How long the command may run, counted from when it starts — never the time it queued for `requires`.'),
+  queue_timeout_s: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      'How long a phase gate may wait for its `requires` pools before the attempt fails, naming ' +
+        'who held them and for how long. Absent, it waits as long as it takes.',
+    ),
   tuning: GateTuningSchema.optional(),
   description: z.string().optional(),
 })

@@ -247,6 +247,7 @@ function showRun(
   io.out(`elapsed   ${duration((row.ended_at ?? Date.now()) - row.started_at)}`)
   for (const outage of outages) io.out(`outage    ${describeOutage(outage)}`)
   for (const lane of unhealthy) io.out(`lane      ${describeUnhealthyLane(lane)}`)
+  if (state === 'running') for (const line of describePoolQueues(poolQueues(journal.events(runId)))) io.out(`pool      ${line}`)
   io.out('')
   io.out(
     table(
@@ -350,4 +351,80 @@ export function describeUnhealthyLane(lane: UnhealthyLane): string {
     `${lane.lane} is unhealthy (${lane.stage} would not recycle) and was replaced by ${lane.replacement}` +
     (blocked.length === 0 ? '' : `; could not remove ${blocked.join(', ')}`)
   )
+}
+
+export interface PoolQueue {
+  readonly resource: string
+  /** Who holds it, oldest first, and since when. */
+  readonly holders: readonly { readonly node: string; readonly since: number }[]
+  /** Who waits for it, in the order they asked. */
+  readonly waiting: readonly { readonly node: string; readonly since: number }[]
+}
+
+/**
+ * Who holds each pool and who waits for it, from the journal: a phase's gate
+ * step (`gate_pool`) and an agent's `with` (`agent_lease`). Nobody had to read
+ * `ps` and `lsof` to see that a capacity-1 `test-suite` had four phases in
+ * line behind it.
+ */
+export function poolQueues(events: readonly StoredEvent[]): readonly PoolQueue[] {
+  const holding = new Map<string, Map<string, number>>()
+  const waiting = new Map<string, Map<string, number>>()
+  const leases = new Map<string, { node: string; resources: readonly string[] }>()
+  const at = (map: Map<string, Map<string, number>>, resource: string): Map<string, number> => {
+    const found = map.get(resource) ?? new Map<string, number>()
+    map.set(resource, found)
+    return found
+  }
+  for (const event of events) {
+    if (event.type === 'run_resumed' || event.type === 'run_ended') {
+      holding.clear()
+      waiting.clear()
+      leases.clear()
+      continue
+    }
+    if (event.type === 'gate_pool') {
+      for (const resource of event.payload.resources) {
+        if (event.payload.phase === 'requested') at(waiting, resource).set(event.nodeId, event.ts)
+        if (event.payload.phase === 'granted') {
+          at(waiting, resource).delete(event.nodeId)
+          at(holding, resource).set(event.nodeId, event.ts)
+        }
+        if (event.payload.phase === 'released') {
+          at(waiting, resource).delete(event.nodeId)
+          at(holding, resource).delete(event.nodeId)
+        }
+      }
+    } else if (event.type === 'agent_lease') {
+      if (event.payload.phase === 'acquired') {
+        leases.set(event.payload.lease_id, { node: event.nodeId, resources: event.payload.resources })
+        for (const resource of event.payload.resources) at(holding, resource).set(event.nodeId, event.ts)
+      } else {
+        const lease = leases.get(event.payload.lease_id)
+        leases.delete(event.payload.lease_id)
+        for (const resource of lease?.resources ?? []) at(holding, resource).delete(lease?.node ?? '')
+      }
+    }
+  }
+  const resources = [...new Set([...holding.keys(), ...waiting.keys()])].sort()
+  return resources.flatMap((resource) => {
+    const held = [...(holding.get(resource) ?? new Map<string, number>())].map(([node, since]) => ({ node, since }))
+    const queued = [...(waiting.get(resource) ?? new Map<string, number>())].map(([node, since]) => ({ node, since }))
+    return held.length === 0 && queued.length === 0 ? [] : [{ resource, holders: held, waiting: queued }]
+  })
+}
+
+/** `test-suite: p3b (holds 4m) → p5b (waits 22m) → p5c (waits 3m)`. */
+export function describePoolQueues(queues: readonly PoolQueue[], now: number = Date.now()): string[] {
+  const minutes = (since: number): string => `${Math.max(0, Math.round((now - since) / 60_000))}m`
+  return queues
+    .filter((queue) => queue.waiting.length > 0)
+    .map(
+      (queue) =>
+        `${queue.resource}: ` +
+        [
+          ...queue.holders.map((entry) => `${entry.node} (holds ${minutes(entry.since)})`),
+          ...queue.waiting.map((entry) => `${entry.node} (waits ${minutes(entry.since)})`),
+        ].join(' → '),
+    )
 }

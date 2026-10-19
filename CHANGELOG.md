@@ -36,6 +36,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `queue_timeout_s`, and the pool queue in `status`.**
+  A gate's `timeout_s` counts only its command's runtime, and a regression
+  test now pins that down. The optional `queue_timeout_s` bounds the wait
+  for the gate's pools: a gate that waits too long fails with how long it
+  waited and who held the pool. `status` shows each pool's queue in order,
+  for example `test-suite: p3b (holds 4m) → p5b (waits 22m) → p5c (waits 3m)`.
 - **`vinta-ai-maestro`: a gate can run differently in a lane with no scope
   cache.** A command gate may declare `scope_cache` (for example
   `apps/api/.testmondata`) and `cold_cmd`. When a cache file is missing, the
