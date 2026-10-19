@@ -1191,13 +1191,17 @@ export async function checkCiCoverage(repoPath: string, workflow: Workflow): Pro
   const ci = await readCiCommands(repoPath)
   if (ci.length === 0) return []
   const gaps = uncoveredCommands(ci, workflow)
+  const decided =
+    workflow.ci_only.length === 0 ? '' : `; ${workflow.ci_only.length} left to CI by decision (ci_only)`
   if (gaps.length === 0) {
-    return [pass('ci-coverage', `ci: every check the GitHub Actions workflows run has a gate (${ci.length} command(s) read)`)]
+    return [
+      pass('ci-coverage', `ci: every check the GitHub Actions workflows run has a gate (${ci.length} command(s) read${decided})`),
+    ]
   }
   const remedy =
     'add a gate that runs it — once for every plan as maestro.gates.<id>.cmd in .vinta-ai-workflows.yaml, ' +
-    'named in maestro.defaults.gates, or in this plan as gates.<id>.cmd named in defaults.gates — or leave it to CI if it needs CI ' +
-    '(credentials, a deploy) — this check matches commands by name and can be wrong'
+    'named in maestro.defaults.gates, or in this plan as gates.<id>.cmd named in defaults.gates — or, when it needs CI ' +
+    '(credentials, a deploy), record that under maestro.ci_only with its reason — this check matches commands by name and can be wrong'
   const shown = gaps.slice(0, CI_GAPS_SHOWN).map((gap, index) =>
     flag(
       `ci-coverage:${index}`,

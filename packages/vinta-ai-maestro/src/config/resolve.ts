@@ -93,6 +93,10 @@ export function resolveDocument(authored: unknown, config: ProjectConfig | null)
     doc.append_only = [...maestro.append_only]
   }
 
+  if (authored.ci_only === undefined && Array.isArray(maestro.ci_only)) {
+    doc.ci_only = [...maestro.ci_only]
+  }
+
   const gates = resolveGates(gateTypeDefaults(commands, maestro.gates), customGates(maestro.gates), authored.gates)
   if (gates !== undefined) doc.gates = gates
 

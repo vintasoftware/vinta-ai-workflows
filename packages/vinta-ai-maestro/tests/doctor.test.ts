@@ -1179,6 +1179,42 @@ describe('gates checked against CI', () => {
     ])
   })
 
+  /**
+   * The CI-parity warning listed six commands on every run of one project,
+   * some of them deliberately CI-only. A check recorded under `ci_only` with
+   * its reason is a decision, not a gap.
+   */
+  it('leaves a command the project recorded as CI-only out of the gaps', async () => {
+    const root = await repoWithCi({ 'ci.yml': DJANGO_CI })
+    const config = {
+      maestro: {
+        defaults: { model: 'opus', gates: ['test', 'django-check'] },
+        gates: {
+          test: { cmd: 'uv run pytest' },
+          'django-check': { cmd: 'uv run python manage.py check --deploy --fail-level WARNING' },
+        },
+        ci_only: [
+          { command: 'pnpm run generate-client', reason: 'needs the deployed API schema' },
+          { command: 'git diff --exit-code -- frontend/src/client', reason: 'pairs with generate-client' },
+        ],
+      },
+    }
+    const result = resolveWorkflow(
+      {
+        schema_version: 1,
+        id: 'ci-fixture',
+        base_branch: 'main',
+        resources: { lane: { capacity: 1, kind: 'worktree' } },
+        nodes: [{ id: 'p1', name: 'One', prompt_ref: 'plan.md#phase-1' }],
+      },
+      config,
+    )
+    if (!result.ok) throw new Error(JSON.stringify(result.issues))
+    const checks = await checkCiCoverage(root, result.workflow)
+    expect(checks.map((check) => [check.id, check.status])).toEqual([['ci-coverage', 'pass']])
+    expect(checks[0]?.label).toContain('2 left to CI by decision (ci_only)')
+  })
+
   it('reads commands, not setup, and reduces wrappers to the tool they run', () => {
     expect(commandLines('set -euo pipefail\n# lint\nnpm ci\nnpx eslint . && npx tsc --noEmit\necho done')).toEqual([
       'npx eslint .',

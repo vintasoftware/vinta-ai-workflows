@@ -249,6 +249,7 @@ export function gateCommands(workflow: Workflow): { readonly gate: string; reado
  * are reported once.
  */
 export function uncoveredCommands(ci: readonly CiCommand[], workflow: Workflow): UncoveredCommand[] {
+  const leftToCi = new Set(workflow.ci_only.map((entry) => signature(signatureWords(entry.command))))
   const gates = gateCommands(workflow).map((entry) => {
     const words = signatureWords(entry.command)
     return { ...entry, signature: signature(words), flags: new Set(longFlags(words)) }
@@ -258,7 +259,7 @@ export function uncoveredCommands(ci: readonly CiCommand[], workflow: Workflow):
   for (const command of ci) {
     const words = signatureWords(command.command)
     const sig = signature(words)
-    if (sig === '') continue
+    if (sig === '' || leftToCi.has(sig)) continue
     const flags = longFlags(words)
     const key = `${sig}\u0000${[...flags].sort().join(' ')}`
     if (seen.has(key)) continue

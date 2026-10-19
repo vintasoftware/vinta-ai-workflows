@@ -877,6 +877,19 @@
             "minLength": 1
           }
         },
+        "ci_only": {
+          "description": "CI checks deliberately left to CI, each with its reason (it needs credentials, a deploy, a hosted service). `vinta-ai-maestro doctor` warns about every CI command no gate runs; one listed here is a decision, not a gap. A plan's own `ci_only` replaces this list.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "reason"],
+            "properties": {
+              "command": { "type": "string", "minLength": 1, "description": "The CI command as CI runs it; wrappers like `uv run` are ignored when matching." },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "project": {
           "description": "The workflow schema's `project` block (`migrate_cmd`, `databases`, `env_files`, `commands`, `hooks`, `services`, `compose`, `prepare_cmd`, `setup_cmd`), merged under a plan's own field by field. `project.commands` additionally inherits `lint`, `typecheck` (from `commands.build`) and `test` (from `commands.test_unit`).",
           "type": "object"

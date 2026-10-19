@@ -1193,6 +1193,18 @@ export const WorkflowSchema = z
           'run in every lane before its gates and in the integration worktree around every ' +
           'merge, in `after` order. A failing step is a red gate.',
       ),
+    ci_only: z
+      .array(
+        z.strictObject({
+          command: z.string().min(1).describe('The CI command, as CI runs it (wrappers like `uv run` are ignored when matching).'),
+          reason: z.string().min(1).describe('Why no gate runs it: it needs credentials, a deploy, a hosted service.'),
+        }),
+      )
+      .default([])
+      .describe(
+        'CI checks deliberately left to CI, each with its reason. `doctor` warns about every CI ' +
+          'command no gate runs; one listed here is reported as a decision instead of a gap.',
+      ),
     append_only: z
       .array(z.string().min(1))
       .default([])

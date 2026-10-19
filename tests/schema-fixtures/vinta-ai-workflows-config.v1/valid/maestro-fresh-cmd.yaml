@@ -39,6 +39,9 @@ maestro:
       cmd: make api_client && git diff --exit-code -- frontend/src/api
       requires: [test-suite]
       timeout_s: 600
+  ci_only:
+    - command: pnpm run generate-client
+      reason: needs the deployed API schema
   resources:
     test-suite:
       capacity: 1

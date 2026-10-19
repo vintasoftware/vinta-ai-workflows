@@ -125,6 +125,7 @@ export const MaestroConfigSchema = z
     chores: z.record(Id, ChoreSchema).optional(),
     codegen: z.record(Id, CodegenStepSchema).optional(),
     append_only: z.array(z.string().min(1)).optional(),
+    ci_only: z.array(z.strictObject({ command: z.string().min(1), reason: z.string().min(1) })).optional(),
     project: ProjectSchema.partial().optional(),
   })
   .describe('What every maestro run in this project starts from, before its plan is laid over it.')

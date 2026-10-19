@@ -36,6 +36,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: `ci_only` records CI checks deliberately left to
+  CI.** It lives in a plan or in `maestro.ci_only` in
+  `.vinta-ai-workflows.yaml`. Each entry is a CI command with the reason no
+  gate runs it. `doctor`'s CI-coverage check stops warning about those
+  commands and counts them as decisions.
 - **`vinta-ai-maestro`: `queue_timeout_s`, and the pool queue in `status`.**
   A gate's `timeout_s` counts only its command's runtime, and a regression
   test now pins that down. The optional `queue_timeout_s` bounds the wait
