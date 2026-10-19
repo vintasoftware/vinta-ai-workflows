@@ -862,6 +862,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Bootstrap asks about maestro's test gate in lanes.** In the maestro
+  defaults (C.11), bootstrap now asks:
+  - whether a cache-based scoped run (`pytest --testmon`) should fall back to
+    the full parallel suite in a lane with no cache. This emits
+    `scope_cache`, `cold_cmd` and `project.lane_seed`, and proposes a
+    `test_changed` target that falls back when `.testmondata` is missing.
+    It also explains that `--testmon` with `-n` trades correctness for speed.
+  - whether a suite that reuses its database should get a fresh-database form
+    for the integration worktree. This emits `fresh_cmd` and
+    `tuning.allowed_flags: ['--create-db']`.
+  - for each CI check with no gate, whether to add a gate or record it under
+    `maestro.ci_only` with a reason.
+- **Django stack notes** cover database reuse and testmon in lanes, keeping
+  the virtual environment out of a bind-mounted worktree
+  (`UV_PROJECT_ENVIRONMENT=/opt/venv`, `user: "${UID}:${GID}"`), registries
+  every phase appends to, and drf-spectacular `ENUM_NAME_OVERRIDES` for new
+  choice fields.
+- **`plan-feature`** names the enum for same-named choice fields that two
+  phases expose, lists the usual append-only registries, and records CI
+  checks that cannot run locally under `ci_only`.
 - **`plan-feature`: a rename of a shared symbol is an interface change.** A
   phase that renames something a same-wave sibling also uses does it in the
   foundation phase or keeps the old name as an alias until the wave lands.
