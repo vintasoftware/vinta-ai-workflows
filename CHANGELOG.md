@@ -36,6 +36,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: a gate can run differently in a lane with no scope
+  cache.** A command gate may declare `scope_cache` (for example
+  `apps/api/.testmondata`) and `cold_cmd`. When a cache file is missing, the
+  phase gate runs `cold_cmd` (default `cmd`) instead of a scoped form that
+  would run every test serially. `gate_started` now records which form ran
+  and why. The new `project.lane_seed` option copies such ignored caches into
+  a lane from its dependency's lane, the integration worktree or the main
+  checkout, journalled as `lane_seeded`. Both fields are also accepted in
+  `maestro.gates.<type>`.
 - **`amend-plan` amends a live `vinta-ai-maestro` run instead of rewriting
   its branches.** When a run of the plan is running, paused, interrupted or
   failed, the skill asks whether to amend it, then edits the plan and the

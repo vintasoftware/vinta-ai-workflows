@@ -81,7 +81,7 @@ import {
   runCodegen,
 } from '../codegen/codegen.ts'
 import { gateConfigKey, laneTreeHash, type GateCache } from '../gates/cache.ts'
-import { changedFiles, phaseGate } from '../gates/scope.ts'
+import { changedFiles, choosePhaseGate } from '../gates/scope.ts'
 import { executeGate, TIMEOUT_EXIT, type GateResult, type RunGateOptions } from '../gates/runner.ts'
 import { computeWaves, transitiveDependents } from '../graph.ts'
 import { git, gitLines, gitOk } from '../integration/git.ts'
@@ -606,11 +606,12 @@ export class RunEffectExecutor implements EffectExecutor {
     // narrowed and the gate has one, its full `cmd` otherwise. Resolved per run
     // of the gate, because the files the lane changed move with every fix.
     const node = this.#node(nodeId)
-    const effective = await phaseGate(gate, full ? 'full' : this.#workflow.defaults.gate_scope, {
+    const choice = await choosePhaseGate(gate, full ? 'full' : this.#workflow.defaults.gate_scope, {
       lanePath: lane.path,
       base: this.#row(nodeId)?.base_branch ?? this.#options.integrator.base(nodeId).branch,
       touches: node?.touches ?? [],
     })
+    const effective = choice.gate
     return await this.#gate(
       gateId,
       lane,
@@ -628,7 +629,9 @@ export class RunEffectExecutor implements EffectExecutor {
             runId: this.#options.runId,
             nodeId,
             type: 'gate_started',
-            payload: { gate: gateId },
+            // Which form ran and why: a cold lane's full run and a scoped
+            // run of the same gate cost an order of magnitude apart.
+            payload: { gate: gateId, form: choice.form, ...(choice.why === undefined ? {} : { why: choice.why }) },
           })
         },
       },

@@ -1157,7 +1157,7 @@ describe('journalled gate results', () => {
         .events(RUN_ID)
         .filter((event) => event.type === 'gate_started')
         .map((event) => Object.keys(event.payload).sort()),
-    ).toEqual([['gate']])
+    ).toEqual([['form', 'gate']])
   })
 
   /**
@@ -1176,7 +1176,7 @@ describe('journalled gate results', () => {
       .events(RUN_ID)
       .filter((event) => event.type === 'gate_started' || event.type === 'gate_result')
     expect(gateEvents.map((event) => event.type)).toEqual(['gate_started', 'gate_result'])
-    expect(gateEvents[0]?.payload).toEqual({ gate: 'unit' })
+    expect(gateEvents[0]?.payload).toEqual({ gate: 'unit', form: 'full' })
 
     const verdict = gateEvents[1]?.payload as { duration_ms: number; cached: boolean }
     expect(verdict.cached).toBe(false)

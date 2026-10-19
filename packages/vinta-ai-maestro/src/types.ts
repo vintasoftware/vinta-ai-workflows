@@ -239,6 +239,24 @@ export const CommandGateSchema = z.strictObject({
         'file with no tests is a normal member of the list. When a placeholder would substitute ' +
         'nothing, `cmd` runs instead.',
     ),
+  cold_cmd: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'What a phase gate runs in place of `scoped_cmd` when the lane has no scope cache yet ' +
+        '(`scope_cache`): `make test` (the suite in parallel) instead of a `--testmon` run that, ' +
+        'without `.testmondata`, runs every test serially. Defaults to `cmd`. It must check at ' +
+        'least what `scoped_cmd` does.',
+    ),
+  scope_cache: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'Files `scoped_cmd` narrows by, relative to the lane (`apps/api/.testmondata`). When any is ' +
+        'missing, the scoped form would run everything slowly, so a phase gate runs `cold_cmd` ' +
+        '(or `cmd`) instead, and journals why. `project.lane_seed` can copy them into new lanes.',
+    ),
   fresh_cmd: z
     .string()
     .min(1)
@@ -911,6 +929,16 @@ export const ProjectSchema = z
           '`setup_cmd`. For what a phase leaves behind that the clean does not reach: a cache ' +
           'outside the worktree, a `recycle_keep` directory that needs pruning rather than ' +
           'deleting.',
+      ),
+    lane_seed: z
+      .array(z.string().min(1))
+      .default([])
+      .describe(
+        'Ignored cache files a lane is given when it is handed to a phase and lacks them, ' +
+          'relative to the lane (`apps/api/.testmondata`): copied from the lane of the phase’s ' +
+          'first dependency, else the integration worktree, else the main checkout, whichever ' +
+          'has it first. Only paths git ignores are copied, and never over one the lane has. ' +
+          'For a scope cache (`gates.<id>.scope_cache`) that is expensive to build from nothing.',
       ),
     recycle_keep: z
       .array(z.string().min(1))

@@ -1,4 +1,5 @@
-# A test gate whose integration-worktree runs start from a fresh test database
+# A test gate whose integration-worktree runs start from a fresh test database,
+# and whose scoped testmon form falls back to the parallel suite in a cold lane
 schema_version: 1
 vinta_ai_workflows_version: 0.7.0-alpha25
 project:
@@ -28,6 +29,9 @@ maestro:
     test:
       cmd: pytest --reuse-db -n auto
       fresh_cmd: pytest --create-db -n auto
+      scoped_cmd: pytest --testmon {changed_files}
+      cold_cmd: pytest --reuse-db -n auto
+      scope_cache: [.testmondata]
       requires: [test-suite]
     django-check:
       cmd: uv run python manage.py check --fail-level WARNING

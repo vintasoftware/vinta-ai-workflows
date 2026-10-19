@@ -397,6 +397,16 @@ export interface SchedulerOptions {
    */
   readonly addLane?: (name: string) => Promise<void>
   /**
+   * Gives `lane` the `project.lane_seed` files it lacks, copied from the first
+   * of `from` (lane names) that has each, else the integration worktree, else
+   * the main checkout. Returns what it copied and from where. Absent on a host
+   * with no project block.
+   */
+  readonly seedLane?: (
+    lane: string,
+    from: readonly string[],
+  ) => Promise<readonly { readonly path: string; readonly from: string }[]>
+  /**
    * What changed under a member's worktree since its session last looked.
    *
    * An implementer keeps one directory for the whole run, so continuing its
@@ -2666,6 +2676,7 @@ export class Scheduler {
 
       try {
         await this.#prepareLane(state)
+        await this.#seedLane(state)
         const settled = await this.#drive(state)
         this.#release(state)
         if (settled.outcome === 'done') {
@@ -3169,6 +3180,34 @@ export class Scheduler {
         if (await this.#replaceLane(state, unhealthy)) throw unhealthy
       }
       throw new LaneUnusable(recycleFailure(lane, error))
+    }
+  }
+
+  /**
+   * Seeds the lane this node was handed with the project's `lane_seed` caches
+   * it lacks (`.testmondata`), from the lane its first dependency ran in when
+   * it has them. A lane with no scope cache runs a gate's `cold_cmd`; seeding
+   * it is what lets the next run be the scoped one. Never fails the node: a
+   * cache that cannot be copied only costs a cold run.
+   */
+  async #seedLane(state: NodeState): Promise<void> {
+    const seed = this.#options.seedLane
+    if (seed === undefined || state.lane === null) return
+    const rows = new Map(this.#options.journal.nodes(this.#options.runId).map((row) => [row.node_id, row]))
+    const from = state.node.depends_on.flatMap((dependency) => {
+      const lane = rows.get(dependency.node)?.lane
+      return lane === null || lane === undefined ? [] : [lane]
+    })
+    try {
+      const seeded = await seed(state.lane, from)
+      if (seeded.length === 0) return
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        type: 'lane_seeded',
+        payload: { node: state.node.id, lane: state.lane, seeded: seeded.map((entry) => ({ ...entry })) },
+      })
+    } catch (error) {
+      this.#log.warn('lane.seed_failed', { lane: state.lane, node: state.node.id, ...errorFields(error) })
     }
   }
 

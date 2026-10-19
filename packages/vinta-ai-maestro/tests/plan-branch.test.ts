@@ -7,7 +7,7 @@
  * here runs git against the checkout the suite lives in.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -16,7 +16,8 @@ import type { AmendRunner } from '../src/amend/amend.ts'
 import { amendRun } from '../src/amend/amend.ts'
 import { startConfigReloader } from '../src/config/reload.ts'
 import { resolveWorkflow } from '../src/config/resolve.ts'
-import { changedFiles, phaseGate } from '../src/gates/scope.ts'
+import { changedFiles, choosePhaseGate, phaseGate } from '../src/gates/scope.ts'
+import { seedLane } from '../src/lanes/seed.ts'
 import { openJournal, type Journal } from '../src/journal/journal.ts'
 import { shellQuote } from '../src/platform/platform.ts'
 import { ensurePlanBranch, planBranchName } from '../src/run/plan-branch.ts'
@@ -307,6 +308,37 @@ describe('the scoped gate line', () => {
     expect((await phaseGate(gate, 'full', context)).cmd).toBe('npx vitest run')
   })
 
+  /**
+   * A lane with no `.testmondata` ran `pytest --testmon` over every test,
+   * serially, for 30–40 minutes per phase gate. With the cache missing the
+   * cold form runs — the whole suite, in parallel — and says why.
+   */
+  it('runs cold_cmd when the lane lacks a scope cache, and the scoped form once it has one', async () => {
+    const dir = repo()
+    git(dir, 'checkout', '-q', '-b', 'phase')
+    commit(dir, { 'src/a.ts': 'a\n' }, 'committed')
+    const testmon: CommandGate = {
+      cmd: 'make test',
+      scoped_cmd: 'pytest --testmon {changed_files}',
+      cold_cmd: 'make test_parallel',
+      scope_cache: ['.testmondata'],
+      requires: [],
+      timeout_s: 60,
+    }
+    const context = { lanePath: dir, base: 'main', touches: [] }
+    const cold = await choosePhaseGate(testmon, 'scoped', context)
+    expect(cold).toMatchObject({ form: 'cold', why: 'no .testmondata in the lane' })
+    expect(cold.gate.cmd).toBe('make test_parallel')
+    // `cmd` when no cold form is declared: the whole check either way.
+    const { cold_cmd: _cold, ...plain } = testmon
+    expect((await choosePhaseGate(plain, 'scoped', context)).gate.cmd).toBe('make test')
+
+    writeFileSync(join(dir, '.testmondata'), 'cache')
+    const warm = await choosePhaseGate(testmon, 'scoped', context)
+    expect(warm.form).toBe('scoped')
+    expect(warm.gate.cmd).toMatch(/^pytest --testmon /)
+  })
+
   it('runs the full command when there is nothing to scope to', async () => {
     const dir = repo()
     expect((await phaseGate(gate, 'scoped', { lanePath: dir, base: 'main', touches: [] })).cmd).toBe('npx vitest run')
@@ -314,5 +346,31 @@ describe('the scoped gate line', () => {
     expect((await phaseGate(touches, 'scoped', { lanePath: dir, base: 'main', touches: ['src/a.ts'] })).cmd).toBe(
       `npx vitest related ${shellQuote('src/a.ts')} --run`,
     )
+  })
+})
+
+describe('lane_seed', () => {
+  it('copies an ignored cache the lane lacks from the first source that has it, and nothing else', async () => {
+    const lane = repo()
+    writeFileSync(join(lane, '.gitignore'), '.testmondata\n')
+    commit(lane, { 'tracked.txt': 'x\n' }, 'ignore the cache')
+    const parent = repo()
+    writeFileSync(join(parent, '.testmondata'), 'from the parent lane')
+    writeFileSync(join(parent, 'tracked.txt'), 'never copied')
+    const checkout = repo()
+    writeFileSync(join(checkout, '.testmondata'), 'from the checkout')
+
+    const seeded = await seedLane(lane, ['.testmondata', 'tracked.txt', 'absent.db'], [
+      { name: 'crew-1', path: parent },
+      { name: 'checkout', path: checkout },
+    ])
+    expect(seeded).toEqual([{ path: '.testmondata', from: 'crew-1' }])
+    expect(readFileSync(join(lane, '.testmondata'), 'utf8')).toBe('from the parent lane')
+    expect(readFileSync(join(lane, 'tracked.txt'), 'utf8')).toBe('x\n')
+
+    // Never over a cache the lane already has.
+    writeFileSync(join(parent, '.testmondata'), 'newer')
+    expect(await seedLane(lane, ['.testmondata'], [{ name: 'crew-1', path: parent }])).toEqual([])
+    expect(readFileSync(join(lane, '.testmondata'), 'utf8')).toBe('from the parent lane')
   })
 })

@@ -500,6 +500,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     ...(host.recycleLane === undefined ? {} : { recycleLane: host.recycleLane }),
     // A spare crew member's desk (`defaults.max_spare_crew`).
     ...(host.addLane === undefined ? {} : { addLane: host.addLane }),
+    ...(host.seedLane === undefined ? {} : { seedLane: host.seedLane }),
     // The lane's isolation, reaching the process that needs it. Without this a
     // turn runs in the right directory with the wrong compose project.
     ...(host.laneEnv === undefined ? {} : { laneEnv: host.laneEnv }),

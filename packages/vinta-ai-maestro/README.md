@@ -548,6 +548,23 @@ multi-dependency base. A red full run there is a regression *between* phases. It
 fails the merge and names the gate. `gate_scope: full` runs `cmd` everywhere. A gate with no `scoped_cmd`, or a
 placeholder with nothing to substitute, runs `cmd`.
 
+A scoped form that narrows by a cache (`pytest --testmon` and `.testmondata`)
+runs everything, slowly, in a lane with no cache. List the cache in
+`scope_cache` and give the gate a `cold_cmd` (default `cmd`): a lane without the
+file runs that instead, and `gate_started` records which form ran and why.
+`project.lane_seed` copies such caches into a lane from the lane its first
+dependency ran in, the integration worktree or the main checkout:
+
+```jsonc
+"test": {
+  "cmd": "make test",
+  "scoped_cmd": "make test_changed",
+  "cold_cmd": "make test",
+  "scope_cache": ["apps/api/.testmondata"]
+}
+// project: { "lane_seed": ["apps/api/.testmondata"], … }
+```
+
 The command must accept any path it is given. A source file with no tests of its
 own is a normal member of `{changed_files}`. `vitest related` and
 `jest --findRelatedTests` are built for this; `pytest` needs a plugin such as

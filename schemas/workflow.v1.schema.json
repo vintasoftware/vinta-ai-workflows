@@ -366,6 +366,15 @@
           "type": "string",
           "minLength": 1
         },
+        "lane_seed": {
+          "default": [],
+          "description": "Ignored cache files a lane is given when it is handed to a phase and lacks them, relative to the lane (`apps/api/.testmondata`): copied from the lane of the phase’s first dependency, else the integration worktree, else the main checkout, whichever has it first. Only paths git ignores are copied, and never over one the lane has. For a scope cache (`gates.<id>.scope_cache`) that is expensive to build from nothing.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "recycle_keep": {
           "default": [],
           "description": "Ignored paths a recycled lane keeps. A recycle removes every untracked and ignored file the previous phase left — caches such as `.mypy_cache` and `__pycache__` included, which once kept a deleted package importable and failed a type check on clean code — except the copied dependency tree, the `env_files` and what is listed here. Each entry is a gitignore pattern handed to `git clean -e`: `.venv` keeps one at any depth, `/apps/api/.venv` only that one. For what is expensive to rebuild; anything not listed is rebuilt by `setup_cmd`, which runs on every recycle.",
@@ -682,6 +691,19 @@
                 "description": "The same check narrowed to what the phase changed, run by a phase gate under `defaults.gate_scope: scoped`. `{changed_files}` is the files the lane changed against the phase’s base and `{touches}` the node’s Touch List, each substituted shell-quoted and space-separated. The command must accept any path it is given — `vitest related {changed_files} --run`, `jest --findRelatedTests {changed_files}` — because a source file with no tests is a normal member of the list. When a placeholder would substitute nothing, `cmd` runs instead.",
                 "type": "string",
                 "minLength": 1
+              },
+              "cold_cmd": {
+                "description": "What a phase gate runs in place of `scoped_cmd` when the lane has no scope cache yet (`scope_cache`): `make test` (the suite in parallel) instead of a `--testmon` run that, without `.testmondata`, runs every test serially. Defaults to `cmd`. It must check at least what `scoped_cmd` does.",
+                "type": "string",
+                "minLength": 1
+              },
+              "scope_cache": {
+                "description": "Files `scoped_cmd` narrows by, relative to the lane (`apps/api/.testmondata`). When any is missing, the scoped form would run everything slowly, so a phase gate runs `cold_cmd` (or `cmd`) instead, and journals why. `project.lane_seed` can copy them into new lanes.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
               },
               "fresh_cmd": {
                 "description": "The same check run from fresh state — the test database recreated (`pytest --create-db`, `make test_reset test`) — run in place of `cmd` in the integration worktree whenever the state an earlier run left there may belong to another tree: the tree moved anywhere but forward since the gate last ran there, the gate has not run there in this process, its red output reads as a stale schema (missing or extra columns or relations), or a conflict fixer reported `ENVIRONMENT_STALE`. It must check at least what `cmd` does.",

@@ -169,8 +169,13 @@ function gateRefusals(id: string, before: Gate, after: Gate): readonly PolicyIss
   if (!same(before.type, after.type)) {
     issues.push({ path: [...at, 'type'], message: `gate "${id}"'s \`type\` may not be changed` })
   }
+  // Which form runs when the scope cache is missing: dropping a path would put
+  // a cold lane back on the slow scoped run, and adding one is the plan's call.
+  if (!same(before.scope_cache, after.scope_cache)) {
+    issues.push({ path: [...at, 'scope_cache'], message: `gate "${id}"'s \`scope_cache\` may not be changed` })
+  }
   const allowed = new Set(before.tuning?.allowed_flags ?? [])
-  for (const field of ['cmd', 'scoped_cmd', 'fresh_cmd'] as const) {
+  for (const field of ['cmd', 'scoped_cmd', 'cold_cmd', 'fresh_cmd'] as const) {
     const was = before[field]
     const now = after[field]
     if (was === now) continue

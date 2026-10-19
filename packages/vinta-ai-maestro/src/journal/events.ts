@@ -446,6 +446,16 @@ interface RunPayloads {
    * lane, with their owner's uid (-1 when it could not be read): files a
    * container created as root in a bind-mounted worktree, typically.
    */
+  /**
+   * `project.lane_seed` caches copied into a lane it was handed without them:
+   * each path, relative to the lane, and where it came from (a lane name,
+   * `integration` or `checkout`). Paths only, never contents.
+   */
+  lane_seeded: {
+    readonly node: string
+    readonly lane: string
+    readonly seeded: readonly { readonly path: string; readonly from: string }[]
+  }
   lane_unhealthy: {
     /** The phase that was handed the lane when its recycle failed. */
     readonly node: string
@@ -959,7 +969,17 @@ interface NodePayloads {
    * `gate_result` is the gate's runtime and not its queue time. A gate served
    * from the cache never emits one: nothing started.
    */
-  gate_started: { readonly gate: string }
+  gate_started: {
+    readonly gate: string
+    /**
+     * Which of the gate's commands ran (`gates/scope.ts`): `scoped`, the whole
+     * `cmd` (`full`), or `cold_cmd` for a lane with no scope cache (`cold`).
+     * Absent on rows written before it existed.
+     */
+    readonly form?: 'scoped' | 'full' | 'cold'
+    /** Why it was not the scoped form, when it could have been. */
+    readonly why?: string
+  }
   /**
    * What one gate returned. Identifiers, an exit code and a status — the
    * gate's *output* is repository content and stays in `gates/<id>.log`

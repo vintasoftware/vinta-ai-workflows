@@ -273,6 +273,8 @@ function rig(
     readonly recycleLane?: (name: string) => Promise<void>
     /** `LanePool.addLane`'s seam: a spare crew member's worktree. */
     readonly addLane?: (name: string) => Promise<void>
+    /** `project.lane_seed`'s seam. */
+    readonly seedLane?: (lane: string, from: readonly string[]) => Promise<readonly { path: string; from: string }[]>
     /** Session ids this harness has forgotten (§15.4). */
     readonly staleSessions?: readonly string[]
     /**
@@ -374,6 +376,7 @@ function rig(
     takeovers,
     ...(options.recycleLane === undefined ? {} : { recycleLane: options.recycleLane }),
     ...(options.addLane === undefined ? {} : { addLane: options.addLane }),
+    ...(options.seedLane === undefined ? {} : { seedLane: options.seedLane }),
     ...(options.laneEnv === undefined ? {} : { laneEnv: options.laneEnv }),
     ...(options.onTurnEnded === undefined ? {} : { onTurnEnded: options.onTurnEnded }),
     ...(options.resumeFrom === undefined ? {} : { resumeFrom: journal.nodes(runId) }),
@@ -1275,6 +1278,26 @@ describe('lane reuse', () => {
       'run:b',
       'recycle:run-1-lane-1',
       'run:c',
+    ])
+    expectDrained(r)
+  })
+
+  it('seeds a lane from the lane its dependency ran in, and journals what it copied', async () => {
+    const asked: [string, readonly string[]][] = []
+    const r = rig(makeWorkflow([node('a'), node('b', ['a'])], { lanes: 2 }), {
+      seedLane: async (lane, from) => {
+        asked.push([lane, from])
+        return from.length === 0 ? [] : [{ path: 'apps/api/.testmondata', from: from[0] as string }]
+      },
+    })
+    const report = await r.scheduler.run()
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    const laneOfA = r.journal.nodes('run-1').find((row) => row.node_id === 'a')?.lane as string
+    // `a` had nothing to seed from; `b` is pointed at `a`'s lane.
+    expect(asked.map(([, from]) => from)).toEqual([[], [laneOfA]])
+    const seeded = r.journal.events('run-1').filter((event) => event.type === 'lane_seeded')
+    expect(seeded.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ node: 'b', seeded: [{ path: 'apps/api/.testmondata', from: laneOfA }] }),
     ])
     expectDrained(r)
   })

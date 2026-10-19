@@ -15,6 +15,9 @@
  * same scoped line over the same tree is a hit, and a different set of changed
  * files is a different line and a miss, which is correct.
  */
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { git, gitLines } from '../integration/git.ts'
 import { shellQuote } from '../platform/platform.ts'
 import type { CommandGate, GateScope } from '../types.ts'
@@ -40,19 +43,51 @@ export async function phaseGate(
   scope: GateScope,
   context: ScopeContext,
 ): Promise<CommandGate> {
+  return (await choosePhaseGate(gate, scope, context)).gate
+}
+
+/** Which form of a gate ran, and why — journalled on `gate_started`. */
+export interface PhaseGateChoice {
+  readonly gate: CommandGate
+  readonly form: 'scoped' | 'full' | 'cold'
+  /** For `cold`: the scope-cache path the lane lacked. For `full` under `scoped`: why it fell back. */
+  readonly why?: string
+}
+
+/**
+ * `phaseGate`, saying which form it picked and why.
+ *
+ * **A cold lane runs `cold_cmd`.** A scoped form that narrows by a cache
+ * (`pytest --testmon` and its `.testmondata`) runs *everything* when the cache
+ * is not there — serially, since such a run cannot use workers. One observed
+ * run spent 30–40 minutes per phase gate that way, 246 minutes over eight
+ * phases. When any `scope_cache` path is missing in the lane, `cold_cmd`
+ * (default `cmd`) runs instead: the whole check, run the fast way.
+ */
+export async function choosePhaseGate(
+  gate: CommandGate,
+  scope: GateScope,
+  context: ScopeContext,
+): Promise<PhaseGateChoice> {
   const template = gate.scoped_cmd
-  if (scope === 'full' || template === undefined) return gate
+  if (scope === 'full') return { gate, form: 'full' }
+  if (template === undefined) return { gate, form: 'full' }
+
+  const missing = (gate.scope_cache ?? []).find((path) => !existsSync(join(context.lanePath, path)))
+  if (missing !== undefined) {
+    return { gate: { ...gate, cmd: gate.cold_cmd ?? gate.cmd }, form: 'cold', why: `no ${missing} in the lane` }
+  }
 
   const values: Record<string, readonly string[]> = {}
   if (template.includes('{changed_files}')) values['{changed_files}'] = await changedFiles(context)
   if (template.includes('{touches}')) values['{touches}'] = context.touches
-  if (Object.values(values).some((list) => list.length === 0)) return gate
+  if (Object.values(values).some((list) => list.length === 0)) return { gate, form: 'full', why: 'nothing to scope to' }
 
   let cmd = template
   for (const [placeholder, list] of Object.entries(values)) {
     cmd = cmd.split(placeholder).join(list.map((path) => shellQuote(path)).join(' '))
   }
-  return { ...gate, cmd }
+  return { gate: { ...gate, cmd }, form: 'scoped' }
 }
 
 /**

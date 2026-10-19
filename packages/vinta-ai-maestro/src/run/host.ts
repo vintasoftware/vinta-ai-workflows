@@ -44,6 +44,7 @@ import type { Journal } from '../journal/journal.ts'
 import { describeWorktrees, laneNames, shrinkRemedy, spareHeadroom, worktreeCount } from '../lanes/count.ts'
 import { DiskProbeError } from '../lanes/disk.ts'
 import { DatabaseCommandError } from '../lanes/db-command.ts'
+import { seedLane } from '../lanes/seed.ts'
 import { LaneAdoptError, LaneEnvFileError, LanePool, LaneSetupError, type StackStop } from '../lanes/pool.ts'
 import { errorKind, sanitize } from '../log/index.ts'
 import type { EffectExecutor } from '../pipeline/effects.ts'
@@ -86,6 +87,11 @@ export interface HostWiring {
    * that owns its lanes, which keeps the roster to the plan's.
    */
   readonly addLane?: (name: string) => Promise<void>
+  /** `project.lane_seed` into a lane, from lanes named, the integration worktree or the checkout. */
+  readonly seedLane?: (
+    lane: string,
+    from: readonly string[],
+  ) => Promise<readonly { readonly path: string; readonly from: string }[]>
   /** One lane's environment, for the agent about to run in it. */
   readonly laneEnv?: (name: string) => Readonly<Record<string, string>>
   /**
@@ -526,6 +532,19 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     },
     // Into the executor as well as the pool: the executor resolves a node's
     // lane by name from the list it was built with.
+    seedLane: async (name: string, from: readonly string[]) => {
+      const paths = current.project?.lane_seed ?? []
+      if (paths.length === 0) return []
+      const sources = [
+        ...from.flatMap((lane) => {
+          const found = pool.lanes.find((candidate) => candidate.name === lane)
+          return found === undefined ? [] : [{ name: lane, path: found.path }]
+        }),
+        { name: 'integration', path: integrationPath },
+        { name: 'checkout', path: repoPath },
+      ]
+      return seedLane(pool.lane(name).path, paths, sources)
+    },
     addLane: async (name: string) => {
       const lane = await pool.addLane(name)
       executor.addLane({ name: lane.name, path: lane.path, env: { ...lane.env, ...options.agentEnv } })
