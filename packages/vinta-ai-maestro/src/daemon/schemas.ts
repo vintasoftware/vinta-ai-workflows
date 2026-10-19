@@ -976,6 +976,12 @@ export const AmendResponseSchema = z.strictObject({
   applied: z.array(z.string()),
   /** Already-`done` nodes rebased, in the order they were rebased. */
   rebased: z.array(z.string()),
+  /**
+   * Affected nodes that took neither: running, waiting or parked, they pick
+   * the change up only once they stop — their next attempt or step. Absent
+   * from an older daemon.
+   */
+  waiting: z.array(z.strictObject({ node: z.string(), status: z.string() })).optional(),
 })
 
 // ---------------------------------------------------------------------------

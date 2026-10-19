@@ -869,6 +869,16 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`vinta-ai-maestro`: the coordinator's wakes are more specific.**
+  - The `gate_cost` wake lists uncached minutes per phase and flags any
+    single run of 20 minutes or more as probably a cold lane. Runs of a
+    gate's `cold_cmd` no longer count toward the total.
+  - A failed attempt does not wake the coordinator when it already acted on
+    that phase during the attempt.
+  - A session that ends with shell calls that never returned is journalled
+    as `tool_calls_unfinished` and wakes the coordinator.
+  - `amend` lists the affected phases that are running or waiting, which pick
+    up the change only once they stop.
 - **Bootstrap asks about maestro's test gate in lanes.** In the maestro
   defaults (C.11), bootstrap now asks:
   - whether a cache-based scoped run (`pytest --testmon`) should fall back to

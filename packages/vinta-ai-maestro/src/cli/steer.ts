@@ -355,10 +355,17 @@ export async function amendCommand(argv: readonly string[], io: Io, deps: SteerD
     changes?: { node: string; kind: string }[]
     applied?: string[]
     rebased?: string[]
+    waiting?: { node: string; status: string }[]
   }
   io.out(`amendment ${result.amendment ?? '?'} applied to run ${runId}`)
   for (const change of result.changes ?? []) io.out(`  ${change.node}: ${change.kind.replaceAll('_', ' ')}`)
+  if ((result.applied ?? []).length > 0) io.out(`  takes effect now on: ${(result.applied ?? []).join(', ')}`)
   if ((result.rebased ?? []).length > 0) io.out(`  rebased: ${(result.rebased ?? []).join(', ')}`)
+  // A change to a phase that is in flight is not applied to the attempt it is
+  // in; "gates changed" for a running phase read as if its gate step had it.
+  for (const entry of result.waiting ?? []) {
+    io.out(`  ${entry.node} is ${entry.status}: it takes the change only once it stops — at its next attempt or step`)
+  }
   return OK
 }
 

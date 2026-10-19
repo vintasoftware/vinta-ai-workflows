@@ -1044,6 +1044,18 @@ interface NodePayloads {
     readonly harness: string
   }
   /**
+   * An agent's session ended with tool calls that never reported a result —
+   * a command it started in parallel that is still running, or hung, with
+   * nobody waiting for it. One observed review's parallel Bash calls left a
+   * hung `docker compose run` beside a finished turn. Tool names and a count;
+   * the commands are in the transcript.
+   */
+  tool_calls_unfinished: {
+    readonly harness: string
+    readonly tools: readonly string[]
+    readonly count: number
+  }
+  /**
    * The full form of a gate, run once on a wave's merged tree: because the
    * wave's phases ran it narrowed (`defaults.gate_scope: scoped`), or because
    * `defaults.wave_gates` asks for the merged tree to be checked. Filed

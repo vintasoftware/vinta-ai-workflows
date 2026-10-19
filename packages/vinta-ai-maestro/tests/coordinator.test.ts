@@ -247,6 +247,44 @@ describe('what wakes the coordinator', () => {
     expect(found).toEqual([expect.objectContaining({ kind: 'integration_wait', nodeId: 'p2', holder: 'p1' })])
   })
 
+  /**
+   * The coordinator fixed p10 while its attempt 2 was still in flight; that
+   * attempt then failed on the old cause and woke it again. An attempt that
+   * fails after the coordinator acted on the phase during it is handled.
+   */
+  it('does not wake for a failed attempt the coordinator already acted on', () => {
+    const journal = journalWith(workflowOf())
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'node_status', payload: { status: 'running' } })
+    journal.append({
+      runId: RUN,
+      nodeId: 'p1',
+      type: 'node_operation',
+      payload: { op: 'add_context', delivery: 'queued', by: 'coordinator', reason: 'the db was stale' },
+    })
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'node_error', payload: { reason: 'late', attempt: 2 } })
+    expect(triggersFrom(journal.events(RUN), 0, { phaseThresholdMs: 10 * HOUR }).map((t) => t.kind)).toEqual([])
+
+    // A new attempt that fails after the act is news again.
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'node_status', payload: { status: 'running' } })
+    journal.append({ runId: RUN, nodeId: 'p1', type: 'node_error', payload: { reason: 'again', attempt: 3 } })
+    expect(triggersFrom(journal.events(RUN), 0, { phaseThresholdMs: 10 * HOUR }).map((t) => t.kind)).toEqual([
+      'attempt_failed',
+    ])
+  })
+
+  it('wakes for a session that left a shell call running', () => {
+    const journal = journalWith(workflowOf())
+    journal.append({
+      runId: RUN,
+      nodeId: 'p1',
+      type: 'tool_calls_unfinished',
+      payload: { harness: 'claude-code', tools: ['Bash'], count: 1 },
+    })
+    const found = triggersFrom(journal.events(RUN), 0, { phaseThresholdMs: 10 * HOUR })
+    expect(found).toEqual([expect.objectContaining({ kind: 'tool_calls_unfinished', nodeId: 'p1', count: 1 })])
+    expect(describeTriggers(found)).toContain('1 tool call (Bash) that never returned')
+  })
+
   describe('gate cost', () => {
     const MIN = 60 * 1000
     const gateRun = (journal: Journal, nodeId: string, gate: string, minutes: number, cached = false): void => {
@@ -261,6 +299,31 @@ describe('what wakes the coordinator', () => {
       triggersFrom(journal.events(RUN), Number.MAX_SAFE_INTEGER, options).filter(
         (trigger): trigger is Extract<CoordinatorTrigger, { kind: 'gate_cost' }> => trigger.kind === 'gate_cost',
       )
+
+    /**
+     * One run's wake fired at 246 minutes and the coordinator needed SQL to
+     * see that most of it was first runs in new lanes. The wake now says it
+     * per phase, flags a 20-minute single run as a probable cold lane, and
+     * leaves out runs of a gate's cold_cmd, which are slow by design.
+     */
+    it('breaks the cost down per phase, flags cold lanes, and leaves out cold_cmd runs', () => {
+      const journal = journalWith(workflowOf())
+      gateRun(journal, 'p1', 'unit', 35)
+      gateRun(journal, 'p2', 'unit', 5)
+      journal.append({ runId: RUN, nodeId: 'p3', type: 'gate_started', payload: { gate: 'unit', form: 'cold' } })
+      gateRun(journal, 'p3', 'unit', 40)
+      const [found] = gateCosts(journal, { gateCostCeilingMs: 30 * MIN })
+      expect(found?.observedMs).toBe(40 * MIN)
+      expect(found?.perPhase).toEqual([
+        { nodeId: 'p1', ms: 35 * MIN, longestMs: 35 * MIN },
+        { nodeId: 'p2', ms: 5 * MIN, longestMs: 5 * MIN },
+      ])
+      expect(found?.coldRunsExcluded).toBe(1)
+      const line = describeTriggers(found === undefined ? [] : [found])
+      expect(line).toContain('Per phase: p1 35m, p2 5m')
+      expect(line).toContain('p1 — is probably a cold lane')
+      expect(line).toContain('1 cold-lane run of its cold_cmd left out')
+    })
 
     it('lets every phase spend its share, so a long run is not read as a costly one', () => {
       // The observed run: a six-minute suite in each phase's gate, which a fixed

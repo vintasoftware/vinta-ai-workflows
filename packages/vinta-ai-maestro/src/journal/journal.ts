@@ -928,6 +928,7 @@ export class Journal {
       case 'coordinator_woke':
       case 'bare_gate_blocked':
       case 'bare_gate_detected':
+      case 'tool_calls_unfinished':
       case 'chore_result':
       case 'codegen_result':
       case 'agent_lease':

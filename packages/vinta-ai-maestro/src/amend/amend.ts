@@ -102,6 +102,8 @@ export interface AmendApplied {
   readonly applied: readonly string[]
   /** Already-`done` nodes rebased, in the order they were rebased. */
   readonly rebased: readonly string[]
+  /** Affected nodes that took neither — in flight, they pick it up only once they stop. */
+  readonly waiting: readonly { readonly node: string; readonly status: string }[]
 }
 
 export type AmendResult = AmendApplied | AmendRefusal
@@ -254,6 +256,9 @@ export async function amendRun(options: AmendOptions): Promise<AmendResult> {
     affected: diff.affected,
     applied,
     rebased: rebase,
+    waiting: diff.affected
+      .filter((id) => !applied.includes(id) && !rebase.includes(id) && status(id) !== 'done')
+      .map((id) => ({ node: id, status: status(id) ?? 'unknown' })),
   }
 }
 

@@ -4559,6 +4559,9 @@ export class Scheduler {
     // infrastructure's rather than the agent's (`harness/outage.ts`).
     let endedWithError = false
     let infraLine: string | null = null
+    // Shell calls with no result yet, by id: left over when the session ends,
+    // they are commands still running (or hung) that nobody is waiting for.
+    const openCalls = new Map<string, string>()
 
     // The registry: exactly as long-lived as the turn it points at, so a §9
     // operation can never reach a session whose stream has already ended.
@@ -4574,6 +4577,10 @@ export class Scheduler {
         if (event.type === 'session_ended') endedWithError = event.result === 'error'
         infraLine = isInfrastructureLine(event) ?? infraLine
         if (event.type === 'tool_use') this.#detectBareGate(state, adapter.id, event.name, event.input)
+        if (event.type === 'tool_use' && isShellCall(adapter.id, event.name, event.input)) {
+          openCalls.set(event.id, event.name)
+        }
+        if (event.type === 'tool_result') openCalls.delete(event.id)
         if (event.type === 'session_started') {
           sessionId = event.sessionId
           this.#assign(state, { session_id: event.sessionId })
@@ -4595,6 +4602,15 @@ export class Scheduler {
       if (turnId !== null) this.#options.onTurnEnded?.(state.node.id, turnId)
     }
     if (state.aborted) throw new Aborted()
+
+    if (openCalls.size > 0 && !interrupted && this.#halt === null) {
+      journal.append({
+        runId,
+        nodeId: state.node.id,
+        type: 'tool_calls_unfinished',
+        payload: { harness: adapter.id, tools: [...new Set(openCalls.values())].sort(), count: openCalls.size },
+      })
+    }
 
     // §6.1 for the window that closed *under* the turn rather than refusing it
     // (`TurnRefusal`). Read after the stream, because that is when it is known,
@@ -5576,4 +5592,10 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = done
   })
   return { promise, resolve }
+}
+
+/** A tool call that runs a shell command, on any harness: claude-code's `Bash` as well as `shellLineOf`'s. */
+function isShellCall(harness: string, name: string, input: unknown): boolean {
+  if (shellLineOf(harness, name, input) !== null) return true
+  return name === 'Bash' && typeof (input as { command?: unknown } | null)?.command === 'string'
 }

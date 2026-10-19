@@ -306,7 +306,31 @@ describe('amend', () => {
     expect(code).toBe(OK)
     expect(f.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/amend`)
     expect(f.sent[0]?.body).toBe(contents)
-    expect(r.out).toEqual([`amendment 2 applied to run ${RUN_ID}`, '  b: body changed', '  rebased: a'])
+    expect(r.out).toEqual([
+      `amendment 2 applied to run ${RUN_ID}`,
+      '  b: body changed',
+      '  takes effect now on: b',
+      '  rebased: a',
+    ])
+  })
+
+  /** "gates changed" for a running phase read as if its current gate step had the change. */
+  it('says which affected phases take the change only once they stop', async () => {
+    const r = recorder()
+    const f = fakeFetch(
+      json({
+        ok: true,
+        amendment: 3,
+        runId: RUN_ID,
+        changes: [{ node: 'p0b', kind: 'gates_changed' }],
+        affected: ['p0b'],
+        applied: [],
+        rebased: [],
+        waiting: [{ node: 'p0b', status: 'running' }],
+      }),
+    )
+    expect(await amendCommand([RUN_ID, proposalFile('{}'), '--repo', emptyRepo()], r.io, { env: ENV, fetch: f.fetch })).toBe(OK)
+    expect(r.out).toContain('  p0b is running: it takes the change only once it stops — at its next attempt or step')
   })
 
   /** A refusal is only useful if it says where, so each located issue gets its own line. */

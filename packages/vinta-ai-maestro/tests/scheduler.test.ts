@@ -937,6 +937,32 @@ describe('capacity', () => {
     expectDrained(r)
   })
 
+  /**
+   * A review's parallel Bash calls left a hung `docker compose run` beside a
+   * finished turn, and nothing said so. A session that ends with a shell call
+   * that never returned is journalled for the coordinator.
+   */
+  it('journals shell calls a session ended without a result for', async () => {
+    const r = rig(makeWorkflow([node('a')], { lanes: 1 }), {
+      scripts: [
+        {
+          events: [
+            { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'docker compose run --rm api pytest' } },
+            { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'ls' } },
+            { type: 'tool_result', id: 't2', ok: true, summary: 'ok' },
+            { type: 'assistant_text', text: 'VERDICT: pass' },
+          ],
+          result: 'ok',
+        },
+      ],
+    })
+    const report = await r.scheduler.run()
+    expect(report.statuses).toEqual({ a: 'done' })
+    const unfinished = r.journal.events('run-1').filter((event) => event.type === 'tool_calls_unfinished')
+    expect(unfinished.map((event) => event.payload)).toEqual([{ harness: HARNESS, tools: ['Bash'], count: 1 }])
+    expectDrained(r)
+  })
+
   it('reads an agent writing about an error as the agent’s work, not an outage', async () => {
     const r = rig(makeWorkflow([node('a')], { lanes: 1 }), {
       scripts: [

@@ -1968,6 +1968,7 @@ export function createApi(options: ApiOptions): Hono {
         affected: [...result.affected],
         applied: [...result.applied],
         rebased: [...result.rebased],
+        waiting: result.waiting.map((entry) => ({ ...entry })),
       },
     }
   }

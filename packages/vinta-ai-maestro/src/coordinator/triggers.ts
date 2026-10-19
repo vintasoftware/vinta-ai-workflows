@@ -54,6 +54,13 @@ export const DEFAULT_GATE_COST_CEILING_MS = 30 * 60 * 1000
  */
 export const DEFAULT_GATE_COST_PER_PHASE_MS = 15 * 60 * 1000
 
+/**
+ * One uncached run of a gate this long is probably a cold lane: a scoped form
+ * whose cache the lane did not have yet ran everything. One observed run's
+ * `gate_cost` wake fired at 246 minutes, most of it first runs in new lanes.
+ */
+export const DEFAULT_COLD_RUN_MS = 20 * 60 * 1000
+
 /** A phase queued behind the integration worktree this long is stuck behind something. */
 export const DEFAULT_INTEGRATION_WAIT_MS = 20 * 60 * 1000
 
@@ -82,6 +89,15 @@ export type CoordinatorTrigger =
        * False when the trigger was read without the workflow.
        */
       readonly fullEveryPhase: boolean
+      /** Uncached minutes per phase, largest first, and the phase's longest single run. */
+      readonly perPhase: readonly { readonly nodeId: string; readonly ms: number; readonly longestMs: number }[]
+      /** The single-run threshold `perPhase` entries are flagged against as probably a cold lane. */
+      readonly coldRunMs: number
+      /**
+       * Runs left out of the total because they ran the gate's `cold_cmd` (a
+       * lane with no scope cache): slow by design, and nothing to act on.
+       */
+      readonly coldRunsExcluded: number
     }
   | { readonly kind: 'phase_failed'; readonly key: string; readonly nodeId: string; readonly reason: string }
   /**
@@ -99,6 +115,14 @@ export type CoordinatorTrigger =
       readonly tree: string
     }
   | { readonly kind: 'attempt_failed'; readonly key: string; readonly nodeId: string; readonly reason: string }
+  /** A session ended with tool calls that never returned (`tool_calls_unfinished`). */
+  | {
+      readonly kind: 'tool_calls_unfinished'
+      readonly key: string
+      readonly nodeId: string
+      readonly tools: readonly string[]
+      readonly count: number
+    }
   | {
       readonly kind: 'integration_wait'
       readonly key: string
@@ -120,6 +144,8 @@ export interface TriggerOptions {
   readonly gateCostCeilingMs?: number
   readonly gateCostPerPhaseMs?: number
   readonly integrationWaitMs?: number
+  /** A single uncached run this long reads as a cold lane (`DEFAULT_COLD_RUN_MS`). */
+  readonly coldRunMs?: number
   /**
    * The run's definition now, when the caller has it: lets a `gate_cost`
    * trigger say that the gate has no scoped form. Read without the project's
@@ -148,17 +174,37 @@ export function triggersFrom(
     options.workflow === undefined ? [] : unscopedGates(options.workflow, null).map((finding) => finding.gateId),
   )
   const integrationWaitMs = options.integrationWaitMs ?? DEFAULT_INTEGRATION_WAIT_MS
+  const coldRunMs = options.coldRunMs ?? DEFAULT_COLD_RUN_MS
 
   const found: CoordinatorTrigger[] = []
+  // Where each node's current attempt began, and the coordinator's last act
+  // on it: an attempt that fails after the coordinator already acted on it —
+  // a fix that landed while the attempt was still in flight — is handled.
+  const attemptStart = new Map<string, number>()
+  const coordinatorActed = new Map<string, number>()
 
   for (const event of events) {
     const nodeId = nodeOf(event)
+    noteCoordinatorAct(event, coordinatorActed)
+    if (nodeId !== null && event.type === 'node_status' && (event.payload as { status?: string }).status === 'running') {
+      attemptStart.set(nodeId, event.id)
+    }
     if (event.id <= sinceId || nodeId === null) continue
     const payload = event.payload as { status?: string; reason?: string }
     if (event.type === 'node_status' && payload.status === 'failed') {
       found.push({ kind: 'phase_failed', key: `failed:${event.id}`, nodeId, reason: payload.reason ?? 'no reason recorded' })
     } else if (event.type === 'node_error') {
+      if ((coordinatorActed.get(nodeId) ?? -1) > (attemptStart.get(nodeId) ?? -1)) continue
       found.push({ kind: 'attempt_failed', key: `error:${event.id}`, nodeId, reason: payload.reason ?? 'no reason recorded' })
+    } else if (event.type === 'tool_calls_unfinished') {
+      const unfinished = event.payload as { tools?: readonly string[]; count?: number }
+      found.push({
+        kind: 'tool_calls_unfinished',
+        key: `unfinished:${event.id}`,
+        nodeId,
+        tools: unfinished.tools ?? [],
+        count: unfinished.count ?? 0,
+      })
     } else if (event.type === 'gate_stalled') {
       const stalled = event.payload as { gate?: string; tree?: string; outcome?: string }
       if (stalled.outcome === 'escalated' && stalled.gate !== undefined && stalled.tree !== undefined) {
@@ -195,6 +241,9 @@ export function triggersFrom(
       thresholdMs: ceilingMs,
       phases: cost.phases,
       fullEveryPhase: unscoped.has(gateId),
+      perPhase: cost.perPhase,
+      coldRunMs,
+      coldRunsExcluded: cost.coldRuns,
     })
   }
 
@@ -231,16 +280,34 @@ function describeTrigger(trigger: CoordinatorTrigger): string {
         `- phase ${trigger.nodeId} has been running for ${minutes(trigger.observedMs)} minutes ` +
         `(threshold ${minutes(trigger.thresholdMs)})`
       )
-    case 'gate_cost':
+    case 'gate_cost': {
+      const cold = trigger.perPhase.filter((entry) => entry.longestMs >= trigger.coldRunMs)
       return (
         `- gate ${trigger.gateId} has cost ${minutes(trigger.observedMs)} minutes across this run, ` +
         `uncached, over ${trigger.phases} phase${trigger.phases === 1 ? '' : 's'} ` +
-        `(ceiling ${minutes(trigger.thresholdMs)}); last run by ${trigger.nodeId}` +
+        `(ceiling ${minutes(trigger.thresholdMs)}); last run by ${trigger.nodeId}. Per phase: ` +
+        trigger.perPhase.map((entry) => `${entry.nodeId} ${minutes(entry.ms)}m`).join(', ') +
+        (cold.length === 0
+          ? ''
+          : `. A single run of ${minutes(trigger.coldRunMs)}m or more — ${cold.map((entry) => entry.nodeId).join(', ')} — ` +
+            'is probably a cold lane (a scoped run with no cache yet runs everything); give the gate ' +
+            '`scope_cache` and `cold_cmd`, and `project.lane_seed`, rather than retuning its command') +
+        (trigger.coldRunsExcluded === 0
+          ? ''
+          : ` (${trigger.coldRunsExcluded} cold-lane run${trigger.coldRunsExcluded === 1 ? '' : 's'} of its cold_cmd left out)`) +
         (trigger.fullEveryPhase
           ? '. It has no scoped_cmd, so every phase and fix round runs its full command under ' +
             'gate_scope: scoped; adding one (a line with {changed_files} or {touches}) is the ' +
             'operator’s change, not an amendment you can make — tell them'
           : '')
+      )
+    }
+    case 'tool_calls_unfinished':
+      return (
+        `- phase ${trigger.nodeId}'s agent ended its session with ${trigger.count} tool call` +
+        `${trigger.count === 1 ? '' : 's'} (${trigger.tools.join(', ')}) that never returned: a command it ` +
+        'started is still running, or hung, with nobody waiting for it. Look in its lane (`exec`, ' +
+        '`docker ps` for its compose project) and stop what should not be running'
       )
     case 'integration_wait':
       return (
@@ -279,6 +346,22 @@ interface GateCost {
   readonly phases: number
   /** The last phase to run it — somewhere to start reading. */
   readonly lastNodeId: string
+  readonly perPhase: readonly { readonly nodeId: string; readonly ms: number; readonly longestMs: number }[]
+  /** Runs of the gate's `cold_cmd`, left out of the total. */
+  readonly coldRuns: number
+}
+
+/** A coordinator act on a node, by event id: operations, answers, amendments naming it. */
+function noteCoordinatorAct(event: StoredEvent, acted: Map<string, number>): void {
+  const payload = event.payload as { by?: string; author?: string; targets?: readonly string[] }
+  if ((event.type === 'node_operation' || event.type === 'human_answered') && payload.by === 'coordinator') {
+    const nodeId = nodeOf(event)
+    if (nodeId !== null) acted.set(nodeId, event.id)
+  } else if (event.type === 'workflow_amended' && payload.author === 'coordinator') {
+    for (const target of payload.targets ?? []) {
+      if (target.startsWith('node:')) acted.set(target.slice('node:'.length), event.id)
+    }
+  }
 }
 
 /**
@@ -288,21 +371,53 @@ interface GateCost {
  * so the phases counted are the ones that ran it inside their own fix loops.
  */
 function gateCost(events: readonly StoredEvent[]): ReadonlyMap<string, GateCost> {
-  const totals = new Map<string, { totalMs: number; nodes: Set<string>; lastNodeId: string }>()
+  const totals = new Map<
+    string,
+    { totalMs: number; perNode: Map<string, { ms: number; longestMs: number }>; lastNodeId: string; coldRuns: number }
+  >()
+  // The form the next result of a node's gate ran in, from its `gate_started`.
+  const form = new Map<string, string | undefined>()
   for (const event of events) {
+    if (event.type === 'gate_started') {
+      form.set(`${event.nodeId}\u0000${event.payload.gate}`, event.payload.form)
+      continue
+    }
     if (event.type !== 'gate_result' || event.nodeId === null) continue
     const payload = event.payload as { gate?: string; duration_ms?: number; cached?: boolean }
     if (payload.gate === undefined || typeof payload.duration_ms !== 'number' || payload.cached === true) continue
-    const entry = totals.get(payload.gate) ?? { totalMs: 0, nodes: new Set<string>(), lastNodeId: event.nodeId }
-    entry.totalMs += payload.duration_ms
-    entry.nodes.add(event.nodeId)
-    entry.lastNodeId = event.nodeId
+    const entry = totals.get(payload.gate) ?? {
+      totalMs: 0,
+      perNode: new Map<string, { ms: number; longestMs: number }>(),
+      lastNodeId: event.nodeId,
+      coldRuns: 0,
+    }
     totals.set(payload.gate, entry)
+    const key = `${event.nodeId}\u0000${payload.gate}`
+    const ranCold = form.get(key) === 'cold'
+    form.delete(key)
+    if (ranCold) {
+      entry.coldRuns += 1
+      continue
+    }
+    entry.totalMs += payload.duration_ms
+    const node = entry.perNode.get(event.nodeId) ?? { ms: 0, longestMs: 0 }
+    node.ms += payload.duration_ms
+    node.longestMs = Math.max(node.longestMs, payload.duration_ms)
+    entry.perNode.set(event.nodeId, node)
+    entry.lastNodeId = event.nodeId
   }
   return new Map(
     [...totals].map(([gate, entry]) => [
       gate,
-      { totalMs: entry.totalMs, phases: entry.nodes.size, lastNodeId: entry.lastNodeId },
+      {
+        totalMs: entry.totalMs,
+        phases: entry.perNode.size,
+        lastNodeId: entry.lastNodeId,
+        perPhase: [...entry.perNode]
+          .map(([nodeId, node]) => ({ nodeId, ms: node.ms, longestMs: node.longestMs }))
+          .sort((left, right) => right.ms - left.ms),
+        coldRuns: entry.coldRuns,
+      },
     ]),
   )
 }
