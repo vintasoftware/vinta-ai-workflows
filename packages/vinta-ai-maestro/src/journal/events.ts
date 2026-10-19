@@ -432,6 +432,22 @@ interface RunPayloads {
     readonly cause: 'network' | 'auth'
     readonly duration_ms: number
   }
+  /**
+   * A lane whose recycle failed was taken out of the run and `replacement`
+   * provisioned in its place; the phase that was handed it moved there without
+   * being charged. The old lane is left on disk as it was. `unremovable` is
+   * the paths git could not remove for want of permission, relative to the
+   * lane, with their owner's uid (-1 when it could not be read): files a
+   * container created as root in a bind-mounted worktree, typically.
+   */
+  lane_unhealthy: {
+    /** The phase that was handed the lane when its recycle failed. */
+    readonly node: string
+    readonly lane: string
+    readonly replacement: string
+    readonly stage: 'preserve' | 'worktree' | 'database' | 'reprovision'
+    readonly unremovable?: readonly { readonly path: string; readonly uid: number }[]
+  }
   orphan_containers_stopped: {
     readonly lane: string
     readonly count: number

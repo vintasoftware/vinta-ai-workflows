@@ -30,6 +30,7 @@ import {
   type PendingQuestion,
   type RunRow,
 } from '../journal/journal.ts'
+import type { StoredEvent } from '../journal/events.ts'
 import { describeOutage, openOutages } from '../monitor/monitor.ts'
 import { FAILED, OK, USAGE, type Io } from './io.ts'
 import { storeFor } from './paths.ts'
@@ -205,11 +206,13 @@ function showRun(
   }
 
   const outages = openOutages(journal.events(runId))
+  const unhealthy = unhealthyLanes(journal.events(runId))
   if (json) {
     io.out(
       JSON.stringify({
         runId,
         outages,
+        unhealthyLanes: unhealthy,
         workflowId: row.workflow_id,
         state,
         pid: job?.pid ?? null,
@@ -243,6 +246,7 @@ function showRun(
   if (ended !== null) io.out(`ended     ${ended}`)
   io.out(`elapsed   ${duration((row.ended_at ?? Date.now()) - row.started_at)}`)
   for (const outage of outages) io.out(`outage    ${describeOutage(outage)}`)
+  for (const lane of unhealthy) io.out(`lane      ${describeUnhealthyLane(lane)}`)
   io.out('')
   io.out(
     table(
@@ -328,4 +332,22 @@ export function duration(ms: number): string {
   if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`
   if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`
   return `${seconds}s`
+}
+
+type UnhealthyLane = Extract<StoredEvent, { type: 'lane_unhealthy' }>['payload']
+
+/** Lanes taken out of the run because they could not be recycled (`lane_unhealthy`). */
+export function unhealthyLanes(events: readonly StoredEvent[]): readonly UnhealthyLane[] {
+  return events.flatMap((event) => (event.type === 'lane_unhealthy' ? [event.payload] : []))
+}
+
+/** One line per unhealthy lane: what replaced it, and what is in the way of cleaning it. */
+export function describeUnhealthyLane(lane: UnhealthyLane): string {
+  const blocked = (lane.unremovable ?? []).map((entry) =>
+    entry.uid < 0 ? entry.path : `${entry.path} (owned by uid ${entry.uid})`,
+  )
+  return (
+    `${lane.lane} is unhealthy (${lane.stage} would not recycle) and was replaced by ${lane.replacement}` +
+    (blocked.length === 0 ? '' : `; could not remove ${blocked.join(', ')}`)
+  )
 }

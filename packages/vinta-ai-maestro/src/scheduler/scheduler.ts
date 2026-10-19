@@ -76,7 +76,7 @@ import { infrastructureCause, isInfrastructureLine } from '../harness/outage.ts'
 import { ids as guardIds } from '../guard/guard.ts'
 import { checkCommand, shellLineOf } from '../guard/match.ts'
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AdmissionControl, AdmissionOutcome, AdmitOptions } from '../admission/admission.ts'
 import { systemClock, type Clock } from '../admission/clock.ts'
@@ -634,6 +634,30 @@ class HarnessFault extends SpawnFatal {}
 class LaneUnusable extends Error {}
 
 /**
+ * A lane whose recycle failed: the lane's fault, not the phase's, so the phase
+ * is handed a freshly provisioned lane instead of failing (`#replaceLane`).
+ * One observed phase failed six times in a row on one lane that root-owned
+ * files a container had left made impossible to clean.
+ */
+class LaneUnhealthy extends LaneUnusable {
+  constructor(
+    readonly lane: string,
+    readonly recycle: LaneRecycleError,
+  ) {
+    super(recycle.message)
+  }
+}
+
+/** Paths git could not remove for want of permission, from a recycle's stderr tail. */
+function unremovable(detail: string): string[] {
+  const found: string[] = []
+  for (const match of detail.matchAll(/failed to remove '?([^':\n]+?)'?: Permission denied/g)) {
+    if (match[1] !== undefined) found.push(match[1].replace(/\/$/, ''))
+  }
+  return [...new Set(found)].slice(0, 10)
+}
+
+/**
  * Unwinds a node the operator aborted (§9). It carries no message: the node is
  * already marked failed, with its reason, by the time this is thrown.
  */
@@ -1160,6 +1184,8 @@ export class Scheduler {
    * git can answer exactly (`#reorientation`).
    */
   readonly #laneOf = new Map<string, string>()
+  /** Replacements provisioned per original lane name (`#replaceLane`). */
+  readonly #replacedLanes = new Map<string, number>()
   /** The open login question per harness, resolved with whether it was logged in (`#awaitLogin`). */
   readonly #loginAsked = new Map<string, Promise<boolean>>()
   /**
@@ -2694,6 +2720,8 @@ export class Scheduler {
           this.#setStatus(state, 'running')
           continue
         }
+        // The lane failed, not the phase: it already holds a replacement, and nothing is charged.
+        if (error instanceof LaneUnhealthy) continue
         const reason = failureReason(error)
         this.#recordAttemptFailure(state, reason, error)
         // The operator was asked and said stop: no retry policy overrides that.
@@ -3115,8 +3143,70 @@ export class Scheduler {
       // between a database that would not reset, a worktree that would not come
       // back to its base, and a slot that could not be torn down and rebuilt;
       // the cause is which step refused and what it said.
+      // A `preserve` failure is uncommitted work that could not be saved:
+      // still the phase's to look at, in the lane it is in. Any other stage is
+      // the lane failing, and the phase gets another one.
+      //
+      // Replaced while this node still holds the lane's lease, so no other
+      // node can be handed the broken lane in between: the release that
+      // follows puts the replacement on the free list in its place.
+      if (error instanceof LaneRecycleError && error.stage !== 'preserve') {
+        const unhealthy = new LaneUnhealthy(lane, error)
+        if (await this.#replaceLane(state, unhealthy)) throw unhealthy
+      }
       throw new LaneUnusable(recycleFailure(lane, error))
     }
+  }
+
+  /**
+   * Takes an unhealthy lane out of the run and provisions a replacement under
+   * a new name, which this node holds in its place and the member whose desk
+   * it was takes over. Returns false when no replacement could be provisioned; the
+   * failure is then the phase's, as before.
+   *
+   * The lane is left on disk as it is — nothing in it is deleted — and named
+   * with the paths git could not remove and who owns them, so the operator can
+   * clean it (`lane_unhealthy`).
+   */
+  async #replaceLane(state: NodeState, error: LaneUnhealthy): Promise<boolean> {
+    const addLane = this.#options.addLane
+    if (addLane === undefined) return false
+    const bad = error.lane
+    const replacements = (this.#replacedLanes.get(bad.replace(/-r\d+$/, '')) ?? 0) + 1
+    const replacement = `${bad.replace(/-r\d+$/, '')}-r${replacements}`
+    try {
+      await addLane(replacement)
+    } catch (provisioning) {
+      this.#log.warn('lane.replacement_failed', { lane: bad, replacement, ...errorFields(provisioning) })
+      return false
+    }
+    this.#replacedLanes.set(bad.replace(/-r\d+$/, ''), replacements)
+    // Held by this node, so not on the free list: its release returns the
+    // replacement instead.
+    state.lane = replacement
+    for (const [member, lane] of this.#laneOf) if (lane === bad) this.#laneOf.set(member, replacement)
+    const paths = unremovable(error.recycle.detail)
+    const owners = paths.flatMap((path) => {
+      try {
+        const stat = statSync(join(this.#options.laneRoot, bad, path))
+        return [{ path, uid: stat.uid }]
+      } catch {
+        return [{ path, uid: -1 }]
+      }
+    })
+    this.#options.journal.append({
+      runId: this.#options.runId,
+      type: 'lane_unhealthy',
+      payload: {
+        node: state.node.id,
+        lane: bad,
+        replacement,
+        stage: error.recycle.stage,
+        ...(owners.length === 0 ? {} : { unremovable: owners }),
+      },
+    })
+    this.#log.warn('lane.unhealthy', { lane: bad, replacement, stage: error.recycle.stage, node: state.node.id })
+    return true
   }
 
   /**

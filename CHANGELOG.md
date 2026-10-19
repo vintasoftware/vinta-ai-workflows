@@ -1275,6 +1275,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a lane that cannot be recycled no longer fails the
+  phase handed to it.** A recycle that fails (outside the `preserve` stage)
+  takes that lane out of the run and provisions a fresh one, `<lane>-r<N>`,
+  and the phase runs there with nothing charged. The old lane stays on disk
+  and is journalled as `lane_unhealthy`, with any paths git could not remove
+  and their owner's uid. `status` shows it.
 - **`vinta-ai-maestro`: a provider or network outage no longer fails
   phases.** A turn that ends on an infrastructure error (DNS or connection
   failures, `upstream-unavailable`, HTTP 5xx or 529, an expired or rejected

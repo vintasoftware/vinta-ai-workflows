@@ -12,6 +12,7 @@
  * invisible in the run it happens in and fatal three phases later, so it is
  * checked on the happy paths and on the failure paths alike.
  */
+import { describeUnhealthyLane } from '../src/cli/status.ts'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -1290,6 +1291,57 @@ describe('lane reuse', () => {
 
     expect(report.statuses).toEqual({ a: 'done', b: 'done' })
     expect(recycled).toEqual([])
+    expectDrained(r)
+  })
+
+  /**
+   * Files a container created as root in a bind-mounted lane made it
+   * impossible to clean, and one observed phase failed six times in a row on
+   * that lane before it was moved. The lane is what failed: it is replaced,
+   * and the phase runs in the replacement without being charged.
+   */
+  it('replaces a lane whose recycle failed and runs the phase there, charging it nothing', async () => {
+    const recycled: string[] = []
+    const added: string[] = []
+    const r = rig(makeWorkflow([node('a'), node('b'), node('c')], { lanes: 1 }), {
+      recycleLane: async (name) => {
+        recycled.push(name)
+        if (name === 'run-1-lane-1') {
+          throw new LaneRecycleError(
+            name,
+            'worktree',
+            [],
+            'exited 1\nwarning: failed to remove apps/api/.venv/: Permission denied',
+          )
+        }
+      },
+      addLane: async (name) => {
+        added.push(name)
+      },
+    })
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done', b: 'done', c: 'done' })
+    expect(added).toEqual(['run-1-lane-1-r1'])
+    // The replacement is fresh for b, and recycled for c like any lane.
+    expect(recycled).toEqual(['run-1-lane-1', 'run-1-lane-1-r1'])
+    const events = r.journal.events('run-1')
+    expect(events.some((event) => event.type === 'node_error')).toBe(false)
+    const unhealthy = events.filter((event) => event.type === 'lane_unhealthy').map((event) => event.payload)
+    expect(unhealthy).toEqual([
+      {
+        node: 'b',
+        lane: 'run-1-lane-1',
+        replacement: 'run-1-lane-1-r1',
+        stage: 'worktree',
+        unremovable: [{ path: 'apps/api/.venv', uid: -1 }],
+      },
+    ])
+    expect(describeUnhealthyLane(unhealthy[0] as Parameters<typeof describeUnhealthyLane>[0])).toBe(
+      'run-1-lane-1 is unhealthy (worktree would not recycle) and was replaced by run-1-lane-1-r1; ' +
+        'could not remove apps/api/.venv',
+    )
     expectDrained(r)
   })
 

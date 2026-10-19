@@ -912,6 +912,7 @@ export class Journal {
       case 'orphan_containers_stopped':
       case 'integration_fresh_state':
       case 'outage_started':
+      case 'lane_unhealthy':
       case 'outage_ended':
       case 'branches_moved':
       case 'integration_reclaimed':
