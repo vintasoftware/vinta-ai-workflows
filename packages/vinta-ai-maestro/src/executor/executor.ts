@@ -1753,6 +1753,11 @@ export class RunEffectExecutor implements EffectExecutor {
     next.start()
   }
 
+  /** Who holds the integration worktree now: a node, a label (`coordinator`), or null. */
+  integrationHolder(): string | null {
+    return this.#integrationBusy ? this.#integrationHolder : null
+  }
+
   integrationPause(isPaused: (nodeId: string) => boolean): () => void {
     this.#integrationPaused = isPaused
     return () => this.#pumpIntegration()

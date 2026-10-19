@@ -548,7 +548,7 @@ describe('the coordinator’s turn', () => {
     const task = tasks[0] as AgentTask
     expect(task.env).toEqual(env)
     expect(task.prompt).toContain('You are the run coordinator')
-    expect(task.prompt).toContain(`vinta-ai-maestro exec ${RUN} <lane|integration> -- <command>`)
+    expect(task.prompt).toContain(`vinta-ai-maestro exec ${RUN} <lane|integration> --reason "<why>" -- <command>`)
     expect(task.prompt).toContain('what you may not do')
     expect(task.prompt).toContain('--- you were woken because ---\n- phase p1 failed: gate unit exited 1')
   })

@@ -575,6 +575,7 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
       : execPort({
           workspace: host.workspace,
           ...(host.holdIntegration === undefined ? {} : { holdIntegration: host.holdIntegration }),
+          ...(host.integrationHolder === undefined ? {} : { integrationHolder: host.integrationHolder }),
           ...names,
           // A command's leases and queued waits end with it, as a turn's do.
           onEnded: (holder, turn) => {

@@ -36,6 +36,11 @@ export interface ExecRequest {
   readonly target: string
   readonly command: string
   readonly actor: Actor
+  /**
+   * Called when the command actually starts — at once in a lane, and in the
+   * integration worktree once the queue lets it in. Until then it is queued.
+   */
+  readonly onRunning?: () => void
 }
 
 /** What a run offers `exec` (`DaemonRun.exec`). */
@@ -46,6 +51,8 @@ export interface ExecPort {
   targets(): readonly string[]
   /** Whether a running command holds as `holder` — what lets `with` inside `exec` take a lease. */
   holds(holder: string): boolean
+  /** Who holds the integration worktree now — a phase, or a label like `coordinator` — or null. */
+  integrationHolder(): string | null
   /**
    * Runs the request and resolves with its exit code, or null for a target
    * the run does not have. `onOutput` receives stdout and stderr, combined,
@@ -58,6 +65,8 @@ export interface ExecPortOptions {
   /** The worktree a resolved target names. */
   readonly workspace: (target: string) => Workspace | null
   readonly holdIntegration?: <T>(label: string, work: () => Promise<T>) => Promise<T>
+  /** Who holds the integration worktree now, for "queued behind <holder>". */
+  readonly integrationHolder?: () => string | null
   /** What a typed name means (`resolveExecTarget`). Absent, the name is the target. */
   readonly resolve?: (target: string) => string | null
   readonly targets?: () => readonly string[]
@@ -113,6 +122,7 @@ export function execPort(options: ExecPortOptions): ExecPort {
     },
     targets: () => options.targets?.() ?? [],
     holds: (holder) => (live.get(holder) ?? 0) > 0,
+    integrationHolder: () => options.integrationHolder?.() ?? null,
     async run(request, onOutput, signal) {
       const target = resolve(request.target)
       const workspace = target === null ? null : options.workspace(target)
@@ -122,7 +132,12 @@ export function execPort(options: ExecPortOptions): ExecPort {
       const env = { ...workspace.env, [MAESTRO_NODE_ENV]: holder, [MAESTRO_TURN_ENV]: turn }
       live.set(holder, (live.get(holder) ?? 0) + 1)
       try {
-        const work = () => runCommand({ ...workspace, env }, request.command, onOutput, signal)
+        const work = () => {
+          // Cancelled while it was queued: it never starts.
+          if (signal.aborted) return Promise.resolve(EXEC_KILLED)
+          request.onRunning?.()
+          return runCommand({ ...workspace, env }, request.command, onOutput, signal)
+        }
         if (target !== 'integration' || options.holdIntegration === undefined) return await work()
         return await options.holdIntegration(request.actor, work)
       } finally {

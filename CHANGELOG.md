@@ -1275,6 +1275,15 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: `exec` streams, accepts `--reason`, and can be
+  cancelled.** The daemon used to read each answer whole before sending
+  it, so an `exec` queued behind the integration worktree sent nothing, and
+  the client said the run was "not live" while the command still ran later.
+  The answer now streams. The client says who it is queued behind, and
+  ending the client cancels the command, whether it is queued or running.
+  `--reason` is journalled. `exec --detach`, `exec list <run>` and
+  `exec cancel <run> <id>` are new. Every release of the integration
+  worktree lets the next waiter in.
 - **`vinta-ai-maestro`: a paused phase no longer takes the integration
   worktree.** A paused node waiting in the integration queue keeps its place
   but is passed over, and is let in once it is resumed. This is journalled

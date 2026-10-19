@@ -100,6 +100,8 @@ export interface HostWiring {
   readonly laneNames?: () => readonly string[]
   /** Stops every lane's compose stack, volumes kept (`LanePool.stopStacks`). */
   readonly stopStacks?: () => Promise<readonly StackStop[]>
+  /** Who holds the integration worktree now, for `exec`'s "queued behind". */
+  readonly integrationHolder?: () => string | null
   /** Runs `work` holding the integration worktree's queue, as `label`. */
   readonly holdIntegration?: <T>(label: string, work: () => Promise<T>) => Promise<T>
   /**
@@ -556,6 +558,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
     },
     laneNames: () => pool.lanes.map((lane) => lane.name),
     holdIntegration: (label, work) => executor.integration(work, null, label),
+    integrationHolder: () => executor.integrationHolder(),
     mergeBranch: (into, incoming, wave) => {
       const members: string[] = []
       for (let at = 1; at <= wave; at += 1) members.push(...integrator.nodesAt(at))

@@ -24,7 +24,8 @@
  */
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import { closeSync, openSync, readSync, statSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { closeSync, createWriteStream, openSync, readSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
@@ -213,6 +214,18 @@ const AGENT_ROUTES: readonly { readonly method: string; readonly path: RegExp }[
   { method: 'POST', path: /^\/api\/runs\/[^/]+\/guard$/ },
 ]
 
+/** One `exec` command that has not ended: what `exec list` shows and `exec cancel` ends. */
+interface LiveExec {
+  readonly id: string
+  readonly runId: string
+  readonly target: string
+  readonly actor: Actor
+  readonly reason?: string
+  state: 'queued' | 'running'
+  readonly startedAt: number
+  readonly abort: AbortController
+}
+
 export function agentMayReach(method: string, path: string): boolean {
   return AGENT_ROUTES.some((route) => route.method === method && route.path.test(path))
 }
@@ -316,6 +329,8 @@ export function createApi(options: ApiOptions): Hono {
   const ui = createStaticHandler(options.uiDir ?? DEFAULT_UI_DIR)
   const log = options.logger ?? nullLogger()
   const logDir = options.logDir ?? logDirFor(journal.root)
+  /** `exec` commands that have not ended, by id, across runs (`GET`/`DELETE …/exec`). */
+  const liveExecs = new Map<string, LiveExec>()
   /** Requests the coordinator's token authenticated. Everyone else is the operator. */
   const actors = new WeakMap<Request, Actor>()
   const actorOf = (c: Context): Actor => actors.get(c.req.raw) ?? 'operator'
@@ -897,13 +912,26 @@ export function createApi(options: ApiOptions): Hono {
   /**
    * One shell command run by hand in a live run's lane or its integration
    * worktree, with that worktree's environment (`coordinator/exec.ts`). The
-   * answer streams: one JSON object per line, `{"output": "…"}` as the
-   * command prints and `{"exit": <code>}` last. Closing the request ends the
-   * command. In the integration worktree the command holds the worktree's
-   * queue until it exits.
+   * answer streams, one JSON object per line: `{"accepted": "<id>"}` at once,
+   * `{"queued": "<holder>"}` while it waits for the integration worktree (and
+   * `{"waiting": …}` every fifteen seconds after), `{"running": true}` when it
+   * starts, `{"output": "…"}` as it prints, and `{"exit": <code>}` last.
+   *
+   * Nothing used to be sent until the command ran, so a command queued behind
+   * the integration worktree for minutes looked to the client like a daemon
+   * that was not there: it printed "not live" and gave up, the server never
+   * noticed, and the command ran later with nobody attached — twice in one
+   * observed run, once for 835 seconds, holding the worktree while a phase
+   * sat queued behind it. The first frame is what keeps the client attached;
+   * a client that goes away cancels the command, queued or running.
+   *
+   * `detach: true` answers `{"id": …}` at once and runs the command with
+   * nobody attached, its output in a log; `GET …/exec` lists the commands of
+   * the run that have not ended and `DELETE …/exec/<id>` cancels one.
    *
    * The command and what it prints are repository content and stay out of the
-   * daemon's log; the journal records the target, who ran it and its exit code.
+   * daemon's log; the journal records the target, who ran it, why, and its
+   * exit code.
    */
   app.post('/api/runs/:runId/exec', async (c) => {
     const runId = c.req.param('runId')
@@ -924,39 +952,138 @@ export function createApi(options: ApiOptions): Hono {
     }
 
     const actor = actorOf(c)
+    const reason = reasonOf(c)
     const port = run.exec
+    const id = randomUUID().slice(0, 8)
     const abort = new AbortController()
+    const entry: LiveExec = { id, runId, target, actor, state: 'queued', startedAt: Date.now(), abort, ...(reason === undefined ? {} : { reason }) }
+    liveExecs.set(id, entry)
+
+    const execute = async (onOutput: (chunk: string) => void, onRunning: () => void): Promise<number> => {
+      const started = Date.now()
+      let code = 127
+      try {
+        code =
+          (await port.run(
+            {
+              target,
+              command,
+              actor,
+              onRunning: () => {
+                entry.state = 'running'
+                onRunning()
+              },
+            },
+            onOutput,
+            abort.signal,
+          )) ?? 127
+      } finally {
+        liveExecs.delete(id)
+        journal.append({
+          runId,
+          type: 'workspace_exec',
+          payload: {
+            target,
+            exit_code: code,
+            duration_ms: Date.now() - started,
+            id,
+            ...(actor === 'coordinator' ? { by: actor } : {}),
+            ...(reason === undefined ? {} : { reason }),
+            ...(abort.signal.aborted ? { cancelled: true } : {}),
+          },
+        })
+        log.info('runs.exec', { run: runId, target, actor, exit_code: code, cancelled: abort.signal.aborted })
+      }
+      return code
+    }
+
+    if (body.value.detach === true) {
+      const logPath = journal.gateLogPath(runId, '_exec', id)
+      const out = createWriteStream(logPath)
+      void execute(
+        (chunk) => out.write(chunk),
+        () => {},
+      )
+        .catch(() => 127)
+        .finally(() => out.end())
+      return c.json({ id, target, log: logPath }, 202)
+    }
+
     c.req.raw.signal.addEventListener('abort', () => abort.abort(), { once: true })
     const encoder = new TextEncoder()
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
+    let heartbeat: ReturnType<typeof setInterval> | undefined
+    const stream_ = async (controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> => {
         const send = (frame: Readonly<Record<string, unknown>>): void => {
           try {
             controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`))
           } catch {
-            // The client went away; the abort below ends the command.
+            // The client went away: the command goes with it.
+            abort.abort()
           }
         }
-        const started = Date.now()
-        const code = (await port.run({ target, command, actor }, (output) => send({ output }), abort.signal)) ?? 127
-        journal.append({
-          runId,
-          type: 'workspace_exec',
-          payload: { target, exit_code: code, duration_ms: Date.now() - started, ...(actor === 'coordinator' ? { by: actor } : {}) },
-        })
-        log.info('runs.exec', { run: runId, target, actor, exit_code: code })
+        send({ accepted: id })
+        if (target === 'integration') {
+          const holder = port.integrationHolder()
+          if (holder !== null) {
+            send({ queued: holder })
+            heartbeat = setInterval(() => {
+              if (entry.state === 'queued') send({ waiting: port.integrationHolder() ?? holder })
+            }, 15_000)
+            heartbeat.unref?.()
+          }
+        }
+        const code = await execute(
+          (output) => send({ output }),
+          () => send({ running: true }),
+        )
+        if (heartbeat !== undefined) clearInterval(heartbeat)
         send({ exit: code })
         try {
           controller.close()
         } catch {
           // Already cancelled.
         }
+    }
+    const stream = new ReadableStream<Uint8Array>({
+      // Not awaited: a stream whose `start` is still pending delivers none of
+      // what it enqueued, so awaiting the command here held every frame —
+      // the `accepted` one included — until the command had run.
+      start(controller) {
+        void stream_(controller)
       },
       cancel() {
+        if (heartbeat !== undefined) clearInterval(heartbeat)
         abort.abort()
       },
     })
     return new Response(stream, { headers: { 'content-type': 'application/x-ndjson' } })
+  })
+
+  /** The run's `exec` commands that have not ended: queued or running, attached or detached. */
+  app.get('/api/runs/:runId/exec', (c) => {
+    const runId = c.req.param('runId')
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const execs = [...liveExecs.values()]
+      .filter((entry) => entry.runId === runId)
+      .map(({ id, target, actor, state, startedAt, reason }) => ({
+        id,
+        target,
+        by: actor,
+        state,
+        startedAt,
+        ...(reason === undefined ? {} : { reason }),
+      }))
+    return c.json({ execs })
+  })
+
+  /** Cancels one: a queued command never starts, a running one's process tree is ended. */
+  app.delete('/api/runs/:runId/exec/:id', (c) => {
+    const runId = c.req.param('runId')
+    const entry = liveExecs.get(c.req.param('id'))
+    if (entry === undefined || entry.runId !== runId) return fail(c, 404, 'unknown_exec')
+    const was = entry.state
+    entry.abort.abort()
+    return c.json({ id: entry.id, cancelled: true, was })
   })
 
   /**

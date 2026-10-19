@@ -132,7 +132,9 @@ export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <
   --tree <hash>  Only the result for this lane tree. Default: every tree.
   --repo <dir>   The project. Defaults to the current directory.`
 
-export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integration> [--repo <dir>] -- <command...>
+export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integration> [--reason <text>] [--detach] [--repo <dir>] -- <command...>
+       vinta-ai-maestro exec list <runId> [--repo <dir>]
+       vinta-ai-maestro exec cancel <runId> <id> [--reason <text>] [--repo <dir>]
 
   Runs one shell command in a live run's lane, or in its integration worktree,
   with that worktree's own environment: its database, compose project and
@@ -141,9 +143,17 @@ export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integratio
 
   In \`integration\` the command holds the integration worktree for as long as
   it runs: no wave merge, base preparation or retry checks a branch out
-  underneath it. Lane names are in \`vinta-ai-maestro status <runId>\`.
+  underneath it. While another holder has it, this says who and waits.
+  Ending this command (Ctrl-C) cancels it there too, queued or running.
+  Lane names are in \`vinta-ai-maestro status <runId>\`.
 
-  --repo <dir>   The project. Defaults to the current directory.`
+  --reason <text>  Why, journalled with the command.
+  --detach         Print the command's id and return; it runs with nobody
+                   attached and its output goes to a log.
+  --repo <dir>     The project. Defaults to the current directory.
+
+  list    the run's commands that have not ended, with their ids.
+  cancel  ends one: a queued command never starts.`
 
 const NODE_OPS = {
   context: { path: 'context', field: 'text' },
@@ -512,6 +522,7 @@ export async function fixerCommand(argv: readonly string[], io: Io, deps: SteerD
 }
 
 export async function execCommand(argv: readonly string[], io: Io, deps: SteerDeps = {}): Promise<number> {
+  if (argv[0] === 'list' || argv[0] === 'cancel') return execManage(argv, io, deps)
   const split = argv.indexOf('--')
   if (split === -1) {
     io.err(EXEC_USAGE)
@@ -519,7 +530,11 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
   }
   let parsed
   try {
-    parsed = parseArgs({ args: argv.slice(0, split), options: { repo: { type: 'string' } }, allowPositionals: true })
+    parsed = parseArgs({
+      args: argv.slice(0, split),
+      options: { repo: { type: 'string' }, reason: { type: 'string' }, detach: { type: 'boolean' } },
+      allowPositionals: true,
+    })
   } catch {
     io.err(EXEC_USAGE)
     return USAGE
@@ -533,24 +548,40 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
   // One word is a shell line as written; several are argv, quoted for the
   // job's shell so they arrive as they were typed.
   const command = words.length === 1 ? (words[0] as string) : words.map((word) => shellQuote(word)).join(' ')
+  const detach = parsed.values.detach === true
 
   const repoPath = resolve(parsed.values.repo ?? process.cwd())
   const target = reach(repoPath, runId, deps.env ?? process.env)
   if (target === null) return notLive(io, runId)
+  const reason = parsed.values.reason
   let response: Response
   try {
     response = await (deps.fetch ?? fetch)(`${target.url}/api/runs/${encodeURIComponent(runId)}/exec`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${target.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ target: where, command }),
+      headers: {
+        authorization: `Bearer ${target.token}`,
+        'content-type': 'application/json',
+        ...(reason === undefined || reason.trim() === '' ? {} : { [REASON_HEADER]: encodeURIComponent(reason) }),
+      },
+      body: JSON.stringify({ target: where, command, ...(detach ? { detach: true } : {}) }),
     })
   } catch {
-    return notLive(io, runId)
+    // The run has a job record and its daemon did not answer: that is not
+    // the same thing as a run nobody is hosting, and the command was not sent.
+    io.err(`vinta-ai-maestro: could not reach run ${runId}'s daemon; the command was not sent.`)
+    return FAILED
   }
   if (response.status >= 400) return refused(io, response.status, await response.json().catch(() => null))
+  if (detach) {
+    const answer = (await response.json().catch(() => null)) as { id?: string; log?: string } | null
+    io.out(`exec ${answer?.id ?? '?'} started, detached${answer?.log === undefined ? '' : `; output in ${answer.log}`}`)
+    io.out(`  cancel   vinta-ai-maestro exec cancel ${runId} ${answer?.id ?? '<id>'}`)
+    return OK
+  }
   if (response.body === null) return FAILED
 
-  let exit = FAILED
+  let exit: number | null = null
+  let accepted: string | null = null
   let printed = ''
   let pending = ''
   const decoder = new TextDecoder()
@@ -560,17 +591,95 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
     printed = lines.pop() ?? ''
     for (const line of lines) io.out(line)
   }
-  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-    pending += decoder.decode(chunk, { stream: true })
-    const frames = pending.split('\n')
-    pending = frames.pop() ?? ''
-    for (const frame of frames) {
-      if (frame.trim() === '') continue
-      const parsedFrame = JSON.parse(frame) as { output?: string; exit?: number }
-      if (typeof parsedFrame.output === 'string') emit(parsedFrame.output)
-      if (typeof parsedFrame.exit === 'number') exit = parsedFrame.exit
+  try {
+    for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+      pending += decoder.decode(chunk, { stream: true })
+      const frames = pending.split('\n')
+      pending = frames.pop() ?? ''
+      for (const frame of frames) {
+        if (frame.trim() === '') continue
+        const parsedFrame = JSON.parse(frame) as {
+          accepted?: string
+          queued?: string
+          waiting?: string
+          output?: string
+          exit?: number
+        }
+        if (typeof parsedFrame.accepted === 'string') accepted = parsedFrame.accepted
+        if (typeof parsedFrame.queued === 'string') {
+          io.err(`vinta-ai-maestro: exec ${accepted ?? ''} queued behind ${parsedFrame.queued} for the integration worktree…`)
+        }
+        if (typeof parsedFrame.waiting === 'string') io.err(`vinta-ai-maestro: still queued behind ${parsedFrame.waiting}…`)
+        if (typeof parsedFrame.output === 'string') emit(parsedFrame.output)
+        if (typeof parsedFrame.exit === 'number') exit = parsedFrame.exit
+      }
     }
+  } catch {
+    // Dropped mid-stream: the daemon cancels a command whose client went away.
   }
   if (printed !== '') io.out(printed)
+  if (exit === null) {
+    io.err(
+      `vinta-ai-maestro: lost the connection to run ${runId}${accepted === null ? '' : ` (exec ${accepted})`}; ` +
+        'the daemon cancels a command whose client goes away.',
+    )
+    return FAILED
+  }
   return exit
+}
+
+/** `exec list` and `exec cancel`. */
+async function execManage(argv: readonly string[], io: Io, deps: SteerDeps): Promise<number> {
+  let parsed
+  try {
+    parsed = parseArgs({
+      args: [...argv.slice(1)],
+      options: { repo: { type: 'string' }, reason: { type: 'string' } },
+      allowPositionals: true,
+    })
+  } catch {
+    io.err(EXEC_USAGE)
+    return USAGE
+  }
+  const listing = argv[0] === 'list'
+  const [runId, id] = parsed.positionals
+  if (runId === undefined || parsed.positionals.length !== (listing ? 1 : 2) || (!listing && id === undefined)) {
+    io.err(EXEC_USAGE)
+    return USAGE
+  }
+  const repoPath = resolve(parsed.values.repo ?? process.cwd())
+  const target = reach(repoPath, runId, deps.env ?? process.env)
+  if (target === null) return notLive(io, runId)
+  const reason = parsed.values.reason
+  const path = `${target.url}/api/runs/${encodeURIComponent(runId)}/exec${listing ? '' : `/${encodeURIComponent(id as string)}`}`
+  let response: Response
+  try {
+    response = await (deps.fetch ?? fetch)(path, {
+      method: listing ? 'GET' : 'DELETE',
+      headers: {
+        authorization: `Bearer ${target.token}`,
+        ...(reason === undefined || reason.trim() === '' ? {} : { [REASON_HEADER]: encodeURIComponent(reason) }),
+      },
+    })
+  } catch {
+    io.err(`vinta-ai-maestro: could not reach run ${runId}'s daemon.`)
+    return FAILED
+  }
+  const body = (await response.json().catch(() => null)) as unknown
+  if (response.status >= 400) return refused(io, response.status, body)
+  if (!listing) {
+    const answer = body as { id?: string; was?: string }
+    io.out(`exec ${answer.id ?? id} cancelled (it was ${answer.was ?? 'running'})`)
+    return OK
+  }
+  const execs = (body as { execs?: { id: string; target: string; by: string; state: string; startedAt: number; reason?: string }[] }).execs ?? []
+  if (execs.length === 0) {
+    io.out('no exec commands are queued or running.')
+    return OK
+  }
+  for (const entry of execs) {
+    const age = Math.round((Date.now() - entry.startedAt) / 1000)
+    io.out(`${entry.id}  ${entry.state.padEnd(7)}  ${entry.target}  by ${entry.by}, ${age}s${entry.reason === undefined ? '' : ` — ${entry.reason}`}`)
+  }
+  return OK
 }

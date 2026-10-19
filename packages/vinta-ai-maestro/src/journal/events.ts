@@ -324,6 +324,12 @@ interface RunPayloads {
     readonly exit_code: number
     readonly duration_ms: number
     readonly by?: Actor
+    /** The `--reason` it was run with, when it was given one. */
+    readonly reason?: string
+    /** The command's id, as `exec list` and `exec cancel` name it. */
+    readonly id?: string
+    /** Ended by `exec cancel` or by its client going away, rather than by itself. */
+    readonly cancelled?: boolean
   }
   /**
    * Gate results forgotten by hand (`vinta-ai-maestro gate-cache invalidate`,

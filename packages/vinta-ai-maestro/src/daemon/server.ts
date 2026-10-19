@@ -375,12 +375,35 @@ async function respond(
   res: ServerResponse,
   log: Logger,
 ): Promise<void> {
+  // The client going away aborts the request, which a streaming route (`exec`)
+  // listens to; before this nothing did, and a command whose client was gone
+  // ran on with nobody attached.
+  const gone = new AbortController()
+  res.once('close', () => {
+    if (!res.writableFinished) gone.abort()
+  })
   try {
-    const response = await app.fetch(await toRequest(req))
-    const body = Buffer.from(await response.arrayBuffer())
+    const response = await app.fetch(await toRequest(req, gone.signal))
     res.writeHead(response.status, Object.fromEntries(response.headers))
-    res.end(body)
+    // Streamed, chunk by chunk, rather than read whole first: an answer that
+    // streams (`exec`'s NDJSON) used to reach the client only once it had
+    // ended — so a command queued behind the integration worktree sent
+    // nothing at all for minutes, and its client gave up on a daemon that was
+    // there.
+    if (response.body === null) {
+      res.end()
+      return
+    }
+    const reader = response.body.getReader()
+    gone.signal.addEventListener('abort', () => void reader.cancel().catch(() => {}), { once: true })
+    for (;;) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      res.write(chunk.value)
+    }
+    res.end()
   } catch (error) {
+    if (gone.signal.aborted) return
     // The client still gets a status and no internals — that part of the
     // contract is unchanged. What changed is that the failure is no longer
     // *only* a status: this used to be a bare `catch {}`, so a bridge that
@@ -394,12 +417,16 @@ async function respond(
       path: new URL(req.url ?? '/', `http://${req.headers.host ?? LOOPBACK}`).pathname,
       ...errorFields(error),
     })
+    if (res.headersSent) {
+      res.end()
+      return
+    }
     res.writeHead(500, { 'content-type': 'application/json' })
     res.end('{"error":"internal","issues":null}')
   }
 }
 
-async function toRequest(req: IncomingMessage): Promise<Request> {
+async function toRequest(req: IncomingMessage, signal: AbortSignal): Promise<Request> {
   const headers = new Headers()
   for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
     const name = (req.rawHeaders[i] as string).toLowerCase()
@@ -408,9 +435,9 @@ async function toRequest(req: IncomingMessage): Promise<Request> {
 
   const method = req.method ?? 'GET'
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? LOOPBACK}`)
-  if (method === 'GET' || method === 'HEAD') return new Request(url, { method, headers })
+  if (method === 'GET' || method === 'HEAD') return new Request(url, { method, headers, signal })
 
   const chunks: Buffer[] = []
   for await (const chunk of req) chunks.push(chunk as Buffer)
-  return new Request(url, { method, headers, body: Buffer.concat(chunks) })
+  return new Request(url, { method, headers, body: Buffer.concat(chunks), signal })
 }

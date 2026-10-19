@@ -432,6 +432,66 @@ describe('exec', () => {
     expect(r.out).toEqual(['one', 'two', 'three'])
   })
 
+  /**
+   * `exec --reason` was a usage error, so the coordinator's commands reached
+   * the journal with no reason; and a command queued behind the integration
+   * worktree printed nothing at all while it waited.
+   */
+  it('sends --reason, and says who it is queued behind while it waits', async () => {
+    const r = recorder()
+    const f = fakeFetch(streamed(['{"accepted":"ab12"}\n{"queued":"p6"}\n{"running":true}\n{"exit":0}\n']))
+    const code = await execCommand(
+      [RUN_ID, 'integration', '--reason', 'reset the test db', '--repo', emptyRepo(), '--', 'make test_reset'],
+      r.io,
+      { env: ENV, fetch: f.fetch },
+    )
+    expect(code).toBe(0)
+    expect(decodeURIComponent(f.sent[0]?.headers[REASON_HEADER] ?? '')).toBe('reset the test db')
+    expect(r.err.join('\n')).toContain('exec ab12 queued behind p6')
+  })
+
+  /** A stream that ends without an exit frame is a dropped connection, not a dead run. */
+  it('says the connection was lost, not that the run is not live, when the stream ends early', async () => {
+    const r = recorder()
+    const f = fakeFetch(streamed(['{"accepted":"ab12"}\n']))
+    const code = await execCommand([RUN_ID, 'lane-1', '--repo', emptyRepo(), '--', 'true'], r.io, {
+      env: ENV,
+      fetch: f.fetch,
+    })
+    expect(code).toBe(FAILED)
+    expect(r.err.join('\n')).toContain('lost the connection')
+    expect(r.err.join('\n')).not.toContain('not live')
+  })
+
+  it('detaches, lists and cancels', async () => {
+    const detached = recorder()
+    const started = fakeFetch(json({ id: 'ab12', target: 'integration', log: '/runs/r/execs/ab12.log' }, 202))
+    expect(
+      await execCommand([RUN_ID, 'integration', '--detach', '--repo', emptyRepo(), '--', 'make test'], detached.io, {
+        env: ENV,
+        fetch: started.fetch,
+      }),
+    ).toBe(OK)
+    expect(JSON.parse(started.sent[0]?.body ?? '')).toMatchObject({ detach: true })
+    expect(detached.out[0]).toContain('exec ab12 started, detached')
+
+    const listed = recorder()
+    const list = fakeFetch(
+      json({ execs: [{ id: 'ab12', target: 'integration', by: 'coordinator', state: 'queued', startedAt: Date.now() }] }),
+    )
+    expect(await execCommand(['list', RUN_ID, '--repo', emptyRepo()], listed.io, { env: ENV, fetch: list.fetch })).toBe(OK)
+    expect(list.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/exec`)
+    expect(listed.out[0]).toMatch(/^ab12 +queued +integration +by coordinator/)
+
+    const cancelled = recorder()
+    const cancel = fakeFetch(json({ id: 'ab12', cancelled: true, was: 'queued' }))
+    expect(
+      await execCommand(['cancel', RUN_ID, 'ab12', '--repo', emptyRepo()], cancelled.io, { env: ENV, fetch: cancel.fetch }),
+    ).toBe(OK)
+    expect(cancel.sent[0]?.url).toBe(`${URL}/api/runs/${RUN_ID}/exec/ab12`)
+    expect(cancelled.out[0]).toBe('exec ab12 cancelled (it was queued)')
+  })
+
   /** One word is a shell line as written, so a pipeline typed in quotes still runs as a pipeline. */
   it('sends a single word unquoted', async () => {
     const f = fakeFetch(streamed(['{"exit":0}\n']))

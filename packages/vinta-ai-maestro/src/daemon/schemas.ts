@@ -154,6 +154,8 @@ export const FixerResponseSchema = z.strictObject({
 export const ExecRequestSchema = z.strictObject({
   target: z.string().min(1),
   command: z.string().min(1),
+  /** Answer with the command's id at once and run it with nobody attached; its output goes to a log. */
+  detach: z.boolean().optional(),
 })
 
 /** `POST /api/runs/:runId/branches/propagate` — carry a fix on a phase into the branches built from it. */

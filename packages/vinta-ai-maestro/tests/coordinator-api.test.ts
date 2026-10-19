@@ -11,7 +11,7 @@
  * `daemon.test.ts`; the small helpers are copied from there rather than
  * imported, so one suite's rig can change without breaking another's.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -731,6 +731,115 @@ describe('exec', () => {
     expect((await lease()).status).toBeGreaterThanOrEqual(400)
   })
 
+  /**
+   * A command queued behind the integration worktree used to send nothing
+   * until it ran, so its client read the silence as a dead daemon, printed
+   * "not live" and left, while the command ran later with nobody attached.
+   */
+  describe('queued behind the integration worktree', () => {
+    function heldIntegration() {
+      const path = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-integ-'))
+      cleanups.push(() => rmSync(path, { recursive: true, force: true }))
+      let release!: () => void
+      const held = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const port = execPort({
+        workspace: (target) => (target === 'integration' ? { path, env: {} } : null),
+        holdIntegration: async (_label, work) => {
+          await held
+          return work()
+        },
+        integrationHolder: () => 'p6',
+      })
+      return { port, path, release }
+    }
+
+    // Run in the worktree, so a relative path lands there.
+    const marker = (_path: string) => `node -e "require('fs').writeFileSync('ran', 'x')"`
+
+    it('says it was accepted and who it is queued behind before it runs, and journals the reason', async () => {
+      const r = await rig()
+      const { port, path, release } = heldIntegration()
+      r.register({ exec: port })
+
+      const response = await fetch(`${r.daemon.url}/api/runs/${RUN_ID}/exec`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${r.daemon.coordinatorToken}`,
+          [REASON_HEADER]: encodeURIComponent('reset the test database'),
+        },
+        body: JSON.stringify({ target: 'integration', command: marker(path) }),
+      })
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+      let text = ''
+      while (!text.includes('queued')) text += new TextDecoder().decode((await reader.read()).value)
+      const early = text.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+      expect(early[0]).toHaveProperty('accepted')
+      expect(early[1]).toEqual({ queued: 'p6' })
+      expect(existsSync(join(path, 'ran'))).toBe(false)
+
+      release()
+      for (;;) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        text += new TextDecoder().decode(chunk.value)
+      }
+      expect(text).toContain('"running":true')
+      expect(text).toContain('"exit":0')
+      const journalled = r.journal.events(RUN_ID).filter((event) => event.type === 'workspace_exec')
+      expect(journalled[0]?.payload).toMatchObject({ target: 'integration', reason: 'reset the test database', by: 'coordinator' })
+    })
+
+    it('lists a detached command and cancels it before it ever starts', async () => {
+      const r = await rig()
+      const { port, path, release } = heldIntegration()
+      r.register({ exec: port })
+
+      const started = await call(r.daemon, `/api/runs/${RUN_ID}/exec`, {
+        method: 'POST',
+        body: { target: 'integration', command: marker(path), detach: true },
+      })
+      expect(started.status).toBe(202)
+      const id = (started.body as { id: string }).id
+      const listed = await call(r.daemon, `/api/runs/${RUN_ID}/exec`)
+      expect((listed.body as { execs: { id: string; state: string }[] }).execs).toEqual([
+        expect.objectContaining({ id, state: 'queued', target: 'integration' }),
+      ])
+
+      const cancelled = await call(r.daemon, `/api/runs/${RUN_ID}/exec/${id}`, { method: 'DELETE' })
+      expect(cancelled.body).toEqual({ id, cancelled: true, was: 'queued' })
+      release()
+      await until(() => r.journal.events(RUN_ID).some((event) => event.type === 'workspace_exec'))
+      expect(existsSync(join(path, 'ran'))).toBe(false)
+      const journalled = r.journal.events(RUN_ID).find((event) => event.type === 'workspace_exec')
+      expect(journalled?.payload).toMatchObject({ id, cancelled: true })
+      expect(((await call(r.daemon, `/api/runs/${RUN_ID}/exec`)).body as { execs: unknown[] }).execs).toEqual([])
+    })
+
+    it('cancels a queued command whose client went away', async () => {
+      const r = await rig()
+      const { port, path, release } = heldIntegration()
+      r.register({ exec: port })
+
+      const gone = new AbortController()
+      const response = await fetch(`${r.daemon.url}/api/runs/${RUN_ID}/exec`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${r.daemon.token}` },
+        body: JSON.stringify({ target: 'integration', command: marker(path) }),
+        signal: gone.signal,
+      })
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+      await reader.read()
+      gone.abort()
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      release()
+      await until(() => r.journal.events(RUN_ID).some((event) => event.type === 'workspace_exec'))
+      expect(existsSync(join(path, 'ran'))).toBe(false)
+    })
+  })
+
   /** A host with no worktrees to offer says so, rather than running the command somewhere it guessed. */
   it('refuses on a host with no exec port', async () => {
     const r = await rig()
@@ -953,3 +1062,11 @@ describe('branches', () => {
     expect(ErrorResponseSchema.parse(result.body).error).toBe('branches_unsupported')
   })
 })
+
+async function until(check: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
