@@ -1290,6 +1290,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: conflicts in generated files no longer fail a
+  merge.** After each conflict-fixer round, codegen outputs that the round
+  left conflicted, or staged with conflict markers, are settled again and
+  regenerated, even when the fixer aborted and redid the merge. The fixer's
+  prompt now matches: with codegen declared, generated files are the
+  integrator's; with none declared, every conflicted file is the fixer's. An
+  unresolved conflict over files that look generated suggests declaring a
+  `codegen` step.
 - **`vinta-ai-maestro`: `exec` streams, accepts `--reason`, and can be
   cancelled.** The daemon used to read each answer whole before sending
   it, so an `exec` queued behind the integration worktree sent nothing, and

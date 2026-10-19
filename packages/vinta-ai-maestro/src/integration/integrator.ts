@@ -120,6 +120,9 @@ export interface WaveResult {
  * this run's own merge, so the retry keeps it under `ABANDONED_REFS` and
  * starts the merge again (`Integrator.reclaim`).
  */
+/** Paths that read as a generator's output: `*.gen.*`, `generated/`, an OpenAPI schema. */
+const LOOKS_GENERATED = /(\.gen\.|(^|\/)generated\/|(^|\/)(openapi|schema)\.(ya?ml|json)$|\.generated\.)/
+
 export class UnresolvedConflictError extends Error {
   readonly nodes: readonly string[]
   readonly paths: readonly string[]
@@ -1131,6 +1134,8 @@ export class Integrator {
         throw error
       }
       red = null
+      // Outputs the round left conflicted are the integrator's, as at the merge.
+      if (codegen !== undefined) await codegen.resettle(cwd, paths)
       const stale = verdict === 'environment_stale' && !staleReported
       if (stale) {
         staleReported = true
@@ -1200,7 +1205,7 @@ export class Integrator {
     // empty path list sent one operator looking for a conflict that was a
     // failing test.
     if (red !== null) throw new IntegrationVerifyError(nodes, paths, this.#maxFixRounds, red, into, incoming)
-    throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds)
+    throw new UnresolvedConflictError(nodes, paths, this.#maxFixRounds, await this.#unresolvedMessage(nodes, paths))
   }
 
   /**
@@ -1680,6 +1685,33 @@ export class Integrator {
    * the markers are gone, so a fixer that did nothing would produce a merge
    * commit full of `<<<<<<<`. The file is read and tested, never logged.
    */
+  /**
+   * The unresolved-conflict message, with a hint when what is left looks
+   * generated and no codegen step owns it: a fixer told not to hand-edit
+   * generated files leaves those conflicts in place round after round, and
+   * nothing regenerates a file the workflow does not say is generated.
+   */
+  async #unresolvedMessage(nodes: readonly string[], paths: readonly string[]): Promise<string | undefined> {
+    const left: string[] = []
+    for (const path of paths) {
+      try {
+        if (CONFLICT_MARKER.test(await readFile(join(this.#options.integrationPath, path), 'utf8'))) left.push(path)
+      } catch {
+        // Deleted: resolved.
+      }
+    }
+    const generated = new Set(this.#options.codegen?.generated() ?? [])
+    const looksGenerated = left.filter((path) => LOOKS_GENERATED.test(path) && !generated.has(path))
+    if (looksGenerated.length === 0) return undefined
+    return (
+      `unresolved conflict: ${nodes.join(', ')} both changed ${paths.join(', ')}, ` +
+      `and it still conflicts after ${this.#maxFixRounds} fix rounds. ${looksGenerated.join(', ')} ` +
+      'look generated and no `codegen` step writes them, so nothing regenerated them: declare the ' +
+      'generator under `codegen` (or `maestro.codegen`) with them as its `outputs`, and a merge takes ' +
+      'either side and regenerates them instead of asking the fixer.'
+    )
+  }
+
   async #unresolved(paths: readonly string[]): Promise<boolean> {
     for (const path of paths) {
       try {

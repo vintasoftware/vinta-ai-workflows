@@ -379,10 +379,16 @@ export function composeConflictPrompt(context: ConflictContext): string {
         ]),
     `Phase briefs: ${context.promptRefs.join(' ')}`,
     ...(context.generated === undefined || context.generated.length === 0
-      ? []
+      ? [
+          'This run declares no generated files, so every conflicted path is yours to resolve,',
+          'generated-looking ones included: take one side of a generated file and regenerate it',
+          'with the project’s own command, then `git add` it. Nothing regenerates it for you.',
+        ]
       : [
           `Generated files (${context.generated.join(' ')}) are not yours to edit: the integrator`,
-          'regenerates them from their sources once you stop. Resolve the sources.',
+          'takes a side and regenerates them from their sources once you stop, even if they are',
+          'conflicted again after you redo the merge. Resolve the sources; every other',
+          'conflicted path is yours.',
         ]),
     'Resolve for both phases’ intents. Never resolve with --ours or --theirs.',
     'An intent includes what a phase deleted: a line, an entry or a file one side',

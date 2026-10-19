@@ -331,6 +331,41 @@ describe('codegen in integration', () => {
     expect(run(integ, 'show', 'plan/wf/integ-c:app.txt')).toBe('one\ntwo\nthree\nformatted')
   })
 
+  /**
+   * A fixer that aborted the merge and redid it brought the generated file's
+   * conflict back, left it there as its prompt said to, and the merge failed
+   * as "still conflicts after 2 fix rounds" over files only a generator
+   * writes — twice in one observed run. The integrator settles them again.
+   */
+  it('settles generated files a fix round left conflicted, and regenerates them', async () => {
+    const { integ, integrator, fixes } = await setup(
+      { 'in/base.txt': 'base\n', 'gen.txt': 'base\n' },
+      { 'in/base.txt': 'base a\n', 'gen.txt': 'base a\n' },
+      { 'in/base.txt': 'base b\n', 'gen.txt': 'base b\n' },
+      { codegen: { gen: GENERATE }, append_only: [] },
+      async (cwd) => {
+        // Redo the merge, the way an agent does, then resolve only the source.
+        run(cwd, 'merge', '--abort')
+        try {
+          run(cwd, 'merge', '--no-ff', '--no-edit', 'plan/wf/phase-b')
+        } catch {
+          // Conflicted again, generated file included.
+        }
+        await writeFile(join(cwd, 'in/base.txt'), 'base a b\n')
+        run(cwd, 'add', 'in/base.txt')
+      },
+    )
+    await integrator.prepareBase('c')
+    expect(fixes).toHaveLength(1)
+    expect(run(integ, 'show', 'plan/wf/integ-c:gen.txt')).toBe('base a b')
+    expect(run(integ, 'status', '--porcelain')).toBe('')
+  })
+
+  it('tells a fixer on a run with no codegen that generated-looking files are its own', () => {
+    const prompt = composeConflictPrompt({ into: 'x', incoming: 'y', nodes: ['a'], paths: ['routeTree.gen.ts'], promptRefs: [] })
+    expect(prompt).toContain('every conflicted path is yours to resolve')
+  })
+
   it('tells a conflict fixer which files are generated', () => {
     const prompt = composeConflictPrompt({
       into: 'x',

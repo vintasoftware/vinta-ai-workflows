@@ -460,6 +460,45 @@ export async function settleOutputs(
 }
 
 /**
+ * `settleOutputs` for a merge a fix round has touched: every output among
+ * `paths` that is unmerged is settled as at the merge, and every one that is
+ * staged with conflict markers in it is taken from the side the merge
+ * started on — `HEAD` while the merge is in progress, the merge commit's first
+ * parent once the fixer has committed it. `refresh` regenerates them all
+ * before the commit, so which side is taken does not reach it.
+ */
+export async function resettleOutputs(
+  cwd: string,
+  steps: CodegenSteps,
+  paths: readonly string[],
+): Promise<string[]> {
+  const outputs = await filterMatching(cwd, paths, generatedOutputs(steps))
+  if (outputs.length === 0) return []
+  const unmerged = new Set(
+    (await git(cwd, ['diff', '--name-only', '-z', '--diff-filter=U'])).split('\0').filter((path) => path !== ''),
+  )
+  const settled = await settleOutputs(
+    cwd,
+    steps,
+    outputs.filter((path) => unmerged.has(path)),
+  )
+  const merging = await gitOk(cwd, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])
+  const side = merging ? 'HEAD' : 'HEAD^1'
+  for (const path of outputs) {
+    if (unmerged.has(path)) continue
+    let text: string
+    try {
+      text = readFileSync(join(cwd, path), 'utf8')
+    } catch {
+      continue
+    }
+    if (!/^(<{7}|={7}|>{7})( |$)/m.test(text)) continue
+    if (await gitOk(cwd, ['checkout', side, '--', path])) settled.push(path)
+  }
+  return settled
+}
+
+/**
  * The `-c` arguments that make a merge use git's `union` driver for the
  * append-only files: an attributes file holding whatever `core.attributesFile`
  * already pointed at, then one `<pattern> merge=union` line per pattern. Passed
