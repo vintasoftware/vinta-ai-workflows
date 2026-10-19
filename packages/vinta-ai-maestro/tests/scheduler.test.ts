@@ -13,7 +13,8 @@
  * checked on the happy paths and on the failure paths alike.
  */
 import { describeUnhealthyLane } from '../src/cli/status.ts'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -1946,6 +1947,56 @@ const countOf = (r: Rig, effect: string): number =>
 /** The effects that ran, in order, kept to the ones named. */
 const orderOf = (r: Rig, effects: readonly string[]): string[] =>
   r.calls.map((call) => call.effect).filter((effect) => effects.includes(effect))
+
+describe('a review that leaves the lane dirty', () => {
+  /**
+   * One review ran a mutation experiment in the lane — an old migration put
+   * back, a new one generated — approved, and left both behind for the gates
+   * after it. What a review leaves uncommitted is set aside and the lane put
+   * back at HEAD.
+   */
+  it('sets what the review left aside under a ref and puts the lane back at HEAD', async () => {
+    const r = rig(reviewedWorkflow(), {
+      outcomes: APPROVED,
+      tap: (call) => {
+        if (call.effect !== 'e-review:review') return
+        for (const lane of ['run-1-lane-1', 'run-1-lane-2']) {
+          const path = join(r.laneRoot, lane)
+          writeFileSync(join(path, 'tracked.txt'), 'mutated by the reviewer\n')
+          writeFileSync(join(path, '0005_experiment.py'), 'x\n')
+        }
+      },
+    })
+    for (const lane of ['run-1-lane-1', 'run-1-lane-2']) {
+      const path = join(r.laneRoot, lane)
+      mkdirSync(path, { recursive: true })
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: path, stdio: 'pipe' })
+      git('init', '-q', '-b', 'main')
+      git('config', 'user.email', 'fixture@example.invalid')
+      git('config', 'user.name', 'fixture')
+      git('config', 'commit.gpgsign', 'false')
+      writeFileSync(join(path, 'tracked.txt'), 'as committed\n')
+      writeFileSync(join(path, 'plan.md'), '## a\n\nAdd invoices.\n')
+      git('add', '.')
+      git('commit', '-q', '-m', 'base')
+    }
+
+    const report = await r.scheduler.run()
+
+    expect(report.statuses).toEqual({ a: 'done' })
+    const dirtied = r.journal.events('run-1').filter((event) => event.type === 'review_left_lane_dirty')
+    expect(dirtied).toHaveLength(1)
+    const payload = dirtied[0]?.payload as unknown as { ref: string; paths: string[] }
+    expect(payload.paths.sort()).toEqual(['0005_experiment.py', 'tracked.txt'])
+    const lane = (r.journal.nodes('run-1').find((row) => row.node_id === 'a')?.lane ?? '') as string
+    const path = join(r.laneRoot, lane)
+    expect(readFileSync(join(path, 'tracked.txt'), 'utf8')).toBe('as committed\n')
+    expect(existsSync(join(path, '0005_experiment.py'))).toBe(false)
+    expect(execFileSync('git', ['show', `${payload.ref}:tracked.txt`], { cwd: path, encoding: 'utf8' })).toBe(
+      'mutated by the reviewer\n',
+    )
+  })
+})
 
 describe('standard-phase under the scheduler', () => {
   it('runs implement → gate → review → polish → verify → integrate → done', async () => {

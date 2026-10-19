@@ -22,6 +22,7 @@
  * and databases in place — they are the evidence a human reads when something
  * went wrong, and the skill's teardown steps reverse them from the summary.
  */
+import { setAsideWork } from './wip.ts'
 import { execFile } from 'node:child_process'
 import { constants, existsSync } from 'node:fs'
 import {
@@ -84,10 +85,6 @@ const sh = async (
   await pending
 }
 
-/** Who the rescue commit is by. Never the agent: it did not write this commit. */
-const WIP_AUTHOR = 'vinta-ai-maestro'
-const WIP_EMAIL = 'vinta-ai-maestro@localhost'
-
 /**
  * Where a rescued tree is kept. Outside `refs/heads`, so it is reachable and
  * mergeable by hand and reaches nothing on its own.
@@ -96,11 +93,6 @@ export const WIP_REFS = 'refs/vinta-ai-maestro/wip'
 
 /** How many paths a failed rescue names before it stops listing. */
 const PRESERVE_PATH_LIMIT = 20
-
-/** git, in a lane rather than in the main checkout. */
-const gitIn = async (cwd: string, args: readonly string[]): Promise<void> => {
-  await run('git', [...args], { cwd })
-}
 
 /** Newline-delimited git output as a list. */
 const gitLines = async (cwd: string, args: readonly string[]): Promise<string[]> => {
@@ -1180,43 +1172,13 @@ export class LanePool {
     if (dirty.length === 0) return
 
     try {
-      // A scratch index, so the lane's own staged state is untouched — the
-      // same seam `GateCache` uses to hash a tree without disturbing one.
-      const index = join(lane.path, '.git-wip-index')
-      const scratch = { ...process.env, GIT_INDEX_FILE: index }
-      await run('git', ['read-tree', 'HEAD'], { cwd: lane.path, env: scratch })
-      await run('git', ['add', '--all'], { cwd: lane.path, env: scratch })
-      const { stdout: tree } = await run('git', ['write-tree'], { cwd: lane.path, env: scratch })
-      await rm(index, { force: true })
-
-      const { stdout: commit } = await run(
-        'git',
-        [
-          'commit-tree',
-          tree.trim(),
-          '-p',
-          'HEAD',
-          '-m',
-          `wip: ${lane.name} — uncommitted work, set aside before the lane was recycled`,
-        ],
-        {
-          cwd: lane.path,
-          env: {
-            ...process.env,
-            GIT_AUTHOR_NAME: WIP_AUTHOR,
-            GIT_AUTHOR_EMAIL: WIP_EMAIL,
-            GIT_COMMITTER_NAME: WIP_AUTHOR,
-            GIT_COMMITTER_EMAIL: WIP_EMAIL,
-          },
-        },
-      )
       // One ref per rescue: a lane is recycled once per phase it serves, and a
       // single ref per lane would let the second rescue delete the first.
-      await gitIn(lane.path, [
-        'update-ref',
+      await setAsideWork(
+        lane.path,
         `${WIP_REFS}/${lane.name}/${Date.now()}`,
-        commit.trim(),
-      ])
+        `wip: ${lane.name} — uncommitted work, set aside before the lane was recycled`,
+      )
     } catch (error) {
       // Fail-closed, like every other stage of a recycle. The lane goes back on
       // the free list dirty, the next node to take it fails the same way, and

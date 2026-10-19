@@ -82,7 +82,7 @@
     "review": {
       "skill": "thermo-nuclear-review-loop",
       "when": "review",
-      "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it.",
+      "prompt": "Run the thermo-nuclear-review-loop skill over this phase's diff until its reviewer approves it. Leave the lane as you found it apart from committed fixes: a mutation experiment runs in a throwaway worktree (git worktree add), never here, and `git status --porcelain` is empty before you state the verdict.",
       "description": "The phase's code review: one reviewer sub-agent, the implementer fixing and answering it."
     },
     "deslop": {

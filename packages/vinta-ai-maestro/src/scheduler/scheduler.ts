@@ -124,7 +124,8 @@ import {
   type StepResult,
 } from '../pipeline/interpreter.ts'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
-import { LanePrepareError, LaneRecycleError, LaneSetupError } from '../lanes/pool.ts'
+import { LanePrepareError, LaneRecycleError, LaneSetupError, WIP_REFS } from '../lanes/pool.ts'
+import { restoreToHead, setAsideWork, uncommittedPaths } from '../lanes/wip.ts'
 import { pipelineFor } from '../pipeline/standard.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../resources/agent-leases.ts'
 import { assignCrew, type CrewDecision, roster } from './crew.ts'
@@ -4089,6 +4090,8 @@ export class Scheduler {
           await this.#countRejection(state)
           break
         }
+      } finally {
+        if (review) await this.#cleanAfterReview(state, entry.id)
       }
     }
 
@@ -4101,6 +4104,39 @@ export class Scheduler {
     if (when !== 'review') return outcome
     return {
       facts: { ...outcome.facts, review: { ...outcome.facts?.review, verdict, ...(stated ? {} : { stated: false }) } },
+    }
+  }
+
+  /**
+   * A review leaves the lane as it found it, committed work aside.
+   *
+   * One observed review ran a mutation experiment in the lane — set a
+   * migration back to an older version, generated a new one, migrated the
+   * lane's database — then approved and left the files behind, so the gates
+   * after it judged a tree nobody had written. Whatever a review chore leaves
+   * uncommitted is set aside under `refs/vinta-ai-maestro/wip/<lane>/review-…`,
+   * the lane is put back at `HEAD`, and it is journalled
+   * (`review_left_lane_dirty`). Ignored files are not touched, so a database
+   * the review migrated is not undone; the event says the review ran in the
+   * lane. Never throws: a lane that cannot be cleaned is the next recycle's.
+   */
+  async #cleanAfterReview(state: NodeState, chore: string): Promise<void> {
+    if (state.lane === null) return
+    const lanePath = join(this.#options.laneRoot, state.lane)
+    try {
+      const paths = await uncommittedPaths(lanePath)
+      if (paths.length === 0) return
+      const ref = `${WIP_REFS}/${state.lane}/review-${Date.now()}`
+      await setAsideWork(lanePath, ref, `wip: ${state.lane} — left uncommitted by the ${chore} review chore`)
+      await restoreToHead(lanePath)
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        type: 'review_left_lane_dirty',
+        payload: { node: state.node.id, chore, ref, paths: paths.slice(0, 20), count: paths.length },
+      })
+      this.#log.warn('node.review_left_lane_dirty', { node: state.node.id, chore, count: paths.length })
+    } catch (error) {
+      this.#log.warn('node.review_cleanup_failed', { node: state.node.id, chore, ...errorFields(error) })
     }
   }
 

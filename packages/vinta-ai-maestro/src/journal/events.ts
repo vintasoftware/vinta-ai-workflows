@@ -456,6 +456,19 @@ interface RunPayloads {
     readonly lane: string
     readonly seeded: readonly { readonly path: string; readonly from: string }[]
   }
+  /**
+   * A review chore left uncommitted changes in its lane; they were set aside
+   * under `ref` and the lane put back at `HEAD` before the gates that follow.
+   * Paths (the first twenty) and a count, never contents. Ignored files —
+   * the lane's databases included — are not restored.
+   */
+  review_left_lane_dirty: {
+    readonly node: string
+    readonly chore: string
+    readonly ref: string
+    readonly paths: readonly string[]
+    readonly count: number
+  }
   lane_unhealthy: {
     /** The phase that was handed the lane when its recycle failed. */
     readonly node: string

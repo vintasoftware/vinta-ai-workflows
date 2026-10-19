@@ -920,6 +920,7 @@ export class Journal {
       case 'outage_started':
       case 'lane_unhealthy':
       case 'lane_seeded':
+      case 'review_left_lane_dirty':
       case 'outage_ended':
       case 'branches_moved':
       case 'integration_reclaimed':
