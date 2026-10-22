@@ -36,6 +36,7 @@ import {
   type CommitDecision,
   type CommitFailure,
   Integrator,
+  type VerifyProgress,
   type WaveResult,
 } from '../integration/integrator.ts'
 import { createCrewConflictFixer } from '../integration/staffing.ts'
@@ -377,7 +378,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
      * failing the phase: the fixer gets told, and the round budget is what
      * bounds it.
      */
-    verify: async (cwd: string, force?: FreshReason): Promise<true | RedGate> => {
+    verify: async (cwd: string, force?: FreshReason, progress?: VerifyProgress): Promise<true | RedGate> => {
       // Command gates only. A judge gate's question is about one phase's diff,
       // and a conflict resolution is not any phase's — asking it of the merge
       // would judge a diff the question was never written for.
@@ -387,6 +388,9 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       })
       for (const [id, gate] of gates) {
         const logPath = journal.gateLogPath(runId, INTEGRATION_NODE, id)
+        // Reported before it runs, with its log, so the step is on the record
+        // while the gate writes rather than once it has finished.
+        progress?.started(id, logPath)
         const result = await freshness.run(
           id,
           gate,
@@ -403,6 +407,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
             }),
           force,
         )
+        progress?.finished(id, result.exitCode === 0 ? 'ok' : 'failed')
         // Named, with its log, so the next fix round reads why and the error
         // the rounds end on says where the cause is.
         if (result.exitCode !== 0) return { gateId: id, logPath, exitCode: result.exitCode }

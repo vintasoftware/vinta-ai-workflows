@@ -325,6 +325,17 @@ export interface ReclaimedMerge {
   readonly kept: string | null
 }
 
+/**
+ * How a `verify` callback reports the gates it runs, one at a time, so the
+ * integrator can journal each as its own step with the log path known up
+ * front. Optional on the caller's side: a `verify` that never calls it is
+ * recorded as one step, as before.
+ */
+export interface VerifyProgress {
+  readonly started: (gate: string, log: string) => void
+  readonly finished: (gate: string, outcome: 'ok' | 'failed') => void
+}
+
 export interface IntegratorOptions {
   readonly plan: IntegrationPlan
   /** The dedicated integration worktree: every merge and every fix happens here. */
@@ -337,7 +348,7 @@ export interface IntegratorOptions {
    * sends the conflict back to the fixer — a resolution that does not build is
    * not a resolution.
    */
-  readonly verify?: (cwd: string, force?: FreshReason) => Promise<true | false | RedGate>
+  readonly verify?: (cwd: string, force?: FreshReason, progress?: VerifyProgress) => Promise<true | false | RedGate>
   /**
    * `workflow.post_merge` on the files a clean merge combined: what it
    * changed is staged for a commit on top of the merge, and `ok` is false
@@ -1311,22 +1322,44 @@ export class Integrator {
     if (staged.length > 0 || red !== null) await gitOk(cwd, ['reset', '-q', '--hard', 'HEAD'])
   }
 
-  /** The outer gate on the merged tree: null when green or not configured, else what went red. */
+  /**
+   * The outer gate on the merged tree: null when green or not configured, else
+   * what went red.
+   *
+   * A `verify` that reports its gates (`VerifyProgress`) gets one `verify` step
+   * per gate, opened *before* the gate runs and carrying its log path — which
+   * is what lets the phase view tail the log while the gate is still writing
+   * it, rather than only once the whole suite has finished. One that reports
+   * nothing gets the single bracketing step it always had.
+   */
   async #verify(cwd: string, forNode: string, force?: FreshReason): Promise<RedGate | null> {
     if (this.#options.verify === undefined) return null
-    this.#options.onStep?.(forNode, { step: 'verify', state: 'started' })
-    const verdict = await this.#options.verify(cwd, force).catch((error: unknown) => {
+    let reported = false
+    const progress: VerifyProgress = {
+      started: (gate, log) => {
+        reported = true
+        this.#options.onStep?.(forNode, { step: 'verify', state: 'started', gate, log })
+      },
+      finished: (gate, outcome) => {
+        this.#options.onStep?.(forNode, { step: 'verify', state: 'finished', gate, outcome })
+      },
+    }
+    const verdict = await this.#options.verify(cwd, force, progress).catch((error: unknown) => {
+      if (!reported) this.#options.onStep?.(forNode, { step: 'verify', state: 'started' })
       this.#options.onStep?.(forNode, { step: 'verify', state: 'finished', outcome: 'failed' })
       throw error
     })
     const red = verdict === true ? null : verdict === false ? {} : verdict
-    this.#options.onStep?.(forNode, {
-      step: 'verify',
-      state: 'finished',
-      outcome: red === null ? 'ok' : 'failed',
-      ...(red?.gateId === undefined ? {} : { gate: red.gateId }),
-      ...(red?.logPath === undefined ? {} : { log: red.logPath }),
-    })
+    if (!reported) {
+      this.#options.onStep?.(forNode, { step: 'verify', state: 'started' })
+      this.#options.onStep?.(forNode, {
+        step: 'verify',
+        state: 'finished',
+        outcome: red === null ? 'ok' : 'failed',
+        ...(red?.gateId === undefined ? {} : { gate: red.gateId }),
+        ...(red?.logPath === undefined ? {} : { log: red.logPath }),
+      })
+    }
     return red
   }
 

@@ -1149,6 +1149,56 @@ describe('merge conflicts', () => {
     ])
   })
 
+  /**
+   * A `verify` that reports its gates gets one `verify` step per gate, opened
+   * with the log path before the gate runs — the phase view tails that file
+   * while the gate is still writing it.
+   */
+  it('records each reported verify gate as its own step, with its log, before it runs', async () => {
+    const repo = await conflictingPair()
+    const steps: { step: string; state: string; gate?: string; log?: string; outcome?: string }[] = []
+    let verified = 0
+    const integrator = new Integrator({
+      plan: plan([node('a'), node('b'), node('c', ['a', 'b'])]),
+      integrationPath: repo.integ,
+      fixer: spyFixer(async (request) => {
+        await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+      }),
+      verify: async (_cwd, _force, progress) => {
+        progress?.started('lint', '/l/lint.log')
+        progress?.finished('lint', 'ok')
+        progress?.started('test', '/l/test.log')
+        if (verified++ === 0) {
+          progress?.finished('test', 'failed')
+          return RED_GATE
+        }
+        progress?.finished('test', 'ok')
+        return true
+      },
+      onStep: (_forNode, payload) =>
+        steps.push({
+          step: payload.step,
+          state: payload.state,
+          ...(payload.gate === undefined ? {} : { gate: payload.gate }),
+          ...(payload.log === undefined ? {} : { log: payload.log }),
+          ...(payload.outcome === undefined ? {} : { outcome: payload.outcome }),
+        }),
+    })
+
+    await integrator.prepareBase('c')
+
+    expect(steps.filter((step) => step.step === 'verify')).toEqual([
+      { step: 'verify', state: 'started', gate: 'lint', log: '/l/lint.log' },
+      { step: 'verify', state: 'finished', gate: 'lint', outcome: 'ok' },
+      { step: 'verify', state: 'started', gate: 'test', log: '/l/test.log' },
+      { step: 'verify', state: 'finished', gate: 'test', outcome: 'failed' },
+      { step: 'verify', state: 'started', gate: 'lint', log: '/l/lint.log' },
+      { step: 'verify', state: 'finished', gate: 'lint', outcome: 'ok' },
+      { step: 'verify', state: 'started', gate: 'test', log: '/l/test.log' },
+      { step: 'verify', state: 'finished', gate: 'test', outcome: 'ok' },
+    ])
+  })
+
   it('sends a resolution that fails the gate back to the fixer', async () => {
     const repo = await conflictingPair()
     let attempt = 0
