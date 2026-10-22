@@ -653,6 +653,8 @@ export class Journal {
    */
   integrationHistory(runId: string): IntegrationHistoryRow[] {
     const byNode = new Map<string, IntegrationStepRow[]>()
+    /** Every started step, in journal order, as [node, index in that node's list]. */
+    const started: [string, number][] = []
     const interrupt = (at: number): void => {
       for (const [nodeId, rows] of byNode) {
         byNode.set(
@@ -669,14 +671,22 @@ export class Journal {
       if (event.type !== 'integration_step' || event.nodeId === null) continue
       const payload = event.payload as unknown as IntegrationStepPayload
       if (payload.step === 'hold') continue
-      byNode.set(event.nodeId, foldStep(byNode.get(event.nodeId) ?? [], payload, event.ts))
+      const held = byNode.get(event.nodeId) ?? []
+      // `foldStep` appends a started step, so its index in the node's list is
+      // the length before; the order of these is the journal's own.
+      if (payload.state === 'started') started.push([event.nodeId, held.length])
+      byNode.set(event.nodeId, foldStep(held, payload, event.ts))
     }
+    // Newest first, in the order the steps were journalled — not by
+    // timestamp: two steps can start in the same millisecond, and a sort on
+    // `startedAt` then put them in whichever order the node map happened to.
     const rows: IntegrationHistoryRow[] = []
-    for (const [nodeId, steps] of byNode) {
-      for (const step of steps) rows.push({ ...step, nodeId })
+    for (let index = started.length - 1; index >= 0; index -= 1) {
+      const [nodeId, at] = started[index] as [string, number]
+      const step = byNode.get(nodeId)?.[at]
+      if (step !== undefined) rows.push({ ...step, nodeId })
     }
-    // Newest first; a tie keeps the open step ahead of the finished one.
-    return rows.sort((a, b) => b.startedAt - a.startedAt || Number(a.finishedAt === null) - Number(b.finishedAt === null))
+    return rows
   }
 
   /**
