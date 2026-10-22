@@ -50,6 +50,8 @@ export interface UncoveredCommand extends CiCommand {
 }
 
 const WORKFLOW_DIR = join('.github', 'workflows')
+/** The same directory as a label names it: the repository's own spelling, whatever the host's separator. */
+const WORKFLOW_DIR_LABEL = '.github/workflows'
 
 /** Every `run:` line of every GitHub Actions workflow in the checkout. */
 export async function readCiCommands(repoPath: string): Promise<CiCommand[]> {
@@ -61,10 +63,10 @@ export async function readCiCommands(repoPath: string): Promise<CiCommand[]> {
   }
   const found: CiCommand[] = []
   for (const name of files) {
-    const file = join(WORKFLOW_DIR, name)
+    const file = `${WORKFLOW_DIR_LABEL}/${name}`
     let doc: unknown
     try {
-      doc = parse(await readFile(join(repoPath, file), 'utf8'))
+      doc = parse(await readFile(join(repoPath, WORKFLOW_DIR, name), 'utf8'))
     } catch {
       // A workflow that does not parse is GitHub's to reject, not this check's.
       continue
