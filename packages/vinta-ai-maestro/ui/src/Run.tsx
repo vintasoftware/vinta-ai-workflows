@@ -12,9 +12,9 @@
  * window look, from the graph alone, like nothing happening at all; the
  * operator's next move depends entirely on knowing which it is.
  */
-import { ChevronRightIcon, HistoryIcon } from 'lucide-react'
+import { BarChart3Icon, ChevronRightIcon, HistoryIcon } from 'lucide-react'
 import type { ReactElement } from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Dag } from 'vinta-dag-editor/src/index.ts'
 import {
   DescriptionDetails,
@@ -37,7 +37,12 @@ import {
   TableHeader,
   TableRow,
 } from 'vinta-design-system/ui/table'
-import type { RunSnapshot, RunUsageResponse, UnattendedResponse } from '../../src/daemon/schemas.ts'
+import type {
+  IntegrationHistoryResponse,
+  RunSnapshot,
+  RunUsageResponse,
+  UnattendedResponse,
+} from '../../src/daemon/schemas.ts'
 import { cacheShare } from '../../src/usage/usage.ts'
 import { Chip } from './Chip.tsx'
 import type { Client } from './client.ts'
@@ -47,8 +52,10 @@ import { Live } from './Live.tsx'
 import { EmptyNote, ErrorNote, Hint, Panel } from './Panel.tsx'
 import { nodeLabel, nodeTone, runTone } from './status.ts'
 import { elapsed, useNow } from './time.ts'
+import { TimePanel } from './Analytics.tsx'
+import { CoordinatorButton, CoordinatorDock, useCoordinatorOpen, useWide } from './CoordinatorDock.tsx'
 import { IntegrationWorktree } from './Integration.tsx'
-import { MonitorPanel } from './Monitor.tsx'
+import { RecentList } from './RecentList.tsx'
 import { RunControls } from './RunControls.tsx'
 import { useRun } from './useRun.ts'
 
@@ -66,6 +73,11 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
   const { snapshot, projection, connected, error } = useRun(client, runId)
   const now = useNow()
   const [selected, setSelected] = useState<string | null>(null)
+  // Open by default here, where there is room for the column: this is the
+  // coordinator's home. A narrow window gets the sheet, and only when asked —
+  // a panel that slides over the page unbidden is not a default anyone chose.
+  const [coordinatorOpen, setCoordinatorOpen] = useCoordinatorOpen(useWide())
+  const history = useIntegrationHistory(client, runId, projection.cursor)
 
   const nodes = useMemo(
     () =>
@@ -113,10 +125,12 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
 
   const status = projection.runStatus ?? snapshot.run.status
   const endedAt = snapshot.run.endedAt
+  const ended = endedAt !== null || (status !== 'running' && status !== 'paused')
   const waves = new Set(nodes.map((node) => node.wave)).size
 
   return (
-    <section className="run flex flex-col gap-5">
+    <div className="flex items-start gap-5">
+    <section className="run flex min-w-0 flex-1 flex-col gap-5">
       <PageHeader className="run-head">
         <PageHeaderHeading>
           <PageHeaderTitle>{snapshot.run.workflowId}</PageHeaderTitle>
@@ -145,6 +159,15 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
               Replay
             </a>
           </Button>
+          {/* Where the time is going, live; the same page carries the report
+              once the run has ended, so the button says which it will open. */}
+          <Button asChild variant="outline" size="sm">
+            <a href={`#/runs/${encodeURIComponent(runId)}/analytics`} data-action="analytics">
+              <BarChart3Icon />
+              {ended ? 'Report' : 'Analytics'}
+            </a>
+          </Button>
+          <CoordinatorButton open={coordinatorOpen} onToggle={() => setCoordinatorOpen(!coordinatorOpen)} />
         </PageHeaderActions>
       </PageHeader>
 
@@ -156,23 +179,82 @@ export function Run({ client, runId }: { readonly client: Client; readonly runId
         Drag to pan, ⌘ or Ctrl + scroll to zoom.
       </Hint>
 
-      <div className="panels grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <Nodes
-          runId={snapshot.run.runId}
-          nodes={nodes}
-          selected={selected}
-          onSelect={setSelected}
-        />
-        <IntegrationWorktree worktree={snapshot.integration} />
-        <Rollup client={client} runId={runId} />
-        <Unattended client={client} runId={runId} />
-        <MonitorPanel client={client} runId={runId} />
-        <Pools resources={snapshot.resources} />
-        <GateQueue queue={snapshot.gateQueue} now={now} />
-        <Harnesses harnesses={snapshot.harnesses} now={now} />
+      {/* A tiled grid, not a flow of cards: every cell is one or two row
+          units tall, the panels fill their cells and scroll inside them, and
+          `grid-flow-row-dense` packs the short ones into the holes the tall
+          ones leave. Cards of natural height in a grid aligned at the top
+          left a band of empty page under every short card in a row, and the
+          band changed size as the lists beside it grew. Below `md` the page
+          is one column and the cells take their natural height. */}
+      <div className="panels grid grid-cols-1 gap-4 md:auto-rows-[15rem] md:grid-flow-row-dense md:grid-cols-2 xl:grid-cols-3">
+        <Cell className="md:col-span-2 md:row-span-2">
+          <Nodes
+            runId={snapshot.run.runId}
+            nodes={nodes}
+            selected={selected}
+            onSelect={setSelected}
+          />
+        </Cell>
+        <Cell className="md:row-span-2">
+          <IntegrationWorktree runId={runId} worktree={snapshot.integration} history={history} />
+        </Cell>
+        <Cell className="md:row-span-2">
+          <Rollup client={client} runId={runId} />
+        </Cell>
+        <Cell className="md:row-span-2">
+          <Unattended client={client} runId={runId} />
+        </Cell>
+        <Cell className="md:row-span-2">
+          <TimePanel client={client} runId={runId} ended={ended} />
+        </Cell>
+        <Cell>
+          <Pools resources={snapshot.resources} />
+        </Cell>
+        <Cell>
+          <GateQueue queue={snapshot.gateQueue} now={now} />
+        </Cell>
+        <Cell className="md:col-span-2 xl:col-span-1">
+          <Harnesses harnesses={snapshot.harnesses} now={now} />
+        </Cell>
       </div>
     </section>
+    <CoordinatorDock client={client} runId={runId} open={coordinatorOpen} onOpenChange={setCoordinatorOpen} docked />
+    </div>
   )
+}
+
+/** One cell of the tiled grid. `min-h-0` is what lets the panel inside scroll rather than grow it. */
+function Cell({ className, children }: { readonly className?: string; readonly children: ReactElement }): ReactElement {
+  return <div className={`min-h-0 min-w-0 ${className ?? ''}`}>{children}</div>
+}
+
+/**
+ * The integration worktree's record, re-read when a frame lands — every step
+ * writes an event, so a frame is the daemon saying the record moved — and
+ * on the slow tick for good measure. One SQL fold on the daemon's side.
+ */
+function useIntegrationHistory(
+  client: Client,
+  runId: string,
+  cursor: number,
+): IntegrationHistoryResponse['steps'] | null {
+  const [history, setHistory] = useState<IntegrationHistoryResponse['steps'] | null>(null)
+  const tick = useNow(USAGE_REFRESH_MS)
+  useEffect(() => {
+    let stopped = false
+    client.integration(runId).then(
+      (next) => {
+        if (!stopped) setHistory(next.steps)
+      },
+      // A daemon older than this page has no such route; the panel keeps
+      // showing the holder, which it always had.
+      () => {},
+    )
+    return () => {
+      stopped = true
+    }
+  }, [client, runId, cursor, tick])
+  return history
 }
 
 /**
@@ -199,24 +281,29 @@ function Unattended({ client, runId }: { readonly client: Client; readonly runId
     }
   }, [client, runId, tick])
 
+  // Newest first: the decision worth reading is the one made since you looked.
+  // Sorted, not reversed — the endpoint groups answers before actions.
+  const newest = useMemo(() => (decisions === null ? null : [...decisions].sort((a, b) => b.at - a.at)), [decisions])
+
   return (
     <Panel
       title="Decided without you"
-      description="Answers a timer or the coordinator gave, and what the coordinator did."
+      description="Answers a timer or the coordinator gave, and what the coordinator did. Newest first."
       data-unattended
+      fill
     >
-      {decisions === null ? (
+      {newest === null ? (
         <EmptyNote>Reading the run’s decisions…</EmptyNote>
-      ) : decisions.length === 0 ? (
-        <EmptyNote>Nothing decided without a person yet.</EmptyNote>
       ) : (
-        <ul className="divide-y">
-          {decisions.map((decision, index) => (
-            <li
-              key={`${decision.at}-${index}`}
-              data-unattended-row={decision.category}
-              className="flex flex-col gap-1 py-2 first:pt-0 last:pb-0"
-            >
+        <RecentList
+          rows={newest}
+          keyOf={(decision, index) => `${decision.at}-${index}`}
+          title="Decided without you"
+          description="Every answer a timer or the coordinator gave, and everything the coordinator did, newest first."
+          empty="Nothing decided without a person yet."
+          data-unattended-list=""
+          render={(decision) => (
+            <div data-unattended-row={decision.category} className="flex flex-col gap-1">
               <span className="flex items-center gap-2">
                 {decision.node !== null && (
                   <a
@@ -232,9 +319,9 @@ function Unattended({ client, runId }: { readonly client: Client; readonly runId
                 <span className="text-xs text-muted-foreground">{new Date(decision.at).toLocaleString()}</span>
               </span>
               <span className="text-sm">{withoutNode(decision.summary, decision.node)}</span>
-            </li>
-          ))}
-        </ul>
+            </div>
+          )}
+        />
       )}
     </Panel>
   )
@@ -271,18 +358,34 @@ function Nodes({
   readonly selected: string | null
   readonly onSelect: (nodeId: string) => void
 }): ReactElement {
+  const table = useRef<HTMLDivElement | null>(null)
+
+  // A click on the canvas selects a row that may be below this panel's fold;
+  // the roster scrolls it into view, inside its own box, so the two surfaces
+  // agree about which node is selected without moving the page.
+  useEffect(() => {
+    if (selected === null) return
+    const row = [...(table.current?.querySelectorAll<HTMLElement>('tr[data-node]') ?? [])].find(
+      (candidate) => candidate.dataset['node'] === selected,
+    )
+    // jsdom has no `scrollIntoView`; it is skipped there.
+    if (row !== undefined && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' })
+  }, [selected])
+
   return (
     <Panel
       title="Nodes"
       description="Status is the stream's where it has spoken, the snapshot's otherwise."
-      className="md:col-span-2"
       contentClassName="px-0"
+      fill
+      ref={table}
     >
       {nodes.length === 0 ? (
         <EmptyNote className="px-4">No nodes registered yet.</EmptyNote>
       ) : (
         <Table>
-          <TableHeader>
+          {/* Sticky inside the cell's scroller, so a long roster keeps its column names. */}
+          <TableHeader className="sticky top-0 z-10 bg-card">
             <TableRow className="hover:bg-transparent">
               <TableHead className="pl-4">Node</TableHead>
               <TableHead>Wave</TableHead>
@@ -354,48 +457,66 @@ function Nodes({
   )
 }
 
+/**
+ * The pools, two at a time. A plan declares as many as it needs — a lane
+ * pool, a suite semaphore, one per database — and the cell holds two with
+ * room to read them. The two shown are the ones that matter now: pools with
+ * a holder first, fullest first, then the idle ones in declaration order;
+ * the rest are a dialog away.
+ */
 function Pools({
   resources,
 }: {
   readonly resources: RunSnapshot['resources']
 }): ReactElement {
+  const byUse = useMemo(
+    () =>
+      resources
+        .map((resource, index) => ({ resource, index }))
+        .sort(
+          (a, b) =>
+            Number(b.resource.held > 0) - Number(a.resource.held > 0) ||
+            fraction(b.resource) - fraction(a.resource) ||
+            a.index - b.index,
+        )
+        .map(({ resource }) => resource),
+    [resources],
+  )
   return (
-    <Panel title="Resource pools">
-      {resources.length === 0 ? (
-        <EmptyNote>No pools declared.</EmptyNote>
-      ) : (
-        <ul className="pools divide-y">
-          {resources.map((resource) => (
-            <li
-              key={resource.id}
-              data-resource={resource.id}
-              className="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0"
-            >
-              <div className="pool-head flex items-center justify-between gap-2">
-                <span className="flex items-center gap-2">
-                  <span className="font-medium">{resource.id}</span>
-                  <Badge variant="outline" className="muted">
-                    {resource.kind}
-                  </Badge>
-                </span>
-                <span className="font-mono text-xs" data-occupancy>
-                  {resource.held} / {resource.capacity}
-                </span>
-              </div>
-              <Progress
-                value={fraction(resource)}
-                aria-label={`${resource.id} occupancy`}
-                className="meter h-1.5 bg-muted *:data-[slot=progress-indicator]:bg-tone-active"
-              />
-              <Hint className="text-xs">
-                {resource.holders.length === 0
-                  ? 'idle'
-                  : `held by ${resource.holders.join(', ')}`}
-              </Hint>
-            </li>
-          ))}
-        </ul>
-      )}
+    <Panel title="Resource pools" fill>
+      <RecentList
+        rows={byUse}
+        recent={2}
+        keyOf={(resource) => resource.id}
+        title="Resource pools"
+        description="Every pool the plan declared, the ones in use first."
+        empty="No pools declared."
+        listClassName="pools"
+        data-pools=""
+        render={(resource) => (
+          <div data-resource={resource.id} className="flex flex-col gap-1.5">
+            <div className="pool-head flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <span className="font-medium">{resource.id}</span>
+                <Badge variant="outline" className="muted">
+                  {resource.kind}
+                </Badge>
+              </span>
+              <span className="font-mono text-xs" data-occupancy>
+                {resource.held} / {resource.capacity}
+              </span>
+            </div>
+            <Progress
+              value={fraction(resource)}
+              aria-label={`${resource.id} occupancy`}
+              className="meter h-1.5 bg-muted *:data-[slot=progress-indicator]:bg-tone-active"
+            />
+            <Hint className="text-xs">
+              {resource.holders.length === 0 ? 'idle' : `held by ${resource.holders.join(', ')}`}
+            </Hint>
+          </div>
+        )}
+      />
     </Panel>
   )
 }
@@ -410,6 +531,7 @@ function GateQueue({
   return (
     <Panel
       title="Gate queue"
+      fill
       action={
         <span data-waiting>
           <Chip tone={queue.waiting > 0 ? 'wait' : 'idle'}>{queue.waiting} waiting</Chip>
@@ -454,7 +576,7 @@ function Harnesses({
   readonly now: number
 }): ReactElement {
   return (
-    <Panel title="Harness capacity" description="A parked harness is throttled, not broken.">
+    <Panel title="Harness capacity" description="A parked harness is throttled, not broken." fill>
       {harnesses.length === 0 ? (
         <EmptyNote>No harness in use.</EmptyNote>
       ) : (
@@ -538,6 +660,7 @@ function Rollup({ client, runId }: { readonly client: Client; readonly runId: st
       title="Sessions and cost"
       description="Every figure sits behind its status."
       data-rollup
+      fill
     >
       <DescriptionList>
         <DescriptionTerm>Reuse</DescriptionTerm>

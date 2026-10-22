@@ -578,20 +578,20 @@ test('the integration timeline shows each step, the one in progress, and its log
 
   await waitFor(() => expect(container.querySelector('[data-integration]')).not.toBe(null))
   const rows = [...container.querySelectorAll('[data-integration-step]')]
-  // `hold` wraps the rest, and is not a row of its own.
+  // Newest first, and `hold` wraps the rest rather than being a row of its own.
   expect(rows.map((row) => row.getAttribute('data-integration-step'))).toEqual([
-    'merge',
-    'fix_round',
-    'verify',
     'wave_gate',
+    'verify',
+    'fix_round',
+    'merge',
   ])
-  expect(rows.map((row) => row.getAttribute('data-outcome'))).toEqual(['resolved', 'ok', 'failed', 'running'])
-  expect(rows[0]?.textContent).toContain('merge p4 into plan/x/wave-2')
-  expect(rows[3]?.textContent).toContain('wave 2 gate test')
-  expect(rows[3]?.textContent).toContain('1m 0')
+  expect(rows.map((row) => row.getAttribute('data-outcome'))).toEqual(['running', 'failed', 'ok', 'resolved'])
+  expect(rows[3]?.textContent).toContain('merge p4 into plan/x/wave-2')
+  expect(rows[0]?.textContent).toContain('wave 2 gate test')
+  expect(rows[0]?.textContent).toContain('1m 0')
   expect(container.querySelector('[data-step="integrate"]')).not.toBe(null)
 
-  fireEvent.click(rows[2]?.querySelector('[data-action="open-step-log"]') as Element)
+  fireEvent.click(rows[1]?.querySelector('[data-action="open-step-log"]') as Element)
   await waitFor(() => expect(document.querySelector('[data-step-dialog="verify"]')).not.toBe(null))
   expect(document.querySelector('[data-step-dialog="verify"]')?.textContent).toContain('Conflicting migrations detected')
 })
@@ -1174,4 +1174,67 @@ test('the guide documents every control against this node', async () => {
   expect(textOf(document.body, '[data-guide="pause"]')).toContain('available now')
   expect(textOf(document.body, '[data-guide="retry"]')).toContain('not now')
   expect(document.body.querySelectorAll('[data-capability="yes"]')).toHaveLength(3)
+})
+
+/**
+ * A verify gate's log is tailed while it runs: the daemon records the path
+ * when the gate starts, so the dialog has something to show before the
+ * verdict, and says the step is still going.
+ */
+test('an integration step still running opens its log and says it is live', async () => {
+  const now = Date.now()
+  const running = { ...node('p4', 'running'), step: 'integrate' }
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [running] }) },
+    details: {
+      [`${RUN_ID}/p4`]: nodeDetail({
+        node: running,
+        integration: [
+          {
+            step: 'verify',
+            branch: null,
+            incoming: null,
+            wave: null,
+            gate: 'unit',
+            round: null,
+            log: '/l/unit.log',
+            startedAt: now - 20_000,
+            finishedAt: null,
+            outcome: null,
+            logTail: 'collecting 12 tests\n',
+          },
+        ],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = open(stub, 'p4')
+
+  await waitFor(() => expect(container.querySelector('[data-integration-step="verify"]')).not.toBe(null))
+  const row = container.querySelector('[data-integration-step="verify"]') as HTMLElement
+  expect(row.getAttribute('data-outcome')).toBe('running')
+  expect(row.textContent).toContain('gate unit on the merged tree')
+
+  fireEvent.click(row.querySelector('[data-action="open-step-log"]') as Element)
+  await waitFor(() => expect(document.querySelector('[data-step-dialog="verify"]')).not.toBe(null))
+  const dialog = document.querySelector('[data-step-dialog="verify"]') as HTMLElement
+  expect(dialog.textContent).toContain('collecting 12 tests')
+  expect(dialog.textContent).toContain('Still running')
+})
+
+test('the coordinator opens as a sheet over the phase page', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running')] }) },
+    details: { [`${RUN_ID}/impl`]: nodeDetail() },
+  })
+  daemon = stub
+  const { container } = open(stub, 'impl')
+
+  await waitFor(() => expect(container.querySelector('[data-action="coordinator"]')).not.toBe(null))
+  expect(document.querySelector('[data-coordinator-dock]')).toBe(null)
+  fireEvent.click(container.querySelector('[data-action="coordinator"]') as Element)
+  await waitFor(() => expect(document.querySelector('[data-coordinator-dock="sheet"] [data-monitor]')).not.toBe(null))
+  localStorage.removeItem('vinta-ai-maestro-coordinator')
 })

@@ -45,7 +45,18 @@ import { Transcript } from './Transcript.tsx'
  */
 const WHILE_THINKING_MS = 1_000
 
-export function MonitorPanel({ client, runId }: { readonly client: Client; readonly runId: string }) {
+export function MonitorPanel({
+  client,
+  runId,
+  fill = false,
+  className,
+}: {
+  readonly client: Client
+  readonly runId: string
+  /** Fill the height given, as the sidebar wants; see `Transcript`. */
+  readonly fill?: boolean
+  readonly className?: string
+}) {
   const [entries, setEntries] = useState<readonly unknown[]>([])
   const [pending, setPending] = useState(false)
   const [text, setText] = useState('')
@@ -104,7 +115,8 @@ export function MonitorPanel({ client, runId }: { readonly client: Client; reado
     <Transcript
       entries={entries}
       title="Coordinator"
-      className="monitor"
+      className={className === undefined ? 'monitor' : `monitor ${className}`}
+      fill={fill}
       data-monitor
       empty={
         pending

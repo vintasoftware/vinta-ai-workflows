@@ -51,6 +51,7 @@ export function Transcript({
   title = 'Transcript',
   empty = 'No transcript yet.',
   className,
+  fill = false,
   ...attributes
 }: {
   readonly entries: readonly unknown[]
@@ -64,6 +65,12 @@ export function Transcript({
   /** What an empty transcript says; null says nothing (something is on its way). */
   readonly empty?: ReactNode
   readonly className?: string
+  /**
+   * Take the whole height the panel is given rather than a capped box: the
+   * list grows to fill and scrolls inside, and the composer sits at the
+   * bottom. For the coordinator's sidebar, which is the height of the window.
+   */
+  readonly fill?: boolean
   /** `data-*` hooks for the panel, as a caller's tests address it. */
   readonly [attribute: `data-${string}`]: string | boolean | undefined
 }) {
@@ -105,6 +112,7 @@ export function Transcript({
     <Panel
       title={title}
       expandable
+      fill={fill}
       className={className === undefined ? 'transcript' : `transcript ${className}`}
       {...attributes}
       action={
@@ -121,7 +129,8 @@ export function Transcript({
       }
     >
       {entries.length === 0 ? (
-        empty === null ? null : <EmptyNote>{empty}</EmptyNote>
+        // Filling, the empty note takes the room so the composer stays at the bottom.
+        <div className={fill ? 'flex-1' : undefined}>{empty === null ? null : <EmptyNote>{empty}</EmptyNote>}</div>
       ) : (
         <>
           {(hidden > 0 || !following) && (
@@ -162,9 +171,11 @@ export function Transcript({
             // With a composer seated under it, the list gives up that much
             // height, so the input stays on screen rather than under the fold.
             className={
-              composer === undefined
-                ? 'max-h-[var(--panel-scroll,calc(100vh-18rem))] min-h-[320px] overflow-y-auto'
-                : 'max-h-[calc(var(--panel-scroll,calc(100vh-18rem))-9rem)] min-h-[280px] overflow-y-auto'
+              fill
+                ? 'min-h-0 flex-1 overflow-y-auto'
+                : composer === undefined
+                  ? 'max-h-[var(--panel-scroll,calc(100vh-18rem))] min-h-[320px] overflow-y-auto'
+                  : 'max-h-[calc(var(--panel-scroll,calc(100vh-18rem))-9rem)] min-h-[280px] overflow-y-auto'
             }
             onScroll={(event) => {
               onScroll(event)
