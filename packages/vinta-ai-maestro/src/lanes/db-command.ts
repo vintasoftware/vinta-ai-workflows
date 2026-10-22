@@ -66,14 +66,22 @@ export async function runDatabaseCommand(
   const child = spawn(shell.file, [...shell.args], {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
     detached: ownProcessGroup(),
     ...spawnOptionsFor(shell),
   })
   let stderr = ''
+  let stdout = ''
   child.stderr?.setEncoding('utf8').on('data', (chunk: string) => {
     // Only the tail is ever reported, so never hold more than a bit past it.
     stderr = (stderr + chunk).slice(-STDERR_LIMIT * 4)
+  })
+  // Read too, for the cause: `cmd.exe`'s own commands say why they failed
+  // on stdout — a missing template to `copy` is "The system cannot find the
+  // file specified." there and nothing on stderr — and a failure reported
+  // as "exited 1" with no cause is the message this module exists to avoid.
+  child.stdout?.setEncoding('utf8').on('data', (chunk: string) => {
+    stdout = (stdout + chunk).slice(-STDERR_LIMIT * 4)
   })
 
   let timedOut = false
@@ -88,7 +96,7 @@ export async function runDatabaseCommand(
       child.once('close', (code) => resolve({ code }))
     })
     if (outcome.code === 0 && !timedOut) return
-    throw new DatabaseCommandError(command, outcome.code, timedOut, tail(stderr))
+    throw new DatabaseCommandError(command, outcome.code, timedOut, tail(stderr.trim() === '' ? stdout : stderr))
   } catch (error) {
     if (error instanceof DatabaseCommandError) throw error
     throw new DatabaseCommandError(command, null, false, (error as Error).message)
