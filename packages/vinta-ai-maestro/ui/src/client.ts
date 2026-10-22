@@ -30,6 +30,10 @@ import {
   NodeChangesSchema,
   RunUsageResponseSchema,
   UnattendedResponseSchema,
+  IntegrationHistoryResponseSchema,
+  RunAnalyticsResponseSchema,
+  type IntegrationHistoryResponse,
+  type RunAnalyticsResponse,
   OkResponseSchema,
   OperationResponseSchema,
   RedirectRequestSchema,
@@ -45,6 +49,7 @@ import {
   type RunSummary,
   type MonitorAsked,
 } from '../../src/daemon/schemas.ts'
+import { PostMortemSchema, type PostMortem } from '../../src/postmortem/postmortem.ts'
 import type { z } from 'zod'
 
 /** Mirrors `daemon/auth.ts`'s `TOKEN_QUERY`; that module is Node-only. */
@@ -127,6 +132,16 @@ export interface Client {
   readonly usage: (runId: string) => Promise<RunUsageResponse>
   /** What the run decided with nobody watching. Read on the rollup's slow cadence. */
   readonly unattended: (runId: string) => Promise<UnattendedResponse>
+  /** Every integration step of the run, newest first. Read on the rollup's slow cadence. */
+  readonly integration: (runId: string) => Promise<IntegrationHistoryResponse>
+  /** Where the run's time has gone so far (§13.3). Two folds over the whole log; read slowly. */
+  readonly analytics: (runId: string) => Promise<RunAnalyticsResponse>
+  /**
+   * The run's post-mortem (§13.6). `null` when there is none yet — the run is
+   * still going, or it stopped before writing one — which is an answer, not
+   * a failure.
+   */
+  readonly postmortem: (runId: string) => Promise<PostMortem | null>
   /** One §9 operation. Resolves when the daemon accepted it, and returns nothing. */
   readonly operate: <K extends NodeOperation>(
     runId: string,
@@ -187,6 +202,24 @@ export function createClient(origin: string, token: string): Client {
     },
     async unattended(runId) {
       return await get(`/api/runs/${encodeURIComponent(runId)}/unattended`, UnattendedResponseSchema)
+    },
+    async integration(runId) {
+      return await get(`/api/runs/${encodeURIComponent(runId)}/integration`, IntegrationHistoryResponseSchema)
+    },
+    async analytics(runId) {
+      return await get(`/api/runs/${encodeURIComponent(runId)}/analytics`, RunAnalyticsResponseSchema)
+    },
+    async postmortem(runId) {
+      const path = `/api/runs/${encodeURIComponent(runId)}/postmortem`
+      const response = await fetch(`${origin}${path}`, { headers: { authorization: `Bearer ${token}` } })
+      if (response.status === 404) {
+        const body = ErrorResponseSchema.safeParse(await response.json().catch(() => null))
+        if (body.success && body.data.error === 'no_postmortem') return null
+      }
+      if (!response.ok) throw new Error(`${path}: daemon answered ${response.status}`)
+      const parsed = PostMortemSchema.safeParse(await response.json())
+      if (!parsed.success) throw new Error(`${path}: response did not match the daemon schema`)
+      return parsed.data
     },
     async changes(runId, nodeId, options) {
       return await get(

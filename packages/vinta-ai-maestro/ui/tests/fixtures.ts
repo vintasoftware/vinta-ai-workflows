@@ -8,10 +8,13 @@ import type {
   ChangedFile,
   NodeChanges,
   NodeDetail,
+  RunAnalyticsResponse,
   RunSnapshot,
   RunSummary,
   RunUsageResponse,
+  WireActivity,
 } from '../../src/daemon/schemas.ts'
+import type { PostMortem } from '../../src/postmortem/postmortem.ts'
 
 export const RUN_ID = 'run-1'
 
@@ -243,6 +246,109 @@ export function nodeChanges(parts: Partial<NodeChanges> = {}): NodeChanges {
     },
     patch: null,
     truncated: false,
+    ...parts,
+  }
+}
+
+/** The analytics page's epoch: every activity below is placed relative to it. */
+export const T0 = 1_700_000_000_000
+
+/** One activity, a finished `implement` step of a minute unless told otherwise. */
+export function activity(parts: Partial<WireActivity> = {}): WireActivity {
+  return {
+    node: 'impl',
+    kind: 'step',
+    id: 'implement',
+    attempt: 1,
+    harness: 'claude-code',
+    model: 'opus',
+    crew: null,
+    tier: null,
+    startedAt: T0,
+    endedAt: T0 + 60_000,
+    outcome: null,
+    cached: false,
+    ...parts,
+  }
+}
+
+const EMPTY_SPLIT = {
+  spanMs: 0,
+  laneQueueMs: 0,
+  workingMs: 0,
+  capacityWaitMs: 0,
+  suspendedMs: 0,
+  gatePoolQueueMs: 0,
+  gateRunMs: 0,
+}
+
+export function analyticsNode(
+  nodeId: string,
+  parts: Partial<RunAnalyticsResponse['nodes'][number]> = {},
+): RunAnalyticsResponse['nodes'][number] {
+  return {
+    nodeId,
+    name: nodeId,
+    wave: 1,
+    status: 'running',
+    harness: 'claude-code',
+    model: 'opus',
+    crew: null,
+    tier: null,
+    startedAt: T0,
+    finishedAt: null,
+    inFlight: true,
+    split: { ...EMPTY_SPLIT },
+    ...parts,
+  }
+}
+
+/** A run in progress with one phase, nothing measured until a test says so. */
+export function runAnalytics(parts: Partial<RunAnalyticsResponse> = {}): RunAnalyticsResponse {
+  return {
+    runId: RUN_ID,
+    status: 'running',
+    startedAt: T0,
+    endedAt: null,
+    asOf: T0 + 120_000,
+    elapsedMs: 120_000,
+    partial: true,
+    nodes: [analyticsNode('impl')],
+    activities: [],
+    criticalPath: [],
+    tailGapMs: 0,
+    laneIdleness: { capacity: 2, slotMs: 240_000, idleSlotMs: 120_000, idleFraction: 0.5, freeWallMs: 120_000 },
+    gaps: [],
+    ...parts,
+  }
+}
+
+/** A finished run's post-mortem with nothing to report, for a test to add findings to. */
+export function postMortem(parts: Partial<PostMortem> = {}, findings: Partial<PostMortem['findings']> = {}): PostMortem {
+  return {
+    schema_version: 1,
+    run_id: RUN_ID,
+    workflow_id: 'add-billing',
+    run: {
+      status: 'done',
+      started_at_ms: T0,
+      ended_at_ms: T0 + 3_600_000,
+      elapsed_ms: 3_600_000,
+      node_count: 2,
+      wave_count: 2,
+    },
+    findings: {
+      unused_dependencies: [],
+      missing_dependencies: [],
+      wave_conflicts: [],
+      gate_costs: [],
+      duration_divergences: [],
+      critical_path: null,
+      idle_capacity: null,
+      interventions: [],
+      ...findings,
+    },
+    gaps: [],
     ...parts,
   }
 }

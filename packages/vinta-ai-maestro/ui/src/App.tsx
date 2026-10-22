@@ -1,5 +1,5 @@
 /**
- * Eight views, so the route is the fragment and there is still no router.
+ * Nine views, so the route is the fragment and there is still no router.
  *
  * The fragment is also the only navigation that is safe to render: the token
  * lives in the page's query string, and a fragment link leaves it exactly
@@ -35,6 +35,7 @@ import { NodeView } from './Node.tsx'
 import { PlanReviewView, PlansList } from './PlanReview.tsx'
 import { pagePlansClient, type PlansClient } from './plans-client.ts'
 import { Notifications } from './Notifications.tsx'
+import { AnalyticsView } from './Analytics.tsx'
 import { Replay } from './Replay.tsx'
 import { pageReplayClient, type ReplayClient } from './replay-client.ts'
 import { Run } from './Run.tsx'
@@ -52,6 +53,7 @@ const NODE_ROUTE = /^#\/runs\/([^/]+)\/nodes\/(.+)$/
 // the token's and nothing else may be written into it.
 const CHANGES_ROUTE = /^#\/runs\/([^/]+)\/nodes\/([^/]+)\/changes(?:\?file=(.*))?$/
 const REPLAY_ROUTE = /^#\/runs\/([^/]+)\/replay$/
+const ANALYTICS_ROUTE = /^#\/runs\/([^/]+)\/analytics$/
 const EDITOR_ROUTE = /^#\/editor(?:\/([^/]+))?$/
 const LOGS_ROUTE = /^#\/logs$/
 const PLANS_ROUTE = /^#\/plans(?:\/([^/]+))?$/
@@ -63,6 +65,10 @@ type Route =
   // remount when the run changes. A boolean field would have made those three
   // facts conditional inside one view.
   | { readonly kind: 'replay'; readonly runId: string }
+  // §13.3's analytics and §13.6's report, one page: where the time went,
+  // live, and the post-mortem once there is one. Its own member for the
+  // reasons replay is.
+  | { readonly kind: 'analytics'; readonly runId: string }
   // §10's diff, full page. Its own member for the same reasons replay is: a
   // different read, a different layout, and a remount when the node changes.
   | {
@@ -132,9 +138,11 @@ export function App({
         <AppTopbar className="app-head">
           <AppBrand href="#/">
             <BrandMark />
-            vinta-ai-maestro
+            {/* The name wraps onto two lines on a phone and pushes the inbox off
+                the edge; the mark alone is the brand there. */}
+            <span className="hidden sm:inline">vinta-ai-maestro</span>
           </AppBrand>
-          <AppNav>
+          <AppNav className="min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <AppNavLink href="#/" current={section === 'runs'}>
               Runs
             </AppNavLink>
@@ -148,7 +156,8 @@ export function App({
               Logs
             </AppNavLink>
           </AppNav>
-          <AppTopbarActions>
+          {/* One row on a phone too: the inbox and the theme never wrap under each other. */}
+          <AppTopbarActions className="shrink-0 flex-nowrap">
             {/* §9.1's browser channel: the inbox, the opt-in and the reminders. */}
             <Notifications />
             <ThemeToggle />
@@ -179,6 +188,9 @@ export function App({
           workflowId={route.workflowId}
         />
       )
+    }
+    if (route.kind === 'analytics') {
+      return <AnalyticsView key={route.runId} client={client} runId={route.runId} />
     }
     if (route.kind === 'replay') {
       return (
@@ -244,6 +256,10 @@ function routeOf(hash: string): Route | null {
   if (editor !== null) {
     const id = editor[1]
     return { kind: 'editor', workflowId: id === undefined ? null : decodeURIComponent(id) }
+  }
+  const analytics = ANALYTICS_ROUTE.exec(hash)
+  if (analytics?.[1] !== undefined) {
+    return { kind: 'analytics', runId: decodeURIComponent(analytics[1]) }
   }
   const replay = REPLAY_ROUTE.exec(hash)
   if (replay?.[1] !== undefined) {

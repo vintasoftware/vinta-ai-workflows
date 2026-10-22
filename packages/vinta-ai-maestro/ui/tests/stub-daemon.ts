@@ -39,6 +39,10 @@ import {
   OkResponseSchema,
   RunUsageResponseSchema,
   UnattendedResponseSchema,
+  IntegrationHistoryResponseSchema,
+  RunAnalyticsResponseSchema,
+  type IntegrationHistoryResponse,
+  type RunAnalyticsResponse,
   RedirectRequestSchema,
   RunListResponseSchema,
   RunSnapshotSchema,
@@ -128,6 +132,12 @@ export interface StubOptions {
   readonly usage?: Readonly<Record<string, RunUsageResponse>>
   /** Decisions made unattended, by run. A known run without an entry has none. */
   readonly unattended?: Readonly<Record<string, UnattendedResponse['decisions']>>
+  /** The integration worktree's record, by run. A known run without an entry has none. */
+  readonly integration?: Readonly<Record<string, IntegrationHistoryResponse['steps']>>
+  /** §13.3's analytics, by run. A run with no entry answers 404, as an older daemon would. */
+  readonly analytics?: Readonly<Record<string, RunAnalyticsResponse>>
+  /** §13.6's post-mortem, by run. A run with no entry answers `no_postmortem`. */
+  readonly postmortems?: Readonly<Record<string, unknown>>
   readonly events?: readonly NewEvent[]
   /** Serve a body that does not match the schema, to prove the client parses. */
   readonly corrupt?: 'snapshot' | 'frame'
@@ -356,6 +366,33 @@ export async function startStubDaemon(options: StubOptions): Promise<StubDaemon>
       const runId = decodeURIComponent(unattended[1] ?? '')
       if (!snapshots.has(runId)) return json(response, 404, { error: 'unknown_run', issues: null })
       return json(response, 200, UnattendedResponseSchema.parse({ runId, decisions: options.unattended?.[runId] ?? [] }))
+    }
+
+    const integration = /^\/api\/runs\/([^/]+)\/integration$/.exec(url.pathname)
+    if (integration !== null) {
+      const runId = decodeURIComponent(integration[1] ?? '')
+      if (!snapshots.has(runId)) return json(response, 404, { error: 'unknown_run', issues: null })
+      return json(
+        response,
+        200,
+        IntegrationHistoryResponseSchema.parse({ runId, steps: options.integration?.[runId] ?? [] }),
+      )
+    }
+
+    const analytics = /^\/api\/runs\/([^/]+)\/analytics$/.exec(url.pathname)
+    if (analytics !== null) {
+      const report = options.analytics?.[decodeURIComponent(analytics[1] ?? '')]
+      if (report === undefined) return json(response, 404, { error: 'unknown_run', issues: null })
+      return json(response, 200, RunAnalyticsResponseSchema.parse(report))
+    }
+
+    const postmortem = /^\/api\/runs\/([^/]+)\/postmortem$/.exec(url.pathname)
+    if (postmortem !== null) {
+      const runId = decodeURIComponent(postmortem[1] ?? '')
+      if (!snapshots.has(runId)) return json(response, 404, { error: 'unknown_run', issues: null })
+      const report = options.postmortems?.[runId]
+      if (report === undefined) return json(response, 404, { error: 'no_postmortem', issues: null })
+      return json(response, 200, report)
     }
 
     // The monitor: a question is accepted (`202`) and answered in the
