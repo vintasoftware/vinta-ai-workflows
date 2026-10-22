@@ -37,6 +37,56 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro` UI: run analytics and the end-of-run report.** A new
+  `#/runs/<run>/analytics` page shows where the run's time is going while
+  it runs — working time by pipeline step (implementation, gates, review,
+  polish, integration), filtered by phase, wave, harness, crew member or
+  model, a breakdown grouped by any of those, what each gate and each chore
+  cost, and the critical path — with open activities timed live. Once the
+  run has ended the same page leads with the post-mortem drawn as a report
+  with a short diagnosis. The run view carries a "Where the time goes"
+  summary and a header button that reads Analytics while the run goes and
+  Report after. Two new reads back them: `GET /api/runs/:id/analytics` and
+  `GET /api/runs/:id/postmortem`.
+- **`vinta-ai-maestro` UI: the integration worktree's record.** The run
+  view's worktree panel lists every step every phase took there, newest
+  first, each linked to its phase (`GET /api/runs/:id/integration`).
+- **`vinta-ai-maestro` UI: the coordinator is a sidebar.** The run
+  coordinator's conversation moved out of the run view's grid into a
+  full-height sidebar on the right — from under the top bar to the bottom of
+  the window on a wide screen, a non-modal sheet otherwise, and on the phase
+  page too — opened from a header button and remembered across visits. The
+  conversation fills it and the question box sits at the bottom.
+- **`vinta-ai-maestro` UI: every page fits a phone.** The top bar keeps to
+  one row (the mark alone stands for the brand below the `sm` breakpoint),
+  every two-column layout stacks, and every table scrolls inside its card
+  instead of widening the page.
+- **`vinta-ai-maestro` UI: the run view's panels are a tiled grid.** Every
+  panel is one or two row units tall, fills its cell and scrolls inside it,
+  and short panels pack into the holes tall ones leave — no more band of
+  empty page under a short card beside a long one. The roster, "Decided
+  without you", the integration record and the phase page's integration
+  timeline show their newest five rows (newest first) with the whole record
+  in a paged dialog; the resource pools show the two in use (fullest first)
+  with the rest in a dialog. Selecting a node on the canvas scrolls its
+  roster row into view.
+- **`vinta-dag-editor`: phase ids on the cards.** Each node card carries its
+  id (`p1`, `p2`, …) above its name, so the canvas names phases the way the
+  roster, the transcript and the plan do.
+- **`vinta-dag-editor`: tooltips stay inside the canvas.** A tooltip is kept
+  whole within the viewport — pushed in from the edges and flipped above its
+  source when there is no room below — so the toolbar's and the edge cards'
+  tooltips no longer open into the clipped strip outside the graph.
+- **`vinta-ai-maestro` UI: the graph goes full screen.** A button on the
+  canvas (run view, replay and plan review) takes it over the whole window
+  and frames the graph again for the larger box; Escape or the same button
+  brings it back.
+- **`vinta-ai-maestro`: integration gate logs are live.** The integrator
+  records one `verify` step per gate, with the log's path, when the gate
+  starts rather than when the whole suite ends — so the phase page tails a
+  merged-tree gate's output while it runs. The step's wording is now
+  "gate `<id>` on the merged tree", with the outcome mark saying whether it
+  went red.
 - **`vinta-ai-maestro`: `post_merge`.** A workflow (or `maestro.post_merge`)
   may declare a command that runs in the integration worktree after git
   merges a branch by itself, with `{files}` set to the files both sides
