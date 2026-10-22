@@ -434,7 +434,7 @@ function QuestionStep({
       {question.options.length === 0 && field}
 
       {question.options.length > 0 && (
-        <div className="grid gap-2 sm:grid-cols-2" role={multi ? 'group' : 'radiogroup'}>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role={multi ? 'group' : 'radiogroup'}>
           {question.options.map((option, at) => {
             const selected = choice.picked.includes(at)
             const recommended = RECOMMENDED.test(option.label)

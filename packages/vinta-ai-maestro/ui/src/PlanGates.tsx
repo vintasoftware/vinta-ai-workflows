@@ -111,7 +111,7 @@ export function PlanGates({
         )}
       </Panel>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {columns.map((id) => {
           const gate = workflow.gates[id] ?? null
           const count = open({ kind: 'gate', gate: id })
@@ -152,7 +152,7 @@ export function PlanGates({
         })}
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Panel title="Resource pools" description="What lanes and gates queue on.">
           <ul className="divide-y text-[13px]" data-pools>
             {pools.map(([id, pool]) => (
