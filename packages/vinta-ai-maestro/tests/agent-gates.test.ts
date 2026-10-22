@@ -503,7 +503,11 @@ describe('a gate run with --no-cache', () => {
   }
 
   it('runs the codegen steps through the same route, leaving their outputs uncommitted', async () => {
-    const r = rig({ codegen: { gen: { cmd: 'echo generated > gen.txt', outputs: ['gen.txt'] } } })
+    // `node`, not `echo`: `cmd.exe`'s echo writes `generated \r\n`, and the
+    // assertion below is on the bytes.
+    const r = rig({
+      codegen: { gen: { cmd: `node -e "require('fs').writeFileSync('gen.txt', 'generated\\n')"`, outputs: ['gen.txt'] } },
+    })
     const { env } = await served(r)
     for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value)
     cleanups.push(() => vi.unstubAllEnvs())

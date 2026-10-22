@@ -1383,6 +1383,18 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro` on Windows: a cancelled `exec` ends.** Cancelling a
+  command run through `vinta-ai-maestro exec` sent the polite tree kill,
+  which on Windows closes the shell and orphans the command; the orphan
+  kept the output pipes open and the cancel hung. The kill is forceful
+  there, as it already was for a gate.
+- **`vinta-ai-maestro`: a failing database command names its cause from
+  stdout too.** `cmd.exe`'s own commands report why they failed on stdout,
+  so a lane reset whose template was missing said only "exited 1". The tail
+  of stdout is the cause when stderr said nothing.
+- **`vinta-ai-maestro`: `doctor` labels workflow files with forward
+  slashes on every platform** (`.github/workflows/ci.yml`, never
+  `.github\workflows\ci.yml`).
 - **`vinta-ai-maestro`: a review chore can no longer leave the lane dirty.**
   Whatever a review leaves uncommitted, such as a mutation experiment's
   reverted migration or a generated file, is set aside under a

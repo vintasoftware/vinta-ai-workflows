@@ -77,7 +77,8 @@ describe('harness profiles', () => {
   })
 
   it('reads the file from the operator config directory unless told otherwise', () => {
-    expect(profilesPath({ XDG_CONFIG_HOME: '/cfg' })).toBe('/cfg/vinta-ai-maestro/profiles.yaml')
+    // Built with the platform's separator, as the function builds it.
+    expect(profilesPath({ XDG_CONFIG_HOME: '/cfg' })).toBe(join('/cfg', 'vinta-ai-maestro', 'profiles.yaml'))
     expect(profilesPath({ [PROFILES_ENV]: '/elsewhere.yaml', XDG_CONFIG_HOME: '/cfg' })).toBe('/elsewhere.yaml')
   })
 
