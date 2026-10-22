@@ -58,9 +58,12 @@ import { OpencodeAdapter } from '../src/harness/opencode.ts'
 import {
   EventPageSchema,
   HaltResponseSchema,
+  IntegrationHistoryResponseSchema,
   NodeChangesSchema,
+  RunAnalyticsResponseSchema,
   StartRunResponseSchema,
 } from '../src/daemon/schemas.ts'
+import { postMortem, PostMortemSchema, writePostMortem } from '../src/postmortem/postmortem.ts'
 import { AgentGateRefusal } from '../src/resources/agent-gates.ts'
 import { PtyServerFrameSchema } from '../src/daemon/pty-frames.ts'
 import type {
@@ -750,6 +753,78 @@ describe('snapshots', () => {
     const r = await rig()
     expect((await call(r.daemon, '/api/runs/nope')).status).toBe(404)
     expect((await call(r.daemon, `/api/runs/${RUN_ID}/nodes/nope`)).status).toBe(404)
+  })
+})
+
+describe('where the time went', () => {
+  it('serves every integration step of the run, newest first, against its node', async () => {
+    const r = await rig()
+    const step = (nodeId: string, payload: Extract<NewEvent, { type: 'integration_step' }>['payload']) =>
+      r.journal.append({ runId: RUN_ID, nodeId, type: 'integration_step', payload })
+    step('a', { step: 'hold', state: 'started' })
+    step('a', { step: 'merge', state: 'started', branch: 'main', incoming: 'a' })
+    step('a', { step: 'merge', state: 'finished', outcome: 'ok' })
+    step('a', { step: 'hold', state: 'finished', outcome: 'ok' })
+    step('b', { step: 'hold', state: 'started' })
+    step('b', { step: 'verify', state: 'started', gate: 'unit', log: '/l/unit.log' })
+
+    const body = IntegrationHistoryResponseSchema.parse(
+      (await call(r.daemon, `/api/runs/${RUN_ID}/integration`)).body,
+    )
+    expect(body.steps.map((row) => [row.nodeId, row.step, row.outcome])).toEqual([
+      ['b', 'verify', null],
+      ['a', 'merge', 'ok'],
+    ])
+    expect((await call(r.daemon, '/api/runs/nope/integration')).status).toBe(404)
+  })
+
+  it('serves the run’s analytics with the activities tagged by staffing, and says they are partial', async () => {
+    const r = await rig()
+    r.journal.append({ runId: RUN_ID, type: 'run_started', payload: { workflow_id: 'daemon-flow', base_branch: 'main' } })
+    running(r, 'a')
+    r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_step', payload: { state: 'implement', attempt: 1 } })
+    r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'gate_started', payload: { gate: 'unit' } })
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'gate_result',
+      payload: { gate: 'unit', exit_code: 0, status: 'passed', duration_ms: 1_500, cached: false },
+    })
+
+    const body = RunAnalyticsResponseSchema.parse((await call(r.daemon, `/api/runs/${RUN_ID}/analytics`)).body)
+    expect(body.partial).toBe(true)
+    expect(body.status).toBe('running')
+    expect(body.nodes.map((node) => [node.nodeId, node.harness, node.model, node.status])).toEqual([
+      ['a', HARNESS, 'opus', 'running'],
+      ['b', HARNESS, 'opus', 'pending'],
+    ])
+    expect(body.activities.map((row) => [row.node, row.kind, row.id, row.endedAt === null])).toEqual([
+      ['a', 'step', 'implement', true],
+      ['a', 'gate', 'unit', false],
+    ])
+    // The scheduling split rides along, from the same window.
+    expect(body.nodes[0]?.inFlight).toBe(true)
+    expect(body.nodes[0]?.split.spanMs).toBeGreaterThanOrEqual(0)
+    expect(body.laneIdleness.capacity).toBe(2)
+    expect((await call(r.daemon, '/api/runs/nope/analytics')).status).toBe(404)
+  })
+
+  it('serves the post-mortem once the run wrote one, and says when there is none', async () => {
+    const r = await rig()
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/postmortem`)).status).toBe(404)
+    expect((await call(r.daemon, `/api/runs/${RUN_ID}/postmortem`)).body).toMatchObject({ error: 'no_postmortem' })
+
+    r.journal.append({ runId: RUN_ID, type: 'run_started', payload: { workflow_id: 'daemon-flow', base_branch: 'main' } })
+    running(r, 'a', 'b')
+    r.journal.append({ runId: RUN_ID, nodeId: 'a', type: 'node_status', payload: { status: 'done' } })
+    r.journal.append({ runId: RUN_ID, nodeId: 'b', type: 'node_status', payload: { status: 'done' } })
+    r.journal.append({ runId: RUN_ID, type: 'run_ended', payload: { status: 'done' } })
+    writePostMortem(r.journal.root, postMortem(r.journal, RUN_ID, { integration: [] }))
+
+    const { status, body } = await call(r.daemon, `/api/runs/${RUN_ID}/postmortem`)
+    expect(status).toBe(200)
+    expect(PostMortemSchema.parse(body)).toMatchObject({ run_id: RUN_ID, run: { status: 'done', node_count: 2 } })
+    expect((await call(r.daemon, '/api/runs/nope/postmortem')).status).toBe(404)
   })
 })
 
