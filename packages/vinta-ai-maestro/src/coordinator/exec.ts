@@ -21,7 +21,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { stopComposeOneOffs, type ContainerCleanup } from '../platform/containers.ts'
-import { killTree, ownProcessGroup, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
+import { killTree, ownProcessGroup, politeKillFirst, shellInvocation, spawnOptionsFor } from '../platform/platform.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV } from '../resources/agent-leases.ts'
 import type { Actor } from './actor.ts'
 
@@ -168,8 +168,13 @@ export async function runCommand(
   })
   child.stdout?.setEncoding('utf8').on('data', onOutput)
   child.stderr?.setEncoding('utf8').on('data', onOutput)
+  // Polite where polite works. On Windows `taskkill` without `/f` closes the
+  // shell and orphans the command it was running, which keeps the stdio pipes
+  // open and `close` from ever firing — so there the first blow is forceful
+  // (`politeKillFirst`), as it is for a gate.
+  const blow = politeKillFirst() ? 'SIGTERM' : 'SIGKILL'
   const stop = (): void => {
-    if (child.pid !== undefined && !killTree(child.pid, 'SIGTERM')) child.kill('SIGTERM')
+    if (child.pid !== undefined && !killTree(child.pid, blow)) child.kill(blow)
   }
   signal.addEventListener('abort', stop, { once: true })
   try {
@@ -178,7 +183,11 @@ export async function runCommand(
         onOutput(`vinta-ai-maestro: could not start the command: ${error.message}\n`)
         resolve(127)
       })
-      child.once('close', (code, killedBy) => resolve(code ?? (killedBy === null ? 1 : EXEC_KILLED)))
+      // A tree `taskkill` ended reports an exit code rather than a signal;
+      // the abort is what says it was killed, on either platform.
+      child.once('close', (code, killedBy) =>
+        resolve(signal.aborted ? EXEC_KILLED : (code ?? (killedBy === null ? 1 : EXEC_KILLED))),
+      )
     })
   } finally {
     signal.removeEventListener('abort', stop)
