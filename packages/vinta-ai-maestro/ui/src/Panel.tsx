@@ -57,6 +57,8 @@ export function Panel({
   className,
   contentClassName,
   expandable = false,
+  bounded = false,
+  fill = false,
   children,
   ...props
 }: Omit<ComponentProps<typeof Card>, 'title'> & {
@@ -66,6 +68,20 @@ export function Panel({
   readonly contentClassName?: string
   /** Offer a control that gives this panel the full container and a screen of height. */
   readonly expandable?: boolean
+  /**
+   * Cap the content at `--panel-scroll` (a bounded default in the page, a
+   * screen when expanded) and scroll inside it. For a panel whose content is
+   * a list the run can grow without limit — the roster, the decisions, the
+   * holders — so one long list cannot stretch the whole grid row beside it.
+   */
+  readonly bounded?: boolean
+  /**
+   * Fill the cell the panel is placed in — the run view's tiled grid gives
+   * every cell a fixed height — and scroll the content inside it. The
+   * header stays put; the content takes what is left. With `bounded` too,
+   * the content is also capped, for a flow layout whose row stretches.
+   */
+  readonly fill?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
 
@@ -96,6 +112,7 @@ export function Panel({
     <Card
       className={cn(
         'gap-3 py-4',
+        fill && 'h-full min-h-0',
         expanded && 'fixed inset-0 z-50 m-0 overflow-y-auto rounded-none border-0 shadow-none',
         className,
       )}
@@ -134,7 +151,16 @@ export function Panel({
           </CardAction>
         )}
       </CardHeader>
-      <CardContent className={cn('flex flex-col gap-3 px-4', column, contentClassName)}>
+      <CardContent
+        className={cn(
+          'flex flex-col gap-3 px-4',
+          bounded && 'max-h-[var(--panel-scroll,26rem)] overflow-y-auto',
+          fill && 'min-h-0 flex-1 overflow-y-auto',
+          column,
+          contentClassName,
+        )}
+        data-bounded={bounded || fill ? '' : undefined}
+      >
         {children}
       </CardContent>
     </Card>

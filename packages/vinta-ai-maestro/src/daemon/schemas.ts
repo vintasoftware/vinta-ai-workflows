@@ -910,6 +910,106 @@ export const UnattendedResponseSchema = z.strictObject({
   ),
 })
 
+/**
+ * `GET /api/runs/:runId/integration`: every step every node took in the
+ * integration worktree, newest first. The run view's "what has the worktree
+ * been doing" — the phase view's timeline is one attempt of one node, this is
+ * the whole run. Log tails are not here: the phase view has them, and tailing
+ * every step's file to answer a list would read the run's logs on every poll.
+ */
+export const IntegrationHistoryResponseSchema = z.strictObject({
+  runId: z.string(),
+  steps: z.array(IntegrationStepSchema.extend({ nodeId: z.string() })),
+})
+
+/** `analytics.ts`'s `TimeSplit`, on the wire. The four buckets partition `spanMs`. */
+export const TimeSplitSchema = z.strictObject({
+  spanMs: z.number().int(),
+  laneQueueMs: z.number().int(),
+  workingMs: z.number().int(),
+  capacityWaitMs: z.number().int(),
+  suspendedMs: z.number().int(),
+  gatePoolQueueMs: z.number().int(),
+  gateRunMs: z.number().int(),
+})
+
+/** One activity of `activity.ts`: a pipeline step, a gate run, a chore, or an integration step. */
+export const ActivitySchema = z.strictObject({
+  node: z.string(),
+  kind: z.enum(['step', 'gate', 'chore', 'integration']),
+  id: z.string(),
+  attempt: z.number().int().nullable(),
+  harness: z.string(),
+  model: z.string(),
+  crew: z.string().nullable(),
+  tier: z.number().int().nullable(),
+  startedAt: z.number().int(),
+  /** Null while in progress: the client's clock counts from `startedAt`. */
+  endedAt: z.number().int().nullable(),
+  outcome: z.string().nullable(),
+  cached: z.boolean(),
+})
+
+/**
+ * `GET /api/runs/:runId/analytics`: where the run's time has gone so far —
+ * `analytics.ts`'s per-node split and critical path beside `activity.ts`'s
+ * flat list of what each node did and for how long. Computed on request, so
+ * a run in progress reports floors and says so (`partial`).
+ */
+export const RunAnalyticsResponseSchema = z.strictObject({
+  runId: z.string(),
+  status: z.enum(RUN_STATUSES),
+  startedAt: z.number().int(),
+  endedAt: z.number().int().nullable(),
+  /** The moment every figure is true as of. */
+  asOf: z.number().int(),
+  elapsedMs: z.number().int(),
+  partial: z.boolean(),
+  nodes: z.array(
+    z.strictObject({
+      nodeId: z.string(),
+      name: z.string(),
+      wave: z.number().int(),
+      status: z.enum(NODE_STATUSES),
+      harness: z.string(),
+      model: z.string(),
+      crew: z.string().nullable(),
+      tier: z.number().int().nullable(),
+      startedAt: z.number().int().nullable(),
+      finishedAt: z.number().int().nullable(),
+      inFlight: z.boolean(),
+      split: TimeSplitSchema,
+    }),
+  ),
+  activities: z.array(ActivitySchema),
+  criticalPath: z.array(
+    z.strictObject({
+      nodeId: z.string(),
+      wave: z.number().int(),
+      gapMs: z.number().int(),
+      startedAt: z.number().int(),
+      endsAt: z.number().int(),
+      split: TimeSplitSchema,
+    }),
+  ),
+  tailGapMs: z.number().int(),
+  laneIdleness: z.strictObject({
+    capacity: z.number().int(),
+    slotMs: z.number().int(),
+    idleSlotMs: z.number().int(),
+    idleFraction: z.number(),
+    freeWallMs: z.number().int(),
+  }),
+  gaps: z.array(
+    z.strictObject({
+      kind: z.enum(['gate_pool_events_missing', 'gate_durations_unrecorded']),
+      resources: z.array(z.string()),
+      gates: z.array(z.string()).optional(),
+      needs: z.string(),
+    }),
+  ),
+})
+
 export const RunUsageResponseSchema = z.strictObject({
   runId: z.string(),
   reuse: ReuseTotalsSchema,
@@ -1233,6 +1333,9 @@ export type ChangedFile = z.infer<typeof ChangedFileSchema>
 export type SessionTurn = z.infer<typeof SessionTurnSchema>
 export type RunUsageResponse = z.infer<typeof RunUsageResponseSchema>
 export type UnattendedResponse = z.infer<typeof UnattendedResponseSchema>
+export type IntegrationHistoryResponse = z.infer<typeof IntegrationHistoryResponseSchema>
+export type RunAnalyticsResponse = z.infer<typeof RunAnalyticsResponseSchema>
+export type WireActivity = z.infer<typeof ActivitySchema>
 export type StartRunResponse = z.infer<typeof StartRunResponseSchema>
 export type EventFrame = z.infer<typeof EventFrameSchema>
 export type EventPage = z.infer<typeof EventPageSchema>

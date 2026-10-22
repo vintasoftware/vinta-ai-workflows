@@ -198,7 +198,7 @@ export function DiffView({
       {changes.source !== 'none' && files.length === 0 && <EmptyNote>No file has changed yet.</EmptyNote>}
 
       {files.length > 0 && (
-        <div className="grid items-start gap-5 lg:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
           <nav
             aria-label="Changed files"
             className="flex flex-col gap-0.5 rounded-lg border bg-card p-2 lg:sticky lg:top-16 lg:max-h-[calc(100vh-5rem)] lg:overflow-y-auto"

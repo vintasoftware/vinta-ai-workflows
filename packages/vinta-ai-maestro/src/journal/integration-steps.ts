@@ -26,7 +26,9 @@ export function describeStep(step: DescribedStep): string {
     case 'fix_round':
       return `conflict fix, round ${step.round ?? '?'}`
     case 'verify':
-      return step.gate === null ? 'gates on the merged tree' : `gates on the merged tree — ${step.gate} red`
+      // One row per gate now that `verify` reports them as they start; the
+      // outcome mark beside the row says whether it went red.
+      return step.gate === null ? 'gates on the merged tree' : `gate ${step.gate} on the merged tree`
     case 'base_gate':
       return `gate ${step.gate ?? '?'} on the base${step.branch === null ? '' : ` ${step.branch}`}`
     case 'wave_gate':

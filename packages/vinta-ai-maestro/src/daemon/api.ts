@@ -25,7 +25,7 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { randomUUID } from 'node:crypto'
-import { closeSync, createWriteStream, openSync, readSync, statSync } from 'node:fs'
+import { closeSync, createWriteStream, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { amendRun, type AmendRunner } from '../amend/amend.ts'
@@ -55,6 +55,9 @@ import { execHolder } from '../coordinator/exec.ts'
 import { coordinatorRefusals } from '../coordinator/policy.ts'
 import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
 import { ReassignRefused, StepRefused } from '../scheduler/index.ts'
+import { analyzeRun } from '../analytics/analytics.ts'
+import { collectActivities } from '../analytics/activity.ts'
+import { parsePostMortem, postMortemPath } from '../postmortem/postmortem.ts'
 import { collectRunCrew } from '../usage/crew.ts'
 import { collectRunReuse } from '../usage/reuse.ts'
 import { collectRunUsage } from '../usage/usage.ts'
@@ -119,6 +122,8 @@ import {
   type RunSummary,
   type RunUsageResponse,
   type UnattendedResponse,
+  type IntegrationHistoryResponse,
+  type RunAnalyticsResponse,
   type SessionTurn,
   type StartRunResponse,
   type WorkflowListResponse,
@@ -147,6 +152,17 @@ const GATE_WAIT_MS = 15_000
 
 /** The last 64 KiB of a gate log. Enough for a failure tail, bounded by design. */
 const GATE_LOG_TAIL_BYTES = 64 * 1024
+
+/** A node the analytics fold never saw dispatched. */
+const EMPTY_SPLIT = {
+  spanMs: 0,
+  laneQueueMs: 0,
+  workingMs: 0,
+  capacityWaitMs: 0,
+  suspendedMs: 0,
+  gatePoolQueueMs: 0,
+  gateRunMs: 0,
+} as const
 
 const TranscriptQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(1000).default(100),
@@ -625,6 +641,93 @@ export function createApi(options: ApiOptions): Hono {
         summary: describeUnattended(entry, { details }),
       })),
     } satisfies UnattendedResponse)
+  })
+
+  /**
+   * Every step every node took in the integration worktree, newest first
+   * (§10's run view). Its own read for the reason `unattended` is: it folds
+   * the run's whole integration record, which the snapshot must not do on
+   * every event.
+   */
+  app.get('/api/runs/:runId/integration', (c) => {
+    const runId = c.req.param('runId') ?? ''
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    return c.json({
+      runId,
+      steps: journal.integrationHistory(runId).map(({ nodeId, ...step }) => ({ nodeId, ...step })),
+    } satisfies IntegrationHistoryResponse)
+  })
+
+  /**
+   * Where the run's time has gone (§13.3), as of now. Computed on request
+   * from the whole log — two folds over every event — so the run view asks on
+   * the rollup's slow cadence, never per frame. A run in progress gets floors
+   * measured against the daemon's clock, and `partial` says so.
+   */
+  app.get('/api/runs/:runId/analytics', (c) => {
+    const runId = c.req.param('runId') ?? ''
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    const nowMs = Date.now()
+    const timing = analyzeRun(journal, runId, { nowMs })
+    const activity = collectActivities(journal, runId, { nowMs })
+    const splits = new Map(timing.nodes.map((node) => [node.nodeId, node]))
+    return c.json({
+      runId,
+      status: activity.status,
+      startedAt: activity.startedAtMs,
+      endedAt: activity.endedAtMs,
+      asOf: activity.asOfMs,
+      elapsedMs: activity.elapsedMs,
+      partial: activity.partial,
+      nodes: activity.nodes.map((node) => {
+        const split = splits.get(node.nodeId)
+        return {
+          ...node,
+          startedAt: split?.startedAtMs ?? null,
+          finishedAt: split?.finishedAtMs ?? null,
+          inFlight: split?.inFlight ?? false,
+          split: { ...(split?.split ?? EMPTY_SPLIT) },
+        }
+      }),
+      activities: activity.activities.map((row) => ({ ...row })),
+      criticalPath: timing.criticalPath.map((step) => ({
+        nodeId: step.nodeId,
+        wave: step.wave,
+        gapMs: step.gapMs,
+        startedAt: step.startedAtMs,
+        endsAt: step.endsAtMs,
+        split: { ...step.split },
+      })),
+      tailGapMs: timing.tailGapMs,
+      laneIdleness: { ...timing.laneIdleness },
+      gaps: timing.gaps.map((gap) => ({
+        kind: gap.kind,
+        resources: [...gap.resources],
+        ...(gap.gates === undefined ? {} : { gates: [...gap.gates] }),
+        needs: gap.needs,
+      })),
+    } satisfies RunAnalyticsResponse)
+  })
+
+  /**
+   * The run's post-mortem (§13.6), once there is one. Written by the run at
+   * its end, into the run's own directory, and read back through the same
+   * schema `plan-feature` reads it with — so what the UI shows is exactly the
+   * artifact the next plan will be built from. A run still going, or one
+   * that stopped before writing it, has none: 404, and the UI says which.
+   */
+  app.get('/api/runs/:runId/postmortem', (c) => {
+    const runId = c.req.param('runId') ?? ''
+    if (journal.run(runId) === undefined) return fail(c, 404, 'unknown_run')
+    let raw: unknown
+    try {
+      raw = JSON.parse(readFileSync(postMortemPath(journal.root, runId), 'utf8'))
+    } catch {
+      return fail(c, 404, 'no_postmortem')
+    }
+    const parsed = parsePostMortem(raw)
+    if (!parsed.ok) return fail(c, 500, 'invalid_postmortem')
+    return c.json(parsed.report)
   })
 
   /**
@@ -2493,7 +2596,7 @@ function refusalOf(error: unknown): { readonly code: string; readonly message: s
 
 function fail(
   c: Context,
-  status: 400 | 401 | 403 | 404 | 409 | 501 | 503,
+  status: 400 | 401 | 403 | 404 | 409 | 500 | 501 | 503,
   error: string,
   issues?: Issue[],
 ): Response {

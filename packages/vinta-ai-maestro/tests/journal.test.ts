@@ -526,6 +526,27 @@ describe('integration steps', () => {
     expect(journal.integrationTimeline('r', 'p2')).toEqual([])
   })
 
+  it('lists every node’s steps across the whole run, newest first, without `hold`', () => {
+    nodeStep('p1', 'integrate')
+    step('p1', { step: 'hold', state: 'started' })
+    step('p1', { step: 'merge', state: 'started', branch: 'plan/x/wave-1', incoming: 'p1' })
+    step('p1', { step: 'merge', state: 'finished', outcome: 'ok' })
+    step('p1', { step: 'hold', state: 'finished', outcome: 'ok' })
+    nodeStep('p2', 'integrate', 2)
+    step('p2', { step: 'hold', state: 'started' })
+    step('p2', { step: 'verify', state: 'started', gate: 'test', log: '/l/test.log' })
+
+    const history = journal.integrationHistory('r')
+    expect(history.map((row) => [row.nodeId, row.step, row.outcome])).toEqual([
+      ['p2', 'verify', null],
+      ['p1', 'merge', 'ok'],
+    ])
+    expect(history[0]).toMatchObject({ gate: 'test', log: '/l/test.log', finishedAt: null })
+
+    journal.append({ runId: 'r', type: 'run_resumed', payload: { attempt: 2 } })
+    expect(journal.integrationHistory('r').map((row) => row.outcome)).toEqual(['interrupted', 'ok'])
+  })
+
   it('names the holder between its steps, and who is queued behind it', () => {
     step('p1', { step: 'hold', state: 'started' })
     step('p1', { step: 'merge', state: 'started', branch: 'plan/x/wave-1', incoming: 'p1' })

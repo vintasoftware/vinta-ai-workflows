@@ -451,10 +451,11 @@ test('lists what the run decided without a person, each linked to its phase', as
 
   await waitFor(() => expect(container.querySelector('[data-unattended-row]')).not.toBe(null))
   const rows = [...container.querySelectorAll('[data-unattended-row]')]
-  expect(rows.map((row) => row.getAttribute('data-unattended-row'))).toEqual(['agent_question', 'action'])
-  expect(rows[0]?.textContent).toContain('agent question → Migration: Add published_at (Recommended)')
-  expect(rows[0]?.querySelector('a')?.getAttribute('href')).toBe(`#/runs/${RUN_ID}/nodes/impl`)
-  expect(rows[1]?.textContent).toContain('amended gate:unit')
+  // Newest first: the decision made since you last looked is the one to read.
+  expect(rows.map((row) => row.getAttribute('data-unattended-row'))).toEqual(['action', 'agent_question'])
+  expect(rows[1]?.textContent).toContain('agent question → Migration: Add published_at (Recommended)')
+  expect(rows[1]?.querySelector('a')?.getAttribute('href')).toBe(`#/runs/${RUN_ID}/nodes/impl`)
+  expect(rows[0]?.textContent).toContain('amended gate:unit')
 })
 
 test('a run that decided nothing on its own says so', async () => {
@@ -563,4 +564,169 @@ test('an idle integration worktree says so', async () => {
   daemon = stub
   const { container } = renderApp(stub, RUN_ROUTE)
   await waitFor(() => expect(textOf(container, '[data-integration-worktree]')).toContain('Idle'))
+})
+
+/**
+ * The widgets a run grows without limit — the roster, the decisions, the
+ * integration record — are bounded in the page: the newest few rows, a
+ * scroller for the rest, and the whole record in a paged dialog.
+ */
+test('the roster is bounded and scrolls the selected node into view', async () => {
+  const scrolled: string[] = []
+  const original = HTMLElement.prototype.scrollIntoView
+  HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+    scrolled.push(this.getAttribute('data-node') ?? '?')
+  }
+  try {
+    const stub = await startStubDaemon({
+      runs: [runSummary()],
+      snapshots: { [RUN_ID]: snapshot({ nodes: [node('impl', 'running'), node('docs', 'pending', 1)] }) },
+    })
+    daemon = stub
+    const { container } = renderApp(stub, RUN_ROUTE)
+    await waitFor(() => expect(container.querySelector('tr[data-node="docs"]')).not.toBe(null))
+
+    // The roster's content is a bounded scroller, as are the other lists.
+    expect(container.querySelector('tr[data-node="docs"]')?.closest('[data-bounded]')).not.toBe(null)
+    expect(container.querySelectorAll('.panels [data-bounded]').length).toBeGreaterThanOrEqual(4)
+
+    fireEvent.click(container.querySelector('tr[data-node="docs"] button.link') as Element)
+    await waitFor(() => expect(scrolled).toContain('docs'))
+    expect(container.querySelector('tr[data-node="docs"]')?.getAttribute('aria-current')).toBe('true')
+  } finally {
+    HTMLElement.prototype.scrollIntoView = original
+  }
+})
+
+test('a long list of decisions shows the newest five and pages the rest in a dialog', async () => {
+  const decisions = Array.from({ length: 32 }, (_, index) => ({
+    at: 1_700_000_000_000 + index * 60_000,
+    node: 'impl',
+    by: 'unattended' as const,
+    category: 'retry' as const,
+    summary: `impl · unattended after 30m 00s · retry ${index + 1}`,
+  }))
+  const stub = await startStubDaemon({ ...oneNode(), unattended: { [RUN_ID]: decisions } })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-unattended-row]')).not.toBe(null))
+  const rows = [...container.querySelectorAll('[data-unattended] [data-unattended-row]')]
+  expect(rows).toHaveLength(5)
+  expect(rows[0]?.textContent).toContain('retry 32')
+  expect(rows[4]?.textContent).toContain('retry 28')
+
+  fireEvent.click(container.querySelector('[data-unattended] [data-action="show-all"]') as Element)
+  await waitFor(() => expect(document.querySelector('[data-all-dialog]')).not.toBe(null))
+  const dialog = document.querySelector('[data-all-dialog]') as HTMLElement
+  expect(dialog.querySelectorAll('[data-unattended-row]')).toHaveLength(25)
+  expect(textOf(dialog, '[data-page-range]')).toBe('1–25 of 32')
+
+  fireEvent.click(dialog.querySelector('[data-action="page-next"]') as Element)
+  await waitFor(() => expect(textOf(dialog, '[data-page-range]')).toBe('26–32 of 32'))
+  expect(dialog.querySelectorAll('[data-unattended-row]')).toHaveLength(7)
+  const paged = [...dialog.querySelectorAll('[data-unattended-row]')]
+  expect(paged[paged.length - 1]?.textContent).toContain('retry 1')
+  expect((dialog.querySelector('[data-action="page-next"]') as HTMLButtonElement).disabled).toBe(true)
+})
+
+test('the integration worktree panel lists every phase’s recent steps, newest first', async () => {
+  const now = Date.now()
+  const stub = await startStubDaemon({
+    ...oneNode(),
+    integration: {
+      [RUN_ID]: [
+        { nodeId: 'impl', step: 'verify', branch: null, incoming: null, wave: null, gate: 'unit', round: null, log: '/l/unit.log', startedAt: now - 30_000, finishedAt: null, outcome: null },
+        { nodeId: 'docs', step: 'merge', branch: 'plan/x/wave-1', incoming: 'docs', wave: null, gate: null, round: null, log: null, startedAt: now - 120_000, finishedAt: now - 60_000, outcome: 'ok' },
+      ],
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-integration-history] [data-history-step]')).not.toBe(null))
+  const rows = [...container.querySelectorAll('[data-integration-history] [data-history-step]')]
+  expect(rows.map((row) => row.getAttribute('data-history-node'))).toEqual(['impl', 'docs'])
+  expect(rows[0]?.textContent).toContain('gate unit on the merged tree')
+  expect(rows[0]?.querySelector('a')?.getAttribute('href')).toBe(`#/runs/${RUN_ID}/nodes/impl`)
+  expect(rows[1]?.textContent).toContain('merge docs into plan/x/wave-1')
+  expect(rows[1]?.textContent).toContain('1m 00s')
+})
+
+/**
+ * The coordinator is a dock, not one card of eight: open beside the page by
+ * default on a wide window, closed by the header button, and remembered.
+ */
+test('the coordinator docks beside the run and the header button toggles it', async () => {
+  const stub = await startStubDaemon(oneNode())
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-coordinator-dock="column"] [data-monitor]')).not.toBe(null))
+  // Not in the grid any more.
+  expect(container.querySelector('.panels [data-monitor]')).toBe(null)
+  const button = container.querySelector('[data-action="coordinator"]') as HTMLButtonElement
+  expect(button.getAttribute('aria-pressed')).toBe('true')
+
+  fireEvent.click(button)
+  await waitFor(() => expect(container.querySelector('[data-coordinator-dock]')).toBe(null))
+  expect(button.getAttribute('aria-pressed')).toBe('false')
+  expect(localStorage.getItem('vinta-ai-maestro-coordinator')).toBe('closed')
+
+  fireEvent.click(button)
+  await waitFor(() => expect(container.querySelector('[data-coordinator-dock="column"]')).not.toBe(null))
+  localStorage.removeItem('vinta-ai-maestro-coordinator')
+})
+
+test('the pools panel shows the two that matter now, and the rest in a dialog', async () => {
+  const stub = await startStubDaemon({
+    runs: [runSummary()],
+    snapshots: {
+      [RUN_ID]: snapshot({
+        nodes: [node('impl', 'running')],
+        resources: [
+          resource('lane', 4, 0),
+          resource('db-a', 1, 0),
+          resource('test-suite', 2, 1, ['impl']),
+          resource('db-b', 1, 1, ['impl']),
+        ],
+      }),
+    },
+  })
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+
+  await waitFor(() => expect(container.querySelector('[data-pools] [data-resource]')).not.toBe(null))
+  // In use first, fullest first; the idle ones wait in the dialog.
+  expect([...container.querySelectorAll('[data-pools] [data-resource]')].map((row) => row.getAttribute('data-resource'))).toEqual([
+    'db-b',
+    'test-suite',
+  ])
+  fireEvent.click(container.querySelector('[data-pools] ~ [data-action="show-all"], [data-action="show-all"]') as Element)
+  await waitFor(() => expect(document.querySelector('[data-all-dialog]')).not.toBe(null))
+  expect([...document.querySelectorAll('[data-all-dialog] [data-resource]')].map((row) => row.getAttribute('data-resource'))).toEqual([
+    'db-b',
+    'test-suite',
+    'lane',
+    'db-a',
+  ])
+})
+
+test('the graph goes full screen from its own button, and Escape brings it back', async () => {
+  const stub = await startStubDaemon(oneNode())
+  daemon = stub
+  const { container } = renderApp(stub, RUN_ROUTE)
+  await waitFor(() => expect(container.querySelector('[data-action="dag-fullscreen"]')).not.toBe(null))
+
+  const button = container.querySelector('[data-action="dag-fullscreen"]') as HTMLButtonElement
+  expect(container.querySelector('[data-dag-fullscreen]')).toBe(null)
+  fireEvent.click(button)
+  await waitFor(() => expect(container.querySelector('[data-dag-fullscreen]')).not.toBe(null))
+  expect(container.querySelector('vinta-dag')?.hasAttribute('data-fullscreen')).toBe(true)
+  expect(button.getAttribute('aria-pressed')).toBe('true')
+  expect(document.body.style.overflow).toBe('hidden')
+
+  fireEvent.keyDown(document, { key: 'Escape' })
+  await waitFor(() => expect(container.querySelector('[data-dag-fullscreen]')).toBe(null))
+  expect(document.body.style.overflow).toBe('')
 })

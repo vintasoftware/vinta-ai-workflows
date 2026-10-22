@@ -57,6 +57,7 @@ import type { AgentAnswer } from '../../src/questions/shape.ts'
 import { AgentQuestions } from './AgentQuestions.tsx'
 import { Changes } from './Changes.tsx'
 import { Chip } from './Chip.tsx'
+import { CoordinatorButton, CoordinatorDock, useCoordinatorOpen } from './CoordinatorDock.tsx'
 import type { Client, NodeOperation, OperationBody } from './client.ts'
 import { Gates } from './Gates.tsx'
 import { Live } from './Live.tsx'
@@ -98,6 +99,9 @@ export function NodeView({
   // Which gate's log is open. Here and not in the panel, because the question
   // card opens the gate it is asking about too.
   const [gateLog, setGateLog] = useState<string | null>(null)
+  // Closed by default here: the page is the phase's, and the coordinator is a
+  // sheet over it when asked for.
+  const [coordinatorOpen, setCoordinatorOpen] = useCoordinatorOpen(false)
   const cursor = projection.cursor
 
   useEffect(() => {
@@ -190,6 +194,7 @@ export function NodeView({
               </span>
             )}
             <Live connected={connected} />
+            <CoordinatorButton open={coordinatorOpen} onToggle={() => setCoordinatorOpen(!coordinatorOpen)} />
             <NodeControls
               capabilities={capabilities}
               status={status}
@@ -232,7 +237,7 @@ export function NodeView({
         />
       )}
 
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="flex flex-col gap-4">
           <IntegrationTimeline steps={detail.integration} />
           <Transcript
@@ -267,6 +272,7 @@ export function NodeView({
         capabilities={capabilities}
         status={status}
       />
+      <CoordinatorDock client={client} runId={runId} open={coordinatorOpen} onOpenChange={setCoordinatorOpen} />
     </section>
   )
 }

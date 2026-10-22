@@ -52,7 +52,7 @@ export function PlanDocument({
   }, [split, review])
 
   return (
-    <div className="grid items-start gap-5 xl:grid-cols-[220px_minmax(0,1fr)]" data-plan-document>
+    <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[220px_minmax(0,1fr)]" data-plan-document>
       <nav
         aria-label="Plan outline"
         className="hidden max-h-[calc(100vh-8rem)] overflow-y-auto xl:sticky xl:top-16 xl:block"

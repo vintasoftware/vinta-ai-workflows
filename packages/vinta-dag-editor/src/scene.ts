@@ -295,6 +295,9 @@ function nodeControls(view: SceneView, node: DagNode, at: DagPoint): readonly HT
           : 'ok'
   }
   card.append(
+    // The id is how a phase is named everywhere else — the roster, the
+    // transcript, the plan — so the card carries it beside the prose name.
+    text(view.doc, 'span', 'node-id', node.id),
     text(view.doc, 'span', 'node-name', node.name),
     text(view.doc, 'span', 'node-status', statusLabel),
   )

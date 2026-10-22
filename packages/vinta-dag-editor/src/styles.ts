@@ -167,6 +167,10 @@ svg { display: block; }
 .tooltip {
   position: absolute;
   z-index: 5;
+  /* Its own width, not what the viewport has left to the right of its last
+     position: the box is measured before it is placed, and a shrink-to-fit
+     width would be the previous position's. */
+  width: max-content;
   max-width: 320px;
   padding: 5px 9px;
   border: 1px solid var(--vdag-line);
@@ -306,6 +310,13 @@ svg { display: block; }
    colour across the whole card, so they read from across the room. */
 .node[data-status='failed'], .node[data-status='awaiting_human'] {
   background: color-mix(in oklch, var(--vdag-node-color) 8%, var(--vdag-surface));
+}
+.node-id {
+  color: var(--vdag-muted);
+  font-family: var(--vdag-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  line-height: 1;
 }
 .node-name {
   display: -webkit-box;

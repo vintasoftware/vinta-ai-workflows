@@ -49,7 +49,7 @@ const MARKED: DagStrings = {
 const ALLOWED: readonly string[] = [
   ...Object.values(MARKED.status),
   ...Object.values(MARKED).filter((value): value is string => typeof value === 'string'),
-  ...SAMPLE.nodes.flatMap((node) => [node.name, String(node.wave)]),
+  ...SAMPLE.nodes.flatMap((node) => [node.id, node.name, String(node.wave)]),
   ...SAMPLE.edges.map((edge) => edge.artifact),
   '⟦connectHint⟧',
   '⟦wave⟧',

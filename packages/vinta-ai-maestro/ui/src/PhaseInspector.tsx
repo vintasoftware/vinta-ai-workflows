@@ -115,7 +115,7 @@ export function PhaseInspector({
     >
       <Pipeline workflow={workflow} node={node} gates={gates.length} chores={chores.length} />
 
-      <div className="grid gap-3 text-[13px] sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 text-[13px] sm:grid-cols-2">
         <Relations
           title="Depends on"
           icon={<ArrowUpLeftIcon aria-hidden="true" className="size-3.5" />}

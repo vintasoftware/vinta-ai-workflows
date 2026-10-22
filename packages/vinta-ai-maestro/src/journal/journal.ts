@@ -102,6 +102,11 @@ export interface IntegrationStepRow {
   readonly outcome: 'ok' | 'resolved' | 'failed' | 'interrupted' | null
 }
 
+/** One row of `integrationHistory`: a step, and the node whose turn took it. */
+export interface IntegrationHistoryRow extends IntegrationStepRow {
+  readonly nodeId: string
+}
+
 /** The integration worktree as `integrationWorktree` folds it. */
 export interface IntegrationWorktreeState {
   readonly holder: string | null
@@ -632,6 +637,54 @@ export class Journal {
         continue
       }
       if (event.type === 'integration_step') rows = foldStep(rows, event.payload as unknown as IntegrationStepPayload, event.ts)
+    }
+    return rows
+  }
+
+  /**
+   * Everything every node has done in the integration worktree over the whole
+   * run, newest first — the run view's record of the one worktree every merge
+   * goes through. Every attempt is kept, unlike `integrationTimeline`, because
+   * the question here is "what has the worktree been doing", not "what is
+   * this phase doing now". `hold` is left out for the reason the timeline
+   * leaves it out: it brackets the other rows and adds nothing to read. A
+   * step a killed process left open is closed `interrupted` at the next
+   * `run_resumed` or `run_ended`.
+   */
+  integrationHistory(runId: string): IntegrationHistoryRow[] {
+    const byNode = new Map<string, IntegrationStepRow[]>()
+    /** Every started step, in journal order, as [node, index in that node's list]. */
+    const started: [string, number][] = []
+    const interrupt = (at: number): void => {
+      for (const [nodeId, rows] of byNode) {
+        byNode.set(
+          nodeId,
+          rows.map((row) => (row.finishedAt === null ? { ...row, finishedAt: at, outcome: 'interrupted' } : row)),
+        )
+      }
+    }
+    for (const event of this.#integrationEvents(runId)) {
+      if (event.type === 'run_resumed' || event.type === 'run_ended') {
+        interrupt(event.ts)
+        continue
+      }
+      if (event.type !== 'integration_step' || event.nodeId === null) continue
+      const payload = event.payload as unknown as IntegrationStepPayload
+      if (payload.step === 'hold') continue
+      const held = byNode.get(event.nodeId) ?? []
+      // `foldStep` appends a started step, so its index in the node's list is
+      // the length before; the order of these is the journal's own.
+      if (payload.state === 'started') started.push([event.nodeId, held.length])
+      byNode.set(event.nodeId, foldStep(held, payload, event.ts))
+    }
+    // Newest first, in the order the steps were journalled — not by
+    // timestamp: two steps can start in the same millisecond, and a sort on
+    // `startedAt` then put them in whichever order the node map happened to.
+    const rows: IntegrationHistoryRow[] = []
+    for (let index = started.length - 1; index >= 0; index -= 1) {
+      const [nodeId, at] = started[index] as [string, number]
+      const step = byNode.get(nodeId)?.[at]
+      if (step !== undefined) rows.push({ ...step, nodeId })
     }
     return rows
   }

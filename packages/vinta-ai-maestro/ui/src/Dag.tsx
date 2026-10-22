@@ -21,8 +21,10 @@
  * Selection is pushed back in as a property, and the element's setter does not
  * re-emit, so there is no loop between it and the host's state.
  */
+import { Maximize2Icon, Minimize2Icon } from 'lucide-react'
 import type * as React from 'react'
-import { useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Button } from 'vinta-design-system/ui/button'
 import {
   DAG_NODE_ACTIVATE_EVENT,
   DAG_SELECTION_CHANGE_EVENT,
@@ -68,6 +70,34 @@ export function DagView({
   strings,
 }: DagViewProps): React.ReactElement {
   const host = useRef<VintaDagElement | null>(null)
+  // Full screen: the canvas over the whole window, for a plan too wide to
+  // read in a strip. A reading position like `Panel`'s expand, not a route.
+  const [fullscreen, setFullscreen] = useState(false)
+
+  // Escape leaves, the page behind does not scroll, and the graph is framed
+  // again for the new box — the canvas frames itself only once, on first
+  // render, and a box ten times the size deserves a second fit.
+  useEffect(() => {
+    if (!fullscreen) return
+    const close = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setFullscreen(false)
+    }
+    const { body } = document
+    const restore = body.style.overflow
+    body.style.overflow = 'hidden'
+    document.addEventListener('keydown', close)
+    return () => {
+      document.removeEventListener('keydown', close)
+      body.style.overflow = restore
+    }
+  }, [fullscreen])
+
+  useLayoutEffect(() => {
+    const element = host.current
+    if (element === null) return
+    const frame = requestAnimationFrame(() => element.fitToContent())
+    return () => cancelAnimationFrame(frame)
+  }, [fullscreen])
 
   useLayoutEffect(() => {
     const element = host.current
@@ -102,7 +132,27 @@ export function DagView({
     pushSelection(element, selected)
   }, [selected])
 
-  return <vinta-dag ref={host} className="dag" />
+  return (
+    <div
+      className={fullscreen ? 'fixed inset-0 z-50 flex flex-col bg-background p-3' : 'relative'}
+      data-dag-fullscreen={fullscreen ? '' : undefined}
+    >
+      <vinta-dag ref={host} className="dag" data-fullscreen={fullscreen ? '' : undefined} />
+      <Button
+        type="button"
+        variant="outline"
+        size="icon-sm"
+        className="absolute top-3 right-3 z-10 bg-background/80 backdrop-blur"
+        data-action="dag-fullscreen"
+        aria-pressed={fullscreen}
+        aria-label={fullscreen ? 'Leave full screen' : 'Show the graph full screen'}
+        title={fullscreen ? 'Leave full screen (Esc)' : 'Full screen'}
+        onClick={() => setFullscreen((current) => !current)}
+      >
+        {fullscreen ? <Minimize2Icon aria-hidden="true" /> : <Maximize2Icon aria-hidden="true" />}
+      </Button>
+    </div>
+  )
 }
 
 /**

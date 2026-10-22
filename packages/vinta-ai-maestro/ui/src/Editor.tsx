@@ -243,7 +243,7 @@ export function EditorView({
 
       {notice !== null && <ErrorNote data-role="notice">{notice}</ErrorNote>}
 
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="flex min-w-0 flex-col gap-4">
           <EditorDag
             dag={dag}
@@ -371,7 +371,7 @@ function DependencyForm({
       description="An arrow states an order; the artifact says what the downstream phase builds on."
     >
       <form
-        className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_2fr_auto]"
+        className="grid grid-cols-1 items-end gap-3 sm:grid-cols-[1fr_1fr_2fr_auto]"
         data-role="dependency-form"
         onSubmit={(event) => {
           event.preventDefault()
