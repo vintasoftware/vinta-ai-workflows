@@ -166,8 +166,10 @@ describe('running codegen steps', () => {
     const { root, main } = await makeRepo({})
     const outcome = await runCodegen({
       steps: {
-        broken: step({ cmd: 'echo nope >&2; exit 3', outputs: ['x'] }),
-        later: step({ cmd: 'touch y', outputs: ['y'], after: ['broken'] }),
+        // Written for `node`, not `sh`: a step runs under the platform's shell
+        // (`cmd.exe` on Windows), and `>&2; exit 3` is not a line it can parse.
+        broken: step({ cmd: `node -e "console.error('nope'); process.exit(3)"`, outputs: ['x'] }),
+        later: step({ cmd: `node -e "require('fs').writeFileSync('y', '')"`, outputs: ['y'], after: ['broken'] }),
       },
       cwd: main,
       env: {},
@@ -180,7 +182,12 @@ describe('running codegen steps', () => {
 
   it('hands a formatter only the changed files its outputs match, and skips it with none', async () => {
     const { root, main } = await makeRepo({ 'a.py': 'a\n', 'b.py': 'b\n', 'c.ts': 'c\n' })
-    const format = step({ cmd: 'for f in {changed_files}; do echo formatted >> "$f"; done', outputs: ['**/*.py'], format: true })
+    // `{changed_files}` becomes the files as shell arguments; `node` reads them from `argv` on either platform.
+    const format = step({
+      cmd: `node -e "for (const f of process.argv.slice(1)) require('fs').appendFileSync(f, 'formatted\\n')" {changed_files}`,
+      outputs: ['**/*.py'],
+      format: true,
+    })
     const outcome = await runCodegen({
       steps: { format },
       cwd: main,
