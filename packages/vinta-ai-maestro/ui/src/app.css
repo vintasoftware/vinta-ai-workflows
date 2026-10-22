@@ -104,6 +104,13 @@ state-machine-editor {
   overflow: hidden;
 }
 
+/* Full screen (`Dag.tsx`): the whole window, inside its wrapper's padding. */
+.dag[data-fullscreen] {
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+}
+
 /* The pipeline editor sizes itself from its host the same way. Height only:
    its own :host rule lays it out. */
 .pipeline {
