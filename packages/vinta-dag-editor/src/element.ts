@@ -586,11 +586,25 @@ export class VintaDagElement extends HTMLElement {
       viewport.append(tooltip)
     }
     tooltip.textContent = source.dataset.tooltip ?? ''
+    tooltip.hidden = false
+    // Measured after the text is in and the box is shown, then kept whole
+    // inside the viewport: centred under the source, pushed in from either
+    // edge by its own half-width, and flipped above the source when there is
+    // no room below — the toolbar sits on the bottom edge, and a tooltip that
+    // opened under it was drawn into the clipped strip outside the canvas.
     const box = viewport.getBoundingClientRect()
     const at = source.getBoundingClientRect()
-    tooltip.style.left = `${clamp(at.left - box.left + at.width / 2, 12, Math.max(12, box.width - 12))}px`
-    tooltip.style.top = `${at.bottom - box.top + 6}px`
-    tooltip.hidden = false
+    const size = tooltip.getBoundingClientRect()
+    const margin = 8
+    const half = size.width / 2
+    const centre = at.left - box.left + at.width / 2
+    const minLeft = margin + half
+    const maxLeft = Math.max(minLeft, box.width - margin - half)
+    tooltip.style.left = `${clamp(centre, minLeft, maxLeft)}px`
+    const below = at.bottom - box.top + 6
+    const above = at.top - box.top - 6 - size.height
+    const fitsBelow = below + size.height <= box.height - margin
+    tooltip.style.top = `${Math.max(margin, fitsBelow || above < margin ? below : above)}px`
   }
 
   #hideTooltip(): void {
