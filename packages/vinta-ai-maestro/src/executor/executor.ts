@@ -1736,14 +1736,26 @@ export class RunEffectExecutor implements EffectExecutor {
 
   /** Lets the first waiter that is not paused in, when nothing holds the worktree. */
   #pumpIntegration(): void {
-    if (this.#integrationBusy) return
+    // Pauses are read whether or not the worktree is free: a waiter paused or
+    // resumed behind a long hold is reported when that happens, not when the
+    // hold ends.
     for (const waiting of this.#integrationWaiting) {
-      if (waiting.nodeId === null || this.#integrationPassedOver.has(waiting.nodeId)) continue
+      if (waiting.nodeId === null) continue
+      if (this.#integrationPassedOver.has(waiting.nodeId)) {
+        // Resumed while still in the queue, at the place it always had: said
+        // so, or the journal goes on calling it paused until it is let in.
+        if (!this.#integrationPaused(waiting.nodeId)) {
+          this.#integrationPassedOver.delete(waiting.nodeId)
+          this.#options.onIntegrationWait?.(waiting.nodeId, 'queued', this.#integrationHolder)
+        }
+        continue
+      }
       if (this.#integrationPaused(waiting.nodeId)) {
         this.#integrationPassedOver.add(waiting.nodeId)
         this.#options.onIntegrationWait?.(waiting.nodeId, 'paused', this.#integrationHolder)
       }
     }
+    if (this.#integrationBusy) return
     const index = this.#integrationWaiting.findIndex(
       (waiting) => waiting.nodeId === null || !this.#integrationPaused(waiting.nodeId),
     )

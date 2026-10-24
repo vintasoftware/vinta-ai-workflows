@@ -1787,6 +1787,9 @@ export class Scheduler {
     const nodeId = state.node.id
     state.retryQueued = false
     state.aborted = false
+    // `abortNode` drops it already; a phase that failed on its own with a
+    // pause still pending reaches here with it set, and a retry is a new attempt.
+    this.#dropPause(state)
     // A deferred phase aborted while it waited for its start asks again.
     if (!state.released) state.deferredAsked = false
     state.failure = null
@@ -1961,6 +1964,14 @@ export class Scheduler {
     return this.#operation(state, 'pause', undefined, 'sent', actor, reason)
   }
 
+  /** Forgets every pause and hold asked of the node's current attempt. */
+  #dropPause(state: NodeState): void {
+    state.pauseRequested = false
+    state.holdRequested = false
+    state.held = false
+    state.heldBy = null
+  }
+
   /**
    * Holds the question a node is parked on: no timer answers it. The
    * coordinator cannot take a hold off a node the operator is holding.
@@ -1985,6 +1996,13 @@ export class Scheduler {
     if (this.#settledNode(state)) return this.#operation(state, 'abort', undefined, 'ignored', actor, reason)
 
     state.aborted = true
+    // A pause or a hold was asked of the attempt being aborted, not of the
+    // phase. Left set, it outlived the abort into the retry: one observed
+    // phase, paused and aborted a minute apart, was retried half an hour later
+    // and then passed over in the integration queue by two phases that had
+    // queued after it, until somebody thought to `resume` a phase nobody
+    // remembered pausing.
+    this.#dropPause(state)
     this.#wakeIntegration()
     this.#operation(state, 'abort', undefined, 'sent', actor, reason)
 

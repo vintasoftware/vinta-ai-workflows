@@ -446,9 +446,32 @@ describe('integration waits', () => {
       wait('p2', 'queued', 'p1')
       wait('p3', 'queued', 'p1')
       wait('p2', 'granted', 'p1')
-      expect([...journal.integrationWaits('r')]).toEqual([['p3', 'p1']])
+      expect([...journal.integrationWaits('r')]).toEqual([['p3', { holder: 'p1', paused: false }]])
       wait('p3', 'granted', 'p1')
       expect(journal.integrationWaits('r').size).toBe(0)
+    } finally {
+      journal.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * A phase paused while it queued behind a coordinator's `exec` was shown as
+   * "held by coordinator" long after the exec ended. The pause, not the
+   * holder, is what keeps it waiting.
+   */
+  it('reports a paused waiter as paused, not as held by whoever it queued behind', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vinta-ai-maestro-journal-'))
+    const journal = openJournal(dir)
+    try {
+      journal.createRun('r', golden())
+      const wait = (state: 'queued' | 'paused', holder: string | null) =>
+        journal.append({ runId: 'r', nodeId: 'p5', type: 'node_wait', payload: { on: 'integration_worktree', state, holder } })
+      wait('queued', 'coordinator')
+      wait('paused', null)
+      expect(journal.integrationWaits('r').get('p5')).toEqual({ holder: null, paused: true })
+      wait('queued', 'p3')
+      expect(journal.integrationWaits('r').get('p5')).toEqual({ holder: 'p3', paused: false })
     } finally {
       journal.close()
       rmSync(dir, { recursive: true, force: true })

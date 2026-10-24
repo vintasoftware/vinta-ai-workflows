@@ -2503,10 +2503,47 @@ describe('the integration worktree’s queue', () => {
     await first
     await third
     expect(order).toEqual(['p3'])
-    expect(waits).toContainEqual(['p2', 'paused', null])
+    // Reported as soon as the pause is seen, while p1 still holds the worktree.
+    expect(waits).toContainEqual(['p2', 'paused', 'p1'])
 
     paused.delete('p2')
     wake()
+    await second
+    expect(order).toEqual(['p3', 'p2'])
+  })
+
+  it('says a waiter resumed while the worktree is held is queued again, at its old place', async () => {
+    const waits: [string, string, string | null][] = []
+    const rig = setup(() => goldenWorkflow({}), {
+      onIntegrationWait: (nodeId, state, holder) => waits.push([nodeId, state, holder]),
+    })
+    const paused = new Set(['p2'])
+    const wake = rig.executor.integrationPause((nodeId) => paused.has(nodeId))
+    const gate = () => {
+      let open!: () => void
+      const shut = new Promise<void>((resolve) => {
+        open = resolve
+      })
+      return { open, shut }
+    }
+    const p1 = gate()
+    const p3 = gate()
+    const order: string[] = []
+    const first = rig.executor.integration(() => p1.shut, 'p1')
+    const second = rig.executor.integration(async () => order.push('p2'), 'p2')
+    const third = rig.executor.integration(async () => {
+      order.push('p3')
+      await p3.shut
+    }, 'p3')
+    p1.open()
+    await first
+    for (let tick = 0; tick < 100 && !order.includes('p3'); tick += 1) await new Promise((resolve) => setImmediate(resolve))
+    paused.delete('p2')
+    wake()
+    // Still held by p3, so p2 is queued again rather than let in, behind p3.
+    expect(waits.at(-1)).toEqual(['p2', 'queued', 'p3'])
+    p3.open()
+    await third
     await second
     expect(order).toEqual(['p3', 'p2'])
   })

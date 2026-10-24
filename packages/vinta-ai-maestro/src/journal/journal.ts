@@ -107,6 +107,14 @@ export interface IntegrationHistoryRow extends IntegrationStepRow {
   readonly nodeId: string
 }
 
+/** A node queued behind the integration worktree, as `integrationWaits` folds it. */
+export interface IntegrationWait {
+  /** Who held the worktree when the node queued; null when nobody did, or it is paused. */
+  readonly holder: string | null
+  /** Passed over until a pause is lifted. */
+  readonly paused: boolean
+}
+
 /** The integration worktree as `integrationWorktree` folds it. */
 export interface IntegrationWorktreeState {
   readonly holder: string | null
@@ -579,19 +587,23 @@ export class Journal {
   /**
    * Nodes queued behind the integration worktree right now, with the holder
    * each one was told about: the last `node_wait` per node, where it says
-   * `queued`. For `status`, which otherwise shows such a node as `running`
-   * with nothing running.
+   * `queued` or `paused`. For `status`, which otherwise shows such a node as
+   * `running` with nothing running.
    */
-  integrationWaits(runId: string): Map<string, string | null> {
+  integrationWaits(runId: string): Map<string, IntegrationWait> {
     const rows = this.db
       .prepare("SELECT node_id, payload_json FROM events WHERE run_id = ? AND type = 'node_wait' ORDER BY id")
       .all(runId) as { node_id: string; payload_json: string }[]
-    const waits = new Map<string, string | null>()
+    const waits = new Map<string, IntegrationWait>()
     for (const row of rows) {
       const payload = JSON.parse(row.payload_json) as { state?: string; holder?: string | null }
-      // A paused waiter is still in the queue, passed over until it is resumed.
-      if (payload.state === 'queued') waits.set(row.node_id, payload.holder ?? null)
-      else if (payload.state !== 'paused') waits.delete(row.node_id)
+      if (payload.state === 'queued') waits.set(row.node_id, { holder: payload.holder ?? null, paused: false })
+      // A paused waiter is still in the queue, passed over until it is
+      // resumed. The holder it queued behind is not what keeps it there, and
+      // reporting it as "held by coordinator" long after that `exec` ended
+      // sent one operator looking for a hold that did not exist.
+      else if (payload.state === 'paused') waits.set(row.node_id, { holder: null, paused: true })
+      else waits.delete(row.node_id)
     }
     return waits
   }

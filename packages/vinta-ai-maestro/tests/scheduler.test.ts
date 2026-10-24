@@ -2945,6 +2945,33 @@ describe('§9 operations', () => {
     expectDrained(r)
   })
 
+  /**
+   * The observed run: `node pause p5`, `node abort p5` a minute later, and a
+   * `node retry p5` half an hour after that. The pause was still set on the
+   * retry, which was then passed over in the integration queue until somebody
+   * resumed a phase nobody remembered pausing.
+   */
+  it('drops a pause with the attempt it was asked of, so the retry is not paused', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true, onFailure: 'retry' })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.pause('a')
+    await r.scheduler.abortNode('a')
+    r.stall.release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    r.scheduler.retry('a')
+    await until(
+      () => r.scheduler.statuses['a'] === 'done' || r.scheduler.statuses['a'] === 'awaiting_human',
+      'the retry to finish or park',
+    )
+
+    expect(r.scheduler.statuses['a']).toBe('done')
+    expect(r.journal.pendingQuestion('run-1', 'a')).toBeUndefined()
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+
   it('aborts a node: kills the session, fails it, and blocks exactly its dependents', async () => {
     const workflow = makeWorkflow([node('a'), node('b', ['a']), node('c', ['b']), node('d')])
     const r = rig(workflow, { stall: true })
