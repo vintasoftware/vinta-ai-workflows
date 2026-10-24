@@ -911,6 +911,10 @@
               "after_pr"
             ]
           },
+          "background": {
+            "description": "`false` tells this chore’s turns to run every command in the foreground and wait for it, even on a harness that keeps a session alive for background work. For a review whose turns keep ending on \"waiting on the tests\" with no verdict. Absent, the harness decides.",
+            "type": "boolean"
+          },
           "on_failure": {
             "default": "continue",
             "description": "`continue` — the default — journals a failed chore and moves on. A chore is polish, and losing an implemented phase to one that timed out is the worse trade. `fail` is for a chore whose output the phase is not correct without. A `review` chore ignores it: a review that did not approve, for any reason, is put to the operator.",

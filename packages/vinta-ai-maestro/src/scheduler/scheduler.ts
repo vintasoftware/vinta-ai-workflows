@@ -133,6 +133,7 @@ import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import {
   composeSpawnPrompt,
   PromptError,
+  verdictFollowUp,
   type ChorePrompt,
   type Reorientation,
 } from '../prompts/index.ts'
@@ -4423,7 +4424,7 @@ export class Scheduler {
         continuation: plan.continuation,
         // Whether a turn that waits can end and be woken, which decides how
         // every turn is told to wait on work it started.
-        backgroundWork: adapter.capabilities.backgroundWork,
+        backgroundWork: adapter.capabilities.backgroundWork && chore?.chore.background !== false,
         harness: adapter.id,
         // The instruction this turn exists to carry out, on a chore turn and
         // nowhere else. Unlike everything above it, it is passed on a
@@ -4614,13 +4615,23 @@ export class Scheduler {
         throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything, resumed and cold`)
       }
     }
-    const last = await this.#agentQuestions(state, turn, watch, drained.sessionId)
+    const asked = await this.#agentQuestions(state, turn, watch, drained.sessionId)
+    const reports = [asked.watch.prose()]
+    let result = await this.#options.executor.execute(invocation)
+    // The executor reads the verdict; a review it found silent is asked once more.
+    if (chore?.chore.when === 'review' && result.facts?.review?.['stated'] === false) {
+      const followed = await this.#askForVerdict(state, turn, asked)
+      if (followed !== null) {
+        reports.push(followed.prose())
+        result = await this.#options.executor.execute(invocation)
+      }
+    }
 
     // The review's rejected findings, from its closing report. Kept so the
     // next reviewer — a fresh one, after a resume, a retry or an `unapproved`
     // continue — is handed them rather than raising them again (§16.4).
     if (chore?.chore.when === 'review') {
-      for (const finding of readRejections(last.prose())) {
+      for (const finding of reports.flatMap(readRejections)) {
         this.#decide(state, decision('rejected', 'review', finding))
       }
     }
@@ -4631,7 +4642,7 @@ export class Scheduler {
       if (state.lastRed !== null) state.lastRed.fixedSince = true
     }
 
-    return await this.#options.executor.execute(invocation)
+    return result
   }
 
   /**
@@ -4818,19 +4829,19 @@ export class Scheduler {
     turn: Turn,
     first: QuestionWatch,
     firstSessionId: string,
-  ): Promise<QuestionWatch> {
+  ): Promise<{ readonly watch: QuestionWatch; readonly sessionId: string }> {
     const { runId, journal } = this.#options
     let watch = first
     let sessionId = firstSessionId
     for (;;) {
       const ask = watch.result()
-      if (ask === null) return watch
+      if (ask === null) return { watch, sessionId }
       if (!turn.adapter.capabilities.resume) {
         this.#log.warn('node.agent_question_unanswerable', {
           node: state.node.id,
           harness: turn.adapter.id,
         })
-        return watch
+        return { watch, sessionId }
       }
 
       state.agentQuestions += 1
@@ -4876,6 +4887,38 @@ export class Scheduler {
       watch = new QuestionWatch()
       sessionId = (await this.#drain(state, granted, turn, watch)).sessionId
     }
+  }
+
+  /**
+   * §16.2 — a review turn that ended without its `VERDICT:` line is asked for
+   * one, once, in the same session, before it counts as a review that stated
+   * nothing.
+   *
+   * The silence is rarely the review's judgement. Observed: a review that
+   * started the tests in the background ended on "waiting on the inner-loop
+   * tests" twice, and each time the phase — gates green an hour before — was
+   * failed and restarted from the implementer; another did it for three
+   * hours. The same session still holds the review, the findings and
+   * whatever it was waiting on, so the cheapest thing that can produce the
+   * verdict is to ask it for one. Not on an interrupted turn (an operator is
+   * already looking at it) nor on a harness that cannot resume. Returns the
+   * follow-up's report, or null when none was asked.
+   */
+  async #askForVerdict(
+    state: NodeState,
+    turn: Turn,
+    asked: { readonly watch: QuestionWatch; readonly sessionId: string },
+  ): Promise<QuestionWatch | null> {
+    if (!turn.adapter.capabilities.resume || asked.watch.interrupted() || asked.watch.result() !== null) return null
+    const { runId, journal } = this.#options
+    const prompt = verdictFollowUp()
+    this.#log.info('node.verdict_requested', { node: state.node.id, harness: turn.adapter.id })
+    journal.appendTranscript(runId, state.node.id, { type: 'user_message', text: prompt, by: { role: MONITOR_ROLE } })
+    const granted = await this.#admitAnswer(state, turn, prompt, asked.sessionId)
+    const watch = new QuestionWatch()
+    const drained = await this.#drain(state, granted, turn, watch)
+    // An agent that stops to ask instead is answered the usual way.
+    return (await this.#agentQuestions(state, turn, watch, drained.sessionId)).watch
   }
 
   /**

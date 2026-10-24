@@ -237,6 +237,11 @@ export class QuestionWatch {
     }
   }
 
+  /** Whether the session ended because an operator interrupted it. */
+  interrupted(): boolean {
+    return this.#interrupted
+  }
+
   /** What the agent wrote after its last tool call: the turn's closing report, joined. */
   prose(): string {
     return this.#prose.join('')

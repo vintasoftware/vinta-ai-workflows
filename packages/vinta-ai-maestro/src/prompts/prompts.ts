@@ -77,6 +77,30 @@ export function readVerdict(text: string): 'pass' | 'fail' | undefined {
 }
 
 /**
+ * What a review session is sent when its turn ended without a `VERDICT:` line
+ * (`Scheduler.#askForVerdict`). Into the same session, which holds the review
+ * and whatever it was waiting on, so it is only the ask.
+ *
+ * Observed twice on one phase: a review that started the inner-loop tests in
+ * the background ended its turn on "Waiting on the inner-loop tests", the turn
+ * was read as a review that stated nothing, and the phase — gates green for an
+ * hour — was failed and restarted from the implementer.
+ */
+export function verdictFollowUp(): string {
+  return [
+    'Your last turn ended without the verdict line, so the orchestrator has no verdict',
+    'for this review. If you were waiting on something — a test run, the reviewer —',
+    'wait for it now, in this turn: run what is left in the foreground and read its',
+    'result, and start nothing new in the background. Then finish the review and end',
+    'your final message with one line, exactly:',
+    `    ${VERDICT_MARKER} pass`,
+    'or',
+    `    ${VERDICT_MARKER} fail`,
+    'unless you are stopping for a decision, when the NEEDS_INPUT block ends the turn.',
+  ].join('\n')
+}
+
+/**
  * A prompt that could not be composed. Identifiers only — the node id, the
  * reference, and what about the reference did not resolve.
  */

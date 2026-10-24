@@ -473,6 +473,15 @@ export const ChoreSchema = z.strictObject({
         '`after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be ' +
         '`on_failure: fail`.',
     ),
+  background: z
+    .boolean()
+    .optional()
+    .describe(
+      '`false` tells this chore’s turns to run every command in the foreground and wait for ' +
+        'it, even on a harness that keeps a session alive for background work. For a review ' +
+        'whose turns keep ending on "waiting on the tests" with no verdict. Absent, the ' +
+        'harness decides.',
+    ),
   on_failure: z
     .enum(['continue', 'fail'])
     .default('continue')

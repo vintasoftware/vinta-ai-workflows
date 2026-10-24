@@ -43,6 +43,7 @@ import { LaneRecycleError, LaneSetupError } from '../src/lanes/pool.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
+import { verdictFollowUp } from '../src/prompts/index.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import {
@@ -2521,6 +2522,48 @@ describe('§16 the review', () => {
     expect(choresOf(r, 'a')).toEqual([
       { chore: 'review', status: 'failed', duration_ms: expect.any(Number) },
     ])
+    expectDrained(r)
+  })
+
+  /**
+   * The observed review: it started the tests in the background and ended its
+   * turn on "waiting on the inner-loop tests". Read as a review that stated
+   * nothing, the phase — gates green an hour before — was failed and
+   * restarted from the implementer. The same session is asked for the verdict.
+   */
+  it('asks a review that stated no verdict for one, once, in the same session', async () => {
+    const silent: EffectOutcome = { facts: { review: { verdict: 'fail', stated: false } } }
+    const r = rig(reviewedWorkflow(), { outcomes: { ...APPROVED, 'e-review:review': [silent, verdict('pass')] } })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    // The implementer, the review, and the review again in its own session.
+    const [, , followUp] = r.adapter.spawned
+    expect(r.adapter.spawned).toHaveLength(3)
+    expect(followUp?.prompt).toBe(verdictFollowUp())
+    expect(followUp?.resumeSessionId).toEqual(expect.any(String))
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'user_message', text: verdictFollowUp(), by: { role: 'monitor' } }),
+    )
+    expect(choresOf(r, 'a')).toEqual([{ chore: 'review', status: 'ran', duration_ms: expect.any(Number) }])
+    expectDrained(r)
+  })
+
+  it('asks only once, and a review still silent is put to the operator as before', async () => {
+    const silent: EffectOutcome = { facts: { review: { verdict: 'fail', stated: false } } }
+    const r = rig(reviewedWorkflow(), { outcomes: { ...APPROVED, 'e-review:review': silent } })
+    expect((await runAnsweringStop(r, 'a')).statuses).toEqual({ a: 'failed' })
+    expect(r.adapter.spawned.filter((task) => task.prompt === verdictFollowUp())).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('does not ask a harness that cannot resume the session', async () => {
+    const silent: EffectOutcome = { facts: { review: { verdict: 'fail', stated: false } } }
+    const r = rig(reviewedWorkflow(), {
+      outcomes: { ...APPROVED, 'e-review:review': silent },
+      capabilities: { resume: false },
+    })
+    expect((await runAnsweringStop(r, 'a')).statuses).toEqual({ a: 'failed' })
+    expect(r.adapter.spawned.some((task) => task.prompt === verdictFollowUp())).toBe(false)
     expectDrained(r)
   })
 
