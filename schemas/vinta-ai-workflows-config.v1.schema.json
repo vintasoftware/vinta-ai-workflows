@@ -856,6 +856,14 @@
                   "semaphore"
                 ]
               },
+              "scope": {
+                "description": "`run` (the default) counts this run's holders only; `host` also counts every other maestro run on the machine holding a pool of the same name, so two runs on one laptop take turns at the full suite.",
+                "type": "string",
+                "enum": [
+                  "run",
+                  "host"
+                ]
+              },
               "match": {
                 "type": "array",
                 "items": {

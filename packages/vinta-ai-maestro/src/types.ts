@@ -115,6 +115,16 @@ export const ResourceSchema = z.strictObject({
   kind: z
     .enum(['worktree', 'semaphore'])
     .describe('`worktree` pools are provisioned lanes; `semaphore` pools are pure counters.'),
+  scope: z
+    .enum(['run', 'host'])
+    .optional()
+    .describe(
+      '`run` — the default — counts only this run’s holders. `host` also counts every other ' +
+        'run on this machine holding a pool of the same name, through lock files under ' +
+        '`~/.vinta-ai-maestro/host-leases/` (`VINTA_AI_MAESTRO_HOST_LEASES` moves them), so two ' +
+        'runs on one laptop take turns at the full suite instead of running two at once. Only ' +
+        'meaningful on a `semaphore` pool.',
+    ),
   match: z
     .array(z.string().min(1))
     .optional()

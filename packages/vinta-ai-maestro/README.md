@@ -288,6 +288,13 @@ makes it stick. Every agent a run starts gets a `PreToolUse` hook, in every
 }
 ```
 
+A pool is the run's own unless it says `"scope": "host"`. A host-scoped pool is
+shared by every maestro run on the machine that declares one of the same name —
+two runs on one laptop take turns at the full suite instead of running two at
+once — through lock files under `~/.vinta-ai-maestro/host-leases/` holding a pid
+and a run id (`VINTA_AI_MAESTRO_HOST_LEASES` moves them). A slot whose run died
+is taken over. Each run counts against its own `capacity`.
+
 A gate's *scoped* form is not refused as a gate: `pytest app/a.py` is also what
 an agent running one test file in its inner loop types, which is the work. It
 owes the pool's lease, and the `match` rule asks for exactly that.

@@ -5188,8 +5188,13 @@ export class Scheduler {
         .leases()
         .filter((lease) => needs.includes(lease.resource) && lease.holder_node !== state.node.id)
         .map((lease) => lease.holder_node)
+      // A host-scoped pool may be held by another run on this machine, which
+      // this run's leases cannot name.
+      const elsewhere = needs.flatMap((resource) =>
+        this.#options.pools.hostHolders(resource).filter((held) => held.run !== this.#options.runId).map((held) => `run ${held.run}`),
+      )
       throw new GateQueueTimeout(this.#gateIds(state.node, invocation.effect.params['gate']), needs, Date.now() - queuedAt, [
-        ...new Set(holders),
+        ...new Set([...holders, ...elsewhere]),
       ])
     }
     state.gateHeld = needs

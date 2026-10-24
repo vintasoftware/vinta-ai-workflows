@@ -50,3 +50,4 @@ maestro:
     test-suite:
       capacity: 1
       kind: semaphore
+      scope: host

@@ -322,6 +322,8 @@ Rules that will cause bugs if left implicit:
 
 Resource pools are the generalization that makes the costly-gate queue fall out for free: the worktree lane pool is just the pool named `lane`.
 
+**A pool may be the machine's rather than the run's** (`scope: host`, `src/resources/host-slots.ts`). Two runs on one laptop each had a `test-suite` of capacity 1 and ran two full suites at once; a ten-minute suite took 28 to 42 minutes at a load average of 22 to 26, past its timeout again and again, and each timeout left a container and a half-migrated database for the attempt after it. A grant on a host-scoped pool also takes a lock file, `<root>/<pool>/slot-<n>.lock` under `~/.vinta-ai-maestro/host-leases/`, created exclusively and holding only a pid and a run id; a slot whose pid is gone is taken over. All-or-nothing as within a run, in the same canonical order, and polled every two seconds while a waiter needs one, since another run's release is not an event here. Each run counts against its own `capacity`, so the stricter declaration is never exceeded. `run`, the default, keeps the pool the run's alone; a lane-local gate has no reason to be anything else.
+
 ### 6.1 Harness capacity and backpressure
 
 A vendor refusing to start a session is **backpressure, not failure**. Rate limits, per-account concurrency caps and exhausted usage windows are all expected operating conditions when running N agents on one seat, and none of them may fail a node or end a run.

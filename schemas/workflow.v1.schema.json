@@ -638,6 +638,14 @@
             ],
             "description": "`worktree` pools are provisioned lanes; `semaphore` pools are pure counters."
           },
+          "scope": {
+            "description": "`run` — the default — counts only this run’s holders. `host` also counts every other run on this machine holding a pool of the same name, through lock files under `~/.vinta-ai-maestro/host-leases/` (`VINTA_AI_MAESTRO_HOST_LEASES` moves them), so two runs on one laptop take turns at the full suite instead of running two at once. Only meaningful on a `semaphore` pool.",
+            "type": "string",
+            "enum": [
+              "run",
+              "host"
+            ]
+          },
           "match": {
             "description": "Command patterns that need this pool — `pytest*`, `pnpm test*`. `*` matches any run of characters and the rest is literal, compared against the whole command line with whitespace collapsed. On a harness that can enforce it, an agent running a matching command without `vinta-ai-maestro with <pool> --` in front of it is refused and told to take the lease. A guardrail against habit, not a sandbox: `bash -c` or a script that runs the same suite is not seen. Only meaningful on a `semaphore` pool.",
             "type": "array",

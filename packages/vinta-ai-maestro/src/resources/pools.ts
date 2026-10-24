@@ -27,6 +27,7 @@
  *   a slot never released narrows it permanently.
  */
 import type { Resource } from '../types.ts'
+import type { HostSlot, HostSlots } from './host-slots.ts'
 
 /**
  * A wait that was abandoned before it was granted. Not a failure of the pool:
@@ -95,13 +96,28 @@ export interface ResourcePoolsOptions {
    * strict FIFO and report a schedule the real pool would not produce.
    */
   readonly now?: () => number
+  /**
+   * The machine's slots for the pools declared `scope: host`. Absent, those
+   * pools count this run's holders only — which a projection and every test
+   * want, since another run on the machine is none of their business.
+   */
+  readonly hostSlots?: HostSlots
 }
 
 const DEFAULT_AGING_MS = 500
 
+/**
+ * How often a queue waiting on a host-scoped pool looks again. Another run's
+ * release says nothing to this process, so the wait is polled; a full suite
+ * is minutes, and two seconds of it is noise.
+ */
+const HOST_POLL_MS = 2_000
+
 interface Pool {
   capacity: number
   held: number
+  /** `scope: host`: a grant also takes one of the machine's slots. */
+  readonly host: boolean
 }
 
 interface Waiter {
@@ -115,11 +131,17 @@ export class ResourcePools {
   readonly #pools: Map<string, Pool>
   readonly #agingMs: number
   readonly #now: () => number
+  readonly #hostSlots: HostSlots | undefined
   #queue: Waiter[] = []
+  #poll: ReturnType<typeof setTimeout> | null = null
 
   constructor(resources: Readonly<Record<string, Resource>>, options: ResourcePoolsOptions = {}) {
+    this.#hostSlots = options.hostSlots
     this.#pools = new Map(
-      Object.entries(resources).map(([id, r]) => [id, { capacity: r.capacity, held: 0 }]),
+      Object.entries(resources).map(([id, r]) => [
+        id,
+        { capacity: r.capacity, held: 0, host: r.scope === 'host' && this.#hostSlots !== undefined },
+      ]),
     )
     this.#agingMs = options.agingMs ?? DEFAULT_AGING_MS
     this.#now = options.now ?? (() => Date.now())
@@ -248,15 +270,19 @@ export class ResourcePools {
   #pump(): void {
     const now = this.#now()
     const reserved = new Set<string>()
-    const granted = new Set<Waiter>()
+    const granted = new Map<Waiter, readonly HostSlot[]>()
 
     for (const waiter of this.#queue) {
       const fits = waiter.needs.every(
         (name) => !reserved.has(name) && this.#pool(name).held < this.#pool(name).capacity,
       )
-      if (fits) {
+      // Taken after this run's own counts allow it, and all-or-nothing like
+      // them: a waiter that gets one machine slot and not the next gives the
+      // first straight back.
+      const slots = fits ? this.#hostSlotsFor(waiter.needs) : null
+      if (slots !== null) {
         for (const name of waiter.needs) this.#pool(name).held += 1
-        granted.add(waiter)
+        granted.set(waiter, slots)
         continue
       }
       if (now - waiter.enqueuedAt >= this.#agingMs) {
@@ -264,22 +290,65 @@ export class ResourcePools {
       }
     }
 
-    if (granted.size === 0) return
-    this.#queue = this.#queue.filter((waiter) => !granted.has(waiter))
-    // Resolving is a microtask, so no waiter re-enters #pump mid-scan.
-    for (const waiter of granted) waiter.grant(this.#lease(waiter.needs))
+    if (granted.size > 0) {
+      this.#queue = this.#queue.filter((waiter) => !granted.has(waiter))
+      // Resolving is a microtask, so no waiter re-enters #pump mid-scan.
+      for (const [waiter, slots] of granted) waiter.grant(this.#lease(waiter.needs, slots))
+    }
+    this.#schedulePoll()
   }
 
-  #lease(needs: readonly string[]): Lease {
+  /** One machine slot per host-scoped pool in `needs`, or null with none kept. */
+  #hostSlotsFor(needs: readonly string[]): readonly HostSlot[] | null {
+    const taken: HostSlot[] = []
+    for (const name of needs) {
+      const pool = this.#pool(name)
+      if (!pool.host || this.#hostSlots === undefined) continue
+      const slot = this.#hostSlots.tryTake(name, pool.capacity)
+      if (slot === null) {
+        for (const kept of taken) kept.release()
+        return null
+      }
+      taken.push(slot)
+    }
+    return taken
+  }
+
+  /** Polls while someone waits on a host-scoped pool; another run's release is not an event here. */
+  #schedulePoll(): void {
+    const waitingOnHost = this.#queue.some((waiter) => waiter.needs.some((name) => this.#pool(name).host))
+    if (!waitingOnHost) {
+      if (this.#poll !== null) clearTimeout(this.#poll)
+      this.#poll = null
+      return
+    }
+    if (this.#poll !== null) return
+    this.#poll = setTimeout(() => {
+      this.#poll = null
+      this.#pump()
+    }, HOST_POLL_MS)
+    // A wait on another run must not keep this process alive by itself.
+    this.#poll.unref?.()
+  }
+
+  #lease(needs: readonly string[], slots: readonly HostSlot[] = []): Lease {
     let released = false
     return {
       release: (): void => {
         if (released) return
         released = true
+        for (const slot of slots) slot.release()
         for (const name of needs) this.#pool(name).held -= 1
         this.#pump()
       },
     }
+  }
+
+  /** Who else on this machine holds `name`'s slots, for a waiter to be told; empty for a run-scoped pool. */
+  hostHolders(name: string): readonly { readonly pid: number; readonly run: string }[] {
+    const pool = this.#pool(name)
+    if (!pool.host || this.#hostSlots === undefined) return []
+    return this.#hostSlots.holders(name, pool.capacity)
   }
 
   #pool(name: string): Pool {

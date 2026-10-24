@@ -47,6 +47,7 @@ import {
   writePostMortem,
   type IntegrationWaveRecord,
 } from '../postmortem/postmortem.ts'
+import { defaultHostSlotsRoot, HostSlots } from '../resources/host-slots.ts'
 import { ResourcePools } from '../resources/pools.ts'
 import {
   AgentLeaseBroker,
@@ -455,7 +456,11 @@ export async function startRun(options: StartRunOptions): Promise<StartRunResult
     return { ok: false, message: refusal(error, workflow, laneRoot) }
   }
 
-  const pools = new ResourcePools(workflow.resources)
+  // Pools declared `scope: host` share slots with every other run on this
+  // machine; the rest are this run's alone.
+  const pools = new ResourcePools(workflow.resources, {
+    hostSlots: new HostSlots({ root: defaultHostSlotsRoot(), run: runId }),
+  })
   const agentLeases = new AgentLeaseBroker(pools, journal, runId)
   // The `gate` verb's route in. Absent for a host with no lanes, and then the
   // verb refuses rather than running a gate against a directory it guessed.
