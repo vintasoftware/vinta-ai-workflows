@@ -68,6 +68,7 @@ usage: vinta-ai-maestro <command> [options]
   run --resume <run-id>      Pick a paused, interrupted or failed run back up.
   status [run-id]            What every run — or one run — is doing.
   logs <run-id> [-f]         A run's job log; -f follows it to the end.
+  logs --failures <gate-log> The first failure in a gate's log.
   pause <run-id>             Let running steps finish, then stop. Resumable.
   stop <run-id>              Kill the run now. Final.
   node <op> <run-id> <phase> Steer one phase of a live run: context, redirect,
@@ -84,9 +85,10 @@ usage: vinta-ai-maestro <command> [options]
   exec <run-id> <lane|integration> -- <cmd>
                              Run a command in a lane or the integration
                              worktree, with that worktree's environment.
-  gate-cache invalidate <run-id> <gate-id> [--tree <hash>]
+  gate-cache invalidate <run-id> <gate-id> [--tree <hash>] [--databases]
                              Forget a gate's cached results, so its next run
-                             runs the command rather than replaying them.
+                             runs the command rather than replaying them;
+                             --databases also recreates its test databases.
   land <run-id> [--close]    Which PR lands a finished run, and which of its
                              review PRs are done; --close closes those.
   propagate <run-id> <phase> Carry a fix made on a phase into every integ-*

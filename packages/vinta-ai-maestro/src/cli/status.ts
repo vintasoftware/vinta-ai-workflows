@@ -24,6 +24,7 @@ import { describeUnattended, runAgentDetails, unattendedDecisions } from '../dec
 import { jobLogPathFor, liveJob, type JobRecord } from '../job/job.ts'
 import { describeStep } from '../journal/integration-steps.ts'
 import {
+  type IntegrationWait,
   type IntegrationWorktreeState,
   openJournal,
   type Journal,
@@ -181,7 +182,7 @@ function showRun(
   // from the terminal had to read it out of `flow.db`.
   const questions = new Map(journal.pendingQuestions(runId).map((pending) => [pending.nodeId, pending]))
   const asking = new Set(questions.keys())
-  const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, string | null>()
+  const waiting = state === 'running' ? journal.integrationWaits(runId) : new Map<string, IntegrationWait>()
   const held = state === 'running' ? journal.heldNodes(runId) : new Set<string>()
   const substituted = journal.substitutions(runId)
   // Where each phase is in its pipeline, and who has the integration
@@ -200,9 +201,13 @@ function showRun(
   }
   const waitNote = (nodeId: string): string => {
     if (held.has(nodeId)) return ' — paused by operator'
-    if (!waiting.has(nodeId)) return ''
-    const holder = waiting.get(nodeId)
-    return ` — waiting for the integration worktree${holder === null || holder === undefined ? '' : ` (held by ${holder})`}`
+    const wait = waiting.get(nodeId)
+    if (wait === undefined) return ''
+    if (wait.paused) return ' — paused in the queue for the integration worktree'
+    // Whoever holds it now, when a phase does: the holder recorded at queue
+    // time may have let go long since.
+    const holder = worktree?.holder ?? wait.holder
+    return ` — waiting for the integration worktree${holder === null ? '' : ` (held by ${holder})`}`
   }
 
   const outages = openOutages(journal.events(runId))
@@ -227,7 +232,8 @@ function showRun(
           asking: asking.has(node.node_id),
           question: questionOf(questions.get(node.node_id)),
           waitingOn: waiting.has(node.node_id) ? 'integration_worktree' : null,
-          heldBy: waiting.get(node.node_id) ?? null,
+          heldBy: waiting.get(node.node_id)?.paused === true ? null : (worktree?.holder ?? waiting.get(node.node_id)?.holder ?? null),
+          pausedInQueue: waiting.get(node.node_id)?.paused === true,
           pausedByOperator: held.has(node.node_id),
           step: steps.get(node.node_id) ?? null,
           substitution: substituted.get(node.node_id) ?? null,

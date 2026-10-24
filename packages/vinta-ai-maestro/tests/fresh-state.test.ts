@@ -6,9 +6,9 @@
  * branch — false "pass alone, break together" failures, each two fix rounds.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { type FreshReason, IntegrationFreshness, looksStale } from '../src/integration/fresh.ts'
@@ -20,6 +20,7 @@ const git = (...args: string[]): string =>
   execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
 async function commit(file: string, message: string): Promise<void> {
+  await mkdir(dirname(join(root, file)), { recursive: true })
   await writeFile(join(root, file), message)
   git('add', '--all')
   git('commit', '-q', '-m', message)
@@ -102,6 +103,61 @@ describe('fresh state for integration gates', () => {
     })
     expect(result.status).toBe('failed')
     expect(ran).toEqual(['pytest --create-db', 'pytest --reuse-db'])
+  })
+
+  /**
+   * A suite killed by its timeout left one worker database with 71 of 134
+   * migrations; the next run on the same tree reused it and failed on columns
+   * that were not there yet.
+   */
+  it('starts fresh after a run that was killed, even on the same tree', async () => {
+    const { ran, fresh, tracker, pass } = recorder()
+    await tracker.run('test', gate, root, pass)
+    await tracker.run('test', gate, root, async (chosen) => {
+      ran.push(chosen.cmd)
+      return { status: 'timed_out', logPath: join(root, 'none.log') }
+    })
+    await tracker.run('test', gate, root, pass)
+    await tracker.run('test', gate, root, pass)
+    expect(ran).toEqual(['pytest --create-db', 'pytest --reuse-db', 'pytest --create-db', 'pytest --reuse-db'])
+    expect(fresh).toEqual(['first_run', 'interrupted'])
+  })
+
+  /**
+   * A phase rewrote its own migration mid-run: the integration tree moved
+   * forward, and the reused worker database kept the old 0010 recorded as
+   * applied — "column does not exist" on every test xdist put on it.
+   */
+  it('starts fresh when a `fresh_when` file was rewritten, though the tree moved forward', async () => {
+    const { ran, fresh, tracker, pass } = recorder()
+    const watched: CommandGate = { ...gate, fresh_when: ['migrations/*.py'] }
+    await commit('migrations/0010_targets.py', 'add 0010')
+    await tracker.run('test', watched, root, pass)
+
+    // A new migration is what a reused database applies.
+    await commit('migrations/0011_more.py', 'add 0011')
+    await tracker.run('test', watched, root, pass)
+
+    // 0010 rewritten: forward, and still stale.
+    await writeFile(join(root, 'migrations/0010_targets.py'), 'rewritten\n')
+    git('add', '--all')
+    git('commit', '-q', '-m', 'rewrite 0010')
+    await tracker.run('test', watched, root, pass)
+    await tracker.run('test', watched, root, pass)
+
+    expect(ran).toEqual(['pytest --create-db', 'pytest --reuse-db', 'pytest --create-db', 'pytest --reuse-db'])
+    expect(fresh).toEqual(['first_run', 'inputs_changed'])
+  })
+
+  it('starts fresh once when asked to, and says so for a gate that has no fresh form', async () => {
+    const { ran, fresh, tracker, pass } = recorder()
+    await tracker.run('test', gate, root, pass)
+    expect(tracker.forget('test', gate)).toBe(true)
+    expect(tracker.forget('plain', { cmd: 'pytest', requires: [], timeout_s: 60 })).toBe(false)
+    await tracker.run('test', gate, root, pass)
+    await tracker.run('test', gate, root, pass)
+    expect(ran).toEqual(['pytest --create-db', 'pytest --create-db', 'pytest --reuse-db'])
+    expect(fresh).toEqual(['first_run', 'requested'])
   })
 
   it('runs `cmd` everywhere for a gate without `fresh_cmd`', async () => {

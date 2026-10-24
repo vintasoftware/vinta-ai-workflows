@@ -115,7 +115,7 @@ import {
   UnresolvedConflictError,
 } from '../integration/integrator.ts'
 import { errorFields, errorKind, nullLogger, type Logger } from '../log/index.ts'
-import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
+import type { EffectExecutor, EffectInvocation, EffectOutcome, SetupInputs } from '../pipeline/effects.ts'
 import type { ContextValue, GuardContext } from '../pipeline/guard.ts'
 import {
   createPipelineRun,
@@ -133,6 +133,7 @@ import { planSession, type SessionEntry, type SessionPlan } from './sessions.ts'
 import {
   composeSpawnPrompt,
   PromptError,
+  verdictFollowUp,
   type ChorePrompt,
   type Reorientation,
 } from '../prompts/index.ts'
@@ -206,11 +207,24 @@ export function unattendedAnswerFor(declared: unknown, given: number): string | 
 /** The answers `#offerRetry` understands. `retry with ` carries a member id. */
 const RETRY = 'retry'
 const STOP = 'stop'
+/** The wave question's third answer: leave the wave unbuilt and let the phase finish. */
+const SKIP_WAVE = 'skip'
 /**
  * Identical setup failures in a row before the unattended retry is withheld:
  * the first is an attempt, the second is the proof it is deterministic.
  */
 const REPEATED_SETUP_FAILURES = 2
+/**
+ * Setup failures on unchanged inputs (`EffectExecutor.setupInputs`) before
+ * nothing retries the node unattended. Two, not one: a red gate on a merged
+ * base can be a flaky test, which the first retry is there to take back. One
+ * observed run retried three phases 37 to 40 times each on the same one-line
+ * cross-phase break, a full suite every time, roughly fifteen hours of
+ * integration worktree that told nobody anything after the first.
+ */
+const SAME_INPUTS_FAILURES = 2
+/** How often a node withheld on unchanged inputs looks at them again. */
+const INPUTS_POLL_MS = 60_000
 /**
  * Turns in a row one harness ended without the agent doing anything before it
  * is treated as broken rather than unlucky. Right after one run moved its
@@ -627,6 +641,11 @@ class SpawnFatal extends Error {}
  */
 class LoginDeclined extends SpawnFatal {}
 /**
+ * The wave question answered `stop` (`#waveMerge`): the phase fails on the
+ * wave's error, as a person chose, and no automatic attempt re-drives it.
+ */
+class WaveStopped extends SpawnFatal {}
+/**
  * The same harness ended `EMPTY_TURN_FAULT` turns in a row without the agent
  * doing anything. Not the work's failure and not one a retry changes, so
  * `#recover` spends no automatic attempt on it and asks instead.
@@ -1012,6 +1031,17 @@ interface NodeState {
    */
   setupFailure: { readonly reason: string; readonly count: number } | null
   /**
+   * What the last failed setups were built from (`EffectExecutor.setupInputs`),
+   * and how many failed in a row on exactly that. Unlike `setupFailure` it
+   * counts a red gate on the merged base too: that is a verdict a flaky test
+   * can reverse once, and not a third time on the same tips.
+   */
+  setupInputs: { readonly key: string; readonly label: string; readonly count: number } | null
+  /** `setupInputs`' twin for the wave this node completes (`#waveMerge`). */
+  waveInputs: { readonly key: string; readonly label: string; readonly count: number } | null
+  /** Wave questions asked, for distinct effect ids. */
+  waveAsks: number
+  /**
    * The harness whose turns on this node have ended empty, and how many in a
    * row — across attempts, since the attempt boundary is exactly what an
    * automatic retry crosses. Cleared by any turn the agent took part in.
@@ -1169,6 +1199,18 @@ function recycleFailure(lane: string, error: unknown): string {
   const named = error as { name?: unknown; code?: unknown }
   const name = typeof named.name === 'string' ? named.name : 'Error'
   return `lane "${lane}" could not be recycled (${typeof named.code === 'string' ? `${name}: ${named.code}` : name})`
+}
+
+/**
+ * An answer to a node that is not asking anything — most often because a
+ * timer or the coordinator answered first. By name across the API seam, which
+ * looks up who did (`daemon/api.ts`).
+ */
+export class NotAwaitingAnswer extends Error {
+  constructor(readonly nodeId: string) {
+    super(`node "${nodeId}" is not awaiting an answer`)
+    this.name = 'NotAwaitingAnswer'
+  }
 }
 
 export class Scheduler {
@@ -1389,6 +1431,9 @@ export class Scheduler {
       attemptStartedAt: 0,
       agentRan: false,
       setupFailure: null,
+      setupInputs: null,
+      waveInputs: null,
+      waveAsks: 0,
       emptyTurns: null,
       harnessFault: false,
       reviewRejections: 0,
@@ -1787,6 +1832,9 @@ export class Scheduler {
     const nodeId = state.node.id
     state.retryQueued = false
     state.aborted = false
+    // `abortNode` drops it already; a phase that failed on its own with a
+    // pause still pending reaches here with it set, and a retry is a new attempt.
+    this.#dropPause(state)
     // A deferred phase aborted while it waited for its start asks again.
     if (!state.released) state.deferredAsked = false
     state.failure = null
@@ -1816,9 +1864,7 @@ export class Scheduler {
    */
   answer(nodeId: string, facts: GuardContext, actor: Actor = 'operator', reason?: string): void {
     const state = this.#states.get(nodeId)
-    if (state === undefined || state.resume === null) {
-      throw new Error(`node "${nodeId}" is not awaiting an answer`)
-    }
+    if (state === undefined || state.resume === null) throw new NotAwaitingAnswer(nodeId)
     if (actor === 'coordinator') {
       const refusal = this.#coordinatorMayNotAnswer(state)
       if (refusal !== null) throw new CoordinatorForbidden(refusal)
@@ -1961,6 +2007,14 @@ export class Scheduler {
     return this.#operation(state, 'pause', undefined, 'sent', actor, reason)
   }
 
+  /** Forgets every pause and hold asked of the node's current attempt. */
+  #dropPause(state: NodeState): void {
+    state.pauseRequested = false
+    state.holdRequested = false
+    state.held = false
+    state.heldBy = null
+  }
+
   /**
    * Holds the question a node is parked on: no timer answers it. The
    * coordinator cannot take a hold off a node the operator is holding.
@@ -1985,6 +2039,13 @@ export class Scheduler {
     if (this.#settledNode(state)) return this.#operation(state, 'abort', undefined, 'ignored', actor, reason)
 
     state.aborted = true
+    // A pause or a hold was asked of the attempt being aborted, not of the
+    // phase. Left set, it outlived the abort into the retry: one observed
+    // phase, paused and aborted a minute apart, was retried half an hour later
+    // and then passed over in the integration queue by two phases that had
+    // queued after it, until somebody thought to `resume` a phase nobody
+    // remembered pausing.
+    this.#dropPause(state)
     this.#wakeIntegration()
     this.#operation(state, 'abort', undefined, 'sent', actor, reason)
 
@@ -2768,7 +2829,7 @@ export class Scheduler {
         const reason = failureReason(error)
         this.#recordAttemptFailure(state, reason, error)
         // The operator was asked and said stop: no retry policy overrides that.
-        if (error instanceof LoginDeclined) {
+        if (error instanceof LoginDeclined || error instanceof WaveStopped) {
           this.#fail(state, attempted(reason, state))
           return
         }
@@ -3422,10 +3483,11 @@ export class Scheduler {
     const fault = state.harnessFault
     state.harnessFault = false
     if (policy === 'stop' || state.aborted) return false
+    const unchanged = await this.#sameInputs(state)
 
     // A harness fault is not spent against the automatic budget: every attempt
     // it buys is another empty turn, and the budget is gone in seconds.
-    if (policy === 'retry' && !fault && state.autoRetries < (this.#options.retries ?? 1)) {
+    if (policy === 'retry' && !fault && !unchanged && state.autoRetries < (this.#options.retries ?? 1)) {
       state.autoRetries += 1
       // Cold, for the reason a capacity retry is: the branch the last attempt
       // built is gone and its worktree will be recycled, so a resumed session
@@ -3487,7 +3549,9 @@ export class Scheduler {
       // an informed "retry" and a surprised one.
       question:
         `This phase failed. Try it again?${await this.#uncommittedNote(state)}` +
-        this.#repeatedSetupNote(state) +
+        // One reason it will not answer itself is enough, and the inputs are
+        // the more useful: they also say what will.
+        (this.#sameInputsNote(state) || this.#repeatedSetupNote(state)) +
         (fault ? this.#harnessFaultNote(state) : ''),
       kind: 'choice',
       choices: this.#retryChoices(state),
@@ -3499,16 +3563,26 @@ export class Scheduler {
     // self-answer is withheld. One observed run retried four such phases
     // between four and twenty-three times each, every one on the same line.
     const repeated = this.#repeatedSetupFailure(state)
-    if (repeated) {
+    const unchanged = this.#unchangedInputs(state)
+    if (repeated || unchanged) {
       this.#log.warn('node.unattended_retry_withheld', {
         node: state.node.id,
         setup_repeats: state.setupFailure?.count ?? 0,
+        ...(unchanged ? { same_inputs: state.setupInputs?.count ?? 0 } : {}),
       })
     }
     // Withheld from the timer, not from the coordinator: a setup failure that
     // repeats is exactly what it is woken to fix and then retry.
     state.delegable = true
-    const cancel = repeated ? () => {} : this.#armUnattendedRetry(state, fault)
+    // On unchanged inputs the timer gives way to a watch on them: the retry
+    // comes when a dependency moves, which is the one thing that can change
+    // the answer, and not before.
+    const watched = state.setupInputs
+    const cancel = unchanged && watched !== null
+      ? this.#watchInputs(state, watched, () => this.#options.executor.setupInputs?.(state.node.id) ?? Promise.resolve(null))
+      : repeated
+        ? () => {}
+        : this.#armUnattendedRetry(state, fault)
     const facts = await this.#park(state)
     cancel()
     if (state.aborted) return false
@@ -3521,6 +3595,83 @@ export class Scheduler {
     if (member !== null && this.#workflow.crew[member] !== undefined) state.retryMember = member
     this.#restartAttempt(state)
     return true
+  }
+
+  /**
+   * Records what the failed attempt's setup was built from, and answers
+   * whether it has now failed `SAME_INPUTS_FAILURES` times on exactly that.
+   * An attempt an agent ran in got past setup and clears the record; so does
+   * an executor that cannot say.
+   */
+  async #sameInputs(state: NodeState): Promise<boolean> {
+    if (state.agentRan) {
+      state.setupInputs = null
+      return false
+    }
+    const inputs = await this.#options.executor.setupInputs?.(state.node.id).catch(() => null)
+    if (inputs === undefined || inputs === null) {
+      state.setupInputs = null
+      return false
+    }
+    const previous = state.setupInputs
+    state.setupInputs = { ...inputs, count: previous?.key === inputs.key ? previous.count + 1 : 1 }
+    return this.#unchangedInputs(state)
+  }
+
+  #unchangedInputs(state: NodeState): boolean {
+    return (state.setupInputs?.count ?? 0) >= SAME_INPUTS_FAILURES
+  }
+
+  /** The sentence that names the inputs and says what will retry the phase. */
+  #sameInputsNote(state: NodeState): string {
+    const inputs = state.setupInputs
+    if (inputs === null || !this.#unchangedInputs(state)) return ''
+    const when =
+      this.#options.retryAfterMs === undefined || this.#options.retryAfterMs <= 0
+        ? ''
+        : ' It is retried by itself as soon as one of them moves.'
+    return (
+      ` Its setup has failed ${inputs.count} times in a row on the same inputs (${inputs.label}), so ` +
+      `it will not be retried unattended until one of them changes: fix the cause on a dependency's ` +
+      `branch, or retry it by hand.${when}`
+    )
+  }
+
+  /**
+   * Answers the failure question with a retry once the node's setup inputs
+   * move — a dependency's tip, the run base, a gate's definition — and hands
+   * back the way to stop watching. Only under `--retry-after`, the operator's
+   * consent to unattended answers; without it the question waits for a person
+   * like any other. Polled, because a tip moves by means the scheduler does
+   * not see: a coordinator's `exec`, a `propagate`, a person's commit.
+   */
+  #watchInputs(
+    state: NodeState,
+    watched: { readonly key: string },
+    read: () => Promise<SetupInputs | null>,
+  ): () => void {
+    const after = this.#options.retryAfterMs
+    if (after === undefined || after <= 0) return () => {}
+    const clock = this.#options.clock ?? systemClock
+    let stopped = false
+    let cancel = (): void => {}
+    const look = async (): Promise<void> => {
+      if (stopped || state.resume === null || state.aborted) return
+      const now = await read().catch(() => null)
+      if (stopped || state.resume === null || state.aborted) return
+      if (now === null || now.key === watched.key || state.held) {
+        cancel = clock.at(clock.now() + INPUTS_POLL_MS, () => void look())
+        return
+      }
+      state.unattended += 1
+      this.#log.info('node.inputs_moved', { node: state.node.id, unattended: state.unattended })
+      this.answer(state.node.id, { human: { answer: RETRY, unattended: true } })
+    }
+    cancel = clock.at(clock.now() + INPUTS_POLL_MS, () => void look())
+    return () => {
+      stopped = true
+      cancel()
+    }
   }
 
   /** Whether the last attempts all died in setup on one and the same line. */
@@ -3847,6 +3998,9 @@ export class Scheduler {
         if (verb === 'run_gate') {
           await this.#acquireGate(state, invocation)
           return this.#observe(state, await this.#runGate(state, invocation))
+        }
+        if (verb === 'git_merge' && invocation.effect.params['branch'] === undefined) {
+          return this.#observe(state, await this.#waveMerge(state, invocation))
         }
         // The question is journalled before the host executor runs, because
         // the host executor is what raises the notification: the record of the
@@ -4300,7 +4454,7 @@ export class Scheduler {
         continuation: plan.continuation,
         // Whether a turn that waits can end and be woken, which decides how
         // every turn is told to wait on work it started.
-        backgroundWork: adapter.capabilities.backgroundWork,
+        backgroundWork: adapter.capabilities.backgroundWork && chore?.chore.background !== false,
         harness: adapter.id,
         // The instruction this turn exists to carry out, on a chore turn and
         // nowhere else. Unlike everything above it, it is passed on a
@@ -4491,13 +4645,23 @@ export class Scheduler {
         throw new SpawnFatal(`${adapter.id} ended the turn without the agent doing anything, resumed and cold`)
       }
     }
-    const last = await this.#agentQuestions(state, turn, watch, drained.sessionId)
+    const asked = await this.#agentQuestions(state, turn, watch, drained.sessionId)
+    const reports = [asked.watch.prose()]
+    let result = await this.#options.executor.execute(invocation)
+    // The executor reads the verdict; a review it found silent is asked once more.
+    if (chore?.chore.when === 'review' && result.facts?.review?.['stated'] === false) {
+      const followed = await this.#askForVerdict(state, turn, asked)
+      if (followed !== null) {
+        reports.push(followed.prose())
+        result = await this.#options.executor.execute(invocation)
+      }
+    }
 
     // The review's rejected findings, from its closing report. Kept so the
     // next reviewer — a fresh one, after a resume, a retry or an `unapproved`
     // continue — is handed them rather than raising them again (§16.4).
     if (chore?.chore.when === 'review') {
-      for (const finding of readRejections(last.prose())) {
+      for (const finding of reports.flatMap(readRejections)) {
         this.#decide(state, decision('rejected', 'review', finding))
       }
     }
@@ -4508,7 +4672,7 @@ export class Scheduler {
       if (state.lastRed !== null) state.lastRed.fixedSince = true
     }
 
-    return await this.#options.executor.execute(invocation)
+    return result
   }
 
   /**
@@ -4695,19 +4859,19 @@ export class Scheduler {
     turn: Turn,
     first: QuestionWatch,
     firstSessionId: string,
-  ): Promise<QuestionWatch> {
+  ): Promise<{ readonly watch: QuestionWatch; readonly sessionId: string }> {
     const { runId, journal } = this.#options
     let watch = first
     let sessionId = firstSessionId
     for (;;) {
       const ask = watch.result()
-      if (ask === null) return watch
+      if (ask === null) return { watch, sessionId }
       if (!turn.adapter.capabilities.resume) {
         this.#log.warn('node.agent_question_unanswerable', {
           node: state.node.id,
           harness: turn.adapter.id,
         })
-        return watch
+        return { watch, sessionId }
       }
 
       state.agentQuestions += 1
@@ -4753,6 +4917,123 @@ export class Scheduler {
       watch = new QuestionWatch()
       sessionId = (await this.#drain(state, granted, turn, watch)).sessionId
     }
+  }
+
+  /**
+   * §16.2 — a review turn that ended without its `VERDICT:` line is asked for
+   * one, once, in the same session, before it counts as a review that stated
+   * nothing.
+   *
+   * The silence is rarely the review's judgement. Observed: a review that
+   * started the tests in the background ended on "waiting on the inner-loop
+   * tests" twice, and each time the phase — gates green an hour before — was
+   * failed and restarted from the implementer; another did it for three
+   * hours. The same session still holds the review, the findings and
+   * whatever it was waiting on, so the cheapest thing that can produce the
+   * verdict is to ask it for one. Not on an interrupted turn (an operator is
+   * already looking at it) nor on a harness that cannot resume. Returns the
+   * follow-up's report, or null when none was asked.
+   */
+  async #askForVerdict(
+    state: NodeState,
+    turn: Turn,
+    asked: { readonly watch: QuestionWatch; readonly sessionId: string },
+  ): Promise<QuestionWatch | null> {
+    if (!turn.adapter.capabilities.resume || asked.watch.interrupted() || asked.watch.result() !== null) return null
+    const { runId, journal } = this.#options
+    const prompt = verdictFollowUp()
+    this.#log.info('node.verdict_requested', { node: state.node.id, harness: turn.adapter.id })
+    journal.appendTranscript(runId, state.node.id, { type: 'user_message', text: prompt, by: { role: MONITOR_ROLE } })
+    const granted = await this.#admitAnswer(state, turn, prompt, asked.sessionId)
+    const watch = new QuestionWatch()
+    const drained = await this.#drain(state, granted, turn, watch)
+    // An agent that stops to ask instead is answered the usual way.
+    return (await this.#agentQuestions(state, turn, watch, drained.sessionId)).watch
+  }
+
+  /**
+   * The phase's own merge, which is where the wave it completes is built — and
+   * a wave that cannot be built is the wave's failure, not the phase's.
+   *
+   * It used to fail the phase, and a failed phase is re-driven from its
+   * initial state. One observed phase — the last of its wave to finish — ran
+   * its whole pipeline four times, about an hour each, and failed each time on
+   * the same sibling's merge into the wave: a red test gate twice, then one
+   * unsorted import twice. Nothing in the phase was wrong.
+   *
+   * So the phase parks here instead, in its integrate step, with its lane, and
+   * is landed meanwhile: its dependents build on its branch, not on the wave.
+   * `retry` builds the wave again — the merges already made on it are kept, so
+   * it resumes at the one that failed, and a fixer's unfinished resolution is
+   * picked up rather than redone (`Integrator`). `skip` leaves the wave unbuilt
+   * and lets the phase finish; a later wave's build, or a person, assembles it.
+   * `stop` fails the phase as before.
+   *
+   * Unattended, the retry follows the setup rule (`#sameInputs`): the first
+   * failure on a set of inputs gets the timer's retry, and a second on the
+   * same inputs waits for one of them to move.
+   */
+  async #waveMerge(state: NodeState, invocation: EffectInvocation): Promise<EffectOutcome> {
+    for (;;) {
+      try {
+        const outcome = await this.#options.executor.execute(invocation)
+        state.waveInputs = null
+        return outcome
+      } catch (error) {
+        if (!(error instanceof Error && error.name === 'WaveBuildError')) throw error
+        const answer = await this.#offerWaveRetry(state, error)
+        if (answer === SKIP_WAVE) return {}
+        if (answer !== RETRY) throw new WaveStopped(error.message)
+      }
+    }
+  }
+
+  async #offerWaveRetry(state: NodeState, error: Error): Promise<string> {
+    if (state.aborted) throw new Aborted()
+    const wave = (error as { wave?: unknown }).wave
+    const inputs = await this.#options.executor.waveInputs?.(state.node.id).catch(() => null)
+    const previous = state.waveInputs
+    state.waveInputs =
+      inputs === undefined || inputs === null
+        ? null
+        : { ...inputs, count: previous?.key === inputs.key ? previous.count + 1 : 1 }
+    const unchanged = (state.waveInputs?.count ?? 0) >= SAME_INPUTS_FAILURES
+
+    // Landed: merged into nothing yet, but its dependents build on its branch.
+    if (!state.landed) {
+      state.landed = true
+      this.#wake()
+    }
+    this.#log.warn('node.wave_failed', { node: state.node.id, wave, same_inputs: state.waveInputs?.count ?? 0 })
+
+    state.waveAsks += 1
+    const effectId = `wave:${state.node.id}:${state.waveAsks}`
+    this.#ask(state, effectId, {
+      question:
+        `Wave ${String(wave)} could not be assembled. This phase is finished and its dependents may ` +
+        'start; only the wave is left. Try the wave again?' +
+        (unchanged && state.waveInputs !== null
+          ? ` It has failed ${state.waveInputs.count} times in a row on the same inputs (${state.waveInputs.label}), ` +
+            'so it will not be retried unattended until one of them changes.'
+          : ''),
+      kind: 'choice',
+      choices: [RETRY, SKIP_WAVE, STOP],
+    })
+    state.parkedEffectId = effectId
+    state.delegable = true
+    const watched = state.waveInputs
+    const cancel =
+      unchanged && watched !== null
+        ? this.#watchInputs(state, watched, () => this.#options.executor.waveInputs?.(state.node.id) ?? Promise.resolve(null))
+        : this.#armUnattendedRetry(state)
+    let facts: GuardContext
+    try {
+      facts = await this.#park(state)
+    } finally {
+      cancel()
+    }
+    const answer = facts.human?.['answer']
+    return typeof answer === 'string' ? answer : answer === true ? RETRY : STOP
   }
 
   /**
@@ -5012,8 +5293,13 @@ export class Scheduler {
         .leases()
         .filter((lease) => needs.includes(lease.resource) && lease.holder_node !== state.node.id)
         .map((lease) => lease.holder_node)
+      // A host-scoped pool may be held by another run on this machine, which
+      // this run's leases cannot name.
+      const elsewhere = needs.flatMap((resource) =>
+        this.#options.pools.hostHolders(resource).filter((held) => held.run !== this.#options.runId).map((held) => `run ${held.run}`),
+      )
       throw new GateQueueTimeout(this.#gateIds(state.node, invocation.effect.params['gate']), needs, Date.now() - queuedAt, [
-        ...new Set(holders),
+        ...new Set([...holders, ...elsewhere]),
       ])
     }
     state.gateHeld = needs

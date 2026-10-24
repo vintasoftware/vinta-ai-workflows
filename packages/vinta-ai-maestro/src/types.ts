@@ -115,6 +115,16 @@ export const ResourceSchema = z.strictObject({
   kind: z
     .enum(['worktree', 'semaphore'])
     .describe('`worktree` pools are provisioned lanes; `semaphore` pools are pure counters.'),
+  scope: z
+    .enum(['run', 'host'])
+    .optional()
+    .describe(
+      '`run` — the default — counts only this run’s holders. `host` also counts every other ' +
+        'run on this machine holding a pool of the same name, through lock files under ' +
+        '`~/.vinta-ai-maestro/host-leases/` (`VINTA_AI_MAESTRO_HOST_LEASES` moves them), so two ' +
+        'runs on one laptop take turns at the full suite instead of running two at once. Only ' +
+        'meaningful on a `semaphore` pool.',
+    ),
   match: z
     .array(z.string().min(1))
     .optional()
@@ -268,6 +278,17 @@ export const CommandGateSchema = z.strictObject({
         'but forward since the gate last ran there, the gate has not run there in this process, ' +
         'its red output reads as a stale schema (missing or extra columns or relations), or a ' +
         'conflict fixer reported `ENVIRONMENT_STALE`. It must check at least what `cmd` does.',
+    ),
+  fresh_when: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      'Globs, relative to the repository root, of the files the state `fresh_cmd` recreates is ' +
+        'built from — the migrations, typically (`apps/*/migrations/*.py`). When a file that ' +
+        'matched at the gate’s last run in the integration worktree is gone or different now, ' +
+        'the gate runs `fresh_cmd` even though the tree moved forward: a reused database keeps a ' +
+        'migration that was rewritten or renamed under it. Files added since do not count. ' +
+        'Ignored without `fresh_cmd`.',
     ),
   requires: z
     .array(Id)
@@ -461,6 +482,15 @@ export const ChoreSchema = z.strictObject({
         'for work about the PR rather than the diff (a review canvas, a PR comment). An ' +
         '`after_pr` chore must not edit the tree, is skipped when no PR opened, and cannot be ' +
         '`on_failure: fail`.',
+    ),
+  background: z
+    .boolean()
+    .optional()
+    .describe(
+      '`false` tells this chore’s turns to run every command in the foreground and wait for ' +
+        'it, even on a harness that keeps a session alive for background work. For a review ' +
+        'whose turns keep ending on "waiting on the tests" with no verdict. Absent, the ' +
+        'harness decides.',
     ),
   on_failure: z
     .enum(['continue', 'fail'])

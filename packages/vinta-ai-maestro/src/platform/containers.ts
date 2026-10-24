@@ -23,6 +23,16 @@
  * Docker is optional: with no `docker` on `PATH`, or no daemon, every function
  * here does nothing and says so by returning an empty list. Nothing here logs;
  * a container id is the most it returns.
+ *
+ * **A daemon that does not answer is not a daemon with nothing running.** Under
+ * the load a full suite puts on a laptop, `docker ps` can take longer than its
+ * time limit, and the cleanup used to read that as "no containers" — the one
+ * answer that leaves a killed suite's container running against the databases
+ * of the attempt after it, unnoticed. One observed timed-out gate's container
+ * was still running nine minutes later beside its rerun's. So the stop says
+ * `null` when docker ran out of time, the default cleanup asks once more with
+ * far more patience, and the gate runner owes the project a sweep when even
+ * that fails (`gates/runner.ts`).
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -41,12 +51,49 @@ const DOCKER_TIMEOUT_MS = 30_000
  */
 const CLOCK_SLACK_MS = 2_000
 
-export const dockerExec: DockerExec = async (args) => {
-  const { stdout } = await execFileAsync('docker', [...args], {
-    timeout: DOCKER_TIMEOUT_MS,
-    windowsHide: true,
-  })
-  return stdout
+/** The second try's limit, for a daemon slow under load rather than gone. */
+const PATIENT_DOCKER_TIMEOUT_MS = 120_000
+
+function dockerWithin(timeout: number): DockerExec {
+  return async (args) => {
+    const { stdout } = await execFileAsync('docker', [...args], { timeout, windowsHide: true })
+    return stdout
+  }
+}
+
+export const dockerExec: DockerExec = dockerWithin(DOCKER_TIMEOUT_MS)
+
+const patientDockerExec: DockerExec = dockerWithin(PATIENT_DOCKER_TIMEOUT_MS)
+
+/**
+ * Whether a docker call failed by running out of time — `execFile` kills it and
+ * says `killed`. Anything else (no binary, no daemon, a refusal) is an answer:
+ * nothing of ours can be running where docker cannot run anything.
+ */
+export function dockerTimedOut(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { killed?: unknown }).killed === true
+}
+
+/** How docker answered `docker info`: in time, too late, refusing (no daemon), or not installed. */
+export type DockerState = 'ok' | 'slow' | 'down' | 'absent'
+
+/** How long `dockerState` waits before calling the daemon slow. */
+const PROBE_TIMEOUT_MS = 10_000
+
+/**
+ * Whether the docker daemon answers at all, and quickly. For a command that
+ * timed out, the difference between "waiting for a password" and "waiting for
+ * a daemon stalled under load" — one observed hint sent an operator after a
+ * password that a Docker stall had nothing to do with.
+ */
+export async function dockerState(exec: DockerExec = dockerWithin(PROBE_TIMEOUT_MS)): Promise<DockerState> {
+  try {
+    await exec(['info', '--format', '{{.ServerVersion}}'])
+    return 'ok'
+  } catch (error) {
+    if (dockerTimedOut(error)) return 'slow'
+    return (error as { code?: unknown }).code === 'ENOENT' ? 'absent' : 'down'
+  }
 }
 
 export interface OneOff {
@@ -56,6 +103,11 @@ export interface OneOff {
 
 /** Every running one-off container of a compose project. */
 export async function composeOneOffs(project: string, exec: DockerExec = dockerExec): Promise<readonly OneOff[]> {
+  return (await queryOneOffs(project, exec)) ?? []
+}
+
+/** `composeOneOffs`, with null where docker ran out of time and the answer is unknown. */
+async function queryOneOffs(project: string, exec: DockerExec): Promise<readonly OneOff[] | null> {
   try {
     const ids = (
       await exec([
@@ -82,8 +134,8 @@ export async function composeOneOffs(project: string, exec: DockerExec = dockerE
       found.push({ id, createdAtMs })
     }
     return found
-  } catch {
-    return []
+  } catch (error) {
+    return dockerTimedOut(error) ? null : []
   }
 }
 
@@ -92,12 +144,16 @@ export async function removeContainers(
   ids: readonly string[],
   exec: DockerExec = dockerExec,
 ): Promise<readonly string[]> {
+  return (await removeOrUnknown(ids, exec)) ?? []
+}
+
+async function removeOrUnknown(ids: readonly string[], exec: DockerExec): Promise<readonly string[] | null> {
   if (ids.length === 0) return []
   try {
     await exec(['rm', '-f', ...ids])
     return ids
-  } catch {
-    return []
+  } catch (error) {
+    return dockerTimedOut(error) ? null : []
   }
 }
 
@@ -105,22 +161,27 @@ export async function removeContainers(
  * Stops the one-off containers of `project` created since `sinceMs`. Awaited
  * by the caller before it releases whatever lock the command held, so the
  * next holder never shares the lane's databases with a container nobody owns.
+ * Null when docker ran out of time before it could say.
  */
 export async function stopOneOffsSince(
   project: string,
   sinceMs: number,
   exec: DockerExec = dockerExec,
-): Promise<readonly string[]> {
-  const mine = (await composeOneOffs(project, exec)).filter(
-    (container) => container.createdAtMs >= sinceMs - CLOCK_SLACK_MS,
-  )
-  return removeContainers(
+): Promise<readonly string[] | null> {
+  const found = await queryOneOffs(project, exec)
+  if (found === null) return null
+  const mine = found.filter((container) => container.createdAtMs >= sinceMs - CLOCK_SLACK_MS)
+  return removeOrUnknown(
     mine.map((container) => container.id),
     exec,
   )
 }
 
-/** What a gate or a `with` command stops after it was killed. Injected in tests. */
-export type ContainerCleanup = (project: string, sinceMs: number) => Promise<readonly string[]>
+/**
+ * What a gate or a `with` command stops after it was killed: the containers
+ * stopped, or null when docker could not be asked in time. Injected in tests.
+ */
+export type ContainerCleanup = (project: string, sinceMs: number) => Promise<readonly string[] | null>
 
-export const stopComposeOneOffs: ContainerCleanup = (project, sinceMs) => stopOneOffsSince(project, sinceMs)
+export const stopComposeOneOffs: ContainerCleanup = async (project, sinceMs) =>
+  (await stopOneOffsSince(project, sinceMs)) ?? (await stopOneOffsSince(project, sinceMs, patientDockerExec))

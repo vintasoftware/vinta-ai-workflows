@@ -38,6 +38,29 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`vinta-ai-maestro`: resource pools shared by every run on the machine.**
+  A pool declared `scope: host` also counts every other maestro run holding
+  a pool of the same name, through lock files under
+  `~/.vinta-ai-maestro/host-leases/` (pid and run id only). Two runs on one
+  laptop then take turns at the full suite instead of running two at once.
+  The bootstrap now emits `scope: host` on the `test-suite` pool, and
+  `maestro.resources.<id>.scope` is in the config schema. `run` stays the
+  default.
+- **`vinta-ai-maestro`: test databases as a gate input.** A gate may declare
+  `fresh_when`, globs of the files its state is built from (its
+  migrations). When one that matched at its last run in the integration
+  worktree is gone or different, the gate runs `fresh_cmd` even though the
+  tree moved forward. It is in the workflow schema, in
+  `maestro.gates.<type>` of the config schema, and in the bootstrap's
+  fresh-database question. `gate-cache invalidate <run> <gate> --databases`
+  asks for fresh state once.
+- **`vinta-ai-maestro`: `exec --priority`.** In the integration worktree,
+  waits only for the current holder, ahead of every phase queued.
+- **`vinta-ai-maestro`: `logs --failures <gate-log>`.** Prints the first
+  failing test in a gate log and the first line saying what went wrong, in
+  the operator's own terminal.
+- **`vinta-ai-maestro`: chore `background: false`.** Tells a chore's turns
+  to run everything in the foreground.
 - **`vinta-ai-maestro` UI: run analytics and the end-of-run report.** A new
   `#/runs/<run>/analytics` page shows where the run's time is going while
   it runs — working time by pipeline step (implementation, gates, review,
@@ -1384,6 +1407,58 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`vinta-ai-maestro`: a setup that failed on unchanged inputs is not
+  retried unattended.** A phase whose setup failed twice on the same inputs
+  (the run base's tip, its dependencies' tips and the gates run on the
+  merged base) is no longer retried by the `--retry-after` timer. Red base
+  gates count too. The first retry still runs, so a flaky test gets its
+  second chance. The question names the inputs, and under `--retry-after`
+  the phase is retried as soon as one of them moves. One run retried three
+  phases 37 to 40 times each on the same break, a full suite every time.
+- **`vinta-ai-maestro`: a wave that cannot be assembled parks the phase
+  instead of failing it.** Building the wave inside the last phase's
+  integrate step made any wave failure that phase's failure, and its whole
+  pipeline ran again from the implementer. Now the phase parks in integrate,
+  landed so its dependents start. `retry` rebuilds only the wave, `skip`
+  finishes without it, and `stop` fails the phase with no automatic attempt.
+  The merges already made on the wave are kept. A merge that ran out of fix
+  rounds is retried from the tree its last fixer left: it is verified first
+  and committed without spending a round when it passes. Journalled as
+  `wave_failed`.
+- **`vinta-ai-maestro`: a cross-phase fix is made once.** An `integ-`
+  branch is kept across attempts when its first dependency only moved
+  forward (`refs/vinta-ai-maestro/cut/`), so a fix committed on the branch
+  survives the next attempt. What a fixer changed on a merged tree that was
+  already free of conflicts but still red is kept under
+  `refs/vinta-ai-maestro/fixes/`. A later red merge tries those fixes before
+  another fixer round, and keeps them only if the gates pass
+  (`integration_fix_replayed`).
+- **`vinta-ai-maestro`: a killed gate's containers are checked, not
+  assumed gone.** A docker call that times out under load is no longer read
+  as "no containers". It is retried with more patience, the gate result
+  records `orphan_check: failed`, and the next gate in that compose project
+  sweeps first. A killed integration gate also makes the next run there use
+  `fresh_cmd`.
+- **`vinta-ai-maestro`: a silent review is asked for its verdict before it
+  fails.** A review turn that ended without its `VERDICT:` line (typically
+  "waiting on the tests" after starting them in the background) is asked
+  once more, in the same session, to finish in the foreground and state the
+  verdict. Before, the phase was failed and restarted from the implementer.
+- **`vinta-ai-maestro`: abort and retry drop a phase's pause.** A phase
+  that was paused, aborted and retried kept the pause, and the integration
+  queue passed it over. `status` now shows a waiter paused in that queue as
+  paused, not as held by whoever it queued behind.
+- **`vinta-ai-maestro`: red gate errors name the log instead of guessing.**
+  Base, wave and merge-verify errors no longer call the failure "a
+  regression between" the phases. They name the log and point at
+  `logs --failures`. When the log reads as a stale test database and the
+  gate has no `fresh_cmd`, the error says that instead.
+- **`vinta-ai-maestro`: a late `node answer` says who answered first.** It
+  is `409 not_awaiting_answer` naming who answered and when, not a bare
+  `operation_failed`.
+- **`vinta-ai-maestro`: a stalled Docker daemon is not reported as a
+  missing password.** A database command through docker that times out
+  checks `docker info`, and blames the daemon when it is slow or down.
 - **`vinta-ai-maestro` on Windows: a cancelled `exec` ends.** Cancelling a
   command run through `vinta-ai-maestro exec` sent the polite tree kill,
   which on Windows closes the shell and orphans the command; the orphan

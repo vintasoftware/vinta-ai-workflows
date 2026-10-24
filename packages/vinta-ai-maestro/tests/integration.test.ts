@@ -2422,6 +2422,136 @@ describe('a fix round stopped by its time limit', () => {
   })
 })
 
+describe('an integration branch whose first dependency moved on', () => {
+  /**
+   * integ-p14 carried a coordinator's fix for the one tsc error failing its
+   * base gate; the next attempt reset it to phase-p3's new tip and re-merged,
+   * and the fix was gone within minutes.
+   */
+  it('keeps the branch and its own commits when the dependency moved forward, and merges the new tip', async () => {
+    const repo = await makeRepo({ 'a.ts': 'a\n', 'b.ts': 'b\n', 'glue.ts': 'glue\n' })
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a1\n' }, 'phase a')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'b.ts': 'b1\n' }, 'phase b')
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    const integrator = new Integrator({ plan: plan(nodes), integrationPath: repo.integ, fixer: spyFixer() })
+    await integrator.prepareBase('c')
+
+    // A fix made on the integration branch by hand.
+    await repo.commit(repo.integ, { 'glue.ts': 'glue fixed\n' }, 'coordinator: fix the cross-phase break')
+    // The first dependency moves forward.
+    await repo.commit(one, { 'a.ts': 'a2\n' }, 'phase a, again')
+
+    const base = await integrator.prepareBase('c')
+    expect(run(repo.integ, 'show', `${base}:glue.ts`)).toBe('glue fixed')
+    expect(run(repo.integ, 'show', `${base}:a.ts`)).toBe('a2')
+    expect(run(repo.integ, 'show', `${base}:b.ts`)).toBe('b1')
+  })
+
+  it('rebuilds it when the dependency was redone rather than moved forward', async () => {
+    const repo = await makeRepo({ 'a.ts': 'a\n', 'b.ts': 'b\n', 'glue.ts': 'glue\n' })
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a1\n' }, 'phase a')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'b.ts': 'b1\n' }, 'phase b')
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    const integrator = new Integrator({ plan: plan(nodes), integrationPath: repo.integ, fixer: spyFixer() })
+    await integrator.prepareBase('c')
+    await repo.commit(repo.integ, { 'glue.ts': 'glue fixed\n' }, 'coordinator: fix')
+
+    // Redone from main: the old a1 is in no branch the base is built from.
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'a.ts': 'a-redone\n' }, 'phase a, redone')
+
+    const base = await integrator.prepareBase('c')
+    expect(run(repo.integ, 'show', `${base}:a.ts`)).toBe('a-redone')
+    expect(run(repo.integ, 'show', `${base}:glue.ts`)).toBe('glue')
+  })
+})
+
+describe('a fix one merge needed, in the next merge of the same phases', () => {
+  /**
+   * The same mypy break — a nullable field from one phase meeting a check from
+   * another — was fixed by fixers in at least five different merges, because
+   * each merge started from the phases' branches and none carried it.
+   */
+  it('is replayed before a fixer round is spent on it again', async () => {
+    const repo = await makeRepo({ ...CONFLICTING, 'glue.ts': 'glue\n' })
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'app.ts': 'const value = "a"\n' }, 'phase a: value')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'app.ts': 'const value = "b"\n' }, 'phase b: value')
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b']), node('d', ['a', 'b'])]
+    const fixer = spyFixer(async (request) => {
+      if (request.round === 1) await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+      else await writeFile(join(request.cwd, 'glue.ts'), 'glue fixed\n')
+    })
+    const integrator = new Integrator({
+      plan: plan(nodes),
+      integrationPath: repo.integ,
+      fixer,
+      maxFixRounds: 3,
+      // Red until the cross-phase break in glue.ts is fixed.
+      verify: async (cwd) => ((await readFile(join(cwd, 'glue.ts'), 'utf8')).includes('fixed') ? true : RED_GATE),
+    })
+
+    await integrator.prepareBase('c')
+    expect(fixer.calls).toHaveLength(2)
+    expect(run(repo.integ, 'for-each-ref', '--format=%(refname)', 'refs/vinta-ai-maestro/fixes/')).not.toBe('')
+
+    const base = await integrator.prepareBase('d')
+    // Only the conflict was the fixer's; the break was fixed from the record.
+    expect(fixer.calls).toHaveLength(3)
+    expect(run(repo.integ, 'show', `${base}:glue.ts`)).toBe('glue fixed')
+  })
+})
+
+describe('a merge that ran out of fix rounds', () => {
+  /**
+   * One observed wave failed four times on the same merges, each retry
+   * re-resolving 7 to 12 conflicts from scratch — the last time over one
+   * unsorted import. The retry starts from the tree the last fixer left.
+   */
+  it('is retried from the tree the last fixer left, and spends no round when that tree passes', async () => {
+    const repo = await conflictingPair()
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b'])]
+    let green = false
+    const first = spyFixer(async (request) => {
+      await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+    })
+    const integrator = new Integrator({
+      plan: plan(nodes),
+      integrationPath: repo.integ,
+      fixer: first,
+      maxFixRounds: 1,
+      verify: async () => (green ? true : RED_GATE),
+    })
+
+    const failure = await integrator.prepareBase('c').then(() => null, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(IntegrationVerifyError)
+    expect(first.calls).toHaveLength(1)
+
+    // Whatever made the gate red is fixed outside the merge — a database, a
+    // flaky test — and the phase is retried.
+    green = true
+    const retry = spyFixer()
+    integrator.adopt(plan(nodes), retry)
+    const base = await integrator.prepareBase('c')
+
+    expect(retry.calls).toHaveLength(0)
+    expect(run(repo.integ, 'show', `${base}:app.ts`)).toBe('const value = "a" + "b"')
+    expect(midMerge(repo.integ)).toBe(false)
+    expect(run(repo.integ, 'for-each-ref', 'refs/vinta-ai-maestro/abandoned/')).toBe('')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // A branch that is no phase's: sync-base's wave merges
 // ---------------------------------------------------------------------------

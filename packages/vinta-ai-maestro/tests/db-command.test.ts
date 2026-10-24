@@ -100,6 +100,42 @@ describe('database commands cannot hang a run', () => {
     expect(Date.now() - started).toBeLessThan(10_000)
   })
 
+  /**
+   * Observed: a lane replacement's `docker compose exec … createdb` timed out
+   * under a load average of 24, and the hint sent the operator looking for a
+   * password. Docker itself was stalled.
+   */
+  it('blames a stalled Docker daemon, not a password, when docker does not answer either', async () => {
+    const probed: string[] = []
+    const failure = await runDatabaseCommand(`${node('setTimeout(() => {}, 60000)')} docker`, {
+      cwd: makeTemp(),
+      timeoutMs: 300,
+      dockerState: async () => {
+        probed.push('info')
+        return 'slow'
+      },
+    }).catch((error: unknown) => error)
+
+    expect(probed).toEqual(['info'])
+    const message = (failure as DatabaseCommandError).message
+    expect(message).toContain('Docker daemon did not answer')
+    expect(message).not.toContain('PGPASSWORD')
+  })
+
+  it('does not ask docker about a command that does not go through it', async () => {
+    let probed = false
+    const failure = await runDatabaseCommand(node('setTimeout(() => {}, 60000)'), {
+      cwd: makeTemp(),
+      timeoutMs: 300,
+      dockerState: async () => {
+        probed = true
+        return 'slow'
+      },
+    }).catch((error: unknown) => error)
+    expect(probed).toBe(false)
+    expect((failure as DatabaseCommandError).message).toContain('PGPASSWORD')
+  })
+
   it('closes stdin, so a command reading it sees end-of-file instead of blocking', async () => {
     await expect(
       runDatabaseCommand(node("process.stdin.on('data',()=>{}).on('end',()=>process.exit(0))"), {

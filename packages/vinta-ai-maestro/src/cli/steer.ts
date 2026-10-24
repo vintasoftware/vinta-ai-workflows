@@ -119,7 +119,7 @@ export const WORKFLOW_USAGE = `usage: vinta-ai-maestro workflow <runId> [--repo 
 
   --repo <dir>   The project. Defaults to the current directory.`
 
-export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <runId> <gate-id> [--tree <hash>] [--reason <why>] [--repo <dir>]
+export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <runId> <gate-id> [--tree <hash>] [--databases] [--reason <why>] [--repo <dir>]
 
   Forgets a gate's cached results, so the next run of it — by the phase's gate
   step or by an agent — runs the command instead of replaying the verdict.
@@ -130,9 +130,12 @@ export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <
   move. This is the way out when that verdict is wrong.
 
   --tree <hash>  Only the result for this lane tree. Default: every tree.
+  --databases    Also run the gate's next run in the integration worktree
+                 from fresh state (its \`fresh_cmd\`), for test databases a
+                 killed or reused run left behind. Needs \`fresh_cmd\`.
   --repo <dir>   The project. Defaults to the current directory.`
 
-export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integration> [--reason <text>] [--detach] [--repo <dir>] -- <command...>
+export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integration> [--reason <text>] [--detach] [--priority] [--repo <dir>] -- <command...>
        vinta-ai-maestro exec list <runId> [--repo <dir>]
        vinta-ai-maestro exec cancel <runId> <id> [--reason <text>] [--repo <dir>]
 
@@ -150,6 +153,9 @@ export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integratio
   --reason <text>  Why, journalled with the command.
   --detach         Print the command's id and return; it runs with nobody
                    attached and its output goes to a log.
+  --priority       In \`integration\`: wait only for whoever holds it now,
+                   ahead of every phase queued — for a short command that
+                   should not wait out a queue of full suites.
   --repo <dir>     The project. Defaults to the current directory.
 
   list    the run's commands that have not ended, with their ids.
@@ -405,7 +411,12 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { repo: { type: 'string' }, tree: { type: 'string' }, reason: { type: 'string' } },
+      options: {
+        repo: { type: 'string' },
+        tree: { type: 'string' },
+        databases: { type: 'boolean' },
+        reason: { type: 'string' },
+      },
       allowPositionals: true,
     })
   } catch {
@@ -417,7 +428,7 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
     io.err(GATE_CACHE_USAGE)
     return USAGE
   }
-  const { tree } = parsed.values
+  const { tree, databases } = parsed.values
   const repoPath = resolve(parsed.values.repo ?? process.cwd())
   const target = reach(repoPath, runId, deps.env ?? process.env)
   if (target === null) return notLive(io, runId)
@@ -425,14 +436,19 @@ export async function gateCacheCommand(argv: readonly string[], io: Io, deps: St
   const answered = await post(
     target,
     path,
-    JSON.stringify(tree === undefined ? {} : { tree }),
+    JSON.stringify({ ...(tree === undefined ? {} : { tree }), ...(databases === true ? { databases } : {}) }),
     deps.fetch ?? fetch,
     parsed.values.reason,
   )
   if (answered === null) return notLive(io, runId)
   if (answered.status >= 400) return refused(io, answered.status, answered.body)
-  const removed = (answered.body as { removed?: number } | null)?.removed ?? 0
+  const body = answered.body as { removed?: number; databases?: boolean } | null
+  const removed = body?.removed ?? 0
   io.out(`gate ${gateId}: ${removed} cached result${removed === 1 ? '' : 's'} forgotten`)
+  if (body?.databases === true) io.out(`gate ${gateId}: its next run in the integration worktree starts from fresh state`)
+  if (body?.databases === false) {
+    io.err(`gate ${gateId} declares no fresh_cmd, so there is no fresh form of it to run; recreate the databases by hand`)
+  }
   return OK
 }
 
@@ -539,7 +555,12 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
   try {
     parsed = parseArgs({
       args: argv.slice(0, split),
-      options: { repo: { type: 'string' }, reason: { type: 'string' }, detach: { type: 'boolean' } },
+      options: {
+        repo: { type: 'string' },
+        reason: { type: 'string' },
+        detach: { type: 'boolean' },
+        priority: { type: 'boolean' },
+      },
       allowPositionals: true,
     })
   } catch {
@@ -556,6 +577,7 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
   // job's shell so they arrive as they were typed.
   const command = words.length === 1 ? (words[0] as string) : words.map((word) => shellQuote(word)).join(' ')
   const detach = parsed.values.detach === true
+  const priority = parsed.values.priority === true
 
   const repoPath = resolve(parsed.values.repo ?? process.cwd())
   const target = reach(repoPath, runId, deps.env ?? process.env)
@@ -570,7 +592,12 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
         'content-type': 'application/json',
         ...(reason === undefined || reason.trim() === '' ? {} : { [REASON_HEADER]: encodeURIComponent(reason) }),
       },
-      body: JSON.stringify({ target: where, command, ...(detach ? { detach: true } : {}) }),
+      body: JSON.stringify({
+        target: where,
+        command,
+        ...(detach ? { detach: true } : {}),
+        ...(priority ? { priority: true } : {}),
+      }),
     })
   } catch {
     // The run has a job record and its daemon did not answer: that is not

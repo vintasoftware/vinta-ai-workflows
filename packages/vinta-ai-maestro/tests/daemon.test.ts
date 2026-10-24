@@ -1545,6 +1545,41 @@ describe('§9 operations', () => {
     ])
   })
 
+  /**
+   * An operator answering a moment after `--retry-after` did got a bare
+   * `409 operation_failed`, with no hint the question was already gone.
+   */
+  it('says who already answered a question an answer came too late for', async () => {
+    const r = await rig()
+    const control = runControl({
+      statuses: {},
+      answer: () => {
+        throw Object.assign(new Error('node "a" is not awaiting an answer'), { name: 'NotAwaitingAnswer' })
+      },
+    })
+    r.daemon.register({
+      runId: RUN_ID,
+      control,
+      pools: r.pools,
+      admission: { ceiling: () => 1, inFlight: () => 0, wakeAt: () => undefined },
+    })
+    r.journal.append({
+      runId: RUN_ID,
+      nodeId: 'a',
+      type: 'human_answered',
+      payload: { effect_id: 'retry:a:3', answer: 'retry', unattended: true },
+    })
+
+    const answered = await call(r.daemon, `/api/runs/${RUN_ID}/nodes/a/answer`, {
+      method: 'POST',
+      body: { answer: 'retry' },
+    })
+    expect(answered.status).toBe(409)
+    const body = ErrorResponseSchema.parse(answered.body)
+    expect(body.error).toBe('not_awaiting_answer')
+    expect(body.issues?.[0]?.message).toMatch(/already answered "retry" unattended, by the --retry-after timer at /)
+  })
+
   it('reports a refused operation as a code, with no message from below', async () => {
     const r = await rig()
     const control = runControl({

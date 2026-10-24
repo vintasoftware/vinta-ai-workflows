@@ -43,6 +43,7 @@ import { LaneRecycleError, LaneSetupError } from '../src/lanes/pool.ts'
 import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../src/pipeline/effects.ts'
 import type { GuardContext } from '../src/pipeline/guard.ts'
 import { STANDARD_PHASE } from '../src/pipeline/standard.ts'
+import { verdictFollowUp } from '../src/prompts/index.ts'
 import { MAESTRO_NODE_ENV, MAESTRO_TURN_ENV, MAESTRO_URL_ENV } from '../src/resources/agent-leases.ts'
 import { ResourcePools } from '../src/resources/pools.ts'
 import {
@@ -297,6 +298,10 @@ function rig(
     readonly codex?: MockAdapterOptions
     /** `run --coordinator-authority`. */
     readonly coordinatorAuthority?: 'standard' | 'full'
+    /** `EffectExecutor.setupInputs`: what a node's setup is built from. */
+    readonly setupInputs?: (nodeId: string) => { readonly key: string; readonly label: string } | null
+    /** `EffectExecutor.waveInputs`: what the wave a node completes is built from. */
+    readonly waveInputs?: (nodeId: string) => { readonly key: string; readonly label: string } | null
   readonly retryAfterMs?: number
     readonly agentAnswerAfterMs?: number
     /** `LanePool`'s `Lane.env`: what makes a lane isolated, by slot name. */
@@ -358,7 +363,13 @@ function rig(
     random: () => 1,
     baseBackoffMs: 1_000,
   })
-  const executor = recorder(options.outcomes ?? {}, options.tap)
+  const inputsOf = options.setupInputs
+  const waveOf = options.waveInputs
+  const executor = Object.assign(
+    recorder(options.outcomes ?? {}, options.tap),
+    inputsOf === undefined ? {} : { setupInputs: async (nodeId: string) => inputsOf(nodeId) },
+    waveOf === undefined ? {} : { waveInputs: async (nodeId: string) => waveOf(nodeId) },
+  )
   const takeovers = new PtyRegistry()
 
   const scheduler = createScheduler({
@@ -2518,6 +2529,48 @@ describe('§16 the review', () => {
     expectDrained(r)
   })
 
+  /**
+   * The observed review: it started the tests in the background and ended its
+   * turn on "waiting on the inner-loop tests". Read as a review that stated
+   * nothing, the phase — gates green an hour before — was failed and
+   * restarted from the implementer. The same session is asked for the verdict.
+   */
+  it('asks a review that stated no verdict for one, once, in the same session', async () => {
+    const silent: EffectOutcome = { facts: { review: { verdict: 'fail', stated: false } } }
+    const r = rig(reviewedWorkflow(), { outcomes: { ...APPROVED, 'e-review:review': [silent, verdict('pass')] } })
+
+    expect((await r.scheduler.run()).statuses).toEqual({ a: 'done' })
+    // The implementer, the review, and the review again in its own session.
+    const [, , followUp] = r.adapter.spawned
+    expect(r.adapter.spawned).toHaveLength(3)
+    expect(followUp?.prompt).toBe(verdictFollowUp())
+    expect(followUp?.resumeSessionId).toEqual(expect.any(String))
+    expect(transcriptOf(r, 'a')).toContainEqual(
+      expect.objectContaining({ type: 'user_message', text: verdictFollowUp(), by: { role: 'monitor' } }),
+    )
+    expect(choresOf(r, 'a')).toEqual([{ chore: 'review', status: 'ran', duration_ms: expect.any(Number) }])
+    expectDrained(r)
+  })
+
+  it('asks only once, and a review still silent is put to the operator as before', async () => {
+    const silent: EffectOutcome = { facts: { review: { verdict: 'fail', stated: false } } }
+    const r = rig(reviewedWorkflow(), { outcomes: { ...APPROVED, 'e-review:review': silent } })
+    expect((await runAnsweringStop(r, 'a')).statuses).toEqual({ a: 'failed' })
+    expect(r.adapter.spawned.filter((task) => task.prompt === verdictFollowUp())).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('does not ask a harness that cannot resume the session', async () => {
+    const silent: EffectOutcome = { facts: { review: { verdict: 'fail', stated: false } } }
+    const r = rig(reviewedWorkflow(), {
+      outcomes: { ...APPROVED, 'e-review:review': silent },
+      capabilities: { resume: false },
+    })
+    expect((await runAnsweringStop(r, 'a')).statuses).toEqual({ a: 'failed' })
+    expect(r.adapter.spawned.some((task) => task.prompt === verdictFollowUp())).toBe(false)
+    expectDrained(r)
+  })
+
   it('asks when the review does not approve: continue reviews again, stop fails the phase', async () => {
     const r = rig(reviewedWorkflow(), {
       outcomes: { ...APPROVED, 'e-review:review': verdict('fail') },
@@ -2942,6 +2995,33 @@ describe('§9 operations', () => {
       { op: 'resume', delivery: 'delivered' },
     ])
     expect(r.scheduler.resume('a')).toBe('ignored')
+    expectDrained(r)
+  })
+
+  /**
+   * The observed run: `node pause p5`, `node abort p5` a minute later, and a
+   * `node retry p5` half an hour after that. The pause was still set on the
+   * retry, which was then passed over in the integration queue until somebody
+   * resumed a phase nobody remembered pausing.
+   */
+  it('drops a pause with the attempt it was asked of, so the retry is not paused', async () => {
+    const r = rig(makeWorkflow([node('a')]), { stall: true, onFailure: 'retry' })
+    const running = r.scheduler.run()
+    await until(() => r.stall.live(), "node a's session to open")
+
+    await r.scheduler.pause('a')
+    await r.scheduler.abortNode('a')
+    r.stall.release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    r.scheduler.retry('a')
+    await until(
+      () => r.scheduler.statuses['a'] === 'done' || r.scheduler.statuses['a'] === 'awaiting_human',
+      'the retry to finish or park',
+    )
+
+    expect(r.scheduler.statuses['a']).toBe('done')
+    expect(r.journal.pendingQuestion('run-1', 'a')).toBeUndefined()
+    expect((await running).statuses).toEqual({ a: 'done' })
     expectDrained(r)
   })
 
@@ -6177,6 +6257,70 @@ describe('a failure before any agent ran', () => {
     expectDrained(r)
   })
 
+  /**
+   * The observed run: three phases failed their base gate 37 to 40 times
+   * each, retried a minute apart, a full suite every time, on the same
+   * one-line break between two dependencies whose tips never moved.
+   */
+  it('stops retrying a red base unattended once it has failed twice on the same inputs, until they move', async () => {
+    class BaseGateError extends Error {
+      override name = 'BaseGateError'
+    }
+    let tip = 'p3@aaaaaaa'
+    let attempt = 0
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      setupInputs: () => ({ key: tip, label: tip }),
+      tap: (call) => {
+        if (call.verb !== 'git_branch') return
+        attempt += 1
+        if (tip === 'p3@aaaaaaa') throw new BaseGateError('the base of a merged, but gate "unit" failed on it (exit 1)')
+      },
+    })
+
+    const running = r.scheduler.run()
+    // The automatic retry runs once — a flaky test gets its second chance.
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer after two attempts')
+    expect(attempt).toBe(2)
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('2 times in a row on the same inputs (p3@aaaaaaa)')
+
+    // Windows pass and the inputs stay put: nothing retries.
+    await r.advance(60_000 * 30)
+    expect(attempt).toBe(2)
+    expect(answersOf(r)).toEqual([])
+
+    // A dependency moves: the watch retries it, unattended.
+    tip = 'p3@bbbbbbb'
+    await r.advance(60_000)
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done' })
+    expect(attempt).toBe(3)
+    expect(answersOf(r)).toEqual([{ effect_id: 'retry:a:1', answer: 'retry', unattended: true }])
+    expectDrained(r)
+  })
+
+  it('keeps retrying unattended while the inputs move between failures', async () => {
+    let attempt = 0
+    const r = rig(branchFirstWorkflow(), {
+      onFailure: null,
+      retryAfterMs: 60_000,
+      setupInputs: () => ({ key: `tip-${attempt}`, label: `p3@${attempt}` }),
+      tap: (call) => {
+        if (call.verb !== 'git_branch') return
+        attempt += 1
+        if (attempt <= 2) throw new GitCommandError('checkout', 1, `error ${attempt}`)
+      },
+    })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the offer')
+    expect(questionsOf(r, 'a')[0]?.question).not.toContain('same inputs')
+    await r.advance(60_000)
+    expect((await running).statuses).toEqual({ a: 'done' })
+    expectDrained(r)
+  })
+
   it('keeps the unattended retry while the setup failures differ', async () => {
     let attempt = 0
     const r = rig(branchFirstWorkflow(), {
@@ -6218,6 +6362,100 @@ describe('a failure before any agent ran', () => {
     r.scheduler.answer('a', { human: { answer: 'stop' } })
     await running
     expect(answersOf(r)[0]).toMatchObject({ answer: 'retry', unattended: true })
+    expectDrained(r)
+  })
+})
+
+describe('a wave that cannot be assembled', () => {
+  /** What the executor raises when the wave a phase completes cannot be built. */
+  class WaveBuildError extends Error {
+    override name = 'WaveBuildError'
+    readonly wave = 2
+  }
+
+  /** `a` completes wave 2, whose build fails `failures` times; `b` builds on `a`. */
+  const waveRig = (failures: number, options: Parameters<typeof rig>[1] = {}) => {
+    let merges = 0
+    const r = rig(
+      standardWorkflow([node('a', [], { gates: ['unit'] }), node('b', ['a'], { gates: ['unit'] })]),
+      {
+        outcomes: APPROVED,
+        ...options,
+        tap: (call) => {
+          if (call.nodeId !== 'a' || call.effect !== 'e-merge') return
+          merges += 1
+          if (merges <= failures) throw new WaveBuildError('wave 2 could not be assembled: merge of plan/x/phase-p2 fails gate unit')
+        },
+      },
+    )
+    return { r, merges: () => merges }
+  }
+
+  /**
+   * The observed phase: last of its wave, it ran its whole pipeline four
+   * times, an hour each, failing each time on a sibling's merge into the wave.
+   */
+  it('parks the phase on the wave rather than failing it, and lets its dependents start', async () => {
+    const { r, merges } = waveRig(1)
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the wave question')
+    // Landed: b starts on a's branch while a waits on its wave.
+    await until(() => r.scheduler.statuses['b'] === 'done', 'the dependent to finish')
+    const [question] = questionsOf(r, 'a')
+    expect(question?.question).toContain('Wave 2 could not be assembled')
+    expect(question?.choices).toEqual(['retry', 'skip', 'stop'])
+
+    r.scheduler.answer('a', { human: { answer: 'retry' } })
+    const report = await running
+    expect(report.statuses).toEqual({ a: 'done', b: 'done' })
+    // The wave again, and nothing else of a's: one implementer turn, one gate.
+    expect(merges()).toBe(2)
+    expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(1)
+    expect(r.calls.filter((call) => call.nodeId === 'a' && call.effect === 'e-gate')).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('lets the phase finish without its wave on skip', async () => {
+    const { r, merges } = waveRig(5)
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the wave question')
+    r.scheduler.answer('a', { human: { answer: 'skip' } })
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done' })
+    expect(merges()).toBe(1)
+    expectDrained(r)
+  })
+
+  it('fails the phase on stop, with no automatic attempt behind it', async () => {
+    const { r } = waveRig(5, { onFailure: 'retry' })
+    const report = await runAnsweringStop(r, 'a')
+    expect(report.statuses['a']).toBe('failed')
+    expect(report.failures['a']).toContain('wave 2 could not be assembled')
+    expect(r.adapter.spawned.filter((task) => task.nodeId === 'a')).toHaveLength(1)
+    expectDrained(r)
+  })
+
+  it('retries unattended once, and then waits for the wave’s inputs to move', async () => {
+    let tip = 'p2@aaaa'
+    const { r, merges } = waveRig(2, {
+      retryAfterMs: 60_000,
+      waveInputs: () => ({ key: tip, label: tip }),
+    })
+    const running = r.scheduler.run()
+    await until(() => r.scheduler.statuses['a'] === 'awaiting_human', 'the first wave question')
+    // The first failure on these inputs gets the timer's retry.
+    await r.advance(60_000)
+    await until(() => merges() === 2 && r.scheduler.statuses['a'] === 'awaiting_human', 'the second wave question')
+    expect(questionsOf(r, 'a').at(-1)?.question).toContain('2 times in a row on the same inputs (p2@aaaa)')
+
+    // The same inputs: windows pass and nothing retries.
+    await r.advance(60_000 * 30)
+    expect(merges()).toBe(2)
+
+    // A member's tip moves: retried, and built.
+    tip = 'p2@bbbb'
+    await r.advance(60_000)
+    expect((await running).statuses).toEqual({ a: 'done', b: 'done' })
+    expect(merges()).toBe(3)
     expectDrained(r)
   })
 })

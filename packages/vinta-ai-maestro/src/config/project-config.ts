@@ -58,6 +58,7 @@ export const GateTypeDefaultsSchema = z.strictObject({
   cold_cmd: OptionalCommand,
   scope_cache: z.array(z.string().min(1)).optional(),
   fresh_cmd: OptionalCommand,
+  fresh_when: z.array(z.string().min(1)).optional(),
   requires: z.array(Id).optional(),
   timeout_s: z.number().int().min(1).optional(),
   queue_timeout_s: z.number().int().min(1).optional(),

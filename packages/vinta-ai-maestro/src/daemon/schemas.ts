@@ -156,6 +156,8 @@ export const ExecRequestSchema = z.strictObject({
   command: z.string().min(1),
   /** Answer with the command's id at once and run it with nobody attached; its output goes to a log. */
   detach: z.boolean().optional(),
+  /** In `integration`: wait only for the current holder, ahead of every phase queued. */
+  priority: z.boolean().optional(),
 })
 
 /** `POST /api/runs/:runId/branches/propagate` — carry a fix on a phase into the branches built from it. */
@@ -181,6 +183,8 @@ export const GateCacheInvalidateSchema = z.strictObject({
     .string()
     .regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/)
     .optional(),
+  /** Also start the gate's next integration-worktree run from fresh state. */
+  databases: z.boolean().optional(),
 })
 
 /** A command inside an agent turn asks for semaphore resources as one lease. */

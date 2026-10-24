@@ -202,6 +202,12 @@ export interface AgentGatePort {
 /** See `DaemonRun.gateCache`. Returns how many entries went. */
 export interface GateCachePort {
   invalidate(gateId: string, treeHash?: string): number
+  /**
+   * Makes the gate's next run in the integration worktree start from fresh
+   * state (`integration/fresh.ts`). False when the gate has no `fresh_cmd` to
+   * run. Absent on a host with no integration worktree.
+   */
+  forgetDatabases?(gateId: string): boolean
 }
 
 /**

@@ -36,6 +36,8 @@ export interface ExecRequest {
   readonly target: string
   readonly command: string
   readonly actor: Actor
+  /** In `integration`: queue ahead of every phase waiting, behind the current holder. */
+  readonly priority?: boolean
   /**
    * Called when the command actually starts — at once in a lane, and in the
    * integration worktree once the queue lets it in. Until then it is queued.
@@ -64,7 +66,7 @@ export interface ExecPort {
 export interface ExecPortOptions {
   /** The worktree a resolved target names. */
   readonly workspace: (target: string) => Workspace | null
-  readonly holdIntegration?: <T>(label: string, work: () => Promise<T>) => Promise<T>
+  readonly holdIntegration?: <T>(label: string, work: () => Promise<T>, priority?: boolean) => Promise<T>
   /** Who holds the integration worktree now, for "queued behind <holder>". */
   readonly integrationHolder?: () => string | null
   /** What a typed name means (`resolveExecTarget`). Absent, the name is the target. */
@@ -139,7 +141,7 @@ export function execPort(options: ExecPortOptions): ExecPort {
           return runCommand({ ...workspace, env }, request.command, onOutput, signal)
         }
         if (target !== 'integration' || options.holdIntegration === undefined) return await work()
-        return await options.holdIntegration(request.actor, work)
+        return await options.holdIntegration(request.actor, work, request.priority === true)
       } finally {
         live.set(holder, (live.get(holder) ?? 1) - 1)
         options.onEnded?.(holder, turn)

@@ -330,6 +330,8 @@ interface RunPayloads {
     readonly id?: string
     /** Ended by `exec cancel` or by its client going away, rather than by itself. */
     readonly cancelled?: boolean
+    /** `--priority`: queued for the integration worktree ahead of every phase waiting. */
+    readonly priority?: boolean
   }
   /**
    * Gate results forgotten by hand (`vinta-ai-maestro gate-cache invalidate`,
@@ -340,6 +342,11 @@ interface RunPayloads {
     readonly gate: string
     readonly tree?: string
     readonly removed: number
+    /**
+     * `--databases`: whether the gate's next integration-worktree run will
+     * start from fresh state — false for a gate with no `fresh_cmd`.
+     */
+    readonly databases?: boolean
     readonly by?: Actor
     /** Why, in the caller's words. Payload, never a log field. The coordinator always gives one. */
     readonly reason?: string
@@ -420,7 +427,14 @@ interface RunPayloads {
    */
   integration_fresh_state: {
     readonly gate: string
-    readonly reason: 'tree_moved' | 'first_run' | 'stale_schema' | 'fixer_reported'
+    readonly reason:
+      | 'tree_moved'
+      | 'first_run'
+      | 'stale_schema'
+      | 'fixer_reported'
+      | 'interrupted'
+      | 'inputs_changed'
+      | 'requested'
   }
   /**
    * A harness could not be reached (`network`: DNS, connection refused, a
@@ -1082,12 +1096,32 @@ interface NodePayloads {
     readonly wave: number
     readonly missing: number
   }
+  /**
+   * A wave could not be assembled (`WaveBuildError`): the phase that completed
+   * it is parked on whether to try the wave again, instead of failing. `reason`
+   * is the integrator's own message — branch names, node ids, a gate id and
+   * its log path.
+   */
+  /**
+   * A red merge turned green by fixes kept from earlier merges
+   * (`refs/vinta-ai-maestro/fixes/`), with no fixer round spent on it. How
+   * many files they changed; never the patch.
+   */
+  integration_fix_replayed: {
+    readonly files: number
+  }
+  wave_failed: {
+    readonly wave: number
+    readonly reason: string
+  }
   wave_gate_result: {
     readonly wave: number
     readonly gate: string
     readonly exit_code: number
     readonly status: GateStatus
     readonly duration_ms: number
+    /** As `gate_result`'s: present only on a gate that was killed in a compose project. */
+    readonly orphan_check?: 'done' | 'failed'
   }
   gate_result: {
     readonly gate: string
@@ -1114,6 +1148,11 @@ interface NodePayloads {
      * Absent when there were none.
      */
     readonly containers_stopped?: number
+    /**
+     * Whether docker answered the check for those containers. `failed` means
+     * it did not in time, and the next gate in the project checks first.
+     */
+    readonly orphan_check?: 'done' | 'failed'
   }
   /**
    * A gate red again on the tree it was red on before a fixer round, so the

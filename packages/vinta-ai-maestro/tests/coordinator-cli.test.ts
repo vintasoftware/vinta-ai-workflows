@@ -487,6 +487,16 @@ describe('exec', () => {
     expect(r.err.join('\n')).not.toContain('not live')
   })
 
+  it('asks for the front of the integration queue with --priority', async () => {
+    const r = recorder()
+    const started = fakeFetch(json({ id: 'cd34', target: 'integration', log: '/runs/r/execs/cd34.log' }, 202))
+    await execCommand([RUN_ID, 'integration', '--priority', '--detach', '--repo', emptyRepo(), '--', 'git status'], r.io, {
+      env: ENV,
+      fetch: started.fetch,
+    })
+    expect(JSON.parse(started.sent[0]?.body ?? '')).toMatchObject({ command: 'git status', priority: true })
+  })
+
   it('detaches, lists and cancels', async () => {
     const detached = recorder()
     const started = fakeFetch(json({ id: 'ab12', target: 'integration', log: '/runs/r/execs/ab12.log' }, 202))
@@ -583,6 +593,19 @@ describe('gate-cache', () => {
     expect(code).toBe(OK)
     expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({ tree })
     expect(r.out).toEqual(['gate unit: 1 cached result forgotten'])
+  })
+
+  it('asks for fresh databases with --databases, and says when the gate has no fresh form', async () => {
+    const r = recorder()
+    const f = fakeFetch(json({ gate: 'unit', removed: 0, databases: true }))
+    expect(await gateCacheCommand(['invalidate', RUN_ID, 'unit', '--databases', '--repo', emptyRepo()], r.io, { env: ENV, fetch: f.fetch })).toBe(OK)
+    expect(JSON.parse(f.sent[0]?.body ?? '')).toEqual({ databases: true })
+    expect(r.out).toContain('gate unit: its next run in the integration worktree starts from fresh state')
+
+    const plain = recorder()
+    const g = fakeFetch(json({ gate: 'lint', removed: 0, databases: false }))
+    await gateCacheCommand(['invalidate', RUN_ID, 'lint', '--databases', '--repo', emptyRepo()], plain.io, { env: ENV, fetch: g.fetch })
+    expect(plain.err.join('\n')).toContain('declares no fresh_cmd')
   })
 
   it('is a usage error without the verb, and is reachable from main', async () => {

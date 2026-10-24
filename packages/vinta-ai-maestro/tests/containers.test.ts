@@ -76,6 +76,66 @@ describe('stopping a killed command’s containers', () => {
     expect(await stopOneOffsSince('repo_lane-1', 0, missing)).toEqual([])
   })
 
+  it('says it does not know, rather than "none", when docker runs out of time', async () => {
+    const slow: DockerExec = async () => {
+      throw Object.assign(new Error('Command failed: docker ps'), { killed: true, signal: 'SIGTERM' })
+    }
+    expect(await stopOneOffsSince('repo_lane-1', 0, slow)).toBeNull()
+  })
+
+  /**
+   * Under a load average of 22, a timed-out suite's container was still running
+   * nine minutes later beside its rerun's, against the same worker databases.
+   * A cleanup docker did not answer is recorded, and paid before the next gate.
+   */
+  it('owes the project a sweep when docker does not answer, and pays it before the next gate', async () => {
+    const calls: [string, number][] = []
+    let answer: readonly string[] | null = null
+    const stopContainers = async (project: string, since: number) => {
+      calls.push([project, since])
+      return answer
+    }
+    const env = { COMPOSE_PROJECT_NAME: 'repo_integ-owed' }
+    const killed = await executeGate({
+      gateId: 'test',
+      gate: { cmd: renderGate({ background: { seconds: 60, pidFile: join(workspace, 'pid') } }), requires: [], timeout_s: 1 },
+      cwd: workspace,
+      env,
+      logPath: join(workspace, 'killed.log'),
+      stopContainers,
+    })
+    expect(killed.status).toBe('timed_out')
+    expect(killed.orphanCheck).toBe('failed')
+    expect(await readFile(join(workspace, 'killed.log'), 'utf8')).toContain('docker did not answer')
+
+    answer = ['c1']
+    const next = await executeGate({
+      gateId: 'lint',
+      gate: { cmd: renderGate({ stdout: ['ok'] }), requires: [], timeout_s: 30 },
+      cwd: workspace,
+      env,
+      logPath: join(workspace, 'next.log'),
+      stopContainers,
+    })
+    expect(next.status).toBe('passed')
+    expect(next.orphanCheck).toBeUndefined()
+    // Swept since the killed gate started, before the next one did.
+    expect(calls).toHaveLength(2)
+    expect(calls[1]?.[1]).toBe(calls[0]?.[1])
+    expect(await readFile(join(workspace, 'next.log'), 'utf8')).toContain('stopped 1 container(s) an earlier killed gate')
+
+    // Paid: a third gate sweeps nothing.
+    await executeGate({
+      gateId: 'lint',
+      gate: { cmd: renderGate({ stdout: ['ok'] }), requires: [], timeout_s: 30 },
+      cwd: workspace,
+      env,
+      logPath: join(workspace, 'third.log'),
+      stopContainers,
+    })
+    expect(calls).toHaveLength(2)
+  }, 20_000)
+
   it('stops a timed-out gate’s containers before its pools are released', async () => {
     const pools = new ResourcePools({ 'test-suite': { capacity: 1, kind: 'semaphore' } }, { agingMs: 0 })
     let heldDuringCleanup: number | null = null

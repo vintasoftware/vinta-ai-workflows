@@ -71,6 +71,7 @@
  * this file puts any of them into a fact, an error, a tracking record or a
  * notification body.
  */
+import { createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import {
   type CodegenCache,
@@ -90,10 +91,10 @@ import { prNumberOf } from '../integration/pr.ts'
 import { describeUnattended, runAgentDetails, unattendedDecisions } from '../decisions/index.ts'
 import type { Journal, NodeRow } from '../journal/journal.ts'
 import { GATE_ROLE } from '../journal/transcript.ts'
-import type { EffectExecutor, EffectInvocation, EffectOutcome } from '../pipeline/effects.ts'
+import type { EffectExecutor, EffectInvocation, EffectOutcome, SetupInputs } from '../pipeline/effects.ts'
 import type { ContextValue } from '../pipeline/guard.ts'
 import { readVerdict, resolveBrief } from '../prompts/index.ts'
-import type { IntegrationFreshness } from '../integration/fresh.ts'
+import { looksStale, staleSchemaNote, type IntegrationFreshness } from '../integration/fresh.ts'
 import { isJudgeGate, type CommandGate, type JudgeGate, type Node, type Workflow } from '../types.ts'
 import type { IntegrationStepPayload, SystemOneJudge } from '../journal/events.ts'
 import type { SystemOne } from '../system-one/config.ts'
@@ -201,13 +202,36 @@ export class BaseGateError extends Error {
     readonly gateId: string,
     readonly exitCode: number,
     readonly logPath: string,
+    readonly staleSchema = false,
   ) {
     super(
       `the base of ${nodeId} (${branch}) merged, but gate "${gateId}" failed on it (exit ${exitCode}) — ` +
-        'its dependencies each passed their own gates, so this is a regression between them, and ' +
-        `${nodeId} does not start on it. Log: ${logPath}`,
+        (staleSchema ? `${staleSchemaNote(gateId)}. ` : '') +
+        `${nodeId} does not start on it. Log: ${logPath} — \`vinta-ai-maestro logs --failures <log>\` ` +
+        'prints its first failure',
     )
     this.name = 'BaseGateError'
+  }
+}
+
+/**
+ * Assembling a wave failed — a merge the fixer could not settle, a red gate on
+ * the merged tree, git refusing. The original is the `cause`.
+ *
+ * Its own type because the failure is the wave's and not the phase's that
+ * happened to complete it. Raised as that phase's failure, it re-drove the
+ * phase's whole pipeline: one observed phase ran implement, gates, review,
+ * polish and verify four times — an hour each — and failed every time on the
+ * same sibling's merge into its wave. The scheduler parks the phase on it and
+ * retries the wave alone (`Scheduler.#waveMerge`).
+ */
+export class WaveBuildError extends Error {
+  constructor(
+    readonly wave: number,
+    cause: unknown,
+  ) {
+    super(`wave ${wave} could not be assembled: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = 'WaveBuildError'
   }
 }
 
@@ -217,11 +241,12 @@ export class WaveGateError extends Error {
     readonly gateId: string,
     readonly exitCode: number,
     readonly logPath: string,
+    readonly staleSchema = false,
   ) {
     super(
       `wave ${wave} merged, but gate "${gateId}" failed on the merged tree (exit ${exitCode}) — ` +
-        'the phases each passed their own gates, so this is a regression between them. ' +
-        `Log: ${logPath}`,
+        (staleSchema ? `${staleSchemaNote(gateId)}. ` : '') +
+        `Log: ${logPath} — \`vinta-ai-maestro logs --failures <log>\` prints its first failure`,
     )
     this.name = 'WaveGateError'
   }
@@ -294,7 +319,12 @@ export class RunEffectExecutor implements EffectExecutor {
   /** Whether a turn holds the integration worktree now. */
   #integrationBusy = false
   /** Turns waiting for it, in arrival order; a paused node's is passed over. */
-  readonly #integrationWaiting: { readonly nodeId: string | null; readonly label: string | null; readonly start: () => void }[] = []
+  readonly #integrationWaiting: {
+    readonly nodeId: string | null
+    readonly label: string | null
+    readonly priority: boolean
+    readonly start: () => void
+  }[] = []
   /** Nodes already journalled as passed over for a pause, until they are let in. */
   readonly #integrationPassedOver = new Set<string>()
   #integrationPaused: (nodeId: string) => boolean = () => false
@@ -771,6 +801,7 @@ export class RunEffectExecutor implements EffectExecutor {
               },
             }),
         ...(result.containersStopped === undefined ? {} : { containers_stopped: result.containersStopped }),
+        ...(result.orphanCheck === undefined ? {} : { orphan_check: result.orphanCheck }),
       },
     })
     // And again in the node's transcript, which is where somebody reading
@@ -916,10 +947,23 @@ export class RunEffectExecutor implements EffectExecutor {
     // its wave against is the plan whose last wave this is or is not.
     const final = this.#finalWave()
     let built: readonly number[] = []
-    await this.#integration(async () => {
-      this.#queuedBuilds.delete(wave)
-      built = await this.#buildWaves(nodeId, wave, plan)
-    }, nodeId)
+    try {
+      await this.#integration(async () => {
+        this.#queuedBuilds.delete(wave)
+        built = await this.#buildWaves(nodeId, wave, plan)
+      }, nodeId)
+    } catch (error) {
+      // A harness refusing the fixer is capacity, and the scheduler waits it
+      // out where it waits out every other refusal.
+      if (error instanceof Error && error.name === 'ConflictFixerRefused') throw error
+      this.#options.journal.append({
+        runId: this.#options.runId,
+        nodeId,
+        type: 'wave_failed',
+        payload: { wave, reason: error instanceof Error ? error.message : String(error) },
+      })
+      throw new WaveBuildError(wave, error)
+    }
     // Opened by this node's own `open_pr`, not here. `git_merge` runs before
     // `open_pr` in the phase pipeline, so a plan PR opened now would be written
     // before the last phase's PR exists and could not list it.
@@ -1072,8 +1116,9 @@ export class RunEffectExecutor implements EffectExecutor {
    * is inside its own `integrate` step and may still hold the pool a suite
    * would ask for. Not cached either: a merge produces a tree no lane has had.
    *
-   * Red fails the merge, and with it the node that built the wave — the wave
-   * branch is left as it is for whoever picks it up.
+   * Red fails the merge, and the wave: the node that built it parks on the
+   * wave (`WaveBuildError`, `Scheduler.#waveMerge`) and the branch is left as
+   * it is, every merge before the red one kept, for the retry.
    */
   async #waveGates(
     nodeId: string,
@@ -1120,11 +1165,14 @@ export class RunEffectExecutor implements EffectExecutor {
           exit_code: exitCode,
           status: result.status,
           duration_ms: result.durationMs,
+          ...(result.orphanCheck === undefined ? {} : { orphan_check: result.orphanCheck }),
         },
       })
       // First red stops the wave, for `run_gate`'s reason: the merge fails on
       // this gate whatever the rest say, and they are full suites.
-      if (exitCode !== 0) throw new WaveGateError(wave, gateId, exitCode, logPath)
+      if (exitCode !== 0) {
+        throw new WaveGateError(wave, gateId, exitCode, logPath, gate.fresh_cmd === undefined && (await looksStale(logPath)))
+      }
     }
   }
 
@@ -1181,7 +1229,10 @@ export class RunEffectExecutor implements EffectExecutor {
       })
       const exitCode = result.status === 'passed' ? 0 : (result.exitCode ?? TIMEOUT_EXIT)
       this.#step(nodeId, { ...step, state: 'finished', outcome: exitCode === 0 ? 'ok' : 'failed' })
-      if (exitCode !== 0) throw new BaseGateError(nodeId, base.branch, gateId, exitCode, logPath)
+      if (exitCode !== 0) {
+        const stale = gate.fresh_cmd === undefined && (await looksStale(logPath))
+        throw new BaseGateError(nodeId, base.branch, gateId, exitCode, logPath, stale)
+      }
     }
   }
 
@@ -1708,6 +1759,7 @@ export class RunEffectExecutor implements EffectExecutor {
     work: () => Promise<T>,
     nodeId: string | null = null,
     label: string | null = null,
+    priority = false,
   ): Promise<T> {
     // Decided at the call, not when the work starts: two callers in one tick
     // must see each other, and the holder is whoever got here first.
@@ -1715,7 +1767,13 @@ export class RunEffectExecutor implements EffectExecutor {
     const holder = queued ? this.#integrationHolder : null
     if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'queued', holder)
     await new Promise<void>((start) => {
-      this.#integrationWaiting.push({ nodeId, label, start })
+      // A priority hold goes in next, behind whoever holds the worktree now
+      // and ahead of every phase waiting: a short command by hand should not
+      // wait out a queue of full suites. Never ahead of another priority hold.
+      const entry = { nodeId, label, priority, start }
+      const at = priority ? this.#integrationWaiting.findIndex((waiting) => !waiting.priority) : -1
+      if (at === -1) this.#integrationWaiting.push(entry)
+      else this.#integrationWaiting.splice(at, 0, entry)
       this.#pumpIntegration()
     })
     if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'granted', holder)
@@ -1736,14 +1794,26 @@ export class RunEffectExecutor implements EffectExecutor {
 
   /** Lets the first waiter that is not paused in, when nothing holds the worktree. */
   #pumpIntegration(): void {
-    if (this.#integrationBusy) return
+    // Pauses are read whether or not the worktree is free: a waiter paused or
+    // resumed behind a long hold is reported when that happens, not when the
+    // hold ends.
     for (const waiting of this.#integrationWaiting) {
-      if (waiting.nodeId === null || this.#integrationPassedOver.has(waiting.nodeId)) continue
+      if (waiting.nodeId === null) continue
+      if (this.#integrationPassedOver.has(waiting.nodeId)) {
+        // Resumed while still in the queue, at the place it always had: said
+        // so, or the journal goes on calling it paused until it is let in.
+        if (!this.#integrationPaused(waiting.nodeId)) {
+          this.#integrationPassedOver.delete(waiting.nodeId)
+          this.#options.onIntegrationWait?.(waiting.nodeId, 'queued', this.#integrationHolder)
+        }
+        continue
+      }
       if (this.#integrationPaused(waiting.nodeId)) {
         this.#integrationPassedOver.add(waiting.nodeId)
         this.#options.onIntegrationWait?.(waiting.nodeId, 'paused', this.#integrationHolder)
       }
     }
+    if (this.#integrationBusy) return
     const index = this.#integrationWaiting.findIndex(
       (waiting) => waiting.nodeId === null || !this.#integrationPaused(waiting.nodeId),
     )
@@ -1754,6 +1824,59 @@ export class RunEffectExecutor implements EffectExecutor {
     this.#integrationBusy = true
     this.#integrationHolder = next.nodeId ?? next.label ?? '?'
     next.start()
+  }
+
+  /**
+   * What `nodeId`'s setup is built from (`EffectExecutor.setupInputs`): the run
+   * base's tip, each branch its base merges at its tip, and the definitions of
+   * the gates that run on that base. A setup that failed twice on the same
+   * inputs will fail a third time; one whose dependency moved may not.
+   */
+  async setupInputs(nodeId: string): Promise<SetupInputs | null> {
+    const node = this.#node(nodeId)
+    if (node === undefined) return null
+    const integrator = this.#options.integrator
+    const branches = [
+      integrator.runBase(),
+      ...node.depends_on.map((dep) => integrator.nodeBranch(dep.node)),
+    ]
+    const gateIds = [...new Set(node.depends_on.flatMap((dep) => this.#node(dep.node)?.gates ?? []))]
+    return await this.#inputsOf(branches, gateIds)
+  }
+
+  /** `EffectExecutor.waveInputs`: the wave under, every member's tip, the members' gates. */
+  async waveInputs(nodeId: string): Promise<SetupInputs | null> {
+    const wave = this.#waves.get(nodeId)
+    if (wave === undefined) return null
+    const integrator = this.#options.integrator
+    const members = this.#wavePlan().get(wave) ?? []
+    const branches = [
+      integrator.runBase(),
+      ...(wave > 1 ? [integrator.waveBranch(wave - 1)] : []),
+      ...members.map((member) => integrator.nodeBranch(member)),
+    ]
+    return await this.#inputsOf(branches, [...new Set(members.flatMap((member) => this.#node(member)?.gates ?? []))])
+  }
+
+  /** Branch tips and gate definitions, as one key and a label of identifiers. */
+  async #inputsOf(branches: readonly string[], gateIdsIn: readonly string[]): Promise<SetupInputs> {
+    const tips: string[] = []
+    for (const branch of branches) {
+      const [tip] = await gitLines(this.#options.integrationPath, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/${branch}^{commit}`,
+      ]).catch(() => [])
+      tips.push(`${branch}@${tip === undefined ? '-' : tip.slice(0, 10)}`)
+    }
+    const gateIds = [...gateIdsIn].sort()
+    const gates = createHash('sha256')
+      .update(JSON.stringify(gateIds.map((id) => [id, this.#workflow.gates[id] ?? null])))
+      .digest('hex')
+      .slice(0, 10)
+    const label = `${tips.join(', ')}; gates ${gates}`
+    return { key: createHash('sha256').update(label).digest('hex'), label }
   }
 
   /** Who holds the integration worktree now: a node, a label (`coordinator`), or null. */
@@ -1787,8 +1910,9 @@ export class RunEffectExecutor implements EffectExecutor {
     work: () => Promise<T>,
     nodeId: string | null = null,
     label: string | null = null,
+    priority = false,
   ): Promise<T> {
-    return await this.#integration(work, nodeId, label)
+    return await this.#integration(work, nodeId, label, priority)
   }
 }
 

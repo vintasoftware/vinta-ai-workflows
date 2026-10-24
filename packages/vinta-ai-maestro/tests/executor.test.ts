@@ -1887,6 +1887,41 @@ describe('the git verbs', () => {
       expect(readFileSync(counter, 'utf8').trim().split('\n')).toEqual(['full'])
     })
 
+    it('names a phase’s setup inputs by its dependencies’ tips, and moves the key when one moves', async () => {
+      const rig = setup(gatedDiamond('true'))
+      await work(rig, 'p1', 0)
+      await work(rig, 'p2', 1)
+      const before = await rig.executor.setupInputs('p3')
+      expect(before?.label).toMatch(/phase-p1@[0-9a-f]{10}/)
+      expect(before?.label).toMatch(/phase-p2@[0-9a-f]{10}/)
+      expect(await rig.executor.setupInputs('p3')).toEqual(before)
+
+      const lane = rig.lanes[0] as ExecutorLane
+      writeFileSync(join(lane.path, 'fix.txt'), 'the cross-phase fix\n')
+      execFileSync('git', ['add', 'fix.txt'], { cwd: lane.path })
+      execFileSync('git', ['commit', '-q', '-m', 'fix'], { cwd: lane.path })
+      const after = await rig.executor.setupInputs('p3')
+      expect(after?.key).not.toBe(before?.key)
+    })
+
+    /**
+     * Reported as "a regression between" the dependencies three times out of
+     * three in one run; one was a worker database missing two columns.
+     */
+    it('names a stale test database rather than a regression when the base gate has no fresh form', async () => {
+      const stale = renderGate({ stdout: ['psycopg.errors.UndefinedColumn: column workshop_id does not exist'], exit: 1 })
+      const rig = setup(gatedDiamond(stale), { cache: true })
+      await work(rig, 'p1', 0).catch(() => {})
+      await work(rig, 'p2', 1).catch(() => {})
+      const error = await work(rig, 'p3', 2).then(
+        () => null,
+        (caught: unknown) => caught as Error,
+      )
+      expect(error?.message).toMatch(/test database left behind by another tree/)
+      expect(error?.message).toMatch(/declares no `fresh_cmd`/)
+      expect(error?.message).not.toMatch(/regression between/)
+    })
+
     it('re-runs a red verdict on the base when the phase is retried, rather than replaying it', async () => {
       // A gate that fails the first time it runs and passes after: the
       // time-of-day flake that froze one run's phase for seven retries.
@@ -2503,10 +2538,69 @@ describe('the integration worktree’s queue', () => {
     await first
     await third
     expect(order).toEqual(['p3'])
-    expect(waits).toContainEqual(['p2', 'paused', null])
+    // Reported as soon as the pause is seen, while p1 still holds the worktree.
+    expect(waits).toContainEqual(['p2', 'paused', 'p1'])
 
     paused.delete('p2')
     wake()
+    await second
+    expect(order).toEqual(['p3', 'p2'])
+  })
+
+  /**
+   * A coordinator's one-line `git` command queued behind every pending phase
+   * hold — full suites each — and took about an hour to run.
+   */
+  it('lets a priority hold in next, behind the holder and ahead of the phases queued', async () => {
+    const rig = setup(() => goldenWorkflow({}))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const order: string[] = []
+    const first = rig.executor.integration(() => held, 'p1')
+    const queued = [
+      rig.executor.integration(async () => order.push('p2'), 'p2'),
+      rig.executor.integration(async () => order.push('p3'), 'p3'),
+    ]
+    const byHand = rig.executor.integration(async () => order.push('coordinator'), null, 'coordinator', true)
+    release()
+    await Promise.all([first, ...queued, byHand])
+    expect(order).toEqual(['coordinator', 'p2', 'p3'])
+  })
+
+  it('says a waiter resumed while the worktree is held is queued again, at its old place', async () => {
+    const waits: [string, string, string | null][] = []
+    const rig = setup(() => goldenWorkflow({}), {
+      onIntegrationWait: (nodeId, state, holder) => waits.push([nodeId, state, holder]),
+    })
+    const paused = new Set(['p2'])
+    const wake = rig.executor.integrationPause((nodeId) => paused.has(nodeId))
+    const gate = () => {
+      let open!: () => void
+      const shut = new Promise<void>((resolve) => {
+        open = resolve
+      })
+      return { open, shut }
+    }
+    const p1 = gate()
+    const p3 = gate()
+    const order: string[] = []
+    const first = rig.executor.integration(() => p1.shut, 'p1')
+    const second = rig.executor.integration(async () => order.push('p2'), 'p2')
+    const third = rig.executor.integration(async () => {
+      order.push('p3')
+      await p3.shut
+    }, 'p3')
+    p1.open()
+    await first
+    for (let tick = 0; tick < 100 && !order.includes('p3'); tick += 1) await new Promise((resolve) => setImmediate(resolve))
+    paused.delete('p2')
+    wake()
+    // Still held by p3, so p2 is queued again rather than let in, behind p3.
+    expect(waits.at(-1)).toEqual(['p2', 'queued', 'p3'])
+    p3.open()
+    await third
     await second
     expect(order).toEqual(['p3', 'p2'])
   })

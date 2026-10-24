@@ -94,6 +94,7 @@ Every command runs against a project checkout — your project, not this one. `-
 | `run --resume <run-id>` | Picks a paused, interrupted or failed run back up, as a background job. Done phases stay done; every other phase — a failed run's failed and blocked phases included — is attempted again. Only `done` and `cancelled` runs are refused. It runs under the run's own `--permission`, `--system-one`, `--on-failure`, `--retries`, `--retry-after`, `--no-coordinator`, `--host` and `--harness-profile`, kept in `runs/<id>/policy.json` — the UI's Resume too; a flag given on the command line overrides the stored one. |
 | `status [run-id] [--json]` | Every run in the project and what it is doing — or one run, phase by phase. A run whose job died without ending it shows as `interrupted`. |
 | `logs <run-id> [-f] [-n <lines>]` | The run's job log: what `run` used to print to the terminal, plus its daemon's records. `-f` follows it until the job exits. |
+| `logs --failures <gate-log>` | The first failing test in a gate's log and the first line saying what went wrong, with line numbers — for the log a red base, wave or merge gate names. Printed locally only. |
 | `pause <run-id> [--wait] [--reason <why>]` | Nothing new starts; each running phase finishes the step it is in, then the job exits. The run is `paused`, its lanes intact, and `run --resume` continues it. |
 | `stop <run-id> [--wait] [--reason <why>]` | Kills every live agent turn and gate now. The run is `cancelled` and cannot be resumed. |
 | `node <context\|redirect\|pause\|resume\|abort\|retry\|fresh\|answer> <run-id> <phase> [text]` | Steers one phase of a live run, as the run view's buttons do, and prints what the run did with it (`sent`, `queued`, `held`, `delivered`, or `ignored`, which exits 1). `fresh` drops the phase's agent session so its next turn starts cold. A run whose last runnable phase was aborted stays up for its `retry`. Every `node` verb takes `--reason <why>`, journalled with it. |
@@ -107,8 +108,8 @@ Every command runs against a project checkout — your project, not this one. `-
 | `land <run-id> [--close] [--ready]` | How a finished run lands: merge the plan PR, with a merge commit, and no other. Lists every review PR with its state and marks the ones whose work is already in the base (merging them would change nothing); `--close` closes those with a comment. Names a draft plan PR; `--ready` marks it ready for review. |
 | `propagate <run-id> <phase> [--dry-run] [--no-push]` | Carries a fix made on a phase branch into every `integ-*` and `wave-*` branch that contains the phase, keeping the wave chain, and pushes them. Works on a live run: its job makes the merges, holding the integration worktree's queue. Stops at a conflict, leaving that branch as it was. |
 | `sync-base <run-id> [--dry-run] [--no-push]` | Brings a `base_branch` that moved on into `plan/<id>/base` and every wave, keeping the chain. On a live run a wave's conflict goes to the run's conflict fixer; otherwise, and for the plan branch's own merge, a conflict stops it. |
-| `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it. |
-| `gate-cache invalidate <run-id> <gate-id> [--tree <hash>]` | Forgets a gate's cached results, on one lane tree or on all of them, so its next run runs the command instead of replaying a verdict whose cause was outside the lane's tracked files. The operator's and the run coordinator's. |
+| `exec <run-id> <lane\|integration> -- <cmd>` | Runs a command in a lane or the integration worktree **with that worktree's environment** — its database, compose project and ports — and exits with its code. In `integration` it holds the worktree, so no merge or retry checks a branch out under it; `--priority` queues it behind the current holder only, ahead of every phase waiting. |
+| `gate-cache invalidate <run-id> <gate-id> [--tree <hash>] [--databases]` | Forgets a gate's cached results, on one lane tree or on all of them, so its next run runs the command instead of replaying a verdict whose cause was outside the lane's tracked files. `--databases` also makes the gate's next run in the integration worktree its `fresh_cmd`. The operator's and the run coordinator's. |
 | `ui [--repo <dir>] [--host <host>] [--port <n>]` | Serves the browser UI for every run in the project and prints the URL to open. Runs are not hosted here — close it whenever you like. A run started from its editor is launched as a background job. `serve` is the same command. It records the release it loaded in `.vinta-ai-maestro/ui/<pid>.json`, says once when the package under it is upgraded, and `run` and `status` warn about a live `ui` serving another release — restart it to pick up the new code. |
 | `purge [run-id] [--repo <dir>] [--yes] [--dry-run] [--lanes] [--branches] [--force]` | Deletes run state under `.vinta-ai-maestro/runs/`; `--lanes` also removes lane worktrees and tears down their databases, service slices and compose stacks from each lane's summary. A run whose job is still running is kept; one that could still be resumed (paused, failed, interrupted) is kept unless named or `--force`. It also drops the `refs/vinta-ai-maestro/wip/*` rescues recycled lanes left for the purged runs' phases that have since landed, and keeps every other rescue. |
 | `with <resource> -- <cmd>` | Inside an agent turn, waits for a semaphore resource, runs the command, and releases it. The live run supplies its daemon connection through the lane environment. |
@@ -286,6 +287,13 @@ makes it stick. Every agent a run starts gets a `PreToolUse` hook, in every
   "test-suite": { "capacity": 1, "kind": "semaphore", "match": ["pytest*", "uv run pytest*"] }
 }
 ```
+
+A pool is the run's own unless it says `"scope": "host"`. A host-scoped pool is
+shared by every maestro run on the machine that declares one of the same name —
+two runs on one laptop take turns at the full suite instead of running two at
+once — through lock files under `~/.vinta-ai-maestro/host-leases/` holding a pid
+and a run id (`VINTA_AI_MAESTRO_HOST_LEASES` moves them). A slot whose run died
+is taken over. Each run counts against its own `capacity`.
 
 A gate's *scoped* form is not refused as a gate: `pytest app/a.py` is also what
 an agent running one test file in its inner loop types, which is the work. It
@@ -591,15 +599,28 @@ sees migrations from whichever tree ran before. Give it `fresh_cmd`, the same
 check from fresh state:
 
 ```jsonc
-"test": { "cmd": "pytest --reuse-db -n auto", "fresh_cmd": "pytest --create-db -n auto" }
+"test": {
+  "cmd": "pytest --reuse-db -n auto",
+  "fresh_cmd": "pytest --create-db -n auto",
+  "fresh_when": ["apps/*/migrations/*.py"]
+}
 ```
 
 `fresh_cmd` runs instead of `cmd` in the integration worktree when the tree
 there moved anywhere but forward since the gate last ran, on the gate's first
-run there in a process, after a red run whose output reads as a stale schema,
-and after a conflict fixer reports `ENVIRONMENT_STALE`. Each one is journalled
-as `integration_fresh_state`. `maestro.gates.test.fresh_cmd` in
-`.vinta-ai-workflows.yaml` sets it for every `test`-typed gate.
+run there in a process, after a run that was killed (a timeout), after a red
+run whose output reads as a stale schema, and after a conflict fixer reports
+`ENVIRONMENT_STALE`. With `fresh_when`, it also runs when a file those globs
+matched at the gate's last run there is gone or different — a phase that
+rewrote or renamed its own migration moves the tree forward and still leaves
+the reused database recording the old one. Each one is journalled as
+`integration_fresh_state`. `maestro.gates.test.fresh_cmd` and `fresh_when` in
+`.vinta-ai-workflows.yaml` set them for every `test`-typed gate, and
+`gate-cache invalidate <run> <gate> --databases` asks for fresh state once.
+
+A gate with no `fresh_cmd` cannot be rerun from fresh state. When its red
+output in the integration worktree reads as a stale schema, the error says so
+instead of calling it a regression between the phases.
 
 ### Lane databases on a Postgres you already run
 

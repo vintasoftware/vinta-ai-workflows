@@ -3195,6 +3195,15 @@ describe('vinta-ai-maestro status, pause, stop, logs', () => {
     expect(follow.out).toEqual(['four'])
   })
 
+  it('prints the first failure of a gate log with --failures, and needs no run id for it', async () => {
+    const dir = gitRepo()
+    const log = join(dir, 'base-p5-unit.log')
+    writeFileSync(log, 'collected 3 items\nFAILED api/tests/test_x.py::test_y - KeyError\nE   KeyError: workshop_id\n', 'utf8')
+    const r = recorder()
+    expect(await logsCommand(['--failures', log], r.io)).toBe(OK)
+    expect(r.out).toEqual(['2: FAILED api/tests/test_x.py::test_y - KeyError', '3: E   KeyError: workshop_id'])
+  })
+
   it('keeps a live run out of a purge', async () => {
     const dir = gitRepo()
     orphan(dir, 'live-run')

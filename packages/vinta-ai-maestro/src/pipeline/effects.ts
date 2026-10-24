@@ -143,6 +143,25 @@ export interface EffectExecutor {
    * with no integration worktree.
    */
   integrationPause?(isPaused: (nodeId: string) => boolean): () => void
+  /**
+   * What a node's setup is built from, as a key two attempts can compare and a
+   * label naming it in identifiers: the tips of the branches its base is made
+   * of and the gates run on that base. Null when it cannot be read. Absent on
+   * an executor with no integration (`Scheduler.#sameInputs`).
+   */
+  setupInputs?(nodeId: string): Promise<SetupInputs | null>
+  /**
+   * What the wave `nodeId` completes is assembled from, in the same form: the
+   * wave under it, each member's tip and the gates run on the merged tree.
+   * A wave that failed twice on the same inputs is not retried unattended.
+   */
+  waveInputs?(nodeId: string): Promise<SetupInputs | null>
+}
+
+/** See `EffectExecutor.setupInputs`. Branch names, short commit ids and a hash (§11). */
+export interface SetupInputs {
+  readonly key: string
+  readonly label: string
 }
 
 export interface RecordedEffect {

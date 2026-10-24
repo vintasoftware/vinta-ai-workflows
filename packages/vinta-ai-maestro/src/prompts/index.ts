@@ -7,6 +7,7 @@ export {
   readVerdict,
   resolveBrief,
   VERDICT_MARKER,
+  verdictFollowUp,
   type ChorePrompt,
   type ConflictContext,
   type DependencyContext,

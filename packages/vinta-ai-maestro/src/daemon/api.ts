@@ -926,11 +926,15 @@ export function createApi(options: ApiOptions): Hono {
     const body = await readBody(c, GateCacheInvalidateSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
 
-    const { tree } = body.value
+    const { tree, databases } = body.value
     const actor = actorOf(c)
     const reason = reasonOf(c)
     if (actor === 'coordinator' && reason === undefined) return fail(c, 400, 'reason_required')
+    if (databases === true && run.gateCache.forgetDatabases === undefined) return fail(c, 501, 'fresh_state_unavailable')
     const removed = run.gateCache.invalidate(gateId, tree)
+    // A gate with no `fresh_cmd` has no fresh form to run: said in the answer,
+    // so the caller is not left believing the databases will be recreated.
+    const fresh = databases === true ? (run.gateCache.forgetDatabases?.(gateId) ?? false) : undefined
     journal.append({
       runId,
       type: 'gate_cache_invalidated',
@@ -938,12 +942,13 @@ export function createApi(options: ApiOptions): Hono {
         gate: gateId,
         ...(tree === undefined ? {} : { tree }),
         removed,
+        ...(fresh === undefined ? {} : { databases: fresh }),
         ...(actor === 'coordinator' ? { by: actor } : {}),
         ...(reason === undefined ? {} : { reason }),
       },
     })
-    log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, removed })
-    return c.json({ gate: gateId, removed })
+    log.info('runs.gate_cache_invalidated', { run: runId, gate: gateId, actor, removed, databases: fresh })
+    return c.json({ gate: gateId, removed, ...(fresh === undefined ? {} : { databases: fresh }) })
   })
 
   /**
@@ -1044,7 +1049,7 @@ export function createApi(options: ApiOptions): Hono {
     if (run.exec === undefined) return fail(c, 501, 'exec_unsupported')
     const body = await readBody(c, ExecRequestSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
-    const { command } = body.value
+    const { command, priority } = body.value
     // A lane's short name or its phase's id resolves too, and a refusal lists
     // what the run has: only the full lane name used to work, silently.
     const target = run.exec.resolve(body.value.target)
@@ -1072,6 +1077,7 @@ export function createApi(options: ApiOptions): Hono {
               target,
               command,
               actor,
+              ...(priority === true ? { priority } : {}),
               onRunning: () => {
                 entry.state = 'running'
                 onRunning()
@@ -1093,6 +1099,7 @@ export function createApi(options: ApiOptions): Hono {
             ...(actor === 'coordinator' ? { by: actor } : {}),
             ...(reason === undefined ? {} : { reason }),
             ...(abort.signal.aborted ? { cancelled: true } : {}),
+            ...(priority === true ? { priority } : {}),
           },
         })
         log.info('runs.exec', { run: runId, target, actor, exit_code: code, cancelled: abort.signal.aborted })
@@ -2280,6 +2287,13 @@ export function createApi(options: ApiOptions): Hono {
       // A refusal of the coordinator is its own code: it is not a failure of
       // the operation, and the coordinator reads it to know to stop asking.
       if (error instanceof CoordinatorForbidden) return fail(c, 403, 'coordinator_forbidden')
+      // An answer to a question somebody already answered says who: refused
+      // with a bare `operation_failed`, an operator answering the moment an
+      // unattended retry did had no way to tell it had.
+      if (error instanceof Error && error.name === 'NotAwaitingAnswer') {
+        const answered = lastAnswer(journal, found.runId, found.node.node_id)
+        return fail(c, 409, 'not_awaiting_answer', answered === null ? undefined : [{ path: '', code: 'already_answered', message: answered }])
+      }
       // A reassignment or a step the run cannot make says which and why —
       // ids only, composed by the scheduler for exactly this.
       const refused = refusalOf(error)
@@ -2586,6 +2600,23 @@ const STATUS_FOR: Readonly<Record<RunStartRefusal, 404 | 409>> = {
  * the run cannot make, a harness with no adapter — as a code and its message.
  * Those messages are ids by construction; nothing else thrown is repeated.
  */
+/**
+ * Who answered the node's last question, and when — for an answer that came
+ * too late. The answer itself only when it is a short choice (`retry`,
+ * `stop`); an agent's encoded answers are its words, not this message's (§11).
+ */
+function lastAnswer(journal: Journal, runId: string, nodeId: string): string | null {
+  const answered = journal
+    .events(runId)
+    .filter((event) => event.type === 'human_answered' && event.nodeId === nodeId)
+    .at(-1)
+  if (answered === undefined || answered.type !== 'human_answered') return null
+  const { answer, unattended, by } = answered.payload
+  const who = unattended === true ? 'unattended, by the --retry-after timer' : by === 'coordinator' ? 'by the run coordinator' : 'by the operator'
+  const choice = typeof answer === 'string' && /^[\w -]{1,40}$/.test(answer) ? `"${answer}" ` : ''
+  return `the question was already answered ${choice}${who} at ${new Date(answered.ts).toISOString()}`
+}
+
 function refusalOf(error: unknown): { readonly code: string; readonly message: string } | null {
   if (error instanceof ReassignRefused || error instanceof UnknownHarness) {
     return { code: 'reassign_refused', message: error.message }
