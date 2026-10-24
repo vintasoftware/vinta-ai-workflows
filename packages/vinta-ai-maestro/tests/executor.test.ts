@@ -2547,6 +2547,28 @@ describe('the integration worktree’s queue', () => {
     expect(order).toEqual(['p3', 'p2'])
   })
 
+  /**
+   * A coordinator's one-line `git` command queued behind every pending phase
+   * hold — full suites each — and took about an hour to run.
+   */
+  it('lets a priority hold in next, behind the holder and ahead of the phases queued', async () => {
+    const rig = setup(() => goldenWorkflow({}))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const order: string[] = []
+    const first = rig.executor.integration(() => held, 'p1')
+    const queued = [
+      rig.executor.integration(async () => order.push('p2'), 'p2'),
+      rig.executor.integration(async () => order.push('p3'), 'p3'),
+    ]
+    const byHand = rig.executor.integration(async () => order.push('coordinator'), null, 'coordinator', true)
+    release()
+    await Promise.all([first, ...queued, byHand])
+    expect(order).toEqual(['coordinator', 'p2', 'p3'])
+  })
+
   it('says a waiter resumed while the worktree is held is queued again, at its old place', async () => {
     const waits: [string, string, string | null][] = []
     const rig = setup(() => goldenWorkflow({}), {

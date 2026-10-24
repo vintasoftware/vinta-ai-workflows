@@ -301,7 +301,12 @@ export class RunEffectExecutor implements EffectExecutor {
   /** Whether a turn holds the integration worktree now. */
   #integrationBusy = false
   /** Turns waiting for it, in arrival order; a paused node's is passed over. */
-  readonly #integrationWaiting: { readonly nodeId: string | null; readonly label: string | null; readonly start: () => void }[] = []
+  readonly #integrationWaiting: {
+    readonly nodeId: string | null
+    readonly label: string | null
+    readonly priority: boolean
+    readonly start: () => void
+  }[] = []
   /** Nodes already journalled as passed over for a pause, until they are let in. */
   readonly #integrationPassedOver = new Set<string>()
   #integrationPaused: (nodeId: string) => boolean = () => false
@@ -1722,6 +1727,7 @@ export class RunEffectExecutor implements EffectExecutor {
     work: () => Promise<T>,
     nodeId: string | null = null,
     label: string | null = null,
+    priority = false,
   ): Promise<T> {
     // Decided at the call, not when the work starts: two callers in one tick
     // must see each other, and the holder is whoever got here first.
@@ -1729,7 +1735,13 @@ export class RunEffectExecutor implements EffectExecutor {
     const holder = queued ? this.#integrationHolder : null
     if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'queued', holder)
     await new Promise<void>((start) => {
-      this.#integrationWaiting.push({ nodeId, label, start })
+      // A priority hold goes in next, behind whoever holds the worktree now
+      // and ahead of every phase waiting: a short command by hand should not
+      // wait out a queue of full suites. Never ahead of another priority hold.
+      const entry = { nodeId, label, priority, start }
+      const at = priority ? this.#integrationWaiting.findIndex((waiting) => !waiting.priority) : -1
+      if (at === -1) this.#integrationWaiting.push(entry)
+      else this.#integrationWaiting.splice(at, 0, entry)
       this.#pumpIntegration()
     })
     if (queued && nodeId !== null) this.#options.onIntegrationWait?.(nodeId, 'granted', holder)
@@ -1846,8 +1858,9 @@ export class RunEffectExecutor implements EffectExecutor {
     work: () => Promise<T>,
     nodeId: string | null = null,
     label: string | null = null,
+    priority = false,
   ): Promise<T> {
-    return await this.#integration(work, nodeId, label)
+    return await this.#integration(work, nodeId, label, priority)
   }
 }
 

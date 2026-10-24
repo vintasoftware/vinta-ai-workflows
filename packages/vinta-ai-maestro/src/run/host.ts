@@ -111,7 +111,7 @@ export interface HostWiring {
   /** Who holds the integration worktree now, for `exec`'s "queued behind". */
   readonly integrationHolder?: () => string | null
   /** Runs `work` holding the integration worktree's queue, as `label`. */
-  readonly holdIntegration?: <T>(label: string, work: () => Promise<T>) => Promise<T>
+  readonly holdIntegration?: <T>(label: string, work: () => Promise<T>, priority?: boolean) => Promise<T>
   /**
    * `sync-base`'s wave merge: `incoming` into the wave branch `into`, in the
    * integration worktree, with the conflict fixer (`Integrator.mergeBranch`).
@@ -613,7 +613,7 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
       return lane === undefined ? null : { path: lane.path, env: { ...lane.env, ...options.agentEnv } }
     },
     laneNames: () => pool.lanes.map((lane) => lane.name),
-    holdIntegration: (label, work) => executor.integration(work, null, label),
+    holdIntegration: (label, work, priority) => executor.integration(work, null, label, priority === true),
     integrationHolder: () => executor.integrationHolder(),
     mergeBranch: (into, incoming, wave) => {
       const members: string[] = []

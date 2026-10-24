@@ -330,6 +330,8 @@ interface RunPayloads {
     readonly id?: string
     /** Ended by `exec cancel` or by its client going away, rather than by itself. */
     readonly cancelled?: boolean
+    /** `--priority`: queued for the integration worktree ahead of every phase waiting. */
+    readonly priority?: boolean
   }
   /**
    * Gate results forgotten by hand (`vinta-ai-maestro gate-cache invalidate`,

@@ -487,6 +487,16 @@ describe('exec', () => {
     expect(r.err.join('\n')).not.toContain('not live')
   })
 
+  it('asks for the front of the integration queue with --priority', async () => {
+    const r = recorder()
+    const started = fakeFetch(json({ id: 'cd34', target: 'integration', log: '/runs/r/execs/cd34.log' }, 202))
+    await execCommand([RUN_ID, 'integration', '--priority', '--detach', '--repo', emptyRepo(), '--', 'git status'], r.io, {
+      env: ENV,
+      fetch: started.fetch,
+    })
+    expect(JSON.parse(started.sent[0]?.body ?? '')).toMatchObject({ command: 'git status', priority: true })
+  })
+
   it('detaches, lists and cancels', async () => {
     const detached = recorder()
     const started = fakeFetch(json({ id: 'ab12', target: 'integration', log: '/runs/r/execs/ab12.log' }, 202))

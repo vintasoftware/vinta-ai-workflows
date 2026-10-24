@@ -135,7 +135,7 @@ export const GATE_CACHE_USAGE = `usage: vinta-ai-maestro gate-cache invalidate <
                  killed or reused run left behind. Needs \`fresh_cmd\`.
   --repo <dir>   The project. Defaults to the current directory.`
 
-export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integration> [--reason <text>] [--detach] [--repo <dir>] -- <command...>
+export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integration> [--reason <text>] [--detach] [--priority] [--repo <dir>] -- <command...>
        vinta-ai-maestro exec list <runId> [--repo <dir>]
        vinta-ai-maestro exec cancel <runId> <id> [--reason <text>] [--repo <dir>]
 
@@ -153,6 +153,9 @@ export const EXEC_USAGE = `usage: vinta-ai-maestro exec <runId> <lane|integratio
   --reason <text>  Why, journalled with the command.
   --detach         Print the command's id and return; it runs with nobody
                    attached and its output goes to a log.
+  --priority       In \`integration\`: wait only for whoever holds it now,
+                   ahead of every phase queued — for a short command that
+                   should not wait out a queue of full suites.
   --repo <dir>     The project. Defaults to the current directory.
 
   list    the run's commands that have not ended, with their ids.
@@ -552,7 +555,12 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
   try {
     parsed = parseArgs({
       args: argv.slice(0, split),
-      options: { repo: { type: 'string' }, reason: { type: 'string' }, detach: { type: 'boolean' } },
+      options: {
+        repo: { type: 'string' },
+        reason: { type: 'string' },
+        detach: { type: 'boolean' },
+        priority: { type: 'boolean' },
+      },
       allowPositionals: true,
     })
   } catch {
@@ -569,6 +577,7 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
   // job's shell so they arrive as they were typed.
   const command = words.length === 1 ? (words[0] as string) : words.map((word) => shellQuote(word)).join(' ')
   const detach = parsed.values.detach === true
+  const priority = parsed.values.priority === true
 
   const repoPath = resolve(parsed.values.repo ?? process.cwd())
   const target = reach(repoPath, runId, deps.env ?? process.env)
@@ -583,7 +592,12 @@ export async function execCommand(argv: readonly string[], io: Io, deps: SteerDe
         'content-type': 'application/json',
         ...(reason === undefined || reason.trim() === '' ? {} : { [REASON_HEADER]: encodeURIComponent(reason) }),
       },
-      body: JSON.stringify({ target: where, command, ...(detach ? { detach: true } : {}) }),
+      body: JSON.stringify({
+        target: where,
+        command,
+        ...(detach ? { detach: true } : {}),
+        ...(priority ? { priority: true } : {}),
+      }),
     })
   } catch {
     // The run has a job record and its daemon did not answer: that is not

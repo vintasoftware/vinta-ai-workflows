@@ -1049,7 +1049,7 @@ export function createApi(options: ApiOptions): Hono {
     if (run.exec === undefined) return fail(c, 501, 'exec_unsupported')
     const body = await readBody(c, ExecRequestSchema)
     if ('issues' in body) return fail(c, 400, 'invalid_request', body.issues)
-    const { command } = body.value
+    const { command, priority } = body.value
     // A lane's short name or its phase's id resolves too, and a refusal lists
     // what the run has: only the full lane name used to work, silently.
     const target = run.exec.resolve(body.value.target)
@@ -1077,6 +1077,7 @@ export function createApi(options: ApiOptions): Hono {
               target,
               command,
               actor,
+              ...(priority === true ? { priority } : {}),
               onRunning: () => {
                 entry.state = 'running'
                 onRunning()
@@ -1098,6 +1099,7 @@ export function createApi(options: ApiOptions): Hono {
             ...(actor === 'coordinator' ? { by: actor } : {}),
             ...(reason === undefined ? {} : { reason }),
             ...(abort.signal.aborted ? { cancelled: true } : {}),
+            ...(priority === true ? { priority } : {}),
           },
         })
         log.info('runs.exec', { run: runId, target, actor, exit_code: code, cancelled: abort.signal.aborted })
