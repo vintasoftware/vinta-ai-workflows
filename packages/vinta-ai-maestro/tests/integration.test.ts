@@ -2474,6 +2474,45 @@ describe('an integration branch whose first dependency moved on', () => {
   })
 })
 
+describe('a fix one merge needed, in the next merge of the same phases', () => {
+  /**
+   * The same mypy break — a nullable field from one phase meeting a check from
+   * another — was fixed by fixers in at least five different merges, because
+   * each merge started from the phases' branches and none carried it.
+   */
+  it('is replayed before a fixer round is spent on it again', async () => {
+    const repo = await makeRepo({ ...CONFLICTING, 'glue.ts': 'glue\n' })
+    const one = await repo.lane('lane-1')
+    const two = await repo.lane('lane-2')
+    run(one, 'checkout', '-B', 'plan/wf/phase-a', 'main')
+    await repo.commit(one, { 'app.ts': 'const value = "a"\n' }, 'phase a: value')
+    run(two, 'checkout', '-B', 'plan/wf/phase-b', 'main')
+    await repo.commit(two, { 'app.ts': 'const value = "b"\n' }, 'phase b: value')
+    const nodes = [node('a'), node('b'), node('c', ['a', 'b']), node('d', ['a', 'b'])]
+    const fixer = spyFixer(async (request) => {
+      if (request.round === 1) await writeFile(join(request.cwd, 'app.ts'), 'const value = "a" + "b"\n')
+      else await writeFile(join(request.cwd, 'glue.ts'), 'glue fixed\n')
+    })
+    const integrator = new Integrator({
+      plan: plan(nodes),
+      integrationPath: repo.integ,
+      fixer,
+      maxFixRounds: 3,
+      // Red until the cross-phase break in glue.ts is fixed.
+      verify: async (cwd) => ((await readFile(join(cwd, 'glue.ts'), 'utf8')).includes('fixed') ? true : RED_GATE),
+    })
+
+    await integrator.prepareBase('c')
+    expect(fixer.calls).toHaveLength(2)
+    expect(run(repo.integ, 'for-each-ref', '--format=%(refname)', 'refs/vinta-ai-maestro/fixes/')).not.toBe('')
+
+    const base = await integrator.prepareBase('d')
+    // Only the conflict was the fixer's; the break was fixed from the record.
+    expect(fixer.calls).toHaveLength(3)
+    expect(run(repo.integ, 'show', `${base}:glue.ts`)).toBe('glue fixed')
+  })
+})
+
 describe('a merge that ran out of fix rounds', () => {
   /**
    * One observed wave failed four times on the same merges, each retry

@@ -33,7 +33,7 @@
  * branch name, a path. Diffs, hunks and file contents stay in the worktree.
  */
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { computeWaves } from '../graph.ts'
 import type { IntegrationStepPayload } from '../journal/events.ts'
@@ -325,6 +325,17 @@ export const ABANDONED_REFS = 'refs/vinta-ai-maestro/abandoned'
  */
 export const CUT_REFS = 'refs/vinta-ai-maestro/cut'
 
+/**
+ * Fixes a fixer made to a merged tree that was already free of conflicts and
+ * still red — the cross-phase part of a resolution, as opposed to the
+ * choosing between sides (`Integrator.#replayFixes`). One commit each, whose
+ * parent is the red tree and whose tree is the green one.
+ */
+export const FIX_REFS = 'refs/vinta-ai-maestro/fixes'
+
+/** How many recorded fixes, newest first, a red merge tries before its fixer. */
+const REPLAYED_FIXES = 20
+
 /** An unfinished merge this run started, taken down so it can be redone. Identifiers only. */
 export interface ReclaimedMerge {
   /** The branch the merge was being made on. */
@@ -348,6 +359,8 @@ export interface VerifyProgress {
 
 export interface IntegratorOptions {
   readonly plan: IntegrationPlan
+  /** Told when recorded fixes (`FIX_REFS`) turned a red merge green, and how many files they changed. */
+  readonly onFixReplayed?: (forNode: string, files: number) => void
   /** The dedicated integration worktree: every merge and every fix happens here. */
   readonly integrationPath: string
   readonly fixer: ConflictFixer
@@ -1118,12 +1131,24 @@ export class Integrator {
     }
 
     let red: RedGate | null = null
+    // The resolved tree a gate was first red on: what a fix recorded from this
+    // merge is a change from (`#recordFix`). And whether the recorded fixes
+    // were tried on it, which is once per merge.
+    let redTree: string | null = null
+    let replayed = false
+    // Green because of a replayed fix rather than a fixer's: nothing new to keep.
+    let replayedGreen = false
     if (unmerged.length === 0 && !(await this.#unresolved(paths))) {
       // Already resolved, so 0 rounds: the gates decide, as they would after a
       // fixer. Only a red one reaches the fixer — two migrations on one parent
       // merge cleanly and break together. Regenerated first: the gates judge
       // the tree that is committed, and a failing step is a red gate.
       red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+      if (red !== null) {
+        redTree = await this.#writeTree(cwd)
+        replayed = true
+        if (await this.#replayFixes(cwd, forNode)) red = null
+      }
       if (red === null) {
         await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'], paths.length > 0)
         return paths.length === 0 ? null : { nodes, paths, rounds: 0 }
@@ -1165,6 +1190,11 @@ export class Integrator {
       if (codegen !== undefined) await codegen.resettle(cwd, paths)
       if (!(await this.#unresolved(paths))) {
         red = (await codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+        if (red !== null && !replayed) {
+          redTree ??= await this.#writeTree(cwd)
+          replayed = true
+          if (await this.#replayFixes(cwd, forNode)) red = null
+        }
         if (red === null) {
           await this.#commitResolution(cwd, nodeId, forNode, into, incoming, ['--no-edit'])
           await gitOk(cwd, ['update-ref', '-d', previous])
@@ -1258,6 +1288,16 @@ export class Integrator {
       red =
         (await codegen?.refresh(cwd, forNode)) ??
         (await this.#verify(cwd, forNode, stale ? 'fixer_reported' : undefined))
+      if (red !== null) redTree ??= await this.#writeTree(cwd)
+      // Once per merge, before another round: a fix already made for this
+      // same break, in another merge of the same phases.
+      if (red !== null && !replayed) {
+        replayed = true
+        if (await this.#replayFixes(cwd, forNode)) {
+          red = null
+          replayedGreen = true
+        }
+      }
       if (red !== null) continue
 
       if (await this.#merging(cwd)) {
@@ -1281,6 +1321,7 @@ export class Integrator {
         // much later, as a phase built on work that is not there.
         continue
       }
+      if (redTree !== null && !replayedGreen) await this.#recordFix(cwd, redTree, into, incoming)
       return { nodes, paths, rounds: round }
     }
 
@@ -1608,6 +1649,74 @@ export class Integrator {
     const head = (await git(cwd, ['rev-parse', 'HEAD']).catch(() => '')).trim()
     const tip = (await git(cwd, ['rev-parse', incoming]).catch(() => '')).trim()
     return parents.length === 2 && parents[0] === head && parents[1] === tip ? ref : null
+  }
+
+  /** The index as a tree, or null when it cannot be written (unmerged entries). */
+  async #writeTree(cwd: string): Promise<string | null> {
+    return (await git(cwd, ['write-tree']).catch(() => '')).trim() || null
+  }
+
+  /**
+   * Keeps what a fixer changed between a red, conflict-free tree and the green
+   * one it committed: the semantic part of a resolution, which is what the
+   * next merge of the same phases will need again. One observed run had the
+   * same mypy break — a nullable field from one phase meeting a check from
+   * another — fixed by fixers in five different merges, because each merge
+   * started from the phases' branches and none of them carried it.
+   */
+  async #recordFix(cwd: string, redTree: string, into: string, incoming: string): Promise<void> {
+    try {
+      const green = (await git(cwd, ['rev-parse', 'HEAD^{tree}'])).trim()
+      if (green === redTree) return
+      const message = `Fix made merging ${incoming} into ${into} (kept by vinta-ai-maestro)`
+      const red = (await git(cwd, ['commit-tree', redTree, '-m', `${message}: the red tree`])).trim()
+      const fix = (await git(cwd, ['commit-tree', green, '-p', red, '-m', message])).trim()
+      await git(cwd, ['update-ref', `${FIX_REFS}/${fix.slice(0, 12)}`, fix])
+    } catch {
+      // A record that could not be kept costs a future fixer round, never this merge.
+    }
+  }
+
+  /**
+   * Applies, file by file, the recorded fixes (`FIX_REFS`) that apply exactly
+   * to the staged tree and are not in it already, then runs the gates. Green
+   * is kept; red puts the tree back as it was. Exact context only — a patch
+   * that needs a three-way merge to land is a different situation, and is the
+   * fixer's to judge. Answers whether the tree is now green.
+   */
+  async #replayFixes(cwd: string, forNode: string): Promise<boolean> {
+    const fixes = await gitLines(cwd, [
+      'for-each-ref',
+      '--sort=-creatordate',
+      `--count=${REPLAYED_FIXES}`,
+      '--format=%(objectname)',
+      FIX_REFS,
+    ]).catch(() => [])
+    if (fixes.length === 0) return false
+    const before = await this.#writeTree(cwd)
+    if (before === null) return false
+    const gitDir = (await git(cwd, ['rev-parse', '--absolute-git-dir'])).trim()
+    const patchPath = join(gitDir, 'vinta-ai-maestro-fix.patch')
+    let applied = 0
+    try {
+      for (const fix of fixes) {
+        for (const file of await gitLines(cwd, ['diff', '--name-only', `${fix}^`, fix])) {
+          await writeFile(patchPath, await git(cwd, ['diff', '--binary', `${fix}^`, fix, '--', file]))
+          if (await gitOk(cwd, ['apply', '--reverse', '--check', '--index', patchPath])) continue
+          if (await gitOk(cwd, ['apply', '--index', patchPath])) applied += 1
+        }
+      }
+    } finally {
+      await rm(patchPath, { force: true })
+    }
+    if (applied === 0) return false
+    const red = (await this.#options.codegen?.refresh(cwd, forNode)) ?? (await this.#verify(cwd, forNode))
+    if (red === null) {
+      this.#options.onFixReplayed?.(forNode, applied)
+      return true
+    }
+    await gitOk(cwd, ['read-tree', '--reset', '-u', before])
+    return false
   }
 
   /**

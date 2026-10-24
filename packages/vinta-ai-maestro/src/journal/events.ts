@@ -1102,6 +1102,14 @@ interface NodePayloads {
    * is the integrator's own message — branch names, node ids, a gate id and
    * its log path.
    */
+  /**
+   * A red merge turned green by fixes kept from earlier merges
+   * (`refs/vinta-ai-maestro/fixes/`), with no fixer round spent on it. How
+   * many files they changed; never the patch.
+   */
+  integration_fix_replayed: {
+    readonly files: number
+  }
   wave_failed: {
     readonly wave: number
     readonly reason: string

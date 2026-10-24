@@ -466,6 +466,9 @@ export async function provision(options: ProvisionOptions): Promise<HostWiring> 
         payload: { into: merge.into, incoming: merge.incoming, kept: merge.kept },
       })
     },
+    onFixReplayed: (forNode, files) => {
+      journal.append({ runId, nodeId: forNode, type: 'integration_fix_replayed', payload: { files } })
+    },
     onConflict: (conflict) => {
       journal.append({
         runId,
