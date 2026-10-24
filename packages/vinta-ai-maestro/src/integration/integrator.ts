@@ -329,7 +329,8 @@ export const CUT_REFS = 'refs/vinta-ai-maestro/cut'
  * Fixes a fixer made to a merged tree that was already free of conflicts and
  * still red — the cross-phase part of a resolution, as opposed to the
  * choosing between sides (`Integrator.#replayFixes`). One commit each, whose
- * parent is the red tree and whose tree is the green one.
+ * parent is the red tree and whose tree is the green one, under the plan's
+ * id: another plan's phases are not these.
  */
 export const FIX_REFS = 'refs/vinta-ai-maestro/fixes'
 
@@ -868,7 +869,7 @@ export class Integrator {
   }
 
   #cutRef(branch: string): string {
-    return `${CUT_REFS}/${branch.slice(`plan/${this.#plan.id}/`.length)}`
+    return `${CUT_REFS}/${this.#plan.id}/${branch.slice(`plan/${this.#plan.id}/`.length)}`
   }
 
   /** Merges the plan branch into `branch` when it has commits `branch` lacks. */
@@ -1671,7 +1672,7 @@ export class Integrator {
       const message = `Fix made merging ${incoming} into ${into} (kept by vinta-ai-maestro)`
       const red = (await git(cwd, ['commit-tree', redTree, '-m', `${message}: the red tree`])).trim()
       const fix = (await git(cwd, ['commit-tree', green, '-p', red, '-m', message])).trim()
-      await git(cwd, ['update-ref', `${FIX_REFS}/${fix.slice(0, 12)}`, fix])
+      await git(cwd, ['update-ref', `${FIX_REFS}/${this.#plan.id}/${fix.slice(0, 12)}`, fix])
     } catch {
       // A record that could not be kept costs a future fixer round, never this merge.
     }
@@ -1690,7 +1691,7 @@ export class Integrator {
       '--sort=-creatordate',
       `--count=${REPLAYED_FIXES}`,
       '--format=%(objectname)',
-      FIX_REFS,
+      `${FIX_REFS}/${this.#plan.id}/`,
     ]).catch(() => [])
     if (fixes.length === 0) return false
     const before = await this.#writeTree(cwd)
